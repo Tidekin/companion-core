@@ -14,6 +14,24 @@ by default and a one-hour decision interval. `wake_enabled` must also be on to s
 Quiet hours, owner pause, current input, idle time, existing budget and uncertain outcomes gate
 generation. No eligible source means no Life model call. PREVIEW makes no new tasks or model calls.
 
+`LifeShadowApproval.source_scope` defaults to `selected`, retaining its exact `source_event_ids`
+and unchanged serialized policy identity. An explicit `owner_private_history` approval uses an
+empty selected list and the current OwnerAuthority private-history contract for the same
+conversation. It requires the independent history purpose, original signed input/custody,
+`not_before`, retention, recall and current source validity. Its private context also retains
+the history turn/UTF-8 bounds, alongside the original Life source, item, time and budget limits.
+It grants no QZone source purpose or channel action. Reading results still require the original
+successful, settled Life/Goal/Reader proof under this approval; ordinary historical observations
+do not inherit Life permission.
+
+In this history mode, an actual new owner input that exceeds a topic's source or history-context
+bound closes that bounded topic through native invalidation and starts a new topic. Original
+inputs and independent execution/accounting records remain. This prevents an old eight-source
+topic from permanently excluding every newer input, without dropping a newer message from a
+decision or reopening a topic on silence. Selected-source approvals keep their existing bound.
+The source check reuses `owner_input.source(history=True)`; topic closure reuses `invalidate`.
+There is no new evidence store, executor, timer or message channel.
+
 `life_loop.autonomy_enabled` defaults to false. When enabled, `life_context.decision_context`
 adds deterministic guidance from the same approved `self.interest` evidence. Both goal roots
 and the final result must belong to the activity's source set. Only completed native self

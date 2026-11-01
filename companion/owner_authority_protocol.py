@@ -82,6 +82,9 @@ class OwnerGrantPolicy(StrictModel):
             raise ValueError("memory purpose and source scope must agree")
         if ("life" in self.purposes) != (self.life_shadow is not None):
             raise ValueError("Life requires its bounded purpose/source approval")
+        if (self.life_shadow and self.life_shadow.source_scope == "owner_private_history"
+            and ("history" not in self.purposes or self.history.scope != "owner_private")):
+            raise ValueError("Life history requires the existing private history approval")
         if any(key not in self.purposes or not re.fullmatch(SHA, value)
                for key, value in self.capability_policies.items()):
             raise ValueError("capability policies must match explicit purposes")

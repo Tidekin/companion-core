@@ -40,7 +40,10 @@ class LifeShadowApproval(StrictModel):
     scope: Literal["owner_private_life_shadow_v1"]
     authorization_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     conversation_id: str = Field(min_length=1, max_length=128)
-    source_event_ids: list[str] = Field(min_length=1, max_length=64)
+    source_scope: Literal["selected", "owner_private_history"] = Field(
+        default="selected", exclude_if=lambda value: value == "selected",
+    )
+    source_event_ids: list[str] = Field(default_factory=list, max_length=64)
     purposes: list[Literal["PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "PRIVATE_CREATION"]] = Field(
         min_length=0,
         max_length=3,
@@ -54,6 +57,12 @@ class LifeShadowApproval(StrictModel):
 
     @model_validator(mode="after")
     def unique_scope(self):
+        if self.source_scope == "selected" and not self.source_event_ids:
+            raise ValueError("Selected Life sources require exact event IDs")
+        if self.source_scope == "owner_private_history" and (
+            self.source_event_ids or self.qzone_draft_sources
+        ):
+            raise ValueError("Private history cannot include selected or QZone sources")
         if not self.purposes and not self.qzone_draft_sources:
             raise ValueError("Life requires at least one explicitly approved destination")
         if (

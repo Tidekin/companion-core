@@ -264,6 +264,11 @@ def check_policy(store, settings, old, new, now, *, retained_unknowns):
     if old.life_shadow is not None:
         before, after = (s.model_dump(mode="json") for s in (old.life_shadow, scope))
         allowed = {"authorization_sha256", "expires_at"}
+        if (old.life_shadow.source_scope == "selected"
+            and scope.source_scope == "owner_private_history"):
+            # The new reviewed approval may reuse the unchanged independent
+            # owner-history scope; conversation, destinations and item caps stay exact.
+            allowed.update({"source_scope", "source_event_ids"})
         if {k: v for k, v in before.items() if k not in allowed} != {
             k: v for k, v in after.items() if k not in allowed
         }:
