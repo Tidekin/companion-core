@@ -181,10 +181,12 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
         hooks.update(after_model_request=persistence.after_model_request,
                      tool_execute=persistence.wrap_tool_execute)
     with phase("agent_setup", job["trace_id"]):
-        from companion.agent_output import voice_output
+        from companion.agent_output import song_output, voice_output
 
         output_types = [str, DeferredToolRequests]
         if output := voice_output(core, job):
+            output_types.append(output)
+        if output := song_output(core, job):
             output_types.append(output)
         agent = Agent(
             ControlledModel(core.settings.model_name, complete,

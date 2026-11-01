@@ -33,6 +33,20 @@ METERED_READS_SQL = (
     "AS accounted_bytes FROM exploration_requests x "
     "LEFT JOIN reading_attempts a USING(request_id)"
 )
+METERED_USAGE_SQL = (
+    "SELECT started_at,operation,accounted_requests,accounted_bytes FROM ("
+    + METERED_READS_SQL + ") UNION ALL SELECT source_budget_at,'read',"
+    "COALESCE(source_used_requests,source_reserved_requests),"
+    "COALESCE(source_used_bytes,source_reserved_bytes) FROM voice_jobs "
+    "WHERE operation='sing' AND source_reserved_requests>0"
+)
+
+
+def read_periods(settings, now):
+    local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
+    day = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return tuple(at.astimezone(UTC).isoformat(timespec="microseconds")
+                 for at in (day, day.replace(day=1)))
 
 
 class ReadItem(StrictModel):
@@ -160,12 +174,7 @@ class ExplorationService:
         return policy
 
     def periods(self):
-        local = datetime.fromisoformat(self.clock()).astimezone(ZoneInfo(self.settings.timezone))
-        day = local.replace(hour=0, minute=0, second=0, microsecond=0)
-        return tuple(
-            at.astimezone(UTC).isoformat(timespec="microseconds")
-            for at in (day, day.replace(day=1))
-        )
+        return read_periods(self.settings, self.clock())
 
     def autonomous(self, request, step):
         if step:
@@ -343,7 +352,7 @@ class ExplorationService:
             "SUM(CASE WHEN started_at>=? THEN accounted_bytes "
             "ELSE 0 END) bytes,"
             "SUM(CASE WHEN started_at>=? AND operation='read' THEN 1 ELSE 0 END) reads "
-            f"FROM ({METERED_READS_SQL}) WHERE started_at>=?",
+            f"FROM ({METERED_USAGE_SQL}) WHERE started_at>=?",
             (day, day, day, month),
         )
         return (
@@ -383,7 +392,7 @@ class ExplorationService:
                 "SUM(CASE WHEN started_at>=? THEN accounted_bytes ELSE 0 END) "
                 "AS bytes,SUM(CASE WHEN started_at>=? AND operation='read' "
                 "THEN 1 ELSE 0 END) AS reads "
-                f"FROM ({METERED_READS_SQL}) WHERE started_at>=?",
+                f"FROM ({METERED_USAGE_SQL}) WHERE started_at>=?",
                 (day, day, day, month),
             )
             rows = s.rows(

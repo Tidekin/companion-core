@@ -428,14 +428,20 @@ def prepare_delivery(item, config, *, voice_policy_sha256, now, authority=None, 
     else:
         scope = {"window_sha256": _sha(plan_sha256)}
     envelope = item.get("voice")
-    _fields(envelope, {"binding", "binding_sha256", "audio"})
+    is_song = (isinstance(envelope, dict) and isinstance(envelope.get("audio"), dict)
+               and envelope["audio"].get("kind") == "sing")
+    if is_song and not native:
+        raise ValueError("VOICE_DELIVERY_CHANGED")
+    _fields(envelope, {"binding", "binding_sha256", "audio"}
+            | ({"singing_manifest"} if is_song else set()))
     binding, audio = envelope["binding"], envelope["audio"]
     hashes = {"source_sha256", "identity_sha256", "manifest_sha256",
               "node_config_sha256", "voice_policy_sha256", "content_sha256", "reply_sha256",
               "result_sha256", "audio_sha256"}
     _fields(binding, hashes | scope.keys() | {"schema_version", "job_id", "generation",
         "message_id", "delivery_key", "event_id", "privacy_epoch", "reply_revision", "node_id",
-        "audio_bytes", "expires_at", "retirement_token"})
+        "audio_bytes", "expires_at", "retirement_token"}
+        | ({"singing_segment_index"} if is_song else set()))
     for key in hashes:
         _sha(binding[key])
     if not isinstance(binding["retirement_token"], str) or not re.fullmatch(
@@ -476,7 +482,7 @@ def prepare_delivery(item, config, *, voice_policy_sha256, now, authority=None, 
     _fields(audio, {"kind", "audio_base64", "audio_sha256", "sample_rate", "channels",
                     "sample_width", "frames", "duration_seconds", "mime_type"})
     encoded = audio["audio_base64"]
-    if (audio["kind"] != "tts" or audio["mime_type"] != "audio/wav"
+    if (audio["kind"] != ("sing" if is_song else "tts") or audio["mime_type"] != "audio/wav"
         or not isinstance(encoded, str) or not 60 <= len(encoded) <= 4 * ((4_000_000 + 2) // 3)):
         raise ValueError("VOICE_AUDIO_INVALID")
     for key, low, high in (("sample_width", 2, 2), ("channels", 1, 2),
@@ -487,7 +493,18 @@ def prepare_delivery(item, config, *, voice_policy_sha256, now, authority=None, 
         raise ValueError("VOICE_AUDIO_INVALID")
     data = base64.b64decode(encoded, validate=True)
     actual = wav_info(data, max_bytes=4_000_000, max_seconds=60)
-    if (base64.b64encode(data).decode() != encoded or binding["result_sha256"] != digest(audio)
+    if is_song:
+        from companion_delivery_protocol.singing import validate_manifest, validate_part
+
+        manifest = validate_manifest(envelope["singing_manifest"])
+        validate_part(manifest, binding["singing_segment_index"],
+                      {**actual, "audio_bytes": len(data), "sample_width": 2})
+        if manifest["node_manifest_sha256"] != binding["manifest_sha256"]:
+            raise ValueError("VOICE_AUDIO_INVALID")
+        result_sha = digest(manifest)
+    else:
+        result_sha = digest(audio)
+    if (base64.b64encode(data).decode() != encoded or binding["result_sha256"] != result_sha
         or binding["audio_sha256"] != audio["audio_sha256"]
         or binding["audio_bytes"] != len(data)
         or any(audio[key] != actual[key] for key in (

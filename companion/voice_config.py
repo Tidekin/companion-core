@@ -18,7 +18,7 @@ class VoiceNode(BaseModel):
     enabled: bool = Field(default=True, strict=True)
     token: SecretStr = Field(repr=False)
     manifest_sha256: Digest
-    capabilities: tuple[Literal["tts", "asr"], ...] = ("tts", "asr")
+    capabilities: tuple[Literal["tts", "asr", "sing"], ...] = ("tts", "asr")
     max_tts_chars: int = Field(default=1000, ge=1, le=4000, strict=True)
     max_tts_output_bytes: int = Field(default=4_000_000, ge=44, le=4_000_000, strict=True)
     max_tts_seconds: float = Field(default=60, gt=0, le=60, strict=True, allow_inf_nan=False)
@@ -64,6 +64,15 @@ class VoiceASRPolicy(BaseModel):
     max_context_chars: int = Field(default=4000, ge=128, le=12000, strict=True)
 
 
+class SingingPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
+
+    source_adapter_id: str = Field(pattern=r"^[a-zA-Z0-9_.:-]{1,64}$")
+    max_seconds: int = Field(default=600, ge=1, le=600, strict=True)
+    max_input_bytes: int = Field(default=32 * 1024 * 1024, ge=1024,
+                                 le=32 * 1024 * 1024, strict=True)
+
+
 class VoiceConfig(BaseModel):
     model_config = ConfigDict(
         extra="forbid", frozen=True, hide_input_in_errors=True, validate_default=True
@@ -79,6 +88,7 @@ class VoiceConfig(BaseModel):
     max_private_blob_bytes: int = Field(default=32_000_000, ge=1024, le=256_000_000, strict=True)
     reply: VoiceReplyPolicy = Field(default_factory=VoiceReplyPolicy)
     asr: VoiceASRPolicy = Field(default_factory=VoiceASRPolicy)
+    singing: SingingPolicy | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @field_validator("signing_private_key")
     @classmethod
@@ -97,6 +107,14 @@ class VoiceConfig(BaseModel):
             or not any(node.enabled for node in self.nodes.values())
         ):
             raise ValueError("Enabled voice requires a signing key and an enabled node")
+        singing = any(node.enabled and "sing" in node.capabilities for node in self.nodes.values())
+        if self.enabled and (self.singing is not None) != singing:
+            raise ValueError("Singing policy and an explicitly registered singing node must agree")
+        if self.enabled and singing and (
+            self.job_ttl_seconds < 300 or self.result_ttl_seconds < 120
+            or self.max_private_blob_bytes < 64 * 1024 * 1024
+        ):
+            raise ValueError("Singing requires bounded long-job, result and storage capacity")
         return self
 
     def private_key(self) -> Ed25519PrivateKey:

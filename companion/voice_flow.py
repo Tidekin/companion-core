@@ -138,6 +138,15 @@ class VoiceFlow:
                 raise CoreError("VOICE_FLOW_FENCED", 409)
             return VoiceReplyDecision(state="TEXT", reason="VOICE_DISABLED")
         self._native_delivery(message_id)
+        from companion.agent_output import reply_format
+
+        if reply_format(self.store, row["origin_event_id"]) == "singing":
+            if not value or value.get("state") != "AUDIO":
+                raise CoreError("SINGING_DELIVERY_FENCED", 409)
+            song = self.jobs.singing_manifest(value["job_id"])
+            if song is None:
+                raise CoreError("SINGING_DELIVERY_FENCED", 409)
+            return VoiceReplyDecision(state="AUDIO", job_id=value["job_id"])
         if row["state"] != "PENDING" or row["attempt_count"] != 0:
             if value and value.get("state") == "AUDIO":
                 return VoiceReplyDecision(state="AUDIO", job_id=value["job_id"])
@@ -212,14 +221,23 @@ class VoiceFlow:
             return self._text(row, value, "VOICE_REPLY_WAIT_EXPIRED")
         return VoiceReplyDecision.model_validate(value)
 
-    def _freeze_audio(self, outbox, job_id, audio):
+    def freeze_song(self, message_id, job_id, song, index):
+        _require_transaction(self.store)
+        return self._freeze_audio(self._outbox(message_id), job_id, song.audio[index],
+                                   singing_index=index)
+
+    def _freeze_audio(self, outbox, job_id, audio, *, singing_index=None):
         row = self.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job_id,))
         if (
             not row
-            or row["message_id"] != outbox["message_id"]
             or row["state"] != "READY"
-            or row["outbox_content_sha256"] != outbox["content_sha256"]
-            or row["outbox_delivery_key"] != outbox["delivery_key"]
+            or row["event_id"] != outbox["origin_event_id"]
+            or (singing_index is None and (
+                row["message_id"] != outbox["message_id"]
+                or row["outbox_content_sha256"] != outbox["content_sha256"]
+                or row["outbox_delivery_key"] != outbox["delivery_key"]))
+            or (singing_index is not None and (row["operation"] != "sing"
+                or singing_index != (outbox["segment_index"] or 0)))
         ):
             raise CoreError("VOICE_DELIVERY_FENCED", 409)
         binding = voice_protocol.VoiceDeliveryBinding(
@@ -244,6 +262,7 @@ class VoiceFlow:
             audio_sha256=audio.audio_sha256,
             audio_bytes=len(audio.audio_bytes()),
             expires_at=row["result_expires_at"],
+            singing_segment_index=singing_index,
         )
         value = {
             "state": "AUDIO",
@@ -276,9 +295,12 @@ class VoiceFlow:
         if datetime.fromisoformat(self.clock()) >= binding.expires_at:
             raise CoreError("VOICE_DELIVERY_EXPIRED", 409)
         audio = self.jobs.delivery_audio(binding.job_id, message_id, lease_token)
+        manifest = (self.jobs.singing_manifest(binding.job_id)
+                    if binding.singing_segment_index is not None else None)
         try:
             return voice_protocol.VoiceDeliveryEnvelope(
-                binding=binding, binding_sha256=value["binding_sha256"], audio=audio
+                binding=binding, binding_sha256=value["binding_sha256"], audio=audio,
+                singing_manifest=manifest,
             )
         except (ValueError, KeyError, TypeError):
             raise CoreError("VOICE_DELIVERY_BINDING_CHANGED", 409) from None

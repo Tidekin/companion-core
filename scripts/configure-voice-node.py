@@ -40,6 +40,9 @@ def configure(arguments):
         "startup_timeout_seconds": 30,
         "result_cache_ttl_seconds": 120,
     }
+    if profile.get("singing") is not None:
+        value.update(singing=profile["singing"], execution_timeout_seconds=600,
+                     request_timeout_seconds=30, result_cache_ttl_seconds=300)
     if arguments.connection is None:
         # Connection fields are excluded from the resource manifest. Validate the
         # remaining typed fields with disposable, in-memory values; save no token.
