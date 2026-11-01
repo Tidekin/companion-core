@@ -416,20 +416,26 @@ def test_remote_socket_and_disabled_listener_cannot_be_bypassed_by_headers(harne
     assert api(harness, "GET", "/v1/models").status_code == 503
 
 
-def test_gateway_custody_blocks_schema_downgrade(harness):
+def test_gateway_custody_blocks_schema_downgrade(harness, tmp_path):
+    from contextlib import closing
     from pathlib import Path
 
     from alembic import command
     from alembic.config import Config
 
+    from companion.store import Store
+    from tests.test_test_fixtures import historical_database
+
+    path = historical_database(harness.core.store, tmp_path / "gateway.db", "0059_gateway")
     config = Config()
     config.set_main_option("script_location", str(
         Path(__file__).resolve().parents[1] / "migrations"))
-    config.set_main_option("sqlalchemy.url", "sqlite:///" + harness.core.settings.database)
+    config.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
     with pytest.raises(RuntimeError, match="Gateway custody blocks downgrade"):
         command.downgrade(config, "0058_bili_discovery")
-    client = harness.core.store.one("SELECT client_id FROM gateway_clients")
-    assert client["client_id"] == "client-a"
+    with closing(Store(path)) as store:
+        client = store.one("SELECT client_id FROM gateway_clients")
+        assert client["client_id"] == "client-a"
 
 
 def test_gateway_unknown_never_uses_private_owner_attempt_closures(harness):

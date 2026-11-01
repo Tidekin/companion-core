@@ -9,6 +9,7 @@ from alembic import command
 from alembic.config import Config
 
 from companion.store import Store, encode, migrate
+from tests.test_test_fixtures import historical_database
 
 
 @pytest.mark.parametrize("state", ["RUNNING", "EXECUTION_UNCERTAIN"])
@@ -102,11 +103,12 @@ def test_goal_plan_migration_retains_original_step_promise_and_evidence(tmp_path
             store.execute("UPDATE goal_steps SET goal_id='original-goal' "
                           "WHERE step_id='another-step'")
         store.execute("UPDATE goal_steps SET goal_id=goal_id WHERE goal_id='original-goal'")
+        guarded = historical_database(store, tmp_path / "goal-guard.sqlite3", "0045_goal_read_plan")
     config = Config()
     config.set_main_option("script_location", str(Path(__file__).parents[1] / "migrations"))
-    config.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
+    config.set_main_option("sqlalchemy.url", "sqlite:///" + guarded.as_posix())
     with pytest.raises(RuntimeError, match="GOAL_PLAN_DOWNGRADE_REQUIRES_EXPLICIT_CUSTODY"):
         command.downgrade(config, "0044_voice_owner_authority")
-    with closing(Store(path)) as store:
+    with closing(Store(guarded)) as store:
         assert store.one("SELECT COUNT(*) n FROM goal_steps")["n"] == 4
         assert store.rows("PRAGMA foreign_key_check") == []

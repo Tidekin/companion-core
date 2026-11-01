@@ -222,7 +222,7 @@ def test_populated_snapshot_migration_preserves_legacy_evidence_and_fences_downg
             binding_sha256=runtime_config._digest(settings, ["job:migration", key]),
             created_at=hot.clock())
         before = store.rows("SELECT * FROM operator_task_configuration")
-    migrate(str(path))
+    migrate(str(path), "0057_expression_configuration")
     cfg = Config()
     cfg.set_main_option("script_location", "migrations")
     cfg.set_main_option("sqlalchemy.url", "sqlite:///" + path.resolve().as_posix())
@@ -231,7 +231,7 @@ def test_populated_snapshot_migration_preserves_legacy_evidence_and_fences_downg
         assert runtime_config.identity(settings, legacy) == key and legacy.format_version == 1
         assert store.rows("SELECT * FROM operator_task_configuration") == before
     command.downgrade(cfg, "0056_watch_ledger_goal_reads")
-    migrate(str(path))
+    migrate(str(path), "0057_expression_configuration")
     with closing(Store(str(path))) as store:
         runtime_config.boundary(store, settings, hot.clock)
     with pytest.raises(RuntimeError, match="CONFIGURATION_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"):
