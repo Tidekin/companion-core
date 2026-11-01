@@ -209,6 +209,60 @@ def test_unknown_image_outcome_keeps_charge_sends_text_and_never_repeats(core, t
     run(scenario())
 
 
+@pytest.mark.parametrize("outcome", ["ack", "expired", "lost_ack"])
+def test_generated_image_native_delivery_and_uncertainty(core, tmp_path, outcome):
+    from companion_onebot_bridge.network import private_http_client
+    from companion_onebot_bridge.outbound import deliver_tick
+    from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
+    from tests.support.onebot import provider as onebot_provider
+
+    async def scenario():
+        async with window(core, tmp_path, expression=True) as (client, config_, plan):
+            core.settings.image_generation = config()
+            await owner_text(core, client, config_, plan, tmp_path, "画一只猫")
+            data = png()
+            model = Provider(draw(), answer("画好啦，给你。"))
+            async with worker_for(core, model) as worker:
+                worker.image_transport = httpx.MockTransport(lambda request: image_reply(data))
+                assert await worker.run_once("generated-image-native-send")
+            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            if outcome == "expired":
+                core.store.execute("UPDATE generated_images SET expires_at=?", (core.clock(),))
+
+            spool, runtime = native_spool(core, tmp_path, config_, plan)
+            sends = []
+
+            def transport(request):
+                lost = httpx.ReadTimeout("synthetic ACK loss", request=request)
+                return onebot_provider(request, sends, lost if outcome == "lost_ack" else None)
+
+            try:
+                async with private_http_client(config_.core_url, config_.bridge_token) as bridge, (
+                    private_http_client(config_.onebot_http_url, config_.onebot_token,
+                    transport=httpx.MockTransport(transport),
+                )) as protocol:
+                    guard = OwnerSendGuard(runtime, bridge)
+                    assert await deliver_tick(bridge, OwnerOneBot(guard, protocol), spool,
+                                              guard=guard)
+                assert len(sends) == 1
+                segments = sends[0]["message"]
+                assert segments[0] == {"type": "text", "data": {"text": "画好啦，给你。"}}
+                if outcome == "expired":
+                    assert len(segments) == 1
+                else:
+                    assert segments[1] == {"type": "image", "data": {
+                        "file": "base64://" + base64.b64encode(data).decode()}}
+                outbox = core.store.one("SELECT state,attempt_count FROM outbox")
+                assert outbox == {"state": "DELIVERY_UNCERTAIN" if outcome == "lost_ack"
+                                  else "SENT", "attempt_count": 1}
+                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+                if outcome == "lost_ack":
+                    assert runtime.row()["state"] == "STOPPED"
+            finally:
+                spool.close()
+    run(scenario())
+
+
 @pytest.mark.parametrize("case", ["serious", "size", "daily", "twice"])
 def test_refusals_never_reach_the_provider(core, tmp_path, case):
     async def scenario():
