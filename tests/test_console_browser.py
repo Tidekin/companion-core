@@ -161,6 +161,8 @@ def test_console_runtime_versions_show_boundary_restart_review_and_restore(core,
         async with console_page(core, tmp_path) as page:
             runtime_config.boundary(core.store, core.settings, core.clock)
             await navigate(page, "配置")
+            await page.get_by_role("navigation", name="配置目录").get_by_role(
+                "link", name="表达与表情").click()
             guidance = "接住一个具体细节，自然地说自己的看法。\n不必每次追问。"
             editor = page.get_by_label("交流指导正文", exact=True)
             assert await editor.get_attribute("maxlength") == "2000"
