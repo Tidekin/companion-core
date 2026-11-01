@@ -12,6 +12,7 @@ from companion.model import REVIEW_RULES, ModelClient
 from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
+from tests.support.failure_notice import assert_failure_notice
 from tests.support.owner_memory import environment
 
 FACT = "我用🤔表示在考虑青禾项目的蓝色配色"
@@ -114,8 +115,7 @@ def test_repeated_invalid_memory_tool_arguments_stop_at_sdk_retry_limit(core, tm
                     assert not await worker.run_once("no-job-retry-after-sdk-exhaustion")
             assert len(calls) == 2 <= core.settings.paid_model.per_request_calls
             assert_settled_calls(core, 2)
-            assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
-                                       (source.event_id,))
+            assert_failure_notice(core, source.event_id)
             assert not core.store.rows("SELECT * FROM memories")
     run(scenario())
 

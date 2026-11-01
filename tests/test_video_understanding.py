@@ -16,6 +16,7 @@ from companion.store import encode
 from companion.video_input import VideoInputPolicy, encode_animation, preview, text_and_estimate
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call, worker_for
+from tests.support.failure_notice import assert_failure_notice
 from tests.test_animated_owner_images import animation, policy
 from tests.test_live_image_input import options as image_options
 from tests.test_live_image_input import png
@@ -299,7 +300,10 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp
                 assert all(row["scenario"] == "chat" for row in usages)
                 assert not core.store.one("SELECT 1 FROM agent_tool_calls "
                                            "WHERE metadata_json IS NOT NULL")
-            assert not core.store.rows("SELECT * FROM outbox")
+            if boundary == "payload" or invalid:
+                assert_failure_notice(core)
+            else:
+                assert not core.store.rows("SELECT * FROM outbox")
             before = len(calls)
             core.clock.advance(100)
             async with worker_for(core, respond) as restarted:

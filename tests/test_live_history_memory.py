@@ -19,6 +19,7 @@ from companion.store import after, encode
 from companion_onebot_bridge.window import WindowPlan, digest, stored_plan
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
+from tests.support.failure_notice import assert_failure_notice
 from tests.test_live_continuity import history_snapshot, native_continuity
 from tests.test_live_text_window import live_fixture
 from tests.test_memory_commands import fact
@@ -581,7 +582,9 @@ def test_five_total_attempt_cap_survives_combined_stages_and_fresh_core(core, tm
                 assert not await restarted.run_once()
                 assert restarted.status()["live_text_window"]["approved"] is False
                 assert restarted.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 5
-                assert restarted.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 2
+                assert restarted.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 3
+                failed = restarted.store.one("SELECT event_id FROM jobs WHERE state='FAILED'")
+                assert_failure_notice(restarted, failed["event_id"])
             finally:
                 restarted.store.close()
             assert len(calls) == 5

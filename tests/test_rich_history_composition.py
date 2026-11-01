@@ -9,6 +9,7 @@ from companion import qq_rich
 from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer
+from tests.support.failure_notice import assert_failure_notice
 from tests.support.native_recall_entry import native_recall, returned
 from tests.test_memory_review_output import assert_settled_calls
 from tests.test_onebot_reference_reader import enriched
@@ -144,7 +145,11 @@ def test_rich_combined_unknown_and_budget_never_fall_back_to_unaccounted_chat(
             paid={"max_input_tokens": 1} if failure == "budget" else None) as value:
             await value.capture(message=mixed())
             assert await value.worker.run_once("rich-failed-request")
-            assert not core.store.rows("SELECT * FROM outbox") and not value.sends
+            assert not value.sends
+            if failure == "budget":
+                assert_failure_notice(core)
+            else:
+                assert not core.store.rows("SELECT * FROM outbox")
             usage = core.store.rows("SELECT scenario,state,billed_micro_usd FROM model_usage")
             if failure == "unknown":
                 assert len(value.calls) == len(usage) == 1

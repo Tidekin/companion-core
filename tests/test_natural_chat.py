@@ -14,6 +14,7 @@ from companion.model import ModelClient
 from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
+from tests.support.failure_notice import assert_failure_notice
 from tests.support.native_context import approve_value
 from tests.support.native_context import configure as native_configure
 from tests.test_onebot_capture import real_core_http
@@ -167,7 +168,10 @@ def test_failed_generation_keeps_one_fault_receipt_without_another_model_call(
                 "WHERE action='job.failed' AND entity_id=?", (accepted["job_id"],))
             assert len(receipts) == 1
             assert json.loads(receipts[0]["safe_detail_json"]) == {"code": code, "state": "FAILED"}
-            assert core.store.rows("SELECT * FROM outbox") == []
+            if failure == "budget":
+                assert_failure_notice(core)
+            else:
+                assert core.store.rows("SELECT * FROM outbox") == []
             usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
             if failure == "budget":
                 assert calls == [] and usage == []

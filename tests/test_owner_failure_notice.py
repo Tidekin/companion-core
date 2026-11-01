@@ -4,10 +4,12 @@ import json
 
 import pytest
 
-from companion import owner_delivery
+from companion import owner_authority, owner_delivery, paid_budget
 from companion.contracts import CoreError
+from companion.owner_authority_protocol import AuthorityStop
 from companion.transport import enqueue
 from tests.owner_model_fixtures import authorized_job
+from tests.support.failure_notice import assert_failure_notice
 from tests.test_carried_capabilities import reader_carry
 
 
@@ -55,3 +57,51 @@ def test_no_notice_when_a_reply_already_exists_or_the_job_is_not_failed(core, tm
     assert [row["delivery_key"] for row in core.store.rows(
         "SELECT delivery_key FROM outbox WHERE origin_event_id=?", (job["event_id"],))] == [
         "failure-test-existing"]
+
+
+@pytest.mark.parametrize("boundary", ["state", "code", "content", "source", "stop", "erase"])
+def test_failure_notice_rechecks_job_wording_source_and_authority(core, tmp_path, boundary):
+    job = failed(core, tmp_path, "INTERNAL_ERROR")
+    row = assert_failure_notice(core)
+    if boundary == "state":
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job["job_id"],))
+    elif boundary == "code":
+        core.store.execute("UPDATE jobs SET last_error_code='SOURCE_GRANT_REQUIRED' WHERE job_id=?",
+                           (job["job_id"],))
+    elif boundary == "content":
+        # Even a coherent hash cannot turn fixed Core wording into a model reply.
+        content = {"text": "Unapproved model output"}
+        core.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+                           (json.dumps(content), paid_budget.sha(content), row["message_id"]))
+    elif boundary == "source":
+        event = core.store.one("SELECT body_json FROM events WHERE event_id=?", (job["event_id"],))
+        body = json.loads(event["body_json"])
+        body["text"] = "Changed owner input"
+        core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                           (json.dumps(body), job["event_id"]))
+    elif boundary == "stop":
+        owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+            operation_id="stop-failure-notice", authority=json.loads(job["authority_json"])))
+    else:
+        with core.store.transaction():
+            core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
+    with pytest.raises(CoreError):
+        owner_delivery.check_delivery(core.store, core.settings, core.clock, row["message_id"])
+
+
+def test_failure_notice_is_idempotent_and_binding_rejection_rolls_back(core, tmp_path, monkeypatch):
+    def refuse(*_args):
+        raise CoreError("OWNER_SOURCE_CHANGED", 403)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(owner_delivery, "record_failure_notice", refuse)
+        failed(core, tmp_path, "INTERNAL_ERROR")
+    assert core.store.rows("SELECT * FROM outbox") == []
+    assert core.store.rows("SELECT * FROM runtime_meta WHERE key LIKE 'owner_delivery:%'") == []
+    job_id = authorized_job(core, number=4)
+    job = core.store.one("SELECT j.*,e.trace_id,e.conversation_id FROM jobs j "
+                         "JOIN events e USING(event_id) WHERE job_id=?", (job_id,))
+    core.fail_job(job, "INTERNAL_ERROR")
+    row = assert_failure_notice(core)
+    core.fail_job(job, "INTERNAL_ERROR")
+    assert assert_failure_notice(core)["message_id"] == row["message_id"]

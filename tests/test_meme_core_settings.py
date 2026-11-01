@@ -17,6 +17,7 @@ from companion.model import ModelClient
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from tests.conftest import run
+from tests.support.failure_notice import assert_failure_notice
 from tests.test_paid_model_gate import approved_live
 
 RULE = {
@@ -243,9 +244,8 @@ def test_prepare_failure_fences_fresh_and_persisted_native_chat(core, tmp_path, 
     assert called == [job["job_id"]]
     row = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job["job_id"],))
     assert row == {"state": "FAILED", "last_error_code": "MEME_ASSET_SOURCE_CHANGED"}
-    assert not core.store.rows("SELECT * FROM model_usage") and not core.store.rows(
-        "SELECT * FROM outbox"
-    )
+    assert not core.store.rows("SELECT * FROM model_usage")
+    assert_failure_notice(core)
     if saved:
         assert persistence.row()["phase"] == "READY"
 
@@ -275,7 +275,8 @@ def test_offer_revocation_after_http_hook_fences_final_provider_io(core, tmp_pat
             assert await core.run_once("offer-revocation-hook", job_id=job["job_id"])
 
     asyncio.run(scenario())
-    assert not providers and not core.store.rows("SELECT * FROM outbox")
+    assert not providers
+    assert_failure_notice(core)
     assert core.store.one("SELECT last_error_code FROM jobs WHERE job_id=?", (job["job_id"],)) == {
         "last_error_code": "MEME_ASSET_SOURCE_CHANGED"
     }
