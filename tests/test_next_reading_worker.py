@@ -146,6 +146,18 @@ def test_url_cannot_grant_its_own_host(monkeypatch):
     assert core.results[0]["error_code"] == "CONTENT_URL_NOT_ALLOWED"
 
 
+@pytest.mark.parametrize(("granted", "local", "expected"), [
+    (["*"], None, {"*"}), (["*"], ["articles.example"], {"articles.example"}),
+    (["articles.example"], ["*"], {"articles.example"}),
+])
+def test_all_public_scope_preserves_local_restrictions(monkeypatch, granted, local, expected):
+    backend, scopes = public_web(monkeypatch, web_response())
+    core = MockCore(lease(allowed_hosts=granted))
+    assert run(web_tick(core, local_hosts=local))
+    assert scopes == [frozenset(expected)] and len(backend.requests) == 1
+    assert core.results[0]["status"] == "SUCCESS"
+
+
 def test_titleless_long_url_keeps_dto_title_limit(monkeypatch):
     public_web(monkeypatch, web_response(HTML.replace("<title>测试文章</title>".encode(), b"")))
     url = "https://articles.example/" + "a" * 400

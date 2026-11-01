@@ -20,6 +20,7 @@ from companion.observation import (
 )
 from companion.privacy import epoch
 from companion.source_grants import SourceGrantSnapshot
+from companion.source_policy import web_host_allowed
 from companion.sources import content_target, observation_sources, supports, web_hosts
 from companion.store import after, encode, uid, utcnow
 from companion.transport import digest
@@ -283,7 +284,8 @@ class ExplorationService:
                     name
                     for name, adapter in self.settings.observation_adapters.items()
                     if adapter.source == source and (
-                        source != "web" or urlsplit(url).hostname in self.settings.web_reading_hosts
+                        source != "web" or web_host_allowed(
+                            urlsplit(url).hostname, self.settings.web_reading_hosts)
                     )
                 ),
                 None,

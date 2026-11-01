@@ -236,7 +236,8 @@ def test_redirect_cannot_extend_granted_hosts(target):
     assert result["observations"] == []
 
 
-def test_new_host_dns_checked_and_pinned_on_each_redirect(monkeypatch):
+@pytest.mark.parametrize("hosts", [{"articles.example", "cdn.example"}, {"*"}])
+def test_new_host_dns_checked_and_pinned_on_each_redirect(monkeypatch, hosts):
     from source_reader import web
 
     monkeypatch.setattr(web, "extract_html", lambda raw: "正文")
@@ -253,7 +254,7 @@ def test_new_host_dns_checked_and_pinned_on_each_redirect(monkeypatch):
             return ["93.184.216.34"] if host == "articles.example" else ["127.0.0.1"]
 
         pool._network_backend = PublicNetwork(resolver, backend)
-        async with WebHTTP({"articles.example", "cdn.example"}, pool) as public:
+        async with WebHTTP(hosts, pool) as public:
             result = await read_observation(WebReader(public), {**ITEM, "url": WEB},
                                             ReadingContext("root_web", "web", (), 0), valid)
         assert resolved == ["articles.example", "cdn.example"]
@@ -262,6 +263,22 @@ def test_new_host_dns_checked_and_pinned_on_each_redirect(monkeypatch):
 
     result = run(scenario())
     assert result["error_code"] == "READER_NONPUBLIC_ADDRESS"
+
+
+@pytest.mark.parametrize("target", [
+    "https://127.0.0.1/", "https://169.254.169.254/latest/meta-data/", "https://[::1]/",
+    "https://localhost/", "https://nas.local/", "https://api.internal/",
+    "http://public.example/", "https://user:secret@public.example/", "https://public.example:444/",
+])
+def test_public_scope_redirect_cannot_reach_private_or_unapproved_transport(target):
+    async def scenario():
+        pool, backend = mock_pool(response(status=302, headers={"Location": target}))
+        async with WebHTTP({"*"}, pool) as public:
+            result = await read_observation(WebReader(public), {**ITEM, "url": WEB},
+                                            ReadingContext("root_web", "web", (), 0), valid)
+        assert result["status"] == "FAILED" and not result["observations"]
+        assert len(backend.requests) == 1
+    run(scenario())
 
 
 @pytest.mark.parametrize(("raw", "code"), [

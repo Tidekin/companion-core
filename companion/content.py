@@ -32,6 +32,7 @@ from companion.media_provider import HTTPMediaProvider
 from companion.observation import ObservationEvent, ObservationPayload
 from companion.privacy import epoch, redact
 from companion.reading import followup_item
+from companion.source_policy import web_host_allowed
 from companion.sources import content_target, public_image_url, supports, web_hosts
 from companion.store import after, encode, uid, utcnow
 
@@ -377,7 +378,8 @@ class ContentService:
                             for name, adapter in self.settings.observation_adapters.items()
                             if adapter.source == source and (
                                 source != "web"
-                                or urlsplit(url).hostname in self.settings.web_reading_hosts)
+                                or web_host_allowed(urlsplit(url).hostname,
+                                                    self.settings.web_reading_hosts))
                         ),
                         None,
                     )

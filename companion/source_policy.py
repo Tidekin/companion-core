@@ -3,6 +3,7 @@
 Standard library only: no Core validation, storage, authentication or I/O imports.
 """
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -14,6 +15,21 @@ ObservationSource = Literal[
 SourceCapability = Literal[
     "get", "read", "discover", "reading", "article", "share", "source_grant", "link_images"
 ]
+
+WEB_HOST = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
+)
+
+
+def public_web_host(host):
+    """DNS-name syntax only; the Reader separately resolves and pins public IPs."""
+    return (isinstance(host, str) and len(host) <= 253 and WEB_HOST.fullmatch(host) is not None
+            and not host.endswith((".localhost", ".local", ".internal")))
+
+
+def web_host_allowed(host, hosts):
+    """A sole '*' explicitly permits public DNS names, never IPs or private names."""
+    return public_web_host(host) and (host in hosts or tuple(hosts) == ("*",))
 
 
 @dataclass(frozen=True)

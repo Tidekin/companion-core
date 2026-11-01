@@ -35,8 +35,10 @@ def configure(core):
     core.settings.observation_adapters["web"] = ObservationAdapterConfig(source="web", token=TOKEN)
 
 
-def queued(core, source="web", *, owner=True):
+def queued(core, source="web", *, owner=True, hosts=None):
     configure(core)
+    if hosts is not None:
+        core.settings.web_reading_hosts = hosts
     body = envelope(source)
     if owner:
         accept(core, text="请阅读 " + body["observations"][0]["url"])
@@ -136,8 +138,9 @@ def test_forged_envelope_cannot_commit(core, mutation):
 
 
 @pytest.mark.parametrize("change", ["new_input", "epoch", "expired", "hosts", "disabled"])
-def test_late_success_settles_usage_without_committing_revoked_content(core, change):
-    adapter, item, body = queued(core)
+@pytest.mark.parametrize("hosts", [("articles.example",), ("*",)])
+def test_late_success_settles_usage_without_committing_revoked_content(core, change, hosts):
+    adapter, item, body = queued(core, hosts=hosts)
     if change == "new_input":
         accept(core, 2, text="先聊别的")
     elif change == "epoch":
@@ -268,7 +271,8 @@ def test_web_hosts_are_owner_configuration_not_adapter_credentials(core):
 
     with pytest.raises(ValidationError, match="web_reading_hosts"):
         ObservationAdapterConfig(source="web", token=TOKEN, allowed_hosts=("articles.example",))
-    for hosts in (("*.example.com",), ("192.168.1.1",), ("nas.local",), ("a.example", "a.example")):
+    for hosts in (("*.example.com",), ("192.168.1.1",), ("nas.local",), ("a.example", "a.example"),
+                  ("*", "a.example")):
         with pytest.raises(ValidationError):
             Settings.model_validate({**core.settings.model_dump(mode="python"),
                                      "web_reading_hosts": hosts})

@@ -7,6 +7,7 @@ from html.parser import HTMLParser
 from importlib.metadata import PackageNotFoundError, version
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
+from companion.source_policy import web_host_allowed
 from source_reader.network import PublicHTTP, ReadFailure, response_body
 
 TRAFILATURA_VERSION = "2.3.1"
@@ -19,7 +20,7 @@ def web_url(value, allowed_hosts):
     try:
         parsed = urlsplit(value)
         valid = (
-            parsed.scheme == "https" and parsed.hostname in allowed_hosts
+            parsed.scheme == "https" and web_host_allowed(parsed.hostname, allowed_hosts)
             and parsed.username is None and parsed.password is None
             and parsed.port in {None, 443} and not parsed.fragment
             and re.fullmatch(r"[a-z0-9.-]+", parsed.hostname or "")

@@ -12,6 +12,7 @@ import zlib
 from pathlib import Path
 
 import httpx
+import pytest
 import uvicorn
 
 from companion.api import create_app
@@ -28,8 +29,10 @@ from tests.test_reading_service import TOKEN, configure
 from tests.test_source_reader import ITEM, META, PLAYER, SUBTITLE
 
 
-def test_inbox_to_independent_reader_cli_then_restart_cannot_reexecute(core, tmp_path):
+@pytest.mark.parametrize("hosts", [("articles.example",), ("*",)])
+def test_inbox_to_independent_reader_cli_then_restart_cannot_reexecute(core, tmp_path, hosts):
     configure(core)
+    core.settings.web_reading_hosts = hosts
     # A second actual Core owns HTTP; Reader has no database or Core-service access.
     with Core(core.settings) as http_core:
         app = create_app(core.settings)
@@ -73,9 +76,10 @@ from source_reader.web import WebHTTP
 raw = bytes.fromhex(json.loads(sys.stdin.read())['document'])
 wire = b'HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: '
 wire += str(len(raw)).encode() + b'\r\nConnection: close\r\n\r\n' + raw
+expected_hosts = set(json.loads(sys.argv[3]))
 
 def provider(hosts):
-    assert hosts == {'articles.example'}
+    assert hosts == expected_hosts
     pool = httpcore.AsyncConnectionPool(network_backend=httpcore.AsyncMockBackend([wire]))
     return WebHTTP(hosts, pool)
 
@@ -102,7 +106,7 @@ runpy.run_module('source_reader', run_name='__main__')
             for _ in range(2):
                 child = subprocess.run(
                     [sys.executable, "-I", "-c", script,
-                     str(Path(__file__).resolve().parents[1]), origin],
+                     str(Path(__file__).resolve().parents[1]), origin, json.dumps(hosts)],
                     cwd=tmp_path, input=json.dumps({"document": HTML.hex()}),
                     env={**os.environ, "COMPANION_READER_TOKEN": TOKEN},
                     text=True, capture_output=True, timeout=30,

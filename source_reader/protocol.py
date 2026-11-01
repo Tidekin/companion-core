@@ -3,6 +3,7 @@
 import re
 from datetime import UTC, datetime
 
+from companion.source_policy import public_web_host
 from source_reader.network import ReadFailure
 from source_reader.reading import ReadingContext
 
@@ -17,6 +18,8 @@ def instant(value):
 
 
 def exact_hosts(values):
+    if isinstance(values, (list, tuple)) and tuple(values) == ("*",):
+        return frozenset(values)
     if (not isinstance(values, (list, tuple)) or len(values) > 128
         or any(not isinstance(host, str) or len(host) > 253 or not re.fullmatch(
             r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
@@ -88,6 +91,10 @@ def decode_lease(payload, source, now, *, media_limits=None):
             **{**context, "source_event_ids": tuple(context["source_event_ids"])}
         )
         hosts = exact_hosts(item["allowed_hosts"])
+        if "*" in hosts and source != "web":
+            raise ValueError("Only web reads can permit all public DNS names")
+        if source == "web" and any(host != "*" and not public_web_host(host) for host in hosts):
+            raise ValueError("Web reads require public DNS names")
         if source == "web" and (not hosts or item["operation"] != "read"):
             raise ValueError("Web reads require an explicit host scope")
         if item.get("source_grant") is not None:
