@@ -49,12 +49,12 @@ def upgrade():
                                       "reserved_output_bytes BETWEEN 0 AND 58720256")
     op.execute("CREATE UNIQUE INDEX idx_voice_singing_source ON voice_jobs(event_id) "
                "WHERE operation='sing'")
-    with op.batch_alter_table("agent_tool_calls", naming_convention=convention) as batch:
-        batch.add_column(Column("voice_job_id", Text))
-        batch.create_foreign_key("fk_agent_tool_voice_job", "voice_jobs",
-                                 ["voice_job_id"], ["job_id"])
-        batch.create_check_constraint("ck_agent_tool_voice_binding",
-            "voice_job_id IS NULL OR (tool_name='sing_song' AND request_id IS NULL)")
+    # Native nullable ADD COLUMN retains the historical inline job FK's CASCADE;
+    # SQLite reflection during a batch rebuild loses that delete action.
+    op.execute("ALTER TABLE agent_tool_calls ADD COLUMN voice_job_id TEXT "
+        "CONSTRAINT fk_agent_tool_voice_job REFERENCES voice_jobs(job_id) "
+        "CONSTRAINT ck_agent_tool_voice_binding CHECK "
+        "(voice_job_id IS NULL OR (tool_name='sing_song' AND request_id IS NULL))")
 
 
 def downgrade():
