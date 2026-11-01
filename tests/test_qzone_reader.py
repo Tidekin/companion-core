@@ -38,7 +38,7 @@ def response(now=NOW, **changes):
 
 
 def pool_for(body, calls):
-    raw = json.dumps(body, ensure_ascii=False).encode()
+    raw = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
     wire = (b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(raw)).encode()
             + b"\r\nConnection: close\r\n\r\n" + raw)
 
@@ -93,6 +93,34 @@ def test_one_post_text_preserves_provenance_and_discards_comments_and_credential
     assert "synthetic-private-key" not in json.dumps(result)
     assert "g_tk" not in json.dumps(result)
     assert "87654321" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("callback", [b"_Callback", b"callback"])
+def test_platform_jsonp_is_data_only_and_retains_original_response_hash(tmp_path, callback):
+    import hashlib
+
+    raw = b" \n" + callback + b"(" + json.dumps(response(), ensure_ascii=False).encode() + b");\n"
+    result, calls, _ = read(tmp_path, raw)
+    assert result["status"] == "SUCCESS" and calls == ["GET"]
+    evidence = result["observations"][0]["evidence"]
+    assert evidence["response_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert evidence["response_bytes"] == len(raw)
+
+
+@pytest.mark.parametrize("raw", [
+    b"callback({});alert(1)", b"unapprovedCallback({});", b"prefix callback({});",
+    b"callback({}) callback({})", b"callback(not_json)",
+])
+def test_jsonp_requires_one_known_complete_envelope(tmp_path, raw):
+    result, calls, _ = read(tmp_path, raw)
+    assert calls == ["GET"] and result["status"] == "FAILED"
+    assert result["error_code"] == "UPSTREAM_RESPONSE_INVALID" and not result["observations"]
+
+
+def test_jsonp_access_denial_does_not_become_a_format_error(tmp_path):
+    result, calls, _ = read(tmp_path, b'_Callback({"code":-3000});')
+    assert calls == ["GET"] and result["status"] == "FAILED"
+    assert result["error_code"] == "UPSTREAM_ACCESS_LIMIT" and not result["observations"]
 
 
 @pytest.mark.parametrize("change", [

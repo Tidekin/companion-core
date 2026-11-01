@@ -226,6 +226,55 @@ def test_dns_is_validated_once_and_numeric_connection_keeps_original_tls_name():
     run(scenario())
 
 
+@pytest.mark.parametrize("failure", [
+    OSError("IPv6 route unavailable"), httpcore.ConnectError("IPv6 route unavailable"),
+    httpcore.ConnectTimeout("IPv6 connection failed"),
+])
+def test_failed_public_address_uses_same_dns_snapshot_and_one_http_request(failure):
+    async def scenario():
+        calls = []
+        addresses = ["2606:4700:4700::1111", "1.1.1.1"]
+
+        async def resolver(host, port):
+            calls.append((host, port))
+            assert len(calls) == 1
+            return addresses
+
+        backend = Responses(failure, response(META))
+        pool = httpcore.AsyncConnectionPool(
+            ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
+            network_backend=PublicNetwork(resolver, backend), max_keepalive_connections=0,
+        )
+        budget = ReadBudget(50000, 1)
+        async with PublicHTTP(pool) as public:
+            body = await public.get("https://api.bilibili.com/x/web-interface/view", budget,
+                                    "metadata")
+            assert json.loads(body) == META
+        assert backend.hosts == addresses
+        assert backend.server_names == ["api.bilibili.com"]
+        assert len(backend.requests) == budget.used_requests == 1
+        assert b"Host: api.bilibili.com" in backend.requests[0]
+
+    run(scenario())
+
+
+def test_all_public_addresses_failing_preserves_last_connection_error():
+    async def scenario():
+        addresses = ["2606:4700:4700::1111", "1.1.1.1"]
+
+        async def resolver(host, port):
+            return addresses
+
+        last = httpcore.ConnectError("last public endpoint failed")
+        backend = Responses(httpcore.ConnectError("first public endpoint failed"), last)
+        with pytest.raises(httpcore.ConnectError) as caught:
+            await PublicNetwork(resolver, backend).connect_tcp("api.bilibili.com", 443)
+        assert caught.value is last and backend.hosts == addresses
+        assert not backend.requests
+
+    run(scenario())
+
+
 @pytest.mark.parametrize(
     "addresses",
     [["127.0.0.1"], ["169.254.169.254"], ["::1"], ["1.1.1.1", "192.168.1.1"], ["100.64.0.1"]],
