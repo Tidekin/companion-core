@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from companion_onebot_bridge import app, journal, pending_media
+from companion_onebot_bridge.owner_memes import MemePump
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.profile_probe import ProfilePump
 from companion_onebot_bridge.spool import Spool
@@ -22,6 +23,7 @@ def test_idle_background_waits_skip_history_and_stop_wakes_profile_cooldown(conf
             runtime = OwnerRuntime(spool)
             profile = ProfilePump(runtime, None, None)
             media = pending_media.MediaPump(runtime, None)
+            memes = MemePump(runtime, None)
             profile.next_run = time.monotonic() + 60
             stop, paused = asyncio.Event(), asyncio.Event()
             original_verify, original_pause = runtime.verify, app.pause
@@ -39,7 +41,7 @@ def test_idle_background_waits_skip_history_and_stop_wakes_profile_cooldown(conf
 
             monkeypatch.setattr(runtime, "verify", verify)
             monkeypatch.setattr(app, "pause", pause)
-            tasks = [asyncio.create_task(app.observe_profile(profile, stop), name="profile"),
+            tasks = [asyncio.create_task(app.observe_profile(profile, stop, memes), name="profile"),
                      asyncio.create_task(app.transfer_media(media, stop), name="media")]
             try:
                 await asyncio.wait_for(paused.wait(), 2)

@@ -18,6 +18,7 @@ from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
 from companion_onebot_bridge import profile_probe
 from companion_onebot_bridge.network import private_http_client
+from companion_onebot_bridge.owner_memes import MemePump
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import bridge_code_sha256, digest
@@ -487,7 +488,8 @@ def test_continuous_probe_real_core_http_independent_worker_and_native_profile_a
                     from companion_onebot_bridge.metrics import Metrics
 
                     pump = profile_probe.ProfilePump(window, client, protocol)
-                    await asyncio.gather(observe_profile(pump, pause), execute(),
+                    memes = MemePump(window, client)
+                    await asyncio.gather(observe_profile(pump, pause, memes), execute(),
                         deliver(client, None, window.spool, pause, Metrics(),
                                 runtime=window, protocol=protocol))
             assert handshakes == []

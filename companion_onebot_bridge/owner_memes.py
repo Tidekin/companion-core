@@ -155,6 +155,10 @@ class MemePump:
             return
         self.task = asyncio.create_task(self.execute(row))
 
+    @property
+    def running(self):
+        return self.task is not None and not self.task.done()
+
     async def close(self):
         self.interrupt()
         await asyncio.gather(*self.query_tasks, *([self.task] if self.task else []),
