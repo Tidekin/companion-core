@@ -78,7 +78,8 @@ def test_choice_submits_native_goal_once(core, action, enabled, source):
     assert_no_delivery(core)
 
 
-def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_scope", ["selected", "owner_private_history"])
+def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatch, source_scope):
     configure(core)
     core.settings.observation_adapters["bili"].reader_max_requests = 4
     core.settings.life_loop = LifeLoopConfig(mode="SHADOW", read_goals_enabled=True)
@@ -138,7 +139,7 @@ def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatc
                 ),
             )
 
-        async with environment(core, tmp_path, history=False,
+        async with environment(core, tmp_path, history=source_scope == "owner_private_history",
             additional_purposes=("goals", "content", "exploration")) as (admit, _, reference):
             inbound, _ = await admit(1, "有空可以看看这个星空介绍，明天聊聊。")
             view = owner_authority.current(core.store, core.settings, core.clock)
@@ -154,7 +155,9 @@ def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatc
                     authorization_sha256="e" * 64,
                     conversation_id=core.store.one("SELECT conversation_id FROM events "
                         "WHERE event_id=?", (inbound.event_id,))["conversation_id"],
-                    source_event_ids=[inbound.event_id], purposes=["PRIVATE_MESSAGE_DRAFT"],
+                    source_scope=source_scope,
+                    source_event_ids=[inbound.event_id] if source_scope == "selected" else [],
+                    purposes=["PRIVATE_MESSAGE_DRAFT"],
                     expires_at=core.clock.now + timedelta(days=2), max_items=2)
                 policy = OwnerGrantPolicy.model_validate({**view.policy.model_dump(),
                     "purposes": [*view.policy.purposes, "life"], "life_shadow": scope})

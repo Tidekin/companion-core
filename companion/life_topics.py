@@ -250,7 +250,29 @@ def _source(store, settings, event_id, now):
     }
 
 
-def _completed_goal_source(store, settings, event_id, scope, now, authority_sha256):
+def _scope_source(store, settings, source, scope, now, authority_sha256, *, seen=frozenset()):
+    """Selected consent or the independently verified owner-history source contract."""
+    if scope.source_scope == "selected" and source["event_id"] in scope.source_event_ids:
+        return True
+    if (scope.source_scope == "owner_private_history" and source["kind"] == "owner_message"
+        and source["conversation_id"] == scope.conversation_id):
+        from companion import owner_input
+
+        try:
+            view = owner_authority.current(store, settings, lambda: now, purpose="life")
+            owner_input.source(store, settings, view, source["event_id"], now,
+                               history=True, purpose="life")
+            return True
+        except CoreError:
+            return False
+    if source["kind"] != "observed_content" or source["event_id"] in seen or len(seen) >= 64:
+        return False
+    return _completed_goal_source(store, settings, source["event_id"], scope, now,
+                                  authority_sha256, seen=seen | {source["event_id"]})
+
+
+def _completed_goal_source(store, settings, event_id, scope, now, authority_sha256, *,
+                           seen=frozenset()):
     """Private purpose follows an actual result of this approval's settled Life choice."""
     from companion.notices import _settled
 
@@ -266,15 +288,18 @@ def _completed_goal_source(store, settings, event_id, scope, now, authority_sha2
     )
     for row in rows:
         roots = store.rows("SELECT event_id FROM goal_evidence WHERE goal_id=?", (row["goal_id"],))
-        if (not roots or not {r["event_id"] for r in roots} <= set(scope.source_event_ids)
-                or not _settled(store, row["job_id"])):
+        if (not roots or not _settled(store, row["job_id"])
+            or scope.source_scope == "selected"
+            and not {r["event_id"] for r in roots} <= set(scope.source_event_ids)):
             continue
         try:
             fingerprints = json.loads(row["source_fingerprints_json"])
             for root in roots:
                 source = _source(store, settings, root["event_id"], now)
                 if (source["conversation_id"] != scope.conversation_id
-                    or fingerprints.get(root["event_id"]) != source["source_sha256"]):
+                    or fingerprints.get(root["event_id"]) != source["source_sha256"]
+                    or not _scope_source(store, settings, source, scope, now,
+                                         authority_sha256, seen=seen)):
                     return False
         except (CoreError, ValueError, TypeError, AttributeError):
             continue
@@ -302,14 +327,17 @@ def authority(store, settings, conversation_id, sources, now, *, topic_id=None, 
         or scope.conversation_id != conversation_id
         or scope.expires_at <= datetime.fromisoformat(now)
         or any(
-            source["event_id"] not in scope.source_event_ids
-            and not _completed_goal_source(
-                store, settings, source["event_id"], scope, now, authority_sha256,
-            )
+            not _scope_source(store, settings, source, scope, now, authority_sha256)
             for source in sources
         )
     ):
         raise CoreError("LIFE_SHADOW_SCOPE_REQUIRED", 403)
+    if scope.source_scope == "owner_private_history":
+        private = [source for source in sources if source["kind"] == "owner_message"]
+        if (len(private) > view.policy.history.max_turns
+            or sum(len(source["text"].encode("utf-8")) for source in private)
+            > view.policy.history.max_utf8_bytes):
+            raise CoreError("LIFE_HISTORY_CONTEXT_LIMIT", 409)
     count = store.one(
         "SELECT COUNT(*) n FROM life_activity_results WHERE authority_sha256=? "
         "AND (state='SHADOW' OR (state='PENDING' AND topic_id<>?))",
@@ -346,6 +374,10 @@ def authority(store, settings, conversation_id, sources, now, *, topic_id=None, 
         "sha256": authority_sha256,
         "destinations": [*destinations, *(["QZONE_DRAFT"] if qzone else [])],
         "qzone": qzone,
+        **({"history_sources": True,
+            "source_limit": min(settings.life_loop.source_limit, view.policy.history.max_turns),
+            "source_utf8_limit": view.policy.history.max_utf8_bytes}
+           if scope.source_scope == "owner_private_history" else {}),
     }
 
 
@@ -852,10 +884,20 @@ class LifeTopics:
                         continue
                     conversation = parent["conversation_id"]
                 try:
-                    authority(s, self.settings, conversation, [source], now, check_limit=False)
+                    approved = authority(s, self.settings, conversation, [source], now,
+                                         check_limit=False)
                 except CoreError:
                     # An unapproved older source must not join an approved topic
                     # and prevent the whole conversation from passing its scope.
+                    continue
+                if approved.get("history_sources") and kind == "conversation" and s.one(
+                    "SELECT 1 FROM life_topic_sources ts JOIN life_topics t USING(topic_id) "
+                    "JOIN events e USING(event_id) WHERE t.conversation_id=? "
+                    "AND t.kind='conversation' AND e.rowid>(SELECT rowid FROM events "
+                    "WHERE event_id=?) LIMIT 1", (conversation, row["event_id"]),
+                ):
+                    # The bounded scan can encounter older unprocessed history on
+                    # its next pass. It must never replace a newer topic with it.
                     continue
                 active = (
                     s.one(
@@ -871,17 +913,29 @@ class LifeTopics:
                         "SELECT COUNT(*) n FROM life_topic_sources WHERE topic_id=?",
                         (active["topic_id"],),
                     )["n"]
-                    if count >= cfg.source_limit:
-                        continue
+                    history_full = approved.get("history_sources") and (
+                        count >= approved["source_limit"]
+                        or sum(len(item["text"].encode("utf-8"))
+                               for item in self.sources(active["topic_id"]))
+                        + len(source["text"].encode("utf-8")) > approved["source_utf8_limit"]
+                    )
+                    if count >= cfg.source_limit or history_full:
+                        if not approved.get("history_sources"):
+                            continue
+                        invalidate(s, active["topic_id"], "SOURCE_LIMIT_REACHED",
+                                   terminal="CLOSED", now=now)
+                        active = None
+                if active:
                     invalidate(s, active["topic_id"], "LIFE_NEW_INPUT")
                     s.insert(
                         "life_topic_sources", topic_id=active["topic_id"], event_id=row["event_id"]
                     )
+                    due = after(source["occurred_at"], cfg.follow_up_delay_seconds)
                     s.execute(
-                        "UPDATE life_topics SET revision=revision+1,state='WAITING',due_at=?,"
+                        "UPDATE life_topics SET revision=revision+1,state=?,due_at=?,"
                         "updated_at=? WHERE topic_id=?",
                         (
-                            after(source["occurred_at"], cfg.follow_up_delay_seconds),
+                            "DUE" if due <= now else "WAITING", due,
                             now,
                             active["topic_id"],
                         ),
