@@ -158,7 +158,7 @@ def test_text_delivery_accepts_absent_voice_but_rejects_an_empty_check(core, mon
 @pytest.mark.parametrize("mode", ["offline", "running", "failed", "late_result"])
 def test_local_voice_failure_falls_back_once_without_new_message(core, monkeypatch, mode):
     flow, jobs, message_id, _, _ = flow_fixture(
-        core, monkeypatch, reply=VoiceReplyPolicy(wait_seconds=2)
+        core, monkeypatch, reply=VoiceReplyPolicy(mode="auto", wait_seconds=2)
     )
     original = core.store.one("SELECT content_json,content_sha256,delivery_key FROM outbox")
     first = prepare(core, flow, message_id)

@@ -43,6 +43,7 @@ def voice_config(**updates):
             "enabled": True,
             "signing_private_key": "61" * 32,
             "nodes": {"local": VoiceNode(token=TOKEN, manifest_sha256="b" * 64)},
+            "reply": {"mode": "auto"},
         }
         | updates
     )

@@ -274,7 +274,7 @@ max_private_blob_bytes = 32000000
 # Subpolicy defaults apply only after the top-level voice capability is enabled and scoped.
 [voice.reply]
 enabled = true
-mode = "voice_input"
+mode = "model"
 max_chars = 400
 wait_seconds = 15
 proactive = false

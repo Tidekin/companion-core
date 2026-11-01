@@ -49,7 +49,7 @@ class VoiceReplyPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, validate_default=True)
 
     enabled: bool = Field(default=True, strict=True)
-    mode: Literal["voice_input", "auto"] = "voice_input"
+    mode: Literal["model", "voice_input", "auto"] = "model"
     max_chars: int = Field(default=400, ge=1, le=4000, strict=True)
     wait_seconds: int = Field(default=15, ge=1, le=120, strict=True)
     proactive: bool = Field(default=False, strict=True)

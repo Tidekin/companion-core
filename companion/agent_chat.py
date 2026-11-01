@@ -45,7 +45,10 @@ async def reply(core, job, snapshots):
     if isinstance(result.output, DeferredToolRequests):
         wait(core, job, persistence)
         return None, persistence
-    return result.output, persistence
+    from companion.agent_output import VoiceReply
+
+    output = result.output.text if isinstance(result.output, VoiceReply) else result.output
+    return output, persistence
 
 
 def wait(core, job, persistence):
