@@ -161,3 +161,39 @@ def test_search_tool_is_bound_for_owner_chat(core, tmp_path):
     assert missing["found"] is False and "没收录" in missing["note"]
     core.settings.meme_wiki = MemeWikiConfig(enabled=False)
     assert "search_meme_wiki" not in core_query_tools(core, job, []).tools
+
+
+def test_console_lookup_test_is_read_only_and_needs_a_session(core):
+    from fastapi.testclient import TestClient
+    from pydantic import SecretStr
+
+    from companion.api import create_app
+    from tests.test_console_cognition import ORIGIN, PASSWORD, login
+
+    core.settings.console.enabled = True
+    core.settings.console.public_origin = ORIGIN
+    core.settings.control_token = SecretStr(PASSWORD)
+    with TestClient(create_app(core.settings), base_url=ORIGIN) as client:
+        assert client.get("/v1/console/meme-wiki", params={"q": "芜湖"}).status_code == 401
+        login(client)
+        info = client.get("/v1/console/meme-wiki").json()
+        assert info["available"] and info["count"] == 6668 and info["ordinary"] > 300
+        hit = client.get("/v1/console/meme-wiki", params={"q": "今天不用加班了，芜湖起飞"}).json()
+        assert hit["prefetch"]["found"] and "[梗百科]「芜湖」" in hit["prefetch"]["content"]
+        word = client.get("/v1/console/meme-wiki", params={"q": "房间好乱，还没收拾"}).json()
+        assert word["prefetch"] is None
+        miss = client.get("/v1/console/meme-wiki", params={"q": "蚌埠住了是什么梗"}).json()
+        assert miss["prefetch"]["found"] is False
+        assert client.get("/v1/console/meme-wiki", params={"q": "梗" * 201}).status_code == 422
+
+
+def test_capability_reports_the_glossary_and_its_switch(core):
+    from companion import capabilities
+
+    def row():
+        snapshot = capabilities.snapshot(core.store, core.settings, core.clock)
+        return next(item for item in snapshot["capabilities"] if item["id"] == "memes.wiki")
+
+    assert row()["state"] == "READY"
+    core.settings.meme_wiki = MemeWikiConfig(enabled=False)
+    assert "FEATURE_DISABLED" in row()["reason_codes"]

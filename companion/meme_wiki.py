@@ -18,6 +18,7 @@ import re
 import sqlite3
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 log = logging.getLogger(__name__)
 
@@ -245,3 +246,28 @@ def context(settings, text):
         return None
     q, row = min(hits, key=lambda hit: (hit[1]["step"], -len(hit[1]["title"])))
     return {"role": "user", "content": _result(settings, q, row)["text"]}
+
+
+def inspect(settings, text):
+    """Console lookup test: glossary facts, the tool result for the term and what prefetch
+    would add for the same text as a message. Read-only; nothing is stored."""
+    connection = _connection()
+    if connection is None:
+        return {"available": False}
+    built = connection.execute("SELECT value FROM meta WHERE key='built_at'").fetchone()
+    out = {"available": True, "enabled": settings.meme_wiki.enabled,
+           "count": connection.execute("SELECT COUNT(*) FROM memes").fetchone()[0],
+           "ordinary": connection.execute("SELECT COUNT(*) FROM ordinary").fetchone()[0],
+           "built_at": built[0] if built else None}
+    text = str(text or "").strip()
+    if not text:
+        return out
+    searched = _search(text[:40])
+    row = searched and searched[1]
+    out["entry"] = {key: row[key] for key in ("title", "tags", "usage", "origin")} if row else None
+    probe = SimpleNamespace(meme_wiki=settings.meme_wiki.model_copy(update={"enabled": True}))
+    reference = context(probe, text[:200])
+    out["prefetch"] = None if reference is None else {
+        "found": "[梗百科]「" in reference["content"], "content": reference["content"]}
+    return out
+

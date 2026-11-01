@@ -598,6 +598,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         "tool.cancel_reading": "content", "model.understand_video": "image",
         "tool.analyze_shared_video": "bili_video",
         "tool.search_meme_wiki": "chat",
+        "memes.wiki": "chat",
     }
 
     def add(identifier, summary, invocation=("automatic",), *, enabled=True,
@@ -770,6 +771,11 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         ([] if "understand_video" in names else ["TOOL_NOT_EXPOSED_THIS_TURN"]),
         paused=model_blocks)
     add("unicode.emoji", "保留并理解消息中的 Unicode 表情原文。")
+    from companion import meme_wiki
+
+    add("memes.wiki", "认出主人说的梗：查随包的只读梗百科，可以顺着接话，也可以正常聊。",
+        enabled=cfg.meme_wiki.enabled,
+        unavailable=[] if meme_wiki._connection() else ["MEME_WIKI_DATA_INVALID"])
     add("qq.face_names", "识别 QQ 原生表情 ID 的名称。",
         enabled=cfg.rich_input_scope == "references_v1" or bool(cfg.live_text_window
                 and cfg.live_text_window.rich_input_scope == "references_v1"))

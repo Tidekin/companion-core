@@ -1108,3 +1108,13 @@ details.ev ul { display: grid; gap: 4px; margin-top: 6px; font-size: 12.5px; }
 /* 目标标题与状态标签分开，标签不贴着标题 */
 .goal-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
 .goal-h b { min-width: 0; }
+/* 梗百科：串子程度滑杆与查词结果 */
+.mw-range { display: flex; align-items: center; gap: 12px; min-width: min(320px, 100%); }
+.mw-range .range { flex: 1; accent-color: var(--ink); }
+.mw-range b { min-width: 92px; text-align: right; font-size: 13px; color: var(--ink); }
+.mw-result { margin-top: 12px; }
+.mw-entry { display: grid; gap: 8px; margin-top: 6px; }
+.mw-entry h4 { font-size: 15px; color: var(--ink); }
+.mw-entry p { line-height: 1.7; }
+.mw-entry small { display: block; color: var(--muted); font-size: 11.5px; margin-bottom: 2px; }
+.mw-result li { display: grid; gap: 4px; }

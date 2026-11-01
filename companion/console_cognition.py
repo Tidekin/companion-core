@@ -249,6 +249,14 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
         core = app.state.core
         return {"enabled": jargon.enabled(core.settings), "items": jargon.items(core.store)}
 
+    @app.get(prefix + "/meme-wiki", dependencies=auth)
+    async def meme_wiki_test(q: str = ""):
+        from companion import meme_wiki
+
+        if len(q) > 200:
+            raise CoreError("MEME_WIKI_QUERY_TOO_LONG", 422)
+        return meme_wiki.inspect(app.state.core.settings, q)
+
     @app.post(prefix + "/jargon/forget", dependencies=auth)
     async def jargon_forget(body: JargonForget, request: Request,
                             idempotency_key: str = Header(default="")):

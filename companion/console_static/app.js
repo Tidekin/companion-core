@@ -135,14 +135,14 @@ const CAP_NAMES = {
   "model.understand_video": "视频理解模型", "unicode.emoji": "Unicode 表情", "qq.face_names": "QQ 表情名称",
   "qq.face_images": "QQ 表情图像", "memes.catalog": "表情目录", "memes.community_import": "社区表情获取",
   "memes.search": "表情搜索", "memes.semantic": "表情语义理解", "media.voice": "网页语音会话", "media.camera": "摄像头",
-  "media.android": "安卓设备", executive: "执行任务",
+  "media.android": "安卓设备", executive: "执行任务", "memes.wiki": "梗百科",
 };
 /** @type {Array<[string, string[]]>} */
 const CAP_GROUPS = [
   ["记忆与日记", ["memory.manage", "memory.recall", "diary", "consolidation", "reflection", "goals", "affect"]],
   ["主动与自主", ["proactive", "wake", "exploration", "social", "qq.poke", "qq.poke.native"]],
   ["阅读与内容", ["reading.web", "reading.bilibili", "reading.heybox", "bilibili.video", "model.understand_video", "qq.images", "qq.animation", "qq.files"]],
-  ["表达与表情", ["expression", "expression_learning", "unicode.emoji", "qq.face_names", "qq.face_images", "memes.catalog", "memes.semantic", "memes.search", "memes.community_import"]],
+  ["表达与表情", ["expression", "expression_learning", "unicode.emoji", "qq.face_names", "qq.face_images", "memes.catalog", "memes.semantic", "memes.search", "memes.community_import", "memes.wiki"]],
   ["语音与媒体", ["qq.voice.asr", "qq.voice.tts", "media.voice", "media.camera", "media.android"]],
   ["QQ 资料与执行", ["qq.profile.observe", "qq.account.signature", "qq.account.nickname", "qq.account.avatar", "qq.account.qzone_publish", "executive"]],
 ];
@@ -164,6 +164,7 @@ const CAP_FIELDS = {
   "memes.catalog": ["meme_discovery_enabled"], "memes.search": ["meme_discovery_enabled", "meme_discovery_daily_queries"],
   "memes.community_import": ["meme_discovery_enabled", "meme_discovery_daily_download_bytes", "meme_discovery_daily_storage_bytes"],
   "memes.semantic": ["meme_semantics_enabled", "meme_caption_daily_micro_usd", "meme_caption_max_output_tokens"],
+  "memes.wiki": ["meme_wiki"],
   "qq.voice.asr": ["voice_enabled", "voice"], "qq.voice.tts": ["voice_enabled", "voice"], "media.voice": ["voice_enabled"], "media.camera": ["camera_enabled"], "media.android": ["android_enabled"],
   "qq.profile.observe": ["social_autonomy"], "qq.account.signature": ["social_autonomy"], "qq.account.nickname": ["social_autonomy"], "qq.account.avatar": ["social_autonomy"], "qq.account.qzone_publish": ["social_autonomy"],
 };
@@ -181,7 +182,7 @@ const REASONS = {
   VOICE_CONFIG_INVALID: "语音配置无效", SOCIAL_AUTONOMY_DISABLED: "QQ 资料行为没有开启", SOCIAL_LIVE_SCOPE_REQUIRED: "需要当前窗口的授权",
   SOCIAL_REVIEWED_AVATAR_REQUIRED: "需要审核过的头像素材", EXECUTOR_NOT_CONFIGURED: "没有配置执行端", MEDIA_ADAPTER_NOT_CONFIGURED: "没有配置媒体服务",
   PINNED_PARSER_IMAGE_REQUIRED: "需要固定版本的解析镜像", PRIVATE_FILE_ADAPTER_UNAVAILABLE: "文件解析通道不可用", OWNER_IDENTITY_REQUIRED: "需要确认主人身份",
-  POKE_COOLDOWN: "拍一拍冷却中", POKE_RATE_LIMIT: "拍一拍已到次数上限", GOALS_AND_EXPLORATION_REQUIRED: "需要先开启目标与内容发现",
+  MEME_WIKI_DATA_INVALID: "随包的梗百科词库没有通过校验", POKE_COOLDOWN: "拍一拍冷却中", POKE_RATE_LIMIT: "拍一拍已到次数上限", GOALS_AND_EXPLORATION_REQUIRED: "需要先开启目标与内容发现",
   TOOL_NOT_EXPOSED_THIS_TURN: "这轮对话没有开放", STATIC_FACE_IMAGES_PAUSED: "QQ 表情图像已暂停",
 };
 
@@ -1555,6 +1556,7 @@ const CAP_SWITCH = {
   "qq.files": "private_files.enabled", expression: "expression_enabled", expression_learning: "expression_learning_enabled",
   "unicode.emoji": "expression_enabled", "qq.face_names": "expression_enabled", "qq.face_images": "expression_enabled",
   "memes.catalog": "meme_discovery_enabled", "memes.search": "meme_discovery_enabled", "memes.community_import": "meme_discovery_enabled",
+  "memes.wiki": "meme_wiki.enabled",
   "memes.semantic": "meme_semantics_enabled", "qq.voice.asr": "voice.asr.enabled", "qq.voice.tts": "voice.reply.enabled",
   "media.voice": "voice_enabled", "media.camera": "camera_enabled", "media.android": "android_enabled",
   "qq.profile.observe": "social_autonomy.enabled", "qq.account.signature": "social_autonomy.signature_enabled",
@@ -1623,7 +1625,8 @@ PAGES.caps.after = () => {
   if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - s.offsetHeight) list.scrollTop = top - list.clientHeight / 3;
 };
 function capDetail(c) {
-  const name = CAP_NAMES[c.id] || "未命名能力", fields = capFieldsOf(c.id), main = capMain(c.id), rt = CAP_RUNTIME[c.id];
+  // 梗百科的开关和尺度由总开关和专门的小节编辑，不再重复列出整段对象设置。
+  const name = CAP_NAMES[c.id] || "未命名能力", fields = c.id === "memes.wiki" ? [] : capFieldsOf(c.id), main = capMain(c.id), rt = CAP_RUNTIME[c.id];
   const paused = (c.reason_codes || []).some(r => /PAUSED/.test(r));
   const limits = Object.entries(c.limits || {}).filter(([, v]) => v !== null && v !== undefined && v !== "");
   const reasons = [...new Set((c.reason_codes || []).map(reasonText))];
@@ -1643,8 +1646,50 @@ function capDetail(c) {
         el("small", {}, "调用方式：" + ((c.invocation || []).map(x => ({ automatic: "她自动使用", owner_command: "你的指令", tool: "工具调用", owner: "你发起" })[x] || "其他方式").join("、") || "未记录")))),
     ["proactive", "diary", "consolidation"].includes(c.id) ? el("section", { class: "cd-sec" }, el("h3", {}, "作息时间"), scheduleStrip()) : null,
     autonomySection(c.id),
-    el("section", { class: "cd-sec" }, el("h3", {}, "参数", el("span", {}, fields.length ? "保存为新版本后生效" : "")),
+    c.id === "memes.wiki" ? memeWikiSections() : null,
+    c.id === "memes.wiki" ? null : el("section", { class: "cd-sec" }, el("h3", {}, "参数", el("span", {}, fields.length ? "保存为新版本后生效" : "")),
       fields.length ? el("div", { class: "pf-list" }, fields.map(f => CAP_SUB[c.id]?.[f.key] ? fieldRow(f, CAP_SUB_LABEL[f.key], CAP_SUB[c.id][f.key]) : fieldRow(f))) : el("p", { class: "note" }, CAP_DEPLOY[c.id] ? "这项能力的设置都在部署配置里。" : "这项能力没有可以在控制台修改的参数。")));
+}
+/* ================= 梗百科 ================= */
+/* 与服务端 companion/meme_wiki.py 的四档一致 */
+const BANTER_TIERS = [[20, "很低", "很尊重：可以接正面梗和自嘲，黑称不接。"], [45, "偏低", "可以损操作、损发挥，不损长相；不带头用黑称。"],
+  [70, "中等", "按社区语境来，别人玩得开的梗就跟着玩。"], [100, "很高", "放开串，别人先甩出来的黑称也接着玩，只对真事。"]];
+const banterTier = v => BANTER_TIERS.find(([max]) => v <= max);
+function memeWikiSections() {
+  const f = fieldOf("meme_wiki"); if (!f) return null;
+  const v = draftVal(f) || {}, level = v.banter_level ?? null, tier = level === null ? null : banterTier(level);
+  const setLevel = n => setDraft(f, { ...v, banter_level: n });
+  const value = el("b", { class: "num" }, level === null ? "" : level + "/100 · " + tier[1]);
+  const range = level === null ? null : el("input", { type: "range", class: "range", min: "0", max: "100", step: "5", value: String(level),
+    "aria-label": "串子程度", id: "mw-level",
+    oninput: e => { const n = +e.target.value; value.textContent = n + "/100 · " + banterTier(n)[1]; },
+    onchange: e => setLevel(+e.target.value) });
+  const test = state.memeTest || {};
+  const input = el("input", { class: "input", id: "mw-q", placeholder: "输入一个梗，或一整句话", maxlength: "200", value: test.q || "", "aria-label": "查词内容" });
+  const run = e => { e.preventDefault(); const q = input.value.trim(); if (!q) return;
+    state.memeTest = { q, busy: true }; rerender();
+    api.get("/meme-wiki?q=" + encodeURIComponent(q)).then(r => { state.memeTest = { q, result: r }; }, err => { state.memeTest = { q, error: errorText(err) }; }).finally(rerender); };
+  const r = test.result, entry = r?.entry, pre = r?.prefetch;
+  return [
+    el("section", { class: "cd-sec" }, el("h3", {}, "玩梗尺度", el("span", {}, "保存为新版本后生效")),
+      el("div", { class: "pf" }, el("div", { class: "pf-l" }, el("b", {}, "交给她自己判断"), el("span", {}, "看梗冲谁去，不拿贬损称呼攻击你")),
+        el("div", { class: "pf-c" }, el("button", { type: "button", class: "switch", role: "switch", "aria-checked": String(level === null), "aria-label": "玩梗尺度交给她自己判断",
+          onclick: () => setLevel(level === null ? 50 : null) }))),
+      range ? el("div", { class: "pf" }, el("div", { class: "pf-l" }, el("b", {}, "串子程度"), el("span", {}, tier[2])),
+        el("div", { class: "pf-c mw-range" }, range, value)) : null),
+    el("section", { class: "cd-sec" }, el("h3", {}, "查词测试", el("span", {}, r?.available ? "词库 " + r.count + " 条" + (r.built_at ? "，" + r.built_at.slice(0, 10) + " 整理" : "") : "")),
+      el("p", { class: "note mb" }, "和聊天用的是同一条路径：上面一行是把它当成主人的一句话时会不会预查，下面是她调用查词工具时看到的词条。只读，不会记录。"),
+      el("form", { class: "cog-find", onsubmit: run }, input, btn(test.busy ? "正在查…" : "查一下", () => {}, { cls: "sm", type: "submit", symbol: "search", disabled: !!test.busy })),
+      test.error ? el("div", { class: "alert bad" }, icon("warn"), el("span", {}, test.error)) : null,
+      r && !r.available ? el("div", { class: "alert bad" }, icon("warn"), el("span", {}, "随包的词库没有通过校验，预查和查词工具都已停用。")) : null,
+      r?.available ? el("ul", { class: "rows mw-result" },
+        el("li", { class: "block" }, el("b", {}, "当成一句话"), el("span", { class: "note" },
+          !pre ? "不会预查：不像在问梗，也不是单独的一个梗名。" : pre.found ? "会注入一条词条参考。" : "会提示她词库里没收录，不要编出处。")),
+        el("li", { class: "block" }, el("b", {}, "查词工具"), entry ? el("div", { class: "mw-entry" }, el("h4", {}, "「" + entry.title + "」"),
+          entry.tags ? el("p", { class: "note" }, entry.tags) : null,
+          entry.usage ? el("p", {}, el("small", {}, "怎么用 / 怎么接"), entry.usage) : null,
+          entry.origin ? el("p", {}, el("small", {}, "出处与含义"), entry.origin) : null)
+          : el("span", { class: "note" }, "词库里没收录这个说法。"))) : null)];
 }
 /* ================= 交给她决定 ================= */
 const AUTO_MODES = [["owner", "只由我控制", "她不能改这项能力的任何设置。"], ["propose", "她提议，我批准", "她提出调整和理由，你批准后才生效。"],
