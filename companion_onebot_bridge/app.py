@@ -268,14 +268,16 @@ async def transfer_media(pump, stop):
         await pump.close()
 
 
-async def observe_profile(pump, stop):
+async def observe_profile(pump, stop, memes):
     try:
         while not stop.is_set():
             if pump.running:
                 pump.window.verify()
             pending = pump.window.db.execute(
                 "SELECT 1 FROM inbox WHERE state='pending' LIMIT 1").fetchone()
-            pump.tick(idle=pending is None)
+            # Match the interleaved host: periodic probes wait for discovery,
+            # whose reserved resources remain charged if it is cancelled.
+            pump.tick(idle=pending is None and not memes.running)
             delay = pump.window.config.poll_seconds
             if not pump.running:
                 delay = max(delay, pump.next_run - time.monotonic())
@@ -287,7 +289,7 @@ async def observe_profile(pump, stop):
 async def discover_memes(pump, stop, profile):
     try:
         while not stop.is_set():
-            pump.tick(idle=profile.task is None or profile.task.done())
+            pump.tick(idle=not profile.running)
             await pause(stop, pump.owner.config.poll_seconds)
     finally:
         await pump.close()
@@ -346,7 +348,7 @@ async def run(config):
                     group.create_task(deliver(core, onebot, spool, stop, metrics,
                                               runtime=runtime, protocol=protocol)),
                     group.create_task(transfer_media(media, stop)),
-                    group.create_task(observe_profile(profile, stop)),
+                    group.create_task(observe_profile(profile, stop, memes)),
                     group.create_task(discover_memes(memes, stop, profile)),
                     group.create_task(run_scheduler_loop(stop)),
                 ]
