@@ -105,7 +105,11 @@ async def tick(
     async with AsyncExitStack() as stack:
         if source == "web":
             # Only Core's lease can grant hosts. A local option can reduce that grant.
-            hosts = hosts if local_scope is None else hosts & local_scope
+            if local_scope is not None:
+                if hosts == {"*"}:
+                    hosts = local_scope
+                elif local_scope != {"*"}:
+                    hosts &= local_scope
             if not hosts:
                 result = {
                     "schema_version": 1, "status": "FAILED", "observations": [],

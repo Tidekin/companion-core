@@ -100,7 +100,8 @@ content_enabled = false
 web_reading_enabled = false
 # Later-stage, explicitly authorized QZone latest-text reader; keep disabled in M0/M1.
 qzone_reading_enabled = false
-# Exact public hosts for web reading; editable in the owner console.
+# Exact public hosts, or ["*"] to allow all public DNS names; editable in the owner console.
+# Both scopes retain HTTPS, public-IP DNS pinning, redirect checks and request/byte budgets.
 web_reading_hosts = []
 expression_cooldown_minutes = 30
 expression_meme_categories = ["happy", "like", "surprised", "morning", "sleep"]

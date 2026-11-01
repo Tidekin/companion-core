@@ -1,5 +1,4 @@
 import os
-import re
 import tomllib
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,6 +35,7 @@ from companion.poke_protocol import PokePolicy
 from companion.rem_protocol import RemConfig
 from companion.reply_segments import SegmentedReplyConfig
 from companion.social_autonomy_protocol import SocialAutonomyConfig
+from companion.source_policy import public_web_host
 from companion.sources import ObservationSource
 from companion.style_distill_config import StyleDistillConfig
 from companion.style_live_config import StyleLiveConfig
@@ -78,18 +78,14 @@ class ObservationAdapterConfig(BaseModel):
         return data
 
 
-WEB_HOST = re.compile(
-    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
-)
-
-
 def exact_web_hosts(hosts):
+    if tuple(hosts) == ("*",):
+        return tuple(hosts)
     if len(set(hosts)) != len(hosts) or any(
-        len(host) > 253 or not WEB_HOST.fullmatch(host)
-        or host.endswith((".localhost", ".local", ".internal"))
+        not public_web_host(host)
         for host in hosts
     ):
-        raise ValueError("Web hosts must be unique exact public DNS names")
+        raise ValueError("Web hosts must be unique exact public DNS names or a sole '*'")
     return tuple(hosts)
 
 
@@ -524,7 +520,7 @@ class Settings(BaseModel):
     content_enabled: bool = False
     web_reading_enabled: bool = False
     qzone_reading_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
-    # Exact public hosts the web reader may fetch, including every redirect hop.
+    # Exact public DNS names, or a sole '*'; every hop still requires public-IP DNS pinning.
     web_reading_hosts: tuple[str, ...] = Field(default=(), max_length=32)
     content: ContentConfig = Field(default_factory=ContentConfig)
     private_files: PrivateFilesConfig = Field(default_factory=PrivateFilesConfig)

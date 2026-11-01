@@ -1302,6 +1302,7 @@ function fmtNum(key, type, v) { const u = unitFor(key, type); return (u.pre || "
 function fmtField(f, v) {
   if (v === null || v === undefined) return "未配置";
   if (f.type === "secret") return "新密钥";
+  if (f.key === "web_reading_hosts" && same(v, ["*"])) return "全部公网域名";
   if (f.type === "boolean") return v ? "开" : "关";
   if (isHour(f)) return String(v).padStart(2, "0") + ":00";
   if (["integer", "number"].includes(f.type)) return fmtNum(f.key, f.type, v);
@@ -1409,13 +1410,20 @@ function normHost(raw) {
   return [x, null];
 }
 function hostPicker(f, list) {
+  const all = same(list, ["*"]);
+  const scope = el("label", {}, "读取范围", el("select", { class: "input", id: "cf-web-scope",
+    onchange: e => setDraft(f, e.target.value === "all" ? ["*"] : []) },
+    el("option", { value: "exact", selected: !all }, "指定网站"),
+    el("option", { value: "all", selected: all }, "全部公网域名")));
+  if (all) return el("div", { class: "listed" }, scope,
+    el("p", { class: "note" }, "允许读取公开网站；内网地址仍会被拦截，读取次数和流量仍受现有额度限制。"));
   const input = el("input", { class: "input", id: "cf-web-hosts", placeholder: "输入域名或粘贴网址，例如 sspai.com", maxlength: "300" });
   const err = el("p", { class: "list-err", role: "alert", hidden: true });
   const fail = m => { err.textContent = m; err.hidden = false; input.focus(); };
   const add = () => { const [x, m] = normHost(input.value); if (m) return fail(m); if (list.includes(x)) return fail(x + " 已经在名单里。");
     if (list.length >= 32) return fail("最多 32 个网站。"); setDraft(f, [...list, x]); };
   input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); add(); } });
-  return el("div", { class: "listed" }, el("ul", {}, list.length ? list.map((x, i) => el("li", {}, el("span", { class: "num" }, x),
+  return el("div", { class: "listed" }, scope, el("ul", {}, list.length ? list.map((x, i) => el("li", {}, el("span", { class: "num" }, x),
       el("button", { type: "button", class: "icon-btn", "aria-label": "移除 " + x, onclick: () => setDraft(f, list.filter((_, j) => j !== i)) }, icon("close"))))
       : el("li", { class: "none" }, "名单是空的，网页阅读会保持不可用。")),
     el("div", { class: "list-add" }, input, btn("添加", add, { cls: "sm" }), el("small", { class: "num" }, list.length + " / 32")), err,

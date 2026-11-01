@@ -26,6 +26,7 @@ from companion.source_policy import (
     SourceDefinition as SourceDefinition,
 )
 from companion.source_policy import source_definition as policy_definition
+from companion.source_policy import web_host_allowed
 
 
 def source_definition(name):
@@ -98,7 +99,7 @@ def content_target(value, *, web_hosts=()):
                 if definition.lowercase_identifier:
                     identifier = identifier.lower()
                 return definition.name, definition.canonical_prefix + identifier
-        if (parsed.hostname in web_hosts and "\\" not in value
+        if (web_host_allowed(parsed.hostname, web_hosts) and "\\" not in value
             and not any(char.isspace() for char in value)):
             return "web", urlunsplit(("https", parsed.hostname, parsed.path or "/",
                                       parsed.query, ""))

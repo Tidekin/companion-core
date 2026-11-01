@@ -8,6 +8,7 @@ import pytest
 from pydantic import SecretStr
 
 from companion import owner_authority
+from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.exploration import ReadResult
@@ -32,14 +33,23 @@ from tests.test_source_reader import META, PLAYER, SUBTITLE, response
 
 @pytest.mark.parametrize("action", ["CONTINUE", "EXPLORE"])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_choice_submits_native_goal_once(core, action, enabled):
+@pytest.mark.parametrize("source", ["platform", "public_web"])
+def test_choice_submits_native_goal_once(core, action, enabled, source):
     bug(core)
     configure(core)
+    url = URL
+    if source == "public_web":
+        core.settings.web_reading_enabled = True
+        core.settings.web_reading_hosts = ("*",)
+        core.settings.observation_adapters["web"] = ObservationAdapterConfig(
+            source="web", token="synthetic-web-reader-token-" * 2,
+        )
+        url = "https://new-public.example/story"
     core.settings.life_loop.read_goals_enabled = enabled
     native = GoalProposal(
         topic="阅读游戏介绍",
         source_event_ids=["evt_test_1"],
-        scope={"operation": "read_content", "url": URL},
+        scope={"operation": "read_content", "url": url},
     )
     extra = (
         {"goal_id": core.goals.propose(native)}

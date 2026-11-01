@@ -148,8 +148,12 @@ UNKNOWN 预留，不可恢复正文；两版 API 不能互换租约或回执。
 网页读取默认关闭。Core 需要 `web_reading_enabled=true`、已启用的内容/Observation
 能力和非零请求/字节限额；对应 adapter 配置 `source="web"` 和独立 token，主人配置
 `web_reading_hosts=["articles.example"]`（可在控制台的网页阅读里填写，保存为新配置版本）。
-适配器配置不再接受 `allowed_hosts`。主机必须为小写精确 DNS 名，不接受通配符、IP 或
-私有后缀；DNS 解析还要经过 Reader 的公网检查。重定向的每一跳受同一主机列表约束。
+适配器配置不再接受 `allowed_hosts`。`web_reading_hosts=["*"]` 显式允许全部公网域名；
+该值必须单独使用，不能和域名混用，也不支持部分域名通配符。普通清单仍为小写精确 DNS 名。
+两种范围都拒绝 IP、单标签或私有后缀；Reader 对每次 DNS 解析结果做公网检查并固定连接地址。
+HTTPS、每一跳重定向校验、读取租约复核与请求/字节限额始终生效。租约冻结原范围；关闭开关
+或从全部域名收紧为精确清单会使原宽范围租约失效。现有 `allowed_hosts` 租约字段和数据库
+快照保存这个显式范围；仅 web Reader 接受独立的 `*`，不扩展其他账号来源的读取权限。
 
 部署配置提供显式 `web-reader` Compose profile，凭据来自私有 `privacy/web-reader.env`，
 该文件只设置对应 `COMPANION_READER_TOKEN`。Reader 容器使用固定依赖、非 root、只读

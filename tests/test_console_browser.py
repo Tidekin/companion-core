@@ -113,6 +113,38 @@ async def submit_dialog(page, label, path):
     await page.locator("#page[aria-busy=false]").wait_for()
 
 
+def test_console_public_web_scope_round_trips(core, tmp_path):
+    core.clock.now = datetime.now(UTC)
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            await navigate(page, "能力与开关")
+            await page.locator('a[href="#caps/reading.web"]').click()
+            await page.locator("#cf-web-scope").select_option("all")
+            assert await page.locator("#cf-web-hosts").count() == 0
+            await page.get_by_role("button", name="保存为 v1", exact=True).click()
+            async with page.expect_response(lambda r: r.url.endswith("/configuration")
+                and r.request.method == "PUT") as response:
+                await page.get_by_role("dialog").get_by_role(
+                    "button", name="保存 1 项修改", exact=True).click()
+            result = await response.value
+            assert result.status == 200, await result.text()
+            await page.get_by_role("dialog").wait_for(state="hidden")
+            await page.get_by_role("button", name="刷新当前页面").click()
+            assert await page.locator("#cf-web-scope").input_value() == "all"
+            saved = operator_config._decode(operator_config.latest(core.store), core.settings)
+            assert saved["web_reading_hosts"] == ["*"]
+            evidence = ROOT / "output/playwright/public-web"
+            evidence.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(evidence / "all-public-domains.png"))
+            await page.locator("#cf-web-scope").select_option("exact")
+            await page.locator("#cf-web-hosts").fill("articles.example")
+            await page.locator("#cf-web-hosts").press("Enter")
+            assert await page.locator("#cf-web-scope").input_value() == "exact"
+
+    run(scenario())
+
+
 def test_console_runtime_versions_show_boundary_restart_review_and_restore(core, tmp_path):
     core.settings.operator_hot_reload = True
     core.store.configuration_worker = "worker"
