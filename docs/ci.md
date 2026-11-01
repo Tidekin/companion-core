@@ -161,8 +161,10 @@ The small `ci-container-images-*`
 artifact binds the four separate `runtime-image-{core,bridge,reader,ui}-*` archives; `ci-full-*`
 and `ci-validation-*` reference that metadata. A selected run cannot emit reusable image proof.
 Missing, expired, changed, ambiguous or incomplete image evidence makes main run full validation.
-All retained artifacts expire after seven days. Reuse and consumption retain the existing
-24-hour freshness requirement for the original full run.
+All retained artifacts expire after seven days. Reuse and consumption depend on the exact
+tested tree, the latest successful run/attempt and unexpired authenticated original artifacts.
+Run timestamps do not authorize or expire proof: upstream record timestamps can disagree
+with actual step/log times, as exposed by the [native job API](https://docs.github.com/en/rest/actions/workflow-jobs).
 
 The default `load` command always performs Docker load, including in producer CI where the
 images already exist, so native archive codec validation remains exercised. A deployment resume
