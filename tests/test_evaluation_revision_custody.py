@@ -120,7 +120,7 @@ def test_revision_fsync_projection_interruption_remains_closed(core, tmp_path, m
 
 
 @pytest.mark.parametrize("evaluation", [False, True])
-def test_older_fresh_unknown_after_resume_keeps_existing_renewal_refusal(
+def test_older_closed_unknown_renewal_keeps_explicit_evaluation_scope(
     core, tmp_path, evaluation,
 ):
     case = migrated(core, tmp_path)
@@ -132,9 +132,20 @@ def test_older_fresh_unknown_after_resume_keeps_existing_renewal_refusal(
         revision=case.successor["authority"]["revision"] + 1, operation="fresh-unknown-resume")
     case.successor = active
     before = core.store.rows("SELECT * FROM model_usage")
-    with pytest.raises(CoreError, match="OWNER_MODEL_CARRY_NOT_QUIESCENT"):
-        renewal(core, case)
+    request, policy, witness = renewal(core, case)
+    assert policy.purposes == case.policy.purposes
+    assert policy.capability_policies == case.policy.capability_policies
+    receipt = model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+    with core.store.transaction():
+        saved = owner_authority.custody(core.store, core.settings, settlement=True)[
+            "model_carries"][receipt["carry_sha256"]]
+    assert saved["manifest"]["inputs"] == []
+    assert {item["request_id"] for item in saved["manifest"]["unknowns"]} == {
+        row["request_id"] for row in before}
+    activate(core, policy, revision=request["authority"]["revision"] + 1,
+             operation="renew-retained-evaluation-history")
     assert core.store.rows("SELECT * FROM model_usage") == before
+    assert not core.store.rows("SELECT * FROM outbox")
 
 
 def test_native_source_erasure_keeps_revision_finance_and_blocks_new_authority(
