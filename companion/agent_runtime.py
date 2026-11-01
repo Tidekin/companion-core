@@ -52,14 +52,15 @@ class ControlledModel(Model):
 
     async def request(self, messages, model_settings, model_request_parameters):
         settings, parameters = self.prepare_request(model_settings, model_request_parameters)
-        if (settings or parameters.native_tools or parameters.output_tools
-            or parameters.output_mode != "text"):
+        if (settings or parameters.native_tools
+            or parameters.output_mode not in {"text", "tool"}):
             raise CoreError("CORE_MODEL_CONFIGURATION_REQUIRED", 503)
         # Pydantic AI prepares histories before invoking Model.request, including
         # retry feedback and ordered tool results. Request instructions are also
         # provided by its resolved parameters, not rebuilt from our own state.
         wire = request_wire(messages, parameters)
-        response = await self._complete(wire, tools=parameters.function_tools)
+        response = await self._complete(
+            wire, tools=[*parameters.function_tools, *parameters.output_tools])
         return to_runtime_response(response, model_name=self.model_name, provider_name=self.system)
 
 
@@ -180,10 +181,15 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
         hooks.update(after_model_request=persistence.after_model_request,
                      tool_execute=persistence.wrap_tool_execute)
     with phase("agent_setup", job["trace_id"]):
+        from companion.agent_output import voice_output
+
+        output_types = [str, DeferredToolRequests]
+        if output := voice_output(core, job):
+            output_types.append(output)
         agent = Agent(
             ControlledModel(core.settings.model_name, complete,
                             image_input=bool(paid and paid.image_input)),
-            output_type=[str, DeferredToolRequests], toolsets=toolsets,
+            output_type=output_types, toolsets=toolsets,
             retries=1, name="companion", deps_type=object,
             capabilities=[Hooks(**hooks)],
         )

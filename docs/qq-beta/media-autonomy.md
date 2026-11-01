@@ -179,6 +179,19 @@ Core 不拨入节点，也不把模型/消息投递责任交给节点。
 权重、参考音频、服务 revision 及独立凭据，并从本机文件计算 manifest。
 `voice.enabled` 与旧 `voice_enabled`/`media` 开关是独立合同，后者不能替代语音节点配置。
 
+`voice.reply.mode="model"` 是默认回复策略。模型可直接输出文字，也可使用同一次生成中的
+`reply_with_voice(text)` 最终输出选择语音；它不是额外的模型调用或立即发送工具。
+语音选择保存在原 SDK Conversation 的 Core metadata 中，并绑定原 Outbox 发送证明。
+选择语音时整段保留为一条，避免文字分条与语音互相抢占；普通文字仍按原分条设置发送。
+长度、权限、节点任务期限和合成失败继续使用既有检查与文字回退；已经开始 QQ 发送后出现
+UNKNOWN 时不另发文字。仅有聊天授权、语音关闭或没有 TTS 节点时不提供语音最终输出。
+显式配置 `voice_input` 保留只跟随语音输入的策略，`auto` 保留自动转换符合条件回复的策略。
+
+这里复用已固定的 Pydantic AI Slim 2.60.0
+[ToolOutput](https://github.com/pydantic/pydantic-ai/blob/main/docs/output.md#tool-output)
+及现有 [SDK 会话和 DSH 参考](../plans/2026-10-25-sdk-owner-runtime.md#reused-contracts-and-primary-references)。
+输出工具的 schema 与普通工具一起计入原上下文规划、付费测量和预留，模型映射不接管存储、权限或投递。
+
 ```sh
 python -m companion_voice_node.worker --config /PRIVATE/voice-node.json --print-manifest
 python -m companion_voice_node.worker --config /PRIVATE/voice-node.json

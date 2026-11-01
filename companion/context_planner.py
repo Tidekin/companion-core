@@ -356,7 +356,7 @@ def plan_request(core, job, snapshots, request_context):
             core.settings,
             request_wire(messages, parameters),
             "chat",
-            tools=parameters.function_tools,
+            tools=[*parameters.function_tools, *parameters.output_tools],
         )
 
     measured = measure()

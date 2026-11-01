@@ -138,6 +138,8 @@ def _usage(store, job, view):
 
 
 def _material(store, row, job, view, requests, *, meme_binding=None):
+    from companion.agent_output import reply_format
+
     event = store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
     if (not event or row["origin_event_id"] != job["event_id"]
         or row["conversation_id"] != job["conversation_id"]
@@ -153,6 +155,9 @@ def _material(store, row, job, view, requests, *, meme_binding=None):
             "history_sha256": paid_budget.sha(_history_proof(store, job)),
             "context_sha256": paid_budget.sha(_snapshots(store, job)),
             "request_ids": requests,
+            **({"reply_format": "voice"} if job["kind"] == "chat"
+               and "voice" in view.policy.purposes
+               and reply_format(store, job["event_id"]) == "voice" else {}),
             **({"meme_binding_version": meme_binding["version"],
                 "meme_binding_sha256": paid_budget.sha(meme_binding)}
                if meme_binding is not None else {})}

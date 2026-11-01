@@ -148,6 +148,11 @@ class VoiceFlow:
         content = json.loads(row["content_json"])
         text = content["text"]
         if value is None:
+            from companion.agent_output import reply_format
+
+            if (policy.mode == "model"
+                and reply_format(self.store, row["origin_event_id"]) != "voice"):
+                return self._text(row, None, "VOICE_MODEL_TEXT")
             source = self.store.one(
                 "SELECT body_json FROM events WHERE event_id=?", (row["origin_event_id"],)
             )

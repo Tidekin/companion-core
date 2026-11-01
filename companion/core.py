@@ -1749,6 +1749,11 @@ class Core(Runtime):
                 request_id = None
                 reply = redact(response.text, self.settings)
                 generated_reply = True
+            from companion.agent_output import reply_format
+
+            voice_reply = (self.settings.voice.enabled and self.settings.voice.reply.mode == "model"
+                           and generated_reply and job["kind"] == "chat"
+                           and reply_format(self.store, job["event_id"]) == "voice")
             quote_choice = None
             if (authority and generated_reply and job["kind"] == "chat"
                     and self.settings.quote_policy != "never"):
@@ -1785,11 +1790,14 @@ class Core(Runtime):
                     intent = (
                         self.expression.intent(job["event_id"], reply, now)
                         if policy and generated_reply and job["kind"] == "chat"
+                        and not voice_reply
                         and self.settings.expression_enabled
                         and (authority is None or "expression" in authority.policy.purposes)
                         else None
                     )
-                    if notice_parts is not None:
+                    if voice_reply:
+                        message_ids = enqueue_reply_parts(self.store, job, [reply], 0, now)
+                    elif notice_parts is not None:
                         action = ("qq.private.reply" if notices.required(self.store, job["job_id"])
                                   else "qq.private.proactive")
                         message_ids = enqueue_reply_parts(

@@ -253,10 +253,12 @@ class ConversationStore:
         return metadata
 
     def save_result(self, result):
+        from companion.agent_output import save_format
+
         waiting = isinstance(result.output, DeferredToolRequests)
         with self.store.transaction():
             self._save(result.conversation, "WAITING" if waiting else "OUTPUT",
-                       output=None if waiting else result.output)
+                       output=None if waiting else save_format(result.conversation, result.output))
 
     def complete(self):
         """Join the original job/Outbox commit, never create another delivery path."""
