@@ -97,6 +97,7 @@ def test_core_coalesces_memory_watch_and_life_without_losing_proofs(core):
 
 def test_related_old_judgement_beats_recent_unrelated_reads_and_keeps_origin(core):
     prepare(core)
+    core.settings.context_soft_tokens = 8000
     url = "https://example.org/owner-star"
     _, source = read(core, 1, ASTRONOMY, url, said="你看看这个 " + url)
     judge(core, source, -1, "天文图谱标注太含糊")
@@ -140,6 +141,7 @@ def test_core_drops_mood_before_evidence_and_preserves_current_conversation(core
 @pytest.mark.parametrize("mutation", ["withdraw", "source", "interest"])
 def test_frozen_judgement_revalidates_before_any_new_use(core, mutation):
     prepare(core)
+    core.settings.context_soft_tokens = 8000
     _, source = read(core, 1, ASTRONOMY, "https://example.org/frozen")
     entry = judge(core, source, 1, "星光资料很好懂")
     job, snapshots = current_job(core, text="天文资料怎么样？"), []
