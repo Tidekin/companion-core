@@ -795,16 +795,26 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
     return wire.receipt(result)
 
 
-def evaluation_revision(old, new):
-    """One explicit purpose addition; no paid, identity or source-scope change."""
+def purpose_revision(old, new):
+    """One explicit evaluation or private REM addition under the same paid approval."""
     if old == new:
         return
     before, after = old.model_dump(mode="json"), new.model_dump(mode="json")
-    if ("evaluation" in old.purposes or new.purposes != [*old.purposes, "evaluation"]
-        or old.authorization_sha256 == new.authorization_sha256
-        or {k: v for k, v in before.items() if k not in {"purposes", "authorization_sha256"}}
-        != {k: v for k, v in after.items() if k not in {"purposes", "authorization_sha256"}}):
-        raise ValueError("only an explicitly authorized evaluation purpose may be added")
+    if (len(new.purposes) != len(old.purposes) + 1
+        or new.purposes[:-1] != old.purposes
+        or new.purposes[-1] not in {"evaluation", "rem"}
+        or old.authorization_sha256 == new.authorization_sha256):
+        raise ValueError("explicit private purpose addition required")
+    expected = {**before, "purposes": new.purposes,
+                "authorization_sha256": new.authorization_sha256}
+    if new.purposes[-1] == "rem":
+        fingerprint = new.capability_policies.get("rem")
+        if ("memory" not in old.purposes or old.memory_scope != "owner_private"
+            or "rem" in old.capability_policies or not hash_value(fingerprint)):
+            raise ValueError("REM requires existing private Memory and its exact policy")
+        expected["capability_policies"] = {**old.capability_policies, "rem": fingerprint}
+    if after != expected:
+        raise ValueError("unrelated policy changes are not allowed")
 
 
 def authority_chain(store, saved, revisions):
@@ -843,7 +853,7 @@ def authority_chain(store, saved, revisions):
                 raise ValueError("model carry authority policy changed")
         if previous and row["policy_sha256"] != previous["policy_sha256"]:
             if policy is not None and previous_policy is not None:
-                evaluation_revision(previous_policy, policy)
+                purpose_revision(previous_policy, policy)
             elif policy is not None or previous_policy is not None:
                 raise ValueError("incomplete erased authority transition")
         previous, previous_policy = row, policy
@@ -932,7 +942,7 @@ def activation(store, settings, policy):
         work = _work(store, settings, authority)
         old = owner_authority.evidence(store, settings, authority).policy
         try:
-            evaluation_revision(old, policy)
+            purpose_revision(old, policy)
         except (ValueError, TypeError, KeyError) as error:
             raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409) from error
         if old != policy and any(not state["terminal"] for state in work.values()):

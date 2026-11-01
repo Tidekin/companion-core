@@ -307,6 +307,37 @@ the conservative rollback. Returning to old bytes requires proving that no new
 responsibility or control record has crossed that boundary. Source retention and
 original image expiry are never extended by this operation.
 
+## Adding private REM to an existing carried approval
+
+The existing native owner preview/activate path can add one `rem` purpose under the
+same paid approval after STOP and quiescence. It requires an already approved
+`memory` purpose with `memory_scope=owner_private`, a new authorization digest and
+exactly one added `capability_policies.rem` fingerprint. Native owner policy
+validation checks that fingerprint against the enabled REM configuration. All other
+policy fields, existing purposes in order, capability fingerprints, source grants,
+paid/window identity, limits, carry digest and expiry remain byte-equivalent.
+The existing evaluation-only addition remains supported by the same finite policy
+revision validator; no general capability-extension rule or new journal kind is added.
+
+Historical authority-chain validation recognizes this same explicit REM transition,
+so later STOP/activation and paid approval renewals can retain the granted purpose.
+Renewing a paid window still uses the original renewal checks; this change does not
+combine a new REM grant with a paid-contract change.
+
+Current-authority nonterminal inputs and UNKNOWN requests continue to block a policy
+change, including locally closed UNKNOWN rows. First complete the existing same-policy
+handoff, preserving the original liability; only a quiescent successor can receive the
+new purpose. No usage is settled, refunded, rebound or replayed by purpose revision.
+The source-erasure, original Ledger and credential/paid-contract checks are unchanged.
+
+This reuses the recorded native STOP/ACTIVE, exact-scope and journal research above,
+including the original Docker inspection contracts and existing SQLite transaction
+boundaries. The unchanged producer/terminal responsibility split follows the pinned
+DSH QQ research recorded in [owner authority](../owner-authority.md); no DSH transport
+or producer protocol changes. `tests/test_model_carry_rem.py` verifies narrow scope rejection, retained
+UNKNOWN accounting, later paid renewal, and real owner HTTP preview/activation followed
+by an independent REM worker with mocked provider transport.
+
 ## Closing an attempt that never started I/O
 
 A refusal after admission but before `io_started` (for example a background yield,
