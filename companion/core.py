@@ -365,11 +365,15 @@ class Core(Runtime):
             self.recover(now)
             if (owner_authority.required(s, self.settings)
                 or private_life.enabled(self.settings)):
-                if private_life.busy(s, now) or s.one(
+                foreground_only = bool(owner_authority.required(s, self.settings)
+                                       and self.settings.paid_model
+                                       and self.settings.paid_model.concurrency > 1)
+                if private_life.busy(s, now, foreground_only=foreground_only) or s.one(
                     "SELECT 1 FROM outbox WHERE state='SENDING' LIMIT 1",
                 ):
                     # Input admission and tail cancellation proceed independently;
-                    # the worker waits for an existing model/send responsibility.
+                    # chat waits for its existing model/send responsibility. Separate
+                    # background work shares admission capacity when more slots exist.
                     return None
             if not proactive_allowed(s, self.settings, now):
                 cancel_proactive_work(s, now)
@@ -1893,16 +1897,21 @@ class Core(Runtime):
                     (code, after(now, 60), now, job["job_id"], job["lease_token"]),
                 )
                 return
-            from companion.capabilities import open_unknown
-
-            if (code == "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"
-                and (private_life.enabled(self.settings)
-                     or owner_authority.required(self.store, self.settings))
-                and not self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
-                                       (job["job_id"],))
-                and not open_unknown(self.store, self.settings)):
-                # A different process occupied the provider slot after claim. No
-                # attempt was admitted here, so wait without spending a retry or STOP.
+            checkpoint = self.store.one(
+                "SELECT phase FROM agent_conversations WHERE job_id=?", (job["job_id"],))
+            admitted = self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
+                                      (job["job_id"],))
+            resumable = (checkpoint and checkpoint["phase"] in {"READY", "WAITING"}
+                         and not self.store.one(
+                             "SELECT 1 FROM model_usage WHERE job_id=? AND state!='SETTLED'",
+                             (job["job_id"],))
+                         and not self.store.one(
+                             "SELECT 1 FROM agent_tool_calls WHERE job_id=? "
+                             "AND state IN ('STARTED','UNKNOWN')", (job["job_id"],)))
+            if code in budget.CAPACITY_WAIT_CODES and (not admitted or resumable):
+                # Admission contention is a wait, including between SDK model turns.
+                # A READY checkpoint retains paid responses and observed tool results;
+                # an uncertain original attempt never authorizes this continuation.
                 self.store.execute(
                     "UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL,last_error_code=?,"
                     "next_attempt_at=?,attempts=MAX(0,attempts-1),updated_at=? WHERE job_id=?",

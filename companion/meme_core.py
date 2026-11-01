@@ -811,7 +811,9 @@ class MemeCaptionService:
                     return False
                 job = s.one(
                     "SELECT j.* FROM jobs j JOIN meme_captions c USING(job_id) "
-                    "WHERE j.state='QUEUED' ORDER BY j.rowid LIMIT 1"
+                    "WHERE j.state='QUEUED' "
+                    "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) "
+                    "ORDER BY j.rowid LIMIT 1", (now,),
                 )
                 if not job:
                     return False
@@ -949,6 +951,14 @@ class MemeCaptionService:
             if request_id:
                 budget.settle(s, self.settings, request_id, None)
             code = error.code if isinstance(error, CoreError) else "MEME_CAPTION_INVALID"
+            if budget.capacity_wait(s, code, request_id=request_id):
+                s.execute(
+                    "UPDATE jobs SET state='QUEUED',lease_token=NULL,attempts=0,"
+                    "next_attempt_at=?,last_error_code=?,updated_at=? "
+                    "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+                    (after(self.clock(), 1), code, self.clock(), job["job_id"], job["lease_token"]),
+                )
+                return True
             s.execute(
                 "UPDATE jobs SET state='FAILED',lease_token=NULL,last_error_code=?,updated_at=? "
                 "WHERE job_id=? AND state='RUNNING' AND lease_token=?",

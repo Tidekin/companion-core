@@ -280,7 +280,8 @@ async def run_once(store, settings, model, clock):
         state, retry_at = "FAILED", None
         if unknown:
             state = "UNKNOWN"  # Never replayed.
-        elif request_id is None and code in ADMISSION_RETRY_CODES:
+        elif (request_id is None and code in ADMISSION_RETRY_CODES
+              or budget.capacity_wait(store, code, request_id=request_id)):
             state = "RETRY_WAIT"
             retry_at = (_next_day(settings, clock()) if "DAILY" in code
                         else after(clock(), 60))
@@ -292,6 +293,10 @@ async def run_once(store, settings, model, clock):
             retry_at = after(clock(), 300)
         with store.transaction():
             if state == "RETRY_WAIT":
+                if (request_id is None and code in ADMISSION_RETRY_CODES
+                    or budget.capacity_wait(store, code, request_id=request_id)):
+                    store.execute("UPDATE jargon_work SET attempts=MAX(0,attempts-1) "
+                                  "WHERE work_key=?", (row["work_key"],))
                 store.execute("UPDATE jargon_work SET model_request_id=NULL WHERE work_key=?",
                               (row["work_key"],))
             finish(store, row, state, clock(), code, retry_at=retry_at)

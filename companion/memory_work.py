@@ -695,16 +695,21 @@ async def extraction_step(core, local_day, lease, batch, persist):
         if code in {"PRIVACY_CHANGED", "MEMORY_STALE_LEASE", "ERASURE_REPLAY_REQUIRED"}:
             raise
         usage = s.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
-        if previous_phase == "REVIEW" and usage:
+        unsent = request_id is not None and budget.not_dispatched(s, request_id)
+        if previous_phase == "REVIEW" and usage and not unsent:
             batch["review_attempts"] = batch.get("review_attempts", 0) + 1
         unknown = usage and usage["state"] in {"RESERVED", "UNKNOWN"}
-        blocked = code in {
+        blocked = budget.capacity_wait(s, code, request_id=request_id) or code in {
             "BACKGROUND_YIELD_TO_CHAT",
             "DAILY_BUDGET_EXHAUSTED",
             "MONTHLY_BUDGET_EXHAUSTED",
             "UNKNOWN_PRICING",
         }
         with s.transaction():
+            if previous_phase == "EXTRACT" and unsent:
+                attempts = max(0, attempts - 1)
+                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                          (batch["attempt_key"], str(attempts)))
             if unknown:
                 batch.update(phase="UNKNOWN", error=code)
                 batch.pop("candidates", None)

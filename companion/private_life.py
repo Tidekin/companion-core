@@ -60,12 +60,16 @@ def strict(store, settings):
     return active(store, settings) and not enabled(settings)
 
 
-def busy(store, now):
-    return bool(
-        store.one(
-            "SELECT 1 FROM model_usage m JOIN model_admissions a USING(request_id) "
-            "WHERE m.state='RESERVED' AND a.lease_until>? LIMIT 1",
-            (now,),
+def busy(store, now, *, foreground_only=False):
+    from companion.budget import is_background
+
+    return any(
+        not foreground_only or row["scenario"] not in {"gateway", "evaluation"}
+        and not is_background(row["scenario"], row["job_id"])
+        for row in store.rows(
+            "SELECT m.scenario,m.job_id FROM model_usage m "
+            "JOIN model_admissions a USING(request_id) "
+            "WHERE m.state='RESERVED' AND a.lease_until>?", (now,),
         )
     )
 

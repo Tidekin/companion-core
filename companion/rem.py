@@ -326,10 +326,11 @@ async def run(core, job):
     except Exception as error:
         code = error.code if isinstance(error, CoreError) else "REM_INVALID_RESULT"
         with store.transaction():
-            if code == "BACKGROUND_YIELD_TO_CHAT" and not store.one(
+            if code in budget.CAPACITY_WAIT_CODES and not store.one(
                 "SELECT 1 FROM model_usage WHERE job_id=?", (job["job_id"],),
             ):
                 store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL,updated_at=?,"
+                               "attempts=MAX(0,attempts-1),"
                                "next_attempt_at=?,last_error_code=? WHERE job_id=? "
                                "AND state='RUNNING' AND lease_token=?",
                                (clock(), after(clock(), 60), code, job["job_id"],

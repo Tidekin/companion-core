@@ -29,7 +29,8 @@ from tests.owner_model_fixtures import authorized_job
 from tests.test_owner_authority import activate
 
 
-def renewal(core, case, *, number=1, offset=timedelta(seconds=1), open_ended=False):
+def renewal(core, case, *, number=1, offset=timedelta(seconds=1), open_ended=False,
+            concurrency=None):
     active = case.successor["authority"]
     previous = paid_budget.snapshot(core.settings)
     expiry = core.settings.paid_model.expires_at
@@ -46,6 +47,7 @@ def renewal(core, case, *, number=1, offset=timedelta(seconds=1), open_ended=Fal
             "window_id": f"renewed-window-{number}",
             "approval_sha256": str(number) * 64,
             "expires_at": expires,
+            "concurrency": concurrency or core.settings.paid_model.concurrency,
             "rates_valid_until": None if open_ended else max(
                 core.settings.paid_model.rates_valid_until, expires),
         }
@@ -78,6 +80,30 @@ def renewal(core, case, *, number=1, offset=timedelta(seconds=1), open_ended=Fal
         "previous_paid_contract": previous,
     }
     return request, policy, witness
+
+
+def test_reviewed_renewal_can_raise_capacity_to_ten_without_changing_old_liability(core, tmp_path):
+    case = migrated(core, tmp_path, daily_calls=100, window_calls=100,
+                    expires_at=core.clock.now + timedelta(hours=1),
+                    rates_valid_until=core.clock.now + timedelta(days=1))
+    before = core.store.rows("SELECT * FROM model_usage")
+    request, policy, witness = renewal(core, case, concurrency=10)
+    receipt = model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+    active, _ = activate(core, policy, revision=4, operation="renew-capacity-ten")
+    core.authorized_model_test_capture = active, case.key
+    core.authorized_model_test_jobs = {}
+    job = authorized_job(core, number=2)
+    for index in range(10):
+        budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock(),
+                       clock=core.clock, logical_request_id=f"capacity-renewal-{index}")
+    with pytest.raises(CoreError, match="MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"):
+        budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock(),
+                       clock=core.clock, logical_request_id="capacity-renewal-overflow")
+    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                          (case.request_id,)) == before[0]
+    with core.store.transaction():
+        saved = paid_budget.journal(core.store, core.settings.paid_model)["model_carries"]
+    assert saved[receipt["carry_sha256"]]["concurrency"] == 10
 
 
 def test_expired_renewal_preserves_original_unknown_and_cumulative_calls(core, tmp_path):

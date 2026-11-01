@@ -245,7 +245,8 @@ async def run_once(store, settings, model, clock):
         state, retry_at = "FAILED", None
         if unknown:
             state = "UNKNOWN"  # Never replayed; the original liability stays where it is.
-        elif request_id is None and code in ADMISSION_RETRY_CODES:
+        elif (request_id is None and code in ADMISSION_RETRY_CODES
+              or budget.capacity_wait(store, code, request_id=request_id)):
             state = "RETRY_WAIT"
             retry_at = _next_day(settings, clock()) if "DAILY" in code else after(clock(), 60)
         elif code in {"WATCH_SOURCE_CHANGED", "PRIVACY_CHANGED"}:
@@ -256,6 +257,10 @@ async def run_once(store, settings, model, clock):
             retry_at = after(clock(), 300)
         with store.transaction():
             if state == "RETRY_WAIT":
+                if (request_id is None and code in ADMISSION_RETRY_CODES
+                    or budget.capacity_wait(store, code, request_id=request_id)):
+                    store.execute("UPDATE watch_ledger SET attempts=MAX(0,attempts-1) "
+                                  "WHERE entry_id=?", (entry["entry_id"],))
                 store.execute("UPDATE watch_ledger SET model_request_id=NULL WHERE entry_id=?",
                               (entry["entry_id"],))
             finish(store, entry, state, clock(), code, retry_at=retry_at)

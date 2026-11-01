@@ -5,10 +5,12 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
+import pytest
 from pydantic import SecretStr
 
 from companion.store import after
@@ -18,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PROCESS = ROOT / "tests/support/gateway_process.py"
 
 
-def test_real_http_ingress_independent_worker_and_original_receipt(harness, tmp_path):
+@pytest.mark.parametrize("pause_record", [None, "reserve", "settle"])
+def test_real_http_ingress_independent_worker_and_original_receipt(harness, tmp_path, pause_record):
     core = harness.core
     core.clock.now = datetime.now(UTC)
     rotate(harness, expires_at=after(core.clock(), 7200))
@@ -60,10 +63,26 @@ def test_real_http_ingress_independent_worker_and_original_receipt(harness, tmp_
                         assert time.monotonic() < deadline
                         time.sleep(0.02)
                     observed = tmp_path / "provider.json"
-                    worker = subprocess.run([sys.executable, "-B", str(PROCESS), "worker",
-                        str(settings_file), str(observed)], cwd=ROOT, capture_output=True,
-                        text=True, timeout=30, **flags)
-                    assert worker.returncode == 0, worker.stderr
+                    arguments = [sys.executable, "-B", str(PROCESS),
+                                 "worker-paused" if pause_record else "worker",
+                                 str(settings_file), str(observed)]
+                    if pause_record:
+                        arguments.append(pause_record)
+                        worker = subprocess.Popen(arguments, cwd=ROOT, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
+                        try:
+                            assert worker.stdout.readline().strip() == "GATEWAY_JOURNAL_APPENDED"
+                            # Six API poll intervals pass while the journal append is
+                            # durable but the writer's SQLite transaction is uncommitted.
+                            with pytest.raises(FutureTimeout):
+                                pending.result(timeout=0.3)
+                        finally:
+                            _, error = worker.communicate("continue\n", timeout=30)
+                        assert worker.returncode == 0, error
+                    else:
+                        worker = subprocess.run(arguments, cwd=ROOT, capture_output=True,
+                            text=True, timeout=30, **flags)
+                        assert worker.returncode == 0, worker.stderr
                     result = pending.result(timeout=20)
                 assert result.status_code == 200, result.text
                 completion = result.json()
@@ -78,6 +97,12 @@ def test_real_http_ingress_independent_worker_and_original_receipt(harness, tmp_
                 assert not core.store.rows("SELECT * FROM events")
                 assert not core.store.rows("SELECT * FROM outbox")
                 assert core.model.calls == []
+                with Path(core.settings.paid_model.journal_path).open("ab") as journal:
+                    journal.write(b"{broken-journal-record}\n")
+                blocked = client.get("/v1/gateway/requests/" + request_id)
+                assert blocked.status_code == 503
+                assert blocked.json()["error"]["code"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
+                assert len(json.loads(observed.read_text("utf-8"))) == 1
         finally:
             process.terminate()
             try:

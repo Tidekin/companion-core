@@ -187,13 +187,10 @@ def test_background_memory_yields_to_runnable_chat_before_any_reservation(core, 
     assert core.store.rows("SELECT * FROM model_usage") == []
 
 
-@pytest.mark.parametrize("reason", ["manual", "future_retry", "erased"])
+@pytest.mark.parametrize("reason", ["manual", "erased"])
 def test_background_priority_keeps_manual_and_nonrunnable_work_available(core, reason):
     job_id = ingest(core)["job_id"]
-    if reason == "future_retry":
-        core.store.execute("UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=?",
-                           (after(core.clock(), 60),))
-    elif reason == "erased":
+    if reason == "erased":
         core.store.execute("UPDATE events SET redacted=1")
     request_id = budget.reserve(
         core.store, core.settings, job_id if reason == "manual" else None,
@@ -202,6 +199,15 @@ def test_background_priority_keeps_manual_and_nonrunnable_work_available(core, r
     assert core.store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,)) == {
         "state": "RESERVED",
     }
+
+
+def test_chat_waiting_for_tools_keeps_background_yielding(core):
+    ingest(core)
+    core.store.execute("UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=?",
+                       (after(core.clock(), 60),))
+    with pytest.raises(CoreError, match="BACKGROUND_YIELD_TO_CHAT"):
+        budget.reserve(core.store, core.settings, None, "memory_review", MESSAGES, core.clock())
+    assert not core.store.rows("SELECT * FROM model_usage")
 
 
 def test_extraction_yield_leaves_the_batch_and_retry_count_untouched(core):

@@ -469,7 +469,7 @@ def paid_capacity_settings(core, tmp_path, **changes):
     approval = approved_live(core, tmp_path, **{
         "daily_micro_usd": 1000000, "monthly_micro_usd": 10000000,
         "window_micro_usd": 1000000, "daily_calls": 20,
-        "window_calls": 10, "concurrency": 32, **changes,
+        "window_calls": 10, "concurrency": 10, **changes,
     })
     core.settings.memory_enabled = True
     return approval

@@ -182,17 +182,31 @@ def test_chat_only_checkpoint_needs_no_reader_permission(core, tmp_path, sdk_mod
 
 
 
-def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_modules, monkeypatch):
+@pytest.mark.parametrize("concurrency", [2, 10])
+def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_modules, monkeypatch,
+                                                    concurrency):
     import pickle
 
     from pydantic import SecretStr
 
+    from tests import test_owner_input
     from tests.test_onebot_capture import real_core_http
     from tests.test_owner_input import captured, inbound
 
     monkeypatch.setenv("COMPANION_TELEMETRY", "1")
     monkeypatch.setenv("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")
     core.settings.control_token = SecretStr("synthetic-sdk-owner-control")
+    original_prepare = test_owner_input.prepare
+
+    def prepare(*args):
+        policy = original_prepare(*args)
+        core.settings.paid_model = core.settings.paid_model.model_copy(
+            update={"concurrency": concurrency, "concurrency_basis": (
+                "local_active_attempts_v2" if concurrency == 10 else "unresolved_liabilities_v1")})
+        return policy.model_copy(update={"paid_contract_sha256":
+            paid_budget.sha(paid_budget.snapshot(core.settings))})
+
+    monkeypatch.setattr(test_owner_input, "prepare", prepare)
     capture, _ = captured(core, tmp_path)
 
     async def scenario():

@@ -21,6 +21,7 @@ GENERATOR_VERSION = "diary-1"
 ADMISSION_RETRY_CODES = {
     "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",
     "MODEL_MONTHLY_BUDGET_EXHAUSTED",
+    "BACKGROUND_YIELD_TO_CHAT",
 }
 RATINGS = {2: "很喜欢", 1: "还不错", 0: "一般", -1: "不太喜欢", -2: "很不喜欢"}
 UNSUPPORTED_ACTIVITY = (
@@ -905,9 +906,11 @@ class DiaryService:
             unknown = self.store.one(
                 "SELECT 1 FROM model_usage WHERE request_id=? AND state='UNKNOWN'", (request_id,),
             )
-            if request_id is None and code in ADMISSION_RETRY_CODES:
-                # Claims are counted, but a refused admission consumes no model
-                # attempt. Keep waiting even after many temporary contentions.
+            if (request_id is None and code in ADMISSION_RETRY_CODES
+                or budget.capacity_wait(self.store, code, request_id=request_id)):
+                self.store.execute("UPDATE diary_runs SET attempts=MAX(0,attempts-1) "
+                                   "WHERE run_id=? AND state='RUNNING' AND lease_token=?",
+                                   (run["run_id"], run["lease_token"]))
                 state = "RETRY_WAIT"
                 local = datetime.fromisoformat(self.clock()).astimezone(
                     ZoneInfo(self.settings.timezone),

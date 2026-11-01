@@ -36,9 +36,13 @@ def contract(settings, job_id, logical_request_id):
 
 
 def check_attempt(store, job_id, request_id=None):
-    """A caption job owns one usage row, including failed or uncertain attempts."""
+    """A caption job owns one provider attempt, including any uncertain attempt."""
+    from companion.budget import not_dispatched
+
     if not store.one("SELECT 1 FROM jobs WHERE job_id=? AND kind='meme_caption'", (job_id,)):
         raise CoreError("MODEL_MEME_JOB_REQUIRED", 503)
-    if store.one("SELECT 1 FROM model_usage WHERE job_id=? AND request_id!=?",
-                 (job_id, request_id or "")):
+    if any(not not_dispatched(store, row["request_id"]) for row in store.rows(
+        "SELECT request_id FROM model_usage WHERE job_id=? AND request_id!=?",
+        (job_id, request_id or ""),
+    )):
         raise CoreError("MODEL_MEME_ALREADY_ATTEMPTED", 409)

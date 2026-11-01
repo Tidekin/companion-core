@@ -308,11 +308,21 @@ def test_accounting_requires_first_carry_and_preserves_its_prepared_receipt(core
         "billed_micro_usd": result["accounted_micro_usd"], "state": "UNKNOWN"}
 
 
-def test_local_active_mode_cannot_bootstrap_without_an_approved_carry(core, tmp_path):
+def test_fresh_local_active_approval_needs_no_historical_carry(core, tmp_path):
     approved_live(core, tmp_path, concurrency=1, concurrency_basis="local_active_attempts_v2")
-    with pytest.raises(CoreError, match="OWNER_MODEL_CARRY_REQUIRED"):
-        authorized_job(core)
+    assert authorized_job(core)
     assert not core.store.one("SELECT 1 FROM model_admissions")
+
+
+def test_existing_carry_cannot_be_dropped_from_a_new_activation(core, tmp_path):
+    case = migrated(core, tmp_path)
+    before = core.store.rows("SELECT * FROM model_usage")
+    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="stop-before-dropping-carry", authority=case.successor["authority"]))
+    with pytest.raises(CoreError, match="OWNER_MODEL_CARRY_REQUIRED"):
+        activate(core, case.policy.model_copy(update={"unknown_carry_sha256": None}),
+                 revision=4, operation="drop-historical-carry")
+    assert core.store.rows("SELECT * FROM model_usage") == before
 
 
 def test_only_identical_operation_repairs_fsync_before_projection_crash(

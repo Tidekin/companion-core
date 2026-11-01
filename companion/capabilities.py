@@ -20,7 +20,7 @@ from companion import (
     qq_images,
     video_input,
 )
-from companion.budget import total_monthly
+from companion.budget import capacity_exhausted, total_monthly
 from companion.contracts import CoreError
 from companion.exploration import METERED_READS_SQL
 from companion.source_grants import SourceGrantService, SourceGrantSnapshot
@@ -86,7 +86,8 @@ def _live_blocks(store, settings, now, *, cumulative_state=None, carry_view=None
         reasons.append("BUDGET_RECONCILIATION_REQUIRED")
     carry_view = _carry_view(store, settings) if carry_view is None else carry_view
     closed = sorted(carry_view.get("model_closures", {}))
-    if store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN'"
+    if not model_carry.active(settings) and store.one(
+        "SELECT 1 FROM model_usage WHERE state='UNKNOWN'"
                  + (" AND request_id NOT IN (" + ",".join("?" for _ in closed) + ")"
                     if closed else "") + " LIMIT 1", closed):
         reasons.append("MODEL_USAGE_UNKNOWN")
@@ -211,14 +212,7 @@ def _paid_capacity_blocks(store, settings, approval, now, *, carry_view=None):
     if (window["calls"] >= approval.window_calls
         or (not unlimited and window["amount"] >= approval.window_micro_usd)):
         reasons.append("MODEL_WINDOW_BUDGET_EXHAUSTED")
-    closed = sorted(carry_view.get("model_closures", {}))
-    running = store.one(
-        "SELECT COUNT(*) n FROM model_usage m JOIN model_admissions a USING(request_id) "
-        "WHERE m.state IN ('RESERVED','UNKNOWN')"
-        + (" AND m.request_id NOT IN (" + ",".join("?" for _ in closed) + ")" if closed else ""),
-        closed,
-    )["n"]
-    if running >= approval.concurrency:
+    if capacity_exhausted(store, approval, carry_view.get("model_closures", ())):
         reasons.append("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED")
     return reasons
 

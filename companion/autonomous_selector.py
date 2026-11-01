@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from time import monotonic
 
-from companion import budget, owner_authority, private_life, social_autonomy_runtime
+from companion import budget, owner_authority, social_autonomy_runtime
 from companion.contracts import CoreError
 from companion.store import encode
 from companion.wake import WAKE_PURPOSES
@@ -131,7 +131,7 @@ def foreground_clear(core):
     pending = owner_authority.owner_waiting(
         core.store, core.settings, core.clock(), authority=view.authority.as_dict(),
     )
-    return not pending and not private_life.busy(core.store, core.clock())
+    return not pending
 
 
 def _allowed(core, purposes):
