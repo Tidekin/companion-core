@@ -13,6 +13,7 @@ from companion_delivery_protocol.authority import validate_authority_ref
 
 from .voice_protocol import (
     LegacyVoiceDeliveryBinding,
+    SingingResult,
     VoiceDeliveryBinding,
     VoiceRetiredBinding,
 )
@@ -53,9 +54,13 @@ def validate_original_voice_binding(
             or receipt.get("job_id") != value["job_id"]
             or any(value[k] != given[k] for k in ("job_id", "generation"))):
             raise ValueError("retired voice identity changed")
-        if (not job or job["operation"] != "tts" or any(
-            job[k] != value[k] for k in ("job_id", "generation", "message_id", "event_id")
-        )):
+        singing = bool(job and job["operation"] == "sing" and "authority" in original_scope)
+        identity = ("job_id", "generation", "event_id") if singing else (
+            "job_id", "generation", "message_id", "event_id")
+        if (not job or job["operation"] not in {"tts", "sing"}
+            or singing and job["message_id"] is not None
+            or not singing and job["operation"] != "tts"
+            or any(job[k] != value[k] for k in identity)):
             raise ValueError("retired voice job changed")
         if value["kind"] == "capability" and "retirement_token" in given:
             material = given["retirement_token"].encode()
@@ -89,9 +94,32 @@ def validate_original_voice_binding(
         "node_id": binding["node_id"], "manifest_sha256": binding["manifest_sha256"],
         "config_sha256": binding["node_config_sha256"],
     }
+    singing = binding.get("singing_segment_index") is not None
+    if singing:
+        if not job or "authority" not in original_scope or job["message_id"] is not None:
+            raise ValueError("original singing scope changed")
+        for key in ("message_id", "outbox_content_sha256", "outbox_delivery_key"):
+            del job_expected[key]
+        from companion_delivery_protocol.singing import validate_part
+
+        song = SingingResult.model_validate_json(job["result_blob"])
+        index = binding["singing_segment_index"]
+        if (not 0 <= index < len(song.audio)
+            or index != (outbox.get("segment_index") or 0)
+            or (outbox.get("segment_count") or 1) != len(song.audio)
+            or outbox.get("origin_event_id") != job["event_id"]
+            or wire.digest(song.manifest) != binding["result_sha256"]
+            or song.manifest["node_manifest_sha256"] != binding["manifest_sha256"]):
+            raise ValueError("original singing partition changed")
+        audio = song.audio[index]
+        validate_part(song.manifest, index, {**audio.model_dump(exclude={"audio_base64"}),
+            "audio_bytes": len(audio.audio_bytes())})
+        if (binding["audio_sha256"] != audio.audio_sha256
+            or binding["audio_bytes"] != len(audio.audio_bytes())):
+            raise ValueError("original singing audio changed")
     if "window_sha256" in original_scope:
         job_expected.update(original_scope)
-    if (not job or job["operation"] != "tts"
+    if (not job or job["operation"] != ("sing" if singing else "tts")
         or job["state"] not in {"READY", "CANCELLED", "EXPIRED"}
         or any(job[k] != v for k, v in job_expected.items())
         or "authority" in original_scope

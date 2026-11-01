@@ -195,7 +195,8 @@ def deferred_results(core, job, snapshots, conversation):
     check_conversation(core, job, snapshots, purpose="content")
     answers = {}
     for call in pending.calls:
-        binding = core.store.one("SELECT request_id FROM agent_tool_calls "
+        binding = core.store.one("SELECT COALESCE(voice_job_id,request_id) AS request_id,tool_name "
+                                 "FROM agent_tool_calls "
                                  "WHERE job_id=? AND tool_call_id=? AND state='DEFERRED'",
                                  (job["job_id"], call.tool_call_id))
         metadata = pending.metadata.get(call.tool_call_id, {})
@@ -203,6 +204,14 @@ def deferred_results(core, job, snapshots, conversation):
             "request_id",
         ):
             raise CoreError("CONVERSATION_DEFERRED_BINDING_REQUIRED", 409)
+        if binding["tool_name"] == "sing_song":
+            from companion.agent_singing import ready_result
+
+            answer = ready_result(core, job, snapshots, binding["request_id"])
+            if answer is None:
+                return False, None
+            answers[call.tool_call_id] = answer
+            continue
         row = core.store.one("SELECT created_at FROM exploration_requests WHERE request_id=?",
                              (binding["request_id"],))
         expired_wait = row and after(row["created_at"], core.settings.content.wait_seconds) <= (
@@ -263,13 +272,14 @@ def reader_tools(core, job, snapshots, persistence):
                 core.store.execute("UPDATE content_items SET read_request_id=? WHERE item_id=?",
                                    (request_id, item["item_id"]))
             result = reading_result(core, job, snapshots, request_id)
-            metadata = persistence.bind_reader(ctx.tool_call_id, request_id)
+            metadata = persistence.bind_request(ctx.tool_call_id, request_id)
             if result is not None:
                 return result
         raise CallDeferred(metadata=metadata)
 
-    async def discover_content(ctx: RunContext, source: Literal["bilibili", "heybox"]) -> dict:
-        """Discover source titles through the configured Reader; this is not keyword search."""
+    async def discover_content(ctx: RunContext, source: Literal["bilibili", "heybox"],
+        query: Annotated[str | None, Field(min_length=2, max_length=100)] = None) -> dict:
+        """Discover real source titles; Bilibili accepts an optional song/title search query."""
         check("exploration")
         paused = core.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
         if not core.settings.exploration_enabled or (paused and paused["value"] == "1"):
@@ -282,8 +292,9 @@ def reader_tools(core, job, snapshots, persistence):
             request_id = core.exploration.create(
                 name, "discover", "chat-tool:" + job["job_id"] + ":" + ctx.tool_call_id,
                 source_event_ids=[job["event_id"]],
+                query=query,
             )
-            metadata = persistence.bind_reader(ctx.tool_call_id, request_id)
+            metadata = persistence.bind_request(ctx.tool_call_id, request_id)
         raise CallDeferred(metadata=metadata)
 
     async def analyze_shared_video(ctx: RunContext,
@@ -308,7 +319,7 @@ def reader_tools(core, job, snapshots, persistence):
             check("bili_video")
             request_id = core.bili_video.schedule(item["item_id"], source_id, job_id=job["job_id"])
             result = reading_result(core, job, snapshots, request_id)
-            metadata = persistence.bind_reader(ctx.tool_call_id, request_id)
+            metadata = persistence.bind_request(ctx.tool_call_id, request_id)
             if result is not None:
                 return result
         raise CallDeferred(metadata=metadata)

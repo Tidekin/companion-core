@@ -19,6 +19,8 @@ from companion.qq_rich import input_digest
 from companion.store import after, encode, uid, utcnow
 from companion.voice_protocol import (
     Digest,
+    SingingAudio,
+    SingingResult,
     VoiceAudioResult,
     VoiceClaimResponse,
     VoiceControlResponse,
@@ -33,6 +35,7 @@ from companion.voice_protocol import (
     sign_voice_lease,
 )
 from companion_delivery_protocol.authority import validate_authority_ref
+from companion_delivery_protocol.singing import MAX_RESULT_BODY_BYTES as SONG_RESERVATION
 from companion_voice_node.providers import LocalVoiceError, WAVLimits, validate_wav
 
 UPLOAD_DOMAIN = b"companion-core/onebot-owner-voice/v2\x00"
@@ -92,6 +95,7 @@ def _retire_content(store, row):
         "outbox_content_sha256=NULL,identity_sha256=NULL,window_sha256=NULL,manifest_sha256=NULL,"
         "config_sha256=NULL,config_json='{}',authority_json='{}',input_bytes=NULL,input_duration_seconds=NULL,"
         "result_bytes=NULL,lease_json=NULL,lease_token_sha256=NULL,content_retired=1,"
+        "singing_context_json='{}',reserved_output_bytes=0,"
         "cleanup_epoch=?,cleanup_state=CASE WHEN stop_token_sha256 IS NULL "
         "OR cleanup_state='CONFIRMED' THEN 'CONFIRMED' ELSE 'PENDING' END WHERE job_id=?",
         (epoch(store), row["job_id"]),
@@ -131,6 +135,11 @@ def _fence(store, row, reason, now, *, expired=False):
             node_id=row["node_id"],
         )
     _retire_content(store, row)
+    if row["operation"] == "sing" and not row["started_at"]:
+        store.execute("UPDATE voice_jobs SET source_reserved_requests=0,source_reserved_bytes=0 "
+                      "WHERE job_id=?", (row["job_id"],))
+    if row["operation"] == "sing":
+        _invalidate_flow(store, row, reason)
     if not row["started_at"]:
         store.execute(
             "UPDATE voice_node_state SET active_job_id=NULL WHERE active_job_id=?",
@@ -192,6 +201,9 @@ def _invalidate_flow(store, row, reason):
     _invalidate_receipts(store, "key IN (?,?)",
                          (REPLY_RECEIPT + str(row["message_id"]), INPUT_RECEIPT + row["event_id"]),
                          reason)
+    if row["operation"] == "sing":
+        _invalidate_receipts(store, "key LIKE 'voice_reply:%' AND "
+            "json_extract(value,'$.job_id')=?", (row["job_id"],), reason)
 
 
 def retired_delivery_binding(binding, *, legacy_signature=None):
@@ -229,9 +241,10 @@ def _invalidate_receipts(store, where, parameters, reason):
                 try:
                     proof = VoiceRetiredBinding.model_validate(previous["retired"])
                     original = store.one(
-                        "SELECT v.generation,v.event_id,v.message_id,o.delivery_key "
-                        "FROM voice_jobs v JOIN outbox o USING(message_id) WHERE v.job_id=?",
-                        (proof.job_id,))
+                        "SELECT v.generation,v.event_id,o.message_id,o.delivery_key "
+                        "FROM voice_jobs v JOIN outbox o ON o.message_id=? WHERE v.job_id=? "
+                        "AND o.origin_event_id=v.event_id",
+                        (proof.message_id, proof.job_id))
                     if (original and previous.get("job_id") == proof.job_id
                         and row["key"] == REPLY_RECEIPT + proof.message_id
                         and all(original[k] == getattr(proof, k) for k in (
@@ -415,16 +428,45 @@ class VoiceJobs:
             **extra,
         )
 
-    def _capacity(self, additional_bytes, *, new_job=False):
+    def _capacity(self, additional_bytes, *, new_job=False, replace_job_id=None):
         used = self.store.one(
             "SELECT COALESCE(SUM(COALESCE(length(input_blob),0)+"
-            "COALESCE(length(result_blob),0)),0) AS bytes,"
-            "SUM(state IN ('QUEUED','LEASED','RUNNING')) AS pending FROM voice_jobs"
+            "MAX(COALESCE(length(result_blob),0),reserved_output_bytes)),0) AS bytes,"
+            "SUM(state IN ('QUEUED','LEASED','RUNNING')) AS pending FROM voice_jobs "
+            "WHERE job_id IS NOT ?", (replace_job_id,)
         )
         if used["bytes"] + additional_bytes > self.settings.voice.max_private_blob_bytes or (
             new_job and (used["pending"] or 0) >= self.settings.voice.max_pending_jobs
         ):
             raise CoreError("VOICE_CAPACITY_EXCEEDED", 429)
+
+    def create_sing(self, job, source_event_id, part, tool_call_id):
+        from companion.singing import prepare_context, reserve_read
+
+        _transaction_required(self.store)
+        existing = self.store.one("SELECT * FROM voice_jobs WHERE event_id=? AND operation='sing'",
+                                  (job["event_id"],))
+        if existing:
+            # A retired/unknown original cannot be used as a new singing attempt.
+            raise CoreError("SINGING_ORIGINAL_ATTEMPT_EXISTS", 409)
+        context = prepare_context(self.store, self.settings, self.clock, job,
+                                   source_event_id, part, tool_call_id)
+        data = canonical_bytes(context["recipe"])
+        node_id, _ = self._node(operation="sing")
+        if self.store.one("SELECT 1 FROM voice_jobs WHERE operation='sing' "
+                          "AND state IN ('QUEUED','LEASED','RUNNING')"):
+            raise CoreError("VOICE_CAPACITY_EXCEEDED", 429)
+        self._capacity(len(data) + SONG_RESERVATION, new_job=True)
+        read_budget = reserve_read(self.store, self.settings, self.clock(),
+                                   context["recipe"]["max_input_bytes"])
+        event = self.store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
+        row = self._base(event, node_id, "sing", data, "application/json",
+            singing_context_json=encode(context), source_proof_sha256=digest(context),
+            reserved_output_bytes=SONG_RESERVATION, **read_budget)
+        self.store.insert("voice_jobs", **row)
+        self.store.audit("voice.created", row["job_id"], event["event_id"], row["created_at"],
+                         operation="sing", node_id=node_id, input_sha256=row["input_sha256"])
+        return self._public(row)
 
     def create_tts(self, message_id, text, *, node_id=None):
         _transaction_required(self.store)
@@ -553,23 +595,26 @@ class VoiceJobs:
         )
         return self._public(row)
 
-    def _delivery_binding(self, row):
+    def _delivery_binding(self, row, message_id=None):
         """A selected result may survive Outbox leasing; this never grants execution."""
         from companion.voice_protocol import VoiceDeliveryBinding
 
-        receipt = self.store.one(
-            "SELECT value FROM runtime_meta WHERE key=?", (REPLY_RECEIPT + str(row["message_id"]),)
-        )
+        message_id = message_id or row["message_id"]
+        outbox = self.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+        receipt = self.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                                  (REPLY_RECEIPT + str(message_id),))
         try:
             value = json.loads(receipt["value"]) if receipt else {}
             binding = VoiceDeliveryBinding.model_validate(value["binding"]).model_dump(mode="json")
             expected = {
                 "job_id": row["job_id"],
                 "generation": row["generation"],
-                "message_id": row["message_id"],
+                "message_id": message_id,
                 "result_sha256": row["result_sha256"],
-                "content_sha256": row["outbox_content_sha256"],
-                "delivery_key": row["outbox_delivery_key"],
+                "content_sha256": (outbox["content_sha256"] if row["operation"] == "sing"
+                                   else row["outbox_content_sha256"]),
+                "delivery_key": (outbox["delivery_key"] if row["operation"] == "sing"
+                                 else row["outbox_delivery_key"]),
                 "source_sha256": row["source_sha256"],
                 "authority": voice_authority.saved(row),
                 "identity_sha256": row["identity_sha256"],
@@ -581,6 +626,10 @@ class VoiceJobs:
                 "node_id": row["node_id"],
                 "manifest_sha256": row["manifest_sha256"],
             }
+            if row["operation"] == "sing":
+                if not outbox or outbox["origin_event_id"] != row["event_id"]:
+                    return None
+                expected["singing_segment_index"] = outbox["segment_index"] or 0
             if (
                 value["state"] != "AUDIO"
                 or value["job_id"] != row["job_id"]
@@ -624,6 +673,10 @@ class VoiceJobs:
                 json.loads(outbox["content_json"])["text"]
             ):
                 raise CoreError("VOICE_OUTBOX_SOURCE_CHANGED", 403)
+        elif row["operation"] == "sing":
+            from companion.singing import check_source
+
+            event, _ = check_source(self.store, self.settings, self.clock, row)
         else:
             event, body = self._asr_source(row["event_id"], row["source_segment_index"])
             if input_digest(body) != row["source_input_sha256"]:
@@ -700,8 +753,23 @@ class VoiceJobs:
                 (row["message_id"],),
             ):
                 return None
-            model = VoiceAudioResult if row["operation"] == "tts" else VoiceTranscriptResult
+            model = {"tts": VoiceAudioResult, "asr": VoiceTranscriptResult,
+                     "sing": SingingResult}[row["operation"]]
             return model.model_validate_json(row["result_blob"])
+
+    def singing_manifest(self, job_id):
+        from companion_delivery_protocol.singing import validate_manifest
+
+        with self._transaction():
+            row = self._reconcile(self._get(job_id))
+            if row["operation"] != "sing" or row["state"] != "READY" or row["result_blob"] is None:
+                return None
+            compact = self.store.one("SELECT json_extract(result_blob,'$.manifest') AS manifest "
+                                      "FROM voice_jobs WHERE job_id=?", (job_id,))
+            value = validate_manifest(json.loads(compact["manifest"]))
+            if digest(value) != row["result_sha256"]:
+                raise CoreError("SINGING_RESULT_CHANGED", 409)
+            return value
 
     def delivery_audio(self, job_id, message_id, lease_token):
         """Read only the selected, completed audio bound to this live Outbox lease."""
@@ -709,6 +777,30 @@ class VoiceJobs:
         if not isinstance(lease_token, str) or not lease_token:
             raise CoreError("STALE_DELIVERY_LEASE", 409)
         row = self._reconcile(self._get(job_id))
+        if row["operation"] == "sing":
+            binding = self._delivery_binding(row, message_id)
+            outbox = self.store.one("SELECT * FROM outbox WHERE message_id=? AND lease_token=? "
+                "AND state IN ('LEASED','SENDING') AND lease_until>?",
+                (message_id, lease_token, self.clock()))
+            if not binding or not outbox or row["state"] != "READY" or row["result_blob"] is None:
+                raise CoreError("SINGING_DELIVERY_FENCED", 409)
+            manifest = self.singing_manifest(job_id)
+            index = binding["singing_segment_index"]
+            if (index >= len(manifest["segments"])
+                or digest(manifest) != binding["result_sha256"]
+                or binding["reply_sha256"] != paid_budget.sha(
+                    json.loads(outbox["content_json"])["text"])):
+                raise CoreError("SINGING_DELIVERY_FENCED", 409)
+            from companion_delivery_protocol.singing import validate_part
+
+            part = self.store.one("SELECT json_extract(result_blob,?) AS audio "
+                "FROM voice_jobs WHERE job_id=?", (f"$.audio[{index}]", job_id))
+            audio = SingingAudio.model_validate_json(part["audio"])
+            validate_part(manifest, index, {"audio_bytes": len(audio.audio_bytes()),
+                **audio.model_dump(exclude={"audio_base64"})})
+            if audio.audio_sha256 != binding["audio_sha256"]:
+                raise CoreError("SINGING_DELIVERY_FENCED", 409)
+            return audio
         if (
             row["state"] != "READY"
             or row["message_id"] != message_id
@@ -1097,6 +1189,18 @@ class VoiceJobs:
             else:
                 node = self.settings.voice.nodes[node_id]
                 payload = result.payload
+                if isinstance(payload, SingingResult):
+                    from companion.singing import check_source
+
+                    _, recipe = check_source(self.store, self.settings, self.clock, row)
+                    source = payload.manifest["source"]
+                    if (payload.manifest["node_manifest_sha256"] != row["manifest_sha256"]
+                        or source["bvid"] != recipe.bvid or source["part"] != recipe.part
+                        or source["audio_bytes"] > recipe.max_input_bytes
+                        or source["duration_milliseconds"] > recipe.max_seconds * 1000
+                        or source["used_bytes"] > row["source_reserved_bytes"]
+                        or source["used_requests"] > row["source_reserved_requests"]):
+                        raise CoreError("SINGING_RESULT_SOURCE_CHANGED", 400)
                 invalid = (
                     isinstance(payload, VoiceAudioResult)
                     and (
@@ -1116,13 +1220,13 @@ class VoiceJobs:
                     error = CoreError("VOICE_RESULT_LIMIT_EXCEEDED", 400)
                 elif row["state"] == "RUNNING":
                     data, now = canonical_bytes(payload), self.clock()
-                    self._capacity(max(0, len(data) - len(row["input_blob"] or b"")))
+                    self._capacity(len(data), replace_job_id=row["job_id"])
                     self.store.execute(
                         "UPDATE voice_jobs SET state=?,input_blob=NULL,result_blob=?,"
                         "result_sha256=?,result_bytes=?,completed_at=?,result_expires_at=?,"
-                        "updated_at=? WHERE job_id=?",
+                        "updated_at=?,reserved_output_bytes=0 WHERE job_id=?",
                         (
-                            "READY" if row["operation"] == "tts" else "TRANSCRIBED",
+                            "TRANSCRIBED" if row["operation"] == "asr" else "READY",
                             data,
                             result.result_sha256,
                             len(data),
@@ -1140,6 +1244,11 @@ class VoiceJobs:
                         "AND resource_state='READY'",
                         (row["job_id"],),
                     )
+                    if row["operation"] == "sing":
+                        self.store.execute("UPDATE voice_jobs SET source_used_requests=?,"
+                            "source_used_bytes=? WHERE job_id=?",
+                            (payload.manifest["source"]["used_requests"],
+                             payload.manifest["source"]["used_bytes"], row["job_id"]))
                     self.store.audit(
                         "voice.committed",
                         row["job_id"],

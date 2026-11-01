@@ -23,6 +23,10 @@ async def reply(core, job, snapshots):
         return None, persistence
     with phase("context_tools", job["trace_id"]):
         tools = [core_query_tools(core, job, snapshots)]
+        from companion.agent_singing import toolset
+
+        if singing_tools := toolset(core, job, snapshots, persistence):
+            tools.append(singing_tools)
         if (core.settings.content_enabled and core.settings.observation_enabled
             and "content" in view.policy.purposes):
             tools.append(reader_tools(core, job, snapshots, persistence))
@@ -45,9 +49,10 @@ async def reply(core, job, snapshots):
     if isinstance(result.output, DeferredToolRequests):
         wait(core, job, persistence)
         return None, persistence
-    from companion.agent_output import VoiceReply
+    from companion.agent_output import SongReply, VoiceReply
 
-    output = result.output.text if isinstance(result.output, VoiceReply) else result.output
+    output = (result.output.text if isinstance(result.output, (VoiceReply, SongReply))
+              else result.output)
     return output, persistence
 
 

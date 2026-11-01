@@ -183,7 +183,11 @@ def register_voice_node_routes(app):
     @router.put(ROUTE_PREFIX + "/jobs/{job_id}/result")
     async def result(job_id: str, request: Request):
         node_id = _authenticate(request)
-        body = await _body(request, VoiceResult, MAX_RESULT_BODY_BYTES)
+        from companion_delivery_protocol.singing import MAX_RESULT_BODY_BYTES as song_limit
+
+        node = request.app.state.core.settings.voice.nodes[node_id]
+        body = await _body(request, VoiceResult,
+                           song_limit if "sing" in node.capabilities else MAX_RESULT_BODY_BYTES)
         _path(job_id, body.ref)
         if request.headers.get("idempotency-key") != (
             f"voice-result:{body.ref.job_id}:{body.ref.generation}"

@@ -109,7 +109,7 @@ def process_has_exited(pid: int, identity: str) -> bool:
 class _WindowsJob:
     """The kernel terminates assigned processes when the parent loses this handle."""
 
-    def __init__(self, pid: int):
+    def __init__(self, pid: int, *, memory_bytes=None):
         from ctypes import wintypes
 
         class BasicLimits(ctypes.Structure):
@@ -166,6 +166,9 @@ class _WindowsJob:
             raise VoiceProtocolError("VOICE_PROCESS_CONTAINMENT_UNAVAILABLE")
         limits = ExtendedLimits()
         limits.basic.flags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if memory_bytes is not None:
+            limits.basic.flags |= 0x00000200  # JOB_OBJECT_LIMIT_JOB_MEMORY
+            limits.job_memory = memory_bytes
         process = None
         try:
             if not kernel.SetInformationJobObject(
@@ -228,6 +231,10 @@ def _environment(workspace: Path, temporary: Path) -> dict[str, str]:
         TRANSFORMERS_OFFLINE="1",
         HF_HOME=str(temporary / "hf"),
         XDG_CACHE_HOME=str(temporary / "cache"),
+        XDG_CONFIG_HOME=str(temporary / "config"),
+        APPDATA=str(temporary / "appdata"),
+        LOCALAPPDATA=str(temporary / "localappdata"),
+        MPLCONFIGDIR=str(temporary / "matplotlib"),
         TORCH_HOME=str(temporary / "torch"),
         NUMBA_CACHE_DIR=str(temporary / "numba"),
     )
@@ -243,6 +250,8 @@ class ProcessSupervisor:
         self._job = None
         self.identity = None
         self.on_started = None
+        self.output_limit = MAX_CHILD_OUTPUT
+        self.memory_bytes = None
 
     async def start(self, startup_seconds: float):
         self.temporary.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -267,7 +276,7 @@ class ProcessSupervisor:
         )
         try:
             if os.name == "nt":
-                self._job = _WindowsJob(self.process.pid)
+                self._job = _WindowsJob(self.process.pid, memory_bytes=self.memory_bytes)
             self.identity = process_identity(self.process.pid)
             if self.identity is None:
                 raise VoiceProtocolError("VOICE_PROCESS_IDENTITY_UNAVAILABLE")
@@ -292,7 +301,7 @@ class ProcessSupervisor:
         try:
             header = await self.process.stdout.readexactly(4)
             length = struct.unpack("!I", header)[0]
-            if not 0 < length <= MAX_CHILD_OUTPUT:
+            if not 0 < length <= self.output_limit:
                 raise VoiceProtocolError("VOICE_PROCESS_OUTPUT_TOO_LARGE")
             result = json.loads(await self.process.stdout.readexactly(length))
             if not isinstance(result, dict):
@@ -393,6 +402,10 @@ def execute_provider(packet: dict) -> dict:
                 duration_seconds=result.duration_seconds,
                 partial=result.partial,
             )
+        elif operation == "sing":
+            from companion_voice_node.singing_provider import execute
+
+            payload = execute(packet)
         else:
             raise ValueError
         return {"status": "SUCCEEDED", "payload": payload.model_dump(mode="json")}
@@ -418,9 +431,11 @@ def child_entry(parent_pid: int, *, runner=execute_provider) -> int:
     os.dup2(null, sys.stdout.fileno())
     os.close(null)
 
+    output_limit = MAX_CHILD_OUTPUT
+
     def send(value):
         data = canonical_bytes(value)
-        if len(data) > MAX_CHILD_OUTPUT:
+        if len(data) > output_limit:
             raise ValueError
         frame = struct.pack("!I", len(data)) + data
         offset = 0
@@ -443,6 +458,10 @@ def child_entry(parent_pid: int, *, runner=execute_provider) -> int:
         if len(data) != length:
             return 1
         packet = json.loads(data)
+        if packet.get("operation") == "sing":
+            from companion_delivery_protocol.singing import MAX_RESULT_BODY_BYTES as song_limit
+
+            output_limit = song_limit + 8192
         send(runner(packet))
         return 0
     except Exception:
