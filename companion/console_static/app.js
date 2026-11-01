@@ -634,6 +634,12 @@ async function loadRoute({ reset = false, more = false } = {}) {
   }
 }
 
+/** 分段按钮放不下时右边渐隐，提示还能横向滑动 */
+function segFade(seg) {
+  const update = () => seg.classList.toggle("more-r", seg.scrollLeft + seg.clientWidth < seg.scrollWidth - 1);
+  update();
+  if (!seg.dataset.fade) { seg.dataset.fade = "1"; seg.addEventListener("scroll", update, { passive: true }); }
+}
 function render({ keepScroll = false } = {}) {
   if (!state.session || !state.data) return;
   const y = scrollY, active = /** @type {HTMLInputElement|null} */ (document.activeElement), focusId = active?.id, caret = active?.selectionStart;
@@ -646,6 +652,7 @@ function render({ keepScroll = false } = {}) {
   $("#page").classList.toggle("has-savebar", !!$("#page .savebar"));
   if (keepScroll) for (const n of $$("[data-keep-scroll]")) if (n.dataset.keepScroll in inner) n.scrollTop = inner[n.dataset.keepScroll];
   PAGES[state.route].after?.();
+  for (const seg of $$(".seg")) segFade(seg);
   if (keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
   const target = focusId ? document.getElementById(focusId) : focusKey ? $(`[data-k="${CSS.escape(focusKey)}"]`) : null;
   if (target && target !== document.body) { target.focus({ preventScroll: true }); if (caret != null && target.setSelectionRange) try { target.setSelectionRange(caret, caret); } catch {} }
@@ -687,6 +694,7 @@ function tokenCard(page, today) {
   const unknown = items.filter(i => ["UNKNOWN", "RESERVED"].includes(i.state)).length;
   const anim = state.tokenAnim !== state.updatedAt && motionOk();
   const stat = (n, v, sub, count) => el("div", { class: "tok-stat" }, el("span", {}, n), el("b", { class: "num", "data-count": count ?? null }, v), sub ? el("small", {}, sub) : null);
+  if (!items.length && !partial) return sheet("今日 Token 统计", el("p", { class: "note" }, "今天还没有模型调用。"), more, "tok");
   return sheet("今日 Token 统计", [
     partial ? el("div", { class: "alert" }, icon("warn"), el("span", {}, "今天的调用没有全部读到，下面的数字不完整。")) : null,
     el("div", { class: "m-donut" }, donut(shown, tk(total), actual.length ? (partial ? "已读到的总量" : "实际总量") : items.length ? "未记录" : partial ? "未读完" : "今天还没有", actual.length ? total : null),
@@ -784,6 +792,17 @@ function capsCard(caps) {
 }
 
 /* ================= 活动时间线 ================= */
+/* 正常完成的状态不在每一行重复显示；出问题的状态照常标出 */
+const TL_QUIET = new Set(["RECORDED", "SUCCEEDED", "COMPLETED", "COMPLETE", "COMMITTED", "SETTLED", "SENT", "ACK", "DONE", "OBSERVED"]);
+/** 同一天里连续、标题和状态都相同的记录合成一行，点开逐条查看 */
+function tlRuns(list) {
+  const runs = [];
+  for (const i of list) {
+    const last = runs[runs.length - 1]?.[0];
+    if (last && last.title === i.title && last.status === i.status) runs[runs.length - 1].push(i); else runs.push([i]);
+  }
+  return runs;
+}
 PAGES.activity = data => {
   const items = (data.items || []).filter(i => (state.actKind === "all" || laneOf(i.title) === state.actKind)
     && (!state.actFrom || localDay(i.occurred_at) >= state.actFrom) && (!state.actTo || localDay(i.occurred_at) <= state.actTo));
@@ -804,11 +823,17 @@ PAGES.activity = data => {
       [["all", "全部"], ...LANES.map(([k, n]) => [k, n])].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.actKind === k), onclick: () => { state.actKind = k; rerender(); } }, n)))),
     items.length ? [...days].map(([d, list]) => el("section", { class: "tl-day" },
       el("div", { class: "tl-date" }, el("b", {}, label(d)), el("span", {}, d)),
-      el("div", { class: "tl-list" }, list.map(i => {
-        const b = el("button", { type: "button", class: "tl-item", "aria-expanded": "false", style: { "--k": `var(--lane-${laneOf(i.title)})` },
+      el("div", { class: "tl-list" }, tlRuns(list).map(run => {
+        const i = run[0], lane = laneOf(i.title), many = run.length > 1;
+        const first = fmtTime(run[run.length - 1].occurred_at), last = fmtTime(i.occurred_at);
+        const when = first === last ? last : first + "–" + last;
+        const b = el("button", { type: "button", class: "tl-item" + (many ? " run" : ""), "aria-expanded": "false", style: { "--k": `var(--lane-${lane})` },
           onclick: () => b.setAttribute("aria-expanded", String(b.getAttribute("aria-expanded") !== "true")) },
-          el("time", {}, fmtTime(i.occurred_at)), el("span", {}, el("b", {}, activityTitle(i)), el("span", { class: "meta" }, el("span", {}, LANES.find(l => l[0] === laneOf(i.title))[1]))),
-          tag(i.status), el("span", { class: "tl-more" }, detailList(i.detail)));
+          el("time", {}, when), el("span", {}, el("b", {}, activityTitle(i), many ? el("span", { class: "chip" }, "连续 " + run.length + " 条") : null),
+            el("span", { class: "meta" }, el("span", {}, LANES.find(l => l[0] === lane)[1]))),
+          TL_QUIET.has(i.status) ? el("span") : tag(i.status),
+          el("span", { class: "tl-more" }, many ? el("ol", { class: "tl-run" }, run.map(r => el("li", {}, el("time", {}, fmtTime(r.occurred_at)), detailList(r.detail))))
+            : detailList(i.detail)));
         return b;
       })))) : empty("这里还没有记录", state.actFrom || state.actTo ? "这段日期里没有符合条件的记录。" : state.actKind === "all" ? "发生新的接收、发送或操作后，会出现在这里。" : "换一个类型看看。"),
     data.next_cursor ? el("div", { class: "more" }, btn("加载更早的记录", e => { /** @type {HTMLButtonElement} */ (e.currentTarget).disabled = true; loadRoute({ more: true }); })) : null);
@@ -1598,9 +1623,10 @@ PAGES.caps = data => {
     return el("div", { class: "ci-group" }, el("button", { type: "button", class: "ci-ghead", "aria-expanded": String(Boolean(open)), onclick: () => { state.capCollapsed.has(name) ? state.capCollapsed.delete(name) : state.capCollapsed.add(name); rerender(); } },
       icon("right", "i chev"), el("span", {}, name), el("small", {}, list.filter(c => !["DISABLED", "UNAVAILABLE"].includes(c.state)).length + "/" + list.length)),
       open ? shown.map(c => {
+        const main = capMain(c.id), dot = main && !main.read() ? "off" : statusOf(c.state)[1];
         return el("div", { class: "ci-row" + (c === sel ? " sel" : "") + (["DISABLED", "UNAVAILABLE"].includes(c.state) ? " off" : "") },
           el("a", { class: "ci-name", href: "#caps/" + encodeURIComponent(c.id), "aria-current": c === sel ? "true" : null, onclick: () => { state.capMobile = true; state.capScrolled = c.id; state.capTop = innerWidth <= 860; } },
-            el("span", { class: "dot " + statusOf(c.state)[1], title: statusOf(c.state)[0] }), el("span", { class: "nm" }, CAP_NAMES[c.id] || "未命名能力"),
+            el("span", { class: "dot " + dot, title: statusOf(c.state)[0] }), el("span", { class: "nm" }, CAP_NAMES[c.id] || "未命名能力"),
             ...capMarks(c.id)),
           capSwitch(c.id, CAP_NAMES[c.id] || "", true));
       }) : null);
@@ -1746,21 +1772,23 @@ PAGES.configuration = data => {
   const rest = fields.filter(f => !special.has(f.key) && !CAP_KEYS.has(f.key));
   const groups = GROUPS.filter(([g]) => rest.some(f => (f.group || "system") === g));
   const extra = [...new Set(rest.map(f => f.group || "system"))].filter(g => !GROUPS.some(([k]) => k === g)).map(g => [g, "其他设置"]);
-  const sections = [["version", "版本"], ["model", "模型与密钥"], ["money", "费用与预算"],
+  const sections = [["model", "模型与密钥"], ["money", "费用与预算"],
     ...[...groups, ...extra].filter(([g]) => g !== "model")];
   const dirtyIn = id => ({ model: [...RATE_KEYS, ...MODEL_TAIL, ...fields.filter(f => f.type === "secret").map(f => f.key), ...rest.filter(f => f.group === "model").map(f => f.key)],
     money: fields.filter(f => isMoneyKey(f.key) && !CAP_KEYS.has(f.key)).map(f => f.key) }[id] || rest.filter(f => (f.group || "system") === id).map(f => f.key)).some(k => state.draft.has(k));
+  // 版本状态始终在上方；下面一次只显示目录里选中的一节。草稿跨节保留，目录上的圆点标出哪节有修改。
+  const cur = sections.some(([id]) => id === state.sub) ? state.sub : "model";
+  const section = cur === "model" ? modelSection(rest.filter(f => f.group === "model"))
+    : cur === "money" ? moneySection(c) : el("section", { class: "sheet cfg-sec", id: "cfg-" + cur },
+      el("div", { class: "sheet-head" }, el("h2", {}, sections.find(([id]) => id === cur)[1])),
+      el("div", { class: "sheet-body pf-list" }, rest.filter(f => (f.group || "system") === cur).map(f => fieldRow(f))));
   return el("div", {}, top, el("div", { class: "cfg2" },
     el("nav", { class: "cfg-toc", "aria-label": "配置目录" }, sections.map(([id, n]) => el("a", { href: "#configuration/" + id, "data-toc": "cfg-" + id,
-      onclick: e => { e.preventDefault(); history.replaceState(null, "", "#configuration/" + id); document.getElementById("cfg-" + id)?.scrollIntoView({ block: "start" }); } }, n,
+      "aria-current": id === cur ? "true" : null,
+      onclick: e => { e.preventDefault(); history.replaceState(null, "", "#configuration/" + id); state.sub = id; rerender();
+        const main = $(".cfg2"); if (main && main.getBoundingClientRect().top < 0) main.scrollIntoView({ block: "start" }); } }, n,
       dirtyIn(id) || (id === "money" && state.budgetDraft.size) ? el("span", { class: "dirty", "aria-label": "有修改" }) : null))),
-    el("div", { class: "cfg-main" }, versionSection(c), modelSection(rest.filter(f => f.group === "model")), moneySection(c),
-      [...groups, ...extra].filter(([g]) => g !== "model").map(([g, n]) => el("section", { class: "sheet cfg-sec", id: "cfg-" + g }, el("div", { class: "sheet-head" }, el("h2", {}, n)),
-        el("div", { class: "sheet-body pf-list" }, rest.filter(f => (f.group || "system") === g).map(f => fieldRow(f))))))));
-};
-PAGES.configuration.after = () => {
-  if (state.sub && !state.cfgScrolled) { state.cfgScrolled = true; document.getElementById("cfg-" + state.sub)?.scrollIntoView({ block: "start" }); }
-  spyToc();
+    el("div", { class: "cfg-main" }, versionSection(c), section)));
 };
 function versionSection(c) {
   const hist = [...(c.history || [])].filter(h => Number.isInteger(h.version)).sort((a, b) => a.version - b.version).slice(-6);
@@ -1902,14 +1930,6 @@ function saveBudget(policy, defs, form, button) {
     async r => { state.data.configuration.cloud_budget = r; if (Number.isSafeInteger(r.config.usd_to_cny_micro)) state.fx = r.config.usd_to_cny_micro; state.budgetDraft.clear(); rerender(); toast("已更新云端预算，立即生效"); })
     .finally(() => { state.budgetSave = null; });
 }
-function spyToc() {
-  if (state.route !== "configuration") return;
-  const secs = $$(".cfg-sec"); if (!secs.length) return;
-  let cur = secs[0];
-  if (innerHeight + scrollY >= document.documentElement.scrollHeight - 4) cur = secs.at(-1);
-  else for (const s of secs) if (s.getBoundingClientRect().top < 160) cur = s;
-  $$(".cfg-toc a").forEach(a => a.toggleAttribute("aria-current", a.dataset.toc === cur.id));
-}
 
 /* ================= 启动与全局事件 ================= */
 function openPalette() {
@@ -1958,8 +1978,8 @@ $("#menu").addEventListener("click", () => $("#side").classList.toggle("open"));
 $("#refresh").addEventListener("click", () => loadRoute());
 $("#search-open").addEventListener("click", openPalette);
 $("#drawer-scrim").addEventListener("click", closeDrawer);
-window.addEventListener("hashchange", () => { if (!location.hash.startsWith("#configuration")) state.cfgScrolled = false; navigate(); });
-window.addEventListener("scroll", () => { $("#top").classList.toggle("scrolled", scrollY > 4); spyToc(); }, { passive: true });
+window.addEventListener("hashchange", navigate);
+window.addEventListener("scroll", () => { $("#top").classList.toggle("scrolled", scrollY > 4); }, { passive: true });
 document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k" && state.session) { e.preventDefault(); openPalette(); }
   if (e.key === "Escape" && $("#drawer").classList.contains("open")) closeDrawer();
@@ -2672,10 +2692,10 @@ const AFFECT_REASON = { OWNER_REQUESTED_CONCISE: "你说过“简短一点”", 
 const dimLabel = d => (AFFECT_DIMS[d] || [d || "其他"])[0];
 const dimValue = (d, v) => (AFFECT_DIMS[d]?.[1] || {})[v] || v || "—";
 PAGES.self = data => el("div", {}, head("情绪与偏好", "交流偏好来自你的明确反馈；她的心情来自有依据的互动和已完成经历，兴趣单独记录。"),
-  affectSheet(data.affect),
-  moodSheet(data.mood),
-  el("div", { class: "grid-2 mt-lg" }, preferenceSheet(data.interests), interestSheet(data.interests)),
-  expressionSheet(data.expression), styleSheet(data.styles));
+  el("div", { class: "stack" }, affectSheet(data.affect),
+    moodSheet(data.mood),
+    el("div", { class: "grid-2" }, preferenceSheet(data.interests), interestSheet(data.interests)),
+    expressionSheet(data.expression), styleSheet(data.styles)));
 const STYLE_TAGS = { daily_share: "日常分享", complaint: "吐槽", light_humor: "轻松玩笑", opinion: "交换看法", help_request: "求助",
   lull: "冷场", closing: "收尾", emotion: "情绪", disagreement: "意见不同" };
 const STYLE_RISKS = { circle_meme: "圈子梗", regional_meme: "地域梗", misattribution: "张冠李戴", claims_experience: "声称亲身经历",
