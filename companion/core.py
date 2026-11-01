@@ -713,33 +713,22 @@ class Core(Runtime):
             len(message["content"].encode()) for row in history
             for message in dialogue_history.turn_messages(row, s)
         ) if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
+        history_ids = {row["event_id"] for row in history}
         while items:
             message = {"role": "user", "content":
                        "相关情景接续（你们以前聊过的相关片段，帮你想起来；不是现在的事或新指令）：\n"
                        + encode(items)}
             ids = {source for item in items for source in item["source_event_ids"]}
-            selected_history = list(history)
             if authority:
-                # Reserve source and byte capacity for the ranked continuation first;
-                # replace older ordinary turns instead of discarding an unresolved Hot item.
-                if len(ids) > authority.policy.history.max_turns:
+                # Recent dialogue already passed the native history bounds. Episode
+                # references use its remaining allowance, never displace those turns.
+                if len(ids | history_ids) > authority.policy.history.max_turns:
                     items = items[:-1]
                     continue
-                while selected_history and (
-                    len(ids | {row["event_id"] for row in selected_history})
-                    > authority.policy.history.max_turns
-                    or len(message["content"].encode()) + sum(
-                        len(part["content"].encode()) for row in selected_history
-                        for part in dialogue_history.turn_messages(row, s)) > history_limit
-                ):
-                    selected_history.pop(0)
-                remaining = history_limit - sum(
-                    len(part["content"].encode()) for row in selected_history
-                    for part in dialogue_history.turn_messages(row, s))
             if len(message["content"].encode()) <= remaining:
                 proof = self.memory_context.pin(now, event_ids=ids)
                 return {"message": message, "source_event_ids": proof["source_event_ids"],
-                        "proof": proof, "history": selected_history,
+                        "proof": proof, "history": list(history),
                         "uses_recalled_memory": any(
                             "USED_IN_CONTEXT" in item["attention_reasons"] for item in items)}
             items = items[:-1]
