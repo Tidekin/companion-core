@@ -564,7 +564,7 @@ class Settings(BaseModel):
     wake_max_daily_runs: int = Field(default=3, ge=0, le=20)
     exploration_enabled: bool = False
     exploration_daily_candidate_limit: int = Field(default=40, ge=1, le=40)
-    exploration_daily_deep_reads: int = Field(default=5, ge=0, le=20)
+    exploration_daily_deep_reads: int = Field(default=5, ge=0, le=30)
     exploration_daily_requests: int = Field(default=0, ge=0, le=100)
     exploration_monthly_requests: int = Field(default=0, ge=0, le=3000)
     exploration_max_response_bytes: int = Field(default=524288, ge=4096, le=1048576)

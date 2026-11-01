@@ -10,7 +10,8 @@ delivery state when a reader is replaced.
 `exploration_enabled`, `observation_enabled`, `goals_enabled`, `wake_enabled` and `social_enabled`
 default to false. HTTP request/day, request/month and byte/day budgets default to zero. Set a
 distinct observation token for each source; the Bridge QQ token cannot call the reader endpoints.
-`exploration_daily_deep_reads` limits detail reads independently; discovered candidates have a
+`exploration_daily_deep_reads` defaults to 5 and accepts an explicitly configured limit from 0
+through 30. It limits detail reads independently; discovered candidates have a
 shared daily limit. Each lease reserves the maximum response bytes before I/O. Unknown results
 retain that reservation. Readers use one bounded request, no redirects, and a 20-second total
 timeout. Unclaimed work waits for the reader without exhausting goal attempts; started failures
