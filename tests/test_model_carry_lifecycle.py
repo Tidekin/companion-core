@@ -34,8 +34,8 @@ def test_same_approval_can_resume_after_second_stop(core, tmp_path):
     assert core.store.rows("SELECT * FROM model_usage") == before
 
 
-def current_unknown(core):
-    job = authorized_job(core, number=2)
+def current_unknown(core, *, number=2):
+    job = authorized_job(core, number=number)
     request_id = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
 
     def provider(request):

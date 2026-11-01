@@ -23,30 +23,43 @@ def manifest(store, settings, authority, window, witness, view, original, stop, 
     unknown = {k for k, v in view["model_latest"].items() if v["state"] == "UNKNOWN"}
     retained = {item["request_id"]: item for item in prior["manifest"]["unknowns"]}
     inputs = []
-    if unknown - retained.keys():
-        # Reuse the existing admission-owner closure and source-work proof. The
-        # offline controller also proves every executor is stopped before commit.
+    fresh = {key: store.one("SELECT * FROM model_admissions WHERE request_id=?", (key,))
+             for key in unknown - retained.keys()}
+    revisions = store.rows(
+        "SELECT * FROM owner_authority_revisions WHERE grant_id=? "
+        "AND revision BETWEEN ? AND ? AND state='ACTIVE' ORDER BY revision",
+        (authority["grant_id"], prior["manifest"]["authority"]["revision"] + 2,
+         authority["revision"]),
+    )
+    allowed = [owner_authority.reference(row).as_dict() for row in revisions]
+    if any(not row or json.loads(row["authority_json"]) not in allowed
+           or row["contract_sha256"] != prior["successor_paid_contract_sha256"]
+           for row in fresh.values()):
+        raise CoreError("OWNER_MODEL_RENEWAL_CURRENT_WORK_REQUIRED", 409)
+    current_ids = {key for key, row in fresh.items()
+                   if json.loads(row["authority_json"]) == authority}
+    if current_ids:
+        # Current inputs keep their original source-work proof. Earlier revisions
+        # already crossed the verified STOP/ACTIVE chain with all work quiescent;
+        # their closed liability is retained without transferring their inputs again.
         current = model_carry._local_receipt(store, settings, authority, prior, stopped, view)
-        if set(current["request_ids"]) != unknown - retained.keys():
+        if set(current["request_ids"]) != current_ids:
             raise CoreError("OWNER_MODEL_RENEWAL_CURRENT_WORK_REQUIRED", 409)
         inputs = current["inputs"]
-        for request_id in current["request_ids"]:
-            admission = store.one(
-                "SELECT * FROM model_admissions WHERE request_id=?", (request_id,)
-            )
-            usage = store.one("SELECT job_id FROM model_usage WHERE request_id=?", (request_id,))
-            financial = view["model_latest"][request_id]
-            retained[request_id] = {
-                **model_carry._tuple(admission),
-                "logical_request_id": admission["logical_request_id"],
-                "reserved_micro_usd": admission["reserved_micro_usd"],
-                "minimum_micro_usd": financial["minimum_micro_usd"],
-                "settlement_sha256": paid_budget.sha(financial),
-                "tool_sha256": digest(store.rows(
-                    "SELECT * FROM agent_tool_calls WHERE job_id=? AND state='STARTED'",
-                    (usage["job_id"],),
-                )),
-            }
+    for request_id, admission in fresh.items():
+        usage = store.one("SELECT job_id FROM model_usage WHERE request_id=?", (request_id,))
+        financial = view["model_latest"][request_id]
+        retained[request_id] = {
+            **model_carry._tuple(admission),
+            "logical_request_id": admission["logical_request_id"],
+            "reserved_micro_usd": admission["reserved_micro_usd"],
+            "minimum_micro_usd": financial["minimum_micro_usd"],
+            "settlement_sha256": paid_budget.sha(financial),
+            "tool_sha256": digest(store.rows(
+                "SELECT * FROM agent_tool_calls WHERE job_id=? AND state='STARTED'",
+                (usage["job_id"],),
+            )),
+        }
     carried = {item["event_id"] for item in inputs}
     if unknown != retained.keys() or any(
         not state["terminal"] and event not in carried for event, state in work.items()
@@ -141,9 +154,10 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
     if any(retained.get(key) != item for key, item in previous.items()):
         raise ValueError("model renewal predecessor liability changed")
     fresh = retained.keys() - previous.keys()
-    if fresh:
+    current = {key for key in fresh if retained[key]["authority"] == authority}
+    if current:
         proof = model_carry._input_receipt({**row, "record_sha256": record_sha})
-        if proof["request_ids"] != sorted(fresh):
+        if proof["request_ids"] != sorted(current):
             raise ValueError("model renewal input inventory")
     elif value["inputs"] != []:
         raise ValueError("model renewal input inventory")
@@ -162,7 +176,8 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
             )
             if (
                 not admission
-                or item["authority"] != authority
+                or item["authority"] not in [owner_authority.reference(r).as_dict()
+                                             for r in revisions if r["state"] == "ACTIVE"]
                 or item["contract_sha256"] != prior["successor_paid_contract_sha256"]
                 or admission["window_id"] != prior["manifest"]["successor_window_id"]
                 or any(item[k] != v for k, v in model_carry._tuple(admission).items())

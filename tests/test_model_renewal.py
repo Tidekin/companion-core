@@ -374,6 +374,75 @@ def test_renewal_rejects_current_unknown_without_local_close(core, tmp_path, mon
     assert not any(row["kind"] == model_carry.RENEW for row in rows)
 
 
+@pytest.mark.parametrize(("handoffs", "with_current", "prior_renewal", "erased"), [
+    (1, False, False, False), (2, False, True, False),
+    (1, True, False, False), (2, True, True, False), (1, False, False, True),
+])
+def test_renewal_keeps_closed_unknown_from_an_earlier_same_approval_revision(
+    core, tmp_path, handoffs, with_current, prior_renewal, erased,
+):
+    from tests.test_model_carry_lifecycle import current_unknown
+
+    case = migrated(core, tmp_path, expires_at=core.clock.now + timedelta(hours=2),
+                    rates_valid_until=core.clock.now + timedelta(days=4))
+    if prior_renewal:
+        request, policy, witness = renewal(core, case)
+        model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+        active, _ = activate(core, policy, revision=4, operation="renew-before-history")
+        case.successor, case.policy = active, policy
+        core.authorized_model_test_capture = active, case.key
+        core.authorized_model_test_jobs = {}
+    historical = current_unknown(core)
+    source = core.store.one("SELECT j.event_id FROM jobs j JOIN model_usage m USING(job_id) "
+                            "WHERE m.request_id=?", (historical,))["event_id"]
+    for number in range(handoffs):
+        authority = case.successor["authority"]
+        owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+            operation_id=f"history-stop-{number}", authority=authority))
+        active, _ = activate(core, case.policy, revision=authority["revision"] + 1,
+                             operation=f"history-resume-{number}")
+        case.successor = active
+    if erased:
+        with core.store.transaction():
+            core.ledger.expire_events(core.store, [source], core.clock())
+    current = None
+    if with_current:
+        core.authorized_model_test_capture = case.successor, case.key
+        core.authorized_model_test_jobs = {}
+        current = current_unknown(core, number=3)
+    before = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
+    request, policy, witness = renewal(core, case, number=2 if prior_renewal else 1,
+                                       concurrency=10)
+    assert request["authority"]["revision"] > json.loads(core.store.one(
+        "SELECT authority_json FROM model_admissions WHERE request_id=?",
+        (historical,),
+    )["authority_json"])["revision"]
+    receipt = model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+    assert receipt["retained_micro_usd"] == sum(v["billed_micro_usd"] for v in before)
+    with core.store.transaction():
+        view = owner_authority.custody(core.store, core.settings, settlement=True)
+    saved = view["model_carries"][receipt["carry_sha256"]]
+    assert {key for item in saved["manifest"]["inputs"] for key in item["request_ids"]} == (
+        {current} if current else set())
+    assert {v["request_id"] for v in saved["manifest"]["unknowns"]} == {
+        v["request_id"] for v in before}
+    if current:
+        proof = model_carry.read(core.store, core.settings, request["authority"],
+                                 receipt["carry_sha256"], receipt["successor_policy_sha256"])
+        assert proof["request_ids"] == [current]
+    else:
+        with pytest.raises(CoreError, match="OWNER_MODEL_CARRY_REQUIRED"):
+            model_carry.read(core.store, core.settings, request["authority"],
+                             receipt["carry_sha256"], receipt["successor_policy_sha256"])
+    activate(core, policy, revision=request["authority"]["revision"] + 1,
+             operation="renew-with-retained-previous-revision")
+    assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == before
+    assert not core.store.rows("SELECT * FROM outbox")
+    if erased:
+        assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                               (source,))["redacted"]
+
+
 def test_life_does_not_trust_unproved_unknown_or_recovering_journal(core, tmp_path):
     case = migrated(core, tmp_path)
     assert not _uncertain(core.store, core.settings)

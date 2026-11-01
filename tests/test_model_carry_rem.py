@@ -117,17 +117,28 @@ def test_rem_keeps_current_input_uncertainty_fenced_until_normal_handoff(
                           (request_id,))["state"] == "UNKNOWN"
 
 
-def test_http_rem_revision_reaches_independent_native_worker(core, tmp_path, monkeypatch):
+@pytest.mark.parametrize("renew_closed_history", [False, True])
+def test_http_rem_revision_reaches_independent_native_worker(
+    core, tmp_path, monkeypatch, renew_closed_history,
+):
     case = carried_memory(core, tmp_path, monkeypatch)
     core.settings.control_token = SecretStr("synthetic-rem-revision-control")
-    source_job = authorized_job(core, number=2)
+    if renew_closed_history:
+        current_unknown(core)
+        stop_current(core, case)
+        same, _ = activate(core, case.policy, revision=4, operation="http-history-handoff")
+        case.successor = same
+        core.authorized_model_test_capture = same, case.key
+        core.authorized_model_test_jobs = {}
+    source_job = authorized_job(core, number=3 if renew_closed_history else 2)
     source = core.store.one("SELECT event_id FROM jobs WHERE job_id=?", (source_job,))["event_id"]
     with core.store.transaction():
         core.memory.add(Candidate(subject="user", kind="fact", fact_key="private-rem-material",
             content="synthetic model boundary source",
             evidence_quote="synthetic model boundary source",
             evidence_event_id=source), core.clock(), confirmed=True)
-    stop_current(core, case)
+    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="rem-http-purpose-stop", authority=case.successor["authority"]))
     original = core.store.rows("SELECT * FROM model_usage")
     policy = rem_policy(core, case.policy)
 
@@ -135,7 +146,8 @@ def test_http_rem_revision_reaches_independent_native_worker(core, tmp_path, mon
         async with real_core_http(core) as port, httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}", trust_env=False,
         ) as http:
-            query = {"expected_revision": 4, "policy": policy.model_dump(mode="json")}
+            query = {"expected_revision": case.successor["authority"]["revision"] + 1,
+                     "policy": policy.model_dump(mode="json")}
             denied = await http.post("/internal/v1/owner-authority/preview", json=query)
             assert denied.status_code == 401
             headers = {"Authorization": "Bearer synthetic-rem-revision-control"}
@@ -146,6 +158,21 @@ def test_http_rem_revision_reaches_independent_native_worker(core, tmp_path, mon
                 json={**query, "operation_id": "native-rem-purpose-revision",
                       "preview_sha256": preview.json()["preview_sha256"]})
             assert active.status_code == 200, active.text
+            if renew_closed_history:
+                case.successor, case.policy = active.json(), policy
+                request, renewed, witness = renewal(core, case, concurrency=10,
+                    offset=core.clock.now - core.settings.paid_model.expires_at)
+                model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+                query = {"expected_revision": request["authority"]["revision"] + 1,
+                         "policy": renewed.model_dump(mode="json")}
+                preview = await http.post("/internal/v1/owner-authority/preview",
+                                          headers=headers, json=query)
+                assert preview.status_code == 200, preview.text
+                active = await http.post("/internal/v1/owner-authority/activate", headers=headers,
+                    json={**query, "operation_id": "native-renew-after-rem-history",
+                          "preview_sha256": preview.json()["preview_sha256"]})
+                assert active.status_code == 200, active.text
+                assert core.settings.paid_model.concurrency == 10
             job = rem.schedule_due(core)
             assert job
             config, log = tmp_path / "rem-worker.json", tmp_path / "rem-provider.jsonl"
