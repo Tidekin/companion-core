@@ -22,7 +22,8 @@ def owner_chat(core, tmp_path):
 def test_chat_tools_do_not_expose_ungranted_purposes(owner_chat):
     core, _, job = owner_chat
     tools = core_query_tools(core, job, [])
-    assert set(tools.tools) == {"current_time", "capability_status"}
+    assert set(tools.tools) == {
+        "current_time", "capability_status", "search_meme_wiki"}
     result = asyncio.run(tools.tools["current_time"].function())
     assert result["timezone"] == core.settings.timezone
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_PURPOSE_REQUIRED"):

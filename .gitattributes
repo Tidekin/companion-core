@@ -5,3 +5,4 @@ companion/token_artifacts/deepseek_v41/* -text
 companion/token_artifacts/deepseek_v41/tokenizer.json.gz binary
 companion/token_artifacts/deepseek_v41/LICENSE binary
 companion/token_artifacts/deepseek_v41/manifest.json text eol=lf
+companion/meme_wiki_data/memes.db.gz binary

@@ -1,0 +1,9 @@
+memes.db.gz — 梗百科词库（6668 条，meta.built_at = 2026-10-26 19:07:22）
+
+来源：thawline/dsh-memewiki，提交 15c3c34149dfb0d5ea3a9b3a4b4f0d7f91318e91，data/memes.db；
+该文件来自 in1t1a1/astrbot_plugin_memewiki 随包分发的词库，词条内容由 cnmeme.wiki 整理。
+本仓库只做 gzip 压缩，内容未改动。
+
+许可：词库版权归原作者与 cnmeme.wiki。据词库作者说明，允许非商业使用
+（2026-11-01 由项目主人转述）。本文件不随本仓库的 AGPL-3.0 许可授予任何商业使用权；
+商业使用前须另行取得词库作者和 cnmeme.wiki 的许可。

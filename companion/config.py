@@ -29,6 +29,7 @@ from companion.jargon_config import JargonConfig
 from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.media_config import ContentConfig, MediaConfig
 from companion.meme_policy import TrustedSource
+from companion.meme_wiki_config import MemeWikiConfig
 from companion.operator_config import ConsoleConfig
 from companion.owner_authority_protocol import OwnerRuntimeConfig
 from companion.poke_protocol import PokePolicy
@@ -417,6 +418,10 @@ class Settings(BaseModel):
     jargon: JargonConfig = Field(
         default_factory=JargonConfig, exclude_if=lambda value: value == JargonConfig(),
     )
+    # Bundled read-only meme glossary for chat; see companion/meme_wiki.py.
+    meme_wiki: MemeWikiConfig = Field(
+        default_factory=MemeWikiConfig, exclude_if=lambda value: value == MemeWikiConfig(),
+    )
     style_distill: StyleDistillConfig = Field(
         default_factory=StyleDistillConfig,
         exclude_if=lambda value: value == StyleDistillConfig(),
@@ -787,6 +792,8 @@ class Settings(BaseModel):
                     data[field] = WatchLedgerConfig.model_validate_json(value)
                 elif field == "jargon":
                     data[field] = JargonConfig.model_validate_json(value)
+                elif field == "meme_wiki":
+                    data[field] = MemeWikiConfig.model_validate_json(value)
                 elif field == "style_distill":
                     data[field] = StyleDistillConfig.model_validate_json(value)
                 elif field == "style_live":

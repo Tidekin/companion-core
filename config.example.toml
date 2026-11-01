@@ -168,6 +168,12 @@ max_request_micro_usd = 0
 # max_segments = 3
 # interval_ms = 1500
 
+# Bundled read-only meme glossary (梗百科, non-commercial use only; see docs/meme-wiki.md).
+# On by default. banter_level (串子程度 0-100) is unset, which leaves the scale to the model.
+# [meme_wiki]
+# enabled = true
+# banter_level = 50
+
 # Optional owner-private media and account actions. All top-level capabilities remain off.
 # Activation prerequisites, signed scopes and deployment: docs/qq-beta/media-autonomy.md.
 # These planning ceilings attach to native model/tool charges; they do not enable a provider.
