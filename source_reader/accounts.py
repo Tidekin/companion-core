@@ -12,7 +12,7 @@ from source_reader.network import ReadFailure
 
 HEYBOX_COMMIT = "90d3c9d4d051f912d80ba02b38d5f8f0a5a95aac"
 BILIBILI_COMMIT = "9a3e0e67d82feedf755c763807c806c4d125a245"
-QZONE_COMMIT = "c0d1f293f1bfa32a830473f18e6d50e2d5e070d6"
+QZONE_COMMIT = "e2c6da0ffea8937adac690352647bb023c312759"
 
 
 def _grant_identity(info):

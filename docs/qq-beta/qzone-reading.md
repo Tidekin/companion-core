@@ -27,7 +27,7 @@ Core 以原 `exploration_requests` 保存目标、原始来源、授权和任务
 复用隔离 Reader 的账号文件检查、来源授权元数据和全文件指纹。账号文件字段为
 `enabled`、有时区的 `expires_at`、`cookies`、`upstream_commit` 和 `authorization`。
 `authorization` 使用已在 Core 注册的 `grant_id`、`epoch`、`fingerprint`；它们是独立随机标识，
-不是 Cookie 摘要。固定 `upstream_commit` 为 `c0d1f293f1bfa32a830473f18e6d50e2d5e070d6`。
+不是 Cookie 摘要。固定 `upstream_commit` 为 `e2c6da0ffea8937adac690352647bb023c312759`。
 Cookie 只接受 `uin`、可选的 `p_uin`、`skey`、`p_skey`；须有账号 `uin` 和至少一个 key。
 文件留在隔离 Reader 的私密挂载中，沿用文件权限和禁止符号链接的检查。
 
@@ -44,8 +44,14 @@ python -m source_reader --source qzone --protocol reading-v1 \
 尝试该快照中的下一个地址，保留原 Host、TLS SNI 和证书验证，不重试已发送的 HTTP 请求。
 只解析作者、tid、发表时刻和正文，不获取图片、访客、联系人，不另发评论读取请求。
 上游响应附带的评论或媒体字段不进入持久资料或模型上下文。
-响应可为纯 JSON，或由单个完整的 `_Callback(...)` / `callback(...)` 包装的 JSON；
-包装仅按数据解析，额外脚本和未知回调拒绝，证据仍摘要原始响应字节。
+读取固定的主人时间线 `feeds_html_act_all`，同时指定目标 `uin` 和 `hostuin`，
+`scope=0/start=0/count=1`；不使用好友混合流、不分页、不补发正文或评论请求。
+平台会忽略 `count=1` 返回多条主人动态；仅保留有作者、tid 和原发表时刻证明的最新一条说说。
+任一动态作者与目标不符时拒绝响应，最新条目缺正文或为转发时不降级读取旧条目。
+仅提取该条目的 `f-info` 正文节点，排除评论、操作文字、脚本与媒体。
+响应是包含 `undefined` 等值的 JS 数据对象，可能由单个完整的 `_Callback(...)` /
+`callback(...)` 包装。沿用上游静态 HTML 转义处理和标准库 HTML 解析，不执行上游脚本，
+不增加 JS/JSON5 运行时。证据版本 `qzone-owner-timeline-text-v2` 摘要原始响应字节。
 
 ## Core 操作
 
@@ -94,9 +100,12 @@ ErasureLedger 和来源依赖擦除空间正文、目标中派生的资料及 Li
 
 ## 依据与验证
 
-协议字段依据此前核对的固定
-[qzoneActive 读取请求](https://github.com/Catfish872/astrbot_plugin_qzoneActive/blob/c0d1f293f1bfa32a830473f18e6d50e2d5e070d6/core/api.py#L288-L319)
-和[响应字段转换](https://github.com/Catfish872/astrbot_plugin_qzoneActive/blob/c0d1f293f1bfa32a830473f18e6d50e2d5e070d6/core/utils.py#L134-L169)。
+旧说说 API 在真实账号上返回成功码和总数，但无正文，已由明确指定主人的时间线请求替换。
+协议与静态解码依据固定版本
+[onebot-qzone 时间线请求与解码](https://github.com/Gu-Heping/onebot-qzone/blob/e2c6da0ffea8937adac690352647bb023c312759/src/qzone/client.ts#L2309)
+和[feed 作者、标识、时间及正文解析](https://github.com/Gu-Heping/onebot-qzone/blob/e2c6da0ffea8937adac690352647bb023c312759/src/qzone/feeds3/items.ts#L150)。
+平台 UI 会重复 `class` 属性，按 [HTML 属性解析规则](https://html.spec.whatwg.org/multipage/parsing.html#attribute-name-state)
+保留第一个；重复的作者、标识等 `data-*` 证据属性继续拒绝。
 不引入插件运行时依赖。执行和停止继续复用[统一接入草案记录的 DSH 对照与本项目机制](../design-future/external-capabilities.md#实现与来源依据)，
 没有启动 DSH 或其他高权限执行器。
 

@@ -3,6 +3,7 @@
 import copy
 import json
 from datetime import UTC, datetime, timedelta
+from html import escape
 from urllib.parse import parse_qs, urlsplit
 
 import httpcore
@@ -32,9 +33,17 @@ def account_file(path, now=NOW):
 
 
 def response(now=NOW, **changes):
-    return {"code": 0, "msglist": [{"uin": 12345678, "tid": "synthetic-tid-one",
-        "content": "今天看到的星空很美。", "created_time": int(now.timestamp()) - 60,
-        "commentlist": [{"content": "UNREQUESTED_COMMENT"}], **changes}]}
+    post = {"uin": 12345678, "tid": "synthetic-tid-one", "content": "今天看到的星空很美。",
+            "created_time": int(now.timestamp()) - 60, **changes}
+    def attr(key):
+        return escape(str(post[key]), quote=True)
+    body = (f'<li class="f-single" id="feed_{attr("uin")}_311_0_1780000000_0_1">'
+            f'<div class="f-info">{escape(post["content"])}</div>'
+            f'<i name="feed_data" data-uin="{attr("uin")}" data-tid="{attr("tid")}" '
+            f'data-abstime="{attr("created_time")}"></i>'
+            '<div class="txt-box">UNREQUESTED_UI</div>'
+            '<div class="f-ct"><div class="f-info">UNREQUESTED_COMMENT</div></div></li>')
+    return {"code": 0, "data": {"data": [{"html": body}]}}
 
 
 def pool_for(body, calls):
@@ -46,8 +55,10 @@ def pool_for(body, calls):
         def stream(self, method, url, **kwargs):
             assert method == "GET" and url.startswith(ENDPOINT + "?")
             query = parse_qs(urlsplit(url).query)
-            assert query["num"] == ["1"] and query["uin"] == ["12345678"]
-            assert query["qzreferrer"] == ["https://user.qzone.qq.com/87654321"]
+            assert query["count"] == ["1"] and query["start"] == ["0"]
+            assert query["uin"] == query["hostuin"] == ["12345678"]
+            assert query["scope"] == ["0"] and query["format"] == ["json"]
+            assert kwargs["headers"]["Referer"] == "https://user.qzone.qq.com/12345678"
             calls.append(method)
             return super().stream(method, url, **kwargs)
 
@@ -90,6 +101,7 @@ def test_one_post_text_preserves_provenance_and_discards_comments_and_credential
     assert observed.trust == "untrusted_external"
     assert not observed.evidence.comments_read and not observed.evidence.images_analyzed
     assert "UNREQUESTED_COMMENT" not in json.dumps(result)
+    assert "UNREQUESTED_UI" not in json.dumps(result)
     assert "synthetic-private-key" not in json.dumps(result)
     assert "g_tk" not in json.dumps(result)
     assert "87654321" not in json.dumps(result)
@@ -121,6 +133,72 @@ def test_jsonp_access_denial_does_not_become_a_format_error(tmp_path):
     result, calls, _ = read(tmp_path, b'_Callback({"code":-3000});')
     assert calls == ["GET"] and result["status"] == "FAILED"
     assert result["error_code"] == "UPSTREAM_ACCESS_LIMIT" and not result["observations"]
+
+
+def test_js_data_with_undefined_extracts_html_without_executing_values(tmp_path):
+    import hashlib
+
+    html = response()["data"]["data"][0]["html"].replace('"', r'\x22').replace('<', r'\x3C')
+    raw = ("{code:0,ignored:[undefined],data:{data:[{html:'" + html + "'}]}}").encode()
+    result, calls, _ = read(tmp_path, raw)
+    assert calls == ["GET"] and result["status"] == "SUCCESS"
+    assert result["observations"][0]["evidence"]["response_sha256"] == (
+        hashlib.sha256(raw).hexdigest())
+
+
+def test_server_ignoring_count_keeps_only_newest_owner_body(tmp_path):
+    body = response(content="OLDER_PRIVATE_POST", created_time=int(NOW.timestamp()) - 600)
+    body["data"]["data"].append(response()["data"]["data"][0])
+    result, calls, _ = read(tmp_path, body)
+    assert calls == ["GET"] and result["status"] == "SUCCESS"
+    assert len(result["observations"]) == 1 and "OLDER_PRIVATE_POST" not in json.dumps(result)
+
+
+def test_platform_repeated_ui_class_uses_first_html_attribute(tmp_path):
+    body = response()
+    html = body["data"]["data"][0]["html"]
+    body["data"]["data"][0]["html"] = html.replace('class="f-info"',
+        'class="f-info" class="platform-duplicate"', 1)
+    result, _, _ = read(tmp_path, body)
+    assert result["status"] == "SUCCESS"
+    assert result["observations"][0]["text"] == "今天看到的星空很美。"
+
+
+@pytest.mark.parametrize("html", [
+    lambda value: value.replace('data-uin="12345678"', 'data-uin="99999999"'),
+    lambda value: value.replace('class="f-info"', 'class="txt-box"'),
+    lambda value: value.replace('data-tid="synthetic-tid-one"', 'data-tid=""'),
+    lambda value: value.replace('_311_0_', '_311_5_'),
+    lambda value: value.replace('<i name="feed_data"',
+                                '<i data-origuin="99999999" name="feed_data"'),
+    lambda value: value.replace('</li>', ''),
+    lambda value: value.replace('data-uin="12345678"',
+                                'data-uin="12345678" data-uin="99999999"'),
+])
+def test_timeline_proof_and_body_fail_closed(tmp_path, html):
+    body = response()
+    body["data"]["data"][0]["html"] = html(body["data"]["data"][0]["html"])
+    result, calls, _ = read(tmp_path, body)
+    assert calls == ["GET"] and result["status"] == "FAILED" and not result["observations"]
+
+
+def test_mixed_author_response_is_rejected_even_with_valid_owner_post(tmp_path):
+    body = response()
+    body["data"]["data"].append(response(uin=99999999)["data"]["data"][0])
+    result, _, _ = read(tmp_path, body)
+    assert result["status"] == "FAILED" and not result["observations"]
+
+
+def test_literal_markup_in_owner_body_stays_text_and_scripts_are_discarded(tmp_path):
+    body = response(content='文字 <b>不应变成标签</b> & 后文')
+    html = body["data"]["data"][0]["html"]
+    body["data"]["data"][0]["html"] = html.replace('</div>',
+        '<script>UNREQUESTED_SCRIPT</script><style>UNREQUESTED_STYLE</style></div>', 1)
+    result, _, _ = read(tmp_path, body)
+    assert result["status"] == "SUCCESS"
+    assert "UNREQUESTED_SCRIPT" not in json.dumps(result)
+    assert "UNREQUESTED_STYLE" not in json.dumps(result)
+    assert result["observations"][0]["text"] == '文字 <b>不应变成标签</b> & 后文'
 
 
 @pytest.mark.parametrize("change", [
