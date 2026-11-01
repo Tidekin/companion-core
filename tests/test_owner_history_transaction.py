@@ -18,6 +18,7 @@ from tests.test_native_history_delivery import sdk_step
 
 async def native_history(core, tmp_path, check, *, turns=3, independent=False):
     async with environment(core, tmp_path, purposes=("chat", "history"), expires_in=30,
+                           core_options={"max_recent_messages": 30},
                            paid_options={"daily_calls": 30}) as (
         entry, sends,
     ):
@@ -185,6 +186,17 @@ def test_full_history_batches_without_the_journal_byte_cache(core, tmp_path, mon
         assert not core.store.db.in_transaction
 
     run(native_history(core, tmp_path, check, turns=15))
+
+
+@pytest.mark.parametrize("max_messages", [0, 3])
+def test_native_history_obeys_the_existing_recent_message_setting(core, tmp_path, max_messages):
+    def check(job, expected):
+        core.settings.max_recent_messages = max_messages
+        count = max_messages // 2
+        assert owner_input.history_sources(core.store, core.settings, core.clock, job) == (
+            expected[-count:] if count else [])
+
+    run(native_history(core, tmp_path, check))
 
 
 def test_native_history_survives_real_http_and_an_independent_worker(core, tmp_path):
