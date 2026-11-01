@@ -7,7 +7,6 @@ import os
 import re
 import subprocess
 import zipfile
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -56,7 +55,7 @@ def unpack_record(data):
         return json.loads(archive.read(entries[0]))
 
 
-def verified_run(run, repo, head, target, read, now, *, expected_event="pull_request"):
+def verified_run(run, repo, head, target, read, *, expected_event="pull_request"):
     """Every condition comes from this repository's API and this run's artifact."""
     if (
         type(run.get("id")) is not int or type(run.get("run_attempt")) is not int
@@ -69,9 +68,6 @@ def verified_run(run, repo, head, target, read, now, *, expected_event="pull_req
         or run.get("repository", {}).get("full_name") != repo
         or run.get("head_repository", {}).get("full_name") != repo
     ):
-        return None
-    updated = datetime.fromisoformat(run["updated_at"].replace("Z", "+00:00"))
-    if not timedelta(0) <= now - updated <= timedelta(days=1):
         return None
     prefix = f"repos/{repo}/actions/runs/{run['id']}"
     artifacts = read(prefix + "/artifacts?per_page=100")
@@ -114,7 +110,7 @@ def verified_run(run, repo, head, target, read, now, *, expected_event="pull_req
     return {"run_id": run["id"], "attempt": run["run_attempt"], "tree": target["tree"]}
 
 
-def find_verified_run(event_name, ref, event, *, root=ROOT, read=api, now=None):
+def find_verified_run(event_name, ref, event, *, root=ROOT, read=api):
     """Bounded lookup; any missing, expired or ambiguous evidence keeps full CI."""
     default = event.get("repository", {}).get("default_branch")
     if event_name != "push" or not default or ref != "refs/heads/" + default:
@@ -125,7 +121,6 @@ def find_verified_run(event_name, ref, event, *, root=ROOT, read=api, now=None):
     target = checkout(root)
     if target["commit"] != event.get("after"):
         return None
-    now = now or datetime.now(UTC)
     pulls = read(f"repos/{repo}/commits/{target['commit']}/pulls?per_page=100")
     merged = [pr for pr in pulls if pr.get("merged_at") and pr.get("state") == "closed"
               and pr.get("merge_commit_sha") == target["commit"]
@@ -145,7 +140,7 @@ def find_verified_run(event_name, ref, event, *, root=ROOT, read=api, now=None):
     if not candidates:
         return None
     latest = max(candidates, key=lambda run: run["id"])
-    return verified_run(latest, repo, head, target, read, now)
+    return verified_run(latest, repo, head, target, read)
 
 
 def validate_reuse(env=os.environ, *, root=ROOT):

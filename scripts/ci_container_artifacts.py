@@ -15,7 +15,6 @@ import tarfile
 import time
 import zipfile
 import zlib
-from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -724,7 +723,7 @@ def resolve_source(repo, run_id, *, read=None):
         raise ValueError("PUBLIC_IMAGE_PUSH_CHECKOUT_CHANGED")
     verified = ci_reuse.verified_run(
         source, repo, source["head_sha"], {"commit": record["commit"], "tree": record["tree"]},
-        read, datetime.now(UTC), expected_event=source["event"],
+        read, expected_event=source["event"],
     )
     if verified is None:
         raise ValueError("PUBLIC_IMAGE_ORIGINAL_FULL_RUN_NOT_VERIFIED")

@@ -6,7 +6,6 @@ import subprocess
 import sys
 import zipfile
 from copy import deepcopy
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -43,7 +42,7 @@ def evidence(repository, monkeypatch, tmp_path):
     run = {"id": 101, "run_attempt": 2, "event": "pull_request", "path": ci_reuse.WORKFLOW,
            "status": "completed", "conclusion": "success", "head_sha": head,
            "repository": {"full_name": repo}, "head_repository": {"full_name": repo},
-           "updated_at": datetime.now(UTC).isoformat()}
+           "updated_at": "2026-10-22T00:00:00Z"}
     pr = {"state": "closed", "merged_at": "2026-10-22T00:00:00Z",
           "merge_commit_sha": target["commit"], "base": {"ref": "main", "repo": {
               "full_name": repo}}, "head": {"sha": head, "repo": {"full_name": repo}}}
@@ -132,14 +131,40 @@ def test_identical_actual_tree_reuses_full_success_and_validates_again(evidence)
                                   root=evidence["root"]) == proof
 
 
+@pytest.mark.parametrize("updated_at", [
+    "2026-11-01T09:18:01Z", "2099-01-01T00:00:00Z", "2020-01-01T00:00:00Z", None,
+])
+def test_run_timestamps_do_not_authorize_or_expire_exact_tree_proof(evidence, updated_at):
+    evidence["run"]["updated_at"] = updated_at
+    main_reuse(evidence)
+    profile, proof = evidence["plan"]()
+    assert profile == "reuse"
+    metadata, consumed_proof = images.resolve_source(
+        "synthetic/repository", 201, read=evidence["read"],
+    )
+    assert consumed_proof == proof
+    assert metadata["tree"] == evidence["record"]["tree"]
+
+
+@pytest.mark.parametrize("fault", ["expired-artifact", "failed-job"])
+def test_future_timestamp_never_overrides_artifact_or_job_failure(evidence, fault):
+    evidence["run"]["updated_at"] = "2099-01-01T00:00:00Z"
+    if fault == "expired-artifact":
+        evidence["artifact"]["expired"] = True
+    else:
+        evidence["jobs"]["jobs"][0]["conclusion"] = "failure"
+    main_reuse(evidence)
+    assert evidence["plan"]() == ("full", None)
+    with pytest.raises(ValueError):
+        images.resolve_source("synthetic/repository", 201, read=evidence["read"])
+
+
 @pytest.mark.parametrize("section,field,value", [
     ("run", "conclusion", "failure"), ("run", "conclusion", "cancelled"),
     ("run", "status", "in_progress"), ("run", "event", "pull_request_target"),
     ("run", "path", ".github/workflows/other.yml"), ("run", "head_sha", "c" * 40),
     ("run", "head_repository", {"full_name": "fork/repository"}),
     ("run", "repository", {"full_name": "other/repository"}),
-    ("run", "updated_at", "2020-01-01T00:00:00Z"),
-    ("run", "updated_at", "2099-01-01T00:00:00Z"),
     ("run", "run_attempt", 3),
     ("record", "tree", "c" * 40), ("record", "profile", "docs"),
     ("record", "profile", "reuse"), ("record", "repository", "other/repository"),
@@ -303,7 +328,7 @@ def test_direct_full_push_requires_default_branch_and_original_images(evidence, 
     evidence["record"]["event"] = "push"
     result = ci_reuse.verified_run(
         evidence["run"], "synthetic/repository", evidence["run"]["head_sha"],
-        {"tree": evidence["record"]["tree"]}, evidence["read"], datetime.now(UTC),
+        {"tree": evidence["record"]["tree"]}, evidence["read"],
         expected_event="push",
     )
     assert (result is not None) == (branch == "main")
