@@ -144,7 +144,7 @@ def test_sdk_song_tool_resumes_into_bound_ordered_bubbles(core, tmp_path, monkey
     run(scenario())
 
 
-@pytest.mark.parametrize("change", ["erasure", "expiry", "source", "tool"])
+@pytest.mark.parametrize("change", ["erasure", "expiry", "source", "tool", "receipt_text"])
 def test_singing_source_fences_every_unsent_part(core, tmp_path, monkeypatch, change):
     async def scenario():
         async with singing_window(core, tmp_path, monkeypatch) as (client, config, plan):
@@ -159,12 +159,20 @@ def test_singing_source_fences_every_unsent_part(core, tmp_path, monkeypatch, ch
                 core.clock.advance(301)
             elif change == "source":
                 core.store.execute("UPDATE content_items SET target_url=?", (URL + "changed",))
+            elif change == "receipt_text":
+                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                    (json.dumps({"state": "TEXT", "job_id": job["job_id"]}),
+                     "voice_reply:" + rows[0]["message_id"]))
             else:
                 core.store.execute("UPDATE agent_tool_calls SET args_sha256=? "
                                    "WHERE tool_name='sing_song'", ("f" * 64,))
             with pytest.raises(CoreError):
-                owner_delivery.check_delivery(core.store, core.settings, core.clock,
-                                               rows[0]["message_id"])
+                with core.store.transaction():
+                    if change == "receipt_text":
+                        core.voice.prepare_reply(rows[0]["message_id"])
+                    else:
+                        owner_delivery.check_delivery(core.store, core.settings, core.clock,
+                                                       rows[0]["message_id"])
             leased = await client.post("/internal/v1/deliveries/lease", json={
                 "worker_id": "fenced-singing-bridge", "authority": plan.authority})
             assert leased.status_code == 200, leased.text

@@ -351,7 +351,21 @@ def lease_deliveries(store, settings, request, now):
                 from companion.voice_flow import VoiceFlow
 
                 voice_flow = VoiceFlow(store, settings, lambda: now)
-                if voice_flow.prepare_reply(row["message_id"]).state == "WAITING":
+                try:
+                    decision = voice_flow.prepare_reply(row["message_id"])
+                except CoreError as error:
+                    from companion.agent_output import reply_format
+
+                    if (reply_format(store, row["origin_event_id"]) != "singing"
+                        or error.code not in {"SINGING_DELIVERY_FENCED",
+                                              "VOICE_FLOW_RECEIPT_INVALID"}):
+                        raise
+                    store.execute("UPDATE outbox SET state='CANCELLED',lease_token=NULL,"
+                        "updated_at=?,last_error_code=? WHERE message_id=?",
+                        (now, error.code, row["message_id"]))
+                    _cancel_segment_tails(store, now)
+                    continue
+                if decision.state == "WAITING":
                     continue
             token = uid("lease")
             store.execute(

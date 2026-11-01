@@ -129,6 +129,17 @@ class VoiceFlow:
         value = self._read(REPLY_RECEIPT + message_id)
         if row["state"] not in {"PENDING", "RETRY_WAIT"}:
             raise CoreError("VOICE_DELIVERY_CHOICE_FROZEN", 409)
+        from companion.agent_output import reply_format
+
+        if reply_format(self.store, row["origin_event_id"]) == "singing":
+            self._native_delivery(message_id)
+            if not value or value.get("state") != "AUDIO":
+                raise CoreError("SINGING_DELIVERY_FENCED", 409)
+            song = self.jobs.singing_manifest(value["job_id"])
+            native = self.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (value["job_id"],))
+            if song is None or not native or not self.jobs._delivery_binding(native, message_id):
+                raise CoreError("SINGING_DELIVERY_FENCED", 409)
+            return VoiceReplyDecision(state="AUDIO", job_id=value["job_id"])
         if value and value.get("state") == "TEXT":
             if voice_authority.permitted(self.store, self.settings, self.clock):
                 self._native_delivery(message_id)
@@ -138,15 +149,6 @@ class VoiceFlow:
                 raise CoreError("VOICE_FLOW_FENCED", 409)
             return VoiceReplyDecision(state="TEXT", reason="VOICE_DISABLED")
         self._native_delivery(message_id)
-        from companion.agent_output import reply_format
-
-        if reply_format(self.store, row["origin_event_id"]) == "singing":
-            if not value or value.get("state") != "AUDIO":
-                raise CoreError("SINGING_DELIVERY_FENCED", 409)
-            song = self.jobs.singing_manifest(value["job_id"])
-            if song is None:
-                raise CoreError("SINGING_DELIVERY_FENCED", 409)
-            return VoiceReplyDecision(state="AUDIO", job_id=value["job_id"])
         if row["state"] != "PENDING" or row["attempt_count"] != 0:
             if value and value.get("state") == "AUDIO":
                 return VoiceReplyDecision(state="AUDIO", job_id=value["job_id"])
