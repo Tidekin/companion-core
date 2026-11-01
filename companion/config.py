@@ -130,7 +130,7 @@ class PaidModelApproval(BaseModel):
     monthly_micro_usd: int | None = Field(default=None, strict=True, gt=0)
     window_micro_usd: int | None = Field(default=None, strict=True, gt=0)
     window_calls: int = Field(strict=True, gt=0)
-    concurrency: int = Field(strict=True, gt=0, le=32)
+    concurrency: int = Field(strict=True, gt=0, le=10)
     concurrency_basis: Literal["unresolved_liabilities_v1", "local_active_attempts_v2"] = Field(
         default="unresolved_liabilities_v1",
         exclude_if=lambda value: value == "unresolved_liabilities_v1",

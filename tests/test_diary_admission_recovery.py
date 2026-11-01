@@ -118,7 +118,7 @@ def test_diary_admission_refusal_defers_without_losing_attempts_or_replaying_unk
             assert await core.diary.generate_once("admission-race")
             row = core.store.one("SELECT * FROM diary_runs")
             assert row["state"] == "RETRY_WAIT" and row["model_request_id"] is None
-            assert row["attempts"] == row["max_attempts"] + 1
+            assert row["attempts"] == row["max_attempts"]
             assert row["last_error_code"] == (
                 "MODEL_DAILY_BUDGET_EXHAUSTED" if recovery == "day_reset"
                 else "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED")
@@ -167,7 +167,7 @@ def test_diary_admission_refusal_defers_without_losing_attempts_or_replaying_unk
                     row = worker.store.one("SELECT state,attempts FROM diary_runs")
                     if recovery in {"settled", "day_reset"}:
                         assert row["state"] == "COMMITTED"
-                        assert row["attempts"] == core.settings.diary_max_attempts + 2
+                        assert row["attempts"] == core.settings.diary_max_attempts + 1
                         assert len(draft_model.calls) == 1
                     else:
                         assert draft_model.calls == []

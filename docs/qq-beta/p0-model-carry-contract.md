@@ -97,8 +97,10 @@ Capability readiness uses the same verified `model_closures` and predecessor win
 scope as native model admission. A carried or locally closed UNKNOWN does not occupy
 an execution slot or prevent a new authorized Reader request. Its original logical
 request still cannot retry, and its amount remains in all applicable totals. Missing
-or invalid journal proof, an unclosed UNKNOWN, STOP, expired source grants and exhausted
-budgets still block readiness. This projection performs no settlement or I/O.
+or invalid journal proof, STOP, expired source grants and exhausted budgets still block
+their corresponding readiness. An unclosed UNKNOWN consumes one execution slot; it
+does not prohibit unrelated source reads or model work when capacity remains. This
+projection performs no settlement or I/O.
 
 Integration order is original STOP -> real API/all-model-worker exits -> controlled
 offline carry append -> new API only -> authenticated Bridge carry prepare -> exact
@@ -233,10 +235,11 @@ model responsibility, and cannot add goals, public posting or other actions. Lat
 renewals keep the exact Life source set and limits. Source expiry and erasure still
 apply independently of the new authorization expiry.
 
-Life requires both journal-proven execution closure and explicit retention under
-the current approval to distinguish an old financial UNKNOWN from an outstanding
-execution. A new UNKNOWN, missing closure or journal/projection mismatch still pauses
-Life. Uncertain delivery always pauses it.
+Life uses the same journal-proven execution closures and capacity count as admission.
+A new locally closed UNKNOWN releases its execution slot immediately while retaining
+its financial responsibility. An unclosed UNKNOWN occupies one slot; it does not
+globally pause unrelated Life work when background capacity remains. Journal/projection
+mismatch and uncertain delivery still pause it.
 The UNKNOWN charge remains included in all applicable budgets, and its old logical
 request cannot be retried. Daily limits, cooldown, owner-idle and quiet-hour checks
 remain in their existing scheduling and delivery paths.
@@ -323,3 +326,44 @@ be `STOPPED`, and accepts only an `UNKNOWN` whose admission and settle record bo
 `model_local_close` kind. The outcome stays `UNKNOWN` at its retained amount in every
 total, and the logical request still cannot retry. Older journal readers reject this
 closure, so run it only with the old Core stopped and start the new image afterwards.
+
+## Shared execution capacity (2026-11-01)
+
+`paid_model.concurrency` accepts integers from 1 through 10. Set it to **10** for
+the approved next deployment. All model features use the existing SQLite admission
+transaction and original journal; API and independent workers share the same count.
+When the limit exceeds one, background work may occupy at most `concurrency - 1`
+slots, preserving one for chat and its dependent inputs. At a limit of one, background
+may use that slot while no owner input is waiting. Queued, running and retry-waiting
+chat retain foreground priority, including the interval while tools are pending.
+
+Capacity refusal stays in the domain's existing queue and does not consume a domain
+retry. Chat can resume a persisted READY SDK conversation after earlier paid responses
+and returned tools; it cannot resume an uncertain model/tool effect. Source expiry,
+STOP, erasure and reply supersession continue to fence waiting work. There is no
+second queue and no unbounded population of suspended model coroutines.
+
+The controlled ModelClient's proven pre-I/O yield and HTTP-boundary refusal settle
+zero usage with the existing `model.not_dispatched` audit proof. An unwound transport
+with unknown usage keeps its original UNKNOWN amount and receives the existing
+`model_local_close` witness. Lease expiry alone does not prove transport completion.
+Admission/call accounting records remain present even for a proven unsent attempt;
+waiting for capacity before admission creates neither a charge nor a call record.
+
+Fresh v2 approvals with no outstanding work need no historical carry. Existing carry
+approvals still require their exact carry reference. To change an existing paid
+window from 1 to 10, use the existing reviewed offline renewal with a new window,
+approval digest and policy binding. Renewal now binds the configured 1–10 capacity
+instead of requiring 1; every old financial amount and window scope stays intact.
+Editing a frozen live window in place remains rejected. This code change performs
+no deployment, production renewal, historical closure or input replay.
+
+References inspected: installed DSH **0.2.1-rc.3**, desktop build
+`be72761ee1a6736ebcdf4f3739363b083ae53c98`, bundled
+`dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js`, `runGroup` and
+`executeToolCalls` (bounded in-flight work, ordered outcome recording and draining
+started calls on abort). Core reuses its native queue and closure mechanisms; DSH's
+tool scheduler does not supply Core's financial or owner authority contracts.
+[DeepSeek's concurrency contract](https://api-docs.deepseek.com/quick_start/rate_limit/)
+counts sent requests until response completion at account scope; the local limit of
+10 is an application limit, independent of the provider's account capacity.

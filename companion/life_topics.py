@@ -92,9 +92,8 @@ def _uncertain(store, settings):
         with _transaction(store):
             model_carry.supported(store, settings)
             view = paid_budget.journal(store, settings.paid_model, initialize=False)
-            # A journal-closed UNKNOWN no longer holds liability open: admission,
-            # readiness and chat slot retries count it the same way (owner, 2026-11-01).
-            return any(row["request_id"] not in view["model_closures"] for row in unknown)
+            return budget.capacity_exhausted(store, settings.paid_model, view["model_closures"],
+                                             scenario="activity")
     except CoreError:
         return True
 

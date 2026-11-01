@@ -74,9 +74,12 @@ def test_unverified_or_unclosed_liability_keeps_reader_unavailable(core, tmp_pat
         journal = Path(core.settings.paid_model.journal_path)
         journal.write_bytes(journal.read_bytes() + b'{"broken":true}\n')
     ready = public_source_readiness(core.store, core.settings, core.clock, "bili")
-    assert ready["state"] != "READY", ready
     if boundary == "unclosed":
-        assert "MODEL_USAGE_UNKNOWN" in ready["reason_codes"]
+        assert ready["state"] == "READY", ready
+        rows = snapshot(core.store, core.settings, core.clock)["capabilities"]
+        assert any("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" in row["reason_codes"] for row in rows)
+    else:
+        assert ready["state"] != "READY", ready
 
 
 def test_capability_window_limit_includes_carried_predecessor_usage(core, tmp_path):

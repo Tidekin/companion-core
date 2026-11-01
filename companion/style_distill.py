@@ -213,7 +213,8 @@ async def run_once(store, settings, model, clock):
             state = "UNKNOWN"  # Never replayed.
         elif unsafe:
             state = "REJECTED"
-        elif request_id is None and code in ADMISSION_RETRY_CODES:
+        elif (request_id is None and code in ADMISSION_RETRY_CODES
+              or budget.capacity_wait(store, code, request_id=request_id)):
             state = "RETRY_WAIT"
             retry_at = (_next_day(settings, clock()) if "DAILY" in code
                         else after(clock(), 60))
@@ -225,6 +226,10 @@ async def run_once(store, settings, model, clock):
             retry_at = after(clock(), 300)
         with store.transaction():
             if state == "RETRY_WAIT":
+                if (request_id is None and code in ADMISSION_RETRY_CODES
+                    or budget.capacity_wait(store, code, request_id=request_id)):
+                    store.execute("UPDATE style_pairs SET attempts=MAX(0,attempts-1) "
+                                  "WHERE pair_key=?", (row["pair_key"],))
                 store.execute("UPDATE style_pairs SET model_request_id=NULL WHERE pair_key=?",
                               (row["pair_key"],))
             finish(store, row, state, clock(), code, retry_at=retry_at)

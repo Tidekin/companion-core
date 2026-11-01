@@ -215,7 +215,7 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
     if (
         row["concurrency_basis"] != wire.MODE
         or type(row["concurrency"]) is not int
-        or row["concurrency"] != 1
+        or not 1 <= row["concurrency"] <= 10
         or any(
             not hash_value(row[k])
             for k in (
@@ -435,6 +435,7 @@ def _same_approval(old, new, *, renewal_at=None):
         "concurrency_basis",
         "credential_tag",
         "video_credential_tag",
+        "concurrency",
     }
     if renewal_at is not None:
         # Renewal may happen before or after the old expiry: liabilities are fenced
@@ -460,8 +461,8 @@ def _same_approval(old, new, *, renewal_at=None):
         allowed.add("max_output_tokens")
     if (
         new.get("concurrency_basis") != wire.MODE
-        or old["concurrency"] != 1
-        or new["concurrency"] != 1
+        or not 1 <= old["concurrency"] <= 10
+        or not 1 <= new["concurrency"] <= 10
         or old["window_id"] == new["window_id"]
         or old["approval_sha256"] == new["approval_sha256"]
         or {k: v for k, v in old.items() if k not in allowed}
@@ -631,7 +632,7 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
             "successor_paid_contract_sha256": paid_budget.sha(new),
             "successor_approval_sha256": settings.paid_model.approval_sha256,
             "concurrency_basis": wire.MODE,
-            "concurrency": 1,
+            "concurrency": settings.paid_model.concurrency,
             "closed_executors": verified_executors.value,
             "at": now,
         }

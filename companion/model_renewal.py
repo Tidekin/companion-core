@@ -183,7 +183,7 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
         digest(baseline) != value["budget_baseline_sha256"]
         or row["concurrency_basis"] != model_carry.wire.MODE
         or type(row["concurrency"]) is not int
-        or row["concurrency"] != 1
+        or not 1 <= row["concurrency"] <= 10
         or any(
             not hash_value(row[key])
             for key in (

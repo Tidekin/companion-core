@@ -53,9 +53,56 @@ def total_monthly(store, month, before=None):
 def chat_pending(store, now):
     return bool(store.one(
         "SELECT 1 FROM jobs j JOIN events e ON e.event_id=j.event_id "
-        "WHERE j.kind='chat' AND e.redacted=0 AND (j.state IN ('QUEUED','RUNNING') "
-        "OR (j.state='RETRY_WAIT' AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?))) "
-        "LIMIT 1", (now,),
+        "WHERE j.kind='chat' AND e.redacted=0 "
+        "AND j.state IN ('QUEUED','RUNNING','RETRY_WAIT') LIMIT 1",
+    ))
+
+
+BACKGROUND_SCENARIOS = frozenset({
+    "activity", "social_autonomy", "memory_extract", "memory_review", "diary",
+    "reflection", "rem", "meme_caption", "qq_poke", "watch_review", "style_distill", "jargon",
+})
+CAPACITY_WAIT_CODES = frozenset({"MODEL_PROVIDER_CONCURRENCY_EXHAUSTED",
+                                 "BACKGROUND_YIELD_TO_CHAT"})
+
+
+def execution_counts(store, closures=()):
+    """Count native admitted attempts, excluding only verified execution closures."""
+    closed = sorted(closures)
+    return store.one(
+        "SELECT COUNT(*) AS total,COALESCE(SUM(m.scenario IN ("
+        + ",".join("?" for _ in BACKGROUND_SCENARIOS)
+        + ") AND (m.scenario!='memory_review' OR m.job_id IS NULL)),0) AS background "
+        "FROM model_usage m JOIN model_admissions a USING(request_id) "
+        "WHERE m.state IN ('RESERVED','UNKNOWN')"
+        + (" AND m.request_id NOT IN (" + ",".join("?" for _ in closed) + ")" if closed else ""),
+        [*sorted(BACKGROUND_SCENARIOS), *closed],
+    )
+
+
+def is_background(scenario, job_id=None):
+    return scenario in BACKGROUND_SCENARIOS and not (scenario == "memory_review" and job_id)
+
+
+def capacity_exhausted(store, approval, closures=(), *, scenario="chat", job_id=None):
+    counts = execution_counts(store, closures)
+    return (counts["total"] >= approval.concurrency or is_background(scenario, job_id)
+            and counts["background"] >= max(1, approval.concurrency - 1))
+
+
+def capacity_wait(store, code, *, request_id=None):
+    """Only an unadmitted or proven unsent attempt may wait, never an uncertain call."""
+    return code in CAPACITY_WAIT_CODES and (request_id is None or not store.one(
+        "SELECT 1 FROM model_usage WHERE request_id=?", (request_id,),
+    ) or not_dispatched(store, request_id))
+
+
+def not_dispatched(store, request_id):
+    return bool(store.one(
+        "SELECT 1 FROM model_usage m JOIN audit_log a ON a.entity_id=m.request_id "
+        "WHERE m.request_id=? AND m.state='SETTLED' AND m.billed_micro_usd=0 "
+        "AND m.input_tokens=0 AND m.output_tokens=0 AND m.is_estimate=0 "
+        "AND a.action='model.not_dispatched' LIMIT 1", (request_id,),
     ))
 
 
@@ -323,7 +370,8 @@ def reserve(
                 raise CoreError("DAILY_BUDGET_EXHAUSTED", 429)
         if approval:
             logical_request_id = logical_request_id or job_id or uid("logical")
-            _admit(store, settings, approval, logical_request_id, estimate, now, day, month)
+            _admit(store, settings, approval, logical_request_id, estimate, now, day, month,
+                   scenario=scenario, job_id=job_id)
         cloud_pricing = (settings.paid_model.video_input if scenario in VIDEO_SCENARIOS
                          and settings.paid_model and settings.paid_model.video_input else settings)
         cloud_budget.reserve(
@@ -430,7 +478,8 @@ def reserve(
         return request_id
 
 
-def _admit(store, settings, approval, logical, estimate, now, day, month):
+def _admit(store, settings, approval, logical, estimate, now, day, month, *, scenario="chat",
+           job_id=None):
     from companion import model_carry
 
     carry_view = None
@@ -462,8 +511,8 @@ def _admit(store, settings, approval, logical, estimate, now, day, month):
     )
     if estimate <= 0 or estimate > approval.per_attempt_micro_usd:
         raise CoreError("MODEL_ATTEMPT_BUDGET_EXHAUSTED", 429)
-    # Every charge counts, including pre-migration and media/tool estimates; unresolved
-    # admissions consume concurrency forever until independent provider reconciliation.
+    # Financial totals retain every liability; only verified execution closures
+    # release capacity independently of the original accounting outcome.
     daily = store.one(
         "SELECT COUNT(*) AS calls,COALESCE(SUM(billed_micro_usd),0) AS amount "
         "FROM model_usage WHERE occurred_at>=?",
@@ -507,14 +556,9 @@ def _admit(store, settings, approval, logical, estimate, now, day, month):
         limited = column != "window_id" or not approval.unlimited_period_spend
         if usage["calls"] >= calls or (limited and usage["amount"] + estimate > amount):
             raise CoreError("MODEL_" + code + "_BUDGET_EXHAUSTED", 429)
-    closed = sorted(carry_view["model_closures"]) if carry_view else []
-    running = store.one(
-        "SELECT COUNT(*) AS n FROM model_usage m JOIN model_admissions a USING(request_id) "
-        "WHERE m.state IN ('RESERVED','UNKNOWN')"
-        + (" AND m.request_id NOT IN (" + ",".join("?" for _ in closed) + ")" if closed else ""),
-        closed,
-    )["n"]
-    if running >= approval.concurrency:
+    if capacity_exhausted(store, approval,
+                          carry_view["model_closures"] if carry_view else (),
+                          scenario=scenario, job_id=job_id):
         raise CoreError("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", 429)
 
 
@@ -909,7 +953,10 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
             transport_failure = error.failure
         known_not_sent = (isinstance(error, ModelDispatchRefused)
                           and error.admission is dispatch.get("admission"))
-        if (isinstance(model, ModelClient) and (known_not_sent or settings.mode == "live"
+        before_io_yield = (error.code == "BACKGROUND_YIELD_TO_CHAT"
+                           and not dispatch.get("owned"))
+        if (isinstance(model, ModelClient) and (known_not_sent or before_io_yield
+            or settings.mode == "live"
             and error.code in {CANCELLED, SOURCE_RECALLED, SUPERSEDED})):
             _settle_unstarted_reply(store, request_id, dispatch, error.code, clock())
         raise

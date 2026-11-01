@@ -159,6 +159,36 @@ def test_http_native_caption_is_idempotent_and_uses_exact_shared_sampling(
     run(scenario())
 
 
+def test_caption_capacity_wait_keeps_original_job_and_sends_once(core, tmp_path, monkeypatch):
+    from companion import budget
+
+    async def scenario():
+        async with caption_environment(core, tmp_path, monkeypatch) as values:
+            event, _, client, _, _, now, item = values
+            created = await client.post("/internal/v1/memes/captions",
+                                        json=body(core, event, item, now))
+            assert created.status_code == 200, created.text
+            job_id = created.json()["job_id"]
+            calls = []
+
+            def full(*args, **kwargs):
+                raise CoreError("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", 429)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(budget, "reserve", full)
+                assert await worker(core, calls)
+            assert not calls and not core.store.rows("SELECT * FROM model_usage")
+            assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?", (job_id,)) == {
+                "state": "QUEUED", "attempts": 0}
+            core.clock.advance(2)
+            assert await worker(core, calls)
+            assert len(calls) == 1
+            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job_id,))["state"] == (
+                "SUCCEEDED")
+
+    run(scenario())
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

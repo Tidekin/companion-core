@@ -255,13 +255,11 @@ def admit_model(store, settings, clock, job_id, scenario, *, yield_to_chat=True)
     recheck (`yield_to_chat=False`) has no such proof; yielding there left calls UNKNOWN.
     """
     from companion import owner_input, reply_revision
+    from companion.budget import is_background
 
     purpose = model_purpose(store, scenario, job_id)
     view = current(store, settings, clock, purpose=purpose)
-    background = scenario in {"activity", "social_autonomy", "memory_extract", "diary",
-                              "reflection", "rem", "meme_caption", "qq_poke",
-                              "watch_review", "style_distill", "jargon"} or (
-        scenario == "memory_review" and job_id is None)
+    background = is_background(scenario, job_id)
     if background and yield_to_chat and owner_waiting(
             store, settings, clock(), authority=view.authority.as_dict()):
         raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
@@ -491,10 +489,12 @@ def activate(store, settings, clock, request):
         # Preserve the native quiescence inventory: neither UNKNOWN nor a pending send is idle.
         from companion import model_carry
 
-        if model_carry.active(settings):
+        if model_carry.active(settings) and request.policy.unknown_carry_sha256 is not None:
             model_carry.activation(store, settings, request.policy)
         else:
             if request.policy.unknown_carry_sha256 is not None:
+                raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
+            if custody(store, settings, settlement=True)["model_carries"]:
                 raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
             live_text._idle(store)
         old = live_text._meta(store, live_text.BINDING)
