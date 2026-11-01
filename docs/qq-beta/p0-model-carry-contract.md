@@ -235,11 +235,12 @@ model responsibility, and cannot add goals, public posting or other actions. Lat
 renewals keep the exact Life source set and limits. Source expiry and erasure still
 apply independently of the new authorization expiry.
 
-Life uses the same journal-proven execution closures and capacity count as admission.
-A new locally closed UNKNOWN releases its execution slot immediately while retaining
-its financial responsibility. An unclosed UNKNOWN occupies one slot; it does not
-globally pause unrelated Life work when background capacity remains. Journal/projection
-mismatch and uncertain delivery still pause it.
+Life leaves execution capacity to native model admission. Its source and delivery
+checks verify journal custody, without treating an admitted attempt's own slot as a
+permission failure. A new locally closed UNKNOWN releases its execution slot immediately
+while retaining its financial responsibility. An unclosed UNKNOWN occupies one slot;
+it does not globally pause unrelated Life work. Full capacity defers model admission.
+Journal/projection mismatch and uncertain delivery still pause it.
 The UNKNOWN charge remains included in all applicable budgets, and its old logical
 request cannot be retried. Daily limits, cooldown, owner-idle and quiet-hour checks
 remain in their existing scheduling and delivery paths.
@@ -336,6 +337,9 @@ When the limit exceeds one, background work may occupy at most `concurrency - 1`
 slots, preserving one for chat and its dependent inputs. At a limit of one, background
 may use that slot while no owner input is waiting. Queued, running and retry-waiting
 chat retain foreground priority, including the interval while tools are pending.
+The same private conversation still waits for an older chat or dependent media call
+to unwind before claiming its successor; extra capacity is shared with independent
+background work, not permission to move or repeat an in-flight foreground phase.
 
 Capacity refusal stays in the domain's existing queue and does not consume a domain
 retry. Chat can resume a persisted READY SDK conversation after earlier paid responses

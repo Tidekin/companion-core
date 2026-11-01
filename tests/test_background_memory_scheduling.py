@@ -75,7 +75,7 @@ def test_chat_restart_does_not_reclassify_another_workers_reserved_request(core,
     ("QUEUED", None, []),
     ("RUNNING", None, []),
     ("RETRY_WAIT", -1, []),
-    ("RETRY_WAIT", 60, ["extract"]),
+    ("RETRY_WAIT", 60, []),
     ("SUCCEEDED", None, ["extract"]),
 ])
 def test_life_worker_extracts_without_nightly_enabled_and_yields_to_chat(

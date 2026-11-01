@@ -91,9 +91,10 @@ def _uncertain(store, settings):
     try:
         with _transaction(store):
             model_carry.supported(store, settings)
-            view = paid_budget.journal(store, settings.paid_model, initialize=False)
-            return budget.capacity_exhausted(store, settings.paid_model, view["model_closures"],
-                                             scenario="activity")
+            paid_budget.journal(store, settings.paid_model, initialize=False)
+            # Admission owns capacity. Rechecking it as source permission after
+            # reserve would reject this very attempt for occupying its own slot.
+            return False
     except CoreError:
         return True
 

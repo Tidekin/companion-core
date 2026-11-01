@@ -365,12 +365,15 @@ class Core(Runtime):
             self.recover(now)
             if (owner_authority.required(s, self.settings)
                 or private_life.enabled(self.settings)):
-                if (not owner_authority.required(s, self.settings)
-                    and private_life.busy(s, now)) or s.one(
+                foreground_only = bool(owner_authority.required(s, self.settings)
+                                       and self.settings.paid_model
+                                       and self.settings.paid_model.concurrency > 1)
+                if private_life.busy(s, now, foreground_only=foreground_only) or s.one(
                     "SELECT 1 FROM outbox WHERE state='SENDING' LIMIT 1",
                 ):
                     # Input admission and tail cancellation proceed independently;
-                    # the worker waits for an existing model/send responsibility.
+                    # chat waits for its existing model/send responsibility. Separate
+                    # background work shares admission capacity when more slots exist.
                     return None
             if not proactive_allowed(s, self.settings, now):
                 cancel_proactive_work(s, now)

@@ -198,8 +198,9 @@ def test_unknown_retains_money_and_blocks_its_input_without_stopping_unrelated_w
     with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock(),
                        clock=core.clock, logical_request_id="uncertain-original")
-    assert budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock(),
-                          clock=core.clock, logical_request_id="independent-input")
+    independent_job = authorized_job(core, number=2)
+    assert budget.reserve(core.store, core.settings, independent_job, "chat", MESSAGES,
+                          core.clock(), clock=core.clock)
 
 
 def test_tool_roundtrip_waits_for_capacity_then_reuses_saved_response_and_tool(core, tmp_path,
