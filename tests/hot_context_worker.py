@@ -15,7 +15,7 @@ from companion.retrieval import SemanticIndex
 from companion.token_measurement import measure_request
 
 settings = Settings.model_validate_json(Path(sys.argv[1]).read_text("utf-8"))
-now, job_id, report_path = sys.argv[2:]
+now, job_id, report_path, expected_history_count = sys.argv[2:]
 SemanticIndex.warmup = lambda self: None
 payloads = []
 
@@ -33,7 +33,7 @@ async def run():
             queued = core.store.one("SELECT j.*,e.conversation_id FROM jobs j "
                                     "JOIN events e USING(event_id) WHERE job_id=?", (job_id,))
             available = owner_input.history_sources(core.store, settings, core.clock, queued)
-            assert len(available) == 8
+            assert len(available) == int(expected_history_count)
             assert await core.run_once("hot-context-worker", job_id=job_id)
             job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
             assert job["state"] == "SUCCEEDED", dict(job)
@@ -44,7 +44,13 @@ async def run():
                 (job_id, job["event_id"]))]
             measurement = measure_request(settings, payload["messages"],
                                           tools=payload.get("tools"))
+            saved = core.store.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+                                   (job_id,))
+            history = next(item["proof"] for item in json.loads(saved["snapshots_json"])
+                           if item["kind"] == "history")
             return {"payload": payload, "sources": sources,
+                    "history_sources": [item["event_id"] for item in history],
+                    "available_history_sources": [item["event_id"] for item in available],
                     "input_tokens": measurement.input_tokens}
 
 

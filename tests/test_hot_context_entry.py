@@ -1,4 +1,4 @@
-"""Old unresolved attention survives a full recent history through real HTTP/worker entry."""
+"""Old unresolved attention uses spare history allowance through real HTTP/worker entry."""
 
 import asyncio
 import hashlib
@@ -7,6 +7,7 @@ import sys
 from datetime import datetime
 
 import httpx
+import pytest
 
 from companion import owner_authority
 from companion.goals import GoalProposal
@@ -20,11 +21,14 @@ from tests.test_owner_authority import activate
 from tests.test_owner_input import captured, inbound
 
 
-def test_hot_episode_reserves_a_history_slot_and_cools_after_closure(core, tmp_path):
+@pytest.mark.parametrize("recent_turns", [6, 9])
+def test_hot_episode_uses_spare_history_capacity_and_cools_after_closure(core, tmp_path,
+                                                                      recent_turns):
     original, key = captured(core, tmp_path)
     first_time = core.clock()
     core.settings.memory_enabled = core.settings.goals_enabled = True
     core.settings.context_soft_tokens = 12000
+    core.settings.max_recent_messages = 16
     marker = "unresolved telescope project"
 
     async def scenario():
@@ -68,7 +72,7 @@ def test_hot_episode_reserves_a_history_slot_and_cools_after_closure(core, tmp_p
             core.memory.episodes([event], core.clock())
             goal = core.goals.propose(GoalProposal(topic=marker, source_event_ids=[old]))
             core.goals.accept(goal)
-            for number in range(2, 11):
+            for number in range(2, recent_turns + 2):
                 await ingest(number, f"recent ordinary turn {number}", authority)
                 core.clock.advance(1)
 
@@ -79,6 +83,7 @@ def test_hot_episode_reserves_a_history_slot_and_cools_after_closure(core, tmp_p
                 process_config(core, config)
                 child = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
                     "tests.hot_context_worker", str(config), core.clock(), job, str(report),
+                    str(min(recent_turns, 8)),
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                 try:
                     _, error = await asyncio.wait_for(child.communicate(), 45)
@@ -93,6 +98,7 @@ def test_hot_episode_reserves_a_history_slot_and_cools_after_closure(core, tmp_p
                     if isinstance(message.get("content"), str)
                     and message["content"].startswith("相关情景接续")]
                 assert (marker in json.dumps(continuation, ensure_ascii=False)) is expected_hot
+                assert value["history_sources"] == value["available_history_sources"]
                 if expected_hot:
                     assert old in value["sources"]
                     assert len(value["sources"]) <= 8
@@ -103,7 +109,7 @@ def test_hot_episode_reserves_a_history_slot_and_cools_after_closure(core, tmp_p
                 assert history_bytes <= 8192
                 assert value["input_tokens"] <= core.settings.context_soft_tokens
 
-            await worker(20, True)
+            await worker(20, recent_turns < 8)
             core.goals.cancel(goal)
             core.clock.advance(1)
             assert not core.memory_context.continuation(
