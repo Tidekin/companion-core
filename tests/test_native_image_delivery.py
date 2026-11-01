@@ -56,6 +56,10 @@ def test_native_reply_rechecks_original_image_after_generation(core, tmp_path, d
                     expiry = core.store.one("SELECT expires_at FROM captured_images")["expires_at"]
                     core.clock.now = datetime.fromisoformat(expiry) + timedelta(seconds=1)
 
+            if drift == "expiry" and boundary == "final_request":
+                expiry = core.store.one("SELECT expires_at FROM captured_images")["expires_at"]
+                # Cross the image deadline inside a still-valid delivery lease.
+                core.clock.now = datetime.fromisoformat(expiry) - timedelta(seconds=1)
             if boundary == "before_lease":
                 change()
             spool, runtime = native_spool(core, tmp_path, config, grant)
@@ -72,9 +76,10 @@ def test_native_reply_rechecks_original_image_after_generation(core, tmp_path, d
                         protocol.event_hooks["request"].append(final_request)
                     guard = OwnerSendGuard(runtime, client)
                     await deliver_tick(client, OwnerOneBot(guard, protocol), spool, guard=guard)
-                assert len(sends) == int(drift == "none")
+                expected = drift in {"none", "expiry"}
+                assert len(sends) == int(expected)
                 assert bool(core.store.one("SELECT 1 FROM outbox WHERE state='SENT'")) == (
-                    drift == "none")
+                    expected)
                 assert core.store.rows("SELECT * FROM model_usage") == usage
             finally:
                 spool.close()
