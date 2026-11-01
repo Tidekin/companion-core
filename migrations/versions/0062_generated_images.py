@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0061_generated_images"
-down_revision = "0060_mood_appraisals"
+revision = "0062_generated_images"
+down_revision = "0061_singing_voice"
 branch_labels = None
 depends_on = None
 

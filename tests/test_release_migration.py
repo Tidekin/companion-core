@@ -83,7 +83,8 @@ REVISION_CHAIN = (
     "0058_bili_discovery",
     "0059_gateway",
     "0060_mood_appraisals",
-    "0061_generated_images",
+    "0061_singing_voice",
+    "0062_generated_images",
 )
 LEGACY_TABLES = (
     "principals",
@@ -370,6 +371,7 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
     ("0043_reader_authority", "OWNER_AUTHORITY_DOWNGRADE"),
     ("0044_voice_owner_authority", "VOICE_AUTHORITY_DOWNGRADE"),
     ("0045_goal_read_plan", "GOAL_PLAN_DOWNGRADE"),
+    ("0061_singing_voice", "SINGING_DOWNGRADE"),
 ])
 def test_authority_downgrade_keeps_custody_and_accounting_unchanged(core, tmp_path, revision, code):
     tables = ("runtime_meta", "voice_jobs", "voice_node_state", "model_usage", "outbox")

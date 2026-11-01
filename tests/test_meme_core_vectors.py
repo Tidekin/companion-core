@@ -367,7 +367,7 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
     with closing(Store(str(restored))) as store:
         assert (
             store.one("SELECT version_num FROM alembic_version")["version_num"]
-            == "0061_generated_images"
+            == "0062_generated_images"
         )
         assert not store.rows("SELECT * FROM meme_vectors")
         assert store.one("SELECT state FROM meme_assets")["state"] == "ERASED"
@@ -501,27 +501,33 @@ def test_cache_capacity_uses_fresh_proof_without_inserting_another_slot(runtime_
 
 
 def test_normal_downgrade_discards_only_projection_and_upgrade_rebuilds_empty(
-    runtime_case, monkeypatch
+    runtime_case, monkeypatch, tmp_path
 ):
     from pathlib import Path
 
     from alembic import command
     from alembic.config import Config
 
+    from companion.meme_core import MemeCaptionService
+    from companion.meme_retrieval import MemeRetrieval
     from companion.store import migrate
+    from tests.test_test_fixtures import historical_database
 
     c = runtime_case
     saved, _ = freeze(c, monkeypatch)
     usage = c.core.store.rows("SELECT * FROM model_usage")
     assets = c.core.store.rows("SELECT * FROM meme_assets")
+    path = historical_database(c.core.store, tmp_path / "projection.db", "0060_mood_appraisals")
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + Path(c.core.settings.database).as_posix())
+    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
     command.downgrade(cfg, "0047_meme_assets")
-    assert not c.core.store.one("SELECT 1 FROM sqlite_master WHERE name='meme_vectors'")
-    assert c.core.store.rows("SELECT * FROM model_usage") == usage
-    assert c.core.store.rows("SELECT * FROM meme_assets") == assets
-    assert c.retrieval.check(c.job) == saved
-    migrate(c.core.settings.database)
-    assert not c.core.store.rows("SELECT * FROM meme_vectors")
-    assert c.retrieval.check(c.job) == saved
+    with closing(Store(path)) as store:
+        retrieval = MemeRetrieval(MemeCaptionService(store, c.core.settings, None, c.core.clock))
+        assert not store.one("SELECT 1 FROM sqlite_master WHERE name='meme_vectors'")
+        assert store.rows("SELECT * FROM model_usage") == usage
+        assert store.rows("SELECT * FROM meme_assets") == assets
+        assert retrieval.check(c.job) == saved
+        migrate(path)
+        assert not store.rows("SELECT * FROM meme_vectors")
+        assert retrieval.check(c.job) == saved

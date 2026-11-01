@@ -37,7 +37,7 @@ from source_reader.video_extract import MediaExtractionError, extract_media
 API_ORIGIN = "https://api.bilibili.com"
 API_PATHS = {"/x/web-interface/view", "/x/web-interface/nav", "/x/player/wbi/playurl"}
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-def media_locator(value):
+def media_locator(value, *, audio=False):
     if (not isinstance(value, str) or len(value) > 4096 or "\\" in value
         or any(ord(char) <= 32 or ord(char) == 127 for char in value)):
         raise ReadFailure("MEDIA_LOCATOR_NOT_ALLOWED")
@@ -46,7 +46,9 @@ def media_locator(value):
     if (parsed.scheme != "https" or parsed.port not in {None, 443}
         or parsed.username is not None or parsed.password is not None or parsed.fragment
         or not re.fullmatch(r"[a-z0-9.-]+", host)
-        or not (host == "bilivideo.com" or host.endswith(".bilivideo.com"))
+        or not any(host == suffix or host.endswith("." + suffix)
+                   for suffix in (("bilivideo.com", "bilivideo.cn") if audio
+                                  else ("bilivideo.com",)))
         or not parsed.path.startswith("/")):
         raise ReadFailure("MEDIA_LOCATOR_NOT_ALLOWED")
     return value
@@ -91,8 +93,9 @@ def representation(data, limits):
 class MediaHTTP:
     """Uses the Reader's pinned public transport; cookies only on three fixed APIs."""
 
-    def __init__(self, public, budget, guard):
+    def __init__(self, public, budget, guard, *, audio=False):
         self.public, self.budget, self.guard = public, budget, guard
+        self.audio = audio
 
     def account(self):
         verify = getattr(self.public, "verify", None)
@@ -112,7 +115,7 @@ class MediaHTTP:
         api = (parsed.scheme == "https" and parsed.netloc == "api.bilibili.com"
                and parsed.path in API_PATHS and not parsed.fragment)
         if not api:
-            media_locator(url)
+            media_locator(url, audio=self.audio)
         headers = {"Accept-Encoding": "identity", "User-Agent": "CompanionSourceReader/0.6",
                    "Referer": "https://www.bilibili.com/"}
         if api and grant:

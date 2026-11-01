@@ -26,7 +26,7 @@ def test_upgrade_retires_only_the_untracked_autonomy_copies(tmp_path, standalone
     migrate(path)  # Normal startup and restore can apply the same head repeatedly.
     with closing(Store(path)) as store:
         assert store.one("SELECT version_num FROM alembic_version")["version_num"] == (
-            "0061_generated_images"
+            "0062_generated_images"
         )
         native = store.one("SELECT value FROM runtime_meta WHERE key='migration-native-evidence'")
         assert native == {

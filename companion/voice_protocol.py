@@ -13,6 +13,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from companion_delivery_protocol import singing
 from companion_delivery_protocol.authority import validate_authority_ref
 
 PROTOCOL_VERSION = 2
@@ -30,7 +31,7 @@ Generation = Annotated[int, Field(ge=1, le=2**63 - 1, strict=True)]
 LeaseToken = Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]{32,256}$", repr=False)]
 ErrorCode = Annotated[str, Field(pattern=r"^[A-Z][A-Z0-9_]{0,63}$")]
 ResourceState = Literal["READY", "RUNNING", "QUARANTINED"]
-Operation = Literal["tts", "asr"]
+Operation = Literal["tts", "asr", "sing"]
 
 
 class VoiceProtocolError(ValueError):
@@ -143,7 +144,7 @@ class VoiceLease(VoiceDTO):
     lease_token: LeaseToken
     input_sha256: Digest
     input_bytes: int = Field(gt=0, le=MAX_INPUT_BYTES, strict=True)
-    input_mime: Literal["text/plain", "audio/wav"]
+    input_mime: Literal["text/plain", "audio/wav", "application/json"]
     source_partial: bool = Field(default=False, strict=True)
     manifest_sha256: Digest
     issued_at: AwareDatetime
@@ -165,6 +166,10 @@ class VoiceLease(VoiceDTO):
         if self.operation == "tts":
             if self.input_mime != "text/plain" or self.source_partial or self.input_bytes > 16000:
                 raise ValueError("TTS lease input must be bounded UTF-8 text")
+        elif self.operation == "sing":
+            if (self.input_mime != "application/json" or self.source_partial
+                or self.input_bytes > 16384):
+                raise ValueError("Singing input must be a bounded source-bound recipe")
         elif self.input_mime != "audio/wav":
             raise ValueError("ASR lease input must be WAV")
         return self
@@ -327,6 +332,39 @@ class VoiceAudioResult(VoiceDTO):
         return self
 
 
+class SingingAudio(VoiceAudioResult):
+    kind: Literal["sing"] = "sing"
+
+
+class SingingResult(VoiceDTO):
+    kind: Literal["sing"] = "sing"
+    manifest: dict
+    audio: tuple[SingingAudio, ...] = Field(min_length=1, max_length=singing.MAX_SEGMENTS,
+                                          repr=False)
+
+    @model_validator(mode="after")
+    def complete_source_partition(self):
+        singing.validate_manifest(self.manifest)
+        if len(self.audio) != len(self.manifest["segments"]):
+            raise ValueError("singing audio count differs")
+        pcm = hashlib.sha256()
+        for index, audio in enumerate(self.audio):
+            data = audio.audio_bytes()
+            singing.validate_part(self.manifest, index, {
+                "audio_bytes": len(data), **audio.model_dump(exclude={"audio_base64"})})
+            with wave.open(BytesIO(data), "rb") as recording:
+                pcm.update(recording.readframes(audio.frames))
+        if pcm.hexdigest() != self.manifest["pcm_sha256"]:
+            raise ValueError("singing PCM coverage digest differs")
+        return self
+
+
+def result_digest(payload):
+    # Per-part byte hashes commit to the full audio. The compact parent manifest
+    # lets the independent Bridge verify each part without receiving every WAV.
+    return digest(payload.manifest) if isinstance(payload, SingingResult) else digest(payload)
+
+
 class _VoiceDeliveryMaterial(VoiceDTO):
     retirement_token: LeaseToken
     job_id: JobId
@@ -360,6 +398,8 @@ class LegacyVoiceDeliveryBinding(_VoiceDeliveryMaterial):
 class VoiceDeliveryBinding(_VoiceDeliveryMaterial):
     schema_version: Literal[3] = 3
     authority: dict
+    singing_segment_index: int | None = Field(default=None, ge=0, lt=singing.MAX_SEGMENTS,
+        strict=True, exclude_if=lambda value: value is None)
 
     @field_validator("authority")
     @classmethod
@@ -392,13 +432,25 @@ class VoiceRetiredBinding(VoiceDTO):
 class VoiceDeliveryEnvelope(VoiceDTO):
     binding: VoiceDeliveryBinding
     binding_sha256: Digest
-    audio: VoiceAudioResult
+    audio: Annotated[VoiceAudioResult | SingingAudio, Field(discriminator="kind")]
+    singing_manifest: dict | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def bound_audio(self):
+        if self.audio.kind == "sing":
+            singing.validate_part(self.singing_manifest, self.binding.singing_segment_index, {
+                "audio_bytes": len(self.audio.audio_bytes()),
+                **self.audio.model_dump(exclude={"audio_base64"})})
+            expected = digest(self.singing_manifest)
+            if self.singing_manifest["node_manifest_sha256"] != self.binding.manifest_sha256:
+                raise ValueError("Singing processor manifest changed")
+        else:
+            if self.singing_manifest is not None or self.binding.singing_segment_index is not None:
+                raise ValueError("TTS must not carry singing material")
+            expected = digest(self.audio)
         if (
             self.binding_sha256 != digest(self.binding)
-            or self.binding.result_sha256 != digest(self.audio)
+            or self.binding.result_sha256 != expected
             or self.binding.audio_sha256 != self.audio.audio_sha256
             or self.binding.audio_bytes != len(self.audio.audio_bytes())
         ):
@@ -439,7 +491,8 @@ class VoiceTranscriptResult(VoiceDTO):
         return self
 
 
-VoicePayload = Annotated[VoiceAudioResult | VoiceTranscriptResult, Field(discriminator="kind")]
+VoicePayload = Annotated[
+    VoiceAudioResult | VoiceTranscriptResult | SingingResult, Field(discriminator="kind")]
 
 
 class VoiceResult(VoiceDTO):
@@ -450,7 +503,7 @@ class VoiceResult(VoiceDTO):
 
     @model_validator(mode="after")
     def result_identity(self):
-        if self.operation != self.payload.kind or self.result_sha256 != digest(self.payload):
+        if self.operation != self.payload.kind or self.result_sha256 != result_digest(self.payload):
             raise ValueError("Voice result identity is invalid")
         return self
 
@@ -459,10 +512,11 @@ def make_voice_result(ref: VoiceLeaseRef, payload: VoicePayload) -> VoiceResult:
     result = VoiceResult(
         ref=ref,
         operation=payload.kind,
-        result_sha256=digest(payload),
+        result_sha256=result_digest(payload),
         payload=payload,
     )
-    if len(canonical_bytes(result)) > MAX_RESULT_BODY_BYTES:
+    limit = (singing.MAX_RESULT_BODY_BYTES if payload.kind == "sing" else MAX_RESULT_BODY_BYTES)
+    if len(canonical_bytes(result)) > limit:
         raise VoiceProtocolError("VOICE_RESULT_TOO_LARGE")
     return result
 

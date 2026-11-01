@@ -35,8 +35,10 @@ def main():
             parsed = urlsplit(url)
             assert method == "GET" and url.startswith(qzone.ENDPOINT + "?")
             query = parse_qs(parsed.query)
-            assert query["uin"] == [payload["target_uin"]] and query["num"] == ["1"]
-            assert query["qzreferrer"] == ["https://user.qzone.qq.com/87654321"]
+            assert query["uin"] == query["hostuin"] == [payload["target_uin"]]
+            assert query["count"] == ["1"] and query["start"] == ["0"]
+            assert kwargs["headers"]["Referer"] == (
+                "https://user.qzone.qq.com/" + payload["target_uin"])
             calls.append({"method": method, "path": parsed.path})
             return super().stream(method, url, **kwargs)
 

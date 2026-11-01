@@ -237,14 +237,19 @@ class ConversationStore:
                                (encode(self.snapshots), self.job["job_id"]))
         return result
 
-    def bind_reader(self, call_id, request_id):
-        """The Reader creator calls this inside the same SQLite transaction."""
+    def bind_request(self, call_id, request_id):
+        """The native request creator calls this inside the same SQLite transaction."""
         if not self.store.db.in_transaction:
             raise RuntimeError("CONVERSATION_READER_TRANSACTION_REQUIRED")
         self.check()
         metadata = {"request_id": request_id}
+        original = self.store.one("SELECT tool_name FROM agent_tool_calls "
+            "WHERE job_id=? AND tool_call_id=?", (self.job["job_id"], call_id))
+        if original is None:
+            raise CoreError("CONVERSATION_DEFERRED_BINDING_REQUIRED", 409)
+        column = "voice_job_id" if original["tool_name"] == "sing_song" else "request_id"
         changed = self.store.execute(
-            "UPDATE agent_tool_calls SET state='DEFERRED',request_id=?,metadata_json=?,"
+            f"UPDATE agent_tool_calls SET state='DEFERRED',{column}=?,metadata_json=?,"
             "updated_at=? WHERE job_id=? AND tool_call_id=? AND state='STARTED'",
             (request_id, encode(metadata), self.core.clock(), self.job["job_id"], call_id),
         ).rowcount
@@ -253,10 +258,15 @@ class ConversationStore:
         return metadata
 
     def save_result(self, result):
-        from companion.agent_output import save_format
+        from companion.agent_output import SongReply, save_format
 
         waiting = isinstance(result.output, DeferredToolRequests)
         with self.store.transaction():
+            if isinstance(result.output, SongReply):
+                from companion.agent_singing import selected
+
+                selected(self.store, self.core.settings, self.core.clock,
+                         self.job, result.output.request_id)
             self._save(result.conversation, "WAITING" if waiting else "OUTPUT",
                        output=None if waiting else save_format(result.conversation, result.output))
 

@@ -300,6 +300,14 @@ wait_seconds = 20
 max_records = 2
 max_context_chars = 4000
 
+# Optional local singing: register an actual node with capability "sing" and its resource manifest.
+# Requires voice/content owner purposes, job_ttl_seconds>=300, result_ttl_seconds>=120,
+# max_private_blob_bytes>=67108864 and enough existing Reader quota for the source reservation.
+# [voice.singing]
+# source_adapter_id = "bili"
+# max_seconds = 600
+# max_input_bytes = 33554432
+
 [social_autonomy]
 enabled = false
 scope = "none"

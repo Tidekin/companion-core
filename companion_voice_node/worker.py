@@ -5,10 +5,12 @@ import asyncio
 import base64
 import hashlib
 import importlib.metadata
+import ipaddress
 import json
 import math
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -46,7 +48,9 @@ from companion.voice_protocol import (
     make_voice_result,
     verify_voice_lease,
 )
-from companion_voice_node.providers import FasterWhisperConfig, GPTSoVITSConfig, validate_wav
+from companion_voice_node.applio_render import ApplioRenderConfig
+from companion_voice_node.providers import FasterWhisperConfig, OpenAISpeechConfig, validate_wav
+from companion_voice_node.resources import file_digest as _file_digest
 from companion_voice_node.state import NodeState
 from companion_voice_node.supervisor import (
     TTS_NOT_STARTED_CODES,
@@ -60,14 +64,15 @@ class VoiceNodeConfig(BaseModel):
 
     node_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     core_origin: str
+    core_connect_address: str | None = None
     credential: SecretStr = Field(repr=False, exclude=True)
     core_public_key: str = Field(pattern=r"^[a-f0-9]{64}$")
     workspace: Path = Field(repr=False)
     state_directory: Path = Field(default=Path(".local/voice-node"), repr=False)
-    tts: GPTSoVITSConfig | None = Field(default=None, repr=False)
+    tts: OpenAISpeechConfig | None = Field(default=None, repr=False)
     asr: FasterWhisperConfig | None = Field(default=None, repr=False)
-    tts_gpt_weights: Path | None = Field(default=None, repr=False)
-    tts_sovits_weights: Path | None = Field(default=None, repr=False)
+    singing: ApplioRenderConfig | None = Field(default=None, repr=False)
+    tts_service_config: Path | None = Field(default=None, repr=False)
     tts_server_revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{40,64}$")
     heartbeat_seconds: float = Field(default=3, ge=0.05, le=30, allow_inf_nan=False)
     request_timeout_seconds: float = Field(default=10, gt=0, le=30, allow_inf_nan=False)
@@ -104,6 +109,19 @@ class VoiceNodeConfig(BaseModel):
             raise ValueError("node credential must be a private printable token")
         return value
 
+    @field_validator("core_connect_address")
+    @classmethod
+    def unicast_address(cls, value):
+        if value is None:
+            return None
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            raise ValueError("Core connect address must be a literal IP address") from None
+        if address.is_unspecified or address.is_multicast:
+            raise ValueError("Core connect address must be unicast")
+        return str(address)
+
     @model_validator(mode="after")
     def local_configuration(self):
         if not self.workspace.is_absolute() or not self.workspace.is_dir():
@@ -117,7 +135,7 @@ class VoiceNodeConfig(BaseModel):
             raise ValueError("state_directory must remain inside the workspace")
         object.__setattr__(self, "workspace", root)
         object.__setattr__(self, "state_directory", state)
-        if self.tts is None and self.asr is None:
+        if self.tts is None and self.asr is None and self.singing is None:
             raise ValueError("at least one local provider must be explicitly configured")
         if self.tts is not None:
             if self.tts.api_key is not None and (
@@ -125,10 +143,8 @@ class VoiceNodeConfig(BaseModel):
             ):
                 raise ValueError("TTS proxy credentials must be independent of the Core credential")
             if (
-                self.tts_gpt_weights is None
-                or not self.tts_gpt_weights.is_absolute()
-                or self.tts_sovits_weights is None
-                or not self.tts_sovits_weights.is_absolute()
+                self.tts_service_config is None
+                or not self.tts_service_config.is_absolute()
                 or self.tts_server_revision is None
                 or self.tts.max_concurrency != 1
                 or self.tts.output.max_bytes > MAX_AUDIO_BYTES
@@ -138,8 +154,7 @@ class VoiceNodeConfig(BaseModel):
         elif any(
             value is not None
             for value in (
-                self.tts_gpt_weights,
-                self.tts_sovits_weights,
+                self.tts_service_config,
                 self.tts_server_revision,
             )
         ):
@@ -155,29 +170,10 @@ class VoiceNodeConfig(BaseModel):
         return self
 
 
-def _file_digest(path: Path) -> dict:
-    try:
-        if not path.is_file() or path.is_symlink():
-            raise OSError
-        before = path.stat()
-        if not 0 < before.st_size <= 32_000_000_000:
-            raise OSError
-        hasher = hashlib.sha256()
-        with path.open("rb") as handle:
-            while block := handle.read(1024 * 1024):
-                hasher.update(block)
-        after = path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-            raise OSError
-        return {"sha256": hasher.hexdigest(), "bytes": after.st_size}
-    except OSError:
-        raise VoiceProtocolError("VOICE_MANIFEST_RESOURCE_UNAVAILABLE") from None
-
-
 def local_manifest(config: VoiceNodeConfig) -> dict:
     """Hash actual operator-controlled resources, never cloud-supplied paths.
 
-    GPT-SoVITS's configured weight files describe the intended service instance;
+    The configured resource files describe the intended service instance;
     this is not remote attestation that an unmanaged HTTP server loaded those files.
     """
     manifest = {
@@ -186,16 +182,20 @@ def local_manifest(config: VoiceNodeConfig) -> dict:
         "execution_timeout_seconds": config.execution_timeout_seconds,
     }
     if config.tts is not None:
+        from companion_voice_node.speech_service import load_service_config, service_manifest
+
         options = config.tts.model_dump(
-            mode="json", exclude={"reference_audio_path", "prompt_text", "api_key"}
+            mode="json", exclude={"api_key"}
         )
-        options["prompt_text_sha256"] = hashlib.sha256(config.tts.prompt_text.encode()).hexdigest()
+        service = load_service_config(config.tts_service_config)
+        if (service.model != config.tts.model or service.voice != config.tts.voice
+                or service.base.max_concurrency != 1):
+            raise VoiceProtocolError("VOICE_MANIFEST_RESOURCE_UNAVAILABLE")
         manifest["providers"]["tts"] = {
             "options": options,
             "server_revision": config.tts_server_revision,
-            "reference": _file_digest(config.tts.reference_audio_path),
-            "gpt_weights": _file_digest(config.tts_gpt_weights),
-            "sovits_weights": _file_digest(config.tts_sovits_weights),
+            "configuration": _file_digest(config.tts_service_config),
+            "service": service_manifest(service),
         }
     if config.asr is not None:
         root = config.asr.model_dir
@@ -219,6 +219,24 @@ def local_manifest(config: VoiceNodeConfig) -> dict:
             "versions": versions,
             "files": {path.name: _file_digest(path) for path in files},
         }
+    if config.singing is not None:
+        overlay = config.singing.dependency_overlay
+        installed = {}
+        if overlay is not None:
+            if not overlay.is_dir():
+                raise VoiceProtocolError("VOICE_MANIFEST_RESOURCE_UNAVAILABLE")
+            records = sorted(overlay.glob("*.dist-info/RECORD"))
+            if not 1 <= len(records) <= 256:
+                raise VoiceProtocolError("VOICE_MANIFEST_RESOURCE_UNAVAILABLE")
+            installed = {path.parent.name: _file_digest(path) for path in records}
+        root = Path(__file__).parent
+        manifest["providers"]["sing"] = {
+            "resources": config.singing.verify(), "installed": installed,
+            "source": {name: _file_digest(root / name) for name in (
+                "worker.py", "state.py", "supervisor.py", "applio_render.py",
+                "singing_provider.py", "singing_audio.py", "singing_decode.py")},
+            "versions": {name: importlib.metadata.version(name) for name in ("av", "numpy")},
+        }
     return manifest
 
 
@@ -229,6 +247,19 @@ class VoiceNodeWorker:
         self.supervisor_factory = supervisor_factory or ProcessSupervisor
         self.manifest_sha256 = None
         self._lease_until = 0.0
+
+    async def _pin_core(self, request):
+        """Reuse Host/SNI destination pinning without changing the HTTPS authority."""
+        if self.config.core_connect_address is None:
+            return
+        origin = httpx.URL(self.config.core_origin)
+        if (request.url.scheme, request.url.host, request.url.port) != (
+            origin.scheme, origin.host, origin.port
+        ):
+            raise VoiceProtocolError("VOICE_CORE_ORIGIN_CHANGED")
+        request.headers["Host"] = urlsplit(self.config.core_origin).netloc
+        request.extensions["sni_hostname"] = origin.host
+        request.url = request.url.copy_with(host=self.config.core_connect_address)
 
     def _verify(self, lease: SignedVoiceLease, *, rtt: float, previous=None) -> float:
         verify_voice_lease(
@@ -271,7 +302,10 @@ class VoiceNodeWorker:
     async def _request(self, client, method, suffix, value, model, *, budget_seconds=None,
                        owner_token=None, recovery_missing=False):
         data = canonical_bytes(value) if value is not None else b""
-        if len(data) > MAX_RESULT_BODY_BYTES:
+        from companion_delivery_protocol.singing import MAX_RESULT_BODY_BYTES as song_limit
+
+        limit = song_limit if getattr(value, "operation", None) == "sing" else MAX_RESULT_BODY_BYTES
+        if len(data) > limit:
             raise VoiceProtocolError("VOICE_CORE_REQUEST_TOO_LARGE")
         headers = {"Content-Type": "application/json"}
         if owner_token is not None:
@@ -393,6 +427,12 @@ class VoiceNodeWorker:
                 raise VoiceProtocolError("VOICE_INPUT_TEXT_INVALID") from None
             if not text.strip() or len(text) > self.config.tts.max_text_chars:
                 raise VoiceProtocolError("VOICE_INPUT_TEXT_INVALID")
+        elif lease.operation == "sing":
+            from companion.singing_protocol import SingingRecipe
+
+            if self.config.singing is None:
+                raise VoiceProtocolError("VOICE_PROVIDER_NOT_CONFIGURED")
+            SingingRecipe.model_validate_json(data)
         else:
             if self.config.asr is None:
                 raise VoiceProtocolError("VOICE_PROVIDER_NOT_CONFIGURED")
@@ -400,7 +440,8 @@ class VoiceNodeWorker:
         return data
 
     def _packet(self, lease, data):
-        provider = self.config.tts if lease.operation == "tts" else self.config.asr
+        provider = {"tts": self.config.tts, "asr": self.config.asr,
+                    "sing": self.config.singing}[lease.operation]
         options = provider.model_dump(mode="json")
         if lease.operation == "tts" and provider.api_key is not None:
             options["api_key"] = provider.api_key.get_secret_value()
@@ -411,10 +452,44 @@ class VoiceNodeWorker:
             "provider": options,
         }
 
+    async def _download_song(self, client, state, lease, data, temporary, deadline):
+        from companion.singing_protocol import SingingRecipe
+        from source_reader.bili_audio import download_song
+        from source_reader.network import PublicHTTP, ReadFailure
+
+        recipe = SingingRecipe.model_validate_json(data)
+
+        async def guard():
+            nonlocal lease
+            remaining = min(self._lease_until, deadline) - time.monotonic()
+            if remaining <= 0:
+                raise VoiceProtocolError("VOICE_EXECUTION_DEADLINE")
+            response, lease = await self._control(client, state, lease, "RUNNING",
+                budget_seconds=min(remaining, self.config.request_timeout_seconds))
+            if response.action != "CONTINUE":
+                raise VoiceProtocolError("VOICE_LEASE_" + response.action)
+
+        try:
+            async with (asyncio.timeout(max(0.001, deadline - time.monotonic())),
+                        PublicHTTP() as public):
+                song = await download_song(public, recipe.bvid, recipe.part,
+                    temporary / "source.m4a", guard=guard,
+                    now=datetime.fromtimestamp(time.time(), UTC),
+                    max_seconds=recipe.max_seconds, max_bytes=recipe.max_input_bytes)
+        except ReadFailure as error:
+            raise VoiceProtocolError(str(error)) from None
+        source = {key: song.identity[key] for key in ("bvid", "cid", "part")}
+        source.update(duration_milliseconds=round(song.identity["duration_seconds"] * 1000),
+            **{key: song.proof[key] for key in ("audio_sha256", "audio_bytes",
+                "view_response_sha256", "nav_response_sha256", "playinfo_response_sha256",
+                "representation_sha256", "locator_sha256", "used_requests", "used_bytes")})
+        return {"song_path": str(song.path), "song_source": source,
+                "node_manifest_sha256": self.manifest_sha256}
+
     def _startup(self, state):
         resource = state.resource()
         if resource["state"] == "RUNNING":
-            if resource.get("operation") == "asr" and process_has_exited(
+            if resource.get("operation") in {"asr", "sing"} and process_has_exited(
                 resource.get("pid"),
                 resource.get("process_identity"),
             ):
@@ -502,6 +577,7 @@ class VoiceNodeWorker:
         old_cursor = state.meta("claim_cursor")
         async with httpx.AsyncClient(
             transport=self.transport, trust_env=False, follow_redirects=False,
+            event_hooks={"request": [self._pin_core]},
             timeout=self.config.request_timeout_seconds,
             headers={"Authorization": "Bearer " + self.config.credential.get_secret_value(),
                      "Accept-Encoding": "identity", "Accept": "application/json"},
@@ -610,6 +686,16 @@ class VoiceNodeWorker:
                 )
             ):
                 raise VoiceProtocolError("VOICE_PROCESS_OUTPUT_INVALID")
+        elif payload.kind == "sing":
+            from companion.singing_protocol import SingingRecipe
+
+            recipe = SingingRecipe.model_validate_json(data)
+            source = payload.manifest["source"]
+            if (payload.manifest["node_manifest_sha256"] != self.manifest_sha256
+                or source["bvid"] != recipe.bvid or source["part"] != recipe.part
+                or source["audio_bytes"] > recipe.max_input_bytes
+                or source["duration_milliseconds"] > recipe.max_seconds * 1000):
+                raise VoiceProtocolError("VOICE_PROCESS_OUTPUT_INVALID")
         elif (
             payload.partial != lease.source_partial
             or payload.duration_seconds
@@ -643,6 +729,11 @@ class VoiceNodeWorker:
             raise VoiceProtocolError("VOICE_MANIFEST_CHANGED")
         temporary = state.prepare_temp(lease)
         supervisor = self.supervisor_factory(self.config.workspace, temporary)
+        if lease.operation == "sing":
+            from companion_delivery_protocol.singing import MAX_RESULT_BODY_BYTES as song_limit
+
+            supervisor.output_limit = song_limit + 8192
+            supervisor.memory_bytes = 16 * 1024**3
         supervisor.on_started = lambda pid, identity: state.bind_process(lease, pid, identity)
         dispatched, cleared, execution = False, False, None
         try:
@@ -658,8 +749,12 @@ class VoiceNodeWorker:
             state.dispatch(lease, pid=supervisor.process.pid, process_identity=supervisor.identity)
             dispatched = True
             overall_deadline = time.monotonic() + self.config.execution_timeout_seconds
+            packet = self._packet(lease, data)
+            if lease.operation == "sing":
+                packet.update(await self._download_song(client, state, lease, data,
+                                                        temporary, overall_deadline))
             await asyncio.wait_for(
-                supervisor.dispatch(self._packet(lease, data)),
+                supervisor.dispatch(packet),
                 max(0.001, min(self._lease_until, overall_deadline) - time.monotonic()),
             )
             execution = asyncio.create_task(supervisor.result())
@@ -710,11 +805,13 @@ class VoiceNodeWorker:
                     resource_state=state.resource()["state"],
                     error_code=code,
                 )
-                if lease.operation == "asr" or message["remote_state"] == "NOT_STARTED":
+                if lease.operation in {"asr", "sing"} or message["remote_state"] == "NOT_STARTED":
                     state.release_resource()
                     cleared = True
                 raise VoiceProtocolError(code)
             payload = self._validated_payload(message, lease, data)
+            if lease.operation == "sing" and payload.manifest["source"] != packet["song_source"]:
+                raise VoiceProtocolError("VOICE_PROCESS_OUTPUT_INVALID")
             state.release_resource()
             cleared = True
             result = make_voice_result(VoiceLeaseRef.from_lease(lease), payload)
@@ -783,6 +880,7 @@ class VoiceNodeWorker:
             self.manifest_sha256 = digest(await asyncio.to_thread(local_manifest, self.config))
             async with httpx.AsyncClient(
                 transport=self.transport,
+                event_hooks={"request": [self._pin_core]},
                 timeout=self.config.request_timeout_seconds,
                 trust_env=False,
                 follow_redirects=False,

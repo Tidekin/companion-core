@@ -13,9 +13,6 @@ def configure(arguments):
     root = arguments.runtime_root.resolve(strict=True)
     workspace = arguments.workspace.resolve(strict=True)
     profile = json.loads(arguments.profile.read_text(encoding="utf-8-sig"))
-    pins = json.loads((root / "upstream-pins.json").read_text(encoding="utf-8-sig"))
-    models = root / "upstream" / ("GPT-SoVITS-" + pins["gpt_release_commit"])
-    models /= "GPT_SoVITS/pretrained_models"
     connection = {
         "node_id": "owner-local-4070",
         "core_origin": "https://core.example.invalid",
@@ -24,7 +21,8 @@ def configure(arguments):
     }
     if arguments.connection is not None:
         connection = json.loads(arguments.connection.read_text(encoding="utf-8-sig"))
-        if set(connection) != {"node_id", "core_origin", "core_public_key", "credential"}:
+        required = {"node_id", "core_origin", "core_public_key", "credential"}
+        if not required <= set(connection) or set(connection) - required - {"core_connect_address"}:
             raise ValueError(
                 "Connection file requires exactly node ID, HTTPS origin, key and token"
             )
@@ -34,15 +32,17 @@ def configure(arguments):
         "state_directory": str(workspace / ".local/voice-node" / connection["node_id"]),
         "tts": profile["tts"],
         "asr": profile["asr"],
-        "tts_gpt_weights": str(models / "s1v3.ckpt"),
-        "tts_sovits_weights": str(models / "v2Pro/s2Gv2ProPlus.pth"),
-        "tts_server_revision": pins["gpt_release_commit"],
+        "tts_service_config": profile.get("tts_service_config"),
+        "tts_server_revision": profile.get("tts_server_revision"),
         "heartbeat_seconds": 3,
         "request_timeout_seconds": 10,
         "execution_timeout_seconds": 90,
         "startup_timeout_seconds": 30,
         "result_cache_ttl_seconds": 120,
     }
+    if profile.get("singing") is not None:
+        value.update(singing=profile["singing"], execution_timeout_seconds=600,
+                     request_timeout_seconds=30, result_cache_ttl_seconds=300)
     if arguments.connection is None:
         # Connection fields are excluded from the resource manifest. Validate the
         # remaining typed fields with disposable, in-memory values; save no token.

@@ -29,11 +29,12 @@ from companion.voice_protocol import (
     digest,
     sign_voice_lease,
 )
-from companion_voice_node.providers import FasterWhisperConfig, GPTSoVITSConfig, validate_wav
+from companion_voice_node.providers import FasterWhisperConfig, OpenAISpeechConfig, validate_wav
 from companion_voice_node.state import NodeState
 from companion_voice_node.supervisor import ProcessSupervisor, child_entry, process_has_exited
 from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker, local_manifest, main
 from tests.test_local_voice_providers import wav_bytes
+from tests.voice_service_fixtures import speech_config
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 
@@ -41,15 +42,13 @@ WORKSPACE = Path(__file__).resolve().parents[1]
 @pytest.fixture
 def node(tmp_path):
     key = Ed25519PrivateKey.generate()
-    reference = tmp_path / "reference.wav"
-    reference.write_bytes(wav_bytes(3))
     model = tmp_path / "asr-model"
     model.mkdir()
     for name in ("model.bin", "config.json", "tokenizer.json"):
         (model / name).write_bytes(b"model stub for supervised process tests")
-    gpt, sovits = tmp_path / "gpt.ckpt", tmp_path / "sovits.pth"
-    gpt.write_bytes(b"pinned GPT stub")
-    sovits.write_bytes(b"pinned SoVITS stub")
+    service = speech_config(tmp_path / "speech")
+    service_path = tmp_path / "speech.json"
+    service_path.write_text(service.model_dump_json(), encoding="utf-8")
     config = VoiceNodeConfig(
         node_id="test-local-node",
         core_origin="https://core.invalid",
@@ -57,10 +56,9 @@ def node(tmp_path):
         core_public_key=key.public_key().public_bytes_raw().hex(),
         workspace=WORKSPACE,
         state_directory=tmp_path / "node-state",
-        tts=GPTSoVITSConfig(reference_audio_path=reference, prompt_text="参考音频原文"),
+        tts=OpenAISpeechConfig(model=service.model),
         asr=FasterWhisperConfig(model_dir=model),
-        tts_gpt_weights=gpt,
-        tts_sovits_weights=sovits,
+        tts_service_config=service_path,
         tts_server_revision="a" * 40,
         heartbeat_seconds=0.05,
         request_timeout_seconds=0.3,
@@ -563,10 +561,11 @@ def test_receipt_digest_mismatch_does_not_accept_or_recompute_result(node):
 def test_local_manifest_hash_tracks_real_files_and_parameters(node):
     config, _, _ = node
     initial = digest(local_manifest(config))
-    config.tts_gpt_weights.write_bytes(b"changed local weights")
+    service = json.loads(config.tts_service_config.read_text(encoding="utf-8"))
+    Path(service["gpt_weights"]).write_bytes(b"changed local weights")
     assert digest(local_manifest(config)) != initial
     manifest = canonical_bytes(local_manifest(config))
-    assert str(config.tts.reference_audio_path).encode() not in manifest
+    assert service["base"]["reference_audio_path"].encode() not in manifest
     assert config.credential.get_secret_value().encode() not in manifest
 
 
@@ -577,7 +576,8 @@ def test_manifest_change_after_claim_prevents_process_dispatch(node):
     def changed(request):
         response = core(request)
         if request.url.path.endswith("/input"):
-            config.tts_gpt_weights.write_bytes(b"changed during the claim")
+            service = json.loads(config.tts_service_config.read_text(encoding="utf-8"))
+            Path(service["gpt_weights"]).write_bytes(b"changed during the claim")
         return response
 
     with pytest.raises(VoiceProtocolError, match="VOICE_MANIFEST_CHANGED"):

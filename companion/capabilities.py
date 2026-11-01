@@ -22,7 +22,7 @@ from companion import (
 )
 from companion.budget import capacity_exhausted, total_monthly
 from companion.contracts import CoreError
-from companion.exploration import METERED_READS_SQL
+from companion.exploration import METERED_USAGE_SQL
 from companion.source_grants import SourceGrantService, SourceGrantSnapshot
 from companion.sources import supports
 
@@ -297,7 +297,7 @@ def public_source_readiness(store, settings, clock, adapter_id, *, integration=N
             "THEN accounted_requests ELSE 0 END) daily, SUM(CASE WHEN started_at>=? "
             "THEN accounted_bytes ELSE 0 END) bytes, SUM(CASE WHEN started_at>=? "
             "AND operation='read' THEN 1 ELSE 0 END) reads "
-            f"FROM ({METERED_READS_SQL}) WHERE started_at>=?", (day, day, day, month),
+            f"FROM ({METERED_USAGE_SQL}) WHERE started_at>=?", (day, day, day, month),
         )
         if ((used["daily"] or 0) + policy.reader_max_requests > limits["daily_requests"]
             or (used["monthly"] or 0) + policy.reader_max_requests > limits["monthly_requests"]
@@ -397,7 +397,7 @@ def _bili_video_facts(store, settings, now, readers, model_blocks):
         "THEN accounted_requests ELSE 0 END) daily,SUM(CASE WHEN started_at>=? "
         "THEN accounted_bytes ELSE 0 END) bytes,SUM(CASE WHEN started_at>=? "
         "AND operation='read' THEN 1 ELSE 0 END) reads "
-        f"FROM ({METERED_READS_SQL}) WHERE started_at>=?", (day, day, day, month))
+        f"FROM ({METERED_USAGE_SQL}) WHERE started_at>=?", (day, day, day, month))
     media_bytes = config.media.max_input_bytes + MAX_METADATA_BYTES
     if ((used["daily"] or 0) + 8 > settings.exploration_daily_requests
         or (used["monthly"] or 0) + 8 > settings.exploration_monthly_requests
@@ -445,9 +445,10 @@ def _voice_facts(store, settings, now, operation, live_blocks):
     if not native and operation == "asr" and (not settings.live_text_window
                               or settings.live_text_window.rich_input_scope != "references_v1"):
         unavailable.append("VOICE_ASR_SCOPE_REQUIRED")
-    policy = config.asr if operation == "asr" else config.reply
+    policy = {"asr": config.asr, "tts": config.reply, "sing": config.singing}[operation]
     used = store.one("SELECT COUNT(CASE WHEN state IN ('QUEUED','LEASED','RUNNING') THEN 1 END) "
-        "pending,COALESCE(SUM(COALESCE(length(input_blob),0)+COALESCE(length(result_blob),0)),0) "
+        "pending,COALESCE(SUM(COALESCE(length(input_blob),0)+"
+        "MAX(COALESCE(length(result_blob),0),reserved_output_bytes)),0) "
         "bytes FROM voice_jobs")
     paused = []
     if used["pending"] >= config.max_pending_jobs or used["bytes"] >= config.max_private_blob_bytes:
@@ -470,13 +471,25 @@ def _voice_facts(store, settings, now, operation, live_blocks):
     observation = ("OBSERVED" if any(value <= config.lease_ttl_seconds for value in age)
                    else "STALE" if age else "UNOBSERVED")
     limits = {"max_pending_jobs": config.max_pending_jobs,
-              "max_private_blob_bytes": config.max_private_blob_bytes,
-              "wait_seconds": policy.wait_seconds}
+              "max_private_blob_bytes": config.max_private_blob_bytes}
+    if operation == "sing":
+        if policy is not None:
+            limits.update(max_seconds=policy.max_seconds, max_input_bytes=policy.max_input_bytes,
+                          segment_seconds=55, max_segments=24)
+            try:
+                from companion.singing import policy as singing_policy
+
+                singing_policy(settings)
+            except CoreError as error:
+                unavailable.append(error.code)
+    else:
+        limits["wait_seconds"] = policy.wait_seconds
     if operation == "asr":
         limits.update(max_records=policy.max_records, max_context_chars=policy.max_context_chars)
-    else:
+    elif operation == "tts":
         limits.update(max_chars=policy.max_chars, mode=policy.mode)
-    return {"enabled": config.enabled and policy.enabled, "unavailable": unavailable,
+    enabled = policy is not None if operation == "sing" else policy.enabled
+    return {"enabled": config.enabled and enabled, "unavailable": unavailable,
             "paused": live_blocks + paused,
             "observation": observation, "limits": limits}
 
@@ -705,6 +718,9 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         **_voice_facts(store, cfg, now, "asr", live_blocks))
     add("qq.voice.tts", "把当前已授权回复转为语音；等待和失败按策略回退文字，"
         "是否发出以原发送回执为准。", **_voice_facts(store, cfg, now, "tts", live_blocks))
+    add("qq.voice.singing", "本轮私聊可按点歌或气氛选择真实 B 站歌曲，用固定本地音色翻唱；"
+        "完成后按序发送完整语音气泡。UNKNOWN 停止后续派发。",
+        **_voice_facts(store, cfg, now, "sing", live_blocks))
     add("qq.poke", "按策略回应主人私聊的原生戳一戳通知，可选择文字、回拍或不回应。",
         **_poke_facts(store, cfg, now, model_blocks, send_blocks))
     add("qq.poke.native", "在单独许可与互动限额内向主人回拍一次。",
@@ -830,6 +846,7 @@ def prompt_parts(summary, *, compact=False):
         "回答能力问题时，以本轮状态为准；历史中的能力自述可能已过时。"
         "可用的系统流程和主人指令也是已接入的能力；本轮没有可直接调用的函数，"
         "不表示这些能力未接入。没有本次回执只表示尚未确认执行结果；"
+        "暂缓或不可用只描述当前接纳状态，不能推断以前未执行；历史操作以原生回执为准。"
         "单次读取失败只说明该次失败，不能据此否定整个读取通道。"
     )
     lines = ["\n当前能力：可用表示这边能接这类事，不代表已经做了；被问能做什么时用自己的话说。",

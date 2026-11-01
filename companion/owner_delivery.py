@@ -113,6 +113,9 @@ def _sources(store, settings, clock, job, *, executing=False):
         _images(store, settings, clock, job, executing=executing)
         _memories(store, settings, clock, job, view)
         _readings(store, settings, clock, job, executing=executing)
+        from companion.agent_singing import revalidate
+
+        revalidate(store, settings, clock, job, _snapshots(store, job))
     elif job["kind"] == "activity":
         notices.validate(store, settings, job, clock())
     elif job["kind"] == "poke":
@@ -138,7 +141,7 @@ def _usage(store, job, view):
 
 
 def _material(store, row, job, view, requests, *, meme_binding=None):
-    from companion.agent_output import reply_format
+    from companion.agent_output import reply_format, song_choice
 
     event = store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
     if (not event or row["origin_event_id"] != job["event_id"]
@@ -158,6 +161,10 @@ def _material(store, row, job, view, requests, *, meme_binding=None):
             **({"reply_format": "voice"} if job["kind"] == "chat"
                and "voice" in view.policy.purposes
                and reply_format(store, job["event_id"]) == "voice" else {}),
+            **({"reply_format": "singing",
+                "singing_request_id": song_choice(store, job["event_id"])}
+               if job["kind"] == "chat" and reply_format(store, job["event_id"]) == "singing"
+               else {}),
             **({"meme_binding_version": meme_binding["version"],
                 "meme_binding_sha256": paid_budget.sha(meme_binding)}
                if meme_binding is not None else {})}
@@ -262,7 +269,17 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
             or [row["message_id"] for row in group["rows"]] != message_ids):
             raise CoreError("OWNER_DELIVERY_GROUP_CHANGED", 403)
         policy = settings.segmented_reply
-        if group["segmented"] and (policy is None
+        from companion.agent_output import reply_format, song_choice
+
+        is_song = job["kind"] == "chat" and reply_format(store, job["event_id"]) == "singing"
+        if is_song:
+            from companion.agent_singing import selected
+
+            manifest = selected(store, settings, clock, job, song_choice(store, job["event_id"]))
+            if (len(message_ids) != len(manifest["segments"])
+                or any(item["interval_ms"] != 0 for item in envelopes.values())):
+                raise CoreError("OWNER_DELIVERY_GROUP_CHANGED", 403)
+        elif group["segmented"] and (policy is None
             or policy.max_segments != "unlimited" and len(message_ids) > policy.max_segments
             or any(item["interval_ms"] != policy.interval_ms for item in envelopes.values())):
             raise CoreError("OWNER_DELIVERY_GROUP_CHANGED", 403)

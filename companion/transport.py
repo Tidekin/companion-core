@@ -314,12 +314,16 @@ def lease_deliveries(store, settings, request, now):
                 if error.code not in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED,
                                       reply_revision.CANCELLED, "OWNER_SOURCE_CHANGED",
                                       "OWNER_CAPTURE_INVALID", "OWNER_SOURCE_JOB_BINDING_REQUIRED",
-                                      "OWNER_DELIVERY_SOURCE_CHANGED"}:
+                                      "OWNER_DELIVERY_SOURCE_CHANGED", "SINGING_RESULT_CHANGED",
+                                      "SINGING_ORIGINAL_SOURCE_CHANGED",
+                                      "SINGING_ORIGINAL_TOOL_REQUIRED",
+                                      "SINGING_DISABLED", "SINGING_SOURCE_UNAVAILABLE"}:
                     raise
                 store.execute(
                     "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
                     "last_error_code=? WHERE message_id=?", (now, error.code, row["message_id"]),
                 )
+                _cancel_segment_tails(store, now)
                 continue
             problem = share_delivery_problem(store, settings, row["message_id"], now)
             if problem:
@@ -348,7 +352,21 @@ def lease_deliveries(store, settings, request, now):
                 from companion.voice_flow import VoiceFlow
 
                 voice_flow = VoiceFlow(store, settings, lambda: now)
-                if voice_flow.prepare_reply(row["message_id"]).state == "WAITING":
+                try:
+                    decision = voice_flow.prepare_reply(row["message_id"])
+                except CoreError as error:
+                    from companion.agent_output import reply_format
+
+                    if (reply_format(store, row["origin_event_id"]) != "singing"
+                        or error.code not in {"SINGING_DELIVERY_FENCED",
+                                              "VOICE_FLOW_RECEIPT_INVALID"}):
+                        raise
+                    store.execute("UPDATE outbox SET state='CANCELLED',lease_token=NULL,"
+                        "updated_at=?,last_error_code=? WHERE message_id=?",
+                        (now, error.code, row["message_id"]))
+                    _cancel_segment_tails(store, now)
+                    continue
+                if decision.state == "WAITING":
                     continue
             token = uid("lease")
             store.execute(

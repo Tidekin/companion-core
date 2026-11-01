@@ -589,8 +589,11 @@ class NodeState:
         return path
 
     def save_result(self, result: VoiceResult, *, expires_at: float):
+        from companion_delivery_protocol.singing import MAX_RESULT_BODY_BYTES as song_limit
+
         data = canonical_bytes(result)
-        if len(data) > MAX_RESULT_BODY_BYTES or expires_at <= time.time():
+        limit = song_limit if result.operation == "sing" else MAX_RESULT_BODY_BYTES
+        if len(data) > limit or expires_at <= time.time():
             raise VoiceProtocolError("VOICE_RESULT_CACHE_EXPIRED")
         name = f"{result.ref.job_id}_{result.ref.generation}.json"
         path = self._cache_path(name)
@@ -608,15 +611,19 @@ class NodeState:
             )
 
     def cached_result(self, job: dict) -> VoiceResult | None:
+        from companion_delivery_protocol.singing import MAX_RESULT_BODY_BYTES as song_limit
+
         if not job["cache_file"] or job["cache_expires"] <= time.time():
             return None
         path = self._cache_path(job["cache_file"])
+        lease = SignedVoiceLease.model_validate_json(job["lease_json"])
+        limit = song_limit if lease.operation == "sing" else MAX_RESULT_BODY_BYTES
         try:
             with path.open("rb") as handle:
-                data = handle.read(MAX_RESULT_BODY_BYTES + 1)
+                data = handle.read(limit + 1)
         except FileNotFoundError:
             return None
-        if len(data) > MAX_RESULT_BODY_BYTES:
+        if len(data) > limit:
             raise VoiceProtocolError("VOICE_RESULT_CACHE_INVALID")
         try:
             result = VoiceResult.model_validate_json(data)

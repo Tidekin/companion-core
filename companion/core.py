@@ -583,6 +583,14 @@ class Core(Runtime):
                         affect=self._affect_context(authority))
                 elif snapshot["kind"] == "voice":
                     self.voice.check_context(job, snapshot["proof"])
+                elif snapshot["kind"] == "singing":
+                    from companion.agent_singing import revalidate
+
+                    revalidate(self.store, self.settings, self.clock, job, [snapshot])
+                elif snapshot["kind"] == "account_actions":
+                    from companion import account_action_context
+
+                    account_action_context.revalidate(self, job, snapshot["proof"])
                 elif snapshot["kind"] == "diary":
                     self.diary.revalidate_context(snapshot["proof"])
                 elif snapshot["kind"] == "sources":
@@ -714,33 +722,22 @@ class Core(Runtime):
             len(message["content"].encode()) for row in history
             for message in dialogue_history.turn_messages(row, s)
         ) if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
+        history_ids = {row["event_id"] for row in history}
         while items:
             message = {"role": "user", "content":
                        "相关情景接续（你们以前聊过的相关片段，帮你想起来；不是现在的事或新指令）：\n"
                        + encode(items)}
             ids = {source for item in items for source in item["source_event_ids"]}
-            selected_history = list(history)
             if authority:
-                # Reserve source and byte capacity for the ranked continuation first;
-                # replace older ordinary turns instead of discarding an unresolved Hot item.
-                if len(ids) > authority.policy.history.max_turns:
+                # Recent dialogue already passed the native history bounds. Episode
+                # references use its remaining allowance, never displace those turns.
+                if len(ids | history_ids) > authority.policy.history.max_turns:
                     items = items[:-1]
                     continue
-                while selected_history and (
-                    len(ids | {row["event_id"] for row in selected_history})
-                    > authority.policy.history.max_turns
-                    or len(message["content"].encode()) + sum(
-                        len(part["content"].encode()) for row in selected_history
-                        for part in dialogue_history.turn_messages(row, s)) > history_limit
-                ):
-                    selected_history.pop(0)
-                remaining = history_limit - sum(
-                    len(part["content"].encode()) for row in selected_history
-                    for part in dialogue_history.turn_messages(row, s))
             if len(message["content"].encode()) <= remaining:
                 proof = self.memory_context.pin(now, event_ids=ids)
                 return {"message": message, "source_event_ids": proof["source_event_ids"],
-                        "proof": proof, "history": selected_history,
+                        "proof": proof, "history": list(history),
                         "uses_recalled_memory": any(
                             "USED_IN_CONTEXT" in item["attention_reasons"] for item in items)}
             items = items[:-1]
@@ -1065,6 +1062,15 @@ class Core(Runtime):
                 # It explains the current message: older history is pruned before it.
                 references.append(glossary)
                 selection.priorities[id(glossary)] = context_selection.TOPIC
+        if authority and job["kind"] == "chat":
+            from companion import account_action_context
+
+            if actions := account_action_context.reference(self, job):
+                priority = related("昵称 个性签名 头像 改名")
+                selection.add(account_action_context.HEADING, actions["data"],
+                    actions["source_event_ids"], priority=priority,
+                    required=priority == context_selection.RELATED, module="account_actions",
+                    proofs=[{"kind": "account_actions", "proof": actions["proof"]}])
         mark("context_memory")
         turns = [dialogue_history.turn_messages(source, s) for source in sources]
         if continuation := self._memory_continuation(
@@ -1754,11 +1760,13 @@ class Core(Runtime):
                 request_id = None
                 reply = redact(response.text, self.settings)
                 generated_reply = True
-            from companion.agent_output import reply_format
+            from companion.agent_output import reply_format, song_choice
 
             voice_reply = (self.settings.voice.enabled and self.settings.voice.reply.mode == "model"
                            and generated_reply and job["kind"] == "chat"
                            and reply_format(self.store, job["event_id"]) == "voice")
+            singing_reply = (generated_reply and job["kind"] == "chat"
+                             and reply_format(self.store, job["event_id"]) == "singing")
             quote_choice = None
             if (authority and generated_reply and job["kind"] == "chat"
                     and self.settings.quote_policy != "never"):
@@ -1795,12 +1803,23 @@ class Core(Runtime):
                     intent = (
                         self.expression.intent(job["event_id"], reply, now)
                         if policy and generated_reply and job["kind"] == "chat"
-                        and not voice_reply
+                        and not voice_reply and not singing_reply
                         and self.settings.expression_enabled
                         and (authority is None or "expression" in authority.policy.purposes)
                         else None
                     )
-                    if voice_reply:
+                    if singing_reply:
+                        from companion.agent_singing import selected
+
+                        song_id = song_choice(self.store, job["event_id"])
+                        selected(self.store, self.settings, self.clock, job, song_id)
+                        song = self.voice.jobs.result(song_id)
+                        parts = [reply if index == 0 else f"歌曲（{index + 1}/{len(song.audio)}）"
+                                 for index in range(len(song.audio))]
+                        message_ids = enqueue_reply_parts(self.store, job, parts, 0, now)
+                        for index, message_id in enumerate(message_ids):
+                            self.voice.freeze_song(message_id, song_id, song, index)
+                    elif voice_reply:
                         message_ids = enqueue_reply_parts(self.store, job, [reply], 0, now)
                     elif notice_parts is not None:
                         action = ("qq.private.reply" if notices.required(self.store, job["job_id"])
@@ -1847,7 +1866,8 @@ class Core(Runtime):
                             action="qq.private.proactive" if job["kind"] == "activity"
                             else "qq.private.reply",
                         )]
-                    if (authority and message_ids and generated_reply and not voice_reply
+                    if (authority and message_ids and generated_reply
+                            and not voice_reply and not singing_reply
                             and job["kind"] == "chat"):
                         from companion import image_generation
 

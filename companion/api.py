@@ -98,7 +98,8 @@ class _MemoryControlExclusive:
 
 class BodyLimit:
     def __init__(self, app, image_limit=131072, meme_limit=131072, file_limit=131072,
-                 voice_limit=131072, voice_input_limit=131072, video_limit=131072):
+                 voice_limit=131072, voice_input_limit=131072, video_limit=131072,
+                 singing_voice_tokens=()):
         self.app = app
         self.image_limit = image_limit
         self.meme_limit = meme_limit
@@ -106,6 +107,7 @@ class BodyLimit:
         self.voice_limit = voice_limit
         self.voice_input_limit = voice_input_limit
         self.video_limit = video_limit
+        self.singing_voice_tokens = singing_voice_tokens
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
@@ -127,6 +129,13 @@ class BodyLimit:
             if re.fullmatch(r"/internal/v3/readers/[^/]+/[^/]+/media", scope["path"])
             else 131072
         )
+        if re.fullmatch(r"/internal/v2/voice-node/jobs/voice_[a-f0-9]{32}/result", scope["path"]):
+            authorization = dict(scope.get("headers", [])).get(b"authorization", b"")
+            if any(hmac.compare_digest(authorization, token)
+                   for token in self.singing_voice_tokens):
+                from companion_delivery_protocol.singing import MAX_RESULT_BODY_BYTES as song_limit
+
+                limit = song_limit
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
@@ -194,6 +203,9 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
                     if settings.private_files.enabled else 131072),
         meme_limit=6 * 1024 * 1024 if settings.meme_semantics_enabled else 131072,
         voice_limit=MAX_RESULT_BODY_BYTES if settings.voice.enabled else 131072,
+        singing_voice_tokens=tuple(("Bearer " + node.token.get_secret_value()).encode()
+            for node in settings.voice.nodes.values()
+            if settings.voice.enabled and node.enabled and "sing" in node.capabilities),
         voice_input_limit=8_000_000 if settings.voice.enabled else 131072,
         video_limit=(4 * ((settings.bili_video.media.max_total_output_bytes + 2) // 3)
                      + 131072 if settings.bili_video.enabled else 131072),

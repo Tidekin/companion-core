@@ -320,7 +320,7 @@ def test_watch_ledger_migration_keeps_entries_and_refuses_lossy_downgrade(tmp_pa
         db.execute("INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_ref,depth,"
                    "state,rating,take,created_at,updated_at) VALUES('watch_1','obs_1',"
                    "'bilibili','u','text','JUDGED',1,'不错',?,?)", (now, now))
-    migrate(str(path))
+    migrate(str(path), "0056_watch_ledger_goal_reads")
     with closing(sqlite3.connect(path)) as db, db:
         assert db.execute("SELECT take FROM watch_ledger").fetchone() == ("不错",)
         db.execute("UPDATE watch_ledger SET platform='web',state='WITHDRAWN'")

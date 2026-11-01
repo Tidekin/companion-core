@@ -1,5 +1,54 @@
 # Native Voice owner authority migration
 
+## Local singing
+
+Optional `voice.singing` adds `sing` to explicitly registered nodes. The SDK uses
+the existing Reader's `discover_content(source="bilibili", query=...)` or the
+owner's shared-link catalog, then `sing_song(source_event_id, part)`. Only actual
+source events already shared with the original chat job are accepted. A settled
+SDK tool call binds `agent_tool_calls.voice_job_id` to the native `voice_jobs`
+queue; the original Reader `request_id` foreign key remains intact. The SDK waits
+without another model request, then `reply_with_song` selects its READY result.
+This enables model choice during a private conversation; it adds no idle scanner.
+
+Singing reserves four requests and bounded source/metadata bytes against the
+existing Reader quota, plus 56 MiB of private result capacity. Cancelled work that
+never released input gives back the source reservation. Started UNKNOWN work
+keeps it; a successful receipt records actual requests and bytes. A second tool
+call cannot replay the original owner input's singing attempt.
+
+The credential-bearing parent rechecks the live Core lease before each public
+request and received chunk. It downloads at most 32 MiB from one API-declared
+HTTPS 443 audio locator, without copying Reader cookies. Its supervised child
+receives local file paths, a frozen source recipe and fixed Applio resources.
+Offline AAC decoding, UVR5 separation and Applio conversion preserve the complete
+source timeline. Windows singing children use the existing Job Object with an
+16 GiB commit limit; all platforms retain the parent deadline and process cleanup.
+Child application/config/cache directories live under the owned temporary path.
+
+The full result is bounded to 56 MiB of JSON, accepted only for an authenticated
+node whose registered capabilities include `sing`. Source policy can tighten the
+600-second/32-MiB limits. The manifest commits to actual source hashes and a
+contiguous PCM16 mono 32-kHz partition, with at most 24 parts, each <=55 seconds
+and 4,000,000 bytes. Each modern outgoing binding includes its exact segment
+index and the compact whole-song manifest; the independent Bridge verifies the
+selected WAV before the existing final send-check. Native ordered Outbox groups
+send the next part only after the previous ACK. An uncertain send stops the tail.
+Full and retired singing proofs remain valid for historical UNKNOWN resolution;
+they never authorize a new delivery.
+
+Configure the operator-owned node profile's `singing` object using
+`ApplioRenderConfig`: explicit absolute model/index/source paths, all ten exact
+resource hashes and, when needed, a local installed `dependency_overlay`.
+`scripts/configure-voice-node.py` retains accepted speech settings and chooses a
+600-second execution budget, 30-second HTTP timeout and 300-second result cache
+for such profiles. It never downloads missing models. A reverse proxy must allow
+the bounded 56-MiB result route; Core still applies the registered-node limit.
+New manifests/configuration require the original native STOP, cleanup, authority
+revision and Bridge handoff. READY heartbeat and actual QQ acceptance are separate
+from offline conversion. The [implementation scope and pinned sources](design-future/applio-singing.md)
+record the approved voice, native Applio API and verification boundaries.
+
 This candidate replaces live-window execution checks in `VoiceFlow` and
 `VoiceJobs` with the existing OwnerAuthority, signed owner-input and native
 Outbox checks. Native Core/API and independent voice-worker acceptance use
@@ -114,6 +163,9 @@ Final service activation remains a separate integration step. No real provider,
 QQ sender or device was activated by these checks.
 
 ## Reuse
+
+The resident fully local GPT-SoVITS/Applio setup and manifest migration are documented
+in [Local daily voice replies](local-speech-runtime.md).
 
 - Existing `owner_authority.current/evidence`, `owner_input.source`,
   `owner_delivery.check_delivery` and native voice lease/retirement code own the

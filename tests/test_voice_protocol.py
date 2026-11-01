@@ -34,7 +34,7 @@ def test_delivery_contracts_import_without_runtime_or_bridge_packages(tmp_path):
         (package / name).write_bytes((root / "companion" / name).read_bytes())
     shared = tmp_path / "companion_delivery_protocol"
     shared.mkdir()
-    for name in ("__init__.py", "authority.py"):
+    for name in ("__init__.py", "authority.py", "singing.py"):
         (shared / name).write_bytes((root / "companion_delivery_protocol" / name).read_bytes())
     source = """
 import importlib.abc, sys
