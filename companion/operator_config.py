@@ -77,7 +77,8 @@ LABELS = {
     "conversation_guidance": "交流指导正文",
     "quote_policy": "回复时引用原消息", "style_live": "聊天时参考已批准的表达",
     "style_distill": "从评论提炼表达候选",
-    "jargon": "学习主人的黑话", "watch_ledger": "观看记录与看法",
+    "jargon": "学习主人的黑话", "meme_wiki": "梗百科（查梗与接梗）",
+    "watch_ledger": "观看记录与看法",
     "rem": "夜间 REM 记录", "life_loop": "生活话题循环",
     "evaluation_enabled": "对话评测实验", "owner_runtime": "主人授权运行模式",
     "token_measurement": "Token 精确计数",
@@ -314,6 +315,7 @@ GROUPS = {"chat_thinking": "model", "chat_thinking_tokens": "model",
           "input_debounce": "expression", "turn_taking": "expression",
           "quote_policy": "expression",
           "style_live": "expression", "style_distill": "expression", "jargon": "memory",
+          "meme_wiki": "expression",
           "watch_ledger": "content", "rem": "autonomy", "life_loop": "autonomy"}
 
 

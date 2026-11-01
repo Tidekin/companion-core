@@ -597,6 +597,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         "tool.discover_content": "exploration", "tool.reading_status": "content",
         "tool.cancel_reading": "content", "model.understand_video": "image",
         "tool.analyze_shared_video": "bili_video",
+        "tool.search_meme_wiki": "chat",
     }
 
     def add(identifier, summary, invocation=("automatic",), *, enabled=True,
@@ -749,6 +750,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         "diary_list": cfg.diary_enabled, "diary_read": cfg.diary_enabled,
         "memory_recall": cfg.memory_enabled, "memory_history": cfg.memory_enabled,
         "goal_list": cfg.goals_enabled,
+        "search_meme_wiki": cfg.meme_wiki.enabled,
         "reading_catalog": cfg.content_enabled and cfg.observation_enabled,
         "read_content": cfg.content_enabled and cfg.observation_enabled,
         "discover_content": cfg.exploration_enabled and cfg.observation_enabled,

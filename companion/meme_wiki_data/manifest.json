@@ -1,0 +1,14 @@
+{
+  "source": "https://github.com/thawline/dsh-memewiki",
+  "revision": "15c3c34149dfb0d5ea3a9b3a4b4f0d7f91318e91",
+  "license": "Non-commercial use permitted by the glossary author; see NOTICE",
+  "files": [
+    {
+      "path": "memes.db.gz",
+      "size": 4697405,
+      "sha256": "60f59618f1cf0f574b5076e8a3e46e47c352b45af397926352f3337375164958",
+      "uncompressed_size": 16732160,
+      "uncompressed_sha256": "f536e40f3d340fd73460598c6adbb5889f715015968d51e6e3b26bf2562b33f7"
+    }
+  ]
+}

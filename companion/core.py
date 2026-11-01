@@ -1052,6 +1052,14 @@ class Core(Runtime):
                     + encode(terms),
                 })
                 reference_sources.append((references[-1], term_sources))
+        # Third-party glossary data: no owner evidence, so no sources or memory purpose.
+        if job["kind"] == "chat" and cfg.meme_wiki.enabled and not bounded_text:
+            from companion import meme_wiki
+
+            if glossary := meme_wiki.context(cfg, text):
+                # It explains the current message: older history is pruned before it.
+                references.append(glossary)
+                selection.priorities[id(glossary)] = context_selection.TOPIC
         mark("context_memory")
         turns = [dialogue_history.turn_messages(source, s) for source in sources]
         if continuation := self._memory_continuation(
