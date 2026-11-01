@@ -15,6 +15,7 @@ from companion.media_config import ContentConfig
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from tests.conftest import run
+from tests.support.failure_notice import assert_failure_notice
 from tests.support.native_images import image_host, raw_event, upload
 from tests.test_onebot_images import image_segment
 
@@ -258,7 +259,10 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
                 with pytest.raises((ValueError, httpx.HTTPStatusError, CoreError)):
                     await upload(active, transport=httpx.MockTransport(cdn), resolver=dns)
             assert not sends and len(calls) <= 1
-            assert not core.store.rows("SELECT * FROM outbox")
+            if failure in {"media_after_dispatch", "reserve"}:
+                assert_failure_notice(core)
+            else:
+                assert not core.store.rows("SELECT * FROM outbox")
             assert not core.store.rows("SELECT * FROM observations")
             if failure in {"dns_stop", "signature", "ledger"}:
                 assert not downloads and not calls

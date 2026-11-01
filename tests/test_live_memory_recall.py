@@ -25,6 +25,7 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
+from tests.support.failure_notice import assert_failure_notice
 from tests.support.native_recall_entry import native_recall, returned
 from tests.support.onebot import provider
 from tests.test_live_text_window import live_fixture
@@ -346,7 +347,8 @@ def test_native_memory_requests_share_the_five_call_cap(core, tmp_path):
             assert len(value.calls) == 5 and len(value.sends) == 2
             assert_settled_calls(core, 5)
             assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 5
-            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 2
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 3
+            assert_failure_notice(core, source["event_id"])
             assert core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
                 (source["event_id"],)) == {"state": "FAILED",
                                          "last_error_code": "MODEL_DAILY_BUDGET_EXHAUSTED"}
@@ -369,7 +371,7 @@ def test_duplicate_memory_tool_ids_across_requests_are_rejected(core, tmp_path):
             assert core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
                 (source["event_id"],)) == {"state": "FAILED",
                                          "last_error_code": "CONVERSATION_TOOL_ID_CONFLICT"}
-            assert not core.store.rows("SELECT * FROM outbox")
+            assert_failure_notice(core)
             assert not await value.worker.run_once("no-duplicate-tool-replay")
     run(scenario())
 
@@ -542,7 +544,7 @@ def test_invalid_memory_tool_arguments_stop_without_facts_or_fallback(core, tmp_
             assert len(value.calls) == 2 and not value.sends
             assert_settled_calls(core, 2)
             assert not core.store.rows("SELECT * FROM agent_tool_calls")
-            assert not core.store.rows("SELECT * FROM outbox")
+            assert_failure_notice(core)
             assert "青竹七号" not in encode(value.calls)
             assert not await value.worker.run_once("no-invalid-tool-replay")
     run(scenario())

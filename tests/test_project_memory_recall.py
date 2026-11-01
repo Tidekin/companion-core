@@ -9,6 +9,7 @@ import pytest
 from companion.store import encode
 from tests.conftest import ingest, run
 from tests.sdk_reader_fixture import answer, call
+from tests.support.failure_notice import assert_failure_notice
 from tests.support.native_recall_entry import native_recall, returned
 from tests.test_live_image_input import options as image_options
 from tests.test_memory_commands import fact
@@ -163,7 +164,7 @@ def test_live_fallback_still_consumes_the_paid_call_budget(core, tmp_path, monke
             assert len(value.calls) == 1 and not value.sends
             assert scores.await_count == 1
             assert_settled_calls(core, 1)
-            assert core.store.rows("SELECT * FROM outbox") == []
+            assert_failure_notice(core)
             assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 1
     run(scenario())
 
@@ -198,7 +199,7 @@ def test_selected_fact_reaches_chat_with_deployed_rich_content_configuration(
             else:
                 # The native tool catalog is part of the actual first request bound.
                 assert len(value.calls) <= 1 and not value.sends
-                assert not core.store.rows("SELECT * FROM outbox")
+                assert_failure_notice(core)
                 assert core.store.one("SELECT last_error_code FROM jobs WHERE event_id=?",
                     (source["event_id"],))["last_error_code"] == "MODEL_INPUT_LIMIT"
             for row in core.store.rows("SELECT input_bound FROM model_admissions"):

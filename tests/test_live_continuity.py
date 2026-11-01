@@ -16,6 +16,7 @@ from companion.privacy import advance_epoch
 from companion.store import encode, uid
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
+from tests.support.failure_notice import assert_failure_notice
 from tests.test_dialogue_context import sent_history
 from tests.test_live_text_window import live_fixture
 
@@ -450,7 +451,11 @@ def test_missing_context_after_model_receive_retains_cost_without_reply(
             core.model.client.event_hooks["response"].append(receive_then_remove)
             assert await core.run_once()
             assert len(calls) == 2 and len(sends) == 1
-            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
+            expected = 1 if change_reply else 2
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == expected
+            if not change_reply:
+                failed = core.store.one("SELECT event_id FROM jobs ORDER BY rowid DESC LIMIT 1")
+                assert_failure_notice(core, failed["event_id"])
             result = core.store.one(
                 "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1"
             )

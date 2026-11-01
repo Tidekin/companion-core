@@ -261,13 +261,16 @@ def test_renewal_fsync_replay_requires_the_exact_reviewed_request(
     assert sum(r["kind"] == model_carry.RENEW for r in rows) == 1
 
 
-def test_new_locally_closed_unknown_still_pauses_life(core, tmp_path):
+def test_new_journal_closed_unknown_no_longer_pauses_life(core, tmp_path):
     from tests.test_model_carry_lifecycle import current_unknown
 
     migrated(core, tmp_path)
     assert not _uncertain(core.store, core.settings)
-    current_unknown(core)
-    assert _uncertain(core.store, core.settings)
+    request_id = current_unknown(core)
+    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+                          (request_id,))["state"] == "UNKNOWN"
+    # Owner decision 2026-11-01: closed liability counts as settled for Life too.
+    assert not _uncertain(core.store, core.settings)
 
 
 @pytest.mark.parametrize("prior_renewal", [False, True])
@@ -287,7 +290,7 @@ def test_renewal_retains_new_closed_unknown_and_uses_existing_input_handoff(
         core.authorized_model_test_jobs = {}
     current = current_unknown(core)
     before = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
-    assert _uncertain(core.store, core.settings)
+    assert not _uncertain(core.store, core.settings)  # journal-closed: Life is not paused
     request, policy, witness = renewal(core, case, number=2 if prior_renewal else 1)
     receipt = model_carry.prepare(core.store, core.settings, request, witness, core.clock())
     assert receipt["retained_micro_usd"] == sum(row["billed_micro_usd"] for row in before)
@@ -318,7 +321,7 @@ def test_renewal_retains_new_closed_unknown_and_uses_existing_input_handoff(
     core.authorized_model_test_capture = active, case.key
     core.authorized_model_test_jobs = {}
     later = current_unknown(core)
-    assert _uncertain(core.store, core.settings)
+    assert not _uncertain(core.store, core.settings)  # journal-closed: Life is not paused
     owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
         operation_id="stop-after-renewal", authority=active["authority"],
     ))

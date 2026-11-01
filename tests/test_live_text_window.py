@@ -13,6 +13,7 @@ from companion.model import ModelClient
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan
 from tests.conftest import run
+from tests.support.failure_notice import assert_failure_notice
 from tests.support.onebot import provider
 from tests.test_onebot_delivery import core_client
 from tests.test_onebot_direct import raw_event
@@ -358,7 +359,10 @@ def test_model_http_request_drift_is_rejected_after_async_hooks(core, tmp_path, 
             usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
             # The checked transport proves that no provider request was dispatched.
             assert usage == {"state": "SETTLED", "billed_micro_usd": 0}
-            assert not core.store.rows("SELECT * FROM outbox")
+            if change in {"body", "header", "endpoint"}:
+                assert_failure_notice(core)
+            else:
+                assert not core.store.rows("SELECT * FROM outbox")
     run(scenario())
 
 
@@ -464,7 +468,10 @@ def test_model_late_or_unknown_results_retain_costs_and_never_enqueue(
             assert await ctx.worker.run_once()
             usage = core.store.one("SELECT * FROM model_usage")
             assert usage["state"] == expected and usage["billed_micro_usd"] > 0
-            assert not core.store.rows("SELECT * FROM outbox")
+            if result == "oversize":
+                assert_failure_notice(core)
+            else:
+                assert not core.store.rows("SELECT * FROM outbox")
             assert len(ctx.calls) == 1 and ctx.sends == []
             core.clock.advance(10)
             await ctx.worker.run_once()
@@ -597,7 +604,7 @@ def test_existing_paid_approval_and_amount_limits_are_not_relaxed(core, tmp_path
             assert await ctx.worker.run_once()
             assert ctx.calls == ctx.sends == []
             assert not core.store.rows("SELECT * FROM model_usage")
-            assert not core.store.rows("SELECT * FROM outbox")
+            assert_failure_notice(core)
             assert ctx.spool.db.execute("SELECT count(*) FROM window_attempts").fetchone()[0] == 0
     run(scenario())
 
@@ -828,7 +835,10 @@ def test_model_dispatch_rechecks_time_after_last_blocking_journal_read(
             assert await ctx.worker.run_once()
             assert preflight_started and advanced
             assert ctx.calls == ctx.sends == []
-            assert not core.store.rows("SELECT * FROM outbox")
+            if boundary == "job_lease":
+                assert_failure_notice(core)
+            else:
+                assert not core.store.rows("SELECT * FROM outbox")
             assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
                 "state": "SETTLED", "billed_micro_usd": 0}
     run(scenario())

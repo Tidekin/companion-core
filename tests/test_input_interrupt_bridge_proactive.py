@@ -14,10 +14,8 @@ from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
-from tests.native_continuous_support import host
-from tests.support.native_context import Capture
+from tests.native_continuous_support import frame, host
 from tests.test_input_interrupt_bridge import model_response
-from tests.test_onebot_direct import raw_event
 from tests.test_owner_authority import activate
 from tests.test_private_companion import companion_options
 
@@ -29,8 +27,8 @@ def test_queued_owner_input_cancels_proactive_before_dispatch_without_unknown(co
     async def source(ws):
         nonlocal number
         number += 1
-        await ws.send(json.dumps(raw_event(number, time=int(core.clock.now.timestamp()),
-            text="我喜欢龙井茶" if number == 1 else "等等，先聊我的事情")))
+        await ws.send(frame(number,
+            text="我喜欢龙井茶" if number == 1 else "等等，先聊我的事情"))
         await ws.wait_closed()
 
     def answer(request):
@@ -103,9 +101,7 @@ def test_queued_owner_input_cancels_proactive_before_dispatch_without_unknown(co
 
             async def before(request):
                 if request.url.path == "/send_private_msg":
-                    captured = Capture(core, window.spool, window.runtime)
-                    assert (await captured.capture_once(window.client, window.protocol))[
-                        "new_inputs"] == 1
+                    await window.capture(2)
 
             async def cancellation(request):
                 if request.url.path.endswith("/cancel-before-send"):

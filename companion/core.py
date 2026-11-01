@@ -1947,6 +1947,29 @@ class Core(Runtime):
                         f"这次回复暂时失败（{code}）。消息已记录，可以稍后再试。",
                         now,
                     )
+                elif state == "FAILED" and job["kind"] == "chat" and not bounded_text:
+                    self._failure_notice(job, now)
+
+    def _failure_notice(self, job, now):
+        """Tell the owner a reply finally failed; best effort, never blocks the failure."""
+        if (reply_revision.control_job(self.store, job)
+                or not reply_revision.owner_input(self.store, job["event_id"])
+                or self.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+                                  (job["event_id"],))):
+            return
+        code = self.store.one("SELECT last_error_code FROM jobs WHERE job_id=?",
+                              (job["job_id"],))["last_error_code"]
+        self.store.execute("SAVEPOINT failure_notice")
+        try:
+            message_id = enqueue(self.store, job["event_id"], job["conversation_id"],
+                                 owner_delivery.failure_text(code), now,
+                                 key=f"failure:{job['job_id']}:v1")
+            owner_delivery.record_failure_notice(
+                self.store, self.settings, self.clock, job["job_id"], message_id)
+        except CoreError:
+            # The grant or source no longer allows a send; the failure itself stands.
+            self.store.execute("ROLLBACK TO SAVEPOINT failure_notice")
+        self.store.execute("RELEASE SAVEPOINT failure_notice")
 
     async def extract_once(self, local_day=None):
         from companion.memory_work import extract_once

@@ -92,14 +92,9 @@ def _uncertain(store, settings):
         with _transaction(store):
             model_carry.supported(store, settings)
             view = paid_budget.journal(store, settings.paid_model, initialize=False)
-            current = view["owner_authority"]
-            retained = {item["request_id"] for carry in view["model_carries"].values()
-                        if current and carry["successor_policy_sha256"] == current["policy_sha256"]
-                        for item in carry["manifest"]["unknowns"]}
-            # Only the current approval's explicitly retained, closed liability
-            # is exempt. A new UNKNOWN still pauses Life, even after local unwind.
-            return any(row["request_id"] not in retained
-                       or row["request_id"] not in view["model_closures"] for row in unknown)
+            # A journal-closed UNKNOWN no longer holds liability open: admission,
+            # readiness and chat slot retries count it the same way (owner, 2026-11-01).
+            return any(row["request_id"] not in view["model_closures"] for row in unknown)
     except CoreError:
         return True
 

@@ -17,6 +17,7 @@ from companion.store import after, encode
 from companion_onebot_bridge import owner_notices
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.failure_notice import assert_failure_notice
 from tests.test_bili_video import final_result, model_response, paid_media, phase_usage, upload_body
 from tests.test_owner_recall_bridge import recall_frame
 
@@ -171,7 +172,10 @@ def test_original_visual_result_checked_at_final_model_boundary(
                     "SELECT 1 FROM job_sources WHERE event_id=?", (visual["output_event_id"],)
                 )
             else:
-                assert not core.store.one("SELECT 1 FROM outbox")
+                if boundary in {"source", "stop", "recall"}:
+                    assert not core.store.one("SELECT 1 FROM outbox")
+                else:
+                    assert_failure_notice(core)
                 final = core.store.rows(
                     "SELECT m.request_id,m.state,m.billed_micro_usd,a.io_started_at "
                     "FROM model_usage m JOIN model_admissions a USING(request_id) "

@@ -16,6 +16,7 @@ from companion.trial_limits import TrialLimits
 from companion_onebot_bridge.window import WindowPlan
 from scripts.trial_limits import load_limits
 from tests.conftest import run
+from tests.support.failure_notice import assert_failure_notice
 from tests.test_cumulative_budget import policy as quota_policy
 from tests.test_cumulative_budget import view
 from tests.test_live_continuity import native_continuity
@@ -155,18 +156,22 @@ def test_each_quota_stops_additional_io_independently(core, tmp_path, caps):
                 assert await core.run_once("independent-native-limits")
                 if caps["max_model_attempts"] == 2:
                     assert len(calls) == 2
-                    assert not await active.pump()
+                    failed = core.store.one("SELECT event_id FROM jobs WHERE state='FAILED'")
+                    assert_failure_notice(core, failed["event_id"])
+                    assert await active.pump()
+                    assert active.attempts() == {"ACK": 3}
                 else:
                     # Exhausted send quota never invents a coupling to model quota.
                     assert len(calls) == 3
                     assert await active.pump()
                     assert active.runtime.row()["state"] == "STOPPED"
                     assert active.attempts() == {"ACK": 2, "UNKNOWN": 1}
-            assert len(sends) == 2
+            notice_sent = caps["max_model_attempts"] == 2
+            assert len(sends) == 2 + notice_sent
             operations = view(core)["operations"]
             assert sum(k.startswith("input:") for k in operations) == (
                 2 if caps["max_inputs"] == 2 else 3)
-            assert sum(k.startswith("send:") for k in operations) == 2
+            assert sum(k.startswith("send:") for k in operations) == 2 + notice_sent
             assert len(view(core)["models"]) == len(calls)
     run(scenario())
 
@@ -188,8 +193,11 @@ def test_large_trial_profile_does_not_override_daily_budget(core, tmp_path):
             assert await finish()
             await capture()
             assert await core.run_once("daily-cap-before-provider")
-            assert not await active.pump()
-            assert len(calls) == len(sends) == 1
+            failed = core.store.one("SELECT event_id FROM jobs WHERE state='FAILED'")
+            assert_failure_notice(core, failed["event_id"])
+            assert await active.pump()
+            assert len(calls) == 1 and len(sends) == 2
+            assert sum(k.startswith("send:") for k in view(core)["operations"]) == 2
             assert len(view(core)["models"]) == 1
     run(scenario())
 

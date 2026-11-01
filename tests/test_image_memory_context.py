@@ -13,6 +13,7 @@ from companion import image_spool, live_text, paid_budget
 from companion.model import ModelClient
 from companion.store import Store, encode
 from tests.conftest import run
+from tests.support.failure_notice import assert_failure_notice
 from tests.support.native_image_memory import native_image_memory
 from tests.test_live_image_input import options
 from tests.test_memory_commands import fact
@@ -214,8 +215,7 @@ def test_five_image_memory_inputs_obey_the_explicit_model_attempt_cap(core, tmp_
                 if number * 2 > limit:
                     assert current["state"] == "FAILED", current
                     assert current["last_error_code"] == "MODEL_DAILY_BUDGET_EXHAUSTED", current
-                    assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
-                                               (job["event_id"],))
+                    assert_failure_notice(core, job["event_id"])
                 else:
                     assert current["state"] == "SUCCEEDED", current
                     assert (await value.entry.send(value.entry.client,
@@ -244,7 +244,11 @@ def test_joint_image_memory_flow_stops_before_final_io_on_lost_evidence(core, tm
         async with native_image_memory(core, tmp_path, mutation=mutation) as value:
             assert await value.worker.run_once("native-image-source-fence")
             assert len(value.calls) <= 1
-            assert not value.sends and not core.store.one("SELECT 1 FROM outbox")
+            assert not value.sends
+            if mutation in {"raw_hash", "expired"}:
+                assert_failure_notice(core)
+            else:
+                assert not core.store.one("SELECT 1 FROM outbox")
             assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
                 (value.job["job_id"],))["state"] == (
                     "CANCELLED" if mutation == "erased_current" else "FAILED")

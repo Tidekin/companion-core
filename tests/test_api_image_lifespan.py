@@ -29,6 +29,7 @@ from companion_onebot_bridge.rich_input import input_digest
 from tests import test_onebot_window as window_fixtures
 from tests.conftest import run
 from tests.native_continuous_support import until
+from tests.support.failure_notice import assert_failure_notice
 from tests.test_live_image_input import options, png
 from tests.test_memory_control import grant
 from tests.test_onebot_capture import pinned_plan
@@ -298,7 +299,10 @@ def test_worker_loop_waits_for_api_vision_and_preserves_unknown_block(
                             "UNKNOWN" if outcome == "unknown" else "SETTLED")
                         await until(lambda: core.store.one("SELECT state FROM jobs WHERE job_id=?",
                             (job_id,))["state"] != "RUNNING", tasks=[task], deadline_seconds=10)
-                        assert not core.store.one("SELECT 1 FROM outbox")
+                        if outcome == "admission_expired":
+                            assert_failure_notice(core)
+                        else:
+                            assert not core.store.one("SELECT 1 FROM outbox")
                         task.cancel()
                         await asyncio.gather(task, return_exceptions=True)
                         if outcome == "unknown":
@@ -308,7 +312,10 @@ def test_worker_loop_waits_for_api_vision_and_preserves_unknown_block(
                         await until(lambda: scans, tasks=[task], deadline_seconds=20)
                         assert len(calls) == (0 if outcome == "admission_expired" else 1)
                         assert core.store.rows("SELECT * FROM model_usage") == usage
-                        assert not core.store.one("SELECT 1 FROM outbox")
+                        if outcome == "admission_expired":
+                            assert_failure_notice(core)
+                        else:
+                            assert not core.store.one("SELECT 1 FROM outbox")
                         if outcome == "unknown":
                             assert core.store.one("SELECT state,last_error_code FROM jobs "
                                 "WHERE job_id=?", (job_id,)) == {

@@ -20,6 +20,7 @@ from companion_onebot_bridge.images import OriginalImage, upload_original
 from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.failure_notice import assert_failure_notice
 from tests.test_onebot_direct import raw_event
 from tests.test_prepare_owner_input import native_spool, window
 
@@ -306,7 +307,7 @@ def test_unknown_image_model_call_is_not_replayed_after_restart(core, tmp_path):
                 await restarted.run_once("never-replay-image-call")
             assert len(calls) == 1
             assert core.store.rows("SELECT * FROM model_usage") == before
-            assert core.store.rows("SELECT * FROM outbox") == []
+            assert_failure_notice(core)
             failed = core.store.one("SELECT job_id,last_error_code FROM jobs WHERE event_id=?",
                                      (event["event_id"],))
             receipts = core.store.rows("SELECT safe_detail_json FROM audit_log "

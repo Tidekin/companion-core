@@ -10,6 +10,14 @@ from companion.private_life import event_digest
 from companion.store import encode
 
 DELIVERY = "owner_delivery:"
+FAILURE_NOTICE = "failure_notice"
+FAILURE_TEXTS = {"SOURCE_GRANT_REQUIRED": "这个链接我现在读不了，得先在控制台给我开读取授权。"}
+FAILURE_TEXT = "刚才那条没回出去，你再说一次吧。"
+
+
+def failure_text(code):
+    """Fixed Core wording for a chat reply that finally failed; never model output."""
+    return FAILURE_TEXTS.get(code, FAILURE_TEXT)
 
 
 def _job(store, job_id):
@@ -160,6 +168,51 @@ def _meme_binding(store, settings, clock, job, row):
         job, image, executing=job["state"] == "RUNNING")
 
 
+def _failure_view(store, settings, clock, job):
+    if (job is None or job["kind"] != "chat" or job["state"] != "FAILED"
+            or reply_revision.control_job(store, job)):
+        raise CoreError("OWNER_DELIVERY_JOB_REQUIRED", 403)
+    view = owner_authority.check_job(store, settings, clock, job, purpose="chat")
+    owner_input.source(store, settings, view, job["event_id"], clock(), allow_commands=True)
+    return view
+
+
+def _failure_material(store, row, job, view):
+    event = store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
+    content = {"text": failure_text(job["last_error_code"])}
+    if (not event or row["origin_event_id"] != job["event_id"]
+            or row["conversation_id"] != job["conversation_id"]
+            or row["action_type"] != "qq.private.reply"
+            or json.loads(row["content_json"]) != content
+            or row["content_sha256"] != paid_budget.sha(content)):
+        raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
+    return {"kind": FAILURE_NOTICE, "authority": view.authority.as_dict(),
+            "job_id": job["job_id"], "failure_code": job["last_error_code"],
+            "privacy_epoch": epoch(store), "message_id": row["message_id"],
+            "event_id": row["origin_event_id"], "event_sha256": event_digest(event),
+            "content_sha256": row["content_sha256"], "delivery_key": row["delivery_key"],
+            "action_type": row["action_type"]}
+
+
+def record_failure_notice(store, settings, clock, job_id, message_id):
+    """Bind Core's fixed failure wording to the failed job's own current owner grant.
+
+    It carries no model output, so it needs no settled model call; it is valid only
+    while the job stays FAILED and its original owner input is still admitted.
+    """
+    if not store.db.in_transaction:
+        raise RuntimeError("owner delivery recording requires the enqueue transaction")
+    job = _job(store, job_id)
+    view = _failure_view(store, settings, clock, job)
+    row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
+        raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
+    material = _failure_material(store, row, job, view)
+    store.execute("UPDATE outbox SET authority_json=? WHERE message_id=?",
+                  (encode(view.authority.as_dict()), message_id))
+    store.insert("runtime_meta", key=DELIVERY + message_id, value=encode(material))
+
+
 def record_replies(store, settings, clock, job, message_ids):
     """Pin replies created by the still-running native model job."""
     if job["kind"] not in {"chat", "activity"}:
@@ -233,12 +286,18 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
         raise CoreError("OWNER_DELIVERY_BINDING_REQUIRED", 403)
     material = json.loads(saved["value"])
     job = _job(store, material["job_id"])
-    view = _sources(store, settings, clock, job)
-    if (job["state"] != "SUCCEEDED"
-        or json.loads(row["authority_json"]) != view.authority.as_dict()
-        or material != _material(store, row, job, view, _usage(store, job, view),
-            meme_binding=_meme_binding(store, settings, clock, job, row))):
-        raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
+    if material.get("kind") == FAILURE_NOTICE:
+        view = _failure_view(store, settings, clock, job)
+        if (json.loads(row["authority_json"]) != view.authority.as_dict()
+                or material != _failure_material(store, row, job, view)):
+            raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
+    else:
+        view = _sources(store, settings, clock, job)
+        if (job["state"] != "SUCCEEDED"
+            or json.loads(row["authority_json"]) != view.authority.as_dict()
+            or material != _material(store, row, job, view, _usage(store, job, view),
+                meme_binding=_meme_binding(store, settings, clock, job, row))):
+            raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     reply_revision.check_delivery(store, message_id)
     if job["kind"] == "poke":
         from companion import poke
