@@ -44,6 +44,8 @@ python -m source_reader --source qzone --protocol reading-v1 \
 尝试该快照中的下一个地址，保留原 Host、TLS SNI 和证书验证，不重试已发送的 HTTP 请求。
 只解析作者、tid、发表时刻和正文，不获取图片、访客、联系人，不另发评论读取请求。
 上游响应附带的评论或媒体字段不进入持久资料或模型上下文。
+响应可为纯 JSON，或由单个完整的 `_Callback(...)` / `callback(...)` 包装的 JSON；
+包装仅按数据解析，额外脚本和未知回调拒绝，证据仍摘要原始响应字节。
 
 ## Core 操作
 

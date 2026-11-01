@@ -92,7 +92,10 @@ class QZoneReader:
             raise ReadFailure("QZONE_TARGET_SCOPE_REQUIRED")
         uin = target_uin(item["url"])
         raw = await self.public.latest(item["url"], budget)
-        data = json.loads(raw)
+        # The fixed platform endpoint can wrap JSON even with format=json. Accept
+        # one known complete envelope as data; never execute callback content.
+        envelope = re.fullmatch(rb"\s*(?:_Callback|callback)\s*\((.*)\)\s*;?\s*", raw, re.S)
+        data = json.loads(envelope[1] if envelope else raw)
         if not isinstance(data, dict) or type(data.get("code")) is not int:
             raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
         if data["code"] != 0:
