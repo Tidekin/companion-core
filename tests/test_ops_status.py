@@ -2,7 +2,9 @@ import json
 import shutil
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from alembic.script import ScriptDirectory
@@ -76,7 +78,15 @@ def test_snapshot_sees_committed_wal_and_preserves_unknown_and_private_content(c
         return connection
 
     monkeypatch.setattr(ops_status.sqlite3, "connect", readonly)
+    # Resource counts and fractional wall time can coincidentally contain the
+    # synthetic owner ID. Keep this privacy check's ambient inputs deterministic.
+    monkeypatch.setattr(ops_status, "datetime", SimpleNamespace(
+        now=lambda _: core.clock.now, fromisoformat=datetime.fromisoformat))
+    monkeypatch.setattr(ops_status.shutil, "disk_usage",
+                        lambda _: SimpleNamespace(free=2 ** 30))
     result = ops_status.snapshot(core.settings)
+    assert result["observed_at"] == core.clock.now.isoformat()
+    assert result["resources"]["disk_free_bytes"] == 2 ** 30
     assert result["database"]["wal_bytes"] > 0
     assert result["deliveries"]["states"] == {"DELIVERY_UNCERTAIN": 1}
     assert result["budget"]["unknown_calls"] == 1

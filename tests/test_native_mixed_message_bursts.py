@@ -2,6 +2,7 @@
 
 import base64
 import json
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -76,6 +77,9 @@ def test_card_image_and_question_keep_all_sources_through_independent_workers(
         ) as (active, handshakes, sends, _):
             await active.capture(len(messages))
             await active.flush()
+            # WS receipt time is real UTC; the shared fixture ticker can lag it.
+            # Align after flush so earlier captures are historical before claim.
+            core.clock.now = max(core.clock.now, datetime.now(UTC))
             assert handshakes == ["Bearer " + active.config.onebot_token]
             latest = core.store.one(
                 "SELECT * FROM jobs WHERE kind='chat' ORDER BY rowid DESC LIMIT 1")
