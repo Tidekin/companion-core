@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import uvicorn
 
-from companion import gateway
+from companion import gateway, paid_budget
 from companion.config import Settings
 from companion.gateway_api import create_app
 from companion.model import ModelClient
@@ -23,6 +23,18 @@ if sys.argv[1] == "api":
                 access_log=False, proxy_headers=False, log_level="error")
 else:
     observed = []
+    if sys.argv[1] == "worker-paused":
+        original_journal = paid_budget.journal
+
+        def paused_journal(store, approval, record=None, **kwargs):
+            result = original_journal(store, approval, record, **kwargs)
+            if record and record.get("kind") == sys.argv[4]:
+                print("GATEWAY_JOURNAL_APPENDED", flush=True)
+                if sys.stdin.readline().strip() != "continue":
+                    raise RuntimeError("synthetic journal gate was not released")
+            return result
+
+        paid_budget.journal = paused_journal
 
     def provider(request):
         observed.append(json.loads(request.content))

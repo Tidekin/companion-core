@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import secrets
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -139,6 +140,11 @@ def revoke_client(store, client_id, now):
 
 
 def authenticate(store, settings, token, now):
+    with nullcontext() if store.in_write_transaction else store.transaction():
+        return _authenticate_locked(store, settings, token, now)
+
+
+def _authenticate_locked(store, settings, token, now):
     config()
     if (not isinstance(token, str) or not token.isascii() or not token.startswith("gwk_")
         or not 32 <= len(token) <= 128):
@@ -169,6 +175,11 @@ def authenticate(store, settings, token, now):
 
 
 def _reference(store, settings, grant, now):
+    with nullcontext() if store.in_write_transaction else store.transaction():
+        return _reference_locked(store, settings, grant, now)
+
+
+def _reference_locked(store, settings, grant, now):
     cumulative.preflight(store, settings, now)
     paid_budget.contract(settings, now)
     if store.one("SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked',"
@@ -344,7 +355,7 @@ def actual_limits(store, usage, actual):
 
 def expire(store, settings, now):
     """Neither an expired wait nor a dead worker grants a second paid attempt."""
-    with store.transaction():
+    with nullcontext() if store.in_write_transaction else store.transaction():
         for row in store.rows("SELECT g.* FROM gateway_requests g WHERE (g.state IN "
                               "('QUEUED','RUNNING') OR EXISTS (SELECT 1 FROM model_usage m "
                               "WHERE m.request_id=g.model_request_id AND m.state='RESERVED')) "
@@ -367,6 +378,13 @@ def expire(store, settings, now):
 
 
 def receipt(store, settings, client_id, request_id, now):
+    # The journal is fsynced before its SQL projection commits. Share the native
+    # writer barrier so receipt polling cannot observe that temporary mismatch.
+    with nullcontext() if store.in_write_transaction else store.transaction():
+        return _receipt_locked(store, settings, client_id, request_id, now)
+
+
+def _receipt_locked(store, settings, client_id, request_id, now):
     expire(store, settings, now)
     row = store.one("SELECT * FROM gateway_requests WHERE request_id=? AND client_id=?",
                     (request_id, client_id))
