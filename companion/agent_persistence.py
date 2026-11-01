@@ -15,6 +15,7 @@ from pydantic_ai.exceptions import CallDeferred
 from companion import context_planner
 from companion.agent_runtime import check_conversation
 from companion.contracts import CoreError
+from companion.privacy import redact
 from companion.store import encode
 from companion.transport import digest
 
@@ -93,6 +94,18 @@ class ConversationStore:
         from companion.agent_images import stored_conversation
 
         stored = stored_conversation(self.core, self.job, conversation)
+        from pydantic_ai.messages import ModelResponse, ThinkingPart
+
+        for message in stored.messages:
+            if isinstance(message, ModelResponse):
+                for part in message.parts:
+                    if isinstance(part, ThinkingPart):
+                        cleaned = redact(part.content, self.core.settings)
+                        if cleaned != part.content:
+                            details = message.provider_details or {}
+                            message.provider_details = {**details, "reasoning": {
+                                **details.get("reasoning", {}), "redacted": True}}
+                        part.content = cleaned
         self.store.execute(
             "INSERT INTO agent_conversations(job_id,phase,conversation_json,snapshots_json,"
             "output_text,created_at,updated_at) VALUES (?,?,?,?,?,?,?) "
@@ -161,6 +174,23 @@ class ConversationStore:
                                     usage=usage,
                                     conversation_id=self.job["job_id"]), "READY")
         return response
+
+    def failed_response(self, response):
+        """Retain received diagnostics in the same checkpoint without allowing a replay."""
+        from companion.agent_messages import to_runtime_response
+
+        if not response.reasoning_content:
+            return
+        with self.store.transaction():
+            row = self.row()
+            if not row or not row["request_id"] or not row["conversation_json"]:
+                return
+            conversation = ConversationTypeAdapter.validate_json(row["conversation_json"])
+            received = to_runtime_response(response, model_name=self.core.settings.model_name,
+                                           provider_name="companion-controlled")
+            received.metadata = {"core_request_id": row["request_id"]}
+            conversation.messages.append(received)
+            self._save(conversation, "STOPPED")
 
     async def wrap_tool_execute(self, ctx, *, call, tool_def, args, handler):
         key = self.job["job_id"], call.tool_call_id

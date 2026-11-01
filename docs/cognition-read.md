@@ -100,7 +100,8 @@ STOP therefore does not erase valid historical visibility. Migration 0045 and
 the matching Life domain/projection implementation are integration prerequisites.
 
 Prompt bodies, topics, diary text, reflection suggestions,
-credentials, model endpoints and raw reasoning are excluded. Reason codes and
+credentials and model endpoints are excluded. Exact provider reasoning from chat
+responses is described below. Reason codes and
 states use explicit allowlists. Measurement exposes the recorded count kind and
 numeric input, reservation margin and output allowance. Missing measurements are
 `NOT_RECORDED`. This view does not attest that an unbound usage row has source
@@ -119,6 +120,41 @@ model-usage row's existing `occurred_at`. It is independent of the response's
 `as_of` read time and opaque record ID. Pagination still follows native append
 order; the console may sort the loaded records by their real timestamps and
 labels its counts as covering only those loaded records.
+
+## Saved provider reasoning
+
+Chat responses retain the provider's `reasoning_content` as the installed Pydantic AI
+2.60 `ThinkingPart` inside the existing `agent_conversations.conversation_json` snapshot.
+Each original SDK response already carries its exact `core_request_id`; model cognition
+uses that identity rather than inferring reasoning from a final answer or another attempt.
+No schema, second history store or accounting protocol is added. Model adapters only parse
+the response. Core's existing checkpoint and source checks own persistence.
+
+The `reasoning` object on a model item has `state=RECORDED`, `text`, `truncated` and `redacted`
+when available. Capture is limited to 64000 characters per response. Credentials are redacted
+before writing the snapshot and again on owner readback. Missing historical snapshots are
+`NOT_RECORDED`; a newly captured response without a valid nonempty reasoning string is
+`NOT_RETURNED`; conflicting or invalid snapshots are `INCONSISTENT`. The page-level field is
+`EXPOSED` only when one of its returned model items contains recorded reasoning.
+
+Unusable replies that still contain provider reasoning use the same SDK snapshot with
+phase `STOPPED`. Original usage settlement remains intact; a diagnostic cannot authorize a
+retry or delivery. Reasoning stays out of normal reply text, prompt mappings, Memory and
+Outbox. Other non-thinking/background lanes do not acquire fabricated reasoning.
+
+Owner-control authentication, console owner sessions, no-store responses, complete job-source
+validation and the outer privacy/custody fence apply. The existing agent-conversation erasure
+contract removes snapshots on source withdrawal, retention expiry and backup erasure replay,
+while financial and UNKNOWN records remain unchanged. The console renders the retained
+reasoning as escaped plain text.
+
+Primary references checked for this repair: the installed `pydantic_ai.messages.ThinkingPart`
+and `ConversationTypeAdapter`, the existing DSH/native snapshot sources below,
+[Pydantic AI message types](https://pydantic.dev/docs/ai/api/pydantic-ai/messages/) and
+[DeepSeek thinking response fields](https://api-docs.deepseek.com/guides/thinking_mode/).
+`tests/test_model_reasoning.py` covers capture, per-request identity, empty replies, tool turns,
+bounded content, redaction and erasure; `test_agent_sdk_entry.py` additionally checks signed
+HTTP ingress, an independent native worker and authenticated cognition readback.
 
 ## Reused sources
 

@@ -1,9 +1,11 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
 from companion.contracts import CoreError
+
+MAX_REASONING_CHARS = 64000
 
 PRINCIPLES = """你在 QQ 私聊里和主人长期相处，是主人很亲近的人。
 名字、称呼、习惯和性格都从你们的相处里慢慢长出来，不预设，主人也可以纠正。
@@ -77,6 +79,8 @@ class ModelResponse:
     tool_calls: tuple[dict, ...] = ()
     finish_reason: str | None = None
     cache_usage_present: bool | None = None
+    reasoning_content: str | None = field(default=None, repr=False)
+    reasoning_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -175,8 +179,7 @@ def model_payload(settings, messages, scenario, *, tools=(), generation=None):
                     "watch_review", "style_distill", "jargon"}:
         payload["response_format"] = {"type": "json_object"}
     if settings.provider == "deepseek" and not video:
-        # reasoning_content is never read, stored or passed back; DeepSeek accepts
-        # tool follow-ups without it (live-checked 2026-10-29).
+        # Core retains returned reasoning in its native SDK conversation snapshots.
         if effort := settings.thinking_effort(scenario):
             payload["thinking"] = {"type": "enabled"}
             payload["reasoning_effort"] = effort
@@ -302,6 +305,13 @@ class ModelClient:
                 message = body["choices"][0]["message"]
                 if not isinstance(message, dict):
                     raise ValueError("invalid model message")
+                reasoning = message.get("reasoning_content")
+                if isinstance(reasoning, str) and reasoning.strip():
+                    received.reasoning_content = reasoning[:MAX_REASONING_CHARS]
+                    received.reasoning_truncated = len(reasoning) > MAX_REASONING_CHARS
+                reason = body["choices"][0].get("finish_reason")
+                received.finish_reason = (reason if isinstance(reason, str)
+                    and reason in {"stop", "length", "content_filter"} else None)
                 calls = message.get("tool_calls")
                 if calls is None:
                     calls = []
@@ -345,9 +355,6 @@ class ModelClient:
                 raise ModelResponseError("MODEL_INVALID_RESPONSE", 502, received) from error
             received.text = text
             received.tool_calls = tuple(calls)
-            reason = body["choices"][0].get("finish_reason")
-            received.finish_reason = (reason if isinstance(reason, str)
-                                      and reason in {"stop", "length", "content_filter"} else None)
             if scenario == "gateway" and (received.finish_reason is None
                 or message.get("role") != "assistant" or len(body["choices"]) != 1
                 or body["choices"][0].get("index", 0) != 0):

@@ -8,15 +8,15 @@ from companion.contracts import StrictModel
 
 
 class RemConfig(StrictModel):
-    enabled: bool = False
+    enabled: bool = True
     local_hour: int = Field(default=4, ge=0, le=23, strict=True)
     max_source_memories: int = Field(default=3, ge=1, le=3, strict=True)
     source_retention_days: int = Field(default=30, ge=1, le=3650, strict=True)
     record_retention_days: int = Field(default=30, ge=1, le=3650, strict=True)
     max_input_tokens: int = Field(default=2400, ge=128, le=8192, strict=True)
     max_output_tokens: int = Field(default=600, ge=128, le=2048, strict=True)
-    daily_micro_usd: int = Field(default=0, ge=0, le=1000000, strict=True)
-    monthly_micro_usd: int = Field(default=0, ge=0, le=10000000, strict=True)
+    daily_micro_usd: int = Field(default=10000, ge=0, le=1000000, strict=True)
+    monthly_micro_usd: int = Field(default=100000, ge=0, le=10000000, strict=True)
 
     @model_validator(mode="after")
     def explicit_budget(self):

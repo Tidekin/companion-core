@@ -53,7 +53,7 @@ def test_rem_requires_both_independent_purposes_before_native_work(core, tmp_pat
     assert core.store.rows("SELECT * FROM rem_records") == []
 
 
-def test_rem_default_off_stays_silent_in_original_selector(core):
+def test_rem_explicit_off_stays_silent_in_original_selector(core):
     assert not core.settings.rem.enabled
     turns = run(drain(native_selector(core, "rem-off")))
     assert {"diary", "consolidation", "memory", "rem"} <= {t.lane for t in turns}

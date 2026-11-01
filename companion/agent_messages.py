@@ -108,6 +108,7 @@ def to_wire_messages(messages: Sequence[ModelMessage]):
         RetryPromptPart,
         SystemPromptPart,
         TextPart,
+        ThinkingPart,
         ToolCallPart,
         ToolReturnPart,
         UserPromptPart,
@@ -143,6 +144,8 @@ def to_wire_messages(messages: Sequence[ModelMessage]):
                 elif isinstance(part, ToolCallPart):
                     calls.append({"id": part.tool_call_id, "type": "function", "function": {
                         "name": part.tool_name, "arguments": part.args_as_json_str()}})
+                elif isinstance(part, ThinkingPart):
+                    continue  # Diagnostic content stays outside the existing input contract.
                 else:
                     raise ValueError("unsupported runtime response part")
             value = {"role": "assistant", "content": "".join(texts) if texts else None}
@@ -158,10 +161,12 @@ def to_wire_messages(messages: Sequence[ModelMessage]):
 
 def to_runtime_response(response: ModelResponse, *, model_name: str,
                         provider_name: str | None = None) -> RuntimeResponse:
-    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+    from pydantic_ai.messages import ModelResponse, TextPart, ThinkingPart, ToolCallPart
     from pydantic_ai.usage import RequestUsage
 
     parts = [TextPart(response.text)] if response.text else []
+    if response.reasoning_content:
+        parts.insert(0, ThinkingPart(response.reasoning_content, provider_name=provider_name))
     parts.extend(ToolCallPart(call["function"]["name"], call["function"]["arguments"],
                               tool_call_id=call["id"]) for call in response.tool_calls)
     usage = RequestUsage(input_tokens=response.input_tokens or 0,
@@ -169,7 +174,10 @@ def to_runtime_response(response: ModelResponse, *, model_name: str,
                          cache_read_tokens=response.cached_tokens,
                          unmeasured_requests=int(response.input_tokens is None
                                                  or response.output_tokens is None))
-    return ModelResponse(parts, model_name=model_name, provider_name=provider_name, usage=usage)
+    return ModelResponse(parts, model_name=model_name, provider_name=provider_name, usage=usage,
+        provider_details={"reasoning": {
+            "state": "RECORDED" if response.reasoning_content else "NOT_RETURNED",
+            "truncated": response.reasoning_truncated}}, finish_reason=response.finish_reason)
 
 
 def request_wire(messages, parameters):
