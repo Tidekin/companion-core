@@ -40,6 +40,8 @@ python -m source_reader --source qzone --protocol reading-v1 \
 `COMPANION_READER_TOKEN` 使用该适配器的专用凭据。QZone 不提供无 Core 租约的 probe，
 也不接受 legacy 协议或浏览器降级。每次请求使用固定 HTTPS GET、公共地址 DNS 固定、
 无重定向、单请求/字节上限和实际发送边界的 Core 复核；凭据及令牌查询参数不进入证据或日志。
+公共传输仅解析一次并先检查全部 DNS 答案；若某个公网地址的 TCP 连接失败，在同一总超时内
+尝试该快照中的下一个地址，保留原 Host、TLS SNI 和证书验证，不重试已发送的 HTTP 请求。
 只解析作者、tid、发表时刻和正文，不获取图片、访客、联系人，不另发评论读取请求。
 上游响应附带的评论或媒体字段不进入持久资料或模型上下文。
 

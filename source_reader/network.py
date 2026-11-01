@@ -158,13 +158,18 @@ class PublicNetwork(httpcore.AsyncNetworkBackend):
             addresses = await self.resolver(host, port)
             if not addresses or any(not global_address(ip) for ip in addresses):
                 raise ReadFailure("READER_NONPUBLIC_ADDRESS")
-            return await self.backend.connect_tcp(
-                addresses[0],
-                port,
-                timeout=timeout,
-                local_address=local_address,
-                socket_options=socket_options,
-            )
+            for index, address in enumerate(addresses):
+                try:
+                    return await self.backend.connect_tcp(
+                        address,
+                        port,
+                        timeout=timeout,
+                        local_address=local_address,
+                        socket_options=socket_options,
+                    )
+                except (OSError, httpcore.ConnectError, httpcore.ConnectTimeout):
+                    if index == len(addresses) - 1:
+                        raise
 
     async def connect_unix_socket(self, *args, **kwargs):
         raise ReadFailure("CONTENT_URL_NOT_ALLOWED")
