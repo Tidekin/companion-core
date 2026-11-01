@@ -254,8 +254,11 @@ def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
     def verify_capture(value):
         return _verify(store, settings, value, evidence)
 
+    # The signed scope is an authority ceiling; the existing presentation setting
+    # may select fewer recent pairs and leave room for episodic continuation.
+    max_turns = min(scope.max_turns, settings.max_recent_messages // 2)
     for item in recent_context_sources(store, job["conversation_id"], job["event_id"],
-                                       scope.max_turns, cutoff_rowid=cutoff_rowid):
+                                       max_turns, cutoff_rowid=cutoff_rowid):
         try:
             if transactional and store.in_write_transaction and store.db.total_changes == changes:
                 if settings.owner_runtime.mode != "ENABLED":

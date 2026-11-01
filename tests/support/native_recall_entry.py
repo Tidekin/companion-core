@@ -36,7 +36,8 @@ async def native_recall(core, tmp_path, *, respond=None, paid=None, core_options
     async with environment(core, tmp_path,
         purposes=("chat", "memory", *additional_purposes, *(["history"] if history_bytes else [])),
         history_bytes=history_bytes, history_start_offset=1 if history_bytes else -1,
-        core_options={"max_recent_messages": 0, **(core_options or {})},
+        core_options={"max_recent_messages": 30 if history_bytes else 0,
+                      **(core_options or {})},
         paid_options={"per_request_calls": 2, **(paid or {})}) as (entry, sends):
         ids, sources = [], []
         for number, text in ((900, fact_text), (901, "另一个公开项目代号是紫云三号。")):

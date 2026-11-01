@@ -796,10 +796,17 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
 
 
 def purpose_revision(old, new):
-    """One explicit evaluation or private REM addition under the same paid approval."""
+    """One explicit private-purpose addition or existing voice configuration revision."""
     if old == new:
         return
     before, after = old.model_dump(mode="json"), new.model_dump(mode="json")
+    voice = new.capability_policies.get("voice")
+    if ("voice" in old.purposes and hash_value(voice)
+        and voice != old.capability_policies.get("voice")
+        and old.authorization_sha256 != new.authorization_sha256
+        and after == {**before, "authorization_sha256": new.authorization_sha256,
+                      "capability_policies": {**old.capability_policies, "voice": voice}}):
+        return
     if (len(new.purposes) != len(old.purposes) + 1
         or new.purposes[:-1] != old.purposes
         or new.purposes[-1] not in {"evaluation", "rem"}
