@@ -28,6 +28,40 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_memory_candidates_show_in_pending_and_badges_refresh_after_confirmation(core, tmp_path):
+    core.clock.now = datetime.now(UTC)
+    memory_id = remember(core, 1, "主人喜欢天文主题", confirmed=False)
+    before = core.store.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            badge = page.locator("#nav a[href='#memories'] .badge")
+            await badge.wait_for()
+            assert await badge.inner_text() == "1"
+            await page.locator("#nav a[href='#memories']").click()
+            await page.locator("#page[aria-busy=false]").wait_for()
+            card = page.locator(".mem").filter(has_text="主人喜欢天文主题")
+            await card.wait_for()
+            assert "候选记忆已自动保存，可在对话中参考" in await page.locator("#page").inner_text()
+            pending = page.locator(".toolbar button[aria-pressed=true]").filter(has_text="待确认")
+            assert await pending.locator(".count").inner_text() == "1"
+            unchanged = core.store.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+            assert unchanged == before
+            await card.get_by_role("button", name="确认", exact=True).click()
+            await submit_dialog(page, "确认", f"/memories/{memory_id}/decision")
+            await page.get_by_role("heading", name="没有待确认的记忆", exact=True).wait_for()
+            await badge.wait_for(state="detached")
+            assert await pending.locator(".count").count() == 0
+            assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (memory_id,))[
+                "status"] == "CONFIRMED"
+            operations = core.store.one(
+                "SELECT COUNT(*) n FROM console_operations WHERE state='COMPLETE'")
+            assert operations["n"] == 1
+            assert not core.store.rows("SELECT * FROM model_usage")
+
+    run(scenario())
+
+
 def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
     from pathlib import Path
 
