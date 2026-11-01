@@ -1,5 +1,6 @@
 """Exact-byte codec reuse must never reuse mutable state or a permission decision."""
 
+import marshal
 import os
 import stat
 from types import SimpleNamespace
@@ -63,7 +64,8 @@ def test_every_read_loads_current_bytes_but_reuses_only_successful_codec_work(
     info = journal._validated_bytes.cache_info()
     assert info.maxsize == info.currsize == info.hits == info.misses == 1
     payload, _ = journal._validated_bytes(raw)
-    assert isinstance(payload, bytes) and len(payload) <= len(raw) + 2
+    assert isinstance(payload, bytes) and len(payload) <= journal.CACHE_MAX_BYTES
+    assert marshal.loads(payload) == rows
 
 
 def test_same_length_rewrite_with_preserved_mtime_uses_new_complete_bytes(tmp_path):
@@ -157,7 +159,7 @@ def test_growth_after_lstat_cannot_bypass_maximum_and_evicts_warm_cache(tmp_path
     assert journal._validated_bytes.cache_info().currsize == 0
 
 
-def test_large_journal_bypasses_and_evicts_the_single_bounded_entry(tmp_path):
+def test_large_journal_reuses_a_bounded_prefix_and_validates_the_tail(tmp_path, monkeypatch):
     path = tmp_path / "journal.jsonl"
     small, _, _ = chain({"value": "small"})
     write(path, small)
@@ -165,9 +167,48 @@ def test_large_journal_bypasses_and_evicts_the_single_bounded_entry(tmp_path):
     large, rows, head = chain(*({"text": "x" * 60000} for _ in range(150)))
     assert journal.CACHE_MAX_BYTES == 8 * 1048576 < len(large) < 32 * 1048576
     path.write_bytes(large)
+    decodes = []
+    native = journal._decode_lines
+
+    def decode(lines, **kwargs):
+        decodes.append(len(lines))
+        return native(lines, **kwargs)
+
+    monkeypatch.setattr(journal, "_decode_lines", decode)
     for _ in range(2):
         assert journal.read(path) == (rows, head)
-        assert journal._validated_bytes.cache_info().currsize == 0
+        assert journal._validated_bytes.cache_info().currsize == 1
+        raw, payload, _, _ = journal._previous
+        assert len(raw) <= journal.CACHE_MAX_BYTES and len(payload) <= journal.CACHE_MAX_BYTES
+    assert decodes[0] > 100
+    assert 0 < decodes[-1] < 20
+
+
+@pytest.mark.parametrize("side", ["prefix", "tail"])
+def test_bounded_prefix_never_hides_tampering_on_either_side(tmp_path, monkeypatch, side):
+    path = tmp_path / "journal.jsonl"
+    raw, rows, head = chain(*({"text": "x" * 1000} for _ in range(8)))
+    monkeypatch.setattr(journal, "CACHE_MAX_BYTES", len(raw) // 2)
+    write(path, raw)
+    assert journal.read(path) == (rows, head)
+    changed = raw.splitlines(keepends=True)
+    index = 0 if side == "prefix" else -2
+    changed[index] = changed[index].replace(b"xxx", b"yyy", 1)
+    stamp = path.stat()
+    path.write_bytes(b"".join(changed))
+    os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    with pytest.raises(ValueError, match="INVALID_WINDOW_JOURNAL"):
+        journal.read(path)
+    assert journal._validated_bytes.cache_info().currsize == 0
+
+
+def test_marshaled_view_preserves_nested_caller_ownership(tmp_path):
+    path = tmp_path / "journal.jsonl"
+    raw, rows, head = chain({"nested": [{"value": [1, 2, 3]}]})
+    write(path, raw)
+    found, _ = journal.read(path)
+    found[0]["data"]["nested"][0]["value"].append("caller-owned")
+    assert journal.read(path) == (rows, head)
 
 
 def test_successful_different_content_evicts_previous_entry_and_read_failure_clears_it(tmp_path):

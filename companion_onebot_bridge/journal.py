@@ -1,7 +1,7 @@
 """The Bridge's original fsynced hash-chain codec, shared by custody versions."""
 
 import hashlib
-import json
+import marshal
 import os
 import stat
 from functools import lru_cache
@@ -9,10 +9,11 @@ from functools import lru_cache
 from .event_normalizer import decode
 from .spool import encode
 
-# One entry retains at most 8 MiB of input plus 8 MiB + 2 of JSON bytes and a head
-# (well inside the Bridge's 256 MiB limit). Live owner journals passed 1 MiB within
-# days, after which every read re-decoded the whole chain (~186 ms at 815 KB).
-# Larger reads and failed reads evict it; no file metadata or authority is cached.
+# One entry retains at most 8 MiB of input and 8 MiB of serialized records.
+# The immutable in-process view follows Core's paid-journal cache: each reader gets
+# fresh objects. Larger files reuse a bounded LF-terminated prefix and validate
+# the remaining lines, rather than dropping all codec reuse at the size boundary.
+# Every read checks the actual bytes; no file metadata or authority is cached.
 CACHE_MAX_BYTES = 8 * 1048576
 
 
@@ -52,11 +53,21 @@ def read(path, *, maximum=32 * 1048576):
         raw = path.read_bytes()
         if len(raw) > maximum:
             raise ValueError("INVALID_WINDOW_JOURNAL")
-        if len(raw) > CACHE_MAX_BYTES:
+        end = len(raw)
+        if end > CACHE_MAX_BYTES:
+            end = raw.rfind(b"\n", 0, CACHE_MAX_BYTES) + 1
+            if not end:
+                _clear()
+                return _decode_lines(raw.decode("utf-8").splitlines())
+        payload, head = _validated_bytes(raw[:end])
+        if len(payload) > CACHE_MAX_BYTES:
             _clear()
-            return _decode_lines(raw.decode("utf-8").splitlines())
-        payload, head = _validated_bytes(raw)
-        return json.loads(payload), head
+        records = marshal.loads(payload)
+        if end < len(raw):
+            tail, head = _decode_lines(raw[end:].decode("utf-8").splitlines(),
+                                       head=head, count=len(records))
+            records.extend(tail)
+        return records, head
     except Exception:
         _clear()
         raise
@@ -83,17 +94,17 @@ def _validated_bytes(raw):
             and len(raw) > len(previous[0]) and raw.startswith(previous[0])):
         _, old_payload, old_head, count = previous
         lines = raw[len(previous[0]):].decode("utf-8").splitlines()
-        records, head = _decode_lines(lines, head=old_head, count=count)
-        tail = ",".join(lines).encode("utf-8")
-        payload = old_payload[:-1] + (b"," if count else b"") + tail + b"]"
-        count += len(records)
+        tail, head = _decode_lines(lines, head=old_head, count=count)
+        records = marshal.loads(old_payload)
+        records.extend(tail)
+        count += len(tail)
     else:
         lines = raw.decode("utf-8").splitlines()
         records, head = _decode_lines(lines)
         count = len(records)
-        # Joining validated object lines preserves their values without mutable aliases.
-        # Replacing line separators with commas and adding brackets costs at most 2 bytes.
-        payload = ("[" + ",".join(lines) + "]").encode("utf-8")
+    # This is process-local serialization of already decoded JSON, never a file format
+    # or an untrusted marshal input. A caller cannot mutate the cached records.
+    payload = marshal.dumps(records)
     _previous = (raw, payload, head, count)
     return payload, head
 
