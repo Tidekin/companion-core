@@ -217,6 +217,16 @@ continuation rules, including when the predecessor is itself a renewal. Older jo
 readers must remain stopped after the renewal append; forward repair preserves the
 whole journal.
 
+A locally closed UNKNOWN can predate the current authority revision without having
+entered a paid renewal yet. Renewal retains that liability under its exact original
+admission and closure when its ACTIVE revision belongs to the verified same-approval
+STOP/ACTIVE chain. Its grant, restore generation, policy reference and paid snapshot
+must match that chain. Earlier inputs are not transferred again, and erased source
+content stays erased. Only UNKNOWNs owned by the current revision produce the
+existing source-bound input-carry receipt. The manifest and wire formats are unchanged;
+all historical and current charges remain in the financial scope, including when
+historical-only renewal uses an ordinary Bridge handoff.
+
 A retained request can refer to several historical inputs. Each input keeps its own
 native source-work proof, while the request and its charge occur only once in the
 carry receipt. A Life source with its own settled responsibility may still be cited
