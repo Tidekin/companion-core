@@ -1,4 +1,4 @@
-"""Synthetic independent Reader process; provider bytes are mocked, Core is absent."""
+"""Independent Reader plus its shipped stdlib policy; Core runtime is absent."""
 
 import json
 import os
@@ -7,14 +7,21 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from tests.test_next_reading import HTML
 
 
-def test_independent_web_reader_needs_no_core_runtime_and_restart_keeps_provenance(tmp_path):
+@pytest.mark.parametrize("hosts", [["articles.example"], ["*"]])
+def test_independent_web_reader_needs_no_core_runtime_and_restart_keeps_provenance(tmp_path, hosts):
     import trafilatura as parser
 
     root = Path(__file__).resolve().parents[1]
     shutil.copytree(root / "source_reader", tmp_path / "source_reader")
+    # Match the Reader Docker artifact: only this stdlib policy and package marker.
+    (tmp_path / "companion").mkdir()
+    for name in ("__init__.py", "source_policy.py"):
+        shutil.copyfile(root / "companion" / name, tmp_path / "companion" / name)
     script = """
 import asyncio
 import importlib.abc
@@ -26,7 +33,8 @@ sys.path[:0] = [sys.argv[1], sys.argv[2]]
 
 class Boundary(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {'companion', 'sqlite3', 'fastapi', 'pydantic', 'alembic'}:
+        if (fullname.split('.')[0] in {'sqlite3', 'fastapi', 'pydantic', 'alembic'}
+                or fullname.startswith('companion.') and fullname != 'companion.source_policy'):
             raise ImportError('FORBIDDEN_READER_DEPENDENCY:' + fullname)
 
 sys.meta_path.insert(0, Boundary())
@@ -34,7 +42,8 @@ import httpcore
 from source_reader.reading import ReadingContext, read_observation
 from source_reader.web import WebHTTP, WebReader
 
-document = bytes.fromhex(json.loads(sys.stdin.read())['document'])
+request = json.loads(sys.stdin.read())
+document = bytes.fromhex(request['document'])
 wire = b'HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: '
 wire += str(len(document)).encode() + b'\\r\\nConnection: close\\r\\n\\r\\n' + document
 
@@ -46,7 +55,7 @@ async def validate(context):
 async def main():
     backend = httpcore.AsyncMockBackend([wire])
     pool = httpcore.AsyncConnectionPool(network_backend=backend)
-    async with WebHTTP({'articles.example'}, pool) as public:
+    async with WebHTTP(request['hosts'], pool) as public:
         return await read_observation(
             WebReader(public, clock=lambda: '2026-10-23T00:00:00+00:00'),
             {'operation': 'read', 'url': 'https://articles.example/story',
@@ -61,7 +70,7 @@ print(json.dumps(asyncio.run(main()), ensure_ascii=True))
         child = subprocess.run(
             [sys.executable, "-I", "-c", script, str(tmp_path),
              str(Path(parser.__file__).resolve().parents[1])],
-            input=json.dumps({"document": HTML.hex()}), cwd=tmp_path,
+            input=json.dumps({"document": HTML.hex(), "hosts": hosts}), cwd=tmp_path,
             env=os.environ.copy(), capture_output=True, text=True, timeout=30,
         )
         assert child.returncode == 0, child.stderr
