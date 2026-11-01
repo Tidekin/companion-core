@@ -562,7 +562,7 @@ def test_local_manifest_hash_tracks_real_files_and_parameters(node):
     config, _, _ = node
     initial = digest(local_manifest(config))
     service = json.loads(config.tts_service_config.read_text(encoding="utf-8"))
-    Path(service["model_path"]).write_bytes(b"changed local weights")
+    Path(service["gpt_weights"]).write_bytes(b"changed local weights")
     assert digest(local_manifest(config)) != initial
     manifest = canonical_bytes(local_manifest(config))
     assert service["base"]["reference_audio_path"].encode() not in manifest
@@ -577,7 +577,7 @@ def test_manifest_change_after_claim_prevents_process_dispatch(node):
         response = core(request)
         if request.url.path.endswith("/input"):
             service = json.loads(config.tts_service_config.read_text(encoding="utf-8"))
-            Path(service["model_path"]).write_bytes(b"changed during the claim")
+            Path(service["gpt_weights"]).write_bytes(b"changed during the claim")
         return response
 
     with pytest.raises(VoiceProtocolError, match="VOICE_MANIFEST_CHANGED"):

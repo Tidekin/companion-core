@@ -1,10 +1,12 @@
-"""Resident local GPT-SoVITS + Applio synthesis; media remains in request memory."""
+"""Resident local reference-voice synthesis; media remains in request memory."""
 
 import argparse
 import asyncio
 import hashlib
-import os
+import math
 import sys
+import wave
+from array import array
 from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
@@ -33,19 +35,12 @@ class SpeechServiceConfig(BaseModel):
     gpt_weights: Path = Field(repr=False)
     sovits_weights: Path = Field(repr=False)
     gpt_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
-    applio_source: Path = Field(repr=False)
-    applio_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
-    model_path: Path = Field(repr=False)
-    index_path: Path = Field(repr=False)
-    pitch: int = Field(default=0, ge=-24, le=24, strict=True)
-    index_rate: float = Field(default=0.35, ge=0, le=1, allow_inf_nan=False)
-    protect: float = Field(default=0.33, ge=0, le=0.5, allow_inf_nan=False)
-    volume_envelope: float = Field(default=1.0, ge=0, le=1, allow_inf_nan=False)
-    seed: int = Field(default=42, ge=0, le=2147483647, strict=True)
+    gpt_source: Path = Field(repr=False)
+    rms_dbfs: float = Field(default=-22, ge=-36, le=-12, allow_inf_nan=False)
     timeout_seconds: float = Field(default=90, gt=0, le=180, allow_inf_nan=False)
     output: WAVLimits = Field(default_factory=WAVLimits)
 
-    @field_validator("gpt_weights", "sovits_weights", "applio_source", "model_path", "index_path")
+    @field_validator("gpt_weights", "sovits_weights", "gpt_source")
     @classmethod
     def absolute_resource(cls, value):
         if not value.is_absolute():
@@ -58,22 +53,19 @@ def load_service_config(path):
 
 
 def service_manifest(config):
-    root = config.applio_source
+    root = config.gpt_source
     resources = {
         "gpt_weights": config.gpt_weights, "sovits_weights": config.sovits_weights,
         "reference": config.base.reference_audio_path,
-        "model": config.model_path, "index": config.index_path,
-        "embedder": root / "rvc/models/embedders/contentvec/pytorch_model.bin",
-        "embedder_config": root / "rvc/models/embedders/contentvec/config.json",
-        "predictor": root / "rvc/models/predictors/rmvpe.pt",
-        "inference_code": root / "rvc/infer/infer.py",
-        "pipeline_code": root / "rvc/infer/pipeline.py",
-        "predictor_code": root / "rvc/lib/predictors/f0.py",
+        "api_code": root / "api_v2.py",
+        "inference_code": root / "GPT_SoVITS/TTS_infer_pack/TTS.py",
+        "decoder_code": root / "GPT_SoVITS/module/models.py",
+        "launcher_code": Path(__file__).with_name("gpt_server.py"),
         "service_code": Path(__file__),
         "provider_code": Path(__file__).with_name("providers.py"),
     }
     options = config.model_dump(mode="json", exclude={
-        "base", "applio_source", "gpt_weights", "sovits_weights", "model_path", "index_path",
+        "base", "gpt_source", "gpt_weights", "sovits_weights",
     })
     options["base"] = config.base.model_dump(mode="json", exclude={
         "reference_audio_path", "prompt_text", "api_key",
@@ -90,63 +82,32 @@ class LocalSpeechEngine:
     def __init__(self, config):
         self.config = config
         self.base = GPTSoVITSProvider(config.base)
-        self.converter = None
-
-    def load(self):
-        # The upstream file frontend uses cwd to locate its pinned assets. This
-        # dedicated process has one immutable source directory and one model.
-        os.chdir(self.config.applio_source)
-        sys.path.insert(0, str(self.config.applio_source))
-        import torch
-        from rvc.infer.infer import VoiceConverter
-        from rvc.lib.utils import HubertModelWithFinalProj
-
-        torch.set_num_threads(4)
-        if not torch.cuda.is_available():
-            raise LocalVoiceError("VOICE_TTS_DEVICE_UNAVAILABLE")
-        self.converter = VoiceConverter()
-        self.converter.get_vc(str(self.config.model_path), 0, "torch")
-        self.converter.hubert_model = HubertModelWithFinalProj.from_pretrained(
-            str(self.config.applio_source / "rvc/models/embedders/contentvec"),
-            local_files_only=True,
-        ).to(self.converter.config.device).float().eval()
-        self.converter.last_embedder_model = "contentvec"
 
     async def synthesize(self, text):
         audio = await self.base.synthesize(text)
-        return await asyncio.to_thread(self._convert, audio)
+        return await asyncio.to_thread(normalize_speech, audio, self.config)
 
-    def _convert(self, audio):
-        import librosa
-        import numpy as np
-        import soundfile as sf
-        import torch
 
-        samples, rate = sf.read(BytesIO(audio.audio), dtype="float32")
-        if rate != 16000:
-            samples = librosa.resample(samples, orig_sr=rate, target_sr=16000,
-                                       res_type="soxr_vhq")
-        maximum = np.abs(samples).max() / 0.95
-        if maximum > 1:
-            samples /= maximum
-        torch.manual_seed(self.config.seed)
-        with torch.inference_mode():
-            converted = self.converter.vc.pipeline(
-                model=self.converter.hubert_model, net_g=self.converter.net_g, sid=0,
-                audio=samples.flatten(), pitch=self.config.pitch, f0_method="rmvpe",
-                file_index=str(self.config.index_path), index_rate=self.config.index_rate,
-                pitch_guidance=self.converter.use_f0, volume_envelope=self.config.volume_envelope,
-                version=self.converter.version, protect=self.config.protect,
-                f0_autotune=False, f0_autotune_strength=0,
-                proposed_pitch=False, proposed_pitch_threshold=155,
-            )
-        if not np.isfinite(converted).all() or np.max(np.abs(converted)) <= 0:
-            raise LocalVoiceError("VOICE_TTS_OUTPUT_INVALID", uncertain=True)
-        # Same uniform listening gain as the approved speech audition; no stretch.
-        converted *= 0.891 / float(np.max(np.abs(converted)))
-        output = BytesIO()
-        sf.write(output, converted, self.converter.tgt_sr, format="WAV", subtype="PCM_16")
-        return validate_wav(output.getvalue(), self.config.output)
+def normalize_speech(audio, config):
+    """Uniform listening gain, matching the approved audition without altering timing."""
+    audio = validate_wav(audio.audio, config.output)
+    with wave.open(BytesIO(audio.audio), "rb") as reader:
+        samples = array("h", reader.readframes(reader.getnframes()))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    peak = max(abs(sample) for sample in samples)
+    if not peak:
+        raise LocalVoiceError("VOICE_TTS_OUTPUT_INVALID")
+    rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+    gain = min(32768 * 10 ** (config.rms_dbfs / 20) / rms, 32768 * 0.891 / peak)
+    samples = array("h", (round(sample * gain) for sample in samples))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    output = BytesIO()
+    with wave.open(output, "wb") as writer:
+        writer.setparams((audio.channels, 2, audio.sample_rate, 0, "NONE", "not compressed"))
+        writer.writeframes(samples.tobytes())
+    return validate_wav(output.getvalue(), config.output)
 
 
 class SpeechRequest(BaseModel):
@@ -186,8 +147,7 @@ def create_app(config, *, engine=None):
         app.state.quarantined = False
         app.state.pending = None
         app.state.manifest = digest(await asyncio.to_thread(service_manifest, config))
-        await asyncio.to_thread(engine.load)
-        # Warm the complete local path before readiness, outside any owner job.
+        # Warm the pinned native model before readiness, outside any owner job.
         await engine.synthesize("语音服务已就绪。")
         if digest(await asyncio.to_thread(service_manifest, config)) != app.state.manifest:
             raise RuntimeError("VOICE_MANIFEST_CHANGED")

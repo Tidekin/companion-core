@@ -150,6 +150,11 @@ class GPTSoVITSConfig(_Config):
     max_text_chars: int = Field(default=1000, ge=1, le=4000, strict=True)
     parallel_infer: bool = Field(default=False, strict=True)
     speed_factor: float = Field(default=1.0, ge=0.5, le=1.5, allow_inf_nan=False)
+    temperature: float = Field(default=1.0, gt=0, le=2, allow_inf_nan=False)
+    top_p: float = Field(default=1.0, gt=0, le=1, allow_inf_nan=False)
+    top_k: int = Field(default=5, ge=1, le=100, strict=True)
+    seed: int = Field(default=-1, ge=-1, le=2147483647, strict=True)
+    text_split_method: Literal["cut0", "cut1", "cut2", "cut3", "cut4", "cut5"] = "cut5"
     output: WAVLimits = Field(default_factory=WAVLimits)
     api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
 
@@ -322,6 +327,10 @@ class GPTSoVITSProvider(_WAVHTTPProvider):
         }
         if self.config.speed_factor != 1.0:
             payload["speed_factor"] = self.config.speed_factor
+        for name, default in (("temperature", 1.0), ("top_p", 1.0), ("top_k", 5),
+                              ("seed", -1), ("text_split_method", "cut5")):
+            if (value := getattr(self.config, name)) != default:
+                payload[name] = value
         return payload
 
 

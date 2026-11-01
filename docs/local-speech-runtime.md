@@ -1,24 +1,30 @@
 # Local daily voice replies
 
-The voice node uses a resident, loopback-only speech service: GPT-SoVITS reads the
-reply, then Applio converts its timbre. Replies do not use Edge TTS or a cloud speech
-provider. Core still owns authorization, job identity, deadlines and delivery;
-the service only accepts bounded text and returns PCM16 WAV in memory.
+The voice node uses a resident, loopback-only speech service. GPT-SoVITS generates
+each reply using a pinned reference voice prepared locally with Applio. The final
+reply passes through one speech synthesis stage. Core still owns authorization,
+job identity, deadlines and delivery; the service only accepts bounded text and
+returns PCM16 WAV in memory. Speech stays local.
 
 The service implements `POST /v1/audio/speech` with a fixed `model`, `voice`,
 `response_format=wav` and `speed=1`. Base reading speed belongs to the pinned
 GPT-SoVITS `speed_factor` configuration. Unsupported fields and streaming are
-rejected. `GET /healthz` becomes ready after both models load and a synthetic
-warm-up finishes. Its manifest identifies the actual model, index, reference,
-inference source and local service bytes. It is an operator consistency check,
+rejected. `GET /healthz` becomes ready after the native GPT server completes a
+synthetic warm-up. Its manifest identifies actual GPT/SoVITS weights, reference,
+native inference source and local service bytes. It is an operator consistency check,
 not remote attestation.
 
 ## Configuration and operation
 
 Keep private configuration, weights, caches and sample outputs inside the project
 runtime directory. A `SpeechServiceConfig` JSON contains the base `GPTSoVITSConfig`,
-absolute `gpt_weights`, `sovits_weights`, `applio_source`, `model_path`, `index_path`,
-the pinned `gpt_revision` and `applio_revision`, and the selected model/voice IDs.
+absolute `gpt_weights`, `sovits_weights`, `gpt_source`, the pinned `gpt_revision`,
+and the selected model/voice IDs. Reading the accepted reference replaces live
+conversion; remove the former Applio source/model/index fields from service JSON.
+The base config pins temperature, top-p, top-k, seed and text splitting. The chosen
+v1 uses temperature 0.6, top-p 0.8, top-k 5, seed 42, `cut5`, and speed factor 1.
+`rms_dbfs=-22` applies uniform listening gain with a -1 dBFS peak ceiling, preserving
+PCM timing. The service uses no time stretching or dynamic compression.
 The native GPT server and the resident service use separate loopback ports (for
 example 19881 and 19880). The native launcher suppresses upstream transcript and
 phoneme console output; it does not log private reply text.
@@ -62,10 +68,12 @@ Restarting a provider never proves a cancelled or UNKNOWN job completed.
 
 The accepted local trial uses [Applio 3.7.1](https://github.com/IAHispano/Applio/tree/6f69726b140c615c8cc6831a7db8b7c5e48ba8af)
 and [GPT-SoVITS v2Pro](https://github.com/RVC-Boss/GPT-SoVITS/tree/d7c2210da8c013e81a94bfc7b811a477c99fd506).
-The service calls the pinned native VoiceConverter pipeline with local ContentVec
-and RMVPE assets; it does not implement another voice conversion algorithm.
-The accepted 32 kHz model uses pitch 0, index rate 0.35, protect 0.33, volume
-envelope 1 and seed 42. Keep the accepted model/index hashes in the runtime receipt.
+Applio's native VoiceConverter prepares the fixed reference with local ContentVec
+and RMVPE assets. The selected daily reference uses the accepted 32 kHz voice model,
+pitch 0, index rate 0, protect 0.5, volume envelope 1 and seed 42. Preserve this WAV
+and its transcript alongside the approved preview, sampling config, model hashes
+and acceptance receipt. Further auditions use separate directories. Singing keeps
+its separately accepted conversion settings and artifacts.
 
 ASR uses local faster-whisper. Its
 [decoder timestamps](https://github.com/SYSTRAN/faster-whisper/blob/v1.2.1/faster_whisper/transcribe.py)

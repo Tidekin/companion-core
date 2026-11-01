@@ -10,9 +10,6 @@ from tests.test_local_voice_providers import wav_bytes
 
 
 class Engine:
-    def load(self):
-        pass
-
     async def synthesize(self, text):
         return validate_wav(wav_bytes())
 

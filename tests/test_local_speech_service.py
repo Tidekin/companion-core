@@ -1,10 +1,14 @@
 import asyncio
 import base64
 import json
+import math
 import os
 import socket
+import struct
 import subprocess
 import sys
+import wave
+from io import BytesIO
 from pathlib import Path
 
 import httpx
@@ -13,12 +17,14 @@ from pydantic import ValidationError
 
 from companion.voice_protocol import VoiceAudioResult, VoiceProtocolError, digest
 from companion_voice_node.providers import (
+    GPTSoVITSConfig,
+    GPTSoVITSProvider,
     LocalVoiceError,
     OpenAISpeechConfig,
     OpenAISpeechProvider,
     validate_wav,
 )
-from companion_voice_node.speech_service import create_app, service_manifest
+from companion_voice_node.speech_service import create_app, normalize_speech, service_manifest
 from companion_voice_node.supervisor import ProcessSupervisor, _environment
 from companion_voice_node.worker import VoiceNodeWorker
 from tests.conftest import run
@@ -30,15 +36,10 @@ from tests.voice_service_fixtures import speech_config
 class Engine:
     def __init__(self):
         self.requests = []
-        self.loaded = False
         self.delay = 0
         self.failure = None
 
-    def load(self):
-        self.loaded = True
-
     async def synthesize(self, text):
-        assert self.loaded
         self.requests.append(text)
         await asyncio.sleep(self.delay)
         if self.failure:
@@ -243,3 +244,53 @@ def test_gpt_launcher_does_not_persist_native_transcript_console_output(tmp_path
                              "--script", str(script), "--config", str(config), "--port", "19881"],
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0 and result.stdout == result.stderr == ""
+
+
+@pytest.mark.parametrize("spike", [False, True])
+def test_listening_gain_keeps_timing_and_bounds_without_compressing_the_waveform(tmp_path, spike):
+    samples = ([32767] + [0]*1599 if spike else
+               [round(1000*math.sin(2*math.pi*200*i/16000)) for i in range(1600)])
+    stream = BytesIO()
+    with wave.open(stream, "wb") as writer:
+        writer.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        writer.writeframes(struct.pack("<1600h", *samples))
+    original = validate_wav(stream.getvalue())
+    result = normalize_speech(original, speech_config(tmp_path))
+    assert (result.frames, result.sample_rate, result.channels) == (1600, 16000, 1)
+    with wave.open(BytesIO(result.audio), "rb") as reader:
+        output = struct.unpack("<1600h", reader.readframes(1600))
+    assert max(abs(value) for value in output) <= round(32768*.891)
+    assert [value == 0 for value in output] == [value == 0 for value in samples]
+    if spike:
+        assert abs(output[0] - 32768*.891) <= 1
+    else:
+        rms = math.sqrt(sum(value*value for value in output)/len(output))/32768
+        assert 20*math.log10(rms) == pytest.approx(-22, abs=.01)
+
+
+def test_reference_sampler_forwards_frozen_native_parameters(tmp_path):
+    config = speech_config(tmp_path).base.model_copy(update={
+        "temperature": .6, "top_p": .8, "seed": 42, "text_split_method": "cut5",
+    })
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, content=wav_bytes(), headers={"content-type": "audio/wav"})
+
+    run(GPTSoVITSProvider(config, transport=httpx.MockTransport(respond)).synthesize("你好"))
+    assert {key: requests[0][key] for key in ("temperature", "top_p", "seed")} == {
+        "temperature": .6, "top_p": .8, "seed": 42,
+    }
+    assert requests[0].get("text_split_method", "cut5") == "cut5"
+    assert requests[0].get("speed_factor", 1) == 1
+
+
+@pytest.mark.parametrize("values", [
+    {"temperature": float("nan")}, {"top_p": 0}, {"top_k": True},
+    {"seed": True}, {"seed": -2}, {"text_split_method": "arbitrary"},
+])
+def test_native_sampler_rejects_invalid_operator_parameters(tmp_path, values):
+    base = speech_config(tmp_path).base.model_dump()
+    with pytest.raises(ValidationError):
+        GPTSoVITSConfig.model_validate({**base, **values})

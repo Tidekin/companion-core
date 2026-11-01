@@ -12,15 +12,7 @@ $configuration = (Resolve-Path -LiteralPath $Config).Path
 if (-not $configuration.StartsWith($voiceRoot + [IO.Path]::DirectorySeparatorChar,
         [StringComparison]::OrdinalIgnoreCase)) { throw 'Speech config must stay in RuntimeRoot' }
 $settings = Get-Content -LiteralPath $configuration -Raw | ConvertFrom-Json
-$applioSource = (Resolve-Path -LiteralPath $settings.applio_source).Path
-$applioRuntime = Split-Path -Parent $applioSource
-$overlay = (Resolve-Path -LiteralPath (Join-Path $applioRuntime 'overlay')).Path
 $python = Join-Path $voiceRoot 'venv/Scripts/python.exe'
-$env:PYTHONPATH = $workspace + ';' + (Join-Path $voiceRoot 'venv/Lib/site-packages') + ';' + $overlay
-$env:APPLIO_ROOT = $applioSource
-$env:APPLIO_CODE_ROOT = $applioSource
-$env:APPLIO_CONFIG_DIR = Join-Path $applioRuntime 'user-config'
-$env:APPLIO_LOGS_DIR = Join-Path $applioRuntime 'logs'
 $env:OMP_NUM_THREADS = '4'
 $env:MKL_NUM_THREADS = '4'
 $expectedManifest = & $python -B -m companion_voice_node.speech_service --config $configuration --print-manifest
