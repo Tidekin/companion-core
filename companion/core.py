@@ -582,6 +582,10 @@ class Core(Runtime):
                     from companion.agent_singing import revalidate
 
                     revalidate(self.store, self.settings, self.clock, job, [snapshot])
+                elif snapshot["kind"] == "account_actions":
+                    from companion import account_action_context
+
+                    account_action_context.revalidate(self, job, snapshot["proof"])
                 elif snapshot["kind"] == "diary":
                     self.diary.revalidate_context(snapshot["proof"])
                 elif snapshot["kind"] == "sources":
@@ -1053,6 +1057,15 @@ class Core(Runtime):
                 # It explains the current message: older history is pruned before it.
                 references.append(glossary)
                 selection.priorities[id(glossary)] = context_selection.TOPIC
+        if authority and job["kind"] == "chat":
+            from companion import account_action_context
+
+            if actions := account_action_context.reference(self, job):
+                priority = related("昵称 个性签名 头像 改名")
+                selection.add(account_action_context.HEADING, actions["data"],
+                    actions["source_event_ids"], priority=priority,
+                    required=priority == context_selection.RELATED, module="account_actions",
+                    proofs=[{"kind": "account_actions", "proof": actions["proof"]}])
         mark("context_memory")
         turns = [dialogue_history.turn_messages(source, s) for source in sources]
         if continuation := self._memory_continuation(
