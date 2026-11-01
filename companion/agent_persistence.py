@@ -156,7 +156,6 @@ class ConversationStore:
 
     async def after_model_request(self, ctx, *, request_context, response):
         with self.store.transaction():
-            self.check()
             row = self.row()
             request_id = row["request_id"] if row else None
             if not request_id or not self.store.one(
@@ -170,6 +169,8 @@ class ConversationStore:
             # response already exists, so its checkpoint includes that request.
             usage = deepcopy(ctx.usage)
             usage.requests += 1
+            # _save checks the live job and all source proofs in this same transaction,
+            # immediately before persisting the received response.
             self._save(Conversation(messages=[*deepcopy(list(request_context.messages)), response],
                                     usage=usage,
                                     conversation_id=self.job["job_id"]), "READY")

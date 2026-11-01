@@ -9,7 +9,7 @@ import re
 from contextlib import nullcontext
 from datetime import UTC, datetime
 
-from companion import goal_plan, mood_appraisals, owner_authority
+from companion import goal_plan, mood_appraisals, owner_authority, owner_input
 from companion.contracts import CoreError
 from companion.memory_authority import source_allowed
 from companion.memory_context import MemorySources, check_version, read_version
@@ -224,24 +224,28 @@ class MoodService:
         except CoreError:
             return False
 
-    def _lineage(self, key, sources):
+    def _lineage(self, key, sources, source_check=None):
         rows = list(sources._lineage(key))
         if not MemoryProjections._live_lineage(rows, sources):
             return None
         for row in rows:
-            if row["source"] == "qq.onebot" and not source_allowed(
-                self.store,
-                self.settings,
-                self.clock,
-                row["event_id"],
-                "expression",
+            if row["source"] == "qq.onebot" and not (
+                source_check(row["event_id"]) if source_check is not None else source_allowed(
+                    self.store, self.settings, self.clock, row["event_id"], "expression",
+                )
             ):
                 return None
         return rows
 
     def _signals(self, at, allowed):
         s, cfg = self.store, self.settings
+        if owner_authority.required(s, cfg) and not s.db.in_transaction:
+            # Reuse the native history reader's synchronous transaction boundary.
+            # This batch never spans an await or a later context revalidation.
+            with s.transaction():
+                return self._signals(at, allowed)
         sources = MemorySources(self.memory, self.clock())
+        view = None
         if owner_authority.required(s, cfg):
             view = owner_authority.current(s, cfg, self.clock, purpose="expression")
             sources.cutoff = max(
@@ -250,6 +254,35 @@ class MoodService:
                     after(self.clock(), -view.policy.source_retention_days * 86400)
                 ),
             )
+        transactional, changes = s.in_write_transaction, s.db.total_changes
+        originals = {encode(view.authority.as_dict()): view} if view else {}
+
+        def evidence(ref):
+            key = encode(ref)
+            if key not in originals:
+                originals[key] = owner_authority.evidence(s, cfg, ref)
+            return originals[key]
+
+        def source_check(event_id):
+            if not (view and transactional and s.in_write_transaction
+                    and s.db.total_changes == changes):
+                return source_allowed(s, cfg, self.clock, event_id, "expression")
+            now = self.clock()
+            if (cfg.owner_runtime.mode != "ENABLED" or "expression" not in view.policy.purposes
+                or view.policy.expires_at is not None
+                and datetime.fromisoformat(now) >= view.policy.expires_at):
+                raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
+            receipt = s.one("SELECT value FROM runtime_meta WHERE key=?",
+                            (owner_input.INPUT + event_id,))
+            try:
+                original = json.loads(receipt["value"]).get("authority") if receipt else None
+                owner_input._source(s, cfg, view, event_id, now,
+                    history=original != view.authority.as_dict(),
+                    verify_capture=lambda value: owner_input._verify(s, cfg, value, evidence))
+            except (CoreError, ValueError, TypeError, AttributeError):
+                return False
+            return True
+
         cutoff = max(after(at, -WINDOW), reset_at(s) or after(at, -WINDOW))
         candidates = s.rows(
             "SELECT e.event_id,e.occurred_at AS at,'feedback' AS kind FROM events e "
@@ -269,7 +302,7 @@ class MoodService:
         signals, used = [], set()
         for candidate in candidates[:LIMIT]:
             key, kind = candidate["event_id"], candidate["kind"]
-            lineage = self._lineage(key, sources)
+            lineage = self._lineage(key, sources, source_check)
             if not lineage:
                 continue
             event = next(row for row in lineage if row["event_id"] == key)
@@ -307,7 +340,9 @@ class MoodService:
                     "ORDER BY o.sent_at DESC,o.rowid DESC LIMIT 1",
                     (event["conversation_id"], candidate["at"], key),
                 )
-                if not reply or not (prior := self._lineage(reply["origin_event_id"], sources)):
+                if not reply or not (prior := self._lineage(
+                    reply["origin_event_id"], sources, source_check,
+                )):
                     continue
                 # A possibly delivered newer reply makes the feedback target ambiguous.
                 # Never silently attribute it to an older known SENT reply instead.
@@ -406,8 +441,9 @@ class MoodService:
                         )
                     ):
                         continue
-                    expanded = [self._lineage(root, sources) for root in roots]
-                    expanded += [self._lineage(step["outcome_event_id"], sources) for step in steps]
+                    expanded = [self._lineage(root, sources, source_check) for root in roots]
+                    expanded += [self._lineage(step["outcome_event_id"], sources, source_check)
+                                 for step in steps]
                     if any(not value for value in expanded):
                         continue
                     lineage += [row for value in expanded for row in value]
@@ -437,7 +473,8 @@ class MoodService:
             if (category, identity) not in used:
                 signals.append(signal)
                 used.add((category, identity))
-        signals += self._appraisals(at, allowed, cutoff, sources, {x["event_id"] for x in signals})
+        signals += self._appraisals(at, allowed, cutoff, sources,
+                                   {x["event_id"] for x in signals}, source_check)
         # The same observation's review and verified goal result form one bounded impulse.
         merged = {}
         for item in signals:
@@ -456,12 +493,18 @@ class MoodService:
                 prior["reason"], prior["kind"] = "REVIEWED_GOAL_COMPLETION", "experience"
             else:
                 merged[key] = item
+        if view and transactional:
+            # Independent journals, STOP and time remain live at the batch boundary.
+            owner_authority.current(s, cfg, self.clock, purpose="expression",
+                                    authority=view.authority)
+            if not s.in_write_transaction or s.db.total_changes != changes:
+                raise CoreError("PRIVACY_CHANGED", 409)
         ordered = sorted(
             merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
         )
         return ordered[-LIMIT:], len(candidates) > LIMIT or len(ordered) > LIMIT
 
-    def _appraisals(self, at, allowed, cutoff, sources, taken):
+    def _appraisals(self, at, allowed, cutoff, sources, taken, source_check=None):
         """Model-judged owner wording; an exact-phrase signal on the same message wins."""
         s = self.store
         rows = [
@@ -476,7 +519,7 @@ class MoodService:
         signals = []
         for row in mood_appraisals.capped(rows, self.settings.timezone):
             key = row["event_id"]
-            lineage = self._lineage(key, sources)
+            lineage = self._lineage(key, sources, source_check)
             if not lineage:
                 continue
             event = next(item for item in lineage if item["event_id"] == key)

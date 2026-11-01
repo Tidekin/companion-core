@@ -1,5 +1,42 @@
 # Responsive memory retrieval and stable prompt prefixes
 
+## Chat validation and Bridge decoding
+
+Mood source validation uses the same synchronous write-transaction boundary as
+`owner_input.history_sources`. Every retained source still passes the original input,
+capture-signature, recall, retention and provenance checks. Original authority evidence
+is reused only within that batch and while the connection has made no writes. The batch
+rechecks current authority, independent journals and expiry before returning; a changed
+connection or a caller-owned read transaction retains the per-source path. Each later
+context check starts a new batch, including after model I/O.
+
+The SDK response checkpoint relies on `_save`'s source check immediately before its
+write, avoiding a second identical check earlier in that transaction. Settlement and
+the final job/Outbox transaction retain their existing boundaries. This reduces CPU
+work while SQLite's single writer is held; WAL and durability settings are unchanged.
+
+Bridge codec reuse follows `paid_budget.journal`'s immutable process-local `marshal`
+view. Only already parsed and hash-checked JSON is serialized, and each caller receives
+independent objects. The disk journal remains the original JSON hash chain. Cache state
+retains at most 8 MiB of source bytes and 8 MiB of serialized records; a larger serialized
+view is evicted. Journals above that input bound reuse an LF-terminated prefix and fully
+validate the tail against its head and sequence, preserving the existing 32 MiB file
+limit. Rewrites, truncation, permissions, STOP and all runtime projection checks remain
+live. Decoding cached records is not authority to send.
+
+These changes leave model generation settings, prompts, output allowances and reply
+segmentation unchanged. Production timing comparisons belong to the verification
+receipt, with receipt-to-platform-ACK separated from provider transport and phone display.
+
+Reused implementations and primary references:
+
+- `companion/owner_input.py` provides the original synchronous source-validation batch.
+- `companion/paid_budget.py` provides immutable serialized views with caller-owned copies.
+- [SQLite isolation](https://www.sqlite.org/isolation.html) describes its single writer
+  and isolation between connections.
+- [Python marshal](https://docs.python.org/3/library/marshal.html) documents the process-local
+  serialization types and the requirement to reject untrusted serialized input.
+
 The reply recall and extraction-review paths previously called synchronous FastEmbed from an
 async task. ONNX's own worker threads do not yield the calling event loop. An offline probe with
 the actual cached BGE model and 32 uncached synthetic memories observed a 504ms heartbeat gap;
