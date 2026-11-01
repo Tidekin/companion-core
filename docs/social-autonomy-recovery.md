@@ -1,5 +1,20 @@
 # Social planning recovery and historical quota reads
 
+Owner chat can read up to three recent nickname, signature and avatar execution receipts
+through the existing Core context reference and snapshot machinery. This requires the current
+native `history`, `social` and `account_actions` purposes and an owner-private history scope;
+the signed history time, count and UTF-8 bounds still apply. Only matching original frozen
+plans, Outbox content, owner identity, lease-bound native receipts and source fingerprints
+are included. Source-only MemoryContext pins preserve erasure and source-change checks after
+the model await, without adding a fact, model call, delivery or database representation.
+
+The bounded view distinguishes success, rejection and uncertainty. A current PAUSED or
+UNAVAILABLE capability cannot establish that an earlier action never happened, and a cached
+profile observation cannot establish who changed it. Missing history is not an exhaustive
+denial. Historical native authority evidence may survive a successor revision for this read;
+it never re-authorizes an old action. Receipt times and values describe that operation, rather
+than guaranteeing that the current external profile is unchanged.
+
 Social planning keeps the existing plan, model request, source snapshot, native budget and
 Outbox identities. Recovery does not reconstruct an unstored model response or repeat an
 admitted request. Revision `0036_social_plan_jobs` adds a one-to-one plan/job mapping; execution
