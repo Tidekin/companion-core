@@ -27,7 +27,7 @@ from companion.image_input import ImageInputPolicy
 from companion.input_debounce import InputDebounceConfig
 from companion.jargon_config import JargonConfig
 from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
-from companion.media_config import ContentConfig, MediaConfig
+from companion.media_config import ContentConfig, ImageGenerationConfig, MediaConfig
 from companion.meme_policy import TrustedSource
 from companion.meme_wiki_config import MemeWikiConfig
 from companion.operator_config import ConsoleConfig
@@ -522,6 +522,10 @@ class Settings(BaseModel):
     control_token: SecretStr = SecretStr("")
     executive: ExecutiveConfig = Field(default_factory=ExecutiveConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
+    image_generation: ImageGenerationConfig = Field(
+        default_factory=ImageGenerationConfig,
+        exclude_if=lambda value: value == ImageGenerationConfig(),
+    )
     content_enabled: bool = False
     web_reading_enabled: bool = False
     qzone_reading_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
@@ -685,6 +689,9 @@ class Settings(BaseModel):
                 raise ValueError("video_model_key is required for approved video input")
             if self.video_model_key.get_secret_value() in tokens:
                 raise ValueError("video_model_key must be separate from management credentials")
+        if self.image_generation.enabled:
+            if self.image_generation.endpoint.key.get_secret_value() in tokens:
+                raise ValueError("image generation key must be separate from management tokens")
         request_span = self.timeout_seconds * (2 if self.memory_enabled else 1)
         if self.lease_seconds <= request_span + 10:
             raise ValueError("lease_seconds must cover model calls plus more than 10 seconds")
@@ -768,6 +775,8 @@ class Settings(BaseModel):
                     data[field] = ExecutiveConfig.model_validate_json(value)
                 elif field == "media":
                     data[field] = MediaConfig.model_validate_json(value)
+                elif field == "image_generation":
+                    data[field] = ImageGenerationConfig.model_validate_json(value)
                 elif field == "content":
                     data[field] = ContentConfig.model_validate_json(value)
                 elif field == "private_files":

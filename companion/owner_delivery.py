@@ -357,6 +357,10 @@ def send_check(store, settings, clock, body):
         if content.get("image") is not None:
             owner_authority.current(store, settings, clock,
                                      purpose="meme", authority=body.authority)
+        if content.get("generated_image") is not None:
+            from companion import image_generation
+
+            image_generation.check_send(store, settings, clock, body.authority)
         if body.voice is not None or store.one(
             "SELECT 1 FROM runtime_meta WHERE key=? AND json_extract(value,'$.state')='AUDIO'",
             (REPLY_RECEIPT + body.message_id,),

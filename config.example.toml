@@ -174,6 +174,22 @@ max_request_micro_usd = 0
 # enabled = true
 # banter_level = 50
 
+# Model-requested pictures in owner private chat (generate_image tool), off by default.
+# Needs the owner grant's "expression" purpose; real provider dispatch still awaits its own
+# approval, so only a synthetic transport runs today. See docs/qq-beta/image-generation.md.
+# [image_generation]
+# enabled = false
+# sizes = ["1024x1024"]
+# daily_micro_usd = 200000
+# max_daily_images = 10
+# cooldown_seconds = 300
+# [image_generation.endpoint]
+# url = "https://api.openai.com/v1/images/generations"
+# model = "gpt-image-1"
+# max_request_micro_usd = 40000
+# Switch url/model/key any time in the Console configuration page; the next chat uses it.
+# Startup alternative: COMPANION_IMAGE_GENERATION as JSON. Never put the key in this file.
+
 # Optional owner-private media and account actions. All top-level capabilities remain off.
 # Activation prerequisites, signed scopes and deployment: docs/qq-beta/media-autonomy.md.
 # These planning ceilings attach to native model/tool charges; they do not enable a provider.

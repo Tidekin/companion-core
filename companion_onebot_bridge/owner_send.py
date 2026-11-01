@@ -221,6 +221,8 @@ class OwnerSendGuard:
         self.lease_until = min(self.lease_until, expiry)
         if item["content"].get("image") is not None:
             await self.runtime.check(self.client, purpose="meme")
+        if item["content"].get("generated_image") is not None:
+            await self.runtime.check(self.client, purpose="expression")
         self._request(request)
         self._local()
         if self.meme_prepared:
@@ -313,6 +315,7 @@ class OwnerOneBot:
     companion = True
     account_scope = True
     voice_scope = True
+    generated_image_scope = True
     probe_before_reservation = True
 
     def __init__(self, guard, protocol):
@@ -355,6 +358,32 @@ class OwnerOneBot:
             permission = await self.guard.runtime.check(self.guard.client, purpose="voice")
             self.guard.prepared_voice = prepare_delivery(self.guard.runtime, item,
                 voice_policy_sha256=permission["capability_policies"]["voice"])
+        elif item["content"].get("generated_image") is not None:
+            from .generated_image_http import read_image
+
+            await self.guard.runtime.check(self.guard.client, purpose="expression")
+            original = journal.digest(item)
+
+            def fence():
+                self.guard.runtime.verify()
+                if journal.digest(item) != original:
+                    raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
+
+            message = reply_segments.quote(item) + [
+                {"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
+            try:
+                image = await read_image(self.guard.runtime, self.guard.client, item,
+                                         check=fence)
+            except httpx.HTTPStatusError as error:
+                # Core no longer offers the picture (expired or erased): send the bound
+                # text alone rather than holding the reply.
+                if error.response.status_code != 410:
+                    raise
+                image = None
+            if image is not None:
+                message.append({"type": "image", "data": {
+                    "file": "base64://" + base64.b64encode(image.data).decode("ascii")}})
+            self.guard.prepared_message = message
         elif item["content"].get("image") is not None:
             await self.guard.runtime.check(self.guard.client, purpose="meme")
             original = journal.digest(item)
@@ -393,6 +422,10 @@ class OwnerOneBot:
             if self.guard.prepared_voice is None:
                 raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
             return await self.delegate.send_message(self.guard.prepared_voice.message)
+        if "generated_image" in content:
+            if self.guard.prepared_message is None:
+                raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
+            return await self.delegate.send_message(self.guard.prepared_message)
         if "image" in content:
             if self.guard.prepared_message is None:
                 raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")

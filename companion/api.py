@@ -842,6 +842,15 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         response.headers["Cache-Control"] = "no-store"
         return meme_delivery.read_asset(core.store, settings, core.clock, message_id, body)
 
+    from companion import image_generation
+
+    @app.post(prefix + "/generated-images/deliveries/{message_id}/asset", dependencies=auth)
+    async def generated_image_asset(message_id: str, body: image_generation.AssetRequest,
+                                    response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return image_generation.read_asset(core.store, settings, core.clock, message_id, body)
+
     @app.post(prefix + "/memes/captions", dependencies=auth)
     async def meme_caption(body: meme_core.CaptionBody):
         return app.state.core.memes.submit(body)

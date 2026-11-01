@@ -94,6 +94,8 @@ class Core(Runtime):
             self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
             self.observations = ObservationService(self.store, settings, clock)
             self.media = MediaService(self.store, settings, clock, self.observations)
+            # Synthetic image provider transport; see image_generation.available.
+            self.image_transport = None
             self.affect = AffectEngine(self.store, settings, clock)
             self.expression_learning = ExpressionLearning(self.store, settings, clock)
             self.reflections = ReflectionService(
@@ -324,6 +326,9 @@ class Core(Runtime):
         from companion import agent_images
 
         image_spool.cleanup(s, now, retain_completed=agent_images.enabled(self.settings))
+        from companion import image_generation
+
+        image_generation.cleanup(s, now)
         # The autonomous selector no longer consumes old fixed-timer greetings.
         # Only unadmitted queued work can be retired; retain all model/send custody.
         for job in s.rows(
@@ -1842,6 +1847,11 @@ class Core(Runtime):
                             action="qq.private.proactive" if job["kind"] == "activity"
                             else "qq.private.reply",
                         )]
+                    if (authority and message_ids and generated_reply and not voice_reply
+                            and job["kind"] == "chat"):
+                        from companion import image_generation
+
+                        image_generation.attach(self.store, job, message_ids, now)
                     if authority and message_ids:
                         owner_delivery.record_replies(
                             self.store, self.settings, self.clock, job, message_ids)

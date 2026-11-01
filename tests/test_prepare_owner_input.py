@@ -29,7 +29,8 @@ from tests.test_owner_authority import activate, prepare
 
 @asynccontextmanager
 async def window(core, tmp_path, *, media=False, content=False, history=False, video=False,
-                 bili=False, voice=False, model=None, video_config=None, image_count=1, meme=False):
+                 bili=False, voice=False, model=None, video_config=None, image_count=1, meme=False,
+                 expression=False):
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     policy = prepare(core, tmp_path)
     core.settings.rich_input_scope = "references_v1"
@@ -89,6 +90,7 @@ async def window(core, tmp_path, *, media=False, content=False, history=False, v
     purposes += ["bili_video"] if bili else []
     purposes += ["voice"] if voice else []
     purposes += ["meme", "expression"] if meme else []
+    purposes += ["expression"] if expression and not meme else []
     capability_names = (["image", "file"] if media else []) + (["bili_video"] if bili else [])
     capability_names += ["voice"] if voice else []
     capability_names += ["meme"] if meme else []

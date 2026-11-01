@@ -83,6 +83,7 @@ REVISION_CHAIN = (
     "0058_bili_discovery",
     "0059_gateway",
     "0060_mood_appraisals",
+    "0061_generated_images",
 )
 LEGACY_TABLES = (
     "principals",
