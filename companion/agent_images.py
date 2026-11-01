@@ -239,13 +239,13 @@ def accept(service, original, data, mime, lease_token, proof):
                 "duplicate": False, "input_ready": True}
 
 
-def _prepared(store, settings, clock, job, item_id, *, executing=True):
+def _source(store, settings, clock, job, item_id, *, executing=True):
     if not enabled(settings):
         raise CoreError("PAID_IMAGE_APPROVAL_REQUIRED", 403)
     row = store.one("SELECT c.*,p.proof_json,p.mime,p.expires_at FROM captured_images p "
                     "JOIN content_items c USING(item_id) WHERE p.item_id=? AND c.redacted=0",
                     (item_id,))
-    if not row or row["state"] != "SUCCEEDED" or row["expires_at"] <= clock():
+    if not row or row["state"] != "SUCCEEDED":
         raise CoreError("LIVE_IMAGE_ORIGINAL_UNAVAILABLE", 410)
     view = owner_authority.check_job(store, settings, clock, job, purpose="image",
                                      executing=executing)
@@ -268,6 +268,21 @@ def _prepared(store, settings, clock, job, item_id, *, executing=True):
                  row["media_sha256"], row["mime"], proof)
     if row["lease_token"] and row["lease_token"] != proof["lease_token"]:
         raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
+    return row, image
+
+
+def input_sources(store, settings, clock, job, *, executing=True):
+    """Revalidate signed provenance without reopening short-lived original bytes."""
+    rows = store.rows("SELECT item_id FROM agent_image_inputs WHERE job_id=? ORDER BY position",
+                      (job["job_id"],))
+    return [_source(store, settings, clock, job, row["item_id"], executing=executing)
+            for row in rows]
+
+
+def _prepared(store, settings, clock, job, item_id, *, executing=True):
+    row, image = _source(store, settings, clock, job, item_id, executing=executing)
+    if row["expires_at"] <= clock():
+        raise CoreError("LIVE_IMAGE_ORIGINAL_UNAVAILABLE", 410)
     maximum = min(settings.content.max_image_bytes,
                   settings.paid_model.image_input.max_bytes_per_image)
     data, mime = image_spool.get(store, row, clock(), maximum)
