@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 param(
     [Parameter(Mandatory = $true)][string]$RuntimeRoot,
-    [ValidateSet('tts','node')][string]$Service = 'tts'
+    [ValidateSet('tts','node','speech')][string]$Service = 'tts'
 )
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path

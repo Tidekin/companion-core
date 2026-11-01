@@ -19,8 +19,9 @@ $record = Join-Path $voiceRoot 'tts-process.json'
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
     throw 'Requested TTS port is already in use'
 }
-$arguments = @('-B', ('"' + (Join-Path $upstream 'api_v2.py') + '"'),
-    '-a', '127.0.0.1', '-p', $Port, '-c', ('"' + $config + '"'))
+$arguments = @('-B', '-m', 'companion_voice_node.gpt_server',
+    '--script', ('"' + (Join-Path $upstream 'api_v2.py') + '"'),
+    '--port', $Port, '--config', ('"' + $config + '"'))
 $process = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $upstream `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $voiceRoot 'logs/tts-stdout.log') `
     -RedirectStandardError (Join-Path $voiceRoot 'logs/tts-stderr.log')

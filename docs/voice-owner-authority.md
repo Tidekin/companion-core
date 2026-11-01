@@ -115,6 +115,9 @@ QQ sender or device was activated by these checks.
 
 ## Reuse
 
+The resident fully local GPT-SoVITS/Applio setup and manifest migration are documented
+in [Local daily voice replies](local-speech-runtime.md).
+
 - Existing `owner_authority.current/evidence`, `owner_input.source`,
   `owner_delivery.check_delivery` and native voice lease/retirement code own the
   permission, source and cleanup semantics.

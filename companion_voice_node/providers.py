@@ -149,6 +149,7 @@ class GPTSoVITSConfig(_Config):
     max_concurrency: int = Field(default=1, ge=1, le=4, strict=True)
     max_text_chars: int = Field(default=1000, ge=1, le=4000, strict=True)
     parallel_infer: bool = Field(default=False, strict=True)
+    speed_factor: float = Field(default=1.0, ge=0.5, le=1.5, allow_inf_nan=False)
     output: WAVLimits = Field(default_factory=WAVLimits)
     api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
 
@@ -217,11 +218,32 @@ def _reference_audio(config: GPTSoVITSConfig) -> str:
     return str(path)
 
 
-class GPTSoVITSProvider:
-    """GPT-SoVITS api_v2 POST /tts, static WAV only; never mutates server weights."""
+class OpenAISpeechConfig(_Config):
+    """Pinned local speech service; the node never chooses a model or voice."""
+
+    base_url: str = "http://127.0.0.1:19880"
+    model: str = Field(pattern=r"^[a-zA-Z0-9._:-]{1,128}$")
+    voice: str = Field(default="bigfish", pattern=r"^[a-zA-Z0-9._:-]{1,128}$")
+    timeout_seconds: float = Field(default=90, gt=0, le=600, allow_inf_nan=False)
+    max_concurrency: int = Field(default=1, ge=1, le=4, strict=True)
+    max_text_chars: int = Field(default=200, ge=1, le=4000, strict=True)
+    output: WAVLimits = Field(default_factory=WAVLimits)
+    api_key: SecretStr | None = Field(default=None, exclude=True, repr=False)
+
+    @field_validator("base_url")
+    @classmethod
+    def loopback_url(cls, value):
+        return GPTSoVITSConfig.loopback_url(value)
+
+
+class _WAVHTTPProvider:
+    """Single-slot, bounded local HTTP synthesis with uncertainty preserved."""
+
+    route = "/tts"
 
     def __init__(
-        self, config: GPTSoVITSConfig, *, transport: httpx.AsyncBaseTransport | None = None
+        self, config: GPTSoVITSConfig | OpenAISpeechConfig,
+        *, transport: httpx.AsyncBaseTransport | None = None
     ):
         self.config = config
         self.transport = transport
@@ -233,21 +255,10 @@ class GPTSoVITSProvider:
         if not self._slots.acquire(blocking=False):
             raise LocalVoiceError("VOICE_BUSY")
         try:
-            reference = await asyncio.to_thread(_reference_audio, self.config)
             headers = {"Accept": "audio/wav", "Accept-Encoding": "identity"}
             if self.config.api_key:
                 headers["Authorization"] = "Bearer " + self.config.api_key.get_secret_value()
-            payload = {
-                "text": text,
-                "text_lang": self.config.text_lang,
-                "ref_audio_path": reference,
-                "prompt_text": self.config.prompt_text,
-                "prompt_lang": self.config.prompt_lang,
-                "media_type": self.config.media_type,
-                "streaming_mode": False,
-                "batch_size": 1,
-                "parallel_infer": self.config.parallel_infer,
-            }
+            payload = await self._payload(text)
             async with asyncio.timeout(self.config.timeout_seconds):
                 async with httpx.AsyncClient(
                     transport=self.transport,
@@ -257,7 +268,7 @@ class GPTSoVITSProvider:
                 ) as client:
                     async with client.stream(
                         "POST",
-                        self.config.base_url + "/tts",
+                        self.config.base_url + self.route,
                         headers=headers,
                         json=payload,
                     ) as response:
@@ -295,6 +306,33 @@ class GPTSoVITSProvider:
         if length is not None and len(data) != int(length):
             raise LocalVoiceError("VOICE_TTS_LENGTH_INVALID")
         return bytes(data)
+
+
+class GPTSoVITSProvider(_WAVHTTPProvider):
+    """Local base speech through GPT-SoVITS's native api_v2 contract."""
+
+    async def _payload(self, text):
+        reference = await asyncio.to_thread(_reference_audio, self.config)
+        payload = {
+            "text": text, "text_lang": self.config.text_lang,
+            "ref_audio_path": reference, "prompt_text": self.config.prompt_text,
+            "prompt_lang": self.config.prompt_lang, "media_type": self.config.media_type,
+            "streaming_mode": False, "batch_size": 1,
+            "parallel_infer": self.config.parallel_infer,
+        }
+        if self.config.speed_factor != 1.0:
+            payload["speed_factor"] = self.config.speed_factor
+        return payload
+
+
+class OpenAISpeechProvider(_WAVHTTPProvider):
+    """OpenAI-compatible static speech bytes from the managed local service."""
+
+    route = "/v1/audio/speech"
+
+    async def _payload(self, text):
+        return {"model": self.config.model, "input": text, "voice": self.config.voice,
+                "response_format": "wav"}
 
 
 class FasterWhisperConfig(_Config):
@@ -432,11 +470,13 @@ class FasterWhisperProvider:
             for segment in segments:
                 self._check_deadline(deadline)
                 start, end, text = segment.start, segment.end, segment.text
-                # Whisper timestamps use 20 ms steps. VAD restoration can round the
-                # final step past the actual PCM end; retain only the captured audio.
+                # Decoder timestamps are estimates in 20 ms steps. After VAD maps
+                # them back, a short tail can extend past the captured PCM (observed
+                # 5.62 s for a 5.56 s clip with faster-whisper 1.2.1). Permit at
+                # most five steps of tail rounding, never invent source duration.
                 if (
                     _finite_number(end)
-                    and audio.duration_seconds < end <= audio.duration_seconds + 0.020000001
+                    and audio.duration_seconds < end <= audio.duration_seconds + 0.100000001
                 ):
                     end = audio.duration_seconds
                 if (
