@@ -30,12 +30,13 @@ def activity(core, before=None, limit=30):
 
 
 def _memory_rows(core, now, review=False):
-    """Bound materialization while keeping native source/retention eligibility."""
+    """Pending means unconfirmed or conflicted; native source eligibility still applies."""
     offset, batch_size = 0, 200
     while True:
         candidates = core.store.rows(
             "SELECT m.memory_id FROM memories m WHERE m.status IN ('CONFIRMED','HYPOTHESIS') "
-            "AND m.privacy_scope='private' AND m.confidence>0 AND (?=0 OR m.needs_review=1) "
+            "AND m.privacy_scope='private' AND m.confidence>0 "
+            "AND (?=0 OR m.status='HYPOTHESIS' OR m.needs_review=1) "
             "AND EXISTS (SELECT 1 FROM memory_evidence v JOIN events e ON e.event_id=v.event_id "
             "WHERE v.memory_id=m.memory_id AND v.polarity=1 AND e.redacted=0 "
             "AND e.actor_id='owner' AND e.privacy_scope='private') "
@@ -56,15 +57,20 @@ def _memory_rows(core, now, review=False):
         offset += len(ids)
 
 
+def _pending_memory(row):
+    return row["status"] == "HYPOTHESIS" or bool(row["needs_review"])
+
+
 def memories(core, query="", review=False, limit=30):
     core.memory.require_owner("owner")
     version, now = read_version(core.memory), core.clock()
-    selected, folded = [], query.casefold()
-    for row in _memory_rows(core, now, review):
-        if folded in row["content"].casefold():
+    selected, folded, pending_count = [], query.casefold(), 0
+    for row in _memory_rows(core, now):
+        pending = _pending_memory(row)
+        pending_count += int(pending)
+        if ((not review or pending) and folded in row["content"].casefold()
+            and len(selected) < limit):
             selected.append(row["memory_id"])
-            if len(selected) >= limit:
-                break
     # Recheck early pages after the complete scan, without returning stale evidence.
     rows = {row["memory_id"]: row for row in core.memory.search(
         "*", memory_ids=selected, limit=len(selected), now=now,
@@ -73,14 +79,14 @@ def memories(core, query="", review=False, limit=30):
     items = []
     for memory_id in selected:
         row = rows.get(memory_id)
-        if (row is None or (review and not row["needs_review"])
+        if (row is None or (review and not _pending_memory(row))
             or folded not in row["content"].casefold()):
             continue
         items.append(entry(row["memory_id"], "memory", row["content"], row["status"],
                            row["updated_at"], subject=row["subject"], memory_kind=row["kind"],
                            needs_review=bool(row["needs_review"]),
                            evidence_ids=row["evidence_ids"]))
-    return collection(core, items)
+    return {**collection(core, items), "meta": {"pending_count": pending_count}}
 
 
 def recall(core, query, limit=10):

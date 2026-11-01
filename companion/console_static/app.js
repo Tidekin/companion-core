@@ -617,6 +617,9 @@ async function loadRoute({ reset = false, more = false } = {}) {
       value = { ...value, items: [...unique.values()] };
     }
     if (route === "overview" || route === "caps") updateNavFrom(value);
+    if (route === "memories" && Number.isSafeInteger(value.meta?.pending_count) && value.meta.pending_count >= 0) {
+      state.nav = { ...(state.nav || {}), review: value.meta.pending_count };
+    }
     if (route === "overview" && value.diagnostics?.items) state.nav.uncertain = value.diagnostics.items.filter(i => i.status === "DELIVERY_UNCERTAIN").length;
     state.data = value; state.updatedAt = new Date().toISOString();
     renderNav(); render({ keepScroll: more });
@@ -736,7 +739,7 @@ function todoList(data) {
   const out = [], counts = data.counts || {}, b = data.budget || {};
   const uncertain = (data.diagnostics?.items || []).filter(i => i.status === "DELIVERY_UNCERTAIN");
   if (uncertain.length) out.push(["bad", uncertain.length, "条投递结果不明", "不会自动重发,请到 QQ 里看看是否已出现", "去核对", "diagnostics"]);
-  if (counts.review_memories) out.push(["", counts.review_memories, "条记忆等你确认", "确认后她才会在对话里用到", "去确认", "memories"]);
+  if (counts.review_memories) out.push(["", counts.review_memories, "条记忆可以核对", "查看候选内容，或核对相互矛盾的说法", "去确认", "memories"]);
   if (counts.companion_proposals) out.push(["info", counts.companion_proposals, "条她的调整提议", "她想少打扰或休息一下,等你批准", "去看看", "caps/wake"]);
   if (counts.pending_goals) out.push(["", counts.pending_goals, "个目标等你决定", "她提出了新目标,需要你接受或取消", "去看看", "life"]);
   if (counts.pending_reflections) out.push(["", counts.pending_reflections, "条反思等你批准", "每日反思已完成,需要你批准或拒绝", "去看看", "life"]);
@@ -858,7 +861,7 @@ PAGES.memories = data => {
   const items = data.items || [];
   const searchInput = el("input", { class: "input", id: "mem-q", type: "search", maxlength: "100", placeholder: "搜索记忆内容", value: state.memQ,
     oninput: e => { if (e.isComposing) return; memSearch(e.target.value); }, oncompositionend: e => memSearch(e.target.value) });
-  return el("div", {}, head("记忆", "每条记忆都有原话作为来源。确认后她会在以后的对话里用到；忘记会同时清除来源和由此衍生的内容。"),
+  return el("div", {}, head("记忆", "候选记忆已自动保存，可在对话中参考。确认表示你认可其内容；忘记会同时清除来源和由此衍生的内容。"),
     el("div", { class: "toolbar" }, el("div", { class: "seg", role: "group" },
       [["review", "待确认"], ["all", "全部"], ["recall", "召回测试"], ["jargon", "黑话"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
         n, k === "review" && state.nav?.review ? el("span", { class: "count" }, String(state.nav.review)) : null))),
@@ -875,7 +878,7 @@ PAGES.memories = data => {
         el("div", { class: "acts" }, m.status !== "CONFIRMED" ? btn("确认", () => memoryAction(m, "confirm"), { cls: "sm primary", symbol: "check" }) : null,
           btn("纠正", () => memoryAction(m, "correct"), { cls: "sm", symbol: "edit" }), btn("忘记", () => memoryAction(m, "forget"), { cls: "sm danger", symbol: "trash" })));
     })) : empty(state.memQ ? "没有匹配的记忆" : state.memTab === "review" ? "没有待确认的记忆" : "还没有记忆",
-      state.memQ ? "换个关键词试试。" : "新的记忆候选出现后，会先放在“待确认”里等你确认。"));
+      state.memQ ? "换个关键词试试。" : "新提取的候选会显示在“待确认”中，也可以在“全部”查看。"));
 };
 function memoryAction(item, decision) {
   const titles = { confirm: "确认这条记忆", correct: "纠正这条记忆", forget: "忘记这条记忆？" };
@@ -889,7 +892,7 @@ function memoryAction(item, decision) {
     form.append(el("p", { class: "muted" }, "会创建一条替代记录，原记录保留修订关系，不会被直接覆盖。"),
       el("label", { class: "field" }, el("span", {}, "原内容"), el("input", { class: "input", value: item.title, disabled: true })),
       el("label", { class: "field" }, el("span", {}, "正确的内容"), input));
-  } else form.append(el("p", {}, "“" + item.title + "”"), el("p", { class: "muted" }, "确认后她会在以后的对话里用到这条记忆。"));
+  } else form.append(el("p", {}, "“" + item.title + "”"), el("p", { class: "muted" }, "确认会把这条记忆标为你已认可。"));
   const submit = el("button", { type: "submit", class: "btn " + (decision === "forget" ? "danger solid" : "primary") },
     decision === "forget" ? "忘记这条记忆" : decision === "correct" ? "保存纠正" : "确认");
   form.append(el("div", { class: "dlg-acts" }, submit));

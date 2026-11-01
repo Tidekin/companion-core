@@ -11,7 +11,7 @@ from companion.api import create_app
 from companion.contracts import Candidate
 from companion.retrieval import SemanticIndex
 from companion.store import after, encode
-from tests.conftest import ingest
+from tests.conftest import ingest, run
 
 ORIGIN = "https://console.example.test"
 PASSWORD = "owner-console-test-password-" * 2
@@ -240,17 +240,90 @@ def test_nested_configuration_errors_do_not_echo_or_persist_secret_input(client,
     assert secret not in encode(core.store.rows("SELECT * FROM audit_log"))
 
 
-def stored_memory(core, number=1, *, source=None, content="主人喜欢龙井茶", review=False):
+def stored_memory(core, number=1, *, source=None, content="主人喜欢龙井茶", review=False,
+                  confirmed=True):
     if source is None:
         source = ingest(core, number, "这是主人确认的项目目录")
     with core.store.transaction():
         memory_id = core.memory.add(Candidate(
             subject="project", kind="fact", fact_key=f"console_{number}", content=content,
             evidence_event_id=source["event_id"], evidence_quote="项目目录",
-        ), core.clock(), confirmed=True)
+        ), core.clock(), confirmed=confirmed)
         if review:
             core.store.execute("UPDATE memories SET needs_review=1 WHERE memory_id=?", (memory_id,))
     return memory_id, source
+
+
+def test_extracted_candidate_appears_in_pending_and_leaves_after_owner_confirmation(client, core):
+    from companion.core import Core
+
+    core.settings.extraction_min_events = 1
+    core.settings.extraction_idle_seconds = 0
+    source = ingest(core, text="我喜欢天文主题")
+    assert run(core.run_once())
+    core.model.extraction = encode({"memories": [{
+        "subject": "user", "kind": "preference", "fact_key": "topic",
+        "content": "主人喜欢天文主题", "evidence_event_id": source["event_id"],
+        "evidence_quote": "我喜欢天文主题"}]})
+    with Core(core.settings, model=core.model, clock=core.clock) as worker:
+        assert worker.store is not client.app_core.store and worker.store is not core.store
+        assert run(worker.extract_once())
+    candidate = core.store.one("SELECT * FROM memories")
+    assert candidate["status"] == "HYPOTHESIS" and candidate["needs_review"] == 0
+    assert client.get("/v1/console/memories?review=true").status_code == 401
+    headers = login(client)
+    listed = client.get("/v1/console/memories?review=true").json()
+    assert listed["meta"]["pending_count"] == 1
+    pending = listed["items"]
+    assert [item["id"] for item in pending] == [candidate["memory_id"]]
+    assert pending[0]["detail"]["needs_review"] is False
+    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 1
+    assert core.store.one("SELECT * FROM memories") == candidate
+    usage = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
+    path = f"/v1/console/memories/{candidate['memory_id']}/decision"
+    response = client.post(path, json={"decision": "confirm"}, headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "CONFIRMED"
+    duplicate = client.post(path, json={"decision": "confirm"}, headers=headers)
+    assert duplicate.json() == response.json()
+    listed = client.get("/v1/console/memories?review=true").json()
+    assert listed["items"] == [] and listed["meta"]["pending_count"] == 0
+    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 0
+    assert client.get("/v1/console/memories").json()["items"][0]["status"] == "CONFIRMED"
+    assert core.store.one("SELECT * FROM memories")["origin"] == "user_confirmed"
+    assert core.store.one("SELECT COUNT(*) n FROM audit_log WHERE action='memory.owner_decision'")[
+        "n"] == 1
+    assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == usage
+
+
+def test_pending_list_and_count_include_candidates_and_confirmed_conflicts(client, core):
+    candidate, _ = stored_memory(core, confirmed=False)
+    candidate_conflict, _ = stored_memory(core, 2, confirmed=False, review=True, content="候选冲突")
+    confirmed_conflict, _ = stored_memory(core, 3, review=True, content="已确认冲突")
+    confirmed, _ = stored_memory(core, 4, content="已确认事实")
+    login(client)
+    items = client.get("/v1/console/memories?review=true").json()["items"]
+    assert {item["id"] for item in items} == {candidate, candidate_conflict, confirmed_conflict}
+    assert confirmed not in {item["id"] for item in items}
+    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 3
+    result = client.get("/v1/console/memories?review=true&q=候选冲突").json()["items"]
+    assert [item["id"] for item in result] == [candidate_conflict]
+    assert result[0]["detail"]["needs_review"] is True
+    empty = client.get("/v1/console/memories?review=true&q=不存在").json()
+    assert empty["items"] == [] and empty["meta"]["pending_count"] == 3
+
+
+def test_pending_count_covers_candidates_beyond_the_list_limit_and_sql_page(client, core):
+    _, source = stored_memory(core, confirmed=False)
+    for number in range(2, 207):
+        core.clock.advance(1)
+        stored_memory(core, number, source=source, content=f"候选事实 {number}", confirmed=False)
+    login(client)
+    listed = client.get("/v1/console/memories?review=true&limit=2").json()
+    assert listed["meta"]["pending_count"] == 206
+    items = listed["items"]
+    assert len(items) == 2 and all(item["status"] == "HYPOTHESIS" for item in items)
+    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 206
 
 
 def test_memory_projection_pages_native_candidates_and_keeps_literal_unicode_search(
@@ -286,10 +359,16 @@ def test_memory_projection_pages_native_candidates_and_keeps_literal_unicode_sea
 @pytest.mark.parametrize("invalid", [
     "negative", "tombstone", "expired", "conversation", "upstream", "future", "ended",
 ])
-def test_memory_projection_preserves_native_source_and_validity_filters(client, core, invalid):
-    memory_id, source = stored_memory(core)
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_memory_projection_preserves_native_source_and_validity_filters(
+    client, core, invalid, confirmed,
+):
+    memory_id, source = stored_memory(core, confirmed=confirmed, review=confirmed)
     login(client)
     assert [row["id"] for row in client.get("/v1/console/memories").json()["items"]] == [memory_id]
+    pending = client.get("/v1/console/memories?review=true").json()["items"]
+    assert [row["id"] for row in pending] == [memory_id]
+    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 1
     if invalid == "negative":
         core.store.execute("UPDATE memory_evidence SET polarity=-1")
     elif invalid == "tombstone":
@@ -312,6 +391,8 @@ def test_memory_projection_preserves_native_source_and_validity_filters(client, 
     result = client.get("/v1/console/memories")
     assert result.status_code == 200, result.text
     assert result.json()["items"] == []
+    assert client.get("/v1/console/memories?review=true").json()["items"] == []
+    assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 0
 
 
 def test_memory_projection_rechecks_erasure_between_candidate_and_final_read(
