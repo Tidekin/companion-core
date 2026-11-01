@@ -26,6 +26,14 @@ $env:MKL_NUM_THREADS = '4'
 $expectedManifest = & $python -B -m companion_voice_node.speech_service --config $configuration --print-manifest
 if ($LASTEXITCODE -ne 0) { throw 'Local speech resources are invalid' }
 $record = Join-Path $voiceRoot 'speech-process.json'
+if (Test-Path -LiteralPath $record) {
+    $previous = Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
+    $existing = Get-Process -Id $previous.pid -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and
+        $existing.StartTime.ToUniversalTime().Ticks -eq $previous.created_utc_ticks) {
+        throw 'This runtime already has a live speech process; use the identity-checked stop script first'
+    }
+}
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
     throw 'Requested local speech port is already in use'
 }

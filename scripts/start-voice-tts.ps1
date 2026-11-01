@@ -16,6 +16,14 @@ $env:PYTHONPATH = (Join-Path $upstream 'GPT_SoVITS') + ';' + $upstream + ';' + $
 $python = Join-Path $voiceRoot 'venv/Scripts/python.exe'
 $config = Join-Path $voiceRoot 'tts-infer.yaml'
 $record = Join-Path $voiceRoot 'tts-process.json'
+if (Test-Path -LiteralPath $record) {
+    $previous = Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
+    $existing = Get-Process -Id $previous.pid -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and
+        $existing.StartTime.ToUniversalTime().Ticks -eq $previous.created_utc_ticks) {
+        throw 'This runtime already has a live TTS process; use the identity-checked stop script first'
+    }
+}
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
     throw 'Requested TTS port is already in use'
 }
