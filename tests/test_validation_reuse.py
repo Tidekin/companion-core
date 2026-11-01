@@ -12,9 +12,21 @@ from tests.support.native_segments import session
 
 
 def receipt_rows(core):
+    # Model reply receipts only; a final failure adds Core's fixed failure notice.
     return core.store.rows(
-        "SELECT key,value FROM runtime_meta WHERE key LIKE 'owner_delivery:%' ORDER BY key",
+        "SELECT key,value FROM runtime_meta WHERE key LIKE 'owner_delivery:%' "
+        "AND json_extract(value,'$.kind') IS NOT 'failure_notice' ORDER BY key",
     )
+
+
+def model_replies(core):
+    return core.store.rows("SELECT * FROM outbox WHERE delivery_key NOT LIKE 'failure:%'")
+
+
+def one_failure_notice(core):
+    rows = core.store.rows("SELECT content_json FROM outbox WHERE delivery_key LIKE 'failure:%'")
+    assert [json.loads(row["content_json"]) for row in rows] == [
+        {"text": owner_delivery.FAILURE_TEXT}]
 
 
 def count_calls(monkeypatch, module, name):
@@ -82,7 +94,8 @@ def test_recording_requires_the_entire_ordered_group(core, tmp_path, monkeypatch
             assert await core.run_once()
             assert errors == ["OWNER_DELIVERY_GROUP_CHANGED"]
             assert receipt_rows(core) == []
-            assert not core.store.rows("SELECT * FROM outbox")
+            assert not model_replies(core)
+            one_failure_notice(core)
             assert len(host.calls) == 1 and host.sends == []
             usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
             assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
@@ -105,9 +118,10 @@ def test_recording_failure_rolls_back_all_receipts(core, tmp_path, monkeypatch):
         async with session(core, tmp_path) as host:
             await host.admit()
             assert await core.run_once()
-            assert len(recorded) == 2
+            assert len(recorded) == 3  # two rolled-back replies, then the failure notice
             assert receipt_rows(core) == []
-            assert not core.store.rows("SELECT * FROM outbox")
+            assert not model_replies(core)
+            one_failure_notice(core)
             assert len(host.calls) == 1 and host.sends == []
             usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
             assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0

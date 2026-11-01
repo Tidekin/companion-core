@@ -319,7 +319,11 @@ def test_reply_limit_applies_to_the_full_answer_before_any_segment_is_deliverabl
             assert len(host.calls) == 1
             assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],))[
                 "state"] == "FAILED"
-            assert core.store.rows("SELECT * FROM outbox") == []
-            assert core.store.rows(
-                "SELECT * FROM runtime_meta WHERE key LIKE 'owner_delivery:%'") == []
+            # No segment of the over-long answer exists; only Core's fixed notice does.
+            rows = core.store.rows("SELECT delivery_key,content_json FROM outbox")
+            assert [(row["delivery_key"], json.loads(row["content_json"])) for row in rows] == [
+                (f"failure:{job['job_id']}:v1", {"text": owner_delivery.FAILURE_TEXT})]
+            assert [json.loads(row["value"])["kind"] for row in core.store.rows(
+                "SELECT value FROM runtime_meta WHERE key LIKE 'owner_delivery:%'")] == [
+                owner_delivery.FAILURE_NOTICE]
     run(scenario())

@@ -117,7 +117,9 @@ def test_preview_keeps_native_dispatch_fences_and_budget_responsibility(core, tm
             async with worker_for(core, provider) as worker:
                 worker.model.client.event_hooks["request"].append(hook)
                 assert await worker.run_once("preview-native-boundary") is (boundary != "budget")
-            assert not provider.requests and not core.store.one("SELECT 1 FROM outbox")
+            # The concurrently failed job may carry Core's fixed failure notice only.
+            assert not provider.requests and not core.store.one(
+                "SELECT 1 FROM outbox WHERE delivery_key NOT LIKE 'failure:%'")
             usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
             if boundary == "budget":
                 assert len(usage) == 1 and usage[0]["state"] == "RESERVED"
