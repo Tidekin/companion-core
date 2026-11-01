@@ -348,6 +348,31 @@ or producer protocol changes. `tests/test_model_carry_rem.py` verifies narrow sc
 UNKNOWN accounting, later paid renewal, and real owner HTTP preview/activation followed
 by an independent REM worker with mocked provider transport.
 
+## Revising an existing private voice configuration
+
+The same finite native owner-policy validator accepts an explicitly confirmed
+revision of the existing `voice` capability fingerprint after STOP and quiescence.
+The owner must already have the voice purpose; its fingerprint must actually change,
+and a new authorization digest binds the newly reviewed voice configuration. Owner
+preview/activation checks the new fingerprint against the actual enabled VoiceConfig.
+Every other policy field and capability fingerprint remains identical, including
+purpose order, capture identity, destination, source retention, paid contract/window,
+original carry and expiry. This does not add purposes or provide a general capability
+revision mechanism.
+
+Historical chain validation uses the same bounded transition so later STOP/resume
+and paid renewal retain the exact granted voice policy. Current unresolved work and
+UNKNOWN requests still require their original same-policy handoff first. No old
+voice task, source proof or send binding is rebound to the replacement configuration;
+native voice source/configuration checks, cleanup and uncertain delivery remain in
+force. No budget is settled, refunded or replayed by this revision.
+
+`tests/test_model_carry_voice_revision.py` covers unrelated scope rejection, actual
+configuration validation, retained UNKNOWN liability and later renewal. The native
+HTTP preview/activation and independent voice worker check uses synthetic owner
+input and provider transport and does not send a QQ message. This reuses the pinned
+DSH stop/settlement and existing native carry research recorded above.
+
 ## Closing an attempt that never started I/O
 
 A refusal after admission but before `io_started` (for example a background yield,
