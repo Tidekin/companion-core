@@ -19,6 +19,7 @@ from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
+from source_reader.web import WebHTTP
 from source_reader.worker_v1 import tick
 from tests.conftest import run
 from tests.support.owner_memory import environment
@@ -26,6 +27,7 @@ from tests.test_exploration import URL, configure
 from tests.test_heybox_reader import mock_pool
 from tests.test_life_topics import assert_no_delivery, bug, due, proposal
 from tests.test_life_worker_integration import native_worker
+from tests.test_next_reading import WEB, web_response
 from tests.test_onebot_capture import real_core_http
 from tests.test_owner_authority import activate
 from tests.test_source_reader import META, PLAYER, SUBTITLE, response
@@ -79,7 +81,10 @@ def test_choice_submits_native_goal_once(core, action, enabled, source):
 
 
 @pytest.mark.parametrize("source_scope", ["selected", "owner_private_history"])
-def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatch, source_scope):
+@pytest.mark.parametrize("reading_source", ["bilibili", "web"])
+def test_live_authority_full_loop_independent_workers(
+    core, tmp_path, monkeypatch, source_scope, reading_source,
+):
     configure(core)
     core.settings.observation_adapters["bili"].reader_max_requests = 4
     core.settings.life_loop = LifeLoopConfig(mode="SHADOW", read_goals_enabled=True)
@@ -91,6 +96,13 @@ def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatc
     core.settings.extraction_min_events = 100
     core.settings.diary_min_source_events = 100
     core.settings.reflection_min_sources = 100
+    target = URL
+    if reading_source == "web":
+        target = WEB + "?page=2"
+        core.settings.web_reading_enabled = True
+        core.settings.web_reading_hosts = ("*",)
+        core.settings.observation_adapters["web"] = ObservationAdapterConfig(
+            source="web", token="synthetic-life-web-reader-token-" * 2, reader_max_requests=4)
     calls = []
 
     def model(request):
@@ -107,7 +119,7 @@ def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatc
                 "goal": {
                     "topic": "阅读星空介绍",
                     "source_event_ids": ids,
-                    "scope": {"operation": "read_content", "url": URL},
+                    "scope": {"operation": "read_content", "url": target},
                 },
             }
             if len(calls) == 1
@@ -170,21 +182,27 @@ def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatc
                 assert result["goal_id"], core.store.rows("SELECT state,last_error_code FROM jobs")
                 with Core(core.settings, clock=core.clock) as goal_worker:
                     assert goal_worker.exploration.schedule_goal()
-                pool, backend = mock_pool(response(META), response(PLAYER), response(SUBTITLE))
+                adapter = "bili" if reading_source == "bilibili" else "web"
                 client.headers["Authorization"] = (
-                    "Bearer " + core.settings.observation_adapters["bili"].token.get_secret_value()
+                    "Bearer " + core.settings.observation_adapters[adapter].token.get_secret_value()
                 )
-                async with PublicHTTP(pool) as public:
-                    assert await tick(
-                        client,
-                        BilibiliReader(public, clock=core.clock),
-                        "bili",
-                        source="bilibili",
-                        clock=lambda: core.clock.now,
-                    )
-                assert len(backend.requests) == 3
+                if reading_source == "web":
+                    from source_reader import worker_v1
+
+                    pool, backend = mock_pool(web_response())
+                    monkeypatch.setattr(worker_v1, "WebHTTP", lambda hosts: WebHTTP(hosts, pool))
+                    assert await tick(client, None, adapter, source="web",
+                                      clock=lambda: core.clock.now)
+                else:
+                    pool, backend = mock_pool(response(META), response(PLAYER), response(SUBTITLE))
+                    async with PublicHTTP(pool) as public:
+                        assert await tick(client, BilibiliReader(public, clock=core.clock),
+                            adapter, source="bilibili", clock=lambda: core.clock.now)
+                assert len(backend.requests) == (1 if reading_source == "web" else 3)
                 goal = core.goals.get(result["goal_id"])
                 assert goal["state"] == "DONE"
+                assert _source(core.store, core.settings, goal["result_event_id"],
+                               core.clock())["kind"] == "observed_content"
                 core.clock.advance(3600)
                 await native_worker(core, model, monkeypatch)
                 shared = core.store.one("SELECT * FROM life_activity_results WHERE action='SHARE'")
@@ -210,6 +228,44 @@ def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatc
                     )
 
                 assert current_authority()["destinations"] == ["PRIVATE_MESSAGE_DRAFT"]
+                if reading_source == "web":
+                    source_id, bad_sha = goal["result_event_id"], "f" * 64
+                    assert core.social.preview(source_id, core.settings.owner_qq_id) is None
+                    for mutation in (
+                        "UPDATE observations SET evidence_json='{}'",
+                        f"UPDATE observations SET source_sha256='{bad_sha}'",
+                        "UPDATE observations SET result_status='DISCOVERED'",
+                        "UPDATE observations SET evidence_json=json_set(evidence_json,"
+                        "'$.read_observation.provenance.source','qzone')",
+                        "UPDATE reading_attempts SET context_json='{}'",
+                        "UPDATE reading_attempts SET result_event_ids_json='[]'",
+                        f"UPDATE reading_attempts SET original_url_sha256='{bad_sha}'",
+                        "UPDATE reading_attempts SET state='UNKNOWN'",
+                    ):
+                        core.store.execute("SAVEPOINT web_attribution_negative")
+                        try:
+                            core.store.execute(mutation)
+                            with pytest.raises(CoreError, match="LIFE_SOURCE_UNAVAILABLE"):
+                                _source(core.store, core.settings, source_id, core.clock())
+                        finally:
+                            core.store.execute("ROLLBACK TO web_attribution_negative")
+                            core.store.execute("RELEASE web_attribution_negative")
+
+                    def visible():
+                        return [r for t in core.life_topics.preview(core.settings.owner_qq_id)[
+                            "items"] for r in t["results"] if r["action"] == "SHARE"]
+
+                    assert len(visible()) == 1
+                    core.store.execute("SAVEPOINT web_metadata_changed")
+                    try:
+                        core.store.execute("UPDATE observations SET evidence_json=json_set("
+                            "evidence_json,'$.read_observation.parser_version','web/changed')")
+                        changed = _source(core.store, core.settings, source_id, core.clock())
+                        assert changed["source_sha256"] != sources[0]["source_sha256"]
+                        assert visible() == []
+                    finally:
+                        core.store.execute("ROLLBACK TO web_metadata_changed")
+                        core.store.execute("RELEASE web_metadata_changed")
                 for mutation in (
                     "UPDATE life_activity_results SET goal_id=NULL WHERE action='EXPLORE'",
                     "UPDATE life_activity_results SET authority_sha256='changed' "

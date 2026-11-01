@@ -1,5 +1,6 @@
 """Source-bound topics and SHADOW results; original activity jobs own execution."""
 
+import hashlib
 import json
 from contextlib import nullcontext
 from datetime import UTC, datetime
@@ -170,6 +171,41 @@ def _qzone_readback(store, settings, result, topic, sources, approved, now):
         return None
 
 
+def _web_source(store, event_id, body):
+    """Private reading material follows an actual completed Reader v3 receipt."""
+    from companion.reading_protocol import ObservationEvidence
+
+    row = store.one(
+        "SELECT o.*,a.context_json,a.original_url_sha256,a.result_event_ids_json "
+        "FROM observations o JOIN exploration_evidence ee USING(event_id) "
+        "JOIN reading_attempts a USING(request_id) WHERE o.event_id=? AND o.redacted=0 "
+        "AND o.source_kind='text' AND o.result_status='FETCHED' AND a.state='DONE' "
+        "AND a.adapter_id=o.adapter_id", (event_id,),
+    )
+    try:
+        metadata = json.loads(row["evidence_json"]) if row else {}
+        observed = ObservationEvidence.model_validate({**metadata["read_observation"],
+            "text": body["text"], "title": body["title"]})
+        if (observed.provenance.source != "web" or observed.result_status != "FETCHED"
+            or observed.provenance.source_grant is not None
+            or store.one("SELECT 1 FROM source_grant_events WHERE event_id=?", (event_id,))
+            or observed.url != row["canonical_url"]
+            or observed.content_sha256 != row["source_sha256"]
+            or hashlib.sha256(observed.original_url.encode()).hexdigest()
+            != row["original_url_sha256"]
+            or observed.provenance.model_dump(mode="json", exclude={"source_grant"})
+            != json.loads(row["context_json"])
+            or event_id not in json.loads(row["result_event_ids_json"])
+            or any(metadata.get(key) is not None for key in ("document", "source_grant"))):
+            raise ValueError("Native web reading attribution differs")
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        raise CoreError("LIFE_SOURCE_UNAVAILABLE", 409) from error
+    return observed, {key: row[key] for key in (
+        "evidence_json", "canonical_url", "source_sha256", "context_json",
+        "original_url_sha256", "result_event_ids_json",
+    )}
+
+
 def _source(store, settings, event_id, now):
     retention = settings.raw_event_retention_days
     if owner_authority.required(store, settings):
@@ -193,7 +229,7 @@ def _source(store, settings, event_id, now):
         or expired_sources(store, [event_id], cutoff)
     ):
         raise CoreError("LIFE_SOURCE_UNAVAILABLE", 409)
-    body = json.loads(row["body_json"])
+    body, reading_fingerprint = json.loads(row["body_json"]), {}
     if row["source"] == "qq.onebot":
         text = body.get("text", "")
         if (
@@ -213,6 +249,10 @@ def _source(store, settings, event_id, now):
 
         preview = review_source(store, settings, event_id, now)
         text, kind, status = preview["excerpt"], "social_content", preview["evidence_level"]
+    elif row["source"] == "observation.web":
+        observed, reading_fingerprint = _web_source(store, event_id, body)
+        text, kind, status = observed.text, "observed_content", observed.result_status
+        preview = {"url": observed.url}
     else:
         preview = SocialPlanner(store, settings, lambda: now).preview(
             event_id, settings.owner_qq_id
@@ -234,9 +274,8 @@ def _source(store, settings, event_id, now):
         "result_status": status,
         "expires_at": after(row["ingested_at"], retention * 86400),
         "source_sha256": sha(
-            {
-                key: row[key]
-                for key in (
+            {**{
+                key: row[key] for key in (
                     "event_id",
                     "source",
                     "body_json",
@@ -245,7 +284,7 @@ def _source(store, settings, event_id, now):
                     "conversation_id",
                     "redacted",
                 )
-            }
+            }, **({"reading": reading_fingerprint} if reading_fingerprint else {})}
         ),
     }
 

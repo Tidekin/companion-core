@@ -24,6 +24,12 @@ It grants no QZone source purpose or channel action. Reading results still requi
 successful, settled Life/Goal/Reader proof under this approval; ordinary historical observations
 do not inherit Life permission.
 
+Private Web reading material uses the completed Reader v3 receipt, its frozen source context,
+original URL hash and result membership. This includes query-bearing pages admitted by that
+receipt. The private view validates the typed evidence and text hash and pins the reading
+metadata in the Life source fingerprint. Metadata changes suppress retained wording. Public
+sharing keeps its independent source rules; QZone remains in its separately approved view.
+
 In this history mode, an actual new owner input that exceeds a topic's source or history-context
 bound closes that bounded topic through native invalidation and starts a new topic. Original
 inputs and independent execution/accounting records remain. This prevents an old eight-source
