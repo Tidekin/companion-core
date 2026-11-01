@@ -21,7 +21,7 @@ from companion.agent_messages import (
     to_runtime_response,
 )
 from companion.contracts import CoreError
-from companion.model import ModelResponse
+from companion.model import ModelResponse, ModelResponseError
 from companion.telemetry import emit, phase
 
 
@@ -134,10 +134,15 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
 
         model_started = perf_counter_ns()
         emit("t_model_request", job["trace_id"], at_ns=model_started)
-        response = await budget.complete(
-            core.model, core.store, core.settings, request_id, wire, "chat", core.clock,
-            tools=tools, source_check=check_request, trace_id=job["trace_id"],
-        )
+        try:
+            response = await budget.complete(
+                core.model, core.store, core.settings, request_id, wire, "chat", core.clock,
+                tools=tools, source_check=check_request, trace_id=job["trace_id"],
+            )
+        except ModelResponseError as error:
+            if persistence is not None:
+                persistence.failed_response(error.response)
+            raise
         model_finished = perf_counter_ns()
         usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=?",
                                (request_id,))

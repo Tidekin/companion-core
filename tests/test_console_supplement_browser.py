@@ -86,6 +86,36 @@ def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
     run(scenario())
 
 
+def test_console_shows_saved_provider_reasoning_as_plain_text(core, tmp_path):
+    from pathlib import Path
+
+    from tests.test_model_reasoning import reasoning_chat
+
+    core.clock.now = datetime.now(UTC)
+    text = "<script>window.reasoningInjected=true</script>\n合成私人推理"
+    _, _, usage, _ = reasoning_chat(core, tmp_path, reasoning=text)
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            await page.evaluate("id => { location.hash = 'thinking/model:' + id; }",
+                                usage[0]["request_id"])
+            await page.locator("#page[aria-busy=false]").wait_for()
+            await page.get_by_role("tab", name="原始推理", exact=True).click()
+            content = page.get_by_label("原始推理内容", exact=True)
+            assert await content.inner_text() == text + "1"
+            assert await page.evaluate("window.reasoningInjected") is None
+            directory = Path(__file__).parents[1] / "output/playwright/reasoning"
+            directory.mkdir(parents=True, exist_ok=True)
+            await page.locator(".dk-card").screenshot(path=str(directory / "desktop.png"))
+            await page.set_viewport_size({"width": 375, "height": 812})
+            await page.evaluate("async () => { await Promise.all(document.getAnimations()"
+                                ".map(animation => animation.finished.catch(() => {}))); }")
+            assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            await page.locator(".dk-card").screenshot(path=str(directory / "mobile.png"))
+
+    run(scenario())
+
+
 def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(core, tmp_path):
     from pathlib import Path
 

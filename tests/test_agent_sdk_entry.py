@@ -185,11 +185,14 @@ def test_chat_only_checkpoint_needs_no_reader_permission(core, tmp_path, sdk_mod
 def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_modules, monkeypatch):
     import pickle
 
+    from pydantic import SecretStr
+
     from tests.test_onebot_capture import real_core_http
     from tests.test_owner_input import captured, inbound
 
     monkeypatch.setenv("COMPANION_TELEMETRY", "1")
     monkeypatch.setenv("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")
+    core.settings.control_token = SecretStr("synthetic-sdk-owner-control")
     capture, _ = captured(core, tmp_path)
 
     async def scenario():
@@ -218,6 +221,7 @@ def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_module
             await process.wait()
             raise
         assert process.returncode == 0, output.decode(errors="replace")
+        assert "independent synthetic reasoning" not in output.decode(errors="replace")
         metrics = [json.loads(line) for line in output.decode().splitlines()
                    if line.startswith("{")]
         stages = {row["stage"] for row in metrics}
@@ -234,6 +238,14 @@ def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_module
             base_url=f"http://127.0.0.1:{port}", trust_env=False,
             headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
         ) as client:
+            denied = await client.post("/internal/v2/cognition", json={"kind": "model"})
+            assert denied.status_code == 401
+            diagnostic = await client.post("/internal/v2/cognition", json={"kind": "model"},
+                headers={"Authorization": "Bearer synthetic-sdk-owner-control"})
+            assert diagnostic.status_code == 200, diagnostic.text
+            assert diagnostic.headers["cache-control"] == "no-store"
+            assert diagnostic.json()["items"][0]["reasoning"]["text"] == (
+                "independent synthetic reasoning")
             missing = await client.post("/internal/v1/deliveries/lease", json={
                 "worker_id": "sdk-delivery"})
             assert missing.status_code >= 400

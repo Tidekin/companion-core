@@ -232,8 +232,8 @@ def test_creation_erasure_replays_after_restore_without_new_payment(core, tmp_pa
     run(scenario())
 
 
-def test_automatic_rem_scope_is_explicit_and_default_off():
-    assert not RemConfig().enabled
+def test_rem_default_enablement_preserves_explicit_creation_scope():
+    assert RemConfig().enabled
     scope = dict(scope="owner_private_life_shadow_v1", authorization_sha256="a" * 64,
                  conversation_id="conversation", source_event_ids=["event"],
                  purposes=["PRIVATE_DIARY"], expires_at="2026-11-01T00:00:00Z", max_items=1)

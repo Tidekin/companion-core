@@ -2287,7 +2287,7 @@ PAGES.thinking = data => {
             el("span", { class: "tag ok" }, "已核验"), el("span", { class: "note" }, "编号尾号 " + shortId(eid))))
         : [el("li", { class: "note" }, "没有来源消息")]
     )
-  ] : state.cogTab === "reasoning" ? reasoningView(sel, data[sel._kind]) : [
+  ] : state.cogTab === "reasoning" ? reasoningView(sel) : [
     el("h3", { class: "dk-title" }, sel._title, el("span", { class: "note" }, fmtDate(sel.occurred_at))),
     el("dl", { class: "dk-rows" }, [
       ["类型", k.name],
@@ -2917,19 +2917,26 @@ function cognitionExtra(sel) {
     : sel._kind === "model" ? modelMeasurementView(sel) : null, cognitionLinks(sel)];
 }
 
-/* 原始推理：只说明有没有、为什么没有，不展示内部字段，也不根据最终结果补写推理 */
+/* 原始推理来自该次模型响应的原生会话快照，只作为纯文本展示。 */
 const REASONING_NOTE = {
   wake: "自主活动调度按规则判断，这一步不调用模型，所以没有推理内容。",
   nightly: "夜间整理的各阶段只记录状态，阶段里的模型调用可以在“模型调用”里查看用量。",
-  model: "这里是一次模型调用的用量记录，服务商返回的推理字段没有保存。",
-  rem: "REM 只保存私人虚构的元数据，生成时的推理没有保存。",
+  rem: "REM 默认使用非思考模式生成私人虚构作品；这里展示作品元数据。",
 };
-function reasoningView(sel, page) {
-  const exposed = page?.reasoning && page.reasoning !== "NOT_EXPOSED";
+function reasoningView(sel) {
+  const diagnosis = sel.reasoning || { state: "NOT_RECORDED" };
+  if (diagnosis.state === "RECORDED" && typeof diagnosis.text === "string") {
+    return [el("h3", { class: "dk-title" }, "模型推理诊断"),
+      el("p", { class: "note" }, "这是服务商在本次调用中返回并保存的推理内容。" + (diagnosis.redacted ? "敏感凭据已脱敏。" : "") + (diagnosis.truncated ? "内容过长，已截断显示。" : "")),
+      el("pre", { class: "scope-text mt", "aria-label": "原始推理内容" }, diagnosis.text)];
+  }
+  const message = sel._kind === "model" ? ({
+    NOT_RETURNED: "这次调用已采集响应，但服务商没有返回有效的推理内容。",
+    INCONSISTENT: "这次调用的推理记录无法校验，请检查原始会话记录。",
+  }[diagnosis.state] || "这次调用没有保存原始推理，历史推理无法补回。") : "这条记录没有可以直接查看的原始推理。";
   return [el("h3", { class: "dk-title" }, "模型推理诊断"),
-    el("div", { class: "alert" }, icon("warn"), el("span", {}, exposed ? "这类记录带有推理字段，但控制台还没有展示它。" : "这一轮没有可以查看的原始推理：推理内容没有采集或保存。")),
-    el("p", { class: "note" }, "这里只显示服务商实际返回并保存下来的推理字段。没有生成或没有采集时会明确写出来，不会根据最终回答补写推理过程。"),
-    el("p", { class: "note mt" }, REASONING_NOTE[sel._kind] || "她的决定和理由在“决策记录”里，依据的来源在“上下文”里。"),
+    el("div", { class: "alert" }, icon("warn"), el("span", {}, message)),
+    sel._kind !== "model" ? el("p", { class: "note mt" }, REASONING_NOTE[sel._kind] || "她的决定和理由在“决策记录”里，依据的来源在“上下文”里。") : null,
     sel.model_request_id ? el("div", { class: "row-gap mt" }, linkTo("thinking/model:" + encodeURIComponent(sel.model_request_id), "查看这次模型调用的用量")) : null];
 }
 

@@ -21,7 +21,8 @@ calls = []
 async def provider(request):
     calls.append(request)
     return httpx.Response(200, json={"choices": [{"message": {
-        "role": "assistant", "content": "independent SDK reply"}}],
+        "role": "assistant", "content": "independent SDK reply",
+        "reasoning_content": "independent synthetic reasoning"}}],
         "usage": {"prompt_tokens": 100, "completion_tokens": 10}})
 
 

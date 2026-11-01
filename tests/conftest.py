@@ -15,6 +15,7 @@ from companion.core import Core
 from companion.input_debounce import InputDebounceConfig
 from companion.jargon_config import JargonConfig
 from companion.model import ModelResponse
+from companion.rem_protocol import RemConfig
 from companion.store import migrate
 from companion.turn_taking import TurnTakingConfig
 
@@ -147,6 +148,7 @@ def core_factory(tmp_path_factory, migrated_database):
             # Scenario tests opt into the humanlike production defaults explicitly;
             # see tests/test_humanlike_defaults.py for the defaults themselves.
             memory_enabled=False, segmented_reply=None, chat_thinking="disabled",
+            rem=RemConfig(enabled=False),
             jargon=JargonConfig(enabled=False),
             input_debounce=InputDebounceConfig(enabled=False),
             turn_taking=TurnTakingConfig(silence_enabled=False, follow_up_enabled=False),

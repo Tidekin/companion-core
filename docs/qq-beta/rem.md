@@ -1,14 +1,16 @@
 # 私人 REM 创作
 
-REM 使用已有 Memory 事实生成明确标为虚构的私人创作，默认关闭。
+REM 使用已有 Memory 事实生成明确标为虚构的私人创作，默认开启。
 Life 也可把已结算的私人创作原文保存到同一 REM 记录中。
 本模块已经接入原生 Core job、预算、擦除、Life selector 与主人 cognition 读取接口。
 合成入口验收通过不表示已启用后台运行，也不表示真实模型或 QQ 已验收。
 
 ## 配置和授权
 
-`Settings.rem` 使用 `RemConfig`。默认 `enabled=false`，每日和每月预算为零。
-启用配置必须同时提供正的 `daily_micro_usd` 与 `monthly_micro_usd`。
+`Settings.rem` 使用 `RemConfig`。默认 `enabled=true`，每日预算为 `10000` micro USD
+（0.01 美元），每月为 `100000` micro USD（0.10 美元），同时受原有全局费用上限约束。
+可显式设置 `enabled=false` 关闭；已有配置中的显式关闭不会被新默认覆盖。
+开启配置必须同时具备正的 `daily_micro_usd` 与 `monthly_micro_usd`。
 执行还要求 live 模式、Memory 开启、当前主人授权包含 `rem` 与 `memory`，
 以及与完整 REM 配置相符的 `capability_policies.rem` 指纹。
 配置变更后必须重新完成原有授权流程，不能沿用旧指纹。

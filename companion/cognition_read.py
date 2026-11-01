@@ -126,6 +126,46 @@ def decision_reason(row, settings):
             "truncated": len(reason) > 160}
 
 
+def provider_reasoning(core, row, roots):
+    """Read one original SDK response under the caller's source and privacy fences."""
+    from pydantic_ai.conversation import ConversationTypeAdapter
+    from pydantic_ai.messages import ModelResponse, ThinkingPart
+
+    from companion.model import MAX_REASONING_CHARS
+
+    missing = {"state": "NOT_RECORDED"}
+    if row["scenario"] != "chat" or not roots:
+        return missing
+    saved = core.store.one("SELECT conversation_json FROM agent_conversations WHERE job_id=?",
+                           (row["job_id"],))
+    if not saved or not saved["conversation_json"]:
+        return missing
+    try:
+        conversation = ConversationTypeAdapter.validate_json(saved["conversation_json"])
+        if conversation.conversation_id != row["job_id"]:
+            return {"state": "INCONSISTENT"}
+        responses = [message for message in conversation.messages
+                     if isinstance(message, ModelResponse)
+                     and (message.metadata or {}).get("core_request_id") == row["request_id"]]
+        if not responses:
+            return missing
+        if len(responses) != 1:
+            return {"state": "INCONSISTENT"}
+        response = responses[0]
+        diagnostic = (response.provider_details or {}).get("reasoning") or {}
+        text = "".join(part.content for part in response.parts if isinstance(part, ThinkingPart))
+        if not text and diagnostic.get("state") == "NOT_RETURNED":
+            return {"state": "NOT_RETURNED"}
+        if diagnostic.get("state") != "RECORDED" or not text or len(text) > MAX_REASONING_CHARS:
+            return missing
+        cleaned = redact(text, core.settings)
+        return {"state": "RECORDED", "text": cleaned,
+                "truncated": diagnostic.get("truncated") is True,
+                "redacted": diagnostic.get("redacted") is True or cleaned != text}
+    except (ValueError, TypeError, AttributeError, RecursionError):
+        return {"state": "INCONSISTENT"}
+
+
 class CognitionRead:
     def __init__(self, core):
         self.core, self.store = core, core.store
@@ -170,7 +210,9 @@ class CognitionRead:
         check_version(self.core.memory, version)
         return {"kind": kind, "items": items, "as_of": now, "privacy_epoch": version[0],
                 "next_cursor": rows[limit - 1][key] if len(rows) > limit else None,
-                "truncated": len(rows) > limit, "reasoning": "NOT_EXPOSED",
+                "truncated": len(rows) > limit, "reasoning": "EXPOSED" if any(
+                    item.get("reasoning", {}).get("state") == "RECORDED" for item in items
+                ) else "NOT_EXPOSED",
                 "candidate_set": "NOT_RECORDED",
                 "record_status": "RECORDED" if items else "NOT_RECORDED"}
 
@@ -285,6 +327,7 @@ class CognitionRead:
             item["usage"]["cache_usage"] = cache_usage(self.store, row, admission)
             item["context_regions"] = item["trimming_reason"] = "NOT_RECORDED"
             item["job_id"] = row["job_id"]
+            item["reasoning"] = provider_reasoning(self.core, row, roots)
         if kind in {"diary", "reflection"}:
             item["model_request_id"] = row["model_request_id"]
         return item

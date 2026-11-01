@@ -54,7 +54,7 @@ def usage(core):
     return core.store.rows("SELECT * FROM model_usage WHERE scenario='rem'")
 
 
-def test_rem_default_off_and_empty_material_are_quiet(core, tmp_path):
+def test_rem_explicit_off_and_empty_material_are_quiet(core, tmp_path):
     assert rem.schedule_due(core) is None
 
     async def scenario():

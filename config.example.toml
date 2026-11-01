@@ -310,6 +310,14 @@ max_pending_plans = 4
 max_asset_bytes = 2097152
 max_asset_dimension = 2048
 
+[rem]
+# Private fictional dreams, at most once per local day after 04:00.
+# Execution requires memory/rem owner purposes, the exact REM policy fingerprint,
+# and usable confirmed memories. Explicit enabled=false still disables this feature.
+enabled = true
+daily_micro_usd = 10000
+monthly_micro_usd = 100000
+
 [watch_ledger]
 # Her own one-line judgement of each completed Bilibili/Heybox read (docs/watch-ledger.md).
 # Like rem, watch_review stays out of the paid contract snapshot; its daily cap applies at

@@ -2,7 +2,8 @@
 
 Every route reuses the native service the internal control plane already calls; the console
 adds only its owner session, exact Origin, CSRF and operation receipt. Nothing here creates a
-new decision path, recomputes history or exposes prompt bodies, credentials or raw reasoning.
+new decision path or recomputes history. Provider reasoning uses native SDK snapshots;
+prompt bodies and credentials remain excluded.
 """
 
 import json
