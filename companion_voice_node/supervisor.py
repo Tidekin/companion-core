@@ -352,17 +352,17 @@ def execute_provider(packet: dict) -> dict:
     from companion_voice_node.providers import (
         FasterWhisperConfig,
         FasterWhisperProvider,
-        GPTSoVITSConfig,
-        GPTSoVITSProvider,
         LocalVoiceError,
+        OpenAISpeechConfig,
+        OpenAISpeechProvider,
     )
 
     try:
         operation = packet["operation"]
         data = base64.b64decode(packet["input_base64"], validate=True)
         if operation == "tts":
-            config = GPTSoVITSConfig.model_validate(packet["provider"])
-            audio = asyncio.run(GPTSoVITSProvider(config).synthesize(data.decode("utf-8")))
+            config = OpenAISpeechConfig.model_validate(packet["provider"])
+            audio = asyncio.run(OpenAISpeechProvider(config).synthesize(data.decode("utf-8")))
             payload = VoiceAudioResult(
                 audio_base64=base64.b64encode(audio.audio).decode(),
                 audio_sha256=audio.sha256,

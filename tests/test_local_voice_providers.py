@@ -397,14 +397,15 @@ def test_asr_silence_returns_no_fabricated_transcript_and_model_is_cached(asr_co
     assert len(calls) == 3  # One model load and two transcriptions.
 
 
-def test_asr_clamps_final_quantized_timestamp_to_actual_pcm_end(asr_config):
+@pytest.mark.parametrize("duration,end", [(5.6, 5.62), (5.56, 5.62), (5.6, 5.7)])
+def test_asr_clamps_final_quantized_timestamp_to_actual_pcm_end(asr_config, duration, end):
     provider = FasterWhisperProvider(
-        asr_config, model_factory=model_factory([segment(0.05, 5.62, "sample")])
+        asr_config, model_factory=model_factory([segment(0.05, end, "sample")])
     )
-    result = provider.transcribe(wav_bytes(5.6), source_partial=True)
-    assert result.duration_seconds == 5.6 and result.partial is True
+    result = provider.transcribe(wav_bytes(duration), source_partial=True)
+    assert result.duration_seconds == duration and result.partial is True
     assert result.segments[0].start_seconds == 0.05
-    assert result.segments[0].end_seconds == 5.6
+    assert result.segments[0].end_seconds == duration
 
 
 @pytest.mark.parametrize("missing", ["model.bin", "config.json", "tokenizer.json"])
@@ -438,7 +439,7 @@ def test_asr_missing_dependency_is_unavailable_and_import_is_lazy(asr_config, mo
         [segment(-0.1, 0.5)],
         [segment(0.5, 0.4)],
         [segment(0.1, 0.1)],
-        [segment(0, 1.021)],
+        [segment(0, 1.101)],
         [segment(1, 1.02)],
         [segment(1.01, 1.02)],
         [segment(float("nan"), 0.5)],

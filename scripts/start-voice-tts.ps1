@@ -16,11 +16,20 @@ $env:PYTHONPATH = (Join-Path $upstream 'GPT_SoVITS') + ';' + $upstream + ';' + $
 $python = Join-Path $voiceRoot 'venv/Scripts/python.exe'
 $config = Join-Path $voiceRoot 'tts-infer.yaml'
 $record = Join-Path $voiceRoot 'tts-process.json'
+if (Test-Path -LiteralPath $record) {
+    $previous = Get-Content -LiteralPath $record -Raw | ConvertFrom-Json
+    $existing = Get-Process -Id $previous.pid -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and
+        $existing.StartTime.ToUniversalTime().Ticks -eq $previous.created_utc_ticks) {
+        throw 'This runtime already has a live TTS process; use the identity-checked stop script first'
+    }
+}
 if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
     throw 'Requested TTS port is already in use'
 }
-$arguments = @('-B', ('"' + (Join-Path $upstream 'api_v2.py') + '"'),
-    '-a', '127.0.0.1', '-p', $Port, '-c', ('"' + $config + '"'))
+$arguments = @('-B', '-m', 'companion_voice_node.gpt_server',
+    '--script', ('"' + (Join-Path $upstream 'api_v2.py') + '"'),
+    '--port', $Port, '--config', ('"' + $config + '"'))
 $process = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $upstream `
     -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $voiceRoot 'logs/tts-stdout.log') `
     -RedirectStandardError (Join-Path $voiceRoot 'logs/tts-stderr.log')

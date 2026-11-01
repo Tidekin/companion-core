@@ -5,6 +5,7 @@ import asyncio
 import base64
 import hashlib
 import importlib.metadata
+import ipaddress
 import json
 import math
 import sys
@@ -46,7 +47,8 @@ from companion.voice_protocol import (
     make_voice_result,
     verify_voice_lease,
 )
-from companion_voice_node.providers import FasterWhisperConfig, GPTSoVITSConfig, validate_wav
+from companion_voice_node.providers import FasterWhisperConfig, OpenAISpeechConfig, validate_wav
+from companion_voice_node.resources import file_digest as _file_digest
 from companion_voice_node.state import NodeState
 from companion_voice_node.supervisor import (
     TTS_NOT_STARTED_CODES,
@@ -60,14 +62,14 @@ class VoiceNodeConfig(BaseModel):
 
     node_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     core_origin: str
+    core_connect_address: str | None = None
     credential: SecretStr = Field(repr=False, exclude=True)
     core_public_key: str = Field(pattern=r"^[a-f0-9]{64}$")
     workspace: Path = Field(repr=False)
     state_directory: Path = Field(default=Path(".local/voice-node"), repr=False)
-    tts: GPTSoVITSConfig | None = Field(default=None, repr=False)
+    tts: OpenAISpeechConfig | None = Field(default=None, repr=False)
     asr: FasterWhisperConfig | None = Field(default=None, repr=False)
-    tts_gpt_weights: Path | None = Field(default=None, repr=False)
-    tts_sovits_weights: Path | None = Field(default=None, repr=False)
+    tts_service_config: Path | None = Field(default=None, repr=False)
     tts_server_revision: str | None = Field(default=None, pattern=r"^[a-f0-9]{40,64}$")
     heartbeat_seconds: float = Field(default=3, ge=0.05, le=30, allow_inf_nan=False)
     request_timeout_seconds: float = Field(default=10, gt=0, le=30, allow_inf_nan=False)
@@ -104,6 +106,19 @@ class VoiceNodeConfig(BaseModel):
             raise ValueError("node credential must be a private printable token")
         return value
 
+    @field_validator("core_connect_address")
+    @classmethod
+    def unicast_address(cls, value):
+        if value is None:
+            return None
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            raise ValueError("Core connect address must be a literal IP address") from None
+        if address.is_unspecified or address.is_multicast:
+            raise ValueError("Core connect address must be unicast")
+        return str(address)
+
     @model_validator(mode="after")
     def local_configuration(self):
         if not self.workspace.is_absolute() or not self.workspace.is_dir():
@@ -125,10 +140,8 @@ class VoiceNodeConfig(BaseModel):
             ):
                 raise ValueError("TTS proxy credentials must be independent of the Core credential")
             if (
-                self.tts_gpt_weights is None
-                or not self.tts_gpt_weights.is_absolute()
-                or self.tts_sovits_weights is None
-                or not self.tts_sovits_weights.is_absolute()
+                self.tts_service_config is None
+                or not self.tts_service_config.is_absolute()
                 or self.tts_server_revision is None
                 or self.tts.max_concurrency != 1
                 or self.tts.output.max_bytes > MAX_AUDIO_BYTES
@@ -138,8 +151,7 @@ class VoiceNodeConfig(BaseModel):
         elif any(
             value is not None
             for value in (
-                self.tts_gpt_weights,
-                self.tts_sovits_weights,
+                self.tts_service_config,
                 self.tts_server_revision,
             )
         ):
@@ -155,29 +167,10 @@ class VoiceNodeConfig(BaseModel):
         return self
 
 
-def _file_digest(path: Path) -> dict:
-    try:
-        if not path.is_file() or path.is_symlink():
-            raise OSError
-        before = path.stat()
-        if not 0 < before.st_size <= 32_000_000_000:
-            raise OSError
-        hasher = hashlib.sha256()
-        with path.open("rb") as handle:
-            while block := handle.read(1024 * 1024):
-                hasher.update(block)
-        after = path.stat()
-        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-            raise OSError
-        return {"sha256": hasher.hexdigest(), "bytes": after.st_size}
-    except OSError:
-        raise VoiceProtocolError("VOICE_MANIFEST_RESOURCE_UNAVAILABLE") from None
-
-
 def local_manifest(config: VoiceNodeConfig) -> dict:
     """Hash actual operator-controlled resources, never cloud-supplied paths.
 
-    GPT-SoVITS's configured weight files describe the intended service instance;
+    The configured resource files describe the intended service instance;
     this is not remote attestation that an unmanaged HTTP server loaded those files.
     """
     manifest = {
@@ -186,16 +179,20 @@ def local_manifest(config: VoiceNodeConfig) -> dict:
         "execution_timeout_seconds": config.execution_timeout_seconds,
     }
     if config.tts is not None:
+        from companion_voice_node.speech_service import load_service_config, service_manifest
+
         options = config.tts.model_dump(
-            mode="json", exclude={"reference_audio_path", "prompt_text", "api_key"}
+            mode="json", exclude={"api_key"}
         )
-        options["prompt_text_sha256"] = hashlib.sha256(config.tts.prompt_text.encode()).hexdigest()
+        service = load_service_config(config.tts_service_config)
+        if (service.model != config.tts.model or service.voice != config.tts.voice
+                or service.base.max_concurrency != 1):
+            raise VoiceProtocolError("VOICE_MANIFEST_RESOURCE_UNAVAILABLE")
         manifest["providers"]["tts"] = {
             "options": options,
             "server_revision": config.tts_server_revision,
-            "reference": _file_digest(config.tts.reference_audio_path),
-            "gpt_weights": _file_digest(config.tts_gpt_weights),
-            "sovits_weights": _file_digest(config.tts_sovits_weights),
+            "configuration": _file_digest(config.tts_service_config),
+            "service": service_manifest(service),
         }
     if config.asr is not None:
         root = config.asr.model_dir
@@ -229,6 +226,19 @@ class VoiceNodeWorker:
         self.supervisor_factory = supervisor_factory or ProcessSupervisor
         self.manifest_sha256 = None
         self._lease_until = 0.0
+
+    async def _pin_core(self, request):
+        """Reuse Host/SNI destination pinning without changing the HTTPS authority."""
+        if self.config.core_connect_address is None:
+            return
+        origin = httpx.URL(self.config.core_origin)
+        if (request.url.scheme, request.url.host, request.url.port) != (
+            origin.scheme, origin.host, origin.port
+        ):
+            raise VoiceProtocolError("VOICE_CORE_ORIGIN_CHANGED")
+        request.headers["Host"] = urlsplit(self.config.core_origin).netloc
+        request.extensions["sni_hostname"] = origin.host
+        request.url = request.url.copy_with(host=self.config.core_connect_address)
 
     def _verify(self, lease: SignedVoiceLease, *, rtt: float, previous=None) -> float:
         verify_voice_lease(
@@ -502,6 +512,7 @@ class VoiceNodeWorker:
         old_cursor = state.meta("claim_cursor")
         async with httpx.AsyncClient(
             transport=self.transport, trust_env=False, follow_redirects=False,
+            event_hooks={"request": [self._pin_core]},
             timeout=self.config.request_timeout_seconds,
             headers={"Authorization": "Bearer " + self.config.credential.get_secret_value(),
                      "Accept-Encoding": "identity", "Accept": "application/json"},
@@ -783,6 +794,7 @@ class VoiceNodeWorker:
             self.manifest_sha256 = digest(await asyncio.to_thread(local_manifest, self.config))
             async with httpx.AsyncClient(
                 transport=self.transport,
+                event_hooks={"request": [self._pin_core]},
                 timeout=self.config.request_timeout_seconds,
                 trust_env=False,
                 follow_redirects=False,
