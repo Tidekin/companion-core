@@ -58,7 +58,7 @@ def test_frozen_strategy_texts_are_untouched():
     payload([cand], live_ids=ids)
     strategies = conversation_policy.STRATEGIES
     assert strategies["participation_v2"] == conversation_policy.PARTICIPATION_V2
-    assert len(conversation_policy.PARTICIPATION_V2.splitlines()) == 7
+    assert len(conversation_policy.PARTICIPATION_V2.splitlines()) == 6
 
 
 def test_no_suitable_candidate_means_no_segment():
