@@ -325,7 +325,8 @@ def check_history(store, settings, clock, job, proof):
         if not proof:
             return
         current = {item["event_id"]: item for item in history_sources(
-            store, settings, clock, job)}
+            store, settings, clock, job,
+            purpose=owner_authority.model_purpose(store, job["kind"], job["job_id"]))}
         actual = history_proof([current[item["event_id"]] for item in proof])
         if actual != proof:
             raise ValueError("history changed")

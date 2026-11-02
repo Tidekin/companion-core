@@ -242,6 +242,7 @@ def check_request(store, settings, request_id, now):
 
 
 def messages(store, settings, job, now, principles):
+    from companion import time_context
     from companion.token_measurement import measure_request
 
     data = validate(store, settings, job, now)
@@ -249,6 +250,7 @@ def messages(store, settings, job, now, principles):
         return None
     payload = {key: value for key, value in data.items() if key != "source_events"}
     rules = RULES
+    time_messages = []
     if data["kind"] == "life":
         from companion.life_topics import RULES as LIFE_RULES
 
@@ -258,7 +260,14 @@ def messages(store, settings, job, now, principles):
 
         rules = FOLLOW_UP_RULES
         payload["silent_minutes"] = silent_minutes(data, now)
+        # Core supplies authorized dialogue and episodes through its shared context path.
+        # The short material remains an unchanged scheduling/source identity.
+        payload.pop("turns")
+        payload["replied_at"] = time_context.stamp(data["replied_at"], settings.timezone)
+        time_messages.append(time_context.now_message(
+            now, settings.timezone, reference="本次主动跟进的时间"))
     result = [{"role": "system", "content": principles + "\n" + rules},
+              *time_messages,
               {"role": "user", "content": encode(payload)}]
     while (payload["text"]
            and (excess := measure_request(settings, result, "activity").reserved_input_tokens
@@ -402,6 +411,9 @@ def delivery_problem(store, settings, message_id, now, *, job=None):
     try:
         if settings is None or job["state"] != "SUCCEEDED":
             raise CoreError("NOTICE_JOB_UNSETTLED", 409)
+        from companion import reply_revision
+
+        reply_revision.check_sources(store, job["job_id"])
         data = validate(store, settings, job, now)
         action = "qq.private.reply" if data["kind"] == "commitment" else "qq.private.proactive"
         delivery = job["delivery"]

@@ -672,8 +672,9 @@ class Core(Runtime):
         authority = self._owner_job_view(job)
         if authority and not {"memory", "history"}.issubset(authority.policy.purposes):
             return None
-        if (not cfg.memory_enabled or job["kind"] != "chat"
-            or not reply_revision.owner_input(s, job["event_id"])
+        followup = (notices.reference(job) or {}).get("kind") == "followup"
+        if (not cfg.memory_enabled or not (followup or job["kind"] == "chat"
+            and reply_revision.owner_input(s, job["event_id"]))
             or reply_revision.control_job(s, job)):
             return None
         source_check = None
@@ -682,7 +683,8 @@ class Core(Runtime):
 
             def source_check(event_id):
                 try:
-                    owner_input.source(s, cfg, authority, event_id, self.clock(), history=True)
+                    owner_input.source(s, cfg, authority, event_id, self.clock(), history=True,
+                                       purpose="proactive" if followup else "chat")
                     return bool(s.one(
                         "SELECT 1 FROM events WHERE event_id=? AND conversation_id=? "
                         "AND rowid<(SELECT rowid FROM events WHERE event_id=?)",
@@ -757,16 +759,21 @@ class Core(Runtime):
             return authority is None or purpose in authority.policy.purposes
         if job["kind"] == "chat":
             reply_revision.require_reply_source(s, job["event_id"], job.get("reply_revision"))
-        if messages := notices.messages(s, cfg, job, self.clock(), PRINCIPLES):
+        followup = (notices.reference(job) or {}).get("kind") == "followup"
+        notice_messages = notices.messages(s, cfg, job, self.clock(), PRINCIPLES)
+        if notice_messages:
             material = notices.validate(s, cfg, job, self.clock())
             reply_revision.remember_sources(s, job, material["source_events"])
-            return messages
+            if not followup:
+                return notice_messages
         body = json.loads(job["body_json"])
         text = body.get("text", "")
         expression_rules, expression_data = self.expression.instruction_parts(job["event_id"]) if (
             permitted("expression")) else ("", "")
         rules = PRINCIPLES + (MEMORY_RULES if cfg.memory_enabled and permitted("memory")
                               else "") + expression_rules
+        if followup:
+            rules += "\n" + turn_taking.FOLLOW_UP_RULES
         affect = self._affect_context(authority)
         rules, policy_data, conversation_decision = conversation_policy.prompt_parts(
             rules, cfg.conversation_policy if job["kind"] == "chat"
@@ -845,6 +852,8 @@ class Core(Runtime):
         memory_references, hits = [], []
         current = {"role": "user", "content": text or (
             "主人发送了一条非文本消息。" if authority else "请看看我分享的内容。")}
+        if followup:
+            current = notice_messages[-1]
         if (job["kind"] == "chat" and not text and not body.get("rich")
             and not (cfg.content_enabled and self.content._rows(job["event_id"]))):
             current["content"] = "本条主人消息的接收事实（不是主人原话或新指令）：\n" + encode({
@@ -877,8 +886,9 @@ class Core(Runtime):
                 available = max(2048, available)
             content_reference = self.content.context_message(job["event_id"], available - 24)
         if authority:
-            sources = owner_input.history_sources(s, cfg, self.clock, job) if (
-                job["kind"] == "chat") else []
+            sources = owner_input.history_sources(s, cfg, self.clock, job,
+                purpose="proactive" if followup else "chat") if (
+                job["kind"] == "chat" or followup) else []
         elif bounded_text:
             sources = live_text.history_sources(s, cfg, self.clock, job)
         else:
@@ -1095,13 +1105,17 @@ class Core(Runtime):
                      for turn, source in zip(turns, sources, strict=True)]
             add_rules(reply_quote.RULES)
         current_input = []
-        if job["kind"] == "chat" and cfg.chat_time_labels:
+        if (job["kind"] == "chat" and cfg.chat_time_labels) or followup:
             turns = [time_context.stamp_turn(turn, source, cfg.timezone)
                      for turn, source in zip(turns, sources, strict=True)]
-            # The owner message's stored time, not the clock: a rebuilt context is identical.
-            received = s.one("SELECT occurred_at FROM events WHERE event_id=?", (job["event_id"],))
-            current_input.append(time_context.now_message(
-                received["occurred_at"] if received else self.clock(), cfg.timezone))
+            if followup:
+                current_input.extend(notice_messages[1:-1])
+            else:
+                # The owner's stored time keeps a rebuilt chat context identical.
+                received = s.one("SELECT occurred_at FROM events WHERE event_id=?",
+                                 (job["event_id"],))
+                current_input.append(time_context.now_message(
+                    received["occurred_at"] if received else self.clock(), cfg.timezone))
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
         if cfg.voice.enabled and permitted("voice") and job["kind"] == "chat":
@@ -1208,7 +1222,7 @@ class Core(Runtime):
                 retained.append(proof)
         if style:
             retained.append({"kind": "style_observation", "proof": style["proof"]})
-        if authority and job["kind"] == "chat":
+        if authority and (job["kind"] == "chat" or followup):
             selected = [source for source, turn in zip(sources, turns, strict=True)
                         if any(message is turn[0] for message in messages)]
             retained.append({"kind": "history", "proof": owner_input.history_proof(selected)})
