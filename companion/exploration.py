@@ -312,35 +312,42 @@ class ExplorationService:
 
     def recover(self):
         s, now = self.store, self.clock()
-        for row in s.rows("SELECT * FROM exploration_requests WHERE state IN ('QUEUED','RUNNING')"):
-            step = json.loads(row["goal_step_json"])
-            expired = row["lease_until"] and row["lease_until"] <= now
-            if row["state"] == "QUEUED" and step:
-                current = s.one(
-                    "SELECT lease_until FROM goal_steps WHERE step_id=?", (step["step_id"],)
-                )
-                expired = not current or current["lease_until"] <= now
-            if not expired:
-                continue
-            was_started = row["state"] == "RUNNING"
-            with s.transaction():
+        with nullcontext() if s.in_write_transaction else s.transaction():
+            for row in s.rows(
+                "SELECT * FROM exploration_requests WHERE state IN ('QUEUED','RUNNING')",
+            ):
+                step = json.loads(row["goal_step_json"])
+                expired = row["lease_until"] and row["lease_until"] <= now
+                if row["state"] == "QUEUED" and step:
+                    current = s.one(
+                        "SELECT lease_until FROM goal_steps WHERE step_id=?", (step["step_id"],)
+                    )
+                    expired = not current or current["lease_until"] <= now
+                if not expired:
+                    continue
+                was_started = row["state"] == "RUNNING"
                 changed = s.execute(
-                    "UPDATE exploration_requests SET state=?,last_error_code=? "
+                    "UPDATE exploration_requests SET state=?,last_error_code=?,updated_at=? "
                     "WHERE request_id=? AND state=?",
                     (
                         "UNKNOWN" if was_started else "CANCELLED",
                         "READ_TIMEOUT" if was_started else "READER_UNAVAILABLE",
+                        now,
                         row["request_id"],
                         row["state"],
                     ),
                 ).rowcount
-            if changed and step:
-                self.goals.fail(
-                    step,
-                    "READ_TIMEOUT" if was_started else "READER_UNAVAILABLE",
-                    execution_uncertain=was_started,
-                    resource=not was_started,
-                )
+                if changed and step:
+                    self.goals.fail(
+                        step,
+                        "READ_TIMEOUT" if was_started else "READER_UNAVAILABLE",
+                        execution_uncertain=was_started,
+                        resource=not was_started,
+                    )
+            # Also repair parent-only timeouts left by older workers. Keep the original
+            # lease identity and reservations so authenticated late usage can still settle.
+            s.execute("UPDATE reading_attempts SET state='UNKNOWN',updated_at=? "
+                      "WHERE state='RUNNING' AND lease_until<=?", (now, now))
 
     def budget_available(self, for_read=False):
         cfg, s = self.settings, self.store
@@ -376,11 +383,7 @@ class ExplorationService:
             day, month = self.periods()
             if source_grant or policy.source_grant_required:
                 self.observations.grants.require(adapter_id, source_grant)
-            s.execute(
-                "UPDATE exploration_requests SET state='UNKNOWN',last_error_code='READ_TIMEOUT' "
-                "WHERE state='RUNNING' AND lease_until<=?",
-                (now,),
-            )
+            self.recover()
             s.execute(
                 "UPDATE exploration_requests SET state='CANCELLED',url='',goal_step_json='{}' "
                 "WHERE state='QUEUED' AND captured_privacy_epoch<>?",
