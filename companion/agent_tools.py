@@ -14,6 +14,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from companion import capabilities, meme_wiki, reply_revision
 from companion.agent_runtime import check_conversation
 from companion.contracts import CoreError
+from companion.paid_budget import sha
 
 
 def core_query_tools(core, job, snapshots):
@@ -37,10 +38,12 @@ Each tool requires its current purpose on the original owner-authorized job.
 
     view = check()
 
-    def pin(rows, *, historical=False):
+    def pin(rows, *, historical=False, retrieval=None):
         proof = core.memory_context.pin(core.clock(), rows=rows, historical=historical)
         reply_revision.remember_sources(core.store, job, proof["source_event_ids"])
         snapshot = {"kind": "memory", "proof": proof}
+        if retrieval is not None:
+            snapshot["retrieval"] = retrieval
         if snapshot not in snapshots:
             snapshots.append(snapshot)
         check()
@@ -114,19 +117,23 @@ Each tool requires its current purpose on the original owner-authorized job.
         """Find bounded memory candidates; assess relevance and conflicts before answering.
 
         Args:
-            query: The subject or question to recall, not an instruction to change memory.
+            query: A short name, identifier, date or distinguishing phrase from the question.
+                If nothing matches, try a shorter specific phrase. No hit does not prove
+                the owner never mentioned it. This query cannot change memory.
         """
         check("memory")
+        trace = {}
         try:
             result = await core.memory_context.recall_async(
                 query, core.clock(), project_query=query, clock=core.clock,
-                source_check=lambda: check("memory"),
+                source_check=lambda: check("memory"), trace=trace,
             )
         except CoreError as error:
             if error.code == "PRIVACY_CHANGED":
                 raise CoreError(reply_revision.CANCELLED, 409) from error
             raise
-        pin(result["rows"])
+        pin(result["rows"], retrieval={"stage": "tool", "query_sha256": sha(query),
+                                       "selection": trace})
         return {key: value for key, value in result.items() if key != "rows"}
 
     async def memory_history(memory_id: str) -> dict:

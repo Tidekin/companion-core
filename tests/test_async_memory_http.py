@@ -17,7 +17,9 @@ from tests.sdk_reader_fixture import answer, call
 from tests.support.native_consumer_entry import environment
 
 
-@pytest.mark.parametrize("path", ["worker", "worker_forget", "search", "search_forget"])
+@pytest.mark.parametrize("path", [
+    "worker", "worker_forget", "worker_tool_forget", "search", "search_forget",
+])
 def test_inference_keeps_http_responsive_and_worker_fenced(core, tmp_path, monkeypatch, path):
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
     calls, inference_threads = [], []
@@ -25,6 +27,8 @@ def test_inference_keeps_http_responsive_and_worker_fenced(core, tmp_path, monke
 
     def infer(self, query, texts):
         inference_threads.append(threading.get_ident())
+        if path == "worker_tool_forget" and not calls:
+            return tuple(np.array([1., 0.]) for _ in texts), np.array([1., 0.])
         entered.set()
         try:
             assert threading.get_ident() != owner_thread
@@ -71,15 +75,18 @@ def test_inference_keeps_http_responsive_and_worker_fenced(core, tmp_path, monke
                             assert forgotten.status_code == 200, forgotten.text
                         release.set()
                         result = await task
-                        if path == "worker_forget":
-                            assert result and len(calls) == 1
+                        if path in {"worker_forget", "worker_tool_forget"}:
+                            paid = path == "worker_tool_forget"
+                            assert result and len(calls) == int(paid)
                             job = core.store.one("SELECT state,last_error_code FROM jobs "
                                 "WHERE event_id=?", (question["event_id"],))
                             assert job == {"state": "CANCELLED",
-                                           "last_error_code": "REPLY_CANCELLED"}
+                                           "last_error_code": (
+                                               "REPLY_SOURCE_RECALLED" if paid
+                                               else "REPLY_CANCELLED")}
                             assert not core.store.rows("SELECT * FROM memory_vectors")
-                            assert core.store.one("SELECT scenario,state FROM model_usage") == {
-                                "scenario": "chat", "state": "SETTLED"}
+                            assert core.store.rows("SELECT scenario,state FROM model_usage") == (
+                                [{"scenario": "chat", "state": "SETTLED"}] if paid else [])
                             assert not core.store.rows("SELECT * FROM outbox")
                         elif path == "worker":
                             assert result and len(calls) == 2

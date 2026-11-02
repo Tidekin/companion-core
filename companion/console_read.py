@@ -92,9 +92,10 @@ def memories(core, query="", review=False, limit=30):
 def recall(core, query, limit=10):
     """The ranking chat recall would produce for a query, with its evidence; no model call."""
     core.memory.require_owner("owner")
-    explain = {}
-    rows = core.memory.search(query, limit=limit, now=core.clock(), explain=explain)
+    explain, trace = {}, {}
+    rows = core.memory.search(query, limit=limit, now=core.clock(), explain=explain, trace=trace)
     return {"query": query, "semantic_min_score": core.settings.semantic_min_score,
+            "retrieval": trace,
             "items": [{"id": row["memory_id"], "content": row["content"],
                        "status": row["status"], "subject": row["subject"],
                        "memory_kind": row["kind"], "needs_review": bool(row["needs_review"]),

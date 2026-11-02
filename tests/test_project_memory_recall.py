@@ -135,7 +135,7 @@ def test_native_project_fallback_keeps_tool_proofs_and_same_answer_review(
             source = await value.capture()
             assert await value.worker.run_once("native-project-fallback")
             assert len(value.calls) == 2 and "紫云三号" not in encode(value.calls)
-            assert scores.await_count == 1
+            assert scores.await_count == 2  # Initial prefetch and the explicit model tool.
             result = json.loads(returned(value.calls[-1])[0]["content"])
             assert [row["memory_id"] for row in result["facts"]] == [value.memory_id]
             assert result["requires_relevance_review"]
@@ -162,7 +162,7 @@ def test_live_fallback_still_consumes_the_paid_call_budget(core, tmp_path, monke
             await value.capture()
             assert await value.worker.run_once("native-project-budget")
             assert len(value.calls) == 1 and not value.sends
-            assert scores.await_count == 1
+            assert scores.await_count == 2
             assert_settled_calls(core, 1)
             assert_failure_notice(core)
             assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 1
@@ -191,7 +191,7 @@ def test_selected_fact_reaches_chat_with_deployed_rich_content_configuration(
             assert await value.worker.run_once("rich-native-project-context")
             if input_limit == 16000:
                 assert len(value.calls) == 2
-                assert scores.await_count == 1
+                assert scores.await_count == 2
                 result = json.loads(returned(value.calls[-1])[0]["content"])
                 assert [row["memory_id"] for row in result["facts"]] == [value.memory_id]
                 assert "青竹七号" in encode(value.calls[-1]["messages"])

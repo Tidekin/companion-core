@@ -88,12 +88,10 @@ def test_tcp_input_independent_worker_process_and_source_fence(core, tmp_path, w
                 "SELECT state,last_error_code FROM jobs WHERE event_id=?", (question["event_id"],),
             )
             if withdraw:
-                assert result["calls"] == ["chat"]
+                assert result["calls"] == []
                 assert job == {"state": "CANCELLED", "last_error_code": "REPLY_CANCELLED"}
-                assert core.store.one("SELECT scenario,state FROM model_usage") == {
-                    "scenario": "chat", "state": "SETTLED"}
-                assert core.store.one("SELECT billed_micro_usd FROM model_usage")[
-                    "billed_micro_usd"] > 0
+                # The first source check now occurs before any paid chat admission.
+                assert not core.store.rows("SELECT * FROM model_usage")
                 assert not core.store.rows("SELECT * FROM memory_vectors")
                 assert not core.store.rows("SELECT * FROM outbox")
             else:

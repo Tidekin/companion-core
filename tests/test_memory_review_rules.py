@@ -78,4 +78,6 @@ def test_console_recall_explains_the_chat_ranking(core, monkeypatch):
         first = page["items"][0]
         assert first["content"] == "我喜欢绿茶" and first["recall"]["exact"] is True
         assert first["recall"]["lexical_rank"] == 1 and first["evidence_ids"]
+        assert page["retrieval"]["eligible_candidates"] == 2
+        assert page["retrieval"]["selected"][first["id"]] == first["recall"]
         assert client.get("/v1/console/memories/recall", params={"q": " "}).status_code == 400

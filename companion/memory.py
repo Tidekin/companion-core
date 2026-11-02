@@ -71,17 +71,18 @@ class Memory:
         ) if row["status"] == "CONFIRMED" and not row["needs_review"]]
 
     def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None, now=None,
-               explain=None):
+               explain=None, trace=None):
         """`explain`, when a dict, receives each returned memory's ranking evidence."""
         version, sources, rows, lexical = self._prepare_search(
             query, actor, subjects, limit, memory_ids=memory_ids, now=now,
         )
         similarities = self.index.scores(query, rows) if query != "*" and rows else {}
         return self._finish_search(query, rows, lexical, similarities, limit, version, sources,
-                                   explain=explain)
+                                   explain=explain, trace=trace)
 
     async def search_async(self, query, actor="owner", subjects=(), limit=6, *,
-                           memory_ids=None, now=None, source_check=None, clock=None):
+                           memory_ids=None, now=None, source_check=None, clock=None,
+                           explain=None, trace=None):
         if source_check:
             source_check()
         version, sources, rows, lexical = self._prepare_search(
@@ -108,7 +109,8 @@ class Memory:
             similarities = await self.index.scores_async(query, rows, revalidate=revalidate)
         if clock:
             sources = MemorySources(self, clock())
-        return self._finish_search(query, rows, lexical, similarities, limit, version, sources)
+        return self._finish_search(query, rows, lexical, similarities, limit, version, sources,
+                                   explain=explain, trace=trace)
 
     def _prepare_search(self, query, actor="owner", subjects=(), limit=6, *,
                         memory_ids=None, now=None):
@@ -186,9 +188,11 @@ class Memory:
         return version, sources, rows, lexical
 
     def _finish_search(self, query, rows, lexical, similarities, limit, version, sources, *,
-                       explain=None):
+                       explain=None, trace=None):
         s = self.store
         ranks = {}
+        eligible, lexical_raw = len(rows), len(lexical)
+        lexical_count = semantic_count = 0
         if query != "*" and rows:
             exact = {row["memory_id"] for row in rows if query in row["content"]}
             # Generic shared phrases (e.g. "most liked") are not enough to change the topic.
@@ -207,6 +211,7 @@ class Memory:
                 reverse=True,
             )
             scores = fuse(lexical, semantic)
+            lexical_count, semantic_count = len(lexical), len(semantic)
             ranks = {key: {"exact": key in exact,
                            "lexical_rank": lexical.index(key) + 1 if key in lexical else None,
                            "semantic_rank": semantic.index(key) + 1 if key in semantic else None,
@@ -222,6 +227,7 @@ class Memory:
                 ),
                 reverse=True,
             )
+        matched = len(rows)
         rows = rows[:limit]
         check_version(self, version)
         current = []
@@ -235,6 +241,12 @@ class Memory:
         check_version(self, version)
         if explain is not None:
             explain.update({row["memory_id"]: ranks.get(row["memory_id"], {}) for row in current})
+        if trace is not None:
+            trace.update({"eligible_candidates": eligible, "lexical_matches": lexical_raw,
+                "accepted_lexical": lexical_count, "accepted_semantic": semantic_count,
+                "matched_candidates": matched, "limit": limit,
+                "selected": {row["memory_id"]: ranks.get(row["memory_id"], {})
+                             for row in current}})
         return current
 
     def validate_candidate(self, candidate, confirmed=False, *, now=None):

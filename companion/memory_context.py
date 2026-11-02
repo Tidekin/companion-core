@@ -202,7 +202,7 @@ class MemoryContext:
         if actual != proof:
             raise CoreError("PRIVACY_CHANGED", 409)
 
-    def recall(self, query, now, *, actor="owner", memory_ids=None, project_query=None):
+    def recall(self, query, now, *, actor="owner", memory_ids=None, project_query=None, trace=None):
         """Six candidates total, at most two unresolved conflicts; no model call here.
 
         NO_RECORD means this eligible scope has no hit. Index/custody errors propagate
@@ -211,22 +211,23 @@ class MemoryContext:
         version = self._begin(actor)
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
-        rows = self.memory.search(query, actor=actor, memory_ids=memory_ids, limit=6, now=now)
-        return self._recall_result(rows, version, query, now, memory_ids, project_query)
+        rows = self.memory.search(query, actor=actor, memory_ids=memory_ids, limit=6, now=now,
+                                  trace=trace)
+        return self._recall_result(rows, version, query, now, memory_ids, project_query, trace)
 
     async def recall_async(self, query, now, *, actor="owner", memory_ids=None,
-                           project_query=None, source_check=None, clock=None):
+                           project_query=None, source_check=None, clock=None, trace=None):
         version = self._begin(actor)
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
         rows = await self.memory.search_async(
             query, actor=actor, memory_ids=memory_ids, limit=6, now=now,
-            source_check=source_check, clock=clock,
+            source_check=source_check, clock=clock, trace=trace,
         )
         return self._recall_result(rows, version, query, clock() if clock else now,
-                                   memory_ids, project_query)
+                                   memory_ids, project_query, trace)
 
-    def _recall_result(self, rows, version, query, now, memory_ids, project_query):
+    def _recall_result(self, rows, version, query, now, memory_ids, project_query, trace=None):
         if not rows and project_query is not None:
             rows = self.memory.project_recall_candidates(
                 project_query, memory_ids=memory_ids, limit=6, now=now,
@@ -249,6 +250,12 @@ class MemoryContext:
             (conflicts if row["needs_review"] else facts).append(item)
         check_version(self.memory, version)
         selected = {row["memory_id"] for row in [*facts, *conflicts[:2]]}
+        if trace is not None:
+            ranks = trace["selected"]
+            trace.update({"search_selected_count": len(ranks),
+                "conflicts_truncated": len(conflicts) > 2,
+                "selected": {mid: ranks.get(mid, {"project_fallback": True})
+                             for mid in sorted(selected)}})
         return {"state": "FOUND" if facts else "NEEDS_REVIEW" if conflicts else "NO_RECORD",
                 "privacy_epoch": version[0], "as_of": now, "facts": facts,
                 "conflicts": conflicts[:2], "conflicts_truncated": len(conflicts) > 2,
