@@ -10,7 +10,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from companion import model_carry, owner_authority, owner_input, voice_authority
+from companion import model_carry, owner_authority, owner_input, owner_input_state, voice_authority
 from companion.contracts import CoreError, InboundEvent
 from companion.owner_authority_protocol import AuthorityStop, OwnerCapture, OwnerGrantPolicy
 from companion.qq_rich import input_digest
@@ -27,6 +27,7 @@ from tests.test_owner_authority import activate
 from tests.test_voice_jobs import voice_config
 from tests.test_voice_node_api import independent_node, tls_core
 from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
+from tests.test_voice_quiescence import stopped_unknown
 from tests.voice_owner_fixtures import native_reply
 
 
@@ -126,9 +127,9 @@ def test_current_unknown_still_requires_same_policy_handoff(core, tmp_path, monk
                           (request_id,))["state"] == "UNKNOWN"
 
 
-def capture_text(core, key, authority, policy):
+def capture_text(core, key, authority, policy, *, number=303):
     source = (f"{core.settings.bot_qq_id}:onebot-direct:FriendMessage:"
-              f"{core.settings.owner_qq_id}:epoch:{policy.capture.protocol_epoch}:303")
+              f"{core.settings.owner_qq_id}:epoch:{policy.capture.protocol_epoch}:{number}")
     incoming = event(core, text="synthetic voice revision request",
         origin="onebot-direct:FriendMessage:" + core.settings.owner_qq_id).model_copy(update={
         "source_event_id": source,
@@ -140,18 +141,29 @@ def capture_text(core, key, authority, policy):
         protocol_epoch=policy.capture.protocol_epoch,
         occurred_at=core.clock(), received_at=core.clock())
     value["signature"] = key.sign(capture_signing_payload(value)).hex()
-    owner_input.approve(core.store, core.settings, core.clock, OwnerCapture.model_validate(value))
-    core.ingest(InboundEvent.model_validate(incoming), "voice-revision-real-source")
+    capture = OwnerCapture.model_validate(value)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    core.ingest(InboundEvent.model_validate(incoming), "voice-revision-real-source-" + str(number))
+    return capture
 
 
-def test_http_voice_revision_runs_independent_voice_node(core, tmp_path, monkeypatch, node):
+@pytest.mark.parametrize("retired_unknown", [False, True])
+def test_http_voice_revision_runs_independent_voice_node(core, tmp_path, monkeypatch, node,
+                                                       retired_unknown):
     case = carried_voice(core, tmp_path, monkeypatch)
+    old_voice = None
+    if retired_unknown:
+        capture = capture_text(core, case.key, case.successor["authority"], case.policy, number=302)
+        old_voice = stopped_unknown(core)
+        assert old_voice["state"] == "UNKNOWN" and old_voice["content_retired"] == 1
+        assert owner_input_state.read(core.store, core.settings, capture)["terminal"]
     stop_current(core, case)
     config, signing_key, counter = node
-    config = config.model_copy(update={"node_id": "local", "heartbeat_seconds": 0.5,
+    config = config.model_copy(update={"node_id": "replacement" if retired_unknown else "local",
+        "heartbeat_seconds": 0.5,
         "execution_timeout_seconds": 20.0, "request_timeout_seconds": 10.0})
     core.settings.voice = voice_config(signing_private_key=signing_key.private_bytes_raw().hex(),
-        nodes={"local": VoiceNode(token=config.credential,
+        nodes={config.node_id: VoiceNode(token=config.credential,
                                   manifest_sha256=digest(local_manifest(config)))})
     policy = case.policy.model_copy(update={"authorization_sha256": "a" * 64,
         "capability_policies": {"voice": core.settings.voice.authority_sha256()}})
@@ -183,6 +195,9 @@ def test_http_voice_revision_runs_independent_voice_node(core, tmp_path, monkeyp
     # The subsequent independent worker opens the same persisted Core after the
     # authenticated HTTP revision; its provider transport is synthetic.
     run(scenario())
+    if old_voice:
+        assert core.store.one("SELECT * FROM voice_jobs WHERE job_id=?",
+                              (old_voice["job_id"],)) == old_voice
     authority = owner_authority.current(core.store, core.settings, core.clock).authority.as_dict()
     capture_text(core, case.key, authority, policy)
     message = native_reply(core, "synthetic voice revision reply")
@@ -200,3 +215,10 @@ def test_http_voice_revision_runs_independent_voice_node(core, tmp_path, monkeyp
     assert core.store.rows("SELECT * FROM model_usage WHERE state='UNKNOWN'") == [original[0]]
     assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (message,))["state"] == (
         "PENDING")
+    if old_voice:
+        retained = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (old_voice["job_id"],))
+        # Fresh input still performs the established content-free supersession audit.
+        for field in ("updated_at", "last_error_code"):
+            retained.pop(field)
+            old_voice.pop(field)
+        assert retained == old_voice

@@ -39,7 +39,8 @@ async def worker(settings):
             with Wakeup(core.store, settings, "worker", core.clock) as wake:
                 # A stop request is honoured only here, between units.
                 while not shutdown.requested():
-                    runtime_config.boundary(core.store, settings, core.clock)
+                    if not await runtime_config.worker_boundary(core.store, settings, core.clock):
+                        break
                     scan = wake.before_scan()
                     result = await run_native_unit(core.run_once, worker_id)
                     maintenance = not result.progressed and maintenance_clock.due()

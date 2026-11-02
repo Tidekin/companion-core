@@ -32,7 +32,8 @@ async def life_worker(settings):
             with Wakeup(core.store, settings, "life-worker", core.clock) as wake:
                 scan, deadline = wake.before_scan(), None
                 while not shutdown.requested():
-                    runtime_config.boundary(core.store, settings, core.clock)
+                    if not await runtime_config.worker_boundary(core.store, settings, core.clock):
+                        break
                     selected = await selector.step()
                     hint = selected.result.next_deadline
                     if hint is not None and hint >= scan.started_at:
