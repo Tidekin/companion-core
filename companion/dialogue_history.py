@@ -21,12 +21,19 @@ def recent_sent_turns(store, conversation_id, current_event_id, max_turns):
 
 def turn_messages(source, store=None):
     """With a store, quotes of since erased or recalled messages are withdrawn."""
-    rich = None
+    rich = observed = None
     if source.get("body_json"):
         body = json.loads(source["body_json"])
         rich = context(body, qq_quotes.withdrawn(store, source["event_id"], body)
                        if store is not None else frozenset())
-    return [*([rich] if rich else []), {"role": "user", "content": source["user_text"]},
+    if store is not None and source.get("event_id"):
+        from companion.memory_references import HISTORY_HEADING, replay
+        from companion.qq_rich import encoded
+
+        if notes := replay(store, source["event_id"]):
+            observed = {"role": "user", "content": HISTORY_HEADING + encoded(notes)}
+    return [*([rich] if rich else []), *([observed] if observed else []),
+            {"role": "user", "content": source["user_text"]},
             *([{"role": "assistant", "content": source["reply_text"]}]
               if source["reply_text"] else [])]
 

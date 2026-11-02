@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from companion.commands import command_parts
 from companion.contracts import CoreError
 from companion.memory_context import MemoryContext, MemorySources, check_version, read_version
-from companion.privacy import advance_epoch, redact, sensitive
+from companion.privacy import advance_epoch, memory_sensitive, redact
 from companion.retrieval import SemanticIndex, fuse
 from companion.store import encode, uid
 
@@ -196,10 +196,13 @@ class Memory:
         if query != "*" and rows:
             exact = {row["memory_id"] for row in rows if query in row["content"]}
             # Generic shared phrases (e.g. "most liked") are not enough to change the topic.
+            # Top lexical ranks survive the floor: short Chinese facts embed weakly.
+            keep = getattr(self.settings, "lexical_keep_rank", 0)
             lexical = [
                 key
-                for key in lexical
-                if key in exact or similarities[key] >= self.settings.semantic_min_score
+                for rank, key in enumerate(lexical)
+                if key in exact or rank < keep
+                or similarities[key] >= self.settings.semantic_min_score
             ]
             semantic = sorted(
                 (
@@ -228,6 +231,14 @@ class Memory:
                 reverse=True,
             )
         matched = len(rows)
+        if query != "*" and len(rows) > 1 and getattr(self.settings, "reranker_model_dir", ""):
+            from companion import reranker
+
+            pool = rows[:limit * 2]
+            scores = reranker.scores(self.settings.reranker_model_dir, query,
+                                     [row["content"] for row in pool])
+            rows = [row for _, row in sorted(zip(scores, pool, strict=True),
+                                             key=lambda item: -item[0])] + rows[limit * 2:]
         rows = rows[:limit]
         check_version(self, version)
         current = []
@@ -275,7 +286,7 @@ class Memory:
         ):
             # A delayed extraction of an old value cannot undo the owner's later correction.
             return None
-        if not confirmed and sensitive(text + candidate.content):
+        if not confirmed and memory_sensitive(text + candidate.content):
             return None
         if candidate.subject == "self" and not re.search(r"你(?:最近|经常|总是|这几次|刚才)", text):
             return None

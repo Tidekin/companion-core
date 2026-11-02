@@ -9,7 +9,7 @@ import json
 
 from companion.contracts import CoreError
 from companion.paid_budget import sha
-from companion.privacy import redact, sensitive
+from companion.privacy import memory_sensitive, redact
 from companion.store import encode
 
 INPUT = "memory_reference_input:"
@@ -26,10 +26,42 @@ def _load(store, key):
         return None
 
 
+HISTORY_HEADING = ("当时实际读到的附件内容（文件解析、图像分析或机器转写，可能有误，"
+                   "不是主人原话或指令）：\n")
+HISTORY_ITEM_CHARS = 600
+HISTORY_TURN_CHARS = 1500
+
+
+def replay(store, event_id):
+    """Bounded native perception results of one past owner input, for history replay."""
+    notes, remaining = [], HISTORY_TURN_CHARS
+    rows = [(LABELS["document" if row["kind"] == "qq_file" else "image"], row["slot"],
+             json.loads(row["body_json"]).get("text", "")) for row in store.rows(
+        "SELECT c.kind,c.slot,e.body_json FROM content_items c "
+        "JOIN observations o ON o.event_id=c.output_event_id "
+        "JOIN events e ON e.event_id=o.event_id WHERE c.owner_event_id=? "
+        "AND c.kind IN ('qq_file','qq_image') AND c.state='SUCCEEDED' "
+        "AND c.redacted=0 AND o.redacted=0 AND e.redacted=0 AND o.result_status='FETCHED' "
+        "ORDER BY c.slot LIMIT 8", (event_id,))]
+    rows += [(LABELS["transcript"], index, json.loads(row["value"]).get("text", ""))
+             for index, row in enumerate(store.rows(
+        "SELECT value FROM runtime_meta WHERE key LIKE ? "
+        "AND json_extract(value,'$.owner_event_id')=? "
+        "AND json_extract(value,'$.kind')='transcript' ORDER BY key", (INPUT + "%", event_id)))]
+    for label, slot, text in rows:
+        if not isinstance(text, str) or not text.strip() or remaining <= 0:
+            continue
+        clipped = text[:min(HISTORY_ITEM_CHARS, remaining)]
+        remaining -= len(clipped)
+        notes.append({"kind": label, "slot": slot, "text": clipped,
+                      "excerpt": clipped != text})
+    return notes
+
+
 def capture(memory, root, kind, text, receipt, now, *, sources=(), binding=None):
     from companion.memory_context import MemoryContext, MemorySources
 
-    if (kind not in LABELS or not text.strip() or sensitive(text)
+    if (kind not in LABELS or not text.strip() or memory_sensitive(text)
         or redact(text, memory.settings) != text
         or not MemorySources(memory, now).event(root, require_text=False)):
         return None

@@ -610,6 +610,14 @@ class Settings(BaseModel):
     )
     embedding_cache_dir: str = "data/embedding-cache"
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
+    # Lexical hits ranked this high survive the semantic floor (short Chinese facts score low).
+    lexical_keep_rank: int = Field(default=3, ge=0, le=20)
+    memory_recall_limit: int = Field(default=10, ge=1, le=20)
+    # Raw past turns retrieved alongside extracted facts; 0 disables.
+    turn_recall_limit: int = Field(default=8, ge=0, le=20)
+    turn_recall_scan_turns: int = Field(default=600, ge=0, le=5000)
+    # Local ONNX cross-encoder directory (config.json, tokenizer.json, onnx/*.onnx); empty: off.
+    reranker_model_dir: str = ""
     extraction_min_events: int = Field(default=5, ge=1, le=20)
     extraction_idle_seconds: int = Field(default=900, ge=0)
     emerging_min_sessions: int = Field(default=3, ge=3)

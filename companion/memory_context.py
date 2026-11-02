@@ -202,8 +202,11 @@ class MemoryContext:
         if actual != proof:
             raise CoreError("PRIVACY_CHANGED", 409)
 
+    def _limit(self):
+        return getattr(self.memory.settings, "memory_recall_limit", 6)
+
     def recall(self, query, now, *, actor="owner", memory_ids=None, project_query=None, trace=None):
-        """Six candidates total, at most two unresolved conflicts; no model call here.
+        """`memory_recall_limit` facts plus at most two unresolved conflicts; no model call.
 
         NO_RECORD means this eligible scope has no hit. Index/custody errors propagate
         rather than misrepresenting unavailable data as an empty personal history.
@@ -211,7 +214,8 @@ class MemoryContext:
         version = self._begin(actor)
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
-        rows = self.memory.search(query, actor=actor, memory_ids=memory_ids, limit=6, now=now,
+        rows = self.memory.search(query, actor=actor, memory_ids=memory_ids,
+                                  limit=self._limit() + 2, now=now,
                                   trace=trace)
         return self._recall_result(rows, version, query, now, memory_ids, project_query, trace)
 
@@ -221,7 +225,7 @@ class MemoryContext:
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
         rows = await self.memory.search_async(
-            query, actor=actor, memory_ids=memory_ids, limit=6, now=now,
+            query, actor=actor, memory_ids=memory_ids, limit=self._limit() + 2, now=now,
             source_check=source_check, clock=clock, trace=trace,
         )
         return self._recall_result(rows, version, query, clock() if clock else now,
@@ -230,7 +234,7 @@ class MemoryContext:
     def _recall_result(self, rows, version, query, now, memory_ids, project_query, trace=None):
         if not rows and project_query is not None:
             rows = self.memory.project_recall_candidates(
-                project_query, memory_ids=memory_ids, limit=6, now=now,
+                project_query, memory_ids=memory_ids, limit=self._limit() + 2, now=now,
             )
         sources = MemorySources(self.memory, now)
         facts, conflicts = [], []
@@ -249,6 +253,7 @@ class MemoryContext:
                     "owner_confirmed": row["origin"] == "user_confirmed"}
             (conflicts if row["needs_review"] else facts).append(item)
         check_version(self.memory, version)
+        facts = facts[:self._limit()]
         selected = {row["memory_id"] for row in [*facts, *conflicts[:2]]}
         if trace is not None:
             ranks = trace["selected"]

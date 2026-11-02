@@ -1038,15 +1038,28 @@ class Core(Runtime):
             for h in hits:
                 memory = {**{k: h[k] for k in (
                     "subject", "content", "status", "needs_review", "evidence_ids")},
-                    **({"recorded_on": time_context.day(h["created_at"], cfg.timezone)}
+                    **({"origin": h["origin"]} if h.get("origin") else {}),
+                    **({"happened_on": happened}
                        if job["kind"] == "chat" and cfg.chat_time_labels
-                       and h.get("created_at") else {})}
+                       and (happened := self._memory_happened_on(h, cfg.timezone)) else {})}
                 reference = selection.add(MEMORY_HEADING,
                     {"memories": [memory], "self_observations": [], "memory_status": "available"},
                     h["evidence_ids"], priority=context_selection.RELATED, required=True,
                     proofs=[{"kind": "memory", "proof": memory_proof}], module="memory",
                     fact=(h["subject"], h["content"]))
                 memory_references.append((reference, h))
+            if job["kind"] == "chat" and authority and not bounded_text and text:
+                from companion import turn_recall
+
+                recalled = turn_recall.reference(
+                    s, cfg, job, text, {source["event_id"] for source in sources},
+                    lambda ids: available(ids, "memory"))
+                if recalled:
+                    data, turn_ids = recalled
+                    selection.add(turn_recall.HEADING, data, turn_ids,
+                        priority=context_selection.RELATED, module="memory",
+                        proofs=[{"kind": "memory", "proof": self.memory_context.pin(
+                            self.clock(), event_ids=set(turn_ids))}])
             if memory_paused:
                 selection.add(MEMORY_HEADING,
                     {"memories": [], "self_observations": [],
@@ -1245,6 +1258,20 @@ class Core(Runtime):
                            assembly_dropped=assembly_dropped)
         mark("context_planning")
         return messages
+
+    def _memory_happened_on(self, row, zone):
+        """Source event dates of a memory, not its later extraction date."""
+        ids = row.get("evidence_ids") or []
+        if not ids:
+            return time_context.day(row["created_at"], zone) if row.get("created_at") else None
+        days = sorted({time_context.day(item["occurred_at"], zone) for item in self.store.rows(
+            "SELECT occurred_at FROM events WHERE event_id IN (" + ",".join("?" for _ in ids)
+            + ") AND occurred_at IS NOT NULL ORDER BY occurred_at", tuple(ids))},
+            key=lambda value: [int(part) for part in value.replace("年", "-").replace(
+                "月", "-").rstrip("日").split("-")])
+        if not days:
+            return None
+        return days[0] if len(days) == 1 else days[0] + "至" + days[-1]
 
     async def recall_for_reply(self, job):
         """A bounded LLM relevance check over candidates, never a full-log prompt."""

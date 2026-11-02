@@ -39,6 +39,18 @@ def redact(text, settings):
     return text
 
 
+def memory_sensitive(text):
+    """Memory keeps attributed third-party facts and quoted lines; secrets stay excluded."""
+    return bool(
+        re.search(
+            r"REDACTED|密码|密钥|身份证|银行卡|住址|诊断|病历|抑郁|性取向|宗教|政治立场|"
+            r"他患|她患|系统规则|system prompt|ignore previous",
+            text,
+            re.I,
+        )
+    )
+
+
 def sensitive(text):
     return bool(
         re.search(
