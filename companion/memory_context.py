@@ -234,7 +234,7 @@ class MemoryContext:
     def _recall_result(self, rows, version, query, now, memory_ids, project_query, trace=None):
         if not rows and project_query is not None:
             rows = self.memory.project_recall_candidates(
-                project_query, memory_ids=memory_ids, limit=self._limit() + 2, now=now,
+                project_query, memory_ids=memory_ids, limit=6, now=now,
             )
         sources = MemorySources(self.memory, now)
         facts, conflicts = [], []
