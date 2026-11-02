@@ -362,7 +362,7 @@ revision mechanism.
 
 Historical chain validation uses the same bounded transition so later STOP/resume
 and paid renewal retain the exact granted voice policy. Current unresolved work and
-UNKNOWN requests still require their original same-policy handoff first. No old
+UNKNOWN model requests still require their original same-policy handoff first. No old
 voice task, source proof or send binding is rebound to the replacement configuration;
 native voice source/configuration checks, cleanup and uncertain delivery remain in
 force. No budget is settled, refunded or replayed by this revision.
@@ -372,6 +372,23 @@ configuration validation, retained UNKNOWN liability and later renewal. The nati
 HTTP preview/activation and independent voice worker check uses synthetic owner
 input and provider transport and does not send a QQ message. This reuses the pinned
 DSH stop/settlement and existing native carry research recorded above.
+
+A retired voice outcome may remain `UNKNOWN` after execution has stopped. The original
+input receipt treats only that execution as quiescent when the existing token-bound
+stop/cleanup receipt is confirmed, a confirmation timestamp is present, both lease
+fields are retired, and the original node is READY with no active/claim job, recovery
+requirement or error. A pending restore also requires the existing node recovery
+evidence for the current incarnation, as checked by `VoiceJobs.session`. Missing
+evidence continues to block handoff. This read-only
+classification changes no voice row, result, model charge, source identity or delivery
+receipt; it grants no permission to retry the original lease or task. Uncertain delivery,
+unsettled model usage, unconfirmed cleanup and all other active source work still block
+the original input receipt and native carry activation. The real TLS revision test
+retains the entire stopped UNKNOWN row across activation and its original outcome and
+custody while a fresh independent node completes a new job. Ordinary content-free
+supersession audit metadata may still advance. Bounded negative cases cover missing
+closure evidence. No new endpoint, journal
+record, recovery operation or storage migration is introduced.
 
 ## Closing an attempt that never started I/O
 
