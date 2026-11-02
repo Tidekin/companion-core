@@ -20,6 +20,7 @@ Life Worker → 有界自主选择 → 原生 Life / Diary / Social / Memory 队
 - 插件不导入核心代码、不访问核心数据库、不调用 LLM。它维护仅用于可靠投递的收件箱，成功接收后删除正文。
 - API 负责鉴权、大小限制、Pydantic 合同校验和错误映射，不启动后台模型循环。
 - Core 负责事件/任务编排、上下文组装和命令路由；模型、时间源均可注入，测试不依赖真实供应商。
+- 主动跟进保留 notice 调度和来源链，复用普通聊天的历史、情景记忆、来源权限及上下文预算装配。`max_recent_messages` 按消息数配置（20 条对应最多 10 轮），显示时间按配置时区转换，原始事件和来源摘要保持不变。主人最近明确说过的活动安排优先于模型先前的推测，无法确定是否适合接话时沿用 `[SKIP]`。
 - ModelClient 只处理 HTTP 协议和标准化响应。它不读记忆库、不决定发送、不具备工具执行权限。以后替换提供商只需满足 `complete(messages, scenario)` 返回 `ModelResponse` 的合同。
 - Memory 拥有证据、检索、冲突、修订与自我观察；Transport 拥有 Outbox 状态转换；Budget 独立预留与结算。模型输出不能直接更新权限或配置。
 - Store 提供事务和 SQL 基础设施。跨模块保持一个本地数据库，重要多表变更仍在同一事务内。SQLite 使用 WAL、FULL synchronous、外键与 busy timeout。

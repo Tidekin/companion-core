@@ -1,11 +1,12 @@
 """Closing messages may go unanswered; a lull after a lively chat may get one more line."""
 
 import json
+from datetime import datetime
 
 import httpx
 import pytest
 
-from companion import turn_taking
+from companion import time_context, turn_taking
 from companion.config import Settings
 from companion.contracts import LeaseRequest
 from companion.model import ModelResponse
@@ -32,6 +33,7 @@ def enable(core, **values):
     core.settings.turn_taking = TurnTakingConfig(**values)
     core.settings.proactive_enabled = True
     core.settings.quiet_start = core.settings.quiet_end = 0
+    core.settings.context_soft_tokens = 12000
     core.model = Model()
 
 
@@ -50,6 +52,11 @@ def turn(core, number, text, answer=None, *, deliver=True):
 
 def system(core, index=-1):
     return core.model.calls[index][0][0]["content"]
+
+
+def history_messages(messages):
+    return [message for message in messages if message["role"] == "user"
+            and isinstance(message["content"], str) and message["content"].startswith("【")]
 
 
 def lease(core):
@@ -146,7 +153,7 @@ def test_a_lull_after_a_lively_chat_gets_one_follow_up(core):
     assert scenario == "activity" and turn_taking.FOLLOW_UP_RULES in messages[0]["content"]
     payload = json.loads(messages[-1]["content"])
     assert payload["silent_minutes"] == 15
-    owner = [item["owner"] for item in payload["turns"]]
+    owner = [item["content"].split("】", 1)[1] for item in history_messages(messages)]
     assert owner == ["我刚看完那部电影", "还行，就是有点仓促"]
     row = core.store.one("SELECT action_type FROM outbox ORDER BY rowid DESC")
     assert row["action_type"] == "qq.private.proactive"
@@ -156,6 +163,72 @@ def test_a_lull_after_a_lively_chat_gets_one_follow_up(core):
                        (core.clock(),))
     core.clock.advance(900)
     assert not turn_taking.flush(core.store, core.settings, core.clock())  # No double text.
+
+
+def test_morning_follow_up_keeps_the_owners_class_and_local_time(core):
+    enable(core)
+    core.settings.max_recent_messages = 20
+    core.settings.context_soft_tokens = 12000
+    core.clock.now = datetime.fromisoformat("2026-11-01T15:55:00+00:00")
+    turn(core, 1, "我准备睡了", "晚安。")
+    morning = (
+        ("00:02:00", "醒了", "早上好。"),
+        ("00:03:00", "要上早八，得去教室", "路上注意安全。"),
+        ("00:04:00", "今天路上手冻僵了", "到教室暖暖。"),
+        ("00:05:00", "没拿手套", "下次记得带。"),
+        ("00:07:00", "试试语音", "试试看。"),
+        ("00:11:00", "没收到语音", "还是文字到了。"),
+        ("00:12:00", "有点失落", "我在这里。"),
+        ("00:13:00", "没想到这个问题这么难修", "慢慢来。"),
+    )
+    for number, (at, owner, answer) in enumerate(morning, 2):
+        core.clock.now = datetime.fromisoformat("2026-11-02T" + at + "+00:00")
+        turn(core, number, owner, answer)
+    core.clock.advance(900)
+    assert turn_taking.flush(core.store, core.settings, core.clock())
+    job = core.store.one("SELECT j.*,e.body_json FROM jobs j JOIN events e USING(event_id) "
+                         "WHERE j.kind='activity'")
+    material = turn_taking.follow_up_material(core.store,
+        json.loads(job["body_json"])["notice"]["ref"], core.clock())
+    core.model.activity.append(turn_taking.SKIP)
+    assert run(run_notice(core))
+    messages, scenario = core.model.calls[-1]
+    assert scenario == "activity"
+    assert "2026年11月2日 星期一 08:28（Asia/Shanghai）" in messages[-2]["content"]
+    assert "主动跟进" in messages[-2]["content"]
+    assert "主人这条消息的时间" not in messages[-2]["content"]
+    payload = json.loads(messages[-1]["content"])
+    history = history_messages(messages)
+    assert len(history) == 9
+    assert [turn["content"].split("】", 1)[1] for turn in history[1:]] == [t[1] for t in morning]
+    assert history[2]["content"] == "【11月2日 周一 08:03】要上早八，得去教室"
+    assert "turns" not in payload  # One shared history, not another abbreviated copy.
+    assert payload["replied_at"] == "11月2日 周一 08:13"
+    assert payload["silent_minutes"] == 15
+    # Display-time conversion must not rewrite the raw evidence/material hash.
+    assert turn_taking.follow_up_material(core.store,
+        json.loads(job["body_json"])["notice"]["ref"], core.clock()) == material
+    assert not core.store.rows("SELECT 1 FROM outbox WHERE action_type='qq.private.proactive'")
+
+
+@pytest.mark.parametrize(("timezone", "expected_day", "expected_time"), [
+    ("Asia/Shanghai", "2026年11月2日 星期一", "00:16"),
+    ("America/Los_Angeles", "2026年11月1日 星期日", "08:16"),
+])
+def test_follow_up_uses_the_configured_timezone_across_midnight(
+        core, timezone, expected_day, expected_time):
+    enable(core)
+    core.settings.timezone = timezone
+    core.clock.now = datetime.fromisoformat("2026-11-01T16:00:00+00:00")
+    lively(core)
+    core.clock.advance(900)
+    assert turn_taking.flush(core.store, core.settings, core.clock())
+    core.model.activity.append(turn_taking.SKIP)
+    assert run(run_notice(core))
+    messages = core.model.calls[-1][0]
+    assert f"{expected_day} {expected_time}（{timezone}）" in messages[-2]["content"]
+    assert history_messages(messages)[-1]["content"].startswith("【" + time_context.stamp(
+        "2026-11-01T16:01:00+00:00", timezone) + "】")
 
 
 @pytest.mark.parametrize(("owner", "answer", "wording"), [
@@ -182,11 +255,10 @@ def test_same_timing_allows_content_handoff_new_topic_or_skip(core, owner, answe
     assert scenario == "activity"
     payload = json.loads(messages[-1]["content"])
     assert payload["silent_minutes"] == 15
-    assert payload["turns"][-1] == {
-        "owner": owner, "you": answer, "owner_at": core.store.one(
-            "SELECT occurred_at FROM events WHERE event_id='evt_test_2'")["occurred_at"],
-        "owner_truncated": False, "you_truncated": False,
-    }
+    assert history_messages(messages)[-1]["content"] == "【" + time_context.stamp(core.store.one(
+        "SELECT occurred_at FROM events WHERE event_id='evt_test_2'")["occurred_at"],
+        core.settings.timezone) + "】" + owner
+    assert {"role": "assistant", "content": answer} in messages
     assert not payload["excerpt_truncated"]
     items = lease(core)
     assert [item["content"]["text"] for item in items] == (
@@ -198,8 +270,9 @@ def test_same_timing_allows_content_handoff_new_topic_or_skip(core, owner, answe
 
 
 @pytest.mark.parametrize("speaker", ["owner", "you"])
-def test_long_turn_keeps_its_final_stance_and_marks_missing_middle(core, speaker):
+def test_followup_shared_history_keeps_the_full_turn_and_final_stance(core, speaker):
     enable(core)
+    core.settings.context_soft_tokens = 12000
     turn(core, 1, "我刚看完那部电影", "结局你喜欢吗？")
     core.clock.advance(60)
     ending = "这段就说到这里，接下来要先忙别的了。"
@@ -210,11 +283,8 @@ def test_long_turn_keeps_its_final_stance_and_marks_missing_middle(core, speaker
     core.model.activity.append(turn_taking.SKIP)
     assert turn_taking.flush(core.store, core.settings, core.clock())
     assert run(run_notice(core))
-    payload = json.loads(core.model.calls[-1][0][-1]["content"])
-    excerpt = payload["turns"][-1][speaker]
-    assert excerpt.startswith("说说电影里的那个配角。") and excerpt.endswith(ending)
-    assert len(excerpt) == turn_taking.TURN_CHARS and "…" in excerpt
-    assert payload["turns"][-1][speaker + "_truncated"] and payload["excerpt_truncated"]
+    messages = core.model.calls[-1][0]
+    assert any(message["content"].endswith(long) for message in messages)
     assert lease(core) == []
 
 
@@ -360,8 +430,10 @@ def test_real_http_and_independent_worker_settle_one_follow_up_across_restart(co
             assert observed["materials"][0]["kind"] == "followup"
             material = observed["materials"][0]
             assert not material["excerpt_truncated"]
-            assert all(turn["owner_at"] and not turn["owner_truncated"]
-                       and not turn["you_truncated"] for turn in material["turns"])
+            assert "turns" not in material
+            # This grant has proactive permission only; it must not expose history.
+            assert not history_messages(observed["prompts"][0])
+            assert "Asia/Shanghai" in observed["prompts"][0][-2]["content"]
             assert {unit["lane"] for unit in observed["units"] if unit["progressed"]} >= {
                 "follow_up", "activity",
             }
