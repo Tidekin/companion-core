@@ -7,6 +7,7 @@ from datetime import datetime
 from companion import reply_revision
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
+from companion_delivery_protocol.reply_groups import manifest, part_hash
 
 
 def digest(value):
@@ -47,9 +48,23 @@ def enqueue(store, event_id, conversation_id, text, now, action="qq.private.repl
         return message_id
 
 
-def _group_manifest(job_id, parts, interval_ms):
-    return {"job_id": job_id, "parts_sha256": [digest(text) for text in parts],
-            "interval_ms": interval_ms, "total_chars": sum(map(len, parts))}
+def _group_manifest(job_id, parts, interval_ms, *, contents=None):
+    version = 2 if contents is not None else 1
+    hashes = ([part_hash(content, version) for content in contents] if contents is not None
+              else [digest(text) for text in parts])
+    return manifest(job_id, hashes, sum(map(len, parts)), interval_ms, version)
+
+
+def _meme_tail(content, event_id):
+    from companion.expression import ImageIntent
+
+    if set(content) != {"text", "image"} or content["text"] != "":
+        raise ValueError("invalid meme tail")
+    image = ImageIntent.model_validate(content["image"])
+    if image.model_dump(exclude_none=True) != content["image"] or (
+        image.offer_key is not None and image.offer_key != "meme:" + event_id
+    ):
+        raise ValueError("invalid meme binding")
 
 
 def valid_reply_to(value):
@@ -59,7 +74,7 @@ def valid_reply_to(value):
 
 
 def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.private.reply",
-                        reply_to=None):
+                        reply_to=None, image=None):
     """Freeze all parts atomically; a retried job cannot recut or duplicate its reply."""
     if (
         not isinstance(parts, list) or not 1 <= len(parts) <= 2**31 - 1
@@ -68,6 +83,18 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.priva
         or type(interval_ms) is not int or not 0 <= interval_ms <= 3000
     ):
         raise CoreError("INVALID_REPLY_SEGMENTS", 400)
+    contents = [{"text": text} for text in parts]
+    if reply_to is not None:
+        contents[0]["reply_to"] = {"message_id": reply_to}
+    if image is not None:
+        tail = {"text": "", "image": image}
+        try:
+            _meme_tail(tail, job["event_id"])
+            if job["kind"] != "chat" or action != "qq.private.reply":
+                raise ValueError("private chat reply required")
+        except (ValueError, TypeError) as error:
+            raise CoreError("INVALID_REPLY_SEGMENTS", 400) from error
+        contents.append(tail)
     with nullcontext() if store.db.in_transaction else store.transaction():
         reply_revision.check_job(store, job)
         source = store.one(
@@ -89,9 +116,7 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.priva
             group = reply_group(store, existing[0]["message_id"])
             if (
                 len(group["rows"]) != len(existing)
-                or [json.loads(row["content_json"])["text"] for row in group["rows"]] != parts
-                or json.loads(group["rows"][0]["content_json"]).get("reply_to") != (
-                    {"message_id": reply_to} if reply_to is not None else None)
+                or [json.loads(row["content_json"]) for row in group["rows"]] != contents
                 or (group["segmented"] and any(
                     row["reply_group_id"] != job["job_id"]
                     or row["segment_interval_ms"] != interval_ms for row in group["rows"]
@@ -99,19 +124,25 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.priva
             ):
                 raise CoreError("REPLY_GROUP_CHANGED", 409)
             return [row["message_id"] for row in group["rows"]]
-        if len(parts) == 1:
+        if len(contents) == 1:
             return [enqueue(store, job["event_id"], job["conversation_id"], parts[0], now,
                             action=action, reply_to=reply_to)]
-        group_hash = digest(_group_manifest(job["job_id"], parts, interval_ms))
+        group_hash = digest(_group_manifest(job["job_id"], parts, interval_ms,
+                            contents=contents if image is not None else None))
         ids = []
-        for index, text in enumerate(parts):
-            message_id = enqueue(store, job["event_id"], job["conversation_id"], text, now,
+        for index, content in enumerate(contents):
+            message_id = enqueue(store, job["event_id"], job["conversation_id"],
+                                 content["text"], now,
                                  key=f"reply:{job['event_id']}:v2:{index}", action=action,
                                  reply_to=reply_to if index == 0 else None)
+            if "image" in content:
+                store.execute("UPDATE outbox SET content_json=?,content_sha256=? "
+                              "WHERE message_id=?",
+                              (encode(content), digest(content), message_id))
             store.execute(
                 "UPDATE outbox SET reply_group_id=?,segment_index=?,segment_count=?,"
                 "reply_group_sha256=?,segment_interval_ms=? WHERE message_id=?",
-                (job["job_id"], index, len(parts), group_hash, interval_ms, message_id),
+                (job["job_id"], index, len(contents), group_hash, interval_ms, message_id),
             )
             ids.append(message_id)
         return ids
@@ -147,29 +178,38 @@ def reply_group(store, message_id, *, require_sent=False):
             or not 0 <= row["segment_interval_ms"] <= 3000
         ):
             raise ValueError("invalid group")
+        contents = [json.loads(part["content_json"]) for part in rows]
+        media = any("image" in content for content in contents)
         parts = []
         for index, part in enumerate(rows):
-            content = json.loads(part["content_json"])
+            content = contents[index]
+            tail = media and index == len(rows) - 1
+            if tail:
+                _meme_tail(content, row["origin_event_id"])
             if (
                 part["segment_index"] != index or part["segment_count"] != len(rows)
                 or any(part[key] != row[key] for key in (
                     "origin_event_id", "conversation_id", "action_type", "reply_group_sha256",
                     "segment_interval_ms"))
                 or part["delivery_key"] != f"reply:{row['origin_event_id']}:v2:{index}"
-                or set(content) - ({"reply_to"} if index == 0 else set()) != {"text"}
+                or not tail and set(content) - ({"reply_to"} if index == 0 else set()) != {"text"}
                 or ("reply_to" in content and not valid_reply_to(content["reply_to"]))
                 or not isinstance(content["text"], str)
-                or not content["text"].strip() or part["content_sha256"] != digest(content)
+                or not tail and not content["text"].strip()
+                or tail and (source["kind"] != "chat" or row["action_type"] != "qq.private.reply")
+                or part["content_sha256"] != digest(content)
             ):
                 raise ValueError("invalid part")
             parts.append(content["text"])
         if sum(map(len, parts)) > 20000 or row["reply_group_sha256"] != digest(
-            _group_manifest(row["reply_group_id"], parts, row["segment_interval_ms"])
+            _group_manifest(row["reply_group_id"], parts, row["segment_interval_ms"],
+                            contents=contents if media else None)
         ):
             raise ValueError("invalid manifest")
         if require_sent and any(part["state"] != "SENT" for part in rows):
             return None
-        return {"rows": rows, "text": "".join(parts), "segmented": True}
+        return {"rows": rows, "text": "".join(parts), "segmented": True,
+                **({"version": 2} if media else {})}
     except (ValueError, TypeError, KeyError) as error:
         raise CoreError("REPLY_GROUP_CHANGED", 409) from error
 
@@ -182,10 +222,11 @@ def segment_envelopes(group):
     """Project envelopes from one freshly validated reply_group; performs no reads."""
     if not group["segmented"]:
         return {group["rows"][0]["message_id"]: None}
-    hashes = [digest(json.loads(part["content_json"])["text"]) for part in group["rows"]]
+    version = group.get("version", 1)
+    hashes = [part_hash(json.loads(part["content_json"]), version) for part in group["rows"]]
     return {
         row["message_id"]: {
-            "version": 1, "group_id": row["reply_group_id"], "index": row["segment_index"],
+            "version": version, "group_id": row["reply_group_id"], "index": row["segment_index"],
             "count": len(group["rows"]), "group_sha256": row["reply_group_sha256"],
             "total_chars": len(group["text"]), "interval_ms": row["segment_interval_ms"],
             "part_sha256s": hashes,

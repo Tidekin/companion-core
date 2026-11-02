@@ -398,10 +398,13 @@ class OwnerOneBot:
             else:
                 image = self.guard.runtime.memes.prepare(item, check=fence)
             self.guard.meme_prepared = image is not None
-            message = reply_segments.quote(item) + [
-                {"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
+            message = reply_segments.quote(item)
+            if not reply_segments.image_only(item):
+                message.append({"type": "text", "data": {"text": reply_segments.wire_text(item)}})
             if image is None:
                 self.guard.runtime.memes.cancel(reply_segments.event_id(item))
+                if reply_segments.image_only(item):
+                    raise ValueError("MEME_SELECTED_ASSET_UNAVAILABLE")
             else:
                 message.append({"type": "image", "data": {
                     "file": "base64://" + base64.b64encode(image.data).decode("ascii")}})

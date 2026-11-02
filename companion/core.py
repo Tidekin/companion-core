@@ -1845,9 +1845,20 @@ class Core(Runtime):
                         ) if notice_parts else []
                         notices.record(self.store, self.settings, job, message_ids, now)
                     elif policy and generated_reply and job["kind"] == "chat" and (
-                        intent is None or intent.image is None
+                        intent is None or intent.image is None or authority is not None
+                        and not self.store.one(
+                            "SELECT 1 FROM generated_images WHERE job_id=? AND state='SUCCEEDED' "
+                            "AND message_id IS NULL", (job["job_id"],),
+                        )
                     ):
                         parts = split_text(intent.text if intent else reply, policy)
+                        image = (intent.image.model_dump(exclude_none=True)
+                                 if intent is not None and intent.image is not None else None)
+                        if image is not None and policy.max_segments != "unlimited":
+                            # The picture occupies one of the existing visible-message slots.
+                            text_slots = policy.max_segments - 1
+                            if len(parts) > text_slots:
+                                parts = parts[:text_slots - 1] + ["".join(parts[text_slots - 1:])]
                         if bounded_text:
                             approval, _ = live_text.check_job(
                                 self.store, self.settings, self.clock, job,
@@ -1859,7 +1870,7 @@ class Core(Runtime):
                                 raise CoreError("LIVE_TEXT_SEND_ATTEMPT_CAP", 403)
                             if len(parts) > available:
                                 parts = [reply]
-                        if len(parts) > 1 and self.store.one(
+                        if (len(parts) > 1 or image is not None) and self.store.one(
                             "SELECT 1 FROM events WHERE conversation_id=? AND actor_id='owner' "
                             "AND event_type IN ('message.received','message.media_received') "
                             "AND source='qq.onebot' AND rowid>(SELECT rowid FROM events "
@@ -1871,6 +1882,7 @@ class Core(Runtime):
                         ) if authority and parts else None
                         message_ids = enqueue_reply_parts(
                             self.store, job, parts, policy.interval_ms, now, reply_to=quote_to,
+                            image=image,
                         ) if parts else []
                     else:
                         create_reply = self.expression.enqueue if (

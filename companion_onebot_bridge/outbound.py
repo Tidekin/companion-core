@@ -67,7 +67,7 @@ def validate_item(item, config, *, companion=False, account_scope=False, voice_s
         or set(content) - {"reply_to"} not in ({"text"}, {"text", "image"},
                                                {"text", "generated_image"})
         or not isinstance(content["text"], str)
-        or not 1 <= len(content["text"]) <= 20000
+        or not (1 <= len(content["text"]) <= 20000 or reply_segments.image_only(item))
     ):
         raise ValueError("TEXT_DELIVERY_REQUIRED")
     if "reply_to" in content:

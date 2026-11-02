@@ -32,7 +32,11 @@ def provider(request, sends, receipt=None):
         if segments[0]["type"] == "reply":  # One native quote may precede the text.
             assert set(segments[0]["data"]) == {"id"} and isinstance(segments[0]["data"]["id"], str)
             segments = segments[1:]
-        assert segments[0]["type"] == "text"
+        if len(segments) == 1 and segments[0]["type"] == "image":
+            assert set(segments[0]["data"]) == {"file"}
+            assert segments[0]["data"]["file"].startswith("base64://")
+        else:
+            assert segments[0]["type"] == "text"
         sends.append(body)
         if isinstance(receipt, Exception):
             raise receipt
