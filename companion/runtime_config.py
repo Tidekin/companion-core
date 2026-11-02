@@ -5,16 +5,18 @@ and ModelClient retain their original settings, clients and stores. No permissio
 budget or delivery check is cached.
 """
 
+import asyncio
 import hashlib
 import hmac
 import json
+import sqlite3
 from contextlib import nullcontext
 from typing import Literal
 
 from cryptography.fernet import InvalidToken
 from pydantic import BaseModel, ConfigDict, Field
 
-from companion import operator_config
+from companion import operator_config, shutdown
 from companion.contracts import CoreError
 from companion.conversation_policy import ConversationPolicyConfig
 from companion.media_config import ImageGenerationConfig
@@ -301,6 +303,24 @@ def boundary(store, settings, clock, *, worker=None):
         }:
             store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(state)))
         return current
+
+
+async def worker_boundary(store, settings, clock):
+    """Wait out SQLite writer contention before starting a native worker unit.
+
+    Only the configuration transaction is retried, after rollback. Business work,
+    provider calls and their uncertainty remain outside this retry boundary.
+    """
+    while not shutdown.requested():
+        try:
+            boundary(store, settings, clock)
+            return True
+        except sqlite3.OperationalError as error:
+            if (getattr(error, "sqlite_errorcode", 0) & 0xFF != sqlite3.SQLITE_BUSY
+                or store.db.in_transaction):
+                raise
+            await asyncio.sleep(0.1)
+    return False
 
 
 def workers(store, settings):

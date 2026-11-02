@@ -3,14 +3,16 @@
 import argparse
 import asyncio
 import json
+import sqlite3
 import sys
 import traceback
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
 
-from companion import operator_config
+from companion import operator_config, runtime_config
 from companion.__main__ import worker
 from companion.config import Settings
 from companion.core import Core
@@ -21,6 +23,7 @@ async def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--now", required=True)
     parser.add_argument("--tasks", type=int, default=2)
+    parser.add_argument("--boundary-contention", action="store_true")
     args = parser.parse_args()
     raw = await asyncio.to_thread(Path(args.config).read_text, "utf-8")
     settings = operator_config.load(Settings.model_validate_json(raw))
@@ -28,7 +31,24 @@ async def main():
         settings.model_key.get_secret_value() != "synthetic-key"
     ):
         raise ValueError("SYNTHETIC_PROCESS_ONLY")
-    calls, completed = [], 0
+    calls, completed, busy_boundaries = [], 0, 0
+    native_boundary = runtime_config.boundary
+
+    def boundary(store, config, clock):
+        nonlocal busy_boundaries
+        if args.boundary_contention and completed == 1 and not busy_boundaries:
+            with closing(sqlite3.connect(config.database, isolation_level=None)) as writer:
+                writer.execute("BEGIN IMMEDIATE")
+                store.db.execute("PRAGMA busy_timeout=0")
+                try:
+                    return native_boundary(store, config, clock)
+                except sqlite3.OperationalError as error:
+                    assert error.sqlite_errorcode == sqlite3.SQLITE_BUSY
+                    busy_boundaries += 1
+                    raise
+                finally:
+                    writer.rollback()
+        return native_boundary(store, config, clock)
 
     async def gate():
         async with asyncio.timeout(25):
@@ -73,11 +93,12 @@ async def main():
             super().__init__(**options)
 
     with (patch("companion.core.Core", SyntheticCore),
+          patch("companion.runtime_config.boundary", boundary),
           patch("companion.__main__.httpx.AsyncClient", SyntheticClient),
           patch("companion.shutdown.requested", lambda: completed >= args.tasks),
           patch("companion.retrieval.SemanticIndex.warmup", lambda self: None)):
         await worker(settings)
-    print(json.dumps({"calls": len(calls),
+    print(json.dumps({"calls": len(calls), "busy_boundaries": busy_boundaries,
         "systems": [call["messages"][0]["content"] for call in calls], "time_labels": [any(
         "当前时间参考" in str(message["content"]) for message in call["messages"])
         for call in calls]}), flush=True)
