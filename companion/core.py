@@ -319,6 +319,7 @@ class Core(Runtime):
         from companion.evaluation import recover as recover_evaluation
 
         s = self.store
+        self.exploration.recover()
         recover_evaluation(s, now)
         from companion.rem import recover_interrupted
 
