@@ -4,7 +4,7 @@ import asyncio
 import base64
 import json
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import datetime
 
 import httpx
 import pytest
@@ -158,9 +158,11 @@ def test_received_control_fences_prepared_meme_before_dispatch(core, tmp_path, c
                         assert runtime.db.execute("SELECT state FROM meme_pins").fetchone()[0] == (
                             "PREPARED")
                         if control == "recall":
-                            # The wire recall and receipt use the same wall clock.
-                            owner_notices.put(window.runtime, recall_frame(), datetime.now(UTC),
-                                              ("127.0.0.1", 12345))
+                            # Match the Core and Bridge clock, including between ticker runs.
+                            received_at = core.clock.now
+                            owner_notices.put(window.runtime,
+                                recall_frame(time=int(received_at.timestamp())), received_at,
+                                ("127.0.0.1", 12345))
                         elif control == "new_input":
                             await window.capture(2)
                         else:
