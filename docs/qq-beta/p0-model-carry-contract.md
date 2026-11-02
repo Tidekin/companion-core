@@ -373,6 +373,37 @@ HTTP preview/activation and independent voice worker check uses synthetic owner
 input and provider transport and does not send a QQ message. This reuses the pinned
 DSH stop/settlement and existing native carry research recorded above.
 
+## Existing meme capability revision
+
+An explicitly approved meme configuration change uses the same bounded native
+STOP/preview/activate and carry continuation as an existing voice revision. The
+owner policy may change only its named authorization evidence and the fingerprint
+of its already granted `meme` capability. Native activation still recomputes that
+fingerprint from the configured discovery/caption policy. Owner identity, purposes,
+capture, history and memory scope, expiry, paid contract, original carry and every
+other capability must be identical. A simultaneous voice and meme revision is
+rejected; this is not a general capability revision permission.
+
+For the approved daily download/storage increase from 16/4 to 32/8 MiB, retain the
+original UNKNOWN discovery reservations at their full reserved amounts. The native
+configuration and Bridge authority handoff must complete before a fresh owner
+input can use the additional allowance. The daily query and paid caption budgets
+remain separately enforced. Neither an older source event nor an original UNKNOWN
+model or discovery attempt is rebound, refunded or replayed by this revision.
+After activation, continuation requires a Core version that understands this
+bounded meme revision. Recovery must retain a compatible official image; earlier
+versions reject the revised authority chain.
+
+`tests/test_model_carry_meme_revision.py` checks both catalog owners, later renewal,
+scope drift, mixed capabilities, the original same-policy UNKNOWN handoff, and
+authenticated TLS preview/activation followed by fresh signed ingress and an
+independent Core worker. Public/model transports are synthetic. The implementation
+reuses the existing voice revision and the pinned DSH producer-settlement research
+above; the [DSH jobs-local producer commit and terminal checks](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/jobs/jobs-local/src/index.ts)
+and [SQLite transaction semantics](https://www.sqlite.org/lang_transaction.html)
+were rechecked on 2026-11-02. They preserve execution/settlement boundaries; the
+owner capability contract remains Core's own.
+
 ## Closing an attempt that never started I/O
 
 A refusal after admission but before `io_started` (for example a background yield,
