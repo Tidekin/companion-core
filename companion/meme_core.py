@@ -43,6 +43,7 @@ from companion_meme_protocol import (
     caption_model_schema,
     caption_text,
     digest,
+    explicit_meme_request,
     parse,
     sample_frames,
     strict_json,
@@ -72,7 +73,7 @@ def query_intent(text):
                 )
                 if re.search(pattern, text)
             ),
-            None,
+            "playful" if explicit_meme_request(text) else None,
         )
     )
 
