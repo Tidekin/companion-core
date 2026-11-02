@@ -19,7 +19,7 @@ from tests.test_owner_console import ORIGIN, PASSWORD
 from tests.test_owner_input import captured, inbound
 
 
-@pytest.mark.parametrize("change", ["safe", "expression", "mixed", "stop", "privacy"])
+@pytest.mark.parametrize("change", ["safe", "expression", "mixed", "stop", "privacy", "busy"])
 def test_native_worker_and_console_share_task_configuration_identity(core, tmp_path, change):
     capture, signing_key = captured(core, tmp_path)
     core.settings.operator_hot_reload = True
@@ -63,9 +63,11 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                        "X-CSRF-Token": login.json()["csrf_token"],
                        "Idempotency-Key": "process-save-runtime-configuration"}
             tasks = 1 if change in {"stop", "privacy"} else 2
+            hot_change = change in {"safe", "expression", "busy"}
             child = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
                 "tests.runtime_config_process", "--config", str(config), "--now", core.clock(),
-                "--tasks", str(tasks), stdin=asyncio.subprocess.PIPE,
+                "--tasks", str(tasks), *(["--boundary-contention"] if change == "busy" else []),
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             try:
                 async with asyncio.timeout(45):
@@ -107,15 +109,15 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                         assert (await child.stdout.readline()).strip() == b"BEFORE_REQUEST"
                         second_snapshot = runtime_config.get(core.store, core.settings,
                                                              "job:" + second)
-                        assert second_snapshot.version == (1 if change in {"safe", "expression"}
-                                                           else 0)
+                        assert second_snapshot.version == int(hot_change)
                         child.stdin.write(b"continue\n")
                         await child.stdin.drain()
                         assert (await child.stdout.readline()).strip() == b"COMPLETED"
                     output, error = await child.communicate()
                     assert child.returncode == 0, error.decode()
                     result = json.loads(output)
-                    expected = [False, change in {"safe", "expression"}] if tasks == 2 else []
+                    assert result["busy_boundaries"] == int(change == "busy")
+                    expected = [False, hot_change] if tasks == 2 else []
                     assert result["time_labels"] == expected
                     if change == "expression":
                         assert "synthetic owner guidance" not in result["systems"][0]
