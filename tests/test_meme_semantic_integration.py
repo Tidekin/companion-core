@@ -15,6 +15,7 @@ from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.image_input import ImageInputPolicy
 from companion.model import ModelClient
+from companion_meme_protocol import OFFER_WAIT_SECONDS
 from companion_onebot_bridge import app
 from companion_onebot_bridge.meme_catalog import key_hash
 from companion_onebot_bridge.owner_memes import MemePump
@@ -28,10 +29,12 @@ from tests.test_onebot_direct import raw_event
 from tests.test_private_companion import companion_options
 
 
-@pytest.mark.parametrize("handoff,deferred", [(False, False), (True, False), (False, True)],
-                         ids=["ordinary", "cancelled-before-usage", "query-unavailable"])
+@pytest.mark.parametrize("handoff,deferred,delayed", [
+    (False, False, False), (True, False, False), (False, True, False),
+    (False, False, True),
+], ids=["ordinary", "cancelled-before-usage", "query-unavailable", "delayed-authority-hops"])
 def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
-    core, tmp_path, handoff, deferred,
+    core, tmp_path, handoff, deferred, delayed,
 ):
     now = datetime.now(UTC).replace(microsecond=0)
     core.clock.now = now
@@ -121,6 +124,13 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
             runtime = window.runtime.memes
             pump = MemePump(window.runtime, client)
 
+            async def delayed_authority_hops(request):
+                # The native offer has several independently authorized HTTP hops.
+                # Keep all those gates, and exercise more than the old 1.5 s total.
+                if request.url.path.startswith(("/internal/v1/owner-authority/",
+                                                "/internal/v1/memes/")):
+                    await asyncio.sleep(0.4)
+
             async def unavailable_query(request):
                 if request.url.path == "/internal/v1/memes/query":
                     raise httpx.ReadTimeout("synthetic unavailable optional query", request=request)
@@ -139,6 +149,8 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
 
                 await app.upload(client, window.spool, wake, stop,
                     SimpleNamespace(accepted=accepted), runtime=window.runtime, memes=pump)
+                if delayed:
+                    client.event_hooks["request"].append(delayed_authority_hops)
                 event_id = pump.latest()[0]
                 row = window.db.execute(
                     "SELECT state,capture_json FROM window_inputs WHERE event_id=?", (event_id,),
@@ -153,6 +165,8 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                 assert task is not None
                 pump.tick(idle=False)
                 await task
+                if delayed:
+                    client.event_hooks["request"].remove(delayed_authority_hops)
                 pump.tick(idle=False)
                 offered = window.db.execute(
                     "SELECT state,offer_json FROM meme_runtime_semantic_offers WHERE event_id=?",
@@ -178,7 +192,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                         client.event_hooks["request"].remove(unavailable_query)
                         assert api_core.store.one("SELECT value FROM runtime_meta WHERE key=?",
                             ("meme_offer:" + first,)) is None
-                        core.clock.advance(2)
+                        core.clock.advance(OFFER_WAIT_SECONDS)
                     assert await worker.run_once("meme-integration-chat")
                     assert (await window.send(client, protocol))["worked"]
                     assert len(sends) == 1 and len(sends[0]["message"]) == 1

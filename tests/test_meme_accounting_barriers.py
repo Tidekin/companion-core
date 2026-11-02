@@ -111,8 +111,9 @@ def test_original_reconciled_v2_then_legally_redacted_policy_is_still_refused(
                 c.core_client, c.owner.config, c.grant, c.owner.clock(), 2
             )
             assert accepted.status_code == 202, accepted.text
-            # Let the original two-second optional-offer wait expire normally.
-            core.clock.advance(3)
+            from companion_meme_protocol import OFFER_WAIT_SECONDS
+
+            core.clock.advance(OFFER_WAIT_SECONDS + 1)
             # Real independent chat worker with Mock provider; no OneBot transport.
             worked = await worker(core, [])
             if not worked:
