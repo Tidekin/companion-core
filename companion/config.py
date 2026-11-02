@@ -477,7 +477,7 @@ class Settings(BaseModel):
     video_model_key: SecretStr = Field(default=SecretStr(""), exclude_if=lambda value: not value)
     timeout_seconds: int = Field(default=45, ge=5, le=180)
     max_output_tokens: int = Field(default=768, ge=128, le=8192)
-    context_soft_tokens: int = Field(default=3200, ge=1000, le=16000)
+    context_soft_tokens: int = Field(default=8000, ge=1000, le=16000)
     max_recent_messages: int = Field(default=12, ge=0, le=30)
     input_rate: int | None = Field(default=None, ge=0)
     cached_input_rate: int | None = Field(default=None, ge=0)

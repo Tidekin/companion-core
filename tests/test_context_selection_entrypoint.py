@@ -60,7 +60,8 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             purposes=("chat", "memory", "history", "goals", "exploration", "expression"),
             core_options={"operator_hot_reload": hot_reload, "goals_enabled": True,
                           "exploration_enabled": True, "mood_enabled": True,
-                          "context_soft_tokens": 8000,
+                          "context_soft_tokens": type(core.settings).model_fields[
+                              "context_soft_tokens"].default,
                           "watch_ledger": core.settings.watch_ledger.model_copy(
                               update={"enabled": True})},
             history_bytes=64000) as (entry, sends):

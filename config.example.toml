@@ -14,7 +14,8 @@ max_output_tokens = 768
 # billed as output; chat may generate max_output_tokens + chat_thinking_tokens in total.
 chat_thinking = "high"
 chat_thinking_tokens = 3072
-context_soft_tokens = 3200
+# Includes system instructions and resolved tool definitions; hard paid limits still apply.
+context_soft_tokens = 8000
 max_recent_messages = 12
 # Integer micro-USD per million tokens, upper-bound peak rates verified 2026-10-19.
 # https://api-docs.deepseek.com/quick_start/pricing/
