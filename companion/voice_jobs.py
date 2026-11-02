@@ -629,7 +629,13 @@ class VoiceJobs:
             if row["operation"] == "sing":
                 if not outbox or outbox["origin_event_id"] != row["event_id"]:
                     return None
-                expected["singing_segment_index"] = outbox["segment_index"] or 0
+                content = json.loads(outbox["content_json"])
+                choice = content.get("reply_part")
+                if choice and (choice.get("kind") != "singing"
+                               or choice.get("request_id") != row["job_id"]):
+                    return None
+                expected["singing_segment_index"] = (choice["singing_segment_index"]
+                    if choice and choice["kind"] == "singing" else outbox["segment_index"] or 0)
             if (
                 value["state"] != "AUDIO"
                 or value["job_id"] != row["job_id"]

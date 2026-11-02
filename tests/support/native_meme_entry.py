@@ -28,11 +28,13 @@ async def native_entry(core, tmp_path, source, *, options, rules, public, resolv
     approved_live(core, tmp_path, **options["paid_options"])
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
     key = Ed25519PrivateKey.generate()
+    voice = ["voice"] if core.settings.voice.enabled else []
     policy = OwnerGrantPolicy(owner_qq_id=core.settings.owner_qq_id,
-        purposes=["chat", "history", "meme", *private_life.FEATURES],
+        purposes=["chat", "history", "meme", *private_life.FEATURES, *voice],
         memory_scope="owner_private", authorization_sha256="d" * 64,
         paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
-        capability_policies={"meme": owner_authority.capability_hashes(core.settings)["meme"]},
+        capability_policies={name: owner_authority.capability_hashes(core.settings)[name]
+                             for name in ("meme", *voice)},
         history={"scope": "owner_private", "not_before": after(core.clock(), -1),
                  "max_turns": 15, "max_utf8_bytes": 16000},
         capture={"public_key": key.public_key().public_bytes_raw().hex(),

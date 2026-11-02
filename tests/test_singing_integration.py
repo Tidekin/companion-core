@@ -131,15 +131,37 @@ async def finish_song(core, client, job):
     return result
 
 
-async def select_song(core, admitted, song_id):
+async def select_song(core, admitted, song_id, *, surrounding_text=False):
     core.clock.advance(2)
-    provider = Provider(answer(calls=[call("final-song", "reply_with_song",
-        {"text": "给你唱一首。", "request_id": song_id})]))
+    parts = [{"kind": "singing", "text": "给你唱一首。", "request_id": song_id}]
+    if surrounding_text:
+        parts = [{"kind": "text", "text": "这首歌送给你。"}, *parts,
+                 {"kind": "text", "text": "唱完啦，我们继续聊。"}]
+    provider = Provider(answer(calls=[call("final-song", "reply_with_parts",
+        {"parts": parts})]))
     async with worker_for(core, provider) as worker:
         assert await worker.run_once("send-singing", job_id=admitted["job_id"])
     assert core.store.one("SELECT state,last_error_code FROM jobs")["state"] == "SUCCEEDED"
     assert len(provider.requests) == 1
     return core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
+
+
+def test_song_partition_keeps_its_own_indices_between_text_bubbles(core, tmp_path, monkeypatch):
+    async def scenario():
+        async with singing_window(core, tmp_path, monkeypatch) as (client, config, plan):
+            _, admitted, job = await queue_song(core, client, config, plan)
+            result = await finish_song(core, client, job)
+            rows = await select_song(core, admitted, job["job_id"], surrounding_text=True)
+            assert [json.loads(row["content_json"])["reply_part"]["kind"] for row in rows] == [
+                "text", "singing", "singing", "text"]
+            assert len(rows) == len(result.payload.audio) + 2
+            original = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job["job_id"],))
+            for index, row in enumerate(rows[1:-1]):
+                binding = core.voice.jobs._delivery_binding(original, row["message_id"])
+                assert binding is not None
+                assert binding["singing_segment_index"] == index
+                assert row["segment_index"] == index + 1
+    run(scenario())
 
 
 def test_sdk_song_tool_resumes_into_bound_ordered_bubbles(core, tmp_path, monkeypatch):

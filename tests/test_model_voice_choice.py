@@ -24,7 +24,8 @@ async def generate(core, tmp_path, choice, *, voice=True, reply_text=TEXT):
     core.settings.segmented_reply = SegmentedReplyConfig(min_chars=12, interval_ms=500)
     native_voice(core, tmp_path, record=False, voice=voice,
                  config=voice_config(reply={"mode": "model"}))
-    response = (answer(calls=[call("voice-final", "reply_with_voice", {"text": reply_text})])
+    response = (answer(calls=[call("voice-final", "reply_with_parts",
+                                 {"parts": [{"kind": "voice", "text": reply_text}]})])
                 if choice == "voice" else answer(reply_text))
     provider = Provider(response)
     async with worker_for(core, provider) as worker:
@@ -38,7 +39,9 @@ async def generate(core, tmp_path, choice, *, voice=True, reply_text=TEXT):
 def test_model_selects_voice_or_segmented_text_in_the_same_generation(core, tmp_path, choice):
     async def scenario():
         request = await generate(core, tmp_path, choice)
-        assert "reply_with_voice" in [t["function"]["name"] for t in request["tools"]]
+        assert "reply_with_parts" in [t["function"]["name"] for t in request["tools"]]
+        assert not {"reply_with_voice", "reply_with_song"} & {
+            t["function"]["name"] for t in request["tools"]}
         rows = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
         assert [json.loads(row["content_json"])["text"] for row in rows] == (
             [TEXT] if choice == "voice" else PARTS)
@@ -47,7 +50,7 @@ def test_model_selects_voice_or_segmented_text_in_the_same_generation(core, tmp_
         usage = core.store.rows("SELECT * FROM model_usage")
         assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
         if choice == "voice":
-            assert rows[0]["reply_group_id"] is None
+            assert rows[0]["reply_group_id"] is not None
             assert prepare(core, core.voice, rows[0]["message_id"]).state == "WAITING"
             assert prepare(core, core.voice, rows[0]["message_id"]).state == "WAITING"
             assert len(core.store.rows("SELECT * FROM voice_jobs")) == 1
@@ -81,18 +84,21 @@ def test_voice_speaks_reply_text_without_quote_control_markers(core, tmp_path):
         core.settings.quote_policy = "often"
         await generate(core, tmp_path, "voice", reply_text="【引用 m1a2b】" + TEXT)
         row = core.store.one("SELECT * FROM outbox")
-        assert json.loads(row["content_json"]) == {"text": TEXT}
+        assert json.loads(row["content_json"])["text"] == TEXT
         assert prepare(core, core.voice, row["message_id"]).state == "WAITING"
         assert core.store.one("SELECT input_blob FROM voice_jobs")["input_blob"] == TEXT.encode()
     run(scenario())
 
 
-def test_saved_voice_output_resumes_without_another_paid_request(core, tmp_path):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_saved_voice_output_resumes_without_another_paid_request(core, tmp_path, legacy):
     native_voice(core, tmp_path, record=False, config=voice_config(reply={"mode": "model"}))
     job = core.claim_job("voice-output-resume")
     snapshots = []
     persistence = ConversationStore(core, job, snapshots)
-    provider = Provider(answer(calls=[call("voice-final", "reply_with_voice", {"text": TEXT})]))
+    provider = Provider(answer(calls=[call("voice-final",
+        "reply_with_voice" if legacy else "reply_with_parts", {"text": TEXT} if legacy else
+        {"parts": [{"kind": "voice", "text": TEXT}]})]))
 
     class SimulatedExit(BaseException):
         pass
@@ -120,7 +126,7 @@ def test_saved_voice_output_resumes_without_another_paid_request(core, tmp_path)
             result = await agent_runtime.run_conversation(core, job, [],
                 conversation=restored.load(), persistence=restored)
             assert result.output.text == TEXT
-            assert reply_format(core.store, job["event_id"]) == "voice"
+            assert reply_format(core.store, job["event_id"]) == ("voice" if legacy else "mixed")
             assert restored.row()["phase"] == "OUTPUT"
             assert len(provider.requests) == 1
             assert len(core.store.rows("SELECT * FROM model_usage WHERE state='SETTLED'")) == 1
@@ -131,7 +137,7 @@ def test_saved_voice_output_resumes_without_another_paid_request(core, tmp_path)
 def test_chat_only_permission_does_not_offer_the_voice_output(core, tmp_path):
     async def scenario():
         request = await generate(core, tmp_path, "text", voice=False)
-        assert "reply_with_voice" not in [t["function"]["name"] for t in request["tools"]]
+        assert "reply_with_parts" not in [t["function"]["name"] for t in request["tools"]]
         assert not core.store.rows("SELECT * FROM voice_jobs")
     run(scenario())
 
