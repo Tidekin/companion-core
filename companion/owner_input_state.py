@@ -157,17 +157,26 @@ def read(store, settings, capture, *, model_requests=None):
         tools = store.rows("SELECT t.task_id,t.state FROM tool_tasks t JOIN tool_evidence e "
             "USING(task_id) WHERE e.event_id=? ORDER BY t.task_id LIMIT ?",
             (event_id, maximum + 1))
-        for table, identity, states in (
-            ("voice_jobs", "job_id", {"QUEUED", "LEASED", "RUNNING", "UNKNOWN"}),
-            ("bili_video_items", "item_id", {"DECLARED", "PREPARED", "ANALYZED", "UNKNOWN"}),
-        ):
-            field = "event_id" if table == "voice_jobs" else "owner_event_id"
-            cleanup = ",cleanup_state" if table == "voice_jobs" else ""
-            extra = store.rows(f"SELECT {identity} AS id,state{cleanup} FROM {table} "
-                               f"WHERE {field}=? ORDER BY {identity} LIMIT ?",
-                               (event_id, maximum + 1))
-            reads.extend({**item, "active": item["state"] in states
-                          or item.get("cleanup_state") == "PENDING"} for item in extra)
+        # UNKNOWN retains the outcome and liability. Only a token-bound cleanup
+        # receipt, retired lease and idle node prove that its execution has ended.
+        voices = store.rows("SELECT v.job_id AS id,v.state,v.cleanup_state,"
+            "v.state IN ('QUEUED','LEASED','RUNNING','UNKNOWN') AND NOT ("
+            "v.state='UNKNOWN' AND v.content_retired=1 AND v.cleanup_state='CONFIRMED' "
+            "AND v.cleanup_confirmed_at IS NOT NULL AND v.stop_token_sha256 IS NOT NULL "
+            "AND v.lease_json IS NULL AND v.lease_token_sha256 IS NULL AND EXISTS ("
+            "SELECT 1 FROM voice_node_state n WHERE n.node_id=v.node_id "
+            "AND n.resource_state='READY' AND n.active_job_id IS NULL "
+            "AND n.claim_job_id IS NULL AND n.recovery_required=0 AND n.last_error_code IS NULL "
+            "AND (NOT EXISTS (SELECT 1 FROM runtime_meta WHERE key='voice_restore_required') "
+            "OR n.recovered_incarnation=(SELECT value FROM runtime_meta "
+            "WHERE key='voice_incarnation')))) "
+            "OR v.cleanup_state='PENDING' AS active FROM voice_jobs v "
+            "WHERE v.event_id=? ORDER BY v.job_id LIMIT ?", (event_id, maximum + 1))
+        reads.extend({**item, "active": bool(item["active"])} for item in voices)
+        videos = store.rows("SELECT item_id AS id,state FROM bili_video_items "
+            "WHERE owner_event_id=? ORDER BY item_id LIMIT ?", (event_id, maximum + 1))
+        reads.extend({**item, "active": item["state"] in {
+            "DECLARED", "PREPARED", "ANALYZED", "UNKNOWN"}} for item in videos)
         complete = all(len(items) <= maximum for items in (jobs, models, deliveries, reads, tools))
         # A native agent read keeps its link row WAITING and records progress only on the
         # exploration request, which `reads` already includes. Judge it there; the digest
