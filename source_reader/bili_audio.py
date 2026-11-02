@@ -68,7 +68,8 @@ def representation(data, *, max_seconds=MAX_SONG_SECONDS, max_bytes=MAX_SONG_BYT
 
 
 async def download_song(public, bvid, part, destination, *, guard, now,
-                        max_seconds=MAX_SONG_SECONDS, max_bytes=MAX_SONG_BYTES):
+                        max_seconds=MAX_SONG_SECONDS, max_bytes=MAX_SONG_BYTES,
+                        stream_guard=None):
     """Fetch one exact part; the guard must recheck the original live Core lease."""
     if (not isinstance(bvid, str) or not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid)
         or type(part) is not int or not 1 <= part <= 100
@@ -83,7 +84,7 @@ async def download_song(public, bvid, part, destination, *, guard, now,
         raise ReadFailure("SINGING_PUBLIC_TRANSPORT_REQUIRED")
     budget = ReadBudget(max_bytes + MAX_METADATA_BYTES, 4)
     budget.validate_account_read = guard
-    transfer = MediaHTTP(public, budget, guard, audio=True)
+    transfer = MediaHTTP(public, budget, guard, audio=True, stream_guard=stream_guard)
     view, view_sha = await transfer.api("/x/web-interface/view", urlencode({"bvid": bvid}))
     pages = view.get("pages")
     if (view.get("bvid") != bvid or not isinstance(pages, list)
