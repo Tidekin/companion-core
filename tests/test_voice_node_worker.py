@@ -492,8 +492,20 @@ def test_asr_native_process_is_killed_at_local_deadline_even_if_core_keeps_renew
     assert core.result_bodies == []
 
 
-def test_lost_control_connection_stops_asr_instead_of_running_offline(node):
+def test_lost_control_connection_stops_asr_instead_of_running_offline(node, monkeypatch):
+    from tests.native_continuous_support import until
+
     config, key, counter = node
+    dispatch = FixtureSupervisor.dispatch
+
+    async def started(supervisor, packet):
+        prior_receipts = len(child_receipts(counter))
+        await dispatch(supervisor, packet)
+        # Inject control loss only after this provider has actually begun.
+        await until(lambda: len(child_receipts(counter)) > prior_receipts,
+                    deadline_seconds=config.startup_timeout_seconds)
+
+    monkeypatch.setattr(FixtureSupervisor, "dispatch", started)
     core = FakeCore(config, key, "asr")
     core.control_failure = True
     with pytest.raises(VoiceProtocolError, match="VOICE_CORE_UNAVAILABLE"):
@@ -501,6 +513,7 @@ def test_lost_control_connection_stops_asr_instead_of_running_offline(node):
     with NodeState(config.state_directory) as state:
         assert state.resource()["state"] == "READY"
     assert len(child_receipts(counter)) == 1
+    assert core.result_bodies == []
 
 
 def test_unknown_tts_execution_requires_explicit_recorded_manual_recovery(node):
