@@ -152,7 +152,14 @@ async def prefetch(store, settings, job, query):
     if not rows:
         return []
     docs = [_document(row, note, settings.timezone) for row, note in zip(rows, notes, strict=True)]
-    ranked = await asyncio.to_thread(select, settings, query, docs, CANDIDATES)
+    try:
+        # A timed-out worker keeps running (threads cannot be cancelled) and only warms
+        # caches; its late result is discarded, so it can never enter a context.
+        ranked = await asyncio.wait_for(
+            asyncio.to_thread(select, settings, query, docs, CANDIDATES),
+            settings.recall_compute_timeout_seconds)
+    except TimeoutError:
+        return []  # Not None: context() must not fall back to ranking inline on the loop.
     return [rows[index]["event_id"] for index in ranked]
 
 

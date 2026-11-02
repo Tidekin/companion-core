@@ -139,3 +139,61 @@ def test_async_memory_search_rescores_in_a_worker_thread(core, monkeypatch):
     monkeypatch.setattr(reranker, "scores", scores)
     rows = asyncio.run(core.memory.search_async("取件码", now=core.clock(), limit=1))
     assert threads == [True] and rows[0]["content"] == "取件码改到第五排"
+
+
+def test_prefetch_gives_up_after_the_compute_timeout(core, monkeypatch):
+    import asyncio
+    import time
+
+    rows = [{"event_id": "evt_0", "user_text": "第0条", "reply_text": "好",
+             "occurred_at": "2026-05-01T01:00:00+00:00"}]
+    monkeypatch.setattr(turn_recall, "_candidates", lambda *args, **kwargs: (rows, [[]]))
+    monkeypatch.setattr(turn_recall, "select", lambda *args: time.sleep(1) or [0])
+    core.settings.recall_compute_timeout_seconds = 0.1
+    started = time.monotonic()
+    ranked = asyncio.run(turn_recall.prefetch(
+        core.store, core.settings, {"conversation_id": "c", "event_id": "e"}, "第0条"))
+    # Empty, not None: context() then recalls nothing instead of ranking on the loop.
+    assert ranked == [] and time.monotonic() - started < 1.5
+
+
+def _owner_fact(core, content, confirmed=False):
+    from companion.contracts import Candidate
+
+    return core.memory.add(Candidate(subject="project", kind="fact", fact_key="visit",
+                                     content=content, evidence_event_id="evt_test_1",
+                                     evidence_quote="这是一份别人整理的资料"),
+                           core.clock(), confirmed=confirmed)
+
+
+def test_owner_relayed_update_ends_older_value_across_origins(core):
+    value, item = prepared(core, "document")
+    old_id = _owner_fact(core, "入场日期原定十二月一日")
+    new_id = core.memory.add(item.model_copy(update={
+        "update": "replaces_previous", "relayed_by_owner": True, "speaker": "document"}),
+        core.clock())
+    old = core.store.one("SELECT * FROM memories WHERE memory_id=?", (old_id,))
+    new = core.store.one("SELECT * FROM memories WHERE memory_id=?", (new_id,))
+    assert old["valid_to"] and old["status"] == "HYPOTHESIS" and not new["needs_review"]
+    contents = [row["content"] for row in core.memory.search("入场日期", now=core.clock())]
+    assert not any("十二月一日" in text for text in contents)
+    assert any("十二月九日" in text for text in contents)
+    assert core.store.one("SELECT 1 FROM audit_log WHERE action='memory.replaced'")
+
+
+def test_update_without_owner_basis_or_flag_changes_nothing(core):
+    value, item = prepared(core, "document")
+    old_id = _owner_fact(core, "入场日期原定十二月一日")
+    core.memory.add(item.model_copy(update={"update": "replaces_previous",
+                                            "speaker": "third_party"}), core.clock())
+    assert not core.store.one("SELECT valid_to FROM memories WHERE memory_id=?",
+                              (old_id,))["valid_to"]
+
+
+def test_update_never_ends_an_owner_confirmed_value(core):
+    value, item = prepared(core, "document")
+    old_id = _owner_fact(core, "入场日期原定十二月一日", confirmed=True)
+    core.memory.add(item.model_copy(update={"update": "replaces_previous",
+                                            "relayed_by_owner": True}), core.clock())
+    assert not core.store.one("SELECT valid_to FROM memories WHERE memory_id=?",
+                              (old_id,))["valid_to"]

@@ -48,7 +48,11 @@ content写清是谁说的、谁做的：主人本人、第三方（写名字和�
 输出 JSON 对象 {"memories": [...],"episode_summaries":[...]}，memories最多20条。
 每条完整结构为 {"subject":"project","kind":"fact","fact_key":"稳定的事实键",
 "content":"带来源和说话人的具体内容","evidence_event_id":"对应事件的event_id",
-"evidence_reference_id":null,"evidence_quote":"证据原文的一段连续子串","salience":5}。
+"evidence_reference_id":null,"evidence_quote":"证据原文的一段连续子串","salience":5,
+"speaker":"owner","relayed_by_owner":false,"update":null}。
+speaker填最初说出这件事的人：owner(主人)、third_party(第三方)、assistant(你)或document(文件/图片/表格)；
+relayed_by_owner表示主人把它转发、引用或转告给你。update只在内容明确用新值取代同一fact_key的旧值时填
+"replaces_previous"（更正、改期、取消、作废、搬迁），并在content里写明旧值和新值；同一事实沿用同一fact_key。
 只使用这些字段。subject限user/self/relationship/project，kind限fact/preference/boundary/episode/skill；
 同一事实使用同一fact_key。不能推测敏感身份、健康、密码或第三方隐私。
 先选证据，再写content：主人正文用text，evidence_reference_id填null；资料用references中

@@ -173,6 +173,13 @@ class Candidate(StrictModel):
     evidence_reference_id: str | None = Field(default=None, min_length=1, max_length=128,
                                              exclude_if=lambda value: value is None)
     salience: int | None = Field(default=None, ge=1, le=10, strict=True)
+    # Who first stated the content, and whether the owner relayed it (forward/quote/notice).
+    speaker: Literal["owner", "third_party", "assistant", "document"] | None = Field(
+        default=None, exclude_if=lambda value: value is None)
+    relayed_by_owner: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    # The content states a new value replacing an older value of this fact_key.
+    update: Literal["replaces_previous"] | None = Field(
+        default=None, exclude_if=lambda value: value is None)
 
 
 class EpisodeSummary(StrictModel):

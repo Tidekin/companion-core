@@ -115,8 +115,13 @@ class Memory:
             from companion import reranker
 
             # CPU-bound cross-encoder stays off the event loop; nothing touches the Store there.
-            values = await asyncio.to_thread(reranker.scores, model, query,
-                                             [row["content"] for row in pool])
+            try:
+                values = await asyncio.wait_for(asyncio.to_thread(
+                    reranker.scores, model, query, [row["content"] for row in pool]),
+                    getattr(self.settings, "recall_compute_timeout_seconds", 15))
+            except TimeoutError:
+                # Keep the fused order; a sync rescore here would block the loop instead.
+                values = [-index for index in range(len(pool))]
             rerank_scores = dict(zip((row["memory_id"] for row in pool), values, strict=True))
         if clock:
             sources = MemorySources(self, clock())
@@ -378,6 +383,20 @@ class Memory:
                 "AND status IN ('HYPOTHESIS','CONFIRMED') AND content<>?",
                 (candidate.subject, candidate.fact_key, content),
             ) if sources.current(row) and (row["origin"] == "event_observed") == reference]
+        replaced = []
+        if (candidate.update == "replaces_previous" and candidate.kind != "episode" and not same
+                and (candidate.speaker == "owner" or candidate.relayed_by_owner)):
+            # An owner-originated or owner-relayed update ends the older values' validity
+            # (kept for history, not deleted), across origins: a forwarded notice may
+            # replace a fact the owner typed. Owner-confirmed corrections stay untouched.
+            replaced = [row for row in s.rows(
+                "SELECT * FROM memories WHERE subject=? AND fact_key=? AND kind<>'episode' "
+                "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0 AND content<>?",
+                (candidate.subject, candidate.fact_key, content),
+            ) if sources.current(row) and not (
+                row["origin"] == "user_confirmed" and row["status"] == "CONFIRMED")]
+            ended = {row["memory_id"] for row in replaced}
+            conflicts = [row for row in conflicts if row["memory_id"] not in ended]
         if same:
             memory_id = same["memory_id"]
             if confirmed:
@@ -412,6 +431,12 @@ class Memory:
                     "UPDATE memories SET needs_review=1 WHERE memory_id=?", (row["memory_id"],)
                 )
             s.audit("memory.conflict", memory_id, event["trace_id"], now)
+        for row in replaced:
+            s.execute("UPDATE memories SET valid_to=?,updated_at=? WHERE memory_id=? "
+                      "AND (valid_to IS NULL OR valid_to>?)",
+                      (event["occurred_at"], now, row["memory_id"], event["occurred_at"]))
+            s.audit("memory.replaced", row["memory_id"], event["trace_id"], now,
+                    by=memory_id)
         s.execute(
             "INSERT OR IGNORE INTO memory_evidence VALUES (?,?,1,?)",
             (memory_id, event["event_id"], now),

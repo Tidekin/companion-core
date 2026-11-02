@@ -616,6 +616,8 @@ class Settings(BaseModel):
     # Raw past turns retrieved alongside extracted facts; 0 disables.
     turn_recall_limit: int = Field(default=8, ge=0, le=20)
     turn_recall_scan_turns: int = Field(default=600, ge=0, le=5000)
+    # Upper bound on waiting for off-loop ranking; on expiry the reply proceeds without it.
+    recall_compute_timeout_seconds: float = Field(default=15, gt=0, le=120)
     # Local ONNX cross-encoder directory (tokenizer.json, onnx/*.onnx). "auto" uses
     # <embedding_cache_dir>/local-bge-reranker-v2-m3-int8 when present; "" turns it off.
     reranker_model_dir: str = "auto"
