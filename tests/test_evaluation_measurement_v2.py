@@ -12,7 +12,6 @@ from companion import budget, evaluation, paid_budget, token_measurement
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import ModelResponse
-from companion.store import Store
 from scripts import evaluate_r1_conversation as experiment
 from tests.test_evaluation import authorize, prepare, response, result, work
 from tests.test_evaluation_process import processes
@@ -50,8 +49,8 @@ def test_v2_receipts_equal_native_reservations_and_restart_does_not_repay(core, 
     assert len(view["requests"]) == 6
     assert core.store.rows("SELECT * FROM outbox") == []
     core.store.close()
-    core.store = Store(core.settings.database)
-    assert not work(core)
+    with Core(core.settings, core.model, core.clock) as restarted:
+        assert not work(restarted)
     assert len(wire) == 6
 
 
@@ -110,9 +109,9 @@ def test_v2_unknown_after_restart_keeps_six_denominator(core, tmp_path, monkeypa
         raise httpx.ReadTimeout("synthetic", request=request)
     work(core, timeout)
     core.store.close()
-    core.store = Store(core.settings.database)
-    assert not work(core, timeout)
-    rows = result(core, submitted)["requests"]
+    with Core(core.settings, core.model, core.clock) as restarted:
+        assert not work(restarted, timeout)
+        rows = result(restarted, submitted)["requests"]
     assert [r["state"] for r in rows] == ["UNKNOWN", *(["NOT_STARTED"] * 5)]
     monkeypatch.setattr(experiment, "ROOT", tmp_path)
     ballot = experiment.blind_export(manifest.plan, rows, tmp_path / ".local/ballot",
@@ -132,12 +131,12 @@ def test_v2_settled_without_result_after_crash_is_not_invented_or_repaid(core, t
     budget.settle(core.store, core.settings, rid, ModelResponse("lost", 30, 2))
     core.clock.advance(core.settings.lease_seconds + 1)
     core.store.close()
-    core.store = Store(core.settings.database)
-    assert not work(core)
-    rows = result(core, submitted)["requests"]
-    assert len(rows) == 6 and rows[0]["state"] == "SETTLED"
-    assert rows[0]["text"] == "" and rows[0]["complete_response"] is False
-    assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
+    with Core(core.settings, core.model, core.clock) as restarted:
+        assert not work(restarted)
+        rows = result(restarted, submitted)["requests"]
+        assert len(rows) == 6 and rows[0]["state"] == "SETTLED"
+        assert rows[0]["text"] == "" and rows[0]["complete_response"] is False
+        assert restarted.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
 
 
 def test_legacy_v1_plan_is_read_without_measurement_backfill(core, tmp_path):

@@ -13,11 +13,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from companion import budget, cloud_budget, evaluation, owner_authority, owner_input, paid_budget
 from companion.backup import backup, restore
 from companion.contracts import CoreError
+from companion.core import Core
 from companion.model import ModelClient, ModelResponse, model_payload
 from companion.policy import ConsentRequest, ConsentService
 from companion.qq_rich import input_digest
 from companion.runtime import Runtime
-from companion.store import Store
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import event, ingest
 from tests.test_paid_model_gate import approved_live
@@ -136,8 +136,8 @@ def test_six_frozen_payloads_use_native_job_usage_cloud_and_no_delivery(core, tm
     assert core.store.rows("SELECT * FROM memories") == before_memories
     assert evaluation.submit(core, request)["reused"]
     core.store.close()
-    core.store = Store(core.settings.database)
-    assert not work(core)
+    with Core(core.settings, core.model, core.clock) as restarted:
+        assert not work(restarted)
     assert len(wire) == 6
 
 
@@ -297,10 +297,10 @@ def test_crash_after_settlement_before_result_never_repays(core, tmp_path):
     budget.settle(core.store, core.settings, rid, ModelResponse("lost response", 30, 2))
     core.clock.advance(core.settings.lease_seconds + 1)
     core.store.close()
-    core.store = Store(core.settings.database)
-    assert not work(core)
-    assert result(core, submitted)["state"] == "CANCELLED"
-    assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
+    with Core(core.settings, core.model, core.clock) as restarted:
+        assert not work(restarted)
+        assert result(restarted, submitted)["state"] == "CANCELLED"
+        assert restarted.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
 
 
 def test_expired_lease_keeps_unknown_in_original_journal(core, tmp_path):
