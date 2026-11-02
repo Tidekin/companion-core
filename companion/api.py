@@ -707,10 +707,11 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         response.headers["Cache-Control"] = "no-store"
 
         def check(store):
-            with store.transaction():
-                view = owner_authority.current(store, settings, clock,
-                                               authority=body.authority, purpose=body.purpose)
-                return owner_authority.check_response(view, body.purpose)
+            # The Bridge polls this every second; a read snapshot leaves the writer free.
+            return store.read_or_write(lambda: owner_authority.check_response(
+                owner_authority.current(store, settings, clock,
+                                        authority=body.authority, purpose=body.purpose),
+                body.purpose))
 
         return await app.state.api_store.run(check)
 

@@ -249,7 +249,8 @@ def boundary(store, settings, clock, *, worker=None):
     """Publish a complete validated version only between native units, transactionally."""
     worker = worker or getattr(store, "configuration_worker", "runtime")
     key = PREFIX + worker
-    with nullcontext() if store.in_write_transaction else store.transaction():
+
+    def publish():
         now, current = clock(), _snapshot(settings)
         prior = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
         previous = {}
@@ -290,6 +291,8 @@ def boundary(store, settings, clock, *, worker=None):
                     _persist(store, settings, proposed, now)
                     current, reason = proposed, None
         except CoreError as error:
+            if store.in_read_snapshot:
+                raise  # A refusal seen only in a snapshot is decided again under the lock.
             reason = error.code
         snapshot_id = _persist(store, settings, current, now)
         state = {"worker": worker, "startup_version": settings._operator_config_version,
@@ -303,6 +306,11 @@ def boundary(store, settings, clock, *, worker=None):
         }:
             store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(state)))
         return current
+
+    if store.in_write_transaction:
+        return publish()
+    # Workers pass here before every native unit; an unchanged state needs no writer lock.
+    return store.read_or_write(publish)
 
 
 async def worker_boundary(store, settings, clock):

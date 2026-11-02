@@ -149,3 +149,35 @@ def test_native_probe_transmits_the_checked_empty_body(core, tmp_path, phase):
             probes = [body for path, body in received if path != "/send_private_msg"]
             assert len(probes) == 3 and probes == [b"{}"] * 3
     run(scenario())
+
+
+def test_ready_probe_is_reused_briefly_for_the_next_segment(core, tmp_path, monkeypatch):
+    from companion_onebot_bridge import owner_send
+    from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
+
+    async def scenario():
+        async with staged(core, tmp_path) as (owner, client, protocol, guard, sends):
+            probes = []
+
+            async def count(request):
+                if request.url.path == "/get_status":
+                    probes.append(request.url.path)
+
+            protocol.event_hooks["request"].append(count)
+            assert await dispatch(owner, client, protocol, guard)
+            assert len(sends) == 1 and len(probes) == 1
+
+            async def probe():
+                return await OwnerOneBot(OwnerSendGuard(owner, client), protocol).probe()
+
+            assert (await probe())["connection_ready"] and len(probes) == 1
+            now = owner_send.monotonic()
+            monkeypatch.setattr(owner_send, "monotonic",
+                                lambda: now + owner_send.PROBE_REUSE_SECONDS + 1)
+            assert (await probe())["connection_ready"] and len(probes) == 2
+            # A stopped runtime is never answered from the reused probe.
+            owner.stop()
+            with pytest.raises(ValueError, match="^OWNER_RUNTIME_STOPPED$"):
+                await probe()
+            assert len(probes) == 2
+    run(scenario())

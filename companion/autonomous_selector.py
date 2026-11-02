@@ -87,7 +87,11 @@ class RoundRobin:
             if lane is None:
                 return Selection(None, UnitResult(False), False, blocked=True)
             selected = await self._run(lane)
-            return Selection(selected.lane, selected.result, False, blocked=True)
+            # Further due bookkeeping runs before the blocked wait, even when this unit
+            # changed nothing; the wait then targets the next future maintenance.
+            return Selection(selected.lane, selected.result,
+                             any(lane.maintenance and self._due(lane) for lane in self.lanes),
+                             blocked=True)
         while self.remaining:
             lane = self.lanes[self.cursor]
             self.cursor = (self.cursor + 1) % len(self.lanes)
@@ -168,10 +172,12 @@ def native_selector(core, worker_id) -> RoundRobin:
 
     def maintenance(name, operation, purposes=()):
         async def run():
+            changes = core.store.db.total_changes
             operation()
             # Completed a scheduled maintenance unit. Its next monotonic deadline
-            # advances once; rescan to observe any work enqueued on our own Store.
-            return UnitResult(True)
+            # advances once; rescan only to observe work it enqueued on our own Store,
+            # whose commits do not change this connection's data_version.
+            return UnitResult(core.store.db.total_changes != changes)
 
         return lane(name, run, purposes, interval=MAINTENANCE_SECONDS, maintenance=True)
 

@@ -1,6 +1,7 @@
 """Native history validation retains its fences while batching one write transaction."""
 
 import json
+import sqlite3
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -100,6 +101,9 @@ def test_transaction_batch_rejects_live_boundary_changes_before_returning(
     def check(job, expected):
         original = owner_input.input_recall.require_not_recalled
         changed, saved = [], {}
+        # An unowned batch reads one snapshot, so the marker comes from another commit.
+        external = not transactional and boundary == "marker"
+        other = sqlite3.connect(core.settings.database, isolation_level=None) if external else None
 
         def recall(*args, **kwargs):
             original(*args, **kwargs)
@@ -109,8 +113,8 @@ def test_transaction_batch_rejects_live_boundary_changes_before_returning(
             if boundary == "stop":
                 core.settings.owner_runtime.mode = "OFF"
             elif boundary == "marker":
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
-                                   (encode("OFF"), owner_authority.MODE))
+                (other or core.store).execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                                              (encode("OFF"), owner_authority.MODE))
             elif boundary == "expiry":
                 core.clock.advance(31)
             else:
@@ -121,6 +125,11 @@ def test_transaction_batch_rejects_live_boundary_changes_before_returning(
 
         monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
         try:
+            if external:
+                # The snapshot answers for the state it began on; the next batch rejects.
+                assert owner_input.history_sources(
+                    core.store, core.settings, core.clock, job) == expected
+                assert changed
             with pytest.raises(CoreError):
                 with core.store.transaction() if transactional else nullcontext():
                     owner_input.history_sources(core.store, core.settings, core.clock, job)
@@ -128,6 +137,8 @@ def test_transaction_batch_rejects_live_boundary_changes_before_returning(
         finally:
             for path, content in saved.items():
                 path.write_bytes(content)
+            if other is not None:
+                other.close()
 
     run(native_history(core, tmp_path, check))
 
@@ -143,28 +154,42 @@ def test_transaction_history_still_checks_every_selected_source(
         changed = []
         proof = owner_input.history_proof(expected)
 
+        # A caller's write transaction sees its own change; an unowned batch reads one
+        # snapshot, so the change comes from another connection's commit.
+        other = None if transactional else sqlite3.connect(core.settings.database,
+                                                           isolation_level=None)
+        execute = core.store.execute if transactional else other.execute
+
         def recall(*args, **kwargs):
             original(*args, **kwargs)
             if changed:
                 return
             changed.append(1)
             if mutation in {"redaction", "redaction_first"}:
-                core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (target,))
+                execute("UPDATE events SET redacted=1 WHERE event_id=?", (target,))
             elif mutation == "future_send":
-                core.store.execute("UPDATE outbox SET sent_at=? WHERE origin_event_id=?",
-                                   (after(core.clock(), 100), target))
+                execute("UPDATE outbox SET sent_at=? WHERE origin_event_id=?",
+                        (after(core.clock(), 100), target))
             else:
                 key = owner_input.INPUT + target
                 row = core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
                 value = json.loads(row["value"])
                 value["capture"]["signature"] = "0" * 128
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
-                                   (encode(value), key))
+                execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), key))
 
         monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
-        with pytest.raises(CoreError):
-            with core.store.transaction() if transactional else nullcontext():
+        try:
+            if not transactional:
+                # The snapshot answers for the state it began on; the commit is ordered
+                # after this batch and the next batch rejects it.
                 owner_input.check_history(core.store, core.settings, core.clock, job, proof)
+                assert changed
+            with pytest.raises(CoreError):
+                with core.store.transaction() if transactional else nullcontext():
+                    owner_input.check_history(core.store, core.settings, core.clock, job, proof)
+        finally:
+            if other is not None:
+                other.close()
         assert changed
 
     run(native_history(core, tmp_path, check))

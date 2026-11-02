@@ -678,21 +678,8 @@ class Core(Runtime):
             and reply_revision.owner_input(s, job["event_id"]))
             or reply_revision.control_job(s, job)):
             return None
-        source_check = None
         if authority:
             allowed = None
-
-            def source_check(event_id):
-                try:
-                    owner_input.source(s, cfg, authority, event_id, self.clock(), history=True,
-                                       purpose="proactive" if followup else "chat")
-                    return bool(s.one(
-                        "SELECT 1 FROM events WHERE event_id=? AND conversation_id=? "
-                        "AND rowid<(SELECT rowid FROM events WHERE event_id=?)",
-                        (event_id, job["conversation_id"], job["event_id"]),
-                    ))
-                except CoreError:
-                    return False
         elif private_life.strict(s, cfg):
             if cfg.live_text_window.history_scope != "approved_window":
                 return None
@@ -712,11 +699,34 @@ class Core(Runtime):
                 (job["conversation_id"], after(now, -cfg.raw_event_retention_days * 86400),
                  now, job["event_id"]),
             )}
-        result = self.memory_context.continuation(
-            job["conversation_id"], now, event_ids=allowed,
-            current_event_ids=[row["event_id"] for row in history],
-            used_memory_ids=used_memory_ids, source_check=source_check,
-        )
+
+        def collect():
+            source_check = finish = None
+            if authority:
+                # Episodes share their sources; check them all against one job view.
+                _, check, finish = owner_input.history_batch(
+                    s, cfg, self.clock, job, purpose="proactive" if followup else "chat")
+
+                def source_check(event_id):
+                    try:
+                        check(event_id)
+                        return bool(s.one(
+                            "SELECT 1 FROM events WHERE event_id=? AND conversation_id=? "
+                            "AND rowid<(SELECT rowid FROM events WHERE event_id=?)",
+                            (event_id, job["conversation_id"], job["event_id"]),
+                        ))
+                    except CoreError:
+                        return False
+            found = self.memory_context.continuation(
+                job["conversation_id"], now, event_ids=allowed,
+                current_event_ids=[row["event_id"] for row in history],
+                used_memory_ids=used_memory_ids, source_check=source_check,
+            )
+            if finish is not None:
+                finish()
+            return found
+
+        result = s.read_or_write(collect) if authority else collect()
         items = result["items"]
         history_limit = authority.policy.history.max_utf8_bytes if authority else (
             cfg.live_text_window.max_history_utf8_bytes if live_text.active(s, cfg)
@@ -969,6 +979,8 @@ class Core(Runtime):
         learned = self._expression_learning_reference(job, affect) if (
             permitted("expression")) else None
         mark("context_references")
+        # A newer owner message cancels this job at ingestion; stop building for it.
+        reply_revision.check_job(s, job)
         if learned:
             references.append(learned["message"])
             reference_sources.append((learned["message"], learned["source_event_ids"]))
@@ -1094,6 +1106,7 @@ class Core(Runtime):
             reference_proofs.append((continuation["message"],
                                      {"kind": "memory", "proof": continuation["proof"]}))
         mark("context_history")
+        reply_revision.check_job(s, job)
         if job["kind"] == "chat" and any(source.get("reply_complete") is False
                                          and not source.get("reply_text") for source in sources):
             add_rules("\n历史里主人连着发了几条、中间没有你的回复时，前面那几条你还没回上；"

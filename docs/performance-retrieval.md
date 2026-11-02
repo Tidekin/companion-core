@@ -2,13 +2,40 @@
 
 ## Chat validation and Bridge decoding
 
-Mood source validation uses the same synchronous write-transaction boundary as
-`owner_input.history_sources`. Every retained source still passes the original input,
-capture-signature, recall, retention and provenance checks. Original authority evidence
-is reused only within that batch and while the connection has made no writes. The batch
-rechecks current authority, independent journals and expiry before returning; a changed
-connection or a caller-owned read transaction retains the per-source path. Each later
-context check starts a new batch, including after model I/O.
+Mood source validation, recent history and episodic continuation share one batch,
+`owner_input.history_batch`, read from one DB state: a write transaction or a
+`Store.read_or_write` snapshot. Every retained source still passes the original input,
+capture-signature, recall, retention and provenance checks. The job authority view and
+original evidence are reused only within that batch and while the connection has made
+no writes. The batch rechecks current authority, independent journals and expiry before
+returning; a changed connection retains the per-source path. Each later context check
+starts a new batch, including after model I/O.
+
+## Read snapshots and writer contention
+
+SQLite has one writer. Production telemetry on 2026-11-02 showed Bridge owner checks
+(about 1.7 per second), each worker's configuration boundary and per-source authority
+checks all taking `BEGIN IMMEDIATE`, so a chat reply waited up to 5 s per transaction
+and spent most of 43–125 s outside the model. `Store.read_or_write` runs a read-only
+operation on one WAL read snapshot with `PRAGMA query_only`. WAL readers do not block
+the writer, and the snapshot is a committed state from within the call. Any write
+statement, a nested write transaction, an independent journal or erasure ledger ahead
+of the snapshot, or any other failure repeats the operation once under
+`BEGIN IMMEDIATE`, whose result is authoritative. A snapshot never creates the budget
+journal, and the shared journal view is neither filled nor reused once the database
+files differ from those at the snapshot's start. Inside one write transaction or
+snapshot, the journal view key reuses its table summary until this connection writes.
+
+The owner check, an unchanged configuration boundary, history sources, mood signals and
+memory continuation use it. Leases and every other mutation keep their transactions.
+Maintenance lanes report progress only when they changed rows, so the Life worker no
+longer restarts a full sweep after bookkeeping that wrote nothing.
+
+Segments of one reply reuse a ready OneBot probe for up to 10 s (`PROBE_REUSE_SECONDS`).
+A failed or unacknowledged send, a different authority or a stopped runtime probes
+again, and send-check, lease and binding fences still run for every segment. Context
+building rechecks the job's reply revision between stages, so a reply superseded by
+newer owner input stops before history and planning instead of finishing its build.
 
 The SDK response checkpoint relies on `_save`'s source check immediately before its
 write, avoiding a second identical check earlier in that transaction. Settlement and
@@ -34,6 +61,10 @@ Reused implementations and primary references:
 - `companion/paid_budget.py` provides immutable serialized views with caller-owned copies.
 - [SQLite isolation](https://www.sqlite.org/isolation.html) describes its single writer
   and isolation between connections.
+- [SQLite WAL](https://www.sqlite.org/wal.html) documents that readers and the writer do
+  not block each other and that each read transaction sees one end mark.
+- [PRAGMA query_only](https://www.sqlite.org/pragma.html#pragma_query_only) refuses every
+  database change on the connection, including statements that match no rows.
 - [Python marshal](https://docs.python.org/3/library/marshal.html) documents the process-local
   serialization types and the requirement to reject untrusted serialized input.
 

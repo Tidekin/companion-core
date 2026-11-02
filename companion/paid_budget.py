@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from companion.contracts import CoreError
-from companion.store import encode, uid
+from companion.store import encode, file_identity, uid
 
 # One complete input plus at most its length + 2 of immutable JSON payload.
 CACHE_MAX_BYTES = 1048576
@@ -287,9 +287,21 @@ def _view_key(store, path, raw):
     writes. The table summary also catches content neither counter sees, such as a page
     level restore into this connection.
     """
+    digest = hashlib.sha256(raw).hexdigest()
+    # Inside one write transaction or read snapshot only this connection's own writes,
+    # counted by total_changes, can change the DB; the summary is then fixed.
+    scope = getattr(store, "frozen_scope", None)
+    memo = getattr(store, "_view_key_memo", None)
+    if scope is not None and memo is not None and memo[0] == (
+        scope, store.db.total_changes, str(path), digest,
+    ):
+        return memo[1]
     summary = tuple(store.db.execute(SUMMARY).fetchone())
     version = store.db.execute("PRAGMA data_version").fetchone()[0]
-    return (str(path), hashlib.sha256(raw).hexdigest(), store.db.total_changes, version, summary)
+    key = (str(path), digest, store.db.total_changes, version, summary)
+    if scope is not None:
+        store._view_key_memo = ((scope, store.db.total_changes, str(path), digest), key)
+    return key
 
 
 def _shared_key(store, key):
@@ -304,17 +316,14 @@ def _shared_key(store, key):
     path = getattr(store, "path", None)
     if not isinstance(path, (str, os.PathLike)) or str(path).startswith((":memory:", "file:")):
         return None
-    files = []
-    for name in (path, str(path) + "-wal"):
-        try:
-            info = os.stat(name)
-        except OSError:
-            files.append(None)
-        else:
-            files.append((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
+    files = file_identity(path)
     if files[0] is None:
         return None
-    return (key[0], key[1], key[4], tuple(files))
+    # A read snapshot is older than the files once anyone commits; such a view must
+    # neither be filled under the newer files nor answer for the older snapshot.
+    if getattr(store, "in_read_snapshot", False) and files != store._snapshot_files:
+        return None
+    return (key[0], key[1], key[4], files)
 
 
 def forget_views(store=None):
@@ -436,7 +445,9 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
         raise
     try:
         if not path.exists():
-            if (not initialize or identity or store.one("SELECT 1 FROM model_admissions LIMIT 1")
+            # A query-only snapshot cannot record the identity, so it never creates the file.
+            if (not initialize or getattr(store, "in_read_snapshot", False) or identity
+                or store.one("SELECT 1 FROM model_admissions LIMIT 1")
                 or store.one("SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,))):
                 raise ValueError("missing independent journal")
             path.parent.mkdir(parents=True, exist_ok=True)
