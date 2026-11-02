@@ -60,6 +60,9 @@ async def uncertain(core, tmp_path, monkeypatch, *, crash=False, kind="poke", se
                       "poke_policy": PokePolicy(enabled=True, allow_native=True,
                                                 coalesce_seconds=0)},
         purposes=("chat", "poke") if kind == "poke" else ("chat",)) as (active, _, _, calls):
+        # The signed receipt and Core source-age checks share this fixture clock.
+        monkeypatch.setattr("companion_onebot_bridge.app.datetime",
+                            SimpleNamespace(now=lambda _tz: core.clock.now))
         grant = owner_authority.current(core.store, core.settings, core.clock).policy
         await active.capture()
         await active.flush()
