@@ -49,7 +49,10 @@ async def independent(config, cert, counter, tmp_path, timestamp):
 
 
 @pytest.mark.parametrize("uncertain", [False, True])
-def test_native_singing_process_and_ordered_delivery(core, tmp_path, monkeypatch, node, uncertain):
+@pytest.mark.parametrize("short_link", [False, True])
+def test_native_singing_process_and_ordered_delivery(
+    core, tmp_path, monkeypatch, node, uncertain, short_link,
+):
     config, _, counter = node
     key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex("61" * 32))
     config = config.model_copy(update={"node_id": "local", "credential": TOKEN,
@@ -65,7 +68,7 @@ def test_native_singing_process_and_ordered_delivery(core, tmp_path, monkeypatch
     async def scenario():
         async with singing_window(core, tmp_path, monkeypatch,
             manifest_sha256=manifest) as (client, bridge, plan):
-            _, admitted, job = await queue_song(core, client, bridge, plan)
+            _, admitted, job = await queue_song(core, client, bridge, plan, short_link=short_link)
             async with tls_core(core, tmp_path) as (origin, cert):
                 await independent(config.model_copy(update={"core_origin": origin}), cert, counter,
                                   tmp_path, core.clock.now.timestamp())
