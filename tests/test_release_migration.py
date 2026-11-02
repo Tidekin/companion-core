@@ -84,6 +84,7 @@ REVISION_CHAIN = (
     "0059_gateway",
     "0060_mood_appraisals",
     "0061_singing_voice",
+    "0062_generated_images",
 )
 LEGACY_TABLES = (
     "principals",

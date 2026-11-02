@@ -140,3 +140,55 @@ class HTTPMediaProvider:
             raise CoreError("MEDIA_PROVIDER_UNCERTAIN", 502) from error
         except (ValueError, KeyError, IndexError, TypeError, AttributeError) as error:
             raise CoreError("INVALID_MEDIA_PROVIDER_RESPONSE", 502) from error
+
+
+class HTTPImageGenerator:
+    """OpenAI-compatible images/generations. Accepts inline b64_json only, never a URL."""
+
+    def __init__(self, options, transport=None):
+        self.options, self.transport = options, transport
+
+    async def generate(self, prompt, size):
+        endpoint = self.options.endpoint
+        body = {"model": endpoint.model, "prompt": prompt, "n": 1, "size": size}
+        if not endpoint.model.startswith("gpt-image"):
+            # gpt-image models always answer in base64 and reject this parameter.
+            body["response_format"] = "b64_json"
+        limit = self.options.max_output_bytes * 4 // 3 + 65536
+        try:
+            async with httpx.AsyncClient(
+                transport=self.transport,
+                timeout=self.options.provider_timeout_seconds,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                async with client.stream(
+                    "POST", endpoint.url, json=body,
+                    headers={"Authorization": "Bearer " + endpoint.key.get_secret_value(),
+                             "Accept-Encoding": "identity"},
+                ) as resp:
+                    if resp.status_code != 200:
+                        raise CoreError("IMAGE_PROVIDER_REJECTED", 502)
+                    if (resp.headers.get("content-encoding", "identity").strip().lower()
+                            != "identity"):
+                        raise CoreError("IMAGE_PROVIDER_ENCODING_UNSUPPORTED", 502)
+                    raw = bytearray()
+                    async for part in resp.aiter_bytes():
+                        raw.extend(part)
+                        if len(raw) > limit:
+                            raise CoreError("IMAGE_PROVIDER_RESPONSE_TOO_LARGE", 502)
+        except httpx.HTTPError as error:
+            raise CoreError("IMAGE_PROVIDER_UNCERTAIN", 502) from error
+        try:
+            items = json.loads(raw)["data"]
+            if not isinstance(items, list) or len(items) != 1:
+                raise ValueError("one image expected")
+            encoded = items[0]["b64_json"]
+            if not isinstance(encoded, str):
+                raise ValueError("b64_json required")
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, KeyError, IndexError, TypeError) as error:
+            raise CoreError("INVALID_IMAGE_PROVIDER_RESPONSE", 502) from error
+        if not data or len(data) > self.options.max_output_bytes:
+            raise CoreError("INVALID_IMAGE_PROVIDER_RESPONSE", 502)
+        return data

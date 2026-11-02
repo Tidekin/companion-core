@@ -34,6 +34,10 @@ async def reply(core, job, snapshots):
 
         if video_input.enabled(core.settings) and {"content", "image"} <= set(view.policy.purposes):
             tools.append(qq_video.toolset(core, job, snapshots))
+        from companion import image_generation
+
+        if image_generation.available(core, job) and "expression" in view.policy.purposes:
+            tools.append(image_generation.toolset(core, job, snapshots))
     with phase("context_build", job["trace_id"]):
         messages = [] if conversation is not None else core.context(
             job, memories=[], snapshots=snapshots,

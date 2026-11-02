@@ -52,6 +52,40 @@ class MediaConfig(BaseModel):
     vision: MediaEndpoint = Field(default_factory=MediaEndpoint)
 
 
+ImageSize = Literal["512x512", "768x768", "1024x1024", "1024x1536", "1536x1024"]
+
+
+class ImageGenerationConfig(BaseModel):
+    """One owner-chat tool call per reply; see companion/image_generation.py."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    # OpenAI-compatible POST .../images/generations returning b64_json PNG/JPEG.
+    endpoint: MediaEndpoint = Field(default_factory=MediaEndpoint)
+    sizes: tuple[ImageSize, ...] = Field(default=("1024x1024",), min_length=1, max_length=5)
+    # Each call also needs this much left on the chat job lease, else it is refused.
+    provider_timeout_seconds: int = Field(default=60, ge=5, le=240)
+    # The Bridge accepts at most 4 MiB, 2048 px per side; see companion_meme_protocol.
+    max_output_bytes: int = Field(default=4 * 1024 * 1024, ge=1024, le=4 * 1024 * 1024)
+    max_daily_images: int = Field(default=10, ge=0, le=100)
+    cooldown_seconds: int = Field(default=300, ge=0, le=86400)
+    daily_micro_usd: int = Field(default=0, ge=0)
+    retention_seconds: int = Field(default=3600, ge=60, le=86400)
+
+    @model_validator(mode="after")
+    def valid_provider(self):
+        if self.enabled:
+            endpoint = self.endpoint
+            if (not endpoint.url or not endpoint.model or not endpoint.key.get_secret_value()
+                    or endpoint.max_request_micro_usd <= 0):
+                raise ValueError("image generation needs endpoint url, model, key and price")
+            if endpoint.protocol != "openai":
+                raise ValueError("image generation supports the openai protocol only")
+            if self.daily_micro_usd < endpoint.max_request_micro_usd:
+                raise ValueError("image generation daily_micro_usd is below one request")
+        return self
+
+
 class ContentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     max_links_per_event: int = Field(default=2, ge=1, le=2)
