@@ -400,7 +400,9 @@ def test_foreground_precedence_pauses_model_lanes_but_not_local_bookkeeping():
     async def scenario():
         turns = [await selector.step() for _ in range(4)]
         assert [turn.lane for turn in turns] == ["retention", "diary_schedule", None, None]
-        assert all(turn.blocked and not turn.more for turn in turns)
+        assert all(turn.blocked for turn in turns)
+        # Only still-due bookkeeping continues the blocked turn without a wait.
+        assert [turn.more for turn in turns] == [True, False, False, False]
         assert calls == ["retention", "diary_schedule"]  # the model lane never ran
         assert selector.next_blocked_maintenance > monotonic()
 

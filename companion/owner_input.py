@@ -222,27 +222,28 @@ def _source(store, settings, view, event_id, now, *, allow_commands=False, histo
 def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid=None):
     """Apply explicit current history bounds to native source-bound dialogue turns."""
     if not store.db.in_transaction:
-        # Own one synchronous batch; never upgrade a caller's read transaction or
-        # retain custody across the model await that separates these calls.
-        with store.transaction():
-            return _history_sources(store, settings, clock, job,
-                                    purpose=purpose, cutoff_rowid=cutoff_rowid)
+        # Own one synchronous batch on one DB state; never retain custody across the
+        # model await that separates these calls.
+        return store.read_or_write(lambda: _history_sources(
+            store, settings, clock, job, purpose=purpose, cutoff_rowid=cutoff_rowid))
     return _history_sources(store, settings, clock, job,
                             purpose=purpose, cutoff_rowid=cutoff_rowid)
 
 
-def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
-    from companion.dialogue_history import recent_context_sources, turn_messages
+def history_batch(store, settings, clock, job, *, purpose):
+    """One job authority view for many history sources read from one DB state.
 
+    Inside a write transaction or a read snapshot no other writer's commit is visible,
+    so per-source checks reuse the view and capture evidence while this connection has
+    not written. Outside them, or after any own write, each source takes the full check.
+    `finish` rechecks live authority and independent files for the whole batch.
+    """
     view = owner_authority.check_job(store, settings, clock, job, purpose=purpose)
-    if "history" not in view.policy.purposes:
-        return []
-    scope = view.policy.history
-    result = []
-    # This local batch never survives this synchronous call or its existing write lock.
-    # Any write on this connection invalidates reuse. Other DB writers cannot enter;
-    # independent files and live authority are checked again before returning.
-    transactional, changes = store.in_write_transaction, store.db.total_changes
+
+    def frozen():
+        return store.in_write_transaction or store.in_read_snapshot
+
+    batched, changes = frozen(), store.db.total_changes
     originals = {encode(view.authority.as_dict()): view}
 
     def evidence(ref):
@@ -254,26 +255,46 @@ def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
     def verify_capture(value):
         return _verify(store, settings, value, evidence)
 
+    def check(event_id):
+        if batched and frozen() and store.db.total_changes == changes:
+            if settings.owner_runtime.mode != "ENABLED":
+                raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
+            if purpose not in view.policy.purposes or "history" not in view.policy.purposes:
+                raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
+            now = clock()
+            if (view.policy.expires_at is not None
+                and datetime.fromisoformat(now) >= view.policy.expires_at):
+                raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
+            return _source(store, settings, view, event_id, now, history=True,
+                           verify_capture=verify_capture)
+        return source(store, settings, view, event_id, clock(), purpose=purpose, history=True)
+
+    def finish():
+        if batched:
+            # Deliberately outside any per-source exclusion handler: STOP, expiry or
+            # changed independent custody invalidates the entire batch.
+            owner_authority.check_job(store, settings, clock, job, purpose=purpose)
+            if not frozen() or store.db.total_changes != changes:
+                raise CoreError(reply_revision.CANCELLED, 409)
+
+    return view, check, finish
+
+
+def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
+    from companion.dialogue_history import recent_context_sources, turn_messages
+
+    view, check, finish = history_batch(store, settings, clock, job, purpose=purpose)
+    if "history" not in view.policy.purposes:
+        return []
+    scope = view.policy.history
+    result = []
     # The signed scope is an authority ceiling; the existing presentation setting
     # may select fewer recent pairs and leave room for episodic continuation.
     max_turns = min(scope.max_turns, settings.max_recent_messages // 2)
     for item in recent_context_sources(store, job["conversation_id"], job["event_id"],
                                        max_turns, cutoff_rowid=cutoff_rowid):
         try:
-            if transactional and store.in_write_transaction and store.db.total_changes == changes:
-                if settings.owner_runtime.mode != "ENABLED":
-                    raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
-                if purpose not in view.policy.purposes or "history" not in view.policy.purposes:
-                    raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
-                now = clock()
-                if (view.policy.expires_at is not None
-                    and datetime.fromisoformat(now) >= view.policy.expires_at):
-                    raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
-                _source(store, settings, view, item["event_id"], now, history=True,
-                        verify_capture=verify_capture)
-            else:
-                source(store, settings, view, item["event_id"], clock(),
-                       purpose=purpose, history=True)
+            check(item["event_id"])
             parts = item.get("reply_segments") or ([item] if item.get("message_id") else [])
             for part in parts:
                 sent = store.one("SELECT sent_at FROM outbox WHERE message_id=?",
@@ -291,12 +312,7 @@ def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
     while result and sum(len(message["content"].encode()) for item in result
                          for message in turn_messages(item)) > scope.max_utf8_bytes:
         result.pop(0)
-    if transactional:
-        # Deliberately outside the per-source exclusion handler: STOP, expiry or
-        # changed independent custody invalidates the entire batch.
-        owner_authority.check_job(store, settings, clock, job, purpose=purpose)
-        if not store.in_write_transaction or store.db.total_changes != changes:
-            raise CoreError(reply_revision.CANCELLED, 409)
+    finish()
     return result
 
 

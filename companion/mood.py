@@ -240,10 +240,9 @@ class MoodService:
     def _signals(self, at, allowed):
         s, cfg = self.store, self.settings
         if owner_authority.required(s, cfg) and not s.db.in_transaction:
-            # Reuse the native history reader's synchronous transaction boundary.
+            # Reuse the native history reader's synchronous batch on one DB state.
             # This batch never spans an await or a later context revalidation.
-            with s.transaction():
-                return self._signals(at, allowed)
+            return s.read_or_write(lambda: self._signals(at, allowed))
         sources = MemorySources(self.memory, self.clock())
         view = None
         if owner_authority.required(s, cfg):
@@ -254,8 +253,23 @@ class MoodService:
                     after(self.clock(), -view.policy.source_retention_days * 86400)
                 ),
             )
-        transactional, changes = s.in_write_transaction, s.db.total_changes
+        def frozen():
+            return s.in_write_transaction or s.in_read_snapshot
+
+        transactional, changes = frozen(), s.db.total_changes
         originals = {encode(view.authority.as_dict()): view} if view else {}
+
+        def batched():
+            return view and transactional and frozen() and s.db.total_changes == changes
+
+        def permitted(purpose):
+            if not batched():
+                return self._permitted(purpose)
+            # The batch view is the current one on this DB state; the boundary below
+            # rechecks live authority and independent files once for every signal.
+            return (cfg.owner_runtime.mode == "ENABLED" and purpose in view.policy.purposes
+                    and (view.policy.expires_at is None
+                         or datetime.fromisoformat(self.clock()) < view.policy.expires_at))
 
         def evidence(ref):
             key = encode(ref)
@@ -264,8 +278,7 @@ class MoodService:
             return originals[key]
 
         def source_check(event_id):
-            if not (view and transactional and s.in_write_transaction
-                    and s.db.total_changes == changes):
+            if not batched():
                 return source_allowed(s, cfg, self.clock, event_id, "expression")
             now = self.clock()
             if (cfg.owner_runtime.mode != "ENABLED" or "expression" not in view.policy.purposes
@@ -385,7 +398,7 @@ class MoodService:
                 identity = "reply:" + reply["message_id"]
                 detail, reason, delta = sha(reply), rule[0], rule[1]
             elif kind == "watch":
-                if not self._permitted("exploration"):
+                if not permitted("exploration"):
                     continue
                 detail = s.one("SELECT * FROM watch_ledger WHERE source_event_id=?", (key,))
                 observation = s.one("SELECT * FROM observations WHERE event_id=?", (key,))
@@ -411,7 +424,7 @@ class MoodService:
                 reason, delta = "COMPLETED_READ_REVIEW", (detail["rating"] * 0.03, 0.0, 0.0)
                 detail = sha([detail, observation])
             else:
-                if not self._permitted("goals"):
+                if not permitted("goals"):
                     continue
                 from companion.goals import GoalEngine
 
@@ -497,7 +510,7 @@ class MoodService:
             # Independent journals, STOP and time remain live at the batch boundary.
             owner_authority.current(s, cfg, self.clock, purpose="expression",
                                     authority=view.authority)
-            if not s.in_write_transaction or s.db.total_changes != changes:
+            if not frozen() or s.db.total_changes != changes:
                 raise CoreError("PRIVACY_CHANGED", 409)
         ordered = sorted(
             merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])

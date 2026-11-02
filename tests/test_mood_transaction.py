@@ -1,6 +1,7 @@
 """Native mood sources share custody only inside one synchronous write transaction."""
 
 import json
+import sqlite3
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -80,6 +81,11 @@ def test_mood_batch_rejects_changes_before_publishing(core, tmp_path, monkeypatc
     def check(expected):
         native = owner_input.input_recall.require_not_recalled
         changed, saved = [], {}
+        # A caller's write transaction sees its own DB change; an unowned batch reads one
+        # snapshot, so the DB change comes from another connection's commit.
+        external = not transactional and boundary in {"marker", "redaction", "signature"}
+        other = sqlite3.connect(core.settings.database, isolation_level=None) if external else None
+        execute = other.execute if external else core.store.execute
 
         def recall(*args, **kwargs):
             native(*args, **kwargs)
@@ -89,8 +95,8 @@ def test_mood_batch_rejects_changes_before_publishing(core, tmp_path, monkeypatc
             if boundary == "stop":
                 core.settings.owner_runtime.mode = "OFF"
             elif boundary == "marker":
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
-                                   (encode("OFF"), owner_authority.MODE))
+                execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                        (encode("OFF"), owner_authority.MODE))
             elif boundary == "expiry":
                 core.clock.advance(121)
             elif boundary in {"journal", "erasure"}:
@@ -99,18 +105,21 @@ def test_mood_batch_rejects_changes_before_publishing(core, tmp_path, monkeypatc
                 saved[path] = path.read_bytes()
                 path.write_bytes(saved[path] + b"\n")
             elif boundary == "redaction":
-                core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
-                                   (expected["signals"][0]["event_id"],))
+                execute("UPDATE events SET redacted=1 WHERE event_id=?",
+                        (expected["signals"][0]["event_id"],))
             else:
                 key = owner_input.INPUT + expected["signals"][0]["event_id"]
                 value = json.loads(core.store.one(
                     "SELECT value FROM runtime_meta WHERE key=?", (key,))["value"])
                 value["capture"]["signature"] = "0" * 128
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
-                                   (encode(value), key))
+                execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), key))
 
         monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
         try:
+            if external:
+                # The snapshot answers for the state it began on; the next batch rejects.
+                core.mood.revalidate(expected)
+                assert changed
             with pytest.raises(CoreError):
                 with core.store.transaction() if transactional else nullcontext():
                     core.mood.revalidate(expected)
@@ -118,5 +127,7 @@ def test_mood_batch_rejects_changes_before_publishing(core, tmp_path, monkeypatc
         finally:
             for path, content in saved.items():
                 path.write_bytes(content)
+            if other is not None:
+                other.close()
 
     run(native_mood(core, tmp_path, check))
