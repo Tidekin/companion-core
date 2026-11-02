@@ -458,9 +458,10 @@ class VoiceNodeWorker:
         from source_reader.network import PublicHTTP, ReadFailure
 
         recipe = SingingRecipe.model_validate_json(data)
+        last_control = None
 
         async def guard():
-            nonlocal lease
+            nonlocal lease, last_control
             remaining = min(self._lease_until, deadline) - time.monotonic()
             if remaining <= 0:
                 raise VoiceProtocolError("VOICE_EXECUTION_DEADLINE")
@@ -468,12 +469,23 @@ class VoiceNodeWorker:
                 budget_seconds=min(remaining, self.config.request_timeout_seconds))
             if response.action != "CONTINUE":
                 raise VoiceProtocolError("VOICE_LEASE_" + response.action)
+            last_control = time.monotonic()
+
+        async def stream_guard():
+            # Body fragments are not new HTTP requests. Keep the original live
+            # heartbeat cadence, checking the lease/deadline before every write.
+            now = time.monotonic()
+            if now >= min(self._lease_until, deadline):
+                raise VoiceProtocolError("VOICE_EXECUTION_DEADLINE")
+            if last_control is None or now - last_control >= self.config.heartbeat_seconds:
+                await guard()
 
         try:
             async with (asyncio.timeout(max(0.001, deadline - time.monotonic())),
                         PublicHTTP() as public):
                 song = await download_song(public, recipe.bvid, recipe.part,
                     temporary / "source.m4a", guard=guard,
+                    stream_guard=stream_guard,
                     now=datetime.fromtimestamp(time.time(), UTC),
                     max_seconds=recipe.max_seconds, max_bytes=recipe.max_input_bytes)
         except ReadFailure as error:

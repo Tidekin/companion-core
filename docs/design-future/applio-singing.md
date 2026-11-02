@@ -1,6 +1,6 @@
 # Applio 自主唱歌与 B 站点歌接入
 
-状态：主人已批准本文范围；原生 voice 修订已合并，唱歌实现与整曲本地验收已完成，等待完整 CI 及统一发布。唱歌尚未启用。2026-11-02。
+状态：唱歌已部署；2026-11-02 点歌超时修复正在验证，修复版真实 QQ 唱歌送达仍待验收。
 
 主人已要求模型自行决定何时唱歌、按歌名或链接点歌、自行从 B 站找歌曲，并明确允许整首歌拆成多个语音气泡顺序发送。沿用已认可的 Applio 音色与参数。
 
@@ -48,10 +48,29 @@
 3. 模型选择与有序发送：真实 SDK 延迟工具恢复和模拟 OneBot，覆盖自主选择、指定歌曲、缓存有效性、发送 UNKNOWN 中止、重启不重发、STOP/遗忘及恢复回放。
 4. 独立原生权限修订与唯一协调人上线，记录当前 manifest、READY 心跳和真实 owner 输入验收。不得用离线产物或部署文件声称线上可用。
 
+## 2026-11-02 点歌超时修复
+
+原生音轨下载曾对每个网络分片同步调用 Core 的 `control`。实际点歌的公开音轨为
+132.8 秒、约 1.6 MiB；无 Core 往返的有界下载约 9.84 秒，却触发 122 次 guard。
+碎片化传输回归中，原实现对 4 KiB 音轨执行 144 次 Core 往返，模拟 5 秒往返即可
+在下载阶段耗尽原 600 秒执行期限。原生产观测也显示下载阶段请求密度明显高于后续心跳。
+
+流式正文复用节点已有 `heartbeat_seconds`，逐分片检查原租约及执行期限，并按原心跳周期
+向 Core 复核。请求开始前、DNS/TLS 等待后的实际请求头发送现场及传输结束仍执行完整
+实时复核；逐分片字节预算、账号指纹、单请求和单来源证明均保持。普通视觉媒体读取继续
+使用其原 guard，唱歌没有新增 wire/config/schema，也没有延长期限或重试 UNKNOWN。
+
+离线原沙箱实测该完整歌曲两次成功，总耗时分别约 128 秒和 96 秒，均为 3 个连续气泡。
+另一次原版变声阶段出现未保留消息的 `RuntimeError`；这不能证明原生产 600 秒超时的
+具体 GPU 异常类型。修复验证包含真实 Core TLS 与独立节点/供应商子进程，只有外部音轨和
+供应商传输被模拟，检查碎片化下载的 Core 往返上界、实时停止、期限及原有有序发送/UNKNOWN。
+离线生成和模拟 OneBot 回执不代替新版本真人 QQ 点歌验收。
+
 ## 已核对来源
 
 - [Applio 原生推理文档](https://docs.applio.org/getting-started/inference/)；实际代码沿用固定 3.7.1 / `6f69726b140c615c8cc6831a7db8b7c5e48ba8af` 的 `core.run_infer_script`。新文档不能替换已验证版本的实际 API。
 - 本地 GPT-SoVITS `d7c2210da8c013e81a94bfc7b811a477c99fd506` 的 `tools/uvr5/vr.py`：`AudioPre._path_audio_`；已有分离回执和实际模型资源沿用原实验。
+- [PyTorch CUDA 内存诊断](https://docs.pytorch.org/docs/stable/notes/cuda.html#memory-management)：张量占用与分配器缓存保留量分别计数，阶段内存数值不能单独证明 OOM。
 - [DSH jobs-local](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/jobs/jobs-local/src/index.ts)：`killJob` 的停止请求和真实终态分开，不复制进程内任务注册表。
 - [DSH agent-loop](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/core/agent-loop/src/index.ts)：停止接纳后等待已跟踪工作的 teardown，不把取消等同于回滚。
 - 本仓库 `agent_reading.py`、`bili_media.py`、`voice_jobs.py`、`voice_protocol.py`、`voice_media.py`、`reply_segments.py`、`owner_delivery.py`、`model_carry.py` 及 [外部能力合同草案](external-capabilities.md)。草案不代表已有可执行通用协议。
