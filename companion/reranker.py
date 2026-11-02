@@ -1,12 +1,13 @@
 """Optional local ONNX cross-encoder (e.g. bge-reranker-v2-m3 int8); never downloads."""
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 
 from companion.contracts import CoreError
 
-MAX_LENGTH = 512
+MAX_LENGTH = 320
 AUTO_NAME = "local-bge-reranker-v2-m3-int8"
 _lock = Lock()
 
@@ -33,7 +34,7 @@ def _model(directory):
     tokenizer.enable_truncation(MAX_LENGTH)
     tokenizer.enable_padding(pad_id=tokenizer.token_to_id("<pad>") or 1, pad_token="<pad>")
     options = onnxruntime.SessionOptions()
-    options.intra_op_num_threads = 2
+    options.intra_op_num_threads = max(1, min(4, (os.cpu_count() or 2) // 2))
     session = onnxruntime.InferenceSession(str(files[0]), options,
                                            providers=["CPUExecutionProvider"])
     return tokenizer, session

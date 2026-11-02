@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import re
@@ -107,10 +108,20 @@ class Memory:
                         raise CoreError("PRIVACY_CHANGED", 409)
 
             similarities = await self.index.scores_async(query, rows, revalidate=revalidate)
+        rerank_scores = None
+        model, pool = self._rerank_pool(
+            query, self._fused_order(query, rows, lexical, similarities)[0], limit)
+        if pool:
+            from companion import reranker
+
+            # CPU-bound cross-encoder stays off the event loop; nothing touches the Store there.
+            values = await asyncio.to_thread(reranker.scores, model, query,
+                                             [row["content"] for row in pool])
+            rerank_scores = dict(zip((row["memory_id"] for row in pool), values, strict=True))
         if clock:
             sources = MemorySources(self, clock())
         return self._finish_search(query, rows, lexical, similarities, limit, version, sources,
-                                   explain=explain, trace=trace)
+                                   explain=explain, trace=trace, rerank_scores=rerank_scores)
 
     def _prepare_search(self, query, actor="owner", subjects=(), limit=6, *,
                         memory_ids=None, now=None):
@@ -187,11 +198,38 @@ class Memory:
                 )
         return version, sources, rows, lexical
 
+    def _rerank_pool(self, query, ordered, limit):
+        """The fused-order rows a configured cross-encoder would rescore, and its model."""
+        from companion import reranker
+
+        model = reranker.directory(self.settings)
+        if query == "*" or not model or len(ordered) < 2:
+            return None, []
+        return model, ordered[:limit * 2]
+
     def _finish_search(self, query, rows, lexical, similarities, limit, version, sources, *,
-                       explain=None, trace=None):
-        s = self.store
-        ranks = {}
+                       explain=None, trace=None, rerank_scores=None):
+        """`rerank_scores` (memory_id -> score) lets async callers rescore off the loop."""
         eligible, lexical_raw = len(rows), len(lexical)
+        rows, ranks, lexical_count, semantic_count = self._fused_order(
+            query, rows, lexical, similarities)
+        matched = len(rows)
+        model, pool = self._rerank_pool(query, rows, limit)
+        if pool:
+            if rerank_scores is None or any(row["memory_id"] not in rerank_scores
+                                            for row in pool):
+                from companion import reranker
+
+                rerank_scores = dict(zip((row["memory_id"] for row in pool), reranker.scores(
+                    model, query, [row["content"] for row in pool]), strict=True))
+            rows = sorted(pool, key=lambda row: -rerank_scores[row["memory_id"]]) + rows[
+                limit * 2:]
+        return self._complete_search(rows, ranks, eligible, lexical_raw, lexical_count,
+                                     semantic_count, matched, limit, version, sources,
+                                     explain=explain, trace=trace)
+
+    def _fused_order(self, query, rows, lexical, similarities):
+        ranks = {}
         lexical_count = semantic_count = 0
         if query != "*" and rows:
             exact = {row["memory_id"] for row in rows if query in row["content"]}
@@ -230,15 +268,12 @@ class Memory:
                 ),
                 reverse=True,
             )
-        matched = len(rows)
-        from companion import reranker
+        return rows, ranks, lexical_count, semantic_count
 
-        if query != "*" and len(rows) > 1 and (model := reranker.directory(self.settings)):
-            pool = rows[:limit * 2]
-            scores = reranker.scores(model, query,
-                                     [row["content"] for row in pool])
-            rows = [row for _, row in sorted(zip(scores, pool, strict=True),
-                                             key=lambda item: -item[0])] + rows[limit * 2:]
+    def _complete_search(self, rows, ranks, eligible, lexical_raw, lexical_count,
+                         semantic_count, matched, limit, version, sources, *,
+                         explain=None, trace=None):
+        s = self.store
         rows = rows[:limit]
         check_version(self, version)
         current = []

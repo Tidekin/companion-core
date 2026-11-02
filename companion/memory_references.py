@@ -34,28 +34,48 @@ HISTORY_TURN_CHARS = 1500
 
 def replay(store, event_id):
     """Bounded native perception results of one past owner input, for history replay."""
-    notes, remaining = [], HISTORY_TURN_CHARS
-    rows = [(LABELS["document" if row["kind"] == "qq_file" else "image"], row["slot"],
-             json.loads(row["body_json"]).get("text", "")) for row in store.rows(
-        "SELECT c.kind,c.slot,e.body_json FROM content_items c "
-        "JOIN observations o ON o.event_id=c.output_event_id "
-        "JOIN events e ON e.event_id=o.event_id WHERE c.owner_event_id=? "
-        "AND c.kind IN ('qq_file','qq_image') AND c.state='SUCCEEDED' "
-        "AND c.redacted=0 AND o.redacted=0 AND e.redacted=0 AND o.result_status='FETCHED' "
-        "ORDER BY c.slot LIMIT 8", (event_id,))]
-    rows += [(LABELS["transcript"], index, json.loads(row["value"]).get("text", ""))
-             for index, row in enumerate(store.rows(
-        "SELECT value FROM runtime_meta WHERE key LIKE ? "
-        "AND json_extract(value,'$.owner_event_id')=? "
-        "AND json_extract(value,'$.kind')='transcript' ORDER BY key", (INPUT + "%", event_id)))]
-    for label, slot, text in rows:
-        if not isinstance(text, str) or not text.strip() or remaining <= 0:
-            continue
-        clipped = text[:min(HISTORY_ITEM_CHARS, remaining)]
-        remaining -= len(clipped)
-        notes.append({"kind": label, "slot": slot, "text": clipped,
-                      "excerpt": clipped != text})
-    return notes
+    return replay_many(store, [event_id])[event_id]
+
+
+def replay_many(store, event_ids):
+    """`replay` for many inputs with one pass over each source table."""
+    found = {key: [] for key in event_ids}
+    ids = list(found)
+    for start in range(0, len(ids), 500):
+        part = ids[start:start + 500]
+        for row in store.rows(
+            "SELECT c.owner_event_id,c.kind,c.slot,e.body_json FROM content_items c "
+            "JOIN observations o ON o.event_id=c.output_event_id "
+            "JOIN events e ON e.event_id=o.event_id WHERE c.owner_event_id IN ("
+            + ",".join("?" for _ in part) + ") "
+            "AND c.kind IN ('qq_file','qq_image') AND c.state='SUCCEEDED' "
+            "AND c.redacted=0 AND o.redacted=0 AND e.redacted=0 AND o.result_status='FETCHED' "
+            "ORDER BY c.owner_event_id,c.slot", tuple(part)):
+            items = found[row["owner_event_id"]]
+            if sum(item[0] != LABELS["transcript"] for item in items) < 8:
+                items.append((LABELS["document" if row["kind"] == "qq_file" else "image"],
+                              row["slot"], json.loads(row["body_json"]).get("text", "")))
+    transcripts = {}
+    for row in store.rows(
+        "SELECT json_extract(value,'$.owner_event_id') AS owner,"
+        "json_extract(value,'$.text') AS text FROM runtime_meta WHERE key LIKE ? "
+        "AND json_extract(value,'$.kind')='transcript' ORDER BY key", (INPUT + "%",)):
+        if row["owner"] in found:
+            transcripts.setdefault(row["owner"], []).append(row["text"])
+    result = {}
+    for key, items in found.items():
+        items = items + [(LABELS["transcript"], index, text)
+                         for index, text in enumerate(transcripts.get(key, []))]
+        notes, remaining = [], HISTORY_TURN_CHARS
+        for label, slot, text in items:
+            if not isinstance(text, str) or not text.strip() or remaining <= 0:
+                continue
+            clipped = text[:min(HISTORY_ITEM_CHARS, remaining)]
+            remaining -= len(clipped)
+            notes.append({"kind": label, "slot": slot, "text": clipped,
+                          "excerpt": clipped != text})
+        result[key] = notes
+    return result
 
 
 def capture(memory, root, kind, text, receipt, now, *, sources=(), binding=None):

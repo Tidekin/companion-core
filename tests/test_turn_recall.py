@@ -63,3 +63,79 @@ def test_reference_returns_nothing_without_history_allowance(core):
     for turns, size in ((0, 32000), (8, 0)):
         assert turn_recall.reference(core.store, core.settings, job, "取件码", set(),
                                      lambda ids: True, max_turns=turns, max_bytes=size) is None
+
+
+def test_prefetch_ranks_in_a_worker_thread_without_blocking_the_loop(core, monkeypatch):
+    import asyncio
+    import threading
+    import time
+
+    rows = [{"event_id": f"evt_{i}", "user_text": f"第{i}条", "reply_text": "好",
+             "occurred_at": "2026-05-01T01:00:00+00:00"} for i in range(3)]
+    monkeypatch.setattr(turn_recall, "_candidates", lambda *args, **kwargs: (rows, [[]] * 3))
+    seen = {}
+
+    def slow_select(settings, query, docs, limit):
+        seen["thread"] = threading.current_thread() is not threading.main_thread()
+        time.sleep(0.3)
+        return [2, 0]
+
+    monkeypatch.setattr(turn_recall, "select", slow_select)
+    job = {"conversation_id": "conv", "event_id": "evt_now"}
+
+    async def scenario():
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.02)
+                ticks += 1
+
+        task = asyncio.create_task(ticker())
+        ranked = await turn_recall.prefetch(core.store, core.settings, job, "第二条")
+        task.cancel()
+        return ranked, ticks
+
+    ranked, ticks = asyncio.run(scenario())
+    assert ranked == ["evt_2", "evt_0"] and seen["thread"] and ticks >= 5
+
+
+def test_reference_with_prefetched_ranking_keeps_order_and_skips_models(core, monkeypatch):
+    rows = {f"evt_{i}": {"event_id": f"evt_{i}", "user_text": f"第{i}条", "reply_text": "好",
+                         "occurred_at": "2026-05-01T01:00:00+00:00", "body_json": None}
+            for i in range(3)}
+    monkeypatch.setattr(turn_recall, "_candidates", lambda store, settings, job, ids=None: (
+        [rows[key] for key in sorted(ids)], [[] for _ in ids]))
+    monkeypatch.setattr(turn_recall, "select", lambda *args: (_ for _ in ()).throw(AssertionError))
+    job = {"conversation_id": "conv", "event_id": "evt_now"}
+    result = turn_recall.reference(core.store, core.settings, job, "第条", {"evt_1"},
+                                   lambda ids: True, max_turns=1, max_bytes=32000,
+                                   ranked_ids=["evt_2", "evt_1", "evt_0"])
+    assert result["event_ids"] == ["evt_2"]
+
+
+def test_async_memory_search_rescores_in_a_worker_thread(core, monkeypatch):
+    import asyncio
+    import threading
+
+    from companion import reranker
+    from companion.contracts import Candidate
+
+    core.settings.memory_enabled = True
+    prepared(core, "transcript")
+    for index, text in enumerate(("取件码在第三排", "取件码改到第五排")):
+        core.memory.add(Candidate(subject="project", kind="fact", fact_key=f"code{index}",
+                                  content=text, evidence_event_id="evt_test_1",
+                                  evidence_quote="这是一份别人整理的资料"), core.clock(),
+                        confirmed=True)
+    threads = []
+    monkeypatch.setattr(reranker, "directory", lambda settings: "model-dir")
+
+    def scores(model, query, docs):
+        threads.append(threading.current_thread() is not threading.main_thread())
+        return [float("第五排" in doc) for doc in docs]
+
+    monkeypatch.setattr(reranker, "scores", scores)
+    rows = asyncio.run(core.memory.search_async("取件码", now=core.clock(), limit=1))
+    assert threads == [True] and rows[0]["content"] == "取件码改到第五排"

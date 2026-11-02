@@ -748,7 +748,7 @@ class Core(Runtime):
         return None
 
     def context(self, job, memories=None, memory_paused=False, *, snapshots=None, model_tools=(),
-                planning=False):
+                planning=False, turn_ranking=None):
         s = self.store
         cfg = runtime_config.for_context(s, self.settings, job, snapshots)
         mark = splits(job.get("trace_id"))
@@ -1097,7 +1097,7 @@ class Core(Runtime):
             scope = authority.policy.history
             recalled = turn_recall.reference(
                 s, cfg, job, text, {source["event_id"] for source in sources},
-                lambda ids: available(ids, "memory"),
+                lambda ids: available(ids, "memory"), ranked_ids=turn_ranking,
                 max_turns=scope.max_turns - len(sources),
                 max_bytes=scope.max_utf8_bytes - sum(len(message["content"].encode())
                                                      for turn in turns for message in turn))
@@ -1762,9 +1762,14 @@ class Core(Runtime):
             elif reply is None:
                 if self.settings.memory_enabled and notices.reference(job) is None:
                     hits, paused_memory = await self.recall_for_reply(job)
+                    from companion import turn_recall
+
+                    ranking = await turn_recall.prefetch(
+                        self.store, self.settings, job,
+                        json.loads(job["body_json"]).get("text", ""))
                     self._check_reply_epoch(job, captured_epoch)
                     messages = self.context(job, hits, paused_memory,
-                                            snapshots=context_snapshots)
+                                            snapshots=context_snapshots, turn_ranking=ranking)
                 else:
                     messages = self.context(job, snapshots=context_snapshots)
                 self._check_reply_epoch(job, captured_epoch)

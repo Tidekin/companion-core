@@ -64,10 +64,17 @@ async def reply(core, job, snapshots):
             reply_revision.remember_sources(core.store, job, proof["source_event_ids"])
             snapshots.append({"kind": "memory", "proof": proof, "retrieval": {
                 "stage": "prefetch", "query_sha256": sha(query), "selection": trace}})
+        ranking = None
+        if (conversation is None and query and core.settings.memory_enabled
+            and {"memory", "history"} <= set(view.policy.purposes)):
+            from companion import turn_recall
+
+            # Embedding and cross-encoder scoring run in a worker thread, not on the loop.
+            ranking = await turn_recall.prefetch(core.store, core.settings, job, query)
         messages = [] if conversation is not None else core.context(
             job, memories=memories, snapshots=snapshots,
             model_tools=tuple(name for toolset in tools for name in toolset.tools),
-            planning=True,
+            planning=True, turn_ranking=ranking,
         )
     emit("t_context_ready", job["trace_id"])
     result = await run_conversation(
