@@ -30,6 +30,7 @@ class MemorySources:
     """Positive owner evidence requires every upstream source to remain available."""
 
     def __init__(self, memory, now=None, excluded=()):
+        self._memory = memory
         self.store, self.settings, self.now = memory.store, memory.settings, now
         self.ledger = memory.ledger
         self.excluded = set(excluded)
@@ -104,12 +105,21 @@ class MemorySources:
         return root
 
     def evidence(self, memory_id):
+        from companion.memory_references import MEMORY
+
+        reference = self.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (MEMORY + memory_id,))
         return [event for row in self.store.rows(
             "SELECT event_id FROM memory_evidence WHERE memory_id=? AND polarity=1 "
             "ORDER BY created_at,event_id", (memory_id,),
-        ) if (event := self.event(row["event_id"]))]
+        ) if (event := self.event(row["event_id"], require_text=not reference))]
 
     def current(self, row):
+        from companion import memory_references
+
+        try:
+            memory_references.for_memory(self._memory, row, self.now)
+        except CoreError:
+            return False
         if not self.now:
             return True
         now = datetime.fromisoformat(self.now)
@@ -130,6 +140,7 @@ class MemoryContext:
     @staticmethod
     def _fact(row, sources):
         return {**{key: row[key] for key in MEMORY_FIELDS},
+                "origin": row["origin"],
                 "evidence_ids": [source["event_id"] for source in sources],
                 "evidence": [{key: source[key] for key in (
             "event_id", "source", "occurred_at", "ingested_at",
@@ -162,6 +173,11 @@ class MemoryContext:
                 raise CoreError("PRIVACY_CHANGED", 409)
             memories.append({**{key: row[key] for key in MEMORY_FIELDS}, "evidence_ids": ids})
             roots.update(ids)
+            from companion import memory_references
+
+            reference = memory_references.for_memory(self.memory, row, now)
+            if reference:
+                roots.update(reference["proof"]["source_event_ids"])
         fingerprints = {}
         for event_id in sorted(roots):
             lineage = sources.lineage(event_id)
@@ -222,6 +238,14 @@ class MemoryContext:
             if not evidence:
                 continue
             item = self._fact(row, evidence)
+            from companion import memory_references
+
+            reference = memory_references.for_memory(self.memory, row, now)
+            if reference:
+                item["reference"] = {"kind": reference["kind"],
+                    "reference_id": reference["reference_id"],
+                    "source_event_ids": reference["proof"]["source_event_ids"],
+                    "owner_confirmed": row["origin"] == "user_confirmed"}
             (conflicts if row["needs_review"] else facts).append(item)
         check_version(self.memory, version)
         selected = {row["memory_id"] for row in [*facts, *conflicts[:2]]}

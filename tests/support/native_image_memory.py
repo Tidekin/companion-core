@@ -24,7 +24,7 @@ QUESTION = "结合我以前的需求，这两张图里的哪一个更合适？"
 
 @asynccontextmanager
 async def native_image_memory(core, tmp_path, *, no_candidates=False, limit=None, mutation=None,
-                              core_options=None, reply=None):
+                              core_options=None, reply=None, record_visible=False):
     originals, calls, downloads = [], [], []
     for color in ("red", "blue"):
         stream = io.BytesIO()
@@ -48,7 +48,10 @@ async def native_image_memory(core, tmp_path, *, no_candidates=False, limit=None
         calls.append(payload)
         returned = [message for message in payload["messages"] if message["role"] == "tool"]
         if not returned:
-            body = answer(calls=[call("recall-image-topic", "memory_recall", {"query": CUES})])
+            body = answer(calls=[call("observe-current-image", "record_image_observation",
+                {"slot": 0, "text": "图中文字：青栎资料卡，十二月九日入场，座位B17。"})]
+                if record_visible else [call("recall-image-topic", "memory_recall",
+                                             {"query": CUES})])
             if mutation == "unknown_tool_request":
                 body.pop("usage")
         else:

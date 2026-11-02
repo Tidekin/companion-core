@@ -243,6 +243,14 @@ class Memory:
             raise CoreError("MISSING_MEMORY_EVIDENCE")
         body = json.loads(event["body_json"])
         text = body.get("text", "")
+        reference = None
+        if candidate.evidence_reference_id:
+            from companion import memory_references
+
+            if confirmed or candidate.subject == "self":
+                raise CoreError("UNSUPPORTED_MEMORY_EVIDENCE")
+            reference = memory_references.candidate(self, candidate, now)
+            text = reference["text"]
         if not text.strip() or candidate.evidence_quote not in text:
             raise CoreError("UNSUPPORTED_MEMORY_EVIDENCE")
         if not confirmed and self.store.one(
@@ -262,6 +270,8 @@ class Memory:
         content = redact(candidate.content, self.settings)
         if "[REDACTED]" in content:
             return None
+        if reference:
+            content = memory_references.attributed(candidate, reference)
         return event, content
 
     def confirm(self, memory_id, now):
@@ -278,12 +288,13 @@ class Memory:
             return None
         event, content = validated
         s = self.store
+        reference = candidate.evidence_reference_id is not None
         sources = MemorySources(self, now)
         same = next((row for row in s.rows(
             "SELECT * FROM memories WHERE content=? AND subject=? AND status IN "
             "('HYPOTHESIS','CONFIRMED')",
             (content, candidate.subject),
-        ) if sources.current(row)), None)
+        ) if sources.current(row) and (row["origin"] == "event_observed") == reference), None)
         conflicts = []
         if resolution is not None:
             for memory_id in [resolution.get("same"), *resolution.get("conflicts", [])]:
@@ -296,6 +307,8 @@ class Memory:
                 )
                 if not row or not sources.current(row):
                     raise CoreError("MEMORY_MATCH_STALE", 409)
+                if (row["origin"] == "event_observed") != reference:
+                    raise CoreError("MEMORY_MATCH_STALE", 409)
                 if memory_id == resolution.get("same"):
                     same = row
                 else:
@@ -306,7 +319,7 @@ class Memory:
                 "SELECT * FROM memories WHERE subject=? AND fact_key=? AND kind<>'episode' "
                 "AND status IN ('HYPOTHESIS','CONFIRMED') AND content<>?",
                 (candidate.subject, candidate.fact_key, content),
-            ) if sources.current(row)]
+            ) if sources.current(row) and (row["origin"] == "event_observed") == reference]
         if same:
             memory_id = same["memory_id"]
             if confirmed:
@@ -320,7 +333,8 @@ class Memory:
                 kind=candidate.kind,
                 content=content,
                 status="CONFIRMED" if confirmed else "HYPOTHESIS",
-                origin="user_confirmed" if confirmed else "model_inferred",
+                origin="event_observed" if reference else (
+                    "user_confirmed" if confirmed else "model_inferred"),
                 confidence=1.0 if confirmed else 0.5,
                 importance=0.5,
                 privacy_scope="private",
@@ -347,6 +361,10 @@ class Memory:
         if candidate.subject == "self":
             key = s.one("SELECT fact_key FROM memories WHERE memory_id=?", (memory_id,))["fact_key"]
             self.observe_trait(key, event, now)
+        if reference:
+            from companion import memory_references
+
+            memory_references.record(self, memory_id, candidate, now)
         advance_epoch(s)
         return memory_id
 

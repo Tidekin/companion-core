@@ -140,6 +140,21 @@ Each tool requires its current purpose on the original owner-authorized job.
         pin(result["revisions"], historical=True)
         return result
 
+    async def record_image_observation(
+        slot: Annotated[int, Field(ge=0, le=7)],
+        text: Annotated[str, Field(min_length=2, max_length=6000)],
+    ) -> dict:
+        """Record visible text and objects from one currently attached original image.
+
+        Call once per image before replying, using its zero-based slot. Include exact
+        visible text and uncertainty; never infer the owner's identity, facts or intent.
+        This is a machine analysis receipt, separate from your conversational reply.
+        """
+        check("memory")
+        from companion.memory_references import image_observation
+
+        return image_observation(core, job, slot, text)
+
     async def search_meme_wiki(query: Annotated[str, Field(min_length=1, max_length=40)]) -> dict:
         """Look up an internet meme, abbreviation or slang term in the local 梗百科 glossary.
 
@@ -160,6 +175,16 @@ Each tool requires its current purpose on the original owner-authorized job.
         handlers.append(search_meme_wiki)
     if core.settings.memory_enabled and "memory" in view.policy.purposes:
         handlers.extend([memory_recall, memory_history])
+        image_adapter = core.settings.observation_adapters.get(core.content.options.image_adapter)
+        if ("image" in view.policy.purposes and core.settings.observation_enabled
+            and image_adapter and image_adapter.source == "qq_image"
+            and image_adapter.media_analysis
+            and core.store.one(
+            "SELECT 1 FROM captured_images p JOIN content_items c USING(item_id) "
+            "WHERE c.owner_event_id=? AND c.state='SUCCEEDED' AND c.redacted=0",
+            (job["event_id"],),
+        )):
+            handlers.append(record_image_observation)
     if core.settings.diary_enabled and "diary" in view.policy.purposes:
         handlers.extend([diary_list, diary_read])
     if core.settings.goals_enabled and "goals" in view.policy.purposes:

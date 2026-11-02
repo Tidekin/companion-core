@@ -13,6 +13,7 @@ from companion import (
     budget,
     live_text,
     memory_enrichment,
+    memory_references,
     mood_appraisals,
     owner_authority,
     private_life,
@@ -112,7 +113,8 @@ async def prepare_memories(
             source_check=check_candidates,
             clock=self.clock,
         ):
-            existing[row["memory_id"]] = row
+            if (row["origin"] == "event_observed") == bool(candidate.evidence_reference_id):
+                existing[row["memory_id"]] = row
     catalog = {f"m{i}": row for i, row in enumerate(existing.values())}
     if len(candidates) == 1:
         same = next(
@@ -122,11 +124,13 @@ async def prepare_memories(
             return candidates, [{"same": same["memory_id"] if same else None, "conflicts": []}]
     payload = {
         "existing": [
-            {"ref": ref, "subject": row["subject"], "kind": row["kind"], "content": row["content"]}
+            {"ref": ref, "subject": row["subject"], "kind": row["kind"], "content": row["content"],
+             "reference": row["origin"] == "event_observed"}
             for ref, row in catalog.items()
         ],
         "candidates": [
-            {"ref": f"c{i}", "subject": row.subject, "kind": row.kind, "content": row.content}
+            {"ref": f"c{i}", "subject": row.subject, "kind": row.kind, "content": row.content,
+             "reference": bool(row.evidence_reference_id)}
             for i, row in enumerate(candidates)
         ],
     }
@@ -189,10 +193,14 @@ async def prepare_memories(
                 raise ValueError("duplicate relation")
             allowed = {
                 **catalog,
-                **{f"c{j}": {"subject": candidates[j].subject} for j in range(i)},
+                **{f"c{j}": {"subject": candidates[j].subject,
+                              "origin": "event_observed" if candidates[j].evidence_reference_id
+                              else "model_inferred"} for j in range(i)},
             }
             if any(
                 ref not in allowed or allowed[ref]["subject"] != candidates[i].subject
+                or (allowed[ref]["origin"] == "event_observed")
+                != bool(candidates[i].evidence_reference_id)
                 for ref in refs
             ):
                 validation_reason = "invalid_reference"
@@ -481,6 +489,8 @@ def _validate_batch(core, lease, batch):
     ):
         raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
     core.memory_context.revalidate(batch["proof"], core.clock())
+    for reference_id in batch.get("reference_ids", []):
+        memory_references.read(core.memory, reference_id, core.clock())
     if not all(
         source_allowed(core.store, core.settings, core.clock, key, "memory")
         for key in batch["event_ids"]
@@ -584,13 +594,37 @@ async def extraction_step(core, local_day, lease, batch, persist):
                         (group for group in groups if event["event_id"] in group), []
                     ),
                     "text": json.loads(event["body_json"]).get("text", ""),
+                    "references": memory_references.inputs(core, event),
                 }
                 for event in events
             ]
+            # Share the existing bounded context allowance across the entire batch.
+            # Receipt/proof payloads stay local; the extractor receives source labels
+            # and an explicitly marked text excerpt, never native credentials.
+            remaining = cfg.content.max_context_chars
+            for item in data:
+                kept = []
+                for reference in item["references"]:
+                    if remaining <= 0:
+                        break
+                    text = reference["text"][:remaining]
+                    remaining -= len(text)
+                    kept.append({"reference_id": reference["reference_id"],
+                                 "kind": reference["kind"], "text": text,
+                                 "excerpt": len(text) < len(reference["text"])})
+                item["references"] = kept
             messages = [
                 {"role": "system", "content": EXTRACT_RULES},
                 {"role": "user", "content": encode(data)},
             ]
+            batch["reference_ids"] = [ref["reference_id"] for event in data
+                                       for ref in event["references"]]
+            batch["proof"] = core.memory_context.pin(core.clock(), event_ids={
+                *batch["event_ids"], *(source for reference_id in batch["reference_ids"]
+                    for source in memory_references.read(core.memory, reference_id, core.clock())[
+                        "proof"]["source_event_ids"]),
+            })
+            persist()
             budget.reserve(
                 s,
                 cfg,
@@ -624,8 +658,15 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 core.memory, events, extraction.episode_summaries, core.clock()
             )
             candidates = []
+            shown_references = {ref["reference_id"]: ref["text"]
+                                for item in data for ref in item["references"]}
             for candidate in extraction.memories:
                 if candidate.evidence_event_id not in batch["event_ids"]:
+                    continue
+                if candidate.evidence_reference_id and candidate.evidence_quote not in (
+                    shown_references.get(candidate.evidence_reference_id, "")
+                ):
+                    s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory", now)
                     continue
                 try:
                     if core.memory.validate_candidate(candidate, now=core.clock()) is not None:
@@ -676,6 +717,7 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 summaries,
                 batch["extraction_request_id"],
                 at,
+                reference_ids=batch.get("reference_ids", []),
             )
             mood_appraisals.record(
                 s, cfg, batch.get("interaction_signals", []), batch["extraction_request_id"], at

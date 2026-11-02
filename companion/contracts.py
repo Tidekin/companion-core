@@ -170,6 +170,8 @@ class Candidate(StrictModel):
     content: str = Field(min_length=1, max_length=500)
     evidence_event_id: str
     evidence_quote: str = Field(min_length=2, max_length=500)
+    evidence_reference_id: str | None = Field(default=None, min_length=1, max_length=128,
+                                             exclude_if=lambda value: value is None)
     salience: int | None = Field(default=None, ge=1, le=10, strict=True)
 
 
