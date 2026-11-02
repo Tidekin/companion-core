@@ -23,7 +23,10 @@ def test_native_recent_turns_precede_fifteen_hot_sources(
 ):
     async def scenario():
         async with environment(core, tmp_path, purposes=("chat", "memory", "history", "goals"),
+            # Raw turn recall shares this ceiling first; it is off here so the test keeps
+            # isolating recent turns against episode continuation (see test_turn_recall).
             core_options={"goals_enabled": True, "context_soft_tokens": 16000,
+                          "turn_recall_limit": 0,
                           "max_recent_messages": 20, "chat_thinking": "high",
                           "chat_thinking_tokens": 3072, "max_output_tokens": 2048},
             paid_options={"daily_calls": 30, "provider": "deepseek", "model": "deepseek-flash",

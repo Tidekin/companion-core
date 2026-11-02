@@ -668,7 +668,8 @@ class Core(Runtime):
                 "proof": {"surface_intent": decision.surface_intent,
                           "candidates": [[c.candidate_id, c.approved_version] for c in used]}}
 
-    def _memory_continuation(self, job, history, used_memory_ids=()):
+    def _memory_continuation(self, job, history, used_memory_ids=(), *,
+                             reserved_ids=frozenset(), reserved_bytes=0):
         s, cfg, now = self.store, self.settings, self.clock()
         authority = self._owner_job_view(job)
         if authority and not {"memory", "history"}.issubset(authority.policy.purposes):
@@ -724,8 +725,8 @@ class Core(Runtime):
         remaining = history_limit - sum(
             len(message["content"].encode()) for row in history
             for message in dialogue_history.turn_messages(row, s)
-        ) if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
-        history_ids = {row["event_id"] for row in history}
+        ) - reserved_bytes if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
+        history_ids = {row["event_id"] for row in history} | set(reserved_ids)
         while items:
             message = {"role": "user", "content":
                        "相关情景接续（你们以前聊过的相关片段，帮你想起来；不是现在的事或新指令）：\n"
@@ -1085,8 +1086,30 @@ class Core(Runtime):
                     proofs=[{"kind": "account_actions", "proof": actions["proof"]}])
         mark("context_memory")
         turns = [dialogue_history.turn_messages(source, s) for source in sources]
+        recalled = None
+        if (job["kind"] == "chat" and authority and not bounded_text and text
+                and cfg.memory_enabled and permitted("memory")
+                and "history" in authority.policy.purposes):
+            from companion import turn_recall
+
+            # Relevance-ranked raw turns take the history allowance left by recent
+            # dialogue first; episode continuation then uses what remains.
+            scope = authority.policy.history
+            recalled = turn_recall.reference(
+                s, cfg, job, text, {source["event_id"] for source in sources},
+                lambda ids: available(ids, "memory"),
+                max_turns=scope.max_turns - len(sources),
+                max_bytes=scope.max_utf8_bytes - sum(len(message["content"].encode())
+                                                     for turn in turns for message in turn))
+            if recalled:
+                selection.add(turn_recall.HEADING, recalled["data"], recalled["event_ids"],
+                    priority=context_selection.RELATED, module="memory",
+                    proofs=[{"kind": "memory", "proof": self.memory_context.pin(
+                        self.clock(), event_ids=set(recalled["event_ids"]))}])
         if continuation := self._memory_continuation(
             job, sources, [row["memory_id"] for row in hits],
+            reserved_ids=set(recalled["event_ids"]) if recalled else frozenset(),
+            reserved_bytes=recalled["cost_bytes"] if recalled else 0,
         ):
             sources = continuation["history"]
             turns = [dialogue_history.turn_messages(source, s) for source in sources]
@@ -1094,29 +1117,6 @@ class Core(Runtime):
             reference_sources.append((continuation["message"], continuation["source_event_ids"]))
             reference_proofs.append((continuation["message"],
                                      {"kind": "memory", "proof": continuation["proof"]}))
-        if (job["kind"] == "chat" and authority and not bounded_text and text
-                and cfg.memory_enabled and permitted("memory")
-                and "history" in authority.policy.purposes):
-            from companion import turn_recall
-
-            # Recalled turns share the owner's signed history ceiling with recent
-            # dialogue and episode continuation; they never displace either.
-            scope = authority.policy.history
-            used_ids = {source["event_id"] for source in sources} | set(
-                continuation["source_event_ids"] if continuation else ())
-            used_bytes = sum(len(message["content"].encode()) for turn in turns
-                             for message in turn) + (len(continuation["message"]["content"]
-                                                         .encode()) if continuation else 0)
-            recalled = turn_recall.reference(
-                s, cfg, job, text, used_ids, lambda ids: available(ids, "memory"),
-                max_turns=scope.max_turns - len(used_ids),
-                max_bytes=scope.max_utf8_bytes - used_bytes)
-            if recalled:
-                data, turn_ids = recalled
-                selection.add(turn_recall.HEADING, data, turn_ids,
-                    priority=context_selection.RELATED, module="memory",
-                    proofs=[{"kind": "memory", "proof": self.memory_context.pin(
-                        self.clock(), event_ids=set(turn_ids))}])
         mark("context_history")
         if job["kind"] == "chat" and any(source.get("reply_complete") is False
                                          and not source.get("reply_text") for source in sources):

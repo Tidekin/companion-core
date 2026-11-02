@@ -121,7 +121,7 @@ def _document(source, notes, zone):
 
 
 def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, max_bytes):
-    """Return (data, source_event_ids) within the turn and UTF-8 byte allowance, or None."""
+    """Return {data, event_ids, cost_bytes} within the turn and UTF-8 allowance, or None."""
     from companion.dialogue_history import recent_sent_sources, turn_messages
     from companion.memory_references import replay
 
@@ -144,8 +144,10 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
     while ranked:
         data = _data(rows, notes, sorted(ranked), settings.timezone)
         shown = len((HEADING + "\n" + encode(data)).encode())
-        if max(shown, len(HEADING.encode()) + sum(full[index] for index in ranked)) <= max_bytes:
-            return data, [rows[index]["event_id"] for index in sorted(ranked)]
+        cost = max(shown, len(HEADING.encode()) + sum(full[index] for index in ranked))
+        if cost <= max_bytes:
+            return {"data": data, "cost_bytes": cost,
+                    "event_ids": [rows[index]["event_id"] for index in sorted(ranked)]}
         ranked = ranked[:-1]
     return None
 
