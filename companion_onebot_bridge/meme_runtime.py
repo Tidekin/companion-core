@@ -29,6 +29,7 @@ from .meme_library import MemeLibrary
 from .meme_semantic import SemanticLibrary, installed, profile, retain_usage
 from .meme_semantic_http import CaptionEmbeddingHTTP, CaptionHTTP, SemanticHTTP, core_request
 from .meme_transport import DeliveryCustody
+from .metrics import emit
 from .onebot_client import bounded_post
 from .rich_input import input_digest
 from .spool import encode
@@ -37,6 +38,17 @@ BASE = "/internal/v1/memes/discovery"
 EVENT = re.compile(r"evt_[a-f0-9]{64}")
 JOB = re.compile(r"job_[a-f0-9]{32}")
 SHA = re.compile(r"[a-f0-9]{64}")
+
+
+def failure_diagnostic(error):
+    """Fixed categories only; exception messages can contain private data."""
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        return {"reason": "TIMEOUT"}
+    if isinstance(error, httpx.HTTPStatusError):
+        return {"reason": "HTTP_STATUS", "http_status": error.response.status_code}
+    if isinstance(error, httpx.HTTPError):
+        return {"reason": "HTTP_TRANSPORT"}
+    return {"reason": "CHECK_REJECTED" if isinstance(error, ValueError) else "INTERNAL_ERROR"}
 
 
 def infer_intent(text):
@@ -657,8 +669,10 @@ class MemeRuntime(DeliveryCustody):
                 result["status"] = "SOURCE_EVIDENCE_REQUIRED"
             return result
         except asyncio.CancelledError:
+            emit("meme_discovery_failed", reason="CANCELLED")
             raise
         except Exception as error:
+            emit("meme_discovery_failed", **failure_diagnostic(error))
             code = error.args[0] if isinstance(error, ValueError) and len(error.args) == 1 else None
             refused = (
                 isinstance(error, httpx.HTTPStatusError)

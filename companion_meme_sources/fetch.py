@@ -146,12 +146,19 @@ class PublicFetcher:
                         if limit <= 0 or not 0 <= size <= limit:
                             raise ValueError("MEME_BYTE_LIMIT")
                         body = bytearray()
+                        checked_bytes = 0
                         async for chunk in response.aiter_bytes():
                             self.usage.download_bytes += len(chunk)
-                            await self.check()
                             if len(body) + len(chunk) > limit:
                                 raise ValueError("MEME_BYTE_LIMIT")
                             body.extend(chunk)
+                            # TCP/TLS fragmentation must not turn every small packet
+                            # into a private Core round trip. Count and bound each
+                            # observed fragment, then fence each bounded read block.
+                            if len(body) - checked_bytes >= 8192:
+                                await self.check()
+                                checked_bytes = len(body)
+                        await self.check()  # Includes the final short block and EOF.
                         if not body:
                             raise ValueError("MEME_EMPTY_RESPONSE")
                         mime = response.headers.get("content-type", "").split(";")[0].lower()

@@ -7,7 +7,7 @@ import time
 import companion_delivery_protocol as wire
 
 from . import journal, pending_media
-from .meme_runtime import infer_intent
+from .meme_runtime import failure_diagnostic, infer_intent
 from .metrics import emit
 from .onebot_client import bounded_post
 from .owner_handoff import terminal
@@ -90,8 +90,8 @@ class MemePump:
                                                     reply_revision=state["reply_revision"])
         except asyncio.CancelledError:
             raise
-        except Exception:
-            emit("meme_semantic_offer", status="DEFERRED")
+        except Exception as error:
+            emit("meme_semantic_offer", status="DEFERRED", **failure_diagnostic(error))
 
     def discovery_offer(self, event_id):
         """A discovery hint only; never creates a current-turn offer receipt."""
