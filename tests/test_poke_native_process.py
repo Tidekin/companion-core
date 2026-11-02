@@ -13,19 +13,31 @@ from tests.conftest import run
 from tests.poke_authority_fixture import environment, signed
 from tests.test_evaluation_process import process_config
 from tests.test_onebot_capture import real_core_http
+from tests.test_reading_service import queued
 
 
-@pytest.mark.parametrize("kind,outcome", [
-    ("text", "SENT"), ("poke", "SENT"), ("poke", "DELIVERY_UNCERTAIN"),
-    ("none", None), ("unknown", None),
+@pytest.mark.parametrize("kind,outcome,stale_read", [
+    ("text", "SENT", False), ("poke", "SENT", False), ("poke", "DELIVERY_UNCERTAIN", False),
+    ("none", None, False), ("unknown", None, False), ("text", "SENT", True),
 ])
 def test_native_poke_process_keeps_original_usage_and_never_replays(
-    core, tmp_path, kind, outcome,
+    core, tmp_path, kind, outcome, stale_read,
 ):
+    if stale_read:
+        queued(core, owner=False)
+        core.clock.advance(31)
+        # Recover the historical parent-only state observed in production.
+        core.store.execute("UPDATE exploration_requests SET state='UNKNOWN',"
+                           "last_error_code='READ_TIMEOUT'")
     env = environment(core, tmp_path)
     capture = signed(env)
     config_path = tmp_path / "worker-config.json"
     process_config(core, config_path)
+    if stale_read:
+        values = json.loads(config_path.read_text("utf-8"))
+        for name, adapter in core.settings.observation_adapters.items():
+            values["observation_adapters"][name]["token"] = adapter.token.get_secret_value()
+        config_path.write_text(json.dumps(values), encoding="utf-8")
 
     async def child(number):
         output = tmp_path / f"worker-{number}.json"
@@ -57,6 +69,10 @@ def test_native_poke_process_keeps_original_usage_and_never_replays(
             core.clock.advance(core.settings.poke_policy.coalesce_seconds + 1)
             first = await child(1)
             assert first["progressed"] and len(first["calls"]) == 1, first
+            if stale_read:
+                assert core.store.one("SELECT state FROM reading_attempts")["state"] == "UNKNOWN"
+                assert core.store.one("SELECT used_requests FROM exploration_requests")[
+                    "used_requests"] is None
             usage = core.store.rows("SELECT * FROM model_usage")
             assert len(usage) == 1 and usage[0]["scenario"] == "qq_poke"
             assert usage[0]["state"] == ("UNKNOWN" if kind == "unknown" else "SETTLED")
