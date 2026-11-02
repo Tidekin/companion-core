@@ -6,7 +6,7 @@ import json
 import re
 from datetime import datetime
 
-from .images import owner_media_request
+from .images import _media_request
 from .meme_caption import (
     CaptionIdentity,
     CaptionOutcome,
@@ -30,8 +30,7 @@ async def core_request(runtime, client, path, body, *, check, after=True):
     """Use the original native transport fence and retain its expiry across the await."""
     check()
     authority = dict(runtime.authority)
-    approval = await runtime.check(client, purpose="meme")
-    expires = datetime.fromisoformat(approval["expires_at"]) if approval["expires_at"] else None
+    expires = None
 
     def fence():
         check()
@@ -41,11 +40,15 @@ async def core_request(runtime, client, path, body, *, check, after=True):
         if expires is not None and runtime.clock() >= expires:
             raise ValueError("OWNER_AUTHORITY_EXPIRED")
 
-    async def before():
+    async def authorize():
+        nonlocal expires
+        fence()
+        approval = await runtime.check(client, purpose="meme")
+        expires = datetime.fromisoformat(approval["expires_at"]) if approval["expires_at"] else None
         fence()
 
-    result = await owner_media_request(runtime, client, path, body,
-                                      purpose="meme", before=before)
+    result = await _media_request(runtime, client, path, body,
+                                 purpose="meme", authorize=authorize)
     if after:
         fence()
     return result

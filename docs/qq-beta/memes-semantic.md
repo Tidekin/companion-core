@@ -224,6 +224,16 @@ caption、context/proof/request 内容，取消 caption job，并沿 `reuse_job_
 使祖先撤回也能阻止后代候选在准备、模型 dispatch 或发送时继续使用。
 费用记录和已收到的 usage 保留，不把 erasure 当成退款依据。
 
+公开素材下载使用现有 8 KiB 读取块复核 Core 权限和租约；逐个实际网络碎片仍立即累计
+下载字节并检查上限，最后的短块及 EOF 也复核后才能签发获取证据。网络中断、取消和
+撤回继续保留已观察流量及原 UNKNOWN 责任。这样 TCP/TLS 碎片数量不会放大远端授权
+往返、耗尽同一请求的有限下载时限。流式读取与关闭沿用
+[HTTPX async streaming](https://www.python-httpx.org/async/#streaming-responses)。
+
+Meme 私有 HTTP 请求复用现有 `_media_request` 的最终请求边界完成一次当前授权，
+返回后仍复核同一 authority 与已确认的过期时间；不跨请求缓存授权。可选检索与后台
+采集失败通过既有 metrics 保留固定错误类别和 HTTP 状态，不记录异常原文、私聊或凭据。
+
 Bridge 在收到认证撤回回执后取消该轮候选/发送 pin；查询和来源任务在 await 后及提交前
 复查本地撤回、当前输入和窗口状态。图库中的缓存本身不是新的授权，重新绑定仍须由 Core
 复核当前来源与其祖先。主动删除素材调用 `catalog.remove()`，同时清除原图和向量。
