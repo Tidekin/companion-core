@@ -79,11 +79,10 @@ def semantic(settings, query, docs):
 
 def rerank(settings, query, docs):
     """Cross-encoder scores, or None when no local reranker is configured."""
-    if not settings.reranker_model_dir or not docs:
-        return None
     from companion import reranker
 
-    return reranker.scores(settings.reranker_model_dir, query, docs)
+    path = reranker.directory(settings)
+    return reranker.scores(path, query, docs) if path and docs else None
 
 
 def _ranked(scores):

@@ -7,7 +7,17 @@ from threading import Lock
 from companion.contracts import CoreError
 
 MAX_LENGTH = 512
+AUTO_NAME = "local-bge-reranker-v2-m3-int8"
 _lock = Lock()
+
+
+def directory(settings):
+    """Configured local model directory, or None: retrieval then keeps fused order."""
+    value = getattr(settings, "reranker_model_dir", "")
+    if not value:
+        return None
+    path = Path(settings.embedding_cache_dir) / AUTO_NAME if value == "auto" else Path(value)
+    return str(path) if (path / "tokenizer.json").is_file() else None
 
 
 @lru_cache(maxsize=1)

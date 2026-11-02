@@ -231,11 +231,11 @@ class Memory:
                 reverse=True,
             )
         matched = len(rows)
-        if query != "*" and len(rows) > 1 and getattr(self.settings, "reranker_model_dir", ""):
-            from companion import reranker
+        from companion import reranker
 
+        if query != "*" and len(rows) > 1 and (model := reranker.directory(self.settings)):
             pool = rows[:limit * 2]
-            scores = reranker.scores(self.settings.reranker_model_dir, query,
+            scores = reranker.scores(model, query,
                                      [row["content"] for row in pool])
             rows = [row for _, row in sorted(zip(scores, pool, strict=True),
                                              key=lambda item: -item[0])] + rows[limit * 2:]

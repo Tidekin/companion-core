@@ -35,6 +35,9 @@ def test_replay_bounds_each_item_and_turn(core):
 def test_select_ranks_by_bigram_overlap_without_reranker(core, monkeypatch):
     monkeypatch.setattr(turn_recall, "semantic", lambda settings, query, docs: [0.0] * len(docs))
     core.settings.reranker_model_dir = ""
+    from companion import reranker
+
+    assert reranker.directory(core.settings) is None
     docs = ["今天路上听到一段广播。", "取件点搬到东侧水池，原地点停止受理。", "晚饭吃多了。"]
     assert turn_recall.select(core.settings, "现在去哪个取件点？旧地点还受理吗", docs, 1) == [1]
     assert turn_recall.select(core.settings, "  ", docs, 3) == []

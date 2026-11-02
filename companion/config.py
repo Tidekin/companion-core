@@ -616,8 +616,9 @@ class Settings(BaseModel):
     # Raw past turns retrieved alongside extracted facts; 0 disables.
     turn_recall_limit: int = Field(default=8, ge=0, le=20)
     turn_recall_scan_turns: int = Field(default=600, ge=0, le=5000)
-    # Local ONNX cross-encoder directory (config.json, tokenizer.json, onnx/*.onnx); empty: off.
-    reranker_model_dir: str = ""
+    # Local ONNX cross-encoder directory (tokenizer.json, onnx/*.onnx). "auto" uses
+    # <embedding_cache_dir>/local-bge-reranker-v2-m3-int8 when present; "" turns it off.
+    reranker_model_dir: str = "auto"
     extraction_min_events: int = Field(default=5, ge=1, le=20)
     extraction_idle_seconds: int = Field(default=900, ge=0)
     emerging_min_sessions: int = Field(default=3, ge=3)
