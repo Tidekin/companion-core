@@ -41,6 +41,7 @@ def run_isolated_worker(settings_path, now):
     def provider(request):
         payload = json.loads(request.content)
         assert payload["messages"][0]["content"] == EXTRACT_RULES
+        assert payload["max_tokens"] == min(2048, settings.paid_model.max_output_tokens)
         calls.append("memory_extract")
         sources = json.loads(payload["messages"][-1]["content"])
         source = next((row for row in sources if row["text"] == "青禾项目下一步检查配色"), None)
@@ -70,12 +71,16 @@ def run_isolated_worker(settings_path, now):
     print(encode({"calls": calls}))
 
 
-@pytest.mark.parametrize("batch", ["text", "mixed_image", "mixed_media_caption", "only_media"])
-def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch):
+@pytest.mark.parametrize("batch,output_ceiling", [
+    ("text", 4096), ("text", 1024), ("mixed_image", 4096),
+    ("mixed_media_caption", 4096), ("only_media", 4096),
+])
+def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch, output_ceiling):
     workspace = Path(__file__).resolve().parents[1]
     async def scenario():
         async with environment(core, tmp_path, purposes=("chat", "memory", "image", "content"),
-            paid_options={"image_input": ImageInputPolicy(approval_sha256="e" * 64,
+            paid_options={"max_output_tokens": output_ceiling,
+                "image_input": ImageInputPolicy(approval_sha256="e" * 64,
                 estimated_tokens_per_image=100, max_bytes_per_image=50000,
                 max_pixels_per_image=100)}, core_options={
             "extraction_min_events": 1, "extraction_idle_seconds": 0,

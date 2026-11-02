@@ -106,6 +106,7 @@ LABELS = {
     "monthly_limit_micro_usd": "模型与工具月额度（微美元）",
     "autonomous_daily_micro_usd": "主动交流日额度（微美元）",
     "memory_daily_micro_usd": "记忆处理日额度（微美元）",
+    "memory_extract_max_output_tokens": "记忆抽取输出上限（token）",
     "diary_generate_hour": "日记整理时刻（小时）",
     "diary_min_source_events": "日记最少来源事件数",
     "diary_max_source_events": "日记最多来源事件数",

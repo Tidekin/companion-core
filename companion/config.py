@@ -506,6 +506,7 @@ class Settings(BaseModel):
     monthly_limit_micro_usd: int = Field(default=20000000, ge=0)
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
     memory_daily_micro_usd: int = Field(default=50000, ge=0)
+    memory_extract_max_output_tokens: int = Field(default=2048, ge=128, le=4096)
     memory_enabled: bool = True
     evaluation_enabled: bool = False
     diary_enabled: bool = False
@@ -709,6 +710,11 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "memory_extract":
+            allowance = self.memory_extract_max_output_tokens
+            if self.paid_model:
+                allowance = min(allowance, self.paid_model.max_output_tokens)
+            return allowance
         if scenario == "jargon":
             return self.jargon.max_output_tokens
         if scenario == "watch_review":

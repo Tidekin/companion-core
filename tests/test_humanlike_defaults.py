@@ -117,7 +117,7 @@ def test_thinking_payload_only_for_chat():
     assert chat["max_tokens"] == settings.max_output_tokens + settings.chat_thinking_tokens
     extract = model_payload(settings, MESSAGES, "memory_extract")
     assert extract["thinking"] == {"type": "disabled"} and "reasoning_effort" not in extract
-    assert extract["max_tokens"] == settings.max_output_tokens
+    assert extract["max_tokens"] == settings.memory_extract_max_output_tokens == 2048
     off = model_payload(plain(chat_thinking="disabled"), MESSAGES, "chat")
     assert off["thinking"] == {"type": "disabled"} and "reasoning_effort" not in off
     other = plain(provider="openai", model_url="https://example.com/v1")
@@ -128,6 +128,7 @@ def test_paid_output_ceiling_bounds_chat_thinking_allowance():
     settings = plain(max_output_tokens=768)
     capped = settings.model_copy(update={"paid_model": SimpleNamespace(max_output_tokens=1024)})
     assert capped.output_tokens("chat") == 1024
+    assert capped.output_tokens("memory_extract") == 1024
     low = settings.model_copy(update={"paid_model": SimpleNamespace(max_output_tokens=512)})
     assert low.output_tokens("chat") == 768  # Never below the configured reply allowance.
 

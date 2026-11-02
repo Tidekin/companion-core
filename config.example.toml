@@ -26,6 +26,8 @@ output_rate = 1200000
 monthly_limit_micro_usd = 20000000
 autonomous_daily_micro_usd = 200000
 memory_daily_micro_usd = 50000
+# Structured evidence needs its own allowance; the approved paid output ceiling still applies.
+memory_extract_max_output_tokens = 2048
 # Owner bursts are answered once: a new message waits 2 s (5 s while the chat is active),
 # each further message 2 s more, at most 8 s per batch. Commands are never delayed.
 # To answer every message at once, add `[input_debounce]` with `enabled = false`.

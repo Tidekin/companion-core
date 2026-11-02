@@ -161,6 +161,7 @@ def test_workers_switch_independently_and_idle_observation_does_not_write(hot):
 
 @pytest.mark.parametrize("changes", [
     {"max_output_tokens": 1024}, {"chat_thinking": "low"},
+    {"memory_extract_max_output_tokens": 3072},
     {"segmented_reply": {"mode": "semantic"}}, {"model_name": "other-model"},
     {"monthly_limit_micro_usd": 123456}, {"expression_selection_probability": 0.7},
     {"quote_policy": "often"}, {"timeout_seconds": 60},
