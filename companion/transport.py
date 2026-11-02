@@ -346,6 +346,7 @@ def lease_deliveries(store, settings, request, now):
                 and (not owner or "voice" in owner_authority.current(
                     store, settings, lambda: now).policy.purposes)
                 and row["action_type"] in {"qq.private.reply", "qq.private.proactive"}
+                and "generated_image" not in json.loads(row["content_json"])
                 and not store.one("SELECT 1 FROM poke_batches WHERE response_message_id=?",
                                   (row["message_id"],))):
                 from companion.voice_flow import VoiceFlow

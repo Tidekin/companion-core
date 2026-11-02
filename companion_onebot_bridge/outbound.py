@@ -11,7 +11,7 @@ from .onebot_client import bounded_post
 
 
 def validate_item(item, config, *, companion=False, account_scope=False, voice_scope=False,
-                  image_scope=False):
+                  image_scope=False, generated_image_scope=False):
     if not isinstance(item, dict):
         raise ValueError("INVALID_DELIVERY")
     if not companion and "window_origin_event_id" in item:
@@ -64,13 +64,21 @@ def validate_item(item, config, *, companion=False, account_scope=False, voice_s
         raise ValueError("INVALID_NOTICE_SCOPE")
     if (
         not isinstance(content, dict)
-        or set(content) - {"reply_to"} not in ({"text"}, {"text", "image"})
+        or set(content) - {"reply_to"} not in ({"text"}, {"text", "image"},
+                                               {"text", "generated_image"})
         or not isinstance(content["text"], str)
         or not 1 <= len(content["text"]) <= 20000
     ):
         raise ValueError("TEXT_DELIVERY_REQUIRED")
     if "reply_to" in content:
         reply_segments.quote(item)
+    if "generated_image" in content:
+        from .generated_image_http import valid_reference
+
+        if (not generated_image_scope or not companion
+                or item["action_type"] != "qq.private.reply" or "voice" in item
+                or not valid_reference(content["generated_image"])):
+            raise ValueError("GENERATED_IMAGE_SCOPE_REQUIRED")
     if "image" in content:
         image = content["image"]
         if (not (companion or image_scope) or item["action_type"] != "qq.private.reply"
@@ -152,7 +160,8 @@ async def _deliver_item(client, onebot, spool, item, *, metrics=None, guard=None
         raise ValueError("INVALID_DELIVERY_LANE")
     validate_item(item, onebot.config, companion=getattr(onebot, "companion", False),
                   account_scope=getattr(onebot, "account_scope", False), voice_scope=voice_scope,
-                  image_scope=getattr(onebot, "image_scope", False))
+                  image_scope=getattr(onebot, "image_scope", False),
+                  generated_image_scope=getattr(onebot, "generated_image_scope", False))
     probe_before_reservation = getattr(onebot, "probe_before_reservation", False)
     if probe_before_reservation and not (await onebot.probe())["connection_ready"]:
         raise ValueError("ONEBOT_NOT_READY")

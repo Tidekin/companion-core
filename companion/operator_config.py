@@ -90,6 +90,7 @@ LABELS = {
     "cached_input_rate": "缓存输入价格（微美元／百万 token）",
     "output_rate": "输出价格（微美元／百万 token）", "max_output_tokens": "最大回复 token",
     "timeout_seconds": "模型请求超时（秒）", "content": "阅读与图片限制",
+    "image_generation": "AI 生图（接口地址、密钥与额度）",
     "private_files": "私聊文件解析与资源限制",
     "bili_video": "B站视频抽样与片段分析",
     "console": "控制台与公网地址", "segmented_reply": "分段回复",
@@ -245,6 +246,12 @@ def _endpoint_changes(before, after, changes):
     if isinstance(vision, dict):
         pairs.append((before.content.vision.url, after.content.vision.url,
                       before.content.vision.key, vision.get("key"), "url" in vision))
+    image = changes.get("image_generation", {})
+    endpoint = image.get("endpoint", {}) if isinstance(image, dict) else {}
+    if isinstance(endpoint, dict):
+        pairs.append((before.image_generation.endpoint.url, after.image_generation.endpoint.url,
+                      before.image_generation.endpoint.key, endpoint.get("key"),
+                      "url" in endpoint))
     for old_url, new_url, old_key, supplied_key, edited in pairs:
         if not edited or not new_url:
             continue
@@ -315,7 +322,7 @@ GROUPS = {"chat_thinking": "model", "chat_thinking_tokens": "model",
           "input_debounce": "expression", "turn_taking": "expression",
           "quote_policy": "expression",
           "style_live": "expression", "style_distill": "expression", "jargon": "memory",
-          "meme_wiki": "expression",
+          "meme_wiki": "expression", "image_generation": "expression",
           "watch_ledger": "content", "rem": "autonomy", "life_loop": "autonomy"}
 
 

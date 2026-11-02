@@ -2048,6 +2048,7 @@ const limitName = k => LIMIT_NAMES[k] || subLabel(k);
 /* 对象配置的子项名称 */
 const SUB = {
   enabled: "开启", mode: "模式", scope: "范围", url: "地址", model: "模型", key: "密钥", protocol: "协议", nodes: "节点", reply: "语音回复", asr: "语音转写",
+  endpoint: "接口", sizes: "可选尺寸", max_output_bytes: "单张图片上限", retention_seconds: "图片保留时长",
   proactive: "主动消息也用语音", media: "媒体处理", sampling: "抽样", limits: "资源限制", vision: "图片理解", adapter_id: "适配器", parser_image: "解析镜像",
   parser_socket: "解析通道", public_origin: "控制台地址", session_seconds: "会话时长", max_sessions: "最多同时登录", allow_native: "允许原生拍一拍",
   coalesce_seconds: "合并间隔", cooldown_seconds: "冷却", daily_limit: "每天最多", max_coalesced: "最多合并", max_text_chars: "文字上限", max_pending_seconds: "最长等待",

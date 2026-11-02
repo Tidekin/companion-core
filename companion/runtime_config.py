@@ -1,7 +1,8 @@
 """Task-pinned runtime values over the startup configuration's unchanged cold identity.
 
-Only reviewed chat expression values are dynamic. Services and ModelClient retain their original
-settings, clients and stores. No permission, source, budget or delivery check is cached.
+Only reviewed chat expression values and the image generation provider are dynamic. Services
+and ModelClient retain their original settings, clients and stores. No permission, source,
+budget or delivery check is cached.
 """
 
 import hashlib
@@ -16,11 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from companion import operator_config
 from companion.contracts import CoreError
 from companion.conversation_policy import ConversationPolicyConfig
+from companion.media_config import ImageGenerationConfig
 from companion.store import encode
 from companion.style_live_config import StyleLiveConfig
 
 HOT_FIELDS = frozenset({"chat_time_labels", "conversation_policy", "style_live",
-                        "conversation_guidance"})
+                        "conversation_guidance", "image_generation"})
 HOT_OBJECT_FIELDS = {"conversation_policy": frozenset({"mode", "strategy"}),
                      "style_live": frozenset({"enabled"})}
 REVIEW_FIELDS = frozenset({
@@ -48,10 +50,12 @@ class ExpressionValues(BaseModel):
 
 class StoredExpression(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    format_version: Literal[2]
+    format_version: Literal[2, 3]
     conversation_policy: ConversationPolicyConfig
     style_live_enabled: bool
     encrypted_guidance: str | None
+    # Format 3: the complete image provider choice, including its key, encrypted.
+    encrypted_image_generation: str | None = None
 
 
 class Snapshot(BaseModel):
@@ -59,8 +63,9 @@ class Snapshot(BaseModel):
     version: int = Field(ge=0)
     base_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     chat_time_labels: bool
-    format_version: Literal[1, 2]
+    format_version: Literal[1, 2, 3]
     expression: ExpressionValues
+    image_generation: ImageGenerationConfig | None = None
 
 
 def _digest(settings, value):
@@ -97,10 +102,14 @@ def _expression(settings):
 
 def _snapshot(settings, version=None, *, candidate=None):
     candidate = candidate or settings
+    # The startup provider needs no snapshot copy; only a Console change is pinned.
+    image = (candidate.image_generation
+             if candidate.image_generation != settings.image_generation else None)
     return Snapshot(version=settings._operator_config_version if version is None else version,
                     base_sha256=_cold(settings),
-                    chat_time_labels=candidate.chat_time_labels, format_version=2,
-                    expression=_expression(candidate))
+                    chat_time_labels=candidate.chat_time_labels,
+                    format_version=2 if image is None else 3,
+                    expression=_expression(candidate), image_generation=image)
 
 
 def identity(settings, snapshot):
@@ -109,15 +118,24 @@ def identity(settings, snapshot):
         # Original evidence is never re-signed. Its cold hash authenticates these
         # reconstructed expression values instead of a new payload field.
         value = {key: value[key] for key in ("version", "base_sha256", "chat_time_labels")}
+    elif snapshot.format_version == 2:
+        if value.pop("image_generation") is not None:
+            raise CoreError("CONFIGURATION_SNAPSHOT_INVALID", 409)
+    else:
+        # The HMAC covers the actual credential, so a key change is a new snapshot.
+        value["image_generation"] = operator_config._raw(snapshot.image_generation)
     return _digest(settings, value)
 
 
 def values(snapshot):
     expression = snapshot.expression
-    return {"chat_time_labels": snapshot.chat_time_labels,
-            "conversation_policy": expression.conversation_policy,
-            "style_live": StyleLiveConfig(enabled=expression.style_live_enabled),
-            "conversation_guidance": expression.conversation_guidance}
+    result = {"chat_time_labels": snapshot.chat_time_labels,
+              "conversation_policy": expression.conversation_policy,
+              "style_live": StyleLiveConfig(enabled=expression.style_live_enabled),
+              "conversation_guidance": expression.conversation_guidance}
+    if snapshot.image_generation is not None:
+        result["image_generation"] = snapshot.image_generation
+    return result
 
 
 def effective(settings, snapshot):
@@ -148,17 +166,20 @@ def _persist(store, settings, snapshot, now):
                          (snapshot.version, snapshot.base_sha256, key))
     if conflict:
         raise CoreError("CONFIGURATION_VERSION_CONFLICT", 409)
-    expression = snapshot.expression
-    stored = StoredExpression(format_version=2,
+    expression, image = snapshot.expression, snapshot.image_generation
+    stored = StoredExpression(format_version=max(snapshot.format_version, 2),
         conversation_policy=expression.conversation_policy,
         style_live_enabled=expression.style_live_enabled,
         encrypted_guidance=operator_config._cipher(settings).encrypt(
             expression.conversation_guidance.encode()).decode()
-        if expression.conversation_guidance is not None else None)
+        if expression.conversation_guidance is not None else None,
+        encrypted_image_generation=operator_config._cipher(settings).encrypt(
+            encode(operator_config._raw(image)).encode()).decode()
+        if image is not None else None)
     store.insert("operator_runtime_snapshots", snapshot_id=key, version=snapshot.version,
         base_sha256=snapshot.base_sha256, chat_time_labels=int(snapshot.chat_time_labels),
-        created_at=now, expression_json=stored.model_dump_json() if snapshot.format_version == 2
-        else None)
+        created_at=now, expression_json=stored.model_dump_json()
+        if snapshot.format_version >= 2 else None)
     return key
 
 
@@ -174,6 +195,7 @@ def validate_record(settings, row, *, lookup=None):
         raise CoreError("CONFIGURATION_SNAPSHOT_MISSING", 409)
     row = dict(row)
     key, legacy = row["snapshot_id"], row.get("expression_json") is None
+    image = None
     try:
         if legacy:
             original = settings
@@ -200,10 +222,16 @@ def validate_record(settings, row, *, lookup=None):
                 if stored.encrypted_guidance is not None else None)
             expression = ExpressionValues(conversation_policy=stored.conversation_policy,
                 style_live_enabled=stored.style_live_enabled, conversation_guidance=guidance)
+            image = (ImageGenerationConfig.model_validate_json(operator_config._cipher(settings)
+                     .decrypt(stored.encrypted_image_generation.encode()))
+                     if stored.encrypted_image_generation is not None else None)
+            if (stored.format_version == 3) != (image is not None):
+                raise ValueError
             cold = _cold(settings)
         snapshot = Snapshot(version=row["version"], base_sha256=row["base_sha256"],
                             chat_time_labels=bool(row["chat_time_labels"]),
-                            format_version=1 if legacy else 2, expression=expression)
+                            format_version=1 if legacy else stored.format_version,
+                            expression=expression, image_generation=image)
         if row["chat_time_labels"] not in (0, 1) or not hmac.compare_digest(
             identity(settings, snapshot), key,
         ):
