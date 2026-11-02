@@ -38,8 +38,10 @@ async def uncertain(core, tmp_path, monkeypatch, *, crash=False, kind="poke", se
     text = "第一条核对前已发送。\n第二条发送响应丢失。" if segmented else "合成待核对文字回复"
 
     async def source(ws):
-        await ws.send(json.dumps(native_frame(int(datetime.now(UTC).timestamp())))
-                      if kind == "poke" else frame())
+        timestamp = int(core.clock.now.timestamp())
+        message = (native_frame(timestamp) if kind == "poke"
+                   else {**json.loads(frame()), "time": timestamp})
+        await ws.send(json.dumps(message))
         await ws.wait_closed()
 
     def lost(request):
