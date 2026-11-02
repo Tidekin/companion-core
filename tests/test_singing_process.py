@@ -40,6 +40,7 @@ async def independent(config, cert, counter, tmp_path, timestamp):
         receipt = json.loads(stdout)
         assert receipt["pid"] != os.getpid()
         assert receipt["outcome"] == "COMPLETED" and receipt["requests"] == 4
+        assert receipt["control_requests"] < 40
     finally:
         if process.returncode is None:
             process.kill()

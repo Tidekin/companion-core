@@ -73,13 +73,15 @@ async def main():
     settings = Settings.model_validate(args["settings"])
     if settings.model_url != "https://synthetic.invalid/v1":
         raise ValueError("SYNTHETIC_PROVIDER_REQUIRED")
-    calls = []
+    calls, prompts = [], []
 
     async def provider(request):
         assert request.url.host == "synthetic.invalid"
-        material = json.loads(json.loads(request.content)["messages"][-1]["content"])
+        messages = json.loads(request.content)["messages"]
+        material = json.loads(messages[-1]["content"])
         assert material["kind"] == ("followup" if args["scenario"] == "followup" else "life")
         calls.append(material)
+        prompts.append(messages)
         print("LIFE_PROVIDER_STARTED", flush=True)
         assert await asyncio.to_thread(sys.stdin.readline) == "continue\n"
         scenario = args["scenario"]
@@ -100,7 +102,7 @@ async def main():
     result = await run_native(settings, lambda: args["now"], provider,
                               stop_on_idle=args.get("restart", False)
                               or args["scenario"] == "followup")
-    result.update(provider_calls=len(calls), materials=calls)
+    result.update(provider_calls=len(calls), materials=calls, prompts=prompts)
     await asyncio.to_thread(Path(args["result_path"]).write_text,
                             json.dumps(result, ensure_ascii=False), encoding="utf-8")
 

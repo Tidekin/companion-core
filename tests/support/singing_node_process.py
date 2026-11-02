@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import httpcore
 import httpx
 
 from companion.voice_protocol import SingingResult
@@ -18,14 +19,16 @@ from source_reader.network import PublicHTTP
 from tests.test_bili_audio import NAV, PLAY, VIEW
 from tests.test_bili_media import pool
 from tests.test_singing_protocol import result
-from tests.test_source_reader import response
+from tests.test_source_reader import RecordingStream, response
+
+AUDIO = b"native audio" * 256
 
 
 def provider(packet):
     counter = Path(packet.pop("_counter"))
     counter.write_text(json.dumps({"pid": os.getpid(), "environment": sorted(os.environ),
         "packet_keys": sorted(packet), "provider_keys": sorted(packet["provider"])}))
-    assert Path(packet["song_path"]).read_bytes() == b"native audio"
+    assert Path(packet["song_path"]).read_bytes() == AUDIO
     value = result(65).model_dump(mode="json")
     value["manifest"].update(source=packet["song_source"],
         node_manifest_sha256=packet["node_manifest_sha256"])
@@ -51,16 +54,38 @@ async def node(config_path, certificate, counter, timestamp):
     view["data"]["pages"][0]["duration"] = 65
     play["data"]["timelength"] = 65000
     connection_pool, backend = pool(response(view), response(NAV), response(play),
-                                     response(b"native audio"))
+                                     response(AUDIO))
+    connect = backend.connect_tcp
+
+    async def fragmented_audio(host, port, **kwargs):
+        if len(backend.rows) != 1:
+            return await connect(host, port, **kwargs)
+        backend.hosts.append(host)
+        header, audio = backend.rows.pop(0).split(b"\r\n\r\n", 1)
+        stream = RecordingStream(b"", backend)
+        httpcore.AsyncMockStream.__init__(stream, [header + b"\r\n\r\n",
+            *[audio[i:i + 16] for i in range(0, len(audio), 16)]])
+        return stream
+
+    backend.connect_tcp = fragmented_audio
     public = PublicHTTP(connection_pool)
     trust = ssl.create_default_context(cafile=str(certificate))
+    controls = []
+
+    class ObservedCore(httpx.AsyncHTTPTransport):
+        async def handle_async_request(self, request):
+            if request.url.path.endswith("/control"):
+                controls.append(request.url.path)
+            return await super().handle_async_request(request)
+
     with (patch("source_reader.network.PublicHTTP", return_value=public),
           patch("companion_voice_node.worker.time.time", return_value=timestamp)):
         outcome = await VoiceNodeWorker(config,
-            transport=httpx.AsyncHTTPTransport(verify=trust),
+            transport=ObservedCore(verify=trust),
             supervisor_factory=lambda workspace, temporary: ProviderProcess(
                 workspace, temporary, counter)).run(once=True)
-    return {"pid": os.getpid(), "outcome": outcome, "requests": len(backend.requests)}
+    return {"pid": os.getpid(), "outcome": outcome, "requests": len(backend.requests),
+            "control_requests": len(controls)}
 
 
 if __name__ == "__main__":

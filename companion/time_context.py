@@ -27,10 +27,10 @@ def day(value, timezone):
     return f"{local.year}年{local.month}月{local.day}日"
 
 
-def now_message(now, timezone):
+def now_message(now, timezone, *, reference="主人这条消息的时间"):
     local = _local(now, timezone)
     return {"role": "user", "content": (
-        "当前时间参考（主人这条消息的时间，不是主人原话）："
+        f"当前时间参考（{reference}，不是主人原话）："
         f"{local.year}年{local.month}月{local.day}日 "
         f"星期{WEEKDAYS[local.weekday()]} {local:%H:%M}（{timezone}）。"
         "历史消息前的【时间】和记忆的记录日期都早于此刻；"

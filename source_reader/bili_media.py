@@ -93,9 +93,10 @@ def representation(data, limits):
 class MediaHTTP:
     """Uses the Reader's pinned public transport; cookies only on three fixed APIs."""
 
-    def __init__(self, public, budget, guard, *, audio=False):
+    def __init__(self, public, budget, guard, *, audio=False, stream_guard=None):
         self.public, self.budget, self.guard = public, budget, guard
         self.audio = audio
+        self.stream_guard = stream_guard or guard
 
     def account(self):
         verify = getattr(self.public, "verify", None)
@@ -153,7 +154,7 @@ class MediaHTTP:
                     size += len(chunk)
                     if size > maximum or self.budget.used_bytes > self.budget.max_bytes:
                         raise ReadFailure("READER_BYTE_LIMIT")
-                    await self.guard()
+                    await self.stream_guard()
                     self.account()
                     digest.update(chunk)
                     if sink is None:
