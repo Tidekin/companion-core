@@ -15,6 +15,7 @@ from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.image_input import ImageInputPolicy
 from companion.model import ModelClient
+from companion_meme_protocol import OFFER_WAIT_SECONDS
 from companion_onebot_bridge import app
 from companion_onebot_bridge.meme_catalog import key_hash
 from companion_onebot_bridge.owner_memes import MemePump
@@ -28,10 +29,12 @@ from tests.test_onebot_direct import raw_event
 from tests.test_private_companion import companion_options
 
 
-@pytest.mark.parametrize("handoff,deferred", [(False, False), (True, False), (False, True)],
-                         ids=["ordinary", "cancelled-before-usage", "query-unavailable"])
+@pytest.mark.parametrize("handoff,deferred,delayed", [
+    (False, False, False), (True, False, False), (False, True, False),
+    (False, False, True),
+], ids=["ordinary", "cancelled-before-usage", "query-unavailable", "delayed-authority-hops"])
 def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
-    core, tmp_path, handoff, deferred,
+    core, tmp_path, handoff, deferred, delayed, explicit=False,
 ):
     now = datetime.now(UTC).replace(microsecond=0)
     core.clock.now = now
@@ -45,9 +48,9 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
         "description": "绿色庆祝图片，适合分享成功的开心心情",
         "visible_text": "",
         "tone": "celebratory",
-        "suitable": ["celebrate"],
+        "suitable": ["celebrate", "playful"],
         "use_when": ["庆祝成功"],
-        "tags": ["庆祝", "成功", "开心"],
+        "tags": ["庆祝", "成功", "开心", "表情包"],
     }
 
     async def source(ws):
@@ -93,7 +96,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
         meme_discovery_daily_download_bytes=32 * 1024 * 1024,
         meme_discovery_daily_storage_bytes=8 * 1024 * 1024,
         meme_caption_daily_micro_usd=50000,
-        expression_selection_probability=1.0,
+        expression_selection_probability=0.0 if explicit else 1.0,
     )
     options["paid_options"].update(
         max_output_tokens=4096,
@@ -121,6 +124,13 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
             runtime = window.runtime.memes
             pump = MemePump(window.runtime, client)
 
+            async def delayed_authority_hops(request):
+                # The native offer has several independently authorized HTTP hops.
+                # Keep all those gates, and exercise more than the old 1.5 s total.
+                if request.url.path.startswith(("/internal/v1/owner-authority/",
+                                                "/internal/v1/memes/")):
+                    await asyncio.sleep(0.4)
+
             async def unavailable_query(request):
                 if request.url.path == "/internal/v1/memes/query":
                     raise httpx.ReadTimeout("synthetic unavailable optional query", request=request)
@@ -139,6 +149,8 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
 
                 await app.upload(client, window.spool, wake, stop,
                     SimpleNamespace(accepted=accepted), runtime=window.runtime, memes=pump)
+                if delayed:
+                    client.event_hooks["request"].append(delayed_authority_hops)
                 event_id = pump.latest()[0]
                 row = window.db.execute(
                     "SELECT state,capture_json FROM window_inputs WHERE event_id=?", (event_id,),
@@ -153,6 +165,8 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                 assert task is not None
                 pump.tick(idle=False)
                 await task
+                if delayed:
+                    client.event_hooks["request"].remove(delayed_authority_hops)
                 pump.tick(idle=False)
                 offered = window.db.execute(
                     "SELECT state,offer_json FROM meme_runtime_semantic_offers WHERE event_id=?",
@@ -178,7 +192,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                         client.event_hooks["request"].remove(unavailable_query)
                         assert api_core.store.one("SELECT value FROM runtime_meta WHERE key=?",
                             ("meme_offer:" + first,)) is None
-                        core.clock.advance(2)
+                        core.clock.advance(OFFER_WAIT_SECONDS)
                     assert await worker.run_once("meme-integration-chat")
                     assert (await window.send(client, protocol))["worked"]
                     assert len(sends) == 1 and len(sends[0]["message"]) == 1
@@ -267,7 +281,8 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     assert caption_row["usage_request_id"] == usage["request_id"]
                     cached = window.db.execute("SELECT * FROM meme_caption_cache").fetchone()
 
-                    number, text = 2 + handoff, "今天又成功了，太开心了"
+                    number = 2 + handoff
+                    text = "请发一张表情包" if explicit else "今天又成功了，太开心了"
                     second, offer = await admit_current()
                     assert 1 <= len(offer["candidates"]) <= 8
                     assert offer["candidates"][0]["candidate_id"] == asset_sha
@@ -315,3 +330,8 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                 await pump.close()
 
     run(scenario())
+
+
+def test_explicit_request_uses_native_image_offer_without_spontaneous_sampling(core, tmp_path):
+    test_signed_capture_caption_index_current_offer_and_original_image_delivery(
+        core, tmp_path, handoff=False, deferred=False, delayed=False, explicit=True)

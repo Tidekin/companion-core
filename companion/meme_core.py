@@ -29,6 +29,7 @@ from companion.retrieval import INDEX_VERSION, encoder
 from companion.store import after, encode, uid, utcnow
 from companion_meme_protocol import (
     CAPTION_INSTRUCTIONS,
+    OFFER_WAIT_SECONDS,
     CaptionAsset,
     CaptionContext,
     CaptionIdentity,
@@ -42,6 +43,7 @@ from companion_meme_protocol import (
     caption_model_schema,
     caption_text,
     digest,
+    explicit_meme_request,
     parse,
     sample_frames,
     strict_json,
@@ -50,8 +52,6 @@ from companion_meme_protocol import (
 
 QUERY = "meme_query:"
 OFFER = "meme_offer:"
-# A chat job waits this long after creation for the Bridge meme offer.
-OFFER_WAIT_SECONDS = 2
 
 
 def query_intent(text):
@@ -73,7 +73,7 @@ def query_intent(text):
                 )
                 if re.search(pattern, text)
             ),
-            None,
+            "playful" if explicit_meme_request(text) else None,
         )
     )
 

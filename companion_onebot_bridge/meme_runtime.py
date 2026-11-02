@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 
 from companion_delivery_protocol.authority import CAPTURE_KINDS
+from companion_meme_protocol import explicit_meme_request
 from companion_meme_sources import INTENTS, DiscoveryLimits, ReviewApproval, Usage
 from companion_meme_sources.community import CommunityPacks
 from companion_meme_sources.review import TrustedReviewer
@@ -71,7 +72,8 @@ def infer_intent(text):
         ("like", r"好可爱|爱心|(?<!不)喜欢|\blove it\b"),
         ("playful", r"开玩笑|逗你|调皮|\bplayful\b"),
     )
-    return next((intent for intent, pattern in patterns if re.search(pattern, lowered)), None)
+    return next((intent for intent, pattern in patterns if re.search(pattern, lowered)),
+                "playful" if explicit_meme_request(text) else None)
 
 
 class MemeRuntime(DeliveryCustody):

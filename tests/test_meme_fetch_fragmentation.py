@@ -133,4 +133,4 @@ def test_fragmented_acquisition_caption_retrieval_and_native_qq_image(core, tmp_
 
     monkeypatch.setattr(integration, "public_transport", public_transport)
     integration.test_signed_capture_caption_index_current_offer_and_original_image_delivery(
-        core, tmp_path, handoff=False, deferred=False)
+        core, tmp_path, handoff=False, deferred=False, delayed=False)

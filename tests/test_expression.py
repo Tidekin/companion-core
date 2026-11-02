@@ -142,6 +142,39 @@ def test_expression_control_external_and_cross_conversation_are_not_image_source
         engine(core).enqueue("evt_test_2", "wrong", "内容", core.clock())
 
 
+@pytest.mark.parametrize("text,requested", [
+    ("请发一张表情包", True),
+    ("太棒了！发一张开心的表情包庆祝一下。", True),
+    ("给我来个表情包", True),
+    ("能不能发一个表情包", True),
+    ("please send me a meme", True),
+    ("太棒了，成功了", False),
+    ("表情包挺好玩", False),
+    ("他说‘发一个表情包’", False),
+    ("不要给我发开心的表情包", False),
+    ("严肃点，发一张表情包", False),
+])
+def test_only_direct_meme_requests_bypass_spontaneous_sampling(core, monkeypatch, text, requested):
+    ingest(core, text=text)
+    monkeypatch.setattr("companion.expression.digest", lambda value: "f" * 64)
+    core.settings.expression_selection_probability = 0.35
+    assert engine(core)._selection_allowed("evt_test_1", "meme:evt_test_1") is requested
+
+
+@pytest.mark.parametrize("change", ["source", "actor", "privacy", "redacted", "control"])
+def test_direct_meme_request_requires_current_owner_private_source(core, change):
+    ingest(core, text="请发一张表情包")
+    if change == "control":
+        core.store.execute("UPDATE events SET body_json=json_set(body_json,'$.control_command',1)")
+    else:
+        field, value = {"source": ("source", "system.activity"),
+                        "actor": ("actor_id", "system"), "privacy": ("privacy_scope", "public"),
+                        "redacted": ("redacted", 1)}[change]
+        core.store.execute("UPDATE events SET " + field + "=?", (value,))
+    core.settings.expression_selection_probability = 0
+    assert not engine(core)._selection_allowed("evt_test_1", "meme:evt_test_1")
+
+
 def test_outbox_cooldown_and_repeat_window_survive_restart_without_starvation(core):
     first = queued(core)
     # Pending and uncertain sends count too: neither can establish non-delivery.

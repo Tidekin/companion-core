@@ -5,6 +5,7 @@ import json
 import time
 
 import companion_delivery_protocol as wire
+from companion_meme_protocol import OFFER_QUERY_SECONDS
 
 from . import journal, pending_media
 from .meme_runtime import failure_diagnostic, infer_intent
@@ -84,7 +85,7 @@ class MemePump:
 
     async def query(self, row):
         try:
-            async with asyncio.timeout(1.5):
+            async with asyncio.timeout(OFFER_QUERY_SECONDS):
                 state = await self.state(row)
                 await self.runtime.semantic_offer(self.client, row[0],
                                                     reply_revision=state["reply_revision"])
