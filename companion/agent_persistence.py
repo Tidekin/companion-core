@@ -258,11 +258,15 @@ class ConversationStore:
         return metadata
 
     def save_result(self, result):
-        from companion.agent_output import SongReply, save_format
+        from companion.agent_output import LegacySongReply, MixedReply, save_format
 
         waiting = isinstance(result.output, DeferredToolRequests)
         with self.store.transaction():
-            if isinstance(result.output, SongReply):
+            if isinstance(result.output, MixedReply):
+                from companion.reply_composition import validate
+
+                validate(self.core, self.job, result.output)
+            elif isinstance(result.output, LegacySongReply):
                 from companion.agent_singing import selected
 
                 selected(self.store, self.core.settings, self.core.clock,

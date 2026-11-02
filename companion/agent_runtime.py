@@ -159,11 +159,17 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
         return response
 
     paid = core.settings.paid_model
+    from companion.agent_output import restored_output
+
+    historical_output = restored_output(conversation)
     async def before_tool_execute(ctx, *, call, tool_def, args):
         check()
         return args
 
     async def before_model_request(ctx, request_context):
+        if historical_output is not None:
+            # Only consume the original settled final response; do not generate with old tools.
+            raise CoreError("CONVERSATION_OUTCOME_UNAVAILABLE", 409)
         with phase("request_guard", job["trace_id"]):
             check()
         with phase("request_plan", job["trace_id"]):
@@ -181,12 +187,10 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
         hooks.update(after_model_request=persistence.after_model_request,
                      tool_execute=persistence.wrap_tool_execute)
     with phase("agent_setup", job["trace_id"]):
-        from companion.agent_output import song_output, voice_output
+        from companion.agent_output import reply_output
 
         output_types = [str, DeferredToolRequests]
-        if output := voice_output(core, job):
-            output_types.append(output)
-        if output := song_output(core, job):
+        if output := historical_output or reply_output(core, job):
             output_types.append(output)
         agent = Agent(
             ControlledModel(core.settings.model_name, complete,

@@ -7,7 +7,7 @@ from datetime import datetime
 from companion import reply_revision
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
-from companion_delivery_protocol.reply_groups import manifest, part_hash
+from companion_delivery_protocol.reply_groups import manifest, mixed_part, part_hash
 
 
 def digest(value):
@@ -48,11 +48,23 @@ def enqueue(store, event_id, conversation_id, text, now, action="qq.private.repl
         return message_id
 
 
-def _group_manifest(job_id, parts, interval_ms, *, contents=None):
-    version = 2 if contents is not None else 1
+def _group_manifest(job_id, parts, interval_ms, *, contents=None, version=None):
+    version = version or (2 if contents is not None else 1)
     hashes = ([part_hash(content, version) for content in contents] if contents is not None
               else [digest(text) for text in parts])
     return manifest(job_id, hashes, sum(map(len, parts)), interval_ms, version)
+
+
+def _mixed_content(content, event_id):
+    choice = mixed_part(content)
+    if choice["kind"] == "meme":
+        from companion.expression import ImageIntent
+
+        image = ImageIntent.model_validate(content["image"])
+        if (image.source != "companion.meme_catalog" or image.offer_key != "meme:" + event_id
+            or image.model_dump(exclude_none=True) != content["image"]):
+            raise ValueError("invalid mixed meme binding")
+    return choice
 
 
 def _meme_tail(content, event_id):
@@ -95,6 +107,27 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.priva
         except (ValueError, TypeError) as error:
             raise CoreError("INVALID_REPLY_SEGMENTS", 400) from error
         contents.append(tail)
+    return _enqueue_contents(store, job, parts, contents, interval_ms, now, action=action,
+                             reply_to=reply_to, version=2 if image is not None else 1)
+
+
+def enqueue_mixed_reply(store, job, contents, interval_ms, now):
+    if (job["kind"] != "chat" or not isinstance(contents, list) or not 1 <= len(contents) <= 64
+        or type(interval_ms) is not int or not 0 <= interval_ms <= 3000):
+        raise CoreError("INVALID_REPLY_SEGMENTS", 400)
+    try:
+        for content in contents:
+            _mixed_content(content, job["event_id"])
+        if sum(len(content["text"]) for content in contents) > 20000:
+            raise ValueError("mixed reply too long")
+    except (ValueError, TypeError, KeyError) as error:
+        raise CoreError("INVALID_REPLY_SEGMENTS", 400) from error
+    return _enqueue_contents(store, job, [content["text"] for content in contents], contents,
+                             interval_ms, now, action="qq.private.reply", version=3)
+
+
+def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, version,
+                      reply_to=None):
     with nullcontext() if store.db.in_transaction else store.transaction():
         reply_revision.check_job(store, job)
         source = store.one(
@@ -124,18 +157,18 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.priva
             ):
                 raise CoreError("REPLY_GROUP_CHANGED", 409)
             return [row["message_id"] for row in group["rows"]]
-        if len(contents) == 1:
+        if len(contents) == 1 and version != 3:
             return [enqueue(store, job["event_id"], job["conversation_id"], parts[0], now,
                             action=action, reply_to=reply_to)]
         group_hash = digest(_group_manifest(job["job_id"], parts, interval_ms,
-                            contents=contents if image is not None else None))
+                            contents=contents if version in (2, 3) else None, version=version))
         ids = []
         for index, content in enumerate(contents):
             message_id = enqueue(store, job["event_id"], job["conversation_id"],
                                  content["text"], now,
                                  key=f"reply:{job['event_id']}:v2:{index}", action=action,
                                  reply_to=reply_to if index == 0 else None)
-            if "image" in content:
+            if version in (2, 3):
                 store.execute("UPDATE outbox SET content_json=?,content_sha256=? "
                               "WHERE message_id=?",
                               (encode(content), digest(content), message_id))
@@ -169,7 +202,7 @@ def reply_group(store, message_id, *, require_sent=False):
         )
         if (
             not source or source["redacted"] or source["kind"] not in {"chat", "activity"}
-            or not 2 <= len(rows) <= 2**31 - 1 or row["segment_count"] != len(rows)
+            or not 1 <= len(rows) <= 2**31 - 1 or row["segment_count"] != len(rows)
             or row["action_type"] not in {"qq.private.reply", "qq.private.proactive"}
             or (source["kind"] == "chat" and row["action_type"] != "qq.private.reply")
             or (source["event_id"], source["conversation_id"]) != (
@@ -179,11 +212,16 @@ def reply_group(store, message_id, *, require_sent=False):
         ):
             raise ValueError("invalid group")
         contents = [json.loads(part["content_json"]) for part in rows]
+        mixed = any("reply_part" in content for content in contents)
         media = any("image" in content for content in contents)
+        if not mixed and len(rows) < 2:
+            raise ValueError("invalid group")
         parts = []
         for index, part in enumerate(rows):
             content = contents[index]
-            tail = media and index == len(rows) - 1
+            tail = not mixed and media and index == len(rows) - 1
+            if mixed:
+                _mixed_content(content, row["origin_event_id"])
             if tail:
                 _meme_tail(content, row["origin_event_id"])
             if (
@@ -192,10 +230,13 @@ def reply_group(store, message_id, *, require_sent=False):
                     "origin_event_id", "conversation_id", "action_type", "reply_group_sha256",
                     "segment_interval_ms"))
                 or part["delivery_key"] != f"reply:{row['origin_event_id']}:v2:{index}"
-                or not tail and set(content) - ({"reply_to"} if index == 0 else set()) != {"text"}
+                or not mixed and not tail and set(content) - (
+                    {"reply_to"} if index == 0 else set()) != {"text"}
                 or ("reply_to" in content and not valid_reply_to(content["reply_to"]))
+                or mixed and "reply_to" in content and index != 0
                 or not isinstance(content["text"], str)
-                or not tail and not content["text"].strip()
+                or not mixed and not tail and not content["text"].strip()
+                or mixed and (source["kind"] != "chat" or row["action_type"] != "qq.private.reply")
                 or tail and (source["kind"] != "chat" or row["action_type"] != "qq.private.reply")
                 or part["content_sha256"] != digest(content)
             ):
@@ -203,13 +244,14 @@ def reply_group(store, message_id, *, require_sent=False):
             parts.append(content["text"])
         if sum(map(len, parts)) > 20000 or row["reply_group_sha256"] != digest(
             _group_manifest(row["reply_group_id"], parts, row["segment_interval_ms"],
-                            contents=contents if media else None)
+                            contents=contents if media or mixed else None,
+                            version=3 if mixed else None)
         ):
             raise ValueError("invalid manifest")
         if require_sent and any(part["state"] != "SENT" for part in rows):
             return None
         return {"rows": rows, "text": "".join(parts), "segmented": True,
-                **({"version": 2} if media else {})}
+                **({"version": 3} if mixed else {"version": 2} if media else {})}
     except (ValueError, TypeError, KeyError) as error:
         raise CoreError("REPLY_GROUP_CHANGED", 409) from error
 
@@ -398,7 +440,7 @@ def lease_deliveries(store, settings, request, now):
                 except CoreError as error:
                     from companion.agent_output import reply_format
 
-                    if (reply_format(store, row["origin_event_id"]) != "singing"
+                    if (reply_format(store, row["origin_event_id"], row) != "singing"
                         or error.code not in {"SINGING_DELIVERY_FENCED",
                                               "VOICE_FLOW_RECEIPT_INVALID"}):
                         raise

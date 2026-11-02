@@ -2025,7 +2025,8 @@ class SendOperation:
             prior = record["data"].get("reply_segment")
             if (not isinstance(prior, dict) or set(prior) != set(saved)
                 or prior["index"] != index or type(prior["chars"]) is not int
-                or not 1 <= prior["chars"] <= segment["total_chars"]
+                or not (0 if segment["version"] == 3 else 1) <= prior["chars"]
+                <= segment["total_chars"]
                 or {key: value for key, value in prior.items()
                     if key not in {"index", "chars"}} != common
                 or record["data"].get("fence") != row["fence"]

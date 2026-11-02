@@ -34,6 +34,7 @@ import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from companion_delivery_protocol import VOICE_CHECK_FIELDS
+from companion_delivery_protocol.reply_groups import mixed_part
 
 from .event_normalizer import decode, normalize
 from .files import _destination, _get, _opaque
@@ -41,6 +42,7 @@ from .images import _private_download, global_address, resolve_public
 from .network import checked_http_client, private_request_matches
 from .onebot_client import bounded_post
 from .reply_segments import event_id as delivery_event_id
+from .reply_segments import voice_content as _voice_content
 from .rich_input import input_digest
 
 UPLOAD_DOMAIN = b"companion-core/onebot-owner-voice/v1\x00"
@@ -442,6 +444,12 @@ def prepare_delivery(item, config, *, voice_policy_sha256, now, authority=None, 
         "message_id", "delivery_key", "event_id", "privacy_epoch", "reply_revision", "node_id",
         "audio_bytes", "expires_at", "retirement_token"}
         | ({"singing_segment_index"} if is_song else set()))
+    if "reply_part" in item["content"]:
+        choice = mixed_part(item["content"])
+        if ((choice["kind"] == "singing") != is_song
+            or is_song and (choice["request_id"] != binding["job_id"]
+                           or choice["singing_segment_index"] != binding["singing_segment_index"])):
+            raise ValueError("VOICE_DELIVERY_CHANGED")
     for key in hashes:
         _sha(binding[key])
     if not isinstance(binding["retirement_token"], str) or not re.fullmatch(
@@ -464,7 +472,7 @@ def prepare_delivery(item, config, *, voice_policy_sha256, now, authority=None, 
         or item.get("delivery_lane", "owner_private") != "owner_private"
         or item.get("conversation_platform_session_key") != config.origin
         or not isinstance(item.get("content"), dict)
-        or set(item["content"]) != {"text"}
+        or not _voice_content(item)
         or not isinstance(item["content"].get("text"), str)
         or not 1 <= len(item["content"]["text"]) <= 20000
         or binding["message_id"] != item.get("message_id")

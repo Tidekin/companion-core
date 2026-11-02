@@ -3,7 +3,7 @@
 import hashlib
 import re
 
-from companion_delivery_protocol.reply_groups import manifest, part_hash
+from companion_delivery_protocol.reply_groups import manifest, mixed_part, part_hash
 
 from .spool import encode
 
@@ -107,7 +107,7 @@ def envelope(item):
     match = (re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v2:(0|[1-9][0-9]{0,9})", key)
              if isinstance(key, str) else None)
     if (not match or not isinstance(value, dict) or set(value) != FIELDS
-        or type(value["version"]) is not int or value["version"] not in (1, 2)
+        or type(value["version"]) is not int or value["version"] not in (1, 2, 3)
         or any(type(value[name]) is not int for name in
                ("index", "count", "total_chars", "interval_ms"))
         or not 1 <= value["count"] <= 2**31 - 1 or not 0 <= value["index"] < value["count"]
@@ -121,6 +121,13 @@ def envelope(item):
         raise ValueError("INVALID_REPLY_SEGMENT")
     text = item["content"]["text"]
     version = value["version"]
+    if version == 3:
+        choice = mixed_part(item["content"])
+        if ("authority" not in item or item.get("action_type") != "qq.private.reply"
+            or "reply_to" in item["content"] and value["index"] != 0
+            or "voice" in item and choice["kind"] not in {"voice", "singing"}
+            or choice["kind"] == "singing" and "voice" not in item):
+            raise ValueError("INVALID_REPLY_SEGMENT")
     if version == 2 and (
         "authority" not in item or item.get("action_type") != "qq.private.reply"
         or value["count"] < 2
@@ -141,12 +148,31 @@ def envelope(item):
 def image_only(item):
     """The image tail is native-owner-only and must still pass full envelope validation."""
     value, content = item.get("reply_segment"), item.get("content")
+    if (isinstance(value, dict) and value.get("version") == 3
+        and isinstance(content, dict) and content.get("text") == ""):
+        try:
+            choice = mixed_part(content)
+        except ValueError:
+            return False
+        return ("authority" in item and item.get("action_type") == "qq.private.reply"
+                and choice["kind"] in {"meme", "generated_image"})
     return ("authority" in item and item.get("action_type") == "qq.private.reply"
             and isinstance(value, dict) and value.get("version") == 2
             and type(value.get("index")) is int and type(value.get("count")) is int
             and isinstance(content, dict) and set(content) == {"text", "image"}
             and content["text"] == "" and isinstance(content["image"], dict)
             and value.get("index") == value.get("count", 0) - 1)
+
+
+def voice_content(item):
+    content = item.get("content", {})
+    if set(content) == {"text"}:
+        return True
+    try:
+        return (envelope(item) is not None and item["reply_segment"]["version"] == 3
+                and mixed_part(content)["kind"] in {"voice", "singing"})
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def journal_value(value, text):

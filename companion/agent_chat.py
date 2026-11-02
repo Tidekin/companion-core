@@ -16,6 +16,9 @@ async def reply(core, job, snapshots):
     with phase("context_restore", job["trace_id"]):
         persistence = ConversationStore(core, job, snapshots)
         conversation = persistence.load()
+        saved = persistence.row()
+        if saved and saved["phase"] == "OUTPUT":
+            return saved["output_text"], persistence
         ready, answers = deferred_results(core, job, snapshots, conversation) if conversation else (
             True, None)
     if not ready:
@@ -53,11 +56,9 @@ async def reply(core, job, snapshots):
     if isinstance(result.output, DeferredToolRequests):
         wait(core, job, persistence)
         return None, persistence
-    from companion.agent_output import SongReply, VoiceReply
+    from companion.agent_output import final_text
 
-    output = (result.output.text if isinstance(result.output, (VoiceReply, SongReply))
-              else result.output)
-    return output, persistence
+    return final_text(result.output), persistence
 
 
 def wait(core, job, persistence):

@@ -1795,6 +1795,8 @@ class Core(Runtime):
                            and reply_format(self.store, job["event_id"]) == "voice")
             singing_reply = (generated_reply and job["kind"] == "chat"
                              and reply_format(self.store, job["event_id"]) == "singing")
+            mixed_reply = (generated_reply and job["kind"] == "chat"
+                           and reply_format(self.store, job["event_id"]) == "mixed")
             quote_choice = None
             if (authority and generated_reply and job["kind"] == "chat"
                     and self.settings.quote_policy != "never"):
@@ -1831,12 +1833,21 @@ class Core(Runtime):
                     intent = (
                         self.expression.intent(job["event_id"], reply, now)
                         if policy and generated_reply and job["kind"] == "chat"
-                        and not voice_reply and not singing_reply
+                        and not voice_reply and not singing_reply and not mixed_reply
                         and self.settings.expression_enabled
                         and (authority is None or "expression" in authority.policy.purposes)
                         else None
                     )
-                    if singing_reply:
+                    if mixed_reply:
+                        from companion import reply_composition
+
+                        newer = self.store.one("SELECT 1 FROM events WHERE conversation_id=? "
+                            "AND actor_id='owner' AND source='qq.onebot' "
+                            "AND event_type IN ('message.received','message.media_received') "
+                            "AND rowid>(SELECT rowid FROM events WHERE event_id=?) LIMIT 1",
+                            (job["conversation_id"], job["event_id"]))
+                        message_ids = [] if newer else reply_composition.enqueue(self, job, now)
+                    elif singing_reply:
                         from companion.agent_singing import selected
 
                         song_id = song_choice(self.store, job["event_id"])
@@ -1907,7 +1918,7 @@ class Core(Runtime):
                             else "qq.private.reply",
                         )]
                     if (authority and message_ids and generated_reply
-                            and not voice_reply and not singing_reply
+                            and not voice_reply and not singing_reply and not mixed_reply
                             and job["kind"] == "chat"):
                         from companion import image_generation
 

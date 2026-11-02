@@ -10,6 +10,7 @@ import json
 
 import companion_delivery_protocol as wire
 from companion_delivery_protocol.authority import validate_authority_ref
+from companion_delivery_protocol.reply_groups import mixed_part
 
 from .voice_protocol import (
     LegacyVoiceDeliveryBinding,
@@ -104,9 +105,17 @@ def validate_original_voice_binding(
 
         song = SingingResult.model_validate_json(job["result_blob"])
         index = binding["singing_segment_index"]
+        choice = mixed_part(content) if "reply_part" in content else None
+        if choice:
+            offset = (outbox.get("segment_index") or 0) - index
+            if (choice["kind"] != "singing" or choice["request_id"] != job["job_id"]
+                or choice["singing_segment_index"] != index or offset < 0
+                or offset + len(song.audio) > (outbox.get("segment_count") or 1)
+                or not outbox["delivery_key"].endswith(":v2:" + str(outbox["segment_index"]))):
+                raise ValueError("original mixed singing partition changed")
         if (not 0 <= index < len(song.audio)
-            or index != (outbox.get("segment_index") or 0)
-            or (outbox.get("segment_count") or 1) != len(song.audio)
+            or not choice and index != (outbox.get("segment_index") or 0)
+            or not choice and (outbox.get("segment_count") or 1) != len(song.audio)
             or outbox.get("origin_event_id") != job["event_id"]
             or wire.digest(song.manifest) != binding["result_sha256"]
             or song.manifest["node_manifest_sha256"] != binding["manifest_sha256"]):

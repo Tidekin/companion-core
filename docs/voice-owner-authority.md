@@ -8,7 +8,9 @@ owner's shared-link catalog, then `sing_song(source_event_id, part)`. Only actua
 source events already shared with the original chat job are accepted. A settled
 SDK tool call binds `agent_tool_calls.voice_job_id` to the native `voice_jobs`
 queue; the original Reader `request_id` foreign key remains intact. The SDK waits
-without another model request, then `reply_with_song` selects its READY result.
+without another model request, then a `singing` item in `reply_with_parts` selects its READY result.
+The [ordered mixed-reply contract](mixed-replies.md) also allows independent text and pictures
+before or after those complete audio parts.
 This enables model choice during a private conversation; it adds no idle scanner.
 
 Singing reserves four requests and bounded source/metadata bytes against the

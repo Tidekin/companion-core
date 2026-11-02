@@ -385,8 +385,9 @@ class OwnerOneBot:
                 if journal.digest(item) != original:
                     raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
 
-            message = reply_segments.quote(item) + [
-                {"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
+            message = reply_segments.quote(item)
+            if not reply_segments.image_only(item):
+                message.append({"type": "text", "data": {"text": reply_segments.wire_text(item)}})
             try:
                 image = await read_image(self.guard.runtime, self.guard.client, item,
                                          check=fence)
@@ -396,6 +397,8 @@ class OwnerOneBot:
                 if error.response.status_code != 410:
                     raise
                 image = None
+            if image is None and reply_segments.image_only(item):
+                raise ValueError("GENERATED_IMAGE_UNAVAILABLE")
             if image is not None:
                 message.append({"type": "image", "data": {
                     "file": "base64://" + base64.b64encode(image.data).decode("ascii")}})

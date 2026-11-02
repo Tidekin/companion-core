@@ -74,7 +74,8 @@ def toolset(core, job, snapshots, persistence):
         source_event_id 必须是目录或 Reader 实际返回的事件，part 是实际视频分P。
         公开原唱和翻唱视频均可作为输入。SINGING_EXACT_VIDEO_REQUIRED 表示需要能验证的单个 BV 来源。
         只支持十分钟内公开歌曲；不要重复调用失败或 UNKNOWN 的原任务。
-        等待返回 READY 后，使用 reply_with_song 选择整曲，Core 按序发送语音气泡。
+        等待返回 READY 后，在 reply_with_parts 中选择 singing 项，可与文字、图片混排。
+        Core 按序发送完整歌曲，不需要主人使用固定指令。
         """
         check_conversation(core, job, snapshots, purpose="voice")
         try:
