@@ -70,7 +70,9 @@ def toolset(core, job, snapshots, persistence):
         """用固定本地音色翻唱一首真实 B 站歌曲。可按点歌或对话气氛自行选择。
 
         先用 reading_catalog 获取主人分享的链接，或 discover_content 按歌名搜索。
+        精确 BV 链接可直接使用；短链接先 read_content，再使用 Reader 返回的事件。
         source_event_id 必须是目录或 Reader 实际返回的事件，part 是实际视频分P。
+        公开原唱和翻唱视频均可作为输入。SINGING_EXACT_VIDEO_REQUIRED 表示需要能验证的单个 BV 来源。
         只支持十分钟内公开歌曲；不要重复调用失败或 UNKNOWN 的原任务。
         等待返回 READY 后，使用 reply_with_song 选择整曲，Core 按序发送语音气泡。
         """
@@ -84,7 +86,11 @@ def toolset(core, job, snapshots, persistence):
                                   "SINGING_ORIGINAL_ATTEMPT_EXISTS",
                                   "SINGING_EXACT_VIDEO_REQUIRED"}:
                 raise
-            return {"state": "UNAVAILABLE", "error_code": error.code, "retry_allowed": False}
+            answer = {"state": "UNAVAILABLE", "error_code": error.code, "retry_allowed": False}
+            if error.code == "SINGING_EXACT_VIDEO_REQUIRED":
+                answer["message"] = ("需要能验证的单个 BV 视频来源：主人分享的精确 BV 链接，"
+                    "或 Reader 已验证的短链读取事件。公开原唱和翻唱视频均可作为输入。")
+            return answer
         raise CallDeferred(metadata=metadata)
 
     options = core.settings.voice.singing

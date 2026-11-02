@@ -49,7 +49,16 @@ def _source(store, settings, clock, job, source_event_id):
         observation = store.one("SELECT canonical_url FROM observations WHERE event_id=? "
                                  "AND redacted=0", (source_event_id,))
         if observation:
-            urls = [observation["canonical_url"]]
+            url = observation["canonical_url"]
+            if url.startswith("https://b23.tv/"):
+                from companion.bili_video import _source as validated_video_source
+
+                try:
+                    _, observed = validated_video_source(store, settings, source_event_id, clock())
+                except CoreError as error:
+                    raise CoreError("SINGING_EXACT_VIDEO_REQUIRED", 400) from error
+                url = "https://www.bilibili.com/video/" + observed.evidence.video.bvid
+            urls = [url]
     choices = []
     for url in urls:
         match = re.fullmatch(r"https://www\.bilibili\.com/video/(BV[0-9A-Za-z]{10})/?", url)

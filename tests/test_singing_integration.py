@@ -49,18 +49,56 @@ async def singing_window(core, tmp_path, monkeypatch, *, manifest_sha256="b" * 6
         yield client, config, plan
 
 
-async def queue_song(core, client, config, plan):
-    event, admitted = await admit(client, core, config, plan, 1, "想听你唱首歌", card=URL)
-    provider = Provider(answer(calls=[call("catalog", "reading_catalog", {})]),
-        answer(calls=[call("sing", "sing_song", {"source_event_id": event["event_id"]})]))
+async def queue_song(core, client, config, plan, *, short_link=False):
+    from tests.test_reading_followup import READER_AUTH, SHORT
+
+    event, admitted = await admit(client, core, config, plan, 1, "想听你唱首歌",
+                                  card=SHORT if short_link else URL)
+    source_event_id = event["event_id"]
+    if short_link:
+        from source_reader.bilibili import BilibiliReader
+        from source_reader.network import PublicHTTP
+        from source_reader.worker_v1 import tick
+        from tests.test_heybox_reader import mock_pool
+        from tests.test_source_reader import META, PLAYER, SUBTITLE, response
+
+        reader = Provider(answer(calls=[call("read-song", "read_content", {"url": SHORT})]))
+        async with worker_for(core, reader) as worker:
+            assert await worker.run_once("read-short-song", job_id=admitted["job_id"])
+        metadata = {**META, "data": {**META["data"], "bvid": URL.rsplit("/", 1)[1],
+            "pages": [{"page": 1, "cid": META["data"]["cid"], "duration": 65}]}}
+        pool, _ = mock_pool(response(status=302, headers={"Location": URL}),
+                           response(metadata), response(PLAYER), response(SUBTITLE))
+        authorization = client.headers["Authorization"]
+        client.headers["Authorization"] = READER_AUTH["Authorization"]
+        try:
+            async with PublicHTTP(pool) as public:
+                assert await tick(client, BilibiliReader(public, clock=core.clock), "bili",
+                                  source="bilibili", clock=lambda: core.clock.now)
+        finally:
+            client.headers["Authorization"] = authorization
+        observation = core.store.one("SELECT * FROM observations")
+        assert observation["canonical_url"] == SHORT
+        evidence = json.loads(observation["evidence_json"])["read_observation"]["evidence"]
+        assert evidence["video"]["bvid"] == URL.rsplit("/", 1)[1]
+        assert evidence["resolution"]["target_url"] == URL
+        source_event_id = observation["event_id"]
+        core.clock.advance(2)
+        provider = Provider(answer(calls=[call("sing", "sing_song", {
+            "source_event_id": source_event_id})]), answer("该歌曲暂时无法处理。"))
+    else:
+        provider = Provider(answer(calls=[call("catalog", "reading_catalog", {})]),
+            answer(calls=[call("sing", "sing_song", {"source_event_id": source_event_id})]))
     async with worker_for(core, provider) as worker:
         assert await worker.run_once("choose-singing", job_id=admitted["job_id"])
     job = core.store.one("SELECT * FROM voice_jobs")
-    assert job is not None, core.store.rows("SELECT state,last_error_code FROM jobs")
+    assert job is not None, core.store.rows("SELECT tool_name,result_json FROM agent_tool_calls "
+                                           "WHERE tool_name='sing_song'")
     assert job["operation"] == "sing" and job["state"] == "QUEUED"
     assert job["reserved_output_bytes"] == 56 * 1024 * 1024
     assert core.store.one("SELECT state FROM jobs")["state"] == "RETRY_WAIT"
-    assert len(provider.requests) == 2 and not core.store.rows("SELECT * FROM outbox")
+    assert len(provider.requests) == (1 if short_link else 2)
+    assert not core.store.rows("SELECT * FROM outbox")
     return event, admitted, job
 
 
