@@ -20,6 +20,7 @@ HEADING = ("相关的以前聊天原文（按相关度从更早的对话里找�
            "以原文和时间为准并说明差异；转述、转发、梦、设想和故事仍按原文的说法区分）：")
 CANDIDATES = 20
 RERANK_CHARS = 400
+RERANK_FLOOR = -4.0
 DISPLAY_CHARS = 700
 _CACHE_LIMIT = 50000
 _vectors, _lock = OrderedDict(), Lock()
@@ -100,7 +101,8 @@ def select(settings, query, docs, limit):
     pool = [index for index, _ in fused.most_common(CANDIDATES)]
     scores = rerank(settings, query, [docs[index][:RERANK_CHARS] for index in pool])
     if scores is not None:
-        pool = [pool[index] for index in _ranked(scores)]
+        # Cross-encoder logits far below zero are unrelated small talk; keep them out.
+        pool = [pool[index] for index in _ranked(scores) if scores[index] >= RERANK_FLOOR]
     return pool[:limit]
 
 
