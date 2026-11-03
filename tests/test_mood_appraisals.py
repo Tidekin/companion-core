@@ -280,5 +280,6 @@ def test_capped_enforces_daily_limit_per_reason(core):
     rows = list(core.store.rows("SELECT * FROM mood_appraisals ORDER BY created_at"))
     assert len(rows) == 5
 
-    kept = mood_appraisals.capped(rows, core.settings.timezone)
-    assert len(kept) == mood_appraisals.DAILY_CAP
+    # Raw rows stay; the projection keeps the earliest DAILY_CAP valid signals.
+    kept = [s["event_id"] for s in core.mood.snapshot()["signals"]]
+    assert kept == ["evt_test_1", "evt_test_2"]
