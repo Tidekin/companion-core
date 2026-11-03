@@ -44,6 +44,8 @@ def test_select_ranks_by_bigram_overlap_without_reranker(core, monkeypatch):
 
 
 def test_select_uses_reranker_order_when_configured(core, monkeypatch):
+    core.settings.turn_recall_rerank = True
+    core.settings.turn_recall_second_hop = 0
     monkeypatch.setattr(turn_recall, "semantic", lambda settings, query, docs: [0.0] * len(docs))
     monkeypatch.setattr(turn_recall, "rerank",
                         lambda settings, query, docs: [float("梦" in doc) for doc in docs])
@@ -217,3 +219,27 @@ def test_update_never_ends_an_owner_confirmed_value(core):
                                             "relayed_by_owner": True}), core.clock())
     assert not core.store.one("SELECT valid_to FROM memories WHERE memory_id=?",
                               (old_id,))["valid_to"]
+
+
+def test_second_hop_reaches_the_record_named_by_first_hop_evidence(core, monkeypatch):
+    monkeypatch.setattr(turn_recall, "semantic", lambda settings, query, docs: [0.0] * len(docs))
+    docs = ["[1月1日] 主人：喷壶锁在桃源阁的3号柜。",
+            "[1月2日] 主人：3号柜的钥匙在顾念手上。",
+            "[1月3日] 主人：今天下雨了。",
+            "[1月4日] 主人：值守表 顾念 周五 14:00-16:00 东园门",
+            "[1月5日] 主人：晚饭吃了面。"]
+    query = "我想取喷壶，要找谁拿钥匙、什么时候、去哪？"
+    core.settings.turn_recall_second_hop = 0
+    assert 3 not in turn_recall.select(core.settings, query, docs, 2)
+    core.settings.turn_recall_second_hop = 1
+    assert 3 in turn_recall.select(core.settings, query, docs, 3)
+
+
+def test_focus_keeps_header_and_matching_whole_lines():
+    lines = ["值守表", "人\t时间\t地点", *(f"路人{i}\t周一\t某处" for i in range(80)),
+             "顾念\t周五 14:00-16:00\t东园门"]
+    shown, cut = turn_recall.focus("\n".join(lines), "顾念什么时候在哪", 120)
+    assert cut and shown.splitlines()[:2] == lines[:2] and lines[-1] in shown.splitlines()
+    assert turn_recall.focus("短表", "q", 120) == ("短表", False)
+
+

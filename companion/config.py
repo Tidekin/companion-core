@@ -616,6 +616,12 @@ class Settings(BaseModel):
     # Raw past turns retrieved alongside extracted facts; 0 disables.
     turn_recall_limit: int = Field(default=8, ge=0, le=20)
     turn_recall_scan_turns: int = Field(default=600, ge=0, le=5000)
+    # Cross-encoder over raw turns: off by default. Offline round-3 recall@8 was the same
+    # with and without it (91.9%) at ~3-6 s per reply; facts keep their own reranker.
+    turn_recall_rerank: bool = False
+    # Second hop: re-query with the best first-hop evidence (e.g. who holds a key) and add
+    # up to this many further turns (their schedule, their place). 0 disables.
+    turn_recall_second_hop: int = Field(default=2, ge=0, le=4)
     # Upper bound on waiting for off-loop ranking; on expiry the reply proceeds without it.
     recall_compute_timeout_seconds: float = Field(default=15, gt=0, le=120)
     # Local ONNX cross-encoder directory (tokenizer.json, onnx/*.onnx). "auto" uses

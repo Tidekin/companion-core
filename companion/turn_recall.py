@@ -21,6 +21,8 @@ HEADING = ("相关的以前聊天原文（按相关度从更早的对话里找�
            "以原文和时间为准。主人自己说的更正按新的为准；转发或引用里别人的说法要说明来源，"
            "可以当作较新的情况，但不能说成主人本人确认）：")
 CANDIDATES = 12
+SECOND_HOP_CHARS = 160
+FOCUS_SOURCE_CHARS = 4000
 RERANK_CHARS = 280
 RERANK_FLOOR = -4.0
 DISPLAY_CHARS = 700
@@ -92,19 +94,38 @@ def _ranked(scores):
     return [index for index, _ in sorted(enumerate(scores), key=lambda item: -item[1])]
 
 
-def select(settings, query, docs, limit):
-    """Indices of the most relevant docs: bigram BM25 + embedding RRF, then rerank."""
-    if not docs or limit <= 0 or not query.strip():
-        return []
+def _fused(settings, query, docs):
     fused = Counter()
     for ranking in (_ranked(lexical(query, docs)), _ranked(semantic(settings, query, docs))):
         for rank, index in enumerate(ranking, 1):
             fused[index] += 1 / (60 + rank)
-    pool = [index for index, _ in fused.most_common(CANDIDATES)]
-    scores = rerank(settings, query, [docs[index][:RERANK_CHARS] for index in pool])
-    if scores is not None:
-        # Cross-encoder logits far below zero are unrelated small talk; keep them out.
-        pool = [pool[index] for index in _ranked(scores) if scores[index] >= RERANK_FLOOR]
+    return [index for index, _ in fused.most_common()]
+
+
+def _evidence(doc):
+    """A doc's owner words and attachments, without its time stamp or the reply."""
+    body = doc.split("\n你当时回复：", 1)[0]
+    return body.split("] ", 1)[-1][:SECOND_HOP_CHARS]
+
+
+def select(settings, query, docs, limit):
+    """Indices of the most relevant docs: bigram BM25 + embedding RRF (optional rerank),
+    then a bounded second hop seeded with the two best first-hop docs."""
+    if not docs or limit <= 0 or not query.strip():
+        return []
+    pool = _fused(settings, query, docs)[:CANDIDATES]
+    if getattr(settings, "turn_recall_rerank", False):
+        scores = rerank(settings, query, [docs[index][:RERANK_CHARS] for index in pool])
+        if scores is not None:
+            # Cross-encoder logits far below zero are unrelated small talk; keep them out.
+            pool = [pool[index] for index in _ranked(scores) if scores[index] >= RERANK_FLOOR]
+    extra = getattr(settings, "turn_recall_second_hop", 0)
+    if extra and pool:
+        seeds = " ".join(_evidence(docs[index]) for index in pool[:2])
+        head = pool[:max(1, limit - extra)]
+        hop = [index for index in _fused(settings, query + " " + seeds, docs)
+               if index not in head][:extra]
+        pool = head + hop + [index for index in pool if index not in head and index not in hop]
     return pool[:limit]
 
 
@@ -134,7 +155,9 @@ def _candidates(store, settings, job, event_ids=None):
     rows = recent_sent_sources(store, job["conversation_id"], job["event_id"],
                                len(event_ids) if event_ids is not None
                                else settings.turn_recall_scan_turns, event_ids=event_ids)
-    found = replay_many(store, [row["event_id"] for row in rows])
+    # Long attachments are read in full here and cut to whole relevant lines on display.
+    found = replay_many(store, [row["event_id"] for row in rows],
+                        item_chars=FOCUS_SOURCE_CHARS, turn_chars=FOCUS_SOURCE_CHARS * 2)
     notes = [found[row["event_id"]] for row in rows]
     return rows, notes
 
@@ -203,7 +226,7 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
     full = {index: sum(len(message["content"].encode())
                        for message in turn_messages(rows[index], store)) for index in ranked}
     while ranked:
-        data = _data(rows, notes, sorted(ranked), settings.timezone)
+        data = _data(rows, notes, sorted(ranked), settings.timezone, query)
         shown = len((HEADING + "\n" + encode(data)).encode())
         cost = max(shown, len(HEADING.encode()) + sum(full[index] for index in ranked))
         if cost <= max_bytes:
@@ -213,14 +236,37 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
     return None
 
 
-def _data(rows, notes, chosen, zone):
+def focus(text, query, budget):
+    """Fit a long attachment by whole lines: title/header lines first, then the lines that
+    share the most bigrams with the query, in original order. Short text is unchanged."""
+    if len(text) <= budget:
+        return text, False
+    lines = text.splitlines()
+    terms = set(_grams(query))
+    keep, used = set(range(min(2, len(lines)))), sum(len(line) + 1 for line in lines[:2])
+    for index in sorted(range(2, len(lines)), key=lambda i: -len(terms & set(_grams(lines[i])))):
+        if used + len(lines[index]) + 1 > budget:
+            continue
+        keep.add(index)
+        used += len(lines[index]) + 1
+    return "\n".join(lines[i] for i in sorted(keep)), True
+
+
+def _data(rows, notes, chosen, zone, query=""):
+    from companion.memory_references import HISTORY_ITEM_CHARS
+
     items = []
     for index in chosen:
         row = rows[index]
         item = {"time": _when(row.get("occurred_at"), zone) or None,
                 "owner_said": (row.get("user_text") or "")[:DISPLAY_CHARS]}
         if notes[index]:
-            item["attachments_read"] = notes[index]
+            shown = []
+            for note in notes[index]:
+                text, cut = focus(note["text"], query, HISTORY_ITEM_CHARS)
+                shown.append({**note, "text": text,
+                              "excerpt": note.get("excerpt", False) or cut})
+            item["attachments_read"] = shown
         if row.get("reply_text"):
             item["you_replied"] = row["reply_text"][:DISPLAY_CHARS]
         items.append(item)

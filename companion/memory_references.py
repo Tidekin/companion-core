@@ -37,7 +37,7 @@ def replay(store, event_id):
     return replay_many(store, [event_id])[event_id]
 
 
-def replay_many(store, event_ids):
+def replay_many(store, event_ids, *, item_chars=HISTORY_ITEM_CHARS, turn_chars=HISTORY_TURN_CHARS):
     """`replay` for many inputs with one pass over each source table."""
     found = {key: [] for key in event_ids}
     ids = list(found)
@@ -66,11 +66,11 @@ def replay_many(store, event_ids):
     for key, items in found.items():
         items = items + [(LABELS["transcript"], index, text)
                          for index, text in enumerate(transcripts.get(key, []))]
-        notes, remaining = [], HISTORY_TURN_CHARS
+        notes, remaining = [], turn_chars
         for label, slot, text in items:
             if not isinstance(text, str) or not text.strip() or remaining <= 0:
                 continue
-            clipped = text[:min(HISTORY_ITEM_CHARS, remaining)]
+            clipped = text[:min(item_chars, remaining)]
             remaining -= len(clipped)
             notes.append({"kind": label, "slot": slot, "text": clipped,
                           "excerpt": clipped != text})
