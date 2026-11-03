@@ -111,3 +111,36 @@ retrieval, rejects a concurrent search-source withdrawal, and completes an indep
 Core worker through mocked provider transport and native memory-review/chat settlement.
 Source-aware image/history, console, extraction and synchronous ranking callers are checked too.
 The exact frozen candidate and checks belong to the single verification receipt.
+
+## Reply query reuse and bounded follow-up
+
+Fact search and raw-turn ranking reuse a query vector only inside one reply, keyed by
+encoder instance and query. The existing inference lock still serializes model calls.
+A standard `ContextVar` propagates the reply's bounded cache through `asyncio.to_thread`;
+the reply clears it on success, error or cancellation. Late CPU work cannot repopulate
+a closed cache. Source proofs and SQLite vectors are revalidated as before. The two
+raw-turn hops also share their document bigram bags; their query terms stay separate.
+The installed Python `asyncio.threads.to_thread` and `contextlib.AsyncContextDecorator`
+implementations were inspected for context propagation and coroutine lifetime.
+
+Within a reply, memory tools return full evidence once per version (including evidence
+and review-state changes), then an ID marker. Two consecutive calls without new evidence
+add a stop hint; later calls return `STOPPED`. An unsuccessful summary lookup can use
+one raw-turn lookup, bounded to four turns / 6,000 bytes and the current signed history
+allowance. Both memory and history permissions and the original source proofs remain
+required; erasure fences tool results and the final answer.
+
+Extraction uses batch-local event, attachment and episode-group refs. Core expands them
+before strict schema, quote, group and source checks. One local bracket repair can close
+missing delimiters outside strings; it never completes a string or invents evidence.
+Unrepairable output retains the original accounted, bounded retry path. Candidate
+rejections record content-free reason codes, including sensitive source/summary,
+redaction, unsupported self observation and a preceding owner correction. Source and
+summary filtering both remain active; an explicit bank-card opening event permits only
+the generic card noun in its summary. The extraction prompt does not request mood fields
+when mood is disabled, and mood recording behavior is unchanged.
+
+Local query timings measure the retrieval pair with one caller and warm document vectors,
+not provider latency, overall chat latency or answer accuracy. Round 5 answer-quality
+acceptance must freeze the candidate before authoring fresh questions and running the
+existing anchored judges and closed-book control.

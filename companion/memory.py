@@ -9,7 +9,12 @@ from zoneinfo import ZoneInfo
 from companion.commands import command_parts
 from companion.contracts import CoreError
 from companion.memory_context import MemoryContext, MemorySources, check_version, read_version
-from companion.privacy import advance_epoch, memory_sensitive, redact
+from companion.privacy import (
+    advance_epoch,
+    memory_sensitive,
+    memory_summary_sensitive,
+    redact,
+)
 from companion.retrieval import SemanticIndex, fuse
 from companion.store import encode, uid
 
@@ -303,7 +308,12 @@ class Memory:
                              for row in current}})
         return current
 
-    def validate_candidate(self, candidate, confirmed=False, *, now=None):
+    def validate_candidate(self, candidate, confirmed=False, *, now=None, rejection=None):
+        def reject(reason):
+            if rejection is not None:
+                rejection["reason"] = reason
+            return None
+
         event = MemorySources(self, now).event(candidate.evidence_event_id, require_text=False)
         if not event:
             raise CoreError("MISSING_MEMORY_EVIDENCE")
@@ -328,14 +338,17 @@ class Memory:
             (candidate.subject, candidate.content, candidate.content, event["ingested_at"]),
         ):
             # A delayed extraction of an old value cannot undo the owner's later correction.
-            return None
-        if not confirmed and memory_sensitive(text + candidate.content):
-            return None
+            return reject("OWNER_CORRECTION_PRECEDES_EXTRACTION")
+        # Check both source and summary; only the generic card noun has a narrow exception.
+        if not confirmed and memory_sensitive(text):
+            return reject("SENSITIVE_SOURCE")
+        if not confirmed and memory_summary_sensitive(candidate.content, text):
+            return reject("SENSITIVE_SUMMARY")
         if candidate.subject == "self" and not re.search(r"你(?:最近|经常|总是|这几次|刚才)", text):
-            return None
+            return reject("UNSUPPORTED_SELF_OBSERVATION")
         content = redact(candidate.content, self.settings)
         if "[REDACTED]" in content:
-            return None
+            return reject("REDACTED_SUMMARY")
         if reference:
             content = memory_references.attributed(candidate, reference)
         return event, content

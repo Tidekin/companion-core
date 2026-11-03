@@ -11,10 +11,12 @@ from companion.agent_runtime import check_conversation, run_conversation
 from companion.agent_tools import core_query_tools
 from companion.contracts import CoreError
 from companion.paid_budget import sha
+from companion.retrieval import query_scope
 from companion.store import after
 from companion.telemetry import emit, phase
 
 
+@query_scope()
 async def reply(core, job, snapshots):
     with phase("context_guard", job["trace_id"]):
         view = check_conversation(core, job, snapshots)

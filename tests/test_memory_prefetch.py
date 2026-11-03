@@ -14,7 +14,7 @@ from companion.agent_persistence import ConversationStore
 from companion.contracts import Candidate, CoreError
 from companion.store import encode
 from tests.conftest import run
-from tests.sdk_reader_fixture import answer, worker_for
+from tests.sdk_reader_fixture import answer, call, worker_for
 from tests.support.native_consumer_entry import environment
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +56,8 @@ def test_prefetch_enters_first_request_without_tool_and_erases_with_source(core,
                 assert child.returncode == 0, stderr.decode(errors="replace")
                 receipt = json.loads(stdout.decode().splitlines()[-1])
                 assert receipt["pid"] != os.getpid() and receipt["provider_calls"] == 1
+                queries = receipt["query_inferences"]
+                assert queries.count("葭岸项目的样机编号是多少？") == 1
             finally:
                 if child.returncode is None:
                     child.kill()
@@ -169,4 +171,47 @@ def test_restored_conversation_does_not_repeat_prefetch_or_paid_request(
                 assert persistence.row()["snapshots_json"] == saved["snapshots_json"]
             assert len(calls) == 1
             assert len(core.store.rows("SELECT * FROM model_usage WHERE state='SETTLED'")) == 1
+    run(scenario())
+
+
+@pytest.mark.parametrize("erase_after_tool", [False, True])
+def test_raw_tool_fallback_uses_original_sources_and_erasure_fence(
+    core, tmp_path, erase_after_tool,
+):
+    async def scenario():
+        async with environment(core, tmp_path, purposes=("chat", "memory", "history")) as (
+            entry, _sends,
+        ):
+            original = await entry.admit(1, "葭岸项目的样机编号是GL-84。")
+            response = lambda _: httpx.Response(200, json=answer("知道了。"))  # noqa: E731
+            async with worker_for(core, response) as w:
+                assert await w.run_once("raw-source")
+            assert (await entry.send(entry.client, entry.protocol))["worked"]
+            assert not core.store.rows("SELECT * FROM memories")
+            fresh = await entry.admit(2, "葭岸项目的样机编号是多少？")
+            calls = []
+
+            def provider(request):
+                payload = json.loads(request.content)
+                calls.append(payload)
+                if len(calls) == 1:
+                    return httpx.Response(200, json=answer(calls=[call(
+                        "raw-lookup", "memory_recall", {"query": "葭岸项目样机编号"})]))
+                tool = next(m for m in payload["messages"] if m.get("role") == "tool")
+                result = json.loads(tool["content"])
+                assert "GL-84" in json.dumps(result["raw_turns"], ensure_ascii=False)
+                if erase_after_tool:
+                    with core.store.transaction():
+                        core.ledger.expire_events(core.store, [original["event_id"]], core.clock())
+                return httpx.Response(200, json=answer("编号是GL-84。"))
+
+            async with worker_for(core, provider) as worker:
+                assert await worker.run_once("raw-fallback")
+            assert len(calls) == 2
+            outbox = core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                                     (fresh["event_id"],))
+            assert bool(outbox) is not erase_after_tool
+            assert all(row["state"] == "SETTLED" for row in core.store.rows(
+                "SELECT state FROM model_usage"))
+
     run(scenario())

@@ -104,10 +104,9 @@ def test_discovery_jobs_do_not_duplicate_or_enable_memory_extraction(
             source = core.store.one(
                 "SELECT conversation_id,occurred_at FROM events WHERE event_id=?",
                 (event["event_id"],))
-            expected = [{"event_id": event["event_id"], "text": event["payload"]["text"],
-                         "conversation_id": source["conversation_id"],
-                         "occurred_at": source["occurred_at"],
-                         "episode_source_event_ids": [event["event_id"]]}]
+            expected = {"groups": {"g0": ["e0"]}, "events": [
+                {"ref": "e0", "text": event["payload"]["text"], "group": "g0",
+                 "references": [], "occurred_at": source["occurred_at"]}]}
             assert completed is (chat_state == "SUCCEEDED"), json.dumps({
                 "clock": core.clock(),
                 "events": core.store.rows(

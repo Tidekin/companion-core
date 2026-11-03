@@ -44,10 +44,11 @@ def run_isolated_worker(settings_path, now):
         assert payload["max_tokens"] == min(2048, settings.paid_model.max_output_tokens)
         calls.append("memory_extract")
         sources = json.loads(payload["messages"][-1]["content"])
-        source = next((row for row in sources if row["text"] == "青禾项目下一步检查配色"), None)
+        source = next((row for row in sources["events"]
+                       if row["text"] == "青禾项目下一步检查配色"), None)
         candidates = [{
             "subject": "project", "kind": "fact", "fact_key": "next_step",
-            "content": "青禾项目下一步检查配色", "evidence_event_id": source["event_id"],
+            "content": "青禾项目下一步检查配色", "evidence_event_id": source["ref"],
             "evidence_quote": "青禾项目下一步检查配色",
         }] if source else []
         return provider_response(encode({"memories": candidates}))

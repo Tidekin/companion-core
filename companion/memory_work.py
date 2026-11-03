@@ -51,6 +51,110 @@ def erase_memory_work(store, event_ids):
         store.execute("DELETE FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
 
 
+def short_refs(data):
+    """Replace long event/reference IDs in the extractor input with e0/r0, and repeated
+    episode groups with g0. Returns (payload, mapping); the model answers in short refs
+    and from_refs() restores the real IDs before any validation."""
+    refs, groups, mapping = {}, {}, {}
+    for index, item in enumerate(data):
+        refs[item["event_id"]] = f"e{index}"
+        mapping[f"e{index}"] = item["event_id"]
+    events = []
+    for item in data:
+        group = tuple(item["episode_source_event_ids"])
+        key = None
+        if group:
+            if group not in groups:
+                groups[group] = f"g{len(groups)}"
+                mapping[groups[group]] = list(group)
+            key = groups[group]
+        references = []
+        for reference in item["references"]:
+            ref = f"r{sum(name.startswith('r') for name in mapping)}"
+            mapping[ref] = reference["reference_id"]
+            references.append({"ref": ref, **{k: v for k, v in reference.items()
+                                             if k != "reference_id"}})
+        events.append({"ref": refs[item["event_id"]], "occurred_at": item["occurred_at"],
+                       "group": key, "text": item["text"], "references": references})
+    payload = {"groups": {ref: [refs.get(e, e) for e in group] for group, ref in groups.items()},
+               "events": events}
+    return payload, mapping
+
+
+def from_refs(value, mapping):
+    """Real IDs for the short refs an extraction used; unknown values stay unchanged
+    and fail the usual evidence checks."""
+    def one(ref):
+        target = mapping.get(ref, ref)
+        return target if isinstance(target, str) else ref
+
+    for item in value.get("memories", []) if isinstance(value, dict) else []:
+        if isinstance(item, dict):
+            for key in ("evidence_event_id", "evidence_reference_id"):
+                if isinstance(item.get(key), str):
+                    item[key] = one(item[key])
+    for item in value.get("episode_summaries", []) if isinstance(value, dict) else []:
+        if isinstance(item, dict) and isinstance(item.get("source_event_ids"), list):
+            ids = []
+            for ref in item["source_event_ids"]:
+                target = mapping.get(ref, ref) if isinstance(ref, str) else ref
+                ids += target if isinstance(target, list) else [target]
+            item["source_event_ids"] = ids
+    for item in value.get("interaction_signals", []) if isinstance(value, dict) else []:
+        if isinstance(item, dict) and isinstance(item.get("event_id"), str):
+            item["event_id"] = one(item["event_id"])
+    return value
+
+
+def repair_json(text):
+    """Close brackets the model left open (e.g. a source list missing its ']').
+
+    Only bracket structure outside strings is touched; nothing is invented, and the
+    result still passes the strict schema and every evidence check. None when the
+    text is not repairable this way."""
+    stack, out, in_string, escaped = [], [], False, False
+    pairs = {"{": "}", "[": "]"}
+    for char in text:
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in pairs:
+            stack.append(pairs[char])
+        elif char in "}]":
+            if char not in stack:
+                return None
+            while stack and stack[-1] != char:
+                out.append(stack.pop())
+            stack.pop()
+        out.append(char)
+    if in_string:
+        return None
+    out.extend(reversed(stack))
+    try:
+        return json.loads("".join(out))
+    except ValueError:
+        return None
+
+
+def parse_extraction(text, mapping):
+    """(Extraction, repaired) from model text in short refs."""
+    try:
+        value, repaired = json.loads(text), False
+    except ValueError:
+        value, repaired = repair_json(text), True
+        if value is None:
+            raise
+    return Extraction.model_validate(from_refs(value, mapping)), repaired
+
+
 def _settled(store, request_id):
     usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
     if not usage or usage["state"] != "SETTLED":
@@ -613,9 +717,11 @@ async def extraction_step(core, local_day, lease, batch, persist):
                                  "kind": reference["kind"], "text": text,
                                  "excerpt": len(text) < len(reference["text"])})
                 item["references"] = kept
+            payload, ref_map = short_refs(data)
+            batch["ref_map"] = ref_map
             messages = [
                 {"role": "system", "content": EXTRACT_RULES},
-                {"role": "user", "content": encode(data)},
+                {"role": "user", "content": encode(payload)},
             ]
             batch["reference_ids"] = [ref["reference_id"] for event in data
                                        for ref in event["references"]]
@@ -652,7 +758,9 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 source_check=lambda: _validate_batch(core, lease, batch),
             )
             _settled(s, request_id)
-            extraction = Extraction.model_validate_json(response.text)
+            extraction, repaired = parse_extraction(response.text, batch.get("ref_map", {}))
+            if repaired:
+                s.audit("memory.output_repaired", events[0]["event_id"], "memory", now)
             _validate_batch(core, lease, batch)
             memory_enrichment.validate_summaries(
                 core.memory, events, extraction.episode_summaries, core.clock()
@@ -662,17 +770,26 @@ async def extraction_step(core, local_day, lease, batch, persist):
                                 for item in data for ref in item["references"]}
             for candidate in extraction.memories:
                 if candidate.evidence_event_id not in batch["event_ids"]:
+                    s.audit("memory.candidate_rejected", events[0]["event_id"], "memory",
+                            now, reason="MISSING_BATCH_EVIDENCE")
                     continue
                 if candidate.evidence_reference_id and candidate.evidence_quote not in (
                     shown_references.get(candidate.evidence_reference_id, "")
                 ):
-                    s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory", now)
+                    s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory",
+                            now, reason="REFERENCE_QUOTE_MISMATCH")
                     continue
                 try:
-                    if core.memory.validate_candidate(candidate, now=core.clock()) is not None:
+                    rejection = {}
+                    if core.memory.validate_candidate(candidate, now=core.clock(),
+                                                      rejection=rejection) is not None:
                         candidates.append(candidate.model_dump(mode="json"))
-                except CoreError:
-                    s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory", now)
+                    else:
+                        s.audit("memory.candidate_rejected", candidate.evidence_event_id,
+                                "memory", now, **rejection)
+                except CoreError as error:
+                    s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory",
+                            now, reason=error.code)
             batch.update(
                 phase="REVIEW",
                 candidates=candidates,

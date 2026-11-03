@@ -34,7 +34,7 @@ def test_queued_owner_input_cancels_proactive_before_dispatch_without_unknown(co
     def answer(request):
         messages = json.loads(request.content)["messages"]
         if messages[0]["content"] == EXTRACT_RULES:
-            event_id = json.loads(messages[-1]["content"])[0]["event_id"]
+            event_id = json.loads(messages[-1]["content"])["events"][0]["ref"]
             text = json.dumps({"memories": [{
                 "subject": "user", "kind": "preference", "fact_key": "drink",
                 "content": "用户喜欢龙井茶", "evidence_event_id": event_id,

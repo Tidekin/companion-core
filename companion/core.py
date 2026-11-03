@@ -52,6 +52,7 @@ from companion.privacy import epoch, redact
 from companion.reading import ReadingService
 from companion.reflection import ReflectionService
 from companion.reply_segments import split_text
+from companion.retrieval import query_scope
 from companion.runtime import Runtime
 from companion.social import SocialPlanner, proactive_allowed
 from companion.store import after, encode, uid, utcnow
@@ -1692,6 +1693,7 @@ class Core(Runtime):
                                  error_code=code)
         return True
 
+    @query_scope()
     async def run_once(self, worker_id="worker", *, job_id=None):
         job = self.claim_job(worker_id, job_id=job_id)
         if job is not None and job["kind"] == "evaluation":

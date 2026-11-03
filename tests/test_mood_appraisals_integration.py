@@ -81,7 +81,8 @@ def run_isolated_worker(settings_path, now):
         assert request.url.host == "synthetic.invalid"
         payload = json.loads(request.content)
         sources = json.loads(payload["messages"][-1]["content"])
-        key = next(row["event_id"] for row in sources if row["text"].startswith("想你了"))
+        # The extractor sees short refs (e0, ...); Core maps them back to event IDs.
+        key = next(row["ref"] for row in sources["events"] if row["text"].startswith("想你了"))
         calls.append("memory_extract")
         return provider_response(encode({"memories": [], "interaction_signals": [{
             "event_id": key, "reason": "OWNER_AFFECTION", "quote": "想你了",

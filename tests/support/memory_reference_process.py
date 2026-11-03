@@ -23,14 +23,14 @@ def run_worker(settings_path, now):
         payload = json.loads(request.content)
         calls.append(payload)
         data = json.loads(payload["messages"][-1]["content"])
-        if isinstance(data, list):
-            event = next(row for row in data if any(
+        if "events" in data:
+            event = next(row for row in data["events"] if any(
                 ref["kind"] == "image" for ref in row["references"]))
             reference = next(ref for ref in event["references"] if ref["kind"] == "image")
             text = json.dumps({"memories": [{"subject": "project", "kind": "fact",
                 "fact_key": "card_entry", "content": "青栎资料卡记载十二月九日入场，座位B17。",
-                "evidence_event_id": event["event_id"], "evidence_quote": "十二月九日入场",
-                "evidence_reference_id": reference["reference_id"]}]}, ensure_ascii=False)
+                "evidence_event_id": event["ref"], "evidence_quote": "十二月九日入场",
+                "evidence_reference_id": reference["ref"]}]}, ensure_ascii=False)
         else:
             text = json.dumps({"relations": [{"same": None, "conflicts": []}
                                             for _ in data["candidates"]]})

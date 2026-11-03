@@ -21,6 +21,15 @@ from tests.test_nightly_stages import staged, step
 IDS = [f"evt_test_{number}" for number in (1, 2, 3)]
 
 
+def groups_by_event(core, payload):
+    """Extractor input (short refs) as {event_id: its episode group's event IDs}."""
+    real = {event["ref"]: core.store.one(
+        "SELECT event_id FROM events WHERE json_extract(body_json,'$.text')=?",
+        (event["text"],))["event_id"] for event in payload["events"]}
+    return {real[event["ref"]]: [real[ref] for ref in payload["groups"].get(event["group"], [])]
+            if event["group"] else [] for event in payload["events"]}
+
+
 def prepared(core):
     model = staged(core)
     core.store.execute("DELETE FROM consolidation_runs")
@@ -212,8 +221,8 @@ def test_late_input_gets_its_own_summary_without_replacing_the_n2_episode(core):
     })
     model.extraction = encode(draft)
     assert run(core.extract_once())
-    events = json.loads(model.calls[0][0][-1]["content"])
-    assert {row["event_id"]: row["episode_source_event_ids"] for row in events} == {
+    events = groups_by_event(core, json.loads(model.calls[0][0][-1]["content"]))
+    assert events == {
         **dict.fromkeys(IDS, IDS), "evt_test_4": ["evt_test_4"]}
     episodes = core.store.rows("SELECT * FROM episodes")
     assert len(episodes) == 2 and original["episode_id"] in {
@@ -240,8 +249,8 @@ def test_prior_episode_with_unprovided_source_cannot_be_resummarized(core):
     }]
     model.extraction = encode(draft)
     assert run(core.extract_once())
-    events = json.loads(model.calls[0][0][-1]["content"])
-    assert {row["event_id"]: row["episode_source_event_ids"] for row in events} == {
+    events = groups_by_event(core, json.loads(model.calls[0][0][-1]["content"]))
+    assert events == {
         "evt_test_2": [], "evt_test_3": ["evt_test_3"]}
     assert core.memory.episode_summary(old_id, IDS[:2], core.clock()) is None
     latest = core.store.one("SELECT episode_id FROM episode_events WHERE event_id='evt_test_3'")

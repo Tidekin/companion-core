@@ -55,10 +55,11 @@ def expand(query):
     return " ".join([query, *extra])
 
 
-def lexical(query, docs):
+def lexical(query, docs, *, bags=None):
     """BM25 over character bigrams; Chinese needs no tokenizer for this."""
     terms = set(_grams(query))
-    bags = [Counter(_grams(doc)) for doc in docs]
+    if bags is None:
+        bags = [Counter(_grams(doc)) for doc in docs]
     if not terms or not bags:
         return [0.0] * len(docs)
     average = sum(sum(bag.values()) for bag in bags) / len(bags) or 1
@@ -80,7 +81,7 @@ def semantic(settings, query, docs):
 
     import numpy as np
 
-    from companion.retrieval import SemanticIndex, _inference_lock
+    from companion.retrieval import SemanticIndex, _inference_lock, query_vector
 
     keys = [hashlib.sha256(doc.encode()).hexdigest() for doc in docs]
     with _lock:
@@ -91,7 +92,7 @@ def semantic(settings, query, docs):
         model = index.warmup()
         encoded = list(model.passage_embed([doc for _, doc in missing], batch_size=32)) if (
             missing) else []
-        question = np.asarray(next(model.query_embed(query)), dtype="<f4")
+        question = query_vector(model, query)
     with _lock:
         for (key, _), vector in zip(missing, encoded, strict=True):
             _vectors[key] = np.asarray(vector, dtype="<f4")
@@ -113,11 +114,11 @@ def _ranked(scores):
     return [index for index, _ in sorted(enumerate(scores), key=lambda item: -item[1])]
 
 
-def _fused(settings, query, docs):
+def _fused(settings, query, docs, *, bags=None):
     """RRF of bigram BM25 and embeddings. Docs without a single shared bigram get no
     lexical vote: ranking them by input order would favour the oldest small talk."""
     fused = Counter()
-    scores = lexical(expand(query), docs)
+    scores = lexical(expand(query), docs, bags=bags)
     hits = [index for index in _ranked(scores) if scores[index] > 0]
     for ranking in (hits, _ranked(semantic(settings, query, docs))):
         for rank, index in enumerate(ranking, 1):
@@ -136,7 +137,8 @@ def parts(settings, query, docs, pool_size=CANDIDATES):
     rerank), then a bounded second hop seeded with the two best first-hop docs."""
     if not docs or not query.strip():
         return [], []
-    pool = _fused(settings, query, docs)[:pool_size]
+    bags = [Counter(_grams(doc)) for doc in docs]
+    pool = _fused(settings, query, docs, bags=bags)[:pool_size]
     if getattr(settings, "turn_recall_rerank", False):
         scores = rerank(settings, query, [docs[index][:RERANK_CHARS] for index in pool])
         if scores is not None:
@@ -146,7 +148,7 @@ def parts(settings, query, docs, pool_size=CANDIDATES):
     if not extra or not pool:
         return pool, []
     seeds = " ".join(_evidence(docs[index]) for index in pool[:2])
-    ranked = _fused(settings, query + " " + seeds, docs)
+    ranked = _fused(settings, query + " " + seeds, docs, bags=bags)
     # Enough hop candidates to survive later filtering of the first hop's head.
     return pool, [index for index in ranked if index not in pool[:2]][:pool_size]
 

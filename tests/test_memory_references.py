@@ -60,7 +60,8 @@ def test_extraction_includes_reference_then_recall_pins_it_and_erasure_replays(c
     assert run(core.extract_once())
     payload = json.loads(next(messages for messages, scenario in core.model.calls
                               if scenario == "memory_extract")[-1]["content"])
-    assert payload[0]["references"][0]["text"] == TEXT
+    assert payload["events"][0]["references"][0]["text"] == TEXT
+    assert payload["events"][0]["references"][0]["ref"] == "r0"
     row = core.memory.search("十二月九日")[0]
     assert row["origin"] == "event_observed"
     proof = core.memory_context.pin(core.clock(), rows=[row])
