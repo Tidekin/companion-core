@@ -91,20 +91,34 @@ def reply_target(store, event_id):
     return reply
 
 
-def validate(store, signals, event_ids):
-    """Keep at most one signal per owner message whose quote is really in that message."""
+def validate(store, signals, event_ids, rejected=None):
+    """Keep at most one signal per owner message whose quote is really in that message.
+
+    `rejected`, when given, counts each dropped signal by a content-free code.
+    """
     kept, seen = [], set()
+    rejected = {} if rejected is None else rejected
+
+    def drop(code):
+        rejected[code] = rejected.get(code, 0) + 1
+
     for signal in signals:
-        if signal.event_id in seen or signal.event_id not in event_ids:
+        if signal.event_id not in event_ids:
+            drop("OUTSIDE_BATCH")
+            continue
+        if signal.event_id in seen:
+            drop("DUPLICATE_EVENT")
             continue
         text, quote = owner_text(store, signal.event_id), signal.quote.strip()
         start = text.find(quote) if text is not None and len(quote) >= 2 else -1
         if start < 0:
+            drop("NOT_OWNER_TEXT" if text is None else "QUOTE_NOT_FOUND")
             continue
         target = None
         if signal.reason == "OWNER_HURT_BY_REPLY":
             target = reply_target(store, signal.event_id)
             if not target:
+                drop("NO_REPLY_TARGET")
                 continue
         seen.add(signal.event_id)
         kept.append(

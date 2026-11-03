@@ -102,6 +102,11 @@ PAD 依次表示愉悦度、唤醒度、支配感。表达参考为即时值加�
   也进入来源链，被遗忘时该信号失效
 - 记录包含 quote_sha256、来源链和回复指纹，支持遗忘和重放
 
+每次提取写一条不含原文的审计 `mood.appraisals_extracted`（实体为该次 `request_id`）：
+`field_present` 区分模型漏掉字段与返回空列表，另记 `returned`、`kept`、按代码计数的
+`rejected`（OUTSIDE_BATCH、DUPLICATE_EVENT、NOT_OWNER_TEXT、QUOTE_NOT_FOUND、
+NO_REPLY_TARGET）和保留信号的 `reasons` 计数，用于定位"没识别"和"识别了被过滤"。
+
 提取后的信号经过 `mood_appraisals.validate` 校验，在 COMMIT 阶段通过 `record` 写入
 `mood_appraisals` 表，投影时与确定性信号一起进入 14 天窗口、256 候选上限和半衰期计算。
 

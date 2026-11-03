@@ -611,6 +611,8 @@ class Settings(BaseModel):
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
     extraction_min_events: int = Field(default=5, ge=1, le=20)
     extraction_idle_seconds: int = Field(default=900, ge=0)
+    # A full 20-event batch with memories, summaries and mood signals can pass 2048.
+    memory_extract_max_output_tokens: int = Field(default=4096, ge=512, le=8192)
     emerging_min_sessions: int = Field(default=3, ge=3)
     stable_min_days: int = Field(default=7, ge=7)
     proactive_enabled: bool = True
@@ -731,6 +733,10 @@ class Settings(BaseModel):
             return self.reflection_max_output_tokens
         if scenario == "diary":
             return self.diary_max_output_tokens
+        if scenario == "memory_extract":
+            # The owner's signed paid ceiling still bounds it; raise that approval to use more.
+            approved = self.paid_model.max_output_tokens if self.paid_model else None
+            return min(self.memory_extract_max_output_tokens, approved or 8192)
         if self.thinking_effort(scenario):
             # Reasoning shares max_tokens; an approved paid ceiling still bounds the total.
             allowance = self.max_output_tokens + self.chat_thinking_tokens
