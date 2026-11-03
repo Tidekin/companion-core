@@ -1,0 +1,311 @@
+"""Aggregate a graded round into results.json, summary.json, charts and memory-report.html.
+
+  python report.py --round DIR [--grading grading] [--prepare-review] [--allow-partial-review]
+
+Everything (personas, categories, families, delays, totals, caps) is derived from the bank
+and round.json. Review overrides live beside the grades and never edit them:
+<grading>/review.jsonl (every reviewed answer) and <grading>/overrides.jsonl (changed ones).
+Charts need matplotlib; without it the report is written without figures.
+"""
+
+import hashlib
+import html
+import json
+import statistics
+import sys
+from collections import Counter, defaultdict
+from datetime import UTC, datetime
+from pathlib import Path
+
+sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parent / "runner")]
+from roundcfg import ARMS, Round, ledger_total, read_rows, save, sha  # noqa: E402
+
+R = Round()
+ROOT = R.root
+ARGS = sys.argv[1:]
+GRADING = ROOT / (ARGS[ARGS.index("--grading") + 1] if "--grading" in ARGS else "grading")
+LABELS = {"old": "旧版 Core", "new": "新版 Core", "rag": "千问 RAG"}
+COLORS = {"old": "#7D8798", "new": "#2859E8", "rag": "#008896"}
+HATCH = {"old": "///", "new": "", "rag": ".."}
+
+
+def latency(answer):
+    if answer.get("elapsed_seconds") is not None:
+        return answer["elapsed_seconds"]
+    if answer.get("actual_finished_at") and answer.get("actual_started_at"):
+        return (datetime.fromisoformat(answer["actual_finished_at"])
+                - datetime.fromisoformat(answer["actual_started_at"])).total_seconds()
+    return None
+
+
+def load():
+    frozen = json.loads((ROOT / "all-answers-frozen.json").read_text("utf-8"))
+    for name, digest in frozen["files_sha256"].items():
+        assert sha(ROOT / name) == digest, name
+    answers = {a: {r["id"]: r for r in R.arm_answers(a)} for a in ARMS}
+    mapping = json.loads((GRADING / "blind-mapping.json").read_text("utf-8"))
+    grades = {r["key"]: r for r in read_rows(GRADING / "grades.jsonl")}
+    assert len(grades) == len(mapping) == R.answers_total, "grading incomplete"
+    final = {k: dict(v) for k, v in grades.items()}
+    for row in read_rows(GRADING / "overrides.jsonl"):
+        assert row["original_grade"] == grades[row["key"]] and type(row["pass"]) is bool
+        final[row["key"]] = {**grades[row["key"]], "pass": row["pass"],
+                             "review_reason": row["reason"]}
+    reverse = {(m["arm"], m["id"]): m for m in mapping}
+    inputs = {r["id"]: r for p in (R.suite / "inputs").glob("*.jsonl") for r in read_rows(p)}
+    rows = []
+    for q in sorted(R.questions, key=lambda r: r["id"]):
+        arms = {}
+        for a in ARMS:
+            ans, m = answers[a][q["id"]], reverse[a, q["id"]]
+            assert m["answer_sha256"] == hashlib.sha256(ans.get("answer", "").encode()).hexdigest()
+            arms[a] = dict(key=m["key"], answer=ans.get("answer", ""), status=ans["status"],
+                           error=ans.get("error"), auto_grade=grades[m["key"]],
+                           passed=final[m["key"]]["pass"], elapsed_seconds=latency(ans),
+                           answer_sha256=m["answer_sha256"])
+        op, npass = arms["old"]["passed"], arms["new"]["passed"]
+        change = ("gain" if npass else "loss") if op != npass else ("both_pass" if op else "both_fail")
+        rows.append({**q, "criteria": R.criteria[q["id"]], "arms": arms, "change": change,
+                     "sources": [inputs[s] for s in q["source_ids"]]})
+    return rows, grades
+
+
+def score(rows, arm):
+    n = len(rows)
+    passed = sum(r["arms"][arm]["passed"] for r in rows)
+    return dict(passed=passed, total=n, rate=passed / n if n else None,
+                execution_failures=sum(r["arms"][arm]["status"] != "SUCCEEDED" for r in rows))
+
+
+def finance(path, cap):
+    total, latest = ledger_total(path)
+    phases = defaultdict(lambda: dict(calls=0, charged_or_held_cny=0.0, input_tokens=0,
+                                      cached_tokens=0, output_tokens=0))
+    for v in latest.values():
+        phase = v.get("phase", "unknown")
+        label = phase.split(":")[1] if phase.startswith("inference:") else phase
+        s, u = phases[label], v.get("usage") or {}
+        s["calls"] += 1
+        s["charged_or_held_cny"] += v.get("charged_or_held_cny", 0)
+        s["input_tokens"] += u.get("prompt_tokens", 0)
+        s["cached_tokens"] += u.get("prompt_cache_hit_tokens", 0)
+        s["output_tokens"] += u.get("completion_tokens", 0)
+    return dict(charged_or_held_cny=total, cap_cny=cap,
+                states=dict(Counter(v.get("state") for v in latest.values())),
+                phases=dict(phases), invoice_verified=False)
+
+
+def modality_groups(rows):
+    return {"纯文字源": [r for r in rows if set(r["input_modalities"]) == {"text"}],
+            "含语音": [r for r in rows if "voice" in r["input_modalities"]],
+            "含图像": [r for r in rows if "image" in r["input_modalities"]],
+            "含文件/表格": [r for r in rows if "file" in r["input_modalities"]],
+            "含引用/转发": [r for r in rows if set(r["input_modalities"]) & {"quote", "forward"}],
+            "含助手历史": [r for r in rows if "assistant" in r["input_modalities"]]}
+
+
+def summarize(rows):
+    excluded = set(R.cfg["sensitivity_exclude_categories"])
+    answered = [r for r in rows if all(r["arms"][a]["status"] == "SUCCEEDED" for a in ARMS)]
+    summary = dict(
+        round=R.name, at=datetime.now(UTC).isoformat(), grading=GRADING.name,
+        overall={a: score(rows, a) for a in ARMS},
+        paired_changes=dict(Counter(r["change"] for r in rows)),
+        all_arms_answered={a: score(answered, a) for a in ARMS},
+        by_delay={str(d): {a: score([r for r in rows if r["delay_days"] == d], a) for a in ARMS}
+                  for d in R.delays},
+        by_category={c: {a: score([r for r in rows if r["category_id"] == c], a) for a in ARMS}
+                     for c in R.categories},
+        category_delay={c: {str(d): {a: score([r for r in rows if r["category_id"] == c
+                                               and r["delay_days"] == d], a) for a in ARMS}
+                            for d in R.delays} for c in R.categories},
+        modality={m: {a: score(rs, a) for a in ARMS} for m, rs in modality_groups(rows).items()
+                  if rs},
+        finance={"deepseek": finance(R.deepseek_ledger, R.cfg["budget"]["deepseek_total_cny"]),
+                 "qwen": finance(R.qwen_ledger, R.cfg["budget"]["qwen_total_cny"])},
+        review_count=len(read_rows(GRADING / "review.jsonl")),
+        override_count=len(read_rows(GRADING / "overrides.jsonl")), not_independent_human=True,
+        limitations=R.cfg["limitations"])
+    if excluded:
+        kept = [r for r in rows if r["category_id"] not in excluded]
+        summary["sensitivity"] = {"excluded_categories": sorted(excluded),
+                                  **{a: score(kept, a) for a in ARMS}}
+    summary["new_minus_old_points"] = (summary["overall"]["new"]["rate"]
+                                       - summary["overall"]["old"]["rate"]) * 100
+    summary["latency"] = {a: dict(median_seconds=statistics.median(v),
+                                  p95_seconds=statistics.quantiles(v, n=100, method="inclusive")[94],
+                                  n=len(v))
+                          for a in ARMS if (v := [r["arms"][a]["elapsed_seconds"] for r in rows
+                                                  if r["arms"][a]["elapsed_seconds"] is not None])}
+    return summary
+
+
+def prepare_review(rows, grades):
+    persona, delay = R.review_persona(), R.cfg["review"]["delay_days"]
+    selected = [(r, a, f"preregistered_{persona}_d{delay}") for r in rows
+                if r["persona"] == persona and r["delay_days"] == delay for a in ARMS]
+    for family in sorted({r["family"] for r in rows}):
+        pool = [r for r in rows if r["family"] == family and r["arms"]["old"]["auto_grade"]["pass"]
+                != r["arms"]["new"]["auto_grade"]["pass"]]
+        for r in pool[:R.cfg["review"]["changed_per_family"]]:
+            selected.extend((r, a, "changed_" + family) for a in ARMS)
+    for r in rows:
+        for a in ARMS:
+            g = r["arms"][a]["auto_grade"]
+            if g.get("index_annotation_errors") or (not g["pass"] and not g.get("missing")
+                                                    and not g.get("violations")
+                                                    and not g.get("unsupported")
+                                                    and not g.get("execution_failure")):
+                selected.append((r, a, "inconsistent_auto_grade"))
+    out, seen = [], set()
+    for r, arm, reason in selected:
+        v = r["arms"][arm]
+        if v["key"] in seen:
+            continue
+        seen.add(v["key"])
+        out.append(dict(key=v["key"], arm=arm, id=r["id"], reason=reason,
+                        answer_sha256=v["answer_sha256"], question=r["question"],
+                        category=r["category"], required=r["criteria"]["required"],
+                        forbidden=r["criteria"].get("forbidden", []), answer=v["answer"],
+                        auto_grade=grades[v["key"]]))
+    path = GRADING / "review-selection.json"
+    if path.exists():
+        assert json.loads(path.read_text("utf-8")) == out, "review selection changed"
+    else:
+        save(path, out)
+    return out
+
+
+def charts(rows, summary):
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.font_manager import FontProperties
+        from matplotlib.patches import Patch
+    except ImportError:
+        return []
+    font = FontProperties(fname="C:/Windows/Fonts/msyh.ttc")
+    plt.rcParams.update({"font.family": font.get_name(), "font.size": 11,
+                         "axes.unicode_minus": False, "svg.fonttype": "path",
+                         "figure.facecolor": "#F5F8FD", "axes.facecolor": "#F5F8FD"})
+
+    def header(fig, title, subtitle):
+        h = fig.get_figheight()
+        fig.text(.06, 1 - .35 / h, title, fontsize=22, weight="bold", color="#102F51", va="top")
+        fig.text(.06, 1 - .85 / h, subtitle, fontsize=11, color="#53677E", va="top")
+        fig.legend(handles=[Patch(facecolor=COLORS[a], hatch=HATCH[a], label=LABELS[a])
+                            for a in ARMS], loc="upper left", bbox_to_anchor=(.055, 1 - 1.2 / h),
+                   ncol=3, frameon=False)
+
+    def store(fig, stem):
+        fig.savefig(ROOT / f"{stem}.png", dpi=150, facecolor=fig.get_facecolor())
+        fig.savefig(ROOT / f"{stem}.svg", facecolor=fig.get_facecolor())
+        plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(11.6, 6.2))
+    fig.subplots_adjust(left=.22, right=.88, bottom=.14, top=.72)
+    header(fig, f"{R.name} · 三路记忆测试", f"同{R.total}题 · {len(R.personas)}个虚构人物 · 整题通过率")
+    for i, a in enumerate(ARMS):
+        s = summary["overall"][a]
+        ax.barh(2 - i, s["rate"] * 100, color=COLORS[a], hatch=HATCH[a], height=.55)
+        ax.text(s["rate"] * 100 + 1, 2 - i, f'{s["passed"]}/{s["total"]}  {s["rate"]:.1%}',
+                va="center", weight="bold", color="#102F51")
+    ax.set(yticks=[2, 1, 0], yticklabels=[LABELS[a] for a in ARMS], xlim=(0, 100))
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    store(fig, "memory-summary")
+    figures = []
+    for page, family in enumerate(dict.fromkeys(r["family"] for r in rows), 1):
+        cats = list(dict.fromkeys(r["category_id"] for r in rows if r["family"] == family))
+        fig, axes = plt.subplots(len(cats), 1, figsize=(12, 3 + 2 * len(cats)), squeeze=False)
+        fig.subplots_adjust(left=.28, right=.95, top=1 - 1.9 / fig.get_figheight(),
+                            bottom=.9 / fig.get_figheight(), hspace=.62)
+        header(fig, family, "柱高=整题通过率 · 柱顶=通过数/题数 · 统一0–100%轴")
+        delays = R.delays
+        for ax, cid in zip(axes[:, 0], cats, strict=True):
+            subset = [r for r in rows if r["category_id"] == cid]
+            ax.text(-.32, .5, subset[0]["category"], transform=ax.transAxes, fontsize=12,
+                    weight="bold", color="#102F51", va="center")
+            for j, a in enumerate(ARMS):
+                s = [score([r for r in subset if r["delay_days"] == d], a) for d in delays]
+                xs = np.arange(len(delays)) + (j - 1) * .21
+                bars = ax.bar(xs, [v["rate"] * 100 for v in s], width=.2, color=COLORS[a],
+                              hatch=HATCH[a])
+                for b, v in zip(bars, s, strict=True):
+                    ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 3,
+                            f'{v["passed"]}/{v["total"]}', ha="center", fontsize=9,
+                            color=COLORS[a], weight="bold", clip_on=False)
+            ax.set(ylim=(0, 100), yticks=[0, 100], xticks=range(len(delays)),
+                   xticklabels=["当天" if d == 0 else f"{d}天" for d in delays])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+        stem = f"category-{page:02d}"
+        store(fig, stem)
+        figures.append(dict(stem=stem, title=family))
+    return figures
+
+
+def render(rows, summary, figures):
+    e = lambda s: html.escape(str(s), quote=True)  # noqa: E731
+    cards = "".join(f'<div class="kpi"><span>{LABELS[a]}</span><strong>{summary["overall"][a]["rate"]:.1%}'
+                    f'</strong><small>{summary["overall"][a]["passed"]}/{R.total} · 执行失败 '
+                    f'{summary["overall"][a]["execution_failures"]}</small></div>' for a in ARMS)
+    figs = "".join(f'<figure><h3>{e(f["title"])}</h3><img src="{f["stem"]}.png"></figure>'
+                   for f in figures)
+    review = {r["key"]: r["reason"] for r in read_rows(GRADING / "review.jsonl")}
+    cards_q = []
+    for r in rows:
+        parts = "".join(
+            f'<section class="answer"><h4>{LABELS[a]} <b class="{"pass" if v["passed"] else "fail"}">'
+            f'{"通过" if v["passed"] else ("执行失败" if v["status"] != "SUCCEEDED" else "未通过")}</b>'
+            f'</h4><pre>{e(v["answer"] or v["error"] or "无可见回答")}</pre>'
+            + (f'<p class="note">复核：{e(review[v["key"]])}</p>' if v["key"] in review else "")
+            + "</section>" for a, v in r["arms"].items())
+        cards_q.append(f'<details class="q" data-cat="{e(r["category_id"])}"><summary><code>'
+                       f'{e(r["id"])}</code> {e(r["category"])} · {r["delay_days"]}天 '
+                       f'{" / ".join("✓" if r["arms"][a]["passed"] else "×" for a in ARMS)}'
+                       f'</summary><h3>{e(r["question"])}</h3><div class="answers">{parts}</div>'
+                       f'<p>必须满足：{e("；".join(r["criteria"]["required"]))}</p>'
+                       f'<p>禁止：{e("；".join(r["criteria"].get("forbidden", [])))}</p></details>')
+    ds, qw = summary["finance"]["deepseek"], summary["finance"]["qwen"]
+    doc = ('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>' + e(R.name)
+           + '</title><style>body{font-family:"Microsoft YaHei",sans-serif;background:#f5f8fd;'
+           'color:#17334f;margin:0}main{max-width:1200px;margin:auto;padding:32px}.kpis{display:grid;'
+           'grid-template-columns:repeat(3,1fr);gap:16px}.kpi{background:#fff;padding:18px}.kpi strong'
+           '{display:block;font-size:38px}figure{background:#fff;margin:20px 0;padding:12px}figure img'
+           '{width:100%}.answers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.answer'
+           '{background:#fff;padding:10px}pre{white-space:pre-wrap;font:inherit}.pass{color:#087869}'
+           '.fail{color:#a43d40}.q{border-bottom:1px solid #d1dce9;padding:10px 0}.note{font-size:12px;'
+           'color:#586c81}</style><main><h1>' + e(R.name) + '</h1>'
+           f'<p>{R.total}题 × 旧版 / 新版 / 千问RAG · 判卷 {e(GRADING.name)}</p><div class="kpis">'
+           f'{cards}</div><p>新版较旧版 {summary["new_minus_old_points"]:+.2f} 个百分点；配对：'
+           f'{e(summary["paired_changes"])}。DeepSeek ¥{ds["charged_or_held_cny"]:.2f}/'
+           f'¥{ds["cap_cny"]}，千问 ¥{qw["charged_or_held_cny"]:.2f}/¥{qw["cap_cny"]}（保守估算）。'
+           f'复核 {summary["review_count"]} 份，改判 {summary["override_count"]} 份，非独立人工。</p>'
+           + figs + "<h2>逐题</h2>" + "".join(cards_q) + "<h2>局限</h2>"
+           + "".join(f"<p>{e(x)}</p>" for x in summary["limitations"]) + "</main></html>")
+    (ROOT / "memory-report.html").write_text(doc, "utf-8")
+
+
+def main():
+    rows, grades = load()
+    selection = prepare_review(rows, grades)
+    if "--prepare-review" in ARGS:
+        print("review_selection", len(selection))
+        return
+    reviewed = {r["key"]: r for r in read_rows(GRADING / "review.jsonl")}
+    missing = {r["key"] for r in selection} - set(reviewed)
+    if missing and "--allow-partial-review" not in ARGS:
+        raise SystemExit(f"Review incomplete: {len(missing)} selected answers unreviewed")
+    summary = summarize(rows)
+    save(ROOT / "results.json", rows)
+    save(ROOT / "summary.json", summary)
+    render(rows, summary, charts(rows, summary))
+    print(json.dumps(summary["overall"], ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
