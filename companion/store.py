@@ -239,7 +239,9 @@ class Store:
             "consolidation_runs": {"steps_json", "lease_token", "captured_privacy_epoch"},
             "consolidation_evidence": {"event_id", "run_id"},
             "goals": {"scope_json", "state", "redacted", "reflection_suggestion_id"},
-            "mood_appraisals": {"event_id", "reason", "quote_sha256", "request_id"},
+            "mood_appraisals": {
+                "event_id", "reason", "quote_sha256", "request_id", "target_message_id"
+            },
             "goal_evidence": {"event_id", "goal_id"},
             "goal_steps": {
                 "lease_token",

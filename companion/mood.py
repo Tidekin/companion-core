@@ -505,20 +505,21 @@ class MoodService:
         return ordered[-LIMIT:], len(candidates) > LIMIT or len(ordered) > LIMIT
 
     def _appraisals(self, at, allowed, cutoff, sources, taken, source_check=None):
-        """Model-judged owner wording; an exact-phrase signal on the same message wins."""
+        """Model-judged owner wording; an exact-phrase signal on the same message wins.
+
+        A row counts once it was recorded by `at`, but acts from when the owner said it:
+        a delayed extraction neither refreshes old words nor moves them to another day.
+        """
         s = self.store
-        rows = [
-            row
-            for row in s.rows(
-                "SELECT * FROM mood_appraisals WHERE created_at>? AND created_at<=? "
-                "ORDER BY created_at,event_id",
-                (cutoff, at),
-            )
-            if row["event_id"] not in taken and mood_appraisals.still_valid(s, row)
-        ]
         signals = []
-        for row in mood_appraisals.capped(rows, self.settings.timezone):
+        for row in s.rows(
+            "SELECT * FROM mood_appraisals WHERE created_at>? AND created_at<=? "
+            "ORDER BY created_at,event_id",
+            (cutoff, at),
+        ):
             key = row["event_id"]
+            if key in taken or not mood_appraisals.still_valid(s, row):
+                continue
             lineage = self._lineage(key, sources, source_check)
             if not lineage:
                 continue
@@ -528,6 +529,17 @@ class MoodService:
                 or not cutoff < stamp(event["occurred_at"]) <= at
             ):
                 continue
+            if row["target_message_id"]:
+                # Hurt about a reply also rests on that reply's own input.
+                target = s.one(
+                    "SELECT action_type,origin_event_id FROM outbox WHERE message_id=?",
+                    (row["target_message_id"],),
+                )
+                if target["action_type"] == "qq.private.reply":
+                    prior = self._lineage(target["origin_event_id"], sources, source_check)
+                    if not prior:
+                        continue
+                    lineage = lineage + prior
             ids = sorted({item["event_id"] for item in lineage})
             if allowed is not None and not set(ids) <= set(allowed):
                 continue
@@ -536,14 +548,14 @@ class MoodService:
                     "event_id": key,
                     "source_event_ids": ids,
                     "kind": "appraisal",
-                    "at": stamp(row["created_at"]),
+                    "at": stamp(event["occurred_at"]),
                     "reason": row["reason"],
                     "delta": list(mood_appraisals.REASONS[row["reason"]]),
                     "independent_id": "appraisal:" + key,
-                    "fingerprint": sha([lineage, dict(row)]),
+                    "fingerprint": sha([lineage, row]),
                 }
             )
-        return signals
+        return mood_appraisals.capped(signals, self.settings.timezone)
 
     def snapshot(self, *, at=None, allowed=None):
         at = stamp(at or self.clock())
