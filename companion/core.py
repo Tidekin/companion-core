@@ -1107,8 +1107,11 @@ class Core(Runtime):
                     scope.max_utf8_bytes - sum(len(message["content"].encode())
                                                for turn in turns for message in turn))))
             if recalled:
+                # These bounded, authorized originals carry attribution and uncertainty
+                # that a later tool summary need not repeat. Keep their source group
+                # through SDK continuations; full paid admission still enforces hard caps.
                 selection.add(turn_recall.HEADING, recalled["data"], recalled["event_ids"],
-                    priority=context_selection.RELATED, module="memory",
+                    priority=context_selection.RELATED, required=True, module="memory",
                     proofs=[{"kind": "memory", "proof": self.memory_context.pin(
                         self.clock(), event_ids=set(recalled["event_ids"]))}])
         mark("context_turn_recall")

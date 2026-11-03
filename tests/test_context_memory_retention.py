@@ -2,12 +2,23 @@
 
 from copy import deepcopy
 
+import httpx
+import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
+from pydantic_ai.toolsets import FunctionToolset
 
+from companion import agent_runtime
 from companion import context_planner as planner
 from companion.agent_messages import from_wire_messages, to_wire_messages
+from companion.agent_persistence import ConversationStore
+from companion.contracts import CoreError
+from companion.model import ModelClient
 from companion.store import encode
 from companion.token_measurement import measure_request
+from companion.transport import enqueue
+from tests.conftest import run
+from tests.sdk_reader_fixture import Provider, answer, call
+from tests.support.owner_memory import environment
 from tests.test_context_planner import request_context
 from tests.test_owner_runtime import chat
 
@@ -69,3 +80,77 @@ def test_tool_metadata_is_compacted_before_original_quoted_update_is_removed(cor
     assert measure_request(core.settings, wire).reserved_input_tokens <= (
         core.settings.context_soft_tokens)
     assert planner.check(core, job, snapshots)["pending"]["dropped"] == []
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_recalled_source_survives_tool_pressure_and_saved_continuation(core, tmp_path, resume):
+    async def scenario():
+        async with environment(core, tmp_path) as (admit, recall, _):
+            core.settings.max_recent_messages = 0  # Use ranked old turns, not recent history.
+            seed, _ = await admit(1, "朋友宁芜转来：市集改从河岸口进。我尚未向组织方核实。")
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=?",
+                               (seed.event_id,))
+            source = core.store.one("SELECT * FROM events WHERE event_id=?", (seed.event_id,))
+            mid = enqueue(core.store, seed.event_id, source["conversation_id"],
+                          "收到。", core.clock())
+            core.store.execute("UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+                               (core.clock(), mid))
+            await admit(2, "市集入口后来有什么新消息？谁说的，我核实了吗？")
+            job = core.claim_job("recalled-source-continuation")
+            snapshots = []
+            prefix = core.context(job, memories=[], snapshots=snapshots, planning=True,
+                                  turn_ranking=[seed.event_id])
+            assert "宁芜" in encode(prefix)
+            core.settings.context_soft_tokens = measure_request(
+                core.settings, prefix).reserved_input_tokens + 1500
+            executions = []
+
+            def memory_recall(query: str) -> dict:
+                """Return a synthetic source-backed memory result."""
+                executions.append(query)
+                data = result()
+                data["facts"][0]["content"] += "市集说明保留在工具结果中。" * 600
+                return data
+
+            provider = Provider(answer(calls=[call("recall-once", "memory_recall", {
+                "query": "市集入口"})]), answer("宁芜转来的消息，尚未核实。"))
+            persistence = ConversationStore(core, job, snapshots)
+
+            class SimulatedExit(BaseException):
+                pass
+
+            original = persistence.after_model_request
+
+            async def stop_after_save(ctx, *, request_context, response):
+                await original(ctx, request_context=request_context, response=response)
+                raise SimulatedExit
+
+            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+                core.model = ModelClient(core.settings, client)
+                options = {"toolsets": [FunctionToolset([memory_recall])],
+                           "snapshots": snapshots, "persistence": persistence}
+                if resume:
+                    persistence.after_model_request = stop_after_save
+                    with pytest.raises(SimulatedExit):
+                        await agent_runtime.run_conversation(core, job, prefix, **options)
+                    persistence = ConversationStore(core, job, [])
+                    conversation = persistence.load()
+                    snapshots = persistence.snapshots
+                    options.update(snapshots=snapshots, persistence=persistence)
+                    await agent_runtime.run_conversation(core, job, [],
+                                                         conversation=conversation, **options)
+                else:
+                    await agent_runtime.run_conversation(core, job, prefix, **options)
+            assert len(provider.requests) == 2 and executions == ["市集入口"]
+            for request in provider.requests:
+                text = encode(request["messages"])
+                assert "宁芜" in text and "尚未向组织方核实" in text
+            assert provider.requests[1]["messages"][-1]["tool_call_id"] == "recall-once"
+            assert len(core.store.rows("SELECT * FROM model_usage WHERE state='SETTLED'")) == 2
+            measured = measure_request(core.settings, provider.requests[1]["messages"])
+            assert measured.reserved_input_tokens > core.settings.context_soft_tokens
+            # Required presentation is still source-bound; a recall revokes saved use.
+            assert (await recall(seed)).status_code == 200
+            with pytest.raises(CoreError):
+                persistence.check()
+    run(scenario())
