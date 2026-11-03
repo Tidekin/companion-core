@@ -146,18 +146,25 @@ async def prefetch(store, settings, job, query):
     caller's thread; context() later re-reads these turns and applies every source,
     authority and ceiling check, so this ranking grants nothing by itself.
     """
+    from companion.telemetry import phase
+
     if not enabled(settings, query):
         return None
-    rows, notes = _candidates(store, settings, job)
+    trace_id = job.get("trace_id")
+    with phase("turn_recall_candidates", trace_id):
+        rows, notes = _candidates(store, settings, job)
+        docs = [_document(row, note, settings.timezone)
+                for row, note in zip(rows, notes, strict=True)]
     if not rows:
         return []
-    docs = [_document(row, note, settings.timezone) for row, note in zip(rows, notes, strict=True)]
     try:
         # A timed-out worker keeps running (threads cannot be cancelled) and only warms
         # caches; its late result is discarded, so it can never enter a context.
-        ranked = await asyncio.wait_for(
-            asyncio.to_thread(select, settings, query, docs, CANDIDATES),
-            settings.recall_compute_timeout_seconds)
+        # The span includes any wait for the shared model locks, as a reply does.
+        with phase("turn_recall_rank", trace_id):
+            ranked = await asyncio.wait_for(
+                asyncio.to_thread(select, settings, query, docs, CANDIDATES),
+                settings.recall_compute_timeout_seconds)
     except TimeoutError:
         return []  # Not None: context() must not fall back to ranking inline on the loop.
     return [rows[index]["event_id"] for index in ranked]

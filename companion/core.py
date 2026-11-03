@@ -1106,6 +1106,7 @@ class Core(Runtime):
                     priority=context_selection.RELATED, module="memory",
                     proofs=[{"kind": "memory", "proof": self.memory_context.pin(
                         self.clock(), event_ids=set(recalled["event_ids"]))}])
+        mark("context_turn_recall")
         if continuation := self._memory_continuation(
             job, sources, [row["memory_id"] for row in hits],
             reserved_ids=set(recalled["event_ids"]) if recalled else frozenset(),
@@ -1761,12 +1762,15 @@ class Core(Runtime):
                 generated_reply = True
             elif reply is None:
                 if self.settings.memory_enabled and notices.reference(job) is None:
-                    hits, paused_memory = await self.recall_for_reply(job)
                     from companion import turn_recall
+                    from companion.telemetry import phase
 
-                    ranking = await turn_recall.prefetch(
-                        self.store, self.settings, job,
-                        json.loads(job["body_json"]).get("text", ""))
+                    with phase("recall_memory", job.get("trace_id")):
+                        hits, paused_memory = await self.recall_for_reply(job)
+                    with phase("recall_turns", job.get("trace_id")):
+                        ranking = await turn_recall.prefetch(
+                            self.store, self.settings, job,
+                            json.loads(job["body_json"]).get("text", ""))
                     self._check_reply_epoch(job, captured_epoch)
                     messages = self.context(job, hits, paused_memory,
                                             snapshots=context_snapshots, turn_ranking=ranking)

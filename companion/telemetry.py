@@ -36,6 +36,8 @@ PHASES = {
     "request_checkpoint", "request_validate", "request_reserve", "request_sources",
     "dispatch_sources", "dispatch_scope", "dispatch_journal", "dispatch_recheck",
     "transport_custody", "transport_payload", "transport_sources", "model_transport",
+    "recall_memory", "recall_turns", "turn_recall_candidates", "turn_recall_rank",
+    "context_turn_recall",
 }
 STAGES.update(PHASES)
 

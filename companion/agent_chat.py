@@ -50,10 +50,11 @@ async def reply(core, job, snapshots):
             and "memory" in view.policy.purposes):
             trace = {}
             try:
-                result = await core.memory_context.recall_async(query, core.clock(),
-                    project_query=query, clock=core.clock, trace=trace,
-                    source_check=lambda: check_conversation(
-                        core, job, snapshots, purpose="memory"))
+                with phase("recall_memory", job["trace_id"]):
+                    result = await core.memory_context.recall_async(query, core.clock(),
+                        project_query=query, clock=core.clock, trace=trace,
+                        source_check=lambda: check_conversation(
+                            core, job, snapshots, purpose="memory"))
             except CoreError as error:
                 if error.code == "PRIVACY_CHANGED":
                     raise CoreError(reply_revision.CANCELLED, 409) from error
@@ -70,7 +71,8 @@ async def reply(core, job, snapshots):
             from companion import turn_recall
 
             # Embedding and cross-encoder scoring run in a worker thread, not on the loop.
-            ranking = await turn_recall.prefetch(core.store, core.settings, job, query)
+            with phase("recall_turns", job["trace_id"]):
+                ranking = await turn_recall.prefetch(core.store, core.settings, job, query)
         messages = [] if conversation is not None else core.context(
             job, memories=memories, snapshots=snapshots,
             model_tools=tuple(name for toolset in tools for name in toolset.tools),
