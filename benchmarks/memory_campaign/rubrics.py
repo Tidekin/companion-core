@@ -44,7 +44,31 @@ def normalize_v2(row, case):
     return row
 
 
-RUBRICS = {"v1": (RULES_V1, normalize_v1), "v2": (RULES_V2, normalize_v2)}
+# v3: v2's meaning-based item checks, but the judge sees no source material, so it cannot
+# verify extra claims. Only claims that contradict the question, required or forbidden
+# items are recorded, and they are reported, not used to fail the answer (v2 failed many
+# correct answers on such "unsupported" flags in the round-3 regrade).
+RULES_V3 = RULES_V2.replace(
+    "另外检查回答新增的、与题目已知事实相矛盾的具体断言（错的日期、数量、人物、归属、"
+    "把计划说成已完成、把助手建议说成主人决定等），逐条写进 unsupported；"
+    "谨慎措辞、请主人确认、指出资料矛盾都不算错误断言。\n",
+    "另外，只有当回答里的具体断言与问题、required 或 forbidden 直接矛盾时，才把它写进 unsupported；"
+    "判据之外的补充、闲聊、推测、追问、计算、请主人确认、指出资料矛盾都不写。\n",
+).replace("pass 仅当 missing、violations、unsupported 都为空时为 true",
+          "pass 仅当 missing、violations 都为空时为 true")
+assert "直接矛盾" in RULES_V3 and "unsupported 都为空" not in RULES_V3
+
+
+def normalize_v3(row, case):
+    unsupported = row.get("unsupported", [])
+    assert isinstance(unsupported, list)
+    row = normalize_v1(row, case)
+    row["unsupported"] = [str(item)[:200] for item in unsupported]
+    return row
+
+
+RUBRICS = {"v1": (RULES_V1, normalize_v1), "v2": (RULES_V2, normalize_v2),
+           "v3": (RULES_V3, normalize_v3)}
 
 
 def rubric(version):

@@ -78,7 +78,7 @@ def prepare():
             answers_freeze_sha256=seed, criteria_sha256=sha(R.suite / "review-only/criteria.jsonl"),
             total=R.answers_total, successful_candidates=len(cases), failures=len(failed),
             arm_and_version_labels_sent_to_judge=False, not_independent_human=True,
-            at=datetime.now(UTC).isoformat(), **G))
+            at=datetime.now(UTC).isoformat(), **{k: v for k, v in G.items() if k != "rubric"}))
     return next(iter(configs.values())), cases, failed
 
 
