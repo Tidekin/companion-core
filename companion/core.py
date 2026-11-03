@@ -982,6 +982,7 @@ class Core(Runtime):
             )["rows"] if (
                 memories is None
             ) else memories
+            hits, relations = self.memory.with_relayed_updates(hits, self.clock())
             memory_proof = self.memory_context.pin(self.clock(), rows=hits)
             from companion.interest import profile
 
@@ -1040,6 +1041,7 @@ class Core(Runtime):
                 memory = {**{k: h[k] for k in (
                     "subject", "content", "status", "needs_review", "evidence_ids")},
                     **({"origin": h["origin"]} if h.get("origin") else {}),
+                    **relations.get(h["memory_id"], {}),
                     **({"happened_on": happened}
                        if job["kind"] == "chat" and cfg.chat_time_labels
                        and (happened := self._memory_happened_on(h, cfg.timezone)) else {})}

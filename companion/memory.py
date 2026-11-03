@@ -13,6 +13,8 @@ from companion.privacy import advance_epoch, memory_sensitive, redact
 from companion.retrieval import SemanticIndex, fuse
 from companion.store import encode, uid
 
+RELAYED = "memory_relayed_update:"
+
 
 class Memory:
     def __init__(self, store, settings, ledger):
@@ -383,12 +385,14 @@ class Memory:
                 "AND status IN ('HYPOTHESIS','CONFIRMED') AND content<>?",
                 (candidate.subject, candidate.fact_key, content),
             ) if sources.current(row) and (row["origin"] == "event_observed") == reference]
-        replaced = []
+        replaced, relayed = [], False
         if (candidate.update == "replaces_previous" and candidate.kind != "episode" and not same
                 and (candidate.speaker == "owner" or candidate.relayed_by_owner)):
-            # An owner-originated or owner-relayed update ends the older values' validity
-            # (kept for history, not deleted), across origins: a forwarded notice may
-            # replace a fact the owner typed. Owner-confirmed corrections stay untouched.
+            # The owner's own update ends the older values' validity (kept for history,
+            # not deleted), across origins. A third party's update the owner only relayed
+            # never does: both stay current and are linked, so the reader sees the later
+            # relayed claim with its source. Owner-confirmed corrections stay untouched.
+            relayed = candidate.speaker != "owner"
             replaced = [row for row in s.rows(
                 "SELECT * FROM memories WHERE subject=? AND fact_key=? AND kind<>'episode' "
                 "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0 AND content<>?",
@@ -432,6 +436,12 @@ class Memory:
                 )
             s.audit("memory.conflict", memory_id, event["trace_id"], now)
         for row in replaced:
+            if relayed:
+                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                          (RELAYED + row["memory_id"], encode({"newer": memory_id})))
+                s.audit("memory.relayed_update", row["memory_id"], event["trace_id"], now,
+                        by=memory_id)
+                continue
             s.execute("UPDATE memories SET valid_to=?,updated_at=? WHERE memory_id=? "
                       "AND (valid_to IS NULL OR valid_to>?)",
                       (event["occurred_at"], now, row["memory_id"], event["occurred_at"]))
@@ -450,6 +460,39 @@ class Memory:
             memory_references.record(self, memory_id, candidate, now)
         advance_epoch(s)
         return memory_id
+
+    def with_relayed_updates(self, rows, now):
+        """Add the other side of each relayed-update link; returns (rows, relations).
+
+        Linked rows pass the same currency and evidence checks as search results, so a
+        forgotten, superseded or erased memory never re-enters through a link.
+        """
+        s, sources = self.store, MemorySources(self, now)
+        ids = {row["memory_id"] for row in rows}
+        links = [(row["key"][len(RELAYED):], json.loads(row["value"])["newer"])
+                 for row in s.rows("SELECT key,value FROM runtime_meta WHERE key LIKE ?",
+                                   (RELAYED + "%",))]
+        out, relations = list(rows), {}
+        for older, newer in links:
+            if not ({older, newer} & ids):
+                continue
+            pair = {}
+            for memory_id in (older, newer):
+                row = next((item for item in out if item["memory_id"] == memory_id), None)
+                if row is None:
+                    row = s.one("SELECT * FROM memories WHERE memory_id=? AND status IN "
+                                "('HYPOTHESIS','CONFIRMED') AND confidence>0", (memory_id,))
+                    evidence = row and sources.current(row) and [
+                        e["event_id"] for e in sources.evidence(memory_id)]
+                    if not evidence:
+                        break
+                    row["evidence_ids"] = evidence
+                    out.append(row)
+                pair[memory_id] = row
+            else:
+                relations.setdefault(older, {})["later_relayed_update"] = pair[newer]["content"]
+                relations.setdefault(newer, {})["relayed_update_of"] = pair[older]["content"]
+        return out, relations
 
     def observe_trait(self, topic, event, now):
         s = self.store
