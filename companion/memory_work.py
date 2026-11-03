@@ -618,6 +618,14 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 source_check=lambda: _validate_batch(core, lease, batch),
             )
             _settled(s, request_id)
+            if response.finish_reason == "length":
+                # The JSON is cut off and the batch will be retried; keep the evidence.
+                s.audit(
+                    "memory.extract_truncated", request_id, "memory", now,
+                    output_tokens=response.output_tokens,
+                    max_tokens=cfg.output_tokens("memory_extract"),
+                    events=len(batch["event_ids"]),
+                )
             extraction = Extraction.model_validate_json(response.text)
             _validate_batch(core, lease, batch)
             memory_enrichment.validate_summaries(
@@ -632,15 +640,30 @@ async def extraction_step(core, local_day, lease, batch, persist):
                         candidates.append(candidate.model_dump(mode="json"))
                 except CoreError:
                     s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory", now)
+            rejected = {}
+            signals = mood_appraisals.validate(
+                s, extraction.interaction_signals, set(batch["event_ids"]), rejected
+            )
+            # Content-free funnel: did the model answer the field, and what survived.
+            s.audit(
+                "mood.appraisals_extracted", request_id, "memory", now,
+                field_present="interaction_signals" in json.loads(response.text),
+                finish_reason=response.finish_reason,
+                returned=len(extraction.interaction_signals),
+                kept=len(signals),
+                rejected=rejected,
+                reasons={
+                    reason: sum(item["reason"] == reason for item in signals)
+                    for reason in sorted({item["reason"] for item in signals})
+                },
+            )
             batch.update(
                 phase="REVIEW",
                 candidates=candidates,
                 episode_summaries=[
                     item.model_dump(mode="json") for item in extraction.episode_summaries
                 ],
-                interaction_signals=mood_appraisals.validate(
-                    s, extraction.interaction_signals, set(batch["event_ids"])
-                ),
+                interaction_signals=signals,
                 extraction_request_id=request_id,
             )
             batch.pop("request_id", None)
