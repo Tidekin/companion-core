@@ -354,15 +354,26 @@ class MemoryContext:
             return {"privacy_epoch": version[0], "as_of": now,
                     "revisions": [], "truncated": False}
         rows = self.store.rows(
-            "WITH RECURSIVE family(memory_id) AS (SELECT ? UNION "
-            "SELECT m.memory_id FROM memories m JOIN family f "
-            "ON m.supersedes_memory_id=f.memory_id UNION "
-            "SELECT m.supersedes_memory_id FROM memories m JOIN family f "
-            "ON m.memory_id=f.memory_id WHERE m.supersedes_memory_id IS NOT NULL) "
+            "WITH RECURSIVE edges(older,newer) AS ("
+            "SELECT supersedes_memory_id,memory_id FROM memories "
+            "WHERE supersedes_memory_id IS NOT NULL UNION "
+            "SELECT a.entity_id,json_extract(a.safe_detail_json,'$.by') FROM audit_log a "
+            "JOIN memories old ON old.memory_id=a.entity_id "
+            "JOIN memories new ON new.memory_id=json_extract(a.safe_detail_json,'$.by') "
+            "WHERE a.action='memory.replaced' AND a.created_at<=? "
+            "AND old.subject=new.subject AND old.fact_key=new.fact_key "
+            "AND old.kind<>'episode' AND new.kind<>'episode'), "
+            "family(memory_id) AS (SELECT ? UNION "
+            "SELECT e.newer FROM edges e JOIN family f ON e.older=f.memory_id UNION "
+            "SELECT e.older FROM edges e JOIN family f ON e.newer=f.memory_id), "
+            "descendants(root,node) AS (SELECT memory_id,memory_id FROM family UNION "
+            "SELECT d.root,e.newer FROM descendants d JOIN edges e ON e.older=d.node) "
             "SELECT m.* FROM memories m JOIN family f USING(memory_id) "
+            "JOIN (SELECT root,COUNT(*) AS later_count FROM descendants GROUP BY root) rank "
+            "ON rank.root=m.memory_id "
             "WHERE m.privacy_scope='private' AND m.confidence>0 "
             "AND m.status IN ('CONFIRMED','HYPOTHESIS','SUPERSEDED') "
-            "ORDER BY m.created_at DESC,m.memory_id LIMIT 21", (memory_id,),
+            "ORDER BY rank.later_count,m.created_at DESC,m.memory_id LIMIT 21", (now, memory_id),
         )
         sources, items = MemorySources(self.memory, now), []
         for row in rows[:20]:

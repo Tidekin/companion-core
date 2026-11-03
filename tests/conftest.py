@@ -64,7 +64,8 @@ class FakeModel:
                     else json.dumps(
                         {
                             "relations": [
-                                {"same": None, "conflicts": []} for _ in payload["candidates"]
+                                {"supported": True, "same": None, "conflicts": [], "replaces": []}
+                                for _ in payload["candidates"]
                             ]
                         }
                     )

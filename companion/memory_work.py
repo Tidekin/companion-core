@@ -13,6 +13,7 @@ from companion import (
     budget,
     live_text,
     memory_enrichment,
+    memory_recovery,
     memory_references,
     mood_appraisals,
     owner_authority,
@@ -38,17 +39,18 @@ def checkpoint_state(store):
 
 def erase_memory_work(store, event_ids):
     """Registered native erasure/replay cleanup; never touches accounting or leases."""
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
-    if not row:
-        return
-    try:
-        record = json.loads(row["value"])
-        ids = set(record.get("source_event_ids", [])) | set(record["batch"].get("event_ids", []))
-        affected = bool(ids & set(event_ids))
-    except (ValueError, TypeError, KeyError, AttributeError):
-        affected = True  # An uninterpretable derived payload cannot prove independence.
-    if affected:
-        store.execute("DELETE FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
+    rows = store.rows("SELECT key,value FROM runtime_meta WHERE key=? OR key GLOB ?",
+                      (CHECKPOINT_KEY, memory_recovery.PREFIX + "*"))
+    for row in rows:
+        try:
+            record = json.loads(row["value"])
+            ids = (set(record.get("source_event_ids", []))
+                   | set(record["batch"].get("event_ids", [])))
+            affected = bool(ids & set(event_ids))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            affected = True  # An uninterpretable payload cannot prove independence.
+        if affected:
+            store.execute("DELETE FROM runtime_meta WHERE key=?", (row["key"],))
 
 
 def short_refs(data):
@@ -224,17 +226,37 @@ async def prepare_memories(
         same = next(
             (row for row in catalog.values() if row["content"] == candidates[0].content), None
         )
-        if same or not catalog:
-            return candidates, [{"same": same["memory_id"] if same else None, "conflicts": []}]
+        # Explicit owner commands contain the owner's verbatim claim; new model
+        # inferences still require review even when there is no existing catalog.
+        if same or (confirmed and not catalog):
+            return candidates, [{"same": same["memory_id"] if same else None,
+                                 "conflicts": [], "replaces": []}]
+    from companion.memory_context import MemorySources
+
+    sources = MemorySources(self.memory, self.clock())
+    quote_chars = min(2000, cfg.context_soft_tokens)
+
+    def quotes(memory_id):
+        nonlocal quote_chars
+        result = []
+        for event in sources.evidence(memory_id)[:2]:
+            text = json.loads(event["body_json"]).get("text", "")[:min(300, quote_chars)]
+            if text:
+                result.append(text)
+                quote_chars -= len(text)
+        return result
+
     payload = {
         "existing": [
             {"ref": ref, "subject": row["subject"], "kind": row["kind"], "content": row["content"],
-             "reference": row["origin"] == "event_observed"}
+             "reference": row["origin"] == "event_observed",
+             "quotes": quotes(row["memory_id"])}
             for ref, row in catalog.items()
         ],
         "candidates": [
             {"ref": f"c{i}", "subject": row.subject, "kind": row.kind, "content": row.content,
-             "reference": bool(row.evidence_reference_id)}
+             "reference": bool(row.evidence_reference_id), "quote": row.evidence_quote,
+             "speaker": row.speaker, "update": row.update}
             for i, row in enumerate(candidates)
         ],
     }
@@ -285,21 +307,43 @@ async def prepare_memories(
         reply_revision.check_job(s, job)
     validation_reason = "schema"
     try:
-        review = MemoryReview.model_validate_json(response.text)
+        value = json.loads(response.text)
+        # Only the exact, lossless ref wrapper is repairable. The full strict schema
+        # and the catalog/subject/origin checks below still validate every reference.
+        if isinstance(value, dict) and isinstance(value.get("relations"), list):
+            for relation in value["relations"]:
+                if not isinstance(relation, dict):
+                    continue
+                for field in ("conflicts", "replaces"):
+                    if isinstance(relation.get(field), list):
+                        relation[field] = [
+                            item["ref"] if isinstance(item, dict) and set(item) == {"ref"}
+                            else item for item in relation[field]
+                        ]
+        review = MemoryReview.model_validate(value)
         if len(review.relations) != len(candidates):
             validation_reason = "relation_count"
             raise ValueError("relation count mismatch")
-        resolutions = []
+        resolutions, supported, positions = [], [], {}
         for i, relation in enumerate(review.relations):
+            if not relation.supported:
+                s.audit("memory.candidate_rejected", candidates[i].evidence_event_id, "memory",
+                        self.clock(), reason="UNSUPPORTED_MEMORY_CLAIM")
+                continue
             refs = ([relation.same] if relation.same else []) + relation.conflicts
             if len(refs) != len(set(refs)):
                 validation_reason = "duplicate_relation"
                 raise ValueError("duplicate relation")
+            if (len(set(relation.replaces)) != len(relation.replaces)
+                or not set(relation.replaces) <= set(relation.conflicts)
+                or relation.replaces and candidates[i].update != "replaces_previous"):
+                validation_reason = "invalid_replacement"
+                raise ValueError("invalid replacement relation")
             allowed = {
                 **catalog,
                 **{f"c{j}": {"subject": candidates[j].subject,
                               "origin": "event_observed" if candidates[j].evidence_reference_id
-                              else "model_inferred"} for j in range(i)},
+                              else "model_inferred"} for j in positions},
             }
             if any(
                 ref not in allowed or allowed[ref]["subject"] != candidates[i].subject
@@ -311,15 +355,19 @@ async def prepare_memories(
                 raise ValueError("invalid memory reference")
 
             def resolve(ref):
-                return catalog[ref]["memory_id"] if ref in catalog else ref
+                return (catalog[ref]["memory_id"] if ref in catalog
+                        else f"c{positions[int(ref[1:])]}" if ref else None)
 
+            positions[i] = len(supported)
+            supported.append(candidates[i])
             resolutions.append(
                 {
                     "same": resolve(relation.same) if relation.same else None,
                     "conflicts": [resolve(ref) for ref in relation.conflicts],
+                    "replaces": [resolve(ref) for ref in relation.replaces],
                 }
             )
-        return candidates, resolutions
+        return supported, resolutions
     except ValueError as error:
         s.audit(
             "memory.review_invalid",
@@ -465,6 +513,7 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
                 batch.pop("interaction_signals", None)
                 batch.pop("episode_summaries", None)
                 batch.pop("proof", None)
+                memory_recovery.finish(s, record)
                 record["next_attempt_at"] = None
                 s.execute(
                     "UPDATE runtime_meta SET value=? WHERE key=?", (encode(record), CHECKPOINT_KEY)
@@ -512,6 +561,8 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
                 | set(batch.get("proof", {}).get("source_event_ids", []))
             )
             if batch.get("phase") in TERMINAL_PHASES:
+                memory_recovery.retain(core, record)
+                memory_recovery.finish(s, record)
                 if batch["phase"] in {"FAILED", "UNKNOWN"}:
                     # A terminal failed/uncertain batch is exhausted work, not a fact.
                     # Its usage remains charged; neither lane may silently replay it.
@@ -624,10 +675,7 @@ def _recover_phase(core, batch, persist):
             attempts = int(row["value"]) if row else 0
         batch["phase"] = "FAILED" if attempts >= core.settings.max_attempts else previous
         batch["error"] = "MEMORY_RESULT_NOT_CHECKPOINTED"
-        if batch["phase"] == "FAILED":
-            batch.pop("candidates", None)
-            batch.pop("interaction_signals", None)
-        else:
+        if batch["phase"] != "FAILED":
             batch.pop("request_id", None)
     else:
         if usage["state"] == "RESERVED":
@@ -881,8 +929,6 @@ async def extraction_step(core, local_day, lease, batch, persist):
                     )
                 s.execute("DELETE FROM runtime_meta WHERE key=?", (batch["attempt_key"],))
                 batch.update(phase="FAILED", error=code)
-                batch.pop("candidates", None)
-                batch.pop("interaction_signals", None)
             else:
                 batch.update(phase=previous_phase, error=code)
                 batch.pop("request_id", None)

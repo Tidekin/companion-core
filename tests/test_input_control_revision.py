@@ -128,7 +128,8 @@ def test_running_control_review_settles_before_action_or_source_cancellation(
             await release.wait()
             return httpx.Response(200, json={
                 "choices": [{"message": {"content": json.dumps({
-                    "relations": [{"same": None, "conflicts": []}],
+                    "relations": [{"supported": True, "same": None,
+                                   "conflicts": [], "replaces": []}],
                 })}}],
                 "usage": {"prompt_tokens": 100, "completion_tokens": 20},
             })

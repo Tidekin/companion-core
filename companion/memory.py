@@ -407,12 +407,17 @@ class Memory:
             # never does: both stay current and are linked, so the reader sees the later
             # relayed claim with its source. Owner-confirmed corrections stay untouched.
             relayed = candidate.speaker != "owner"
-            replaced = [row for row in s.rows(
+            # Reviewed relations identify the attribute before any mutation. A coarse
+            # or differently spelled candidate key must not replace unrelated facts.
+            targets = ([row for row in conflicts if row["memory_id"] in resolution["replaces"]]
+                       if resolution is not None else s.rows(
                 "SELECT * FROM memories WHERE subject=? AND fact_key=? AND kind<>'episode' "
                 "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0 AND content<>?",
-                (candidate.subject, candidate.fact_key, content),
-            ) if sources.current(row) and not (
+                (candidate.subject, candidate.fact_key, content)))
+            replaced = [row for row in targets if sources.current(row) and not (
                 row["origin"] == "user_confirmed" and row["status"] == "CONFIRMED")]
+            if replaced:
+                candidate = candidate.model_copy(update={"fact_key": replaced[0]["fact_key"]})
             ended = {row["memory_id"] for row in replaced}
             conflicts = [row for row in conflicts if row["memory_id"] not in ended]
         if same:

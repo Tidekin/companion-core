@@ -326,21 +326,21 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
 
 def focus(text, query, budget):
     """Fit a long attachment by whole lines: title/header lines first, then the lines that
-    share the most bigrams with the query, in original order. Short text is unchanged.
+    rank by the existing bigram BM25, in original order. Short text is unchanged.
 
     The result never exceeds `budget`: header lines take at most a third of it (cut when
     longer), so an oversized header cannot crowd out the matching rows."""
     if len(text) <= budget:
         return text, False
     lines = text.splitlines()
-    terms = set(_grams(query))
     shown, used = {}, 0
     for index in range(min(2, len(lines))):
         line = lines[index][:max(0, budget // 3 - used - 1)]
         if line:
             shown[index] = line
             used += len(line) + 1
-    for index in sorted(range(2, len(lines)), key=lambda i: -len(terms & set(_grams(lines[i])))):
+    scores = lexical(query, lines[2:])
+    for index in sorted(range(2, len(lines)), key=lambda i: -scores[i - 2]):
         if used + len(lines[index]) + 1 > budget:
             continue
         shown[index] = lines[index]

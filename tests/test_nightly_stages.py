@@ -11,7 +11,7 @@ from cryptography.fernet import Fernet
 
 from companion import budget, erasure
 from companion.backup import backup, restore
-from companion.contracts import CoreError
+from companion.contracts import Candidate, CoreError
 from companion.core import Core
 from companion.diary import day_bounds
 from companion.memory_context import MemoryContext
@@ -430,6 +430,9 @@ def test_native_no_review_shortcut_does_not_claim_an_unmade_call(core):
     model = staged(core)
     candidates = json.loads(model.extraction)["memories"]
     model.extraction = encode({"memories": candidates[:1]})
+    # The no-call path is reuse of an already supported identical fact. A lone
+    # new inference must now be reviewed even without an existing catalog.
+    core.memory.add(Candidate.model_validate(candidates[0]), core.clock())
     assert run(core.extract_step()).progressed
     assert run(core.extract_step()).progressed
     record = checkpoint_state(core.store)

@@ -634,7 +634,7 @@ class Settings(BaseModel):
     # up to this many further turns (their schedule, their place). 0 disables.
     turn_recall_second_hop: int = Field(default=2, ge=0, le=4)
     # Upper bound on waiting for off-loop ranking; on expiry the reply proceeds without it.
-    recall_compute_timeout_seconds: float = Field(default=15, gt=0, le=120)
+    recall_compute_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
     # Local ONNX cross-encoder directory (tokenizer.json, onnx/*.onnx). "auto" uses
     # <embedding_cache_dir>/local-bge-reranker-v2-m3-int8 when present; "" turns it off.
     reranker_model_dir: str = "auto"

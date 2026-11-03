@@ -30,17 +30,20 @@ def run_worker(settings_path, now, stop_after_extract):
         rules, data = messages[0]["content"], json.loads(messages[-1]["content"])
         if rules == EXTRACT_RULES:
             calls.append("memory_extract")
+            events = data["events"]
             value = {"memories": [
                 {"subject": "project", "kind": "fact", "fact_key": "source-" + str(index),
-                 "content": row["text"], "evidence_event_id": row["event_id"],
+                 "content": row["text"], "evidence_event_id": row["ref"],
                  "evidence_quote": row["text"], "salience": (8, 3)[index]}
-                for index, row in enumerate(data[:2])
+                for index, row in enumerate(events[:2])
             ], "episode_summaries": [{"title": "项目安排",
                 "summary": "讨论了两个项目的安排，并计划周末核对资料；这些仍是待办事项。",
-                "source_event_ids": [row["event_id"] for row in data if row["text"].strip()]}]}
+                "source_event_ids": [events[0]["group"]]}]}
         elif rules == REVIEW_RULES:
             calls.append("memory_review")
-            value = {"relations": [{"same": None, "conflicts": []} for _ in data["candidates"]]}
+            value = {"relations": [
+                {"supported": True, "same": None, "conflicts": [], "replaces": []}
+                for _ in data["candidates"]]}
         elif rules == DIARY_RULES:
             calls.append("diary")
             source = next(row for row in data["sources"] if row["kind"] == "owner_message")

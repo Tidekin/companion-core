@@ -1203,8 +1203,9 @@ class Core(Runtime):
                        selection.priorities.get(id(reference), context_selection.BACKGROUND))
                       for reference in references)
         blocks.extend(("history", turn, preserve or source.get("reply_complete") is False,
-                       context_selection.TOPIC if index >= len(turns) - cfg.recent_protected_turns
-                       or related(source.get("user_text", "")) == context_selection.RELATED
+                       context_selection.TOPIC if (
+                           related(source.get("user_text", "")) == context_selection.RELATED
+                           or not focus and index >= len(turns) - cfg.recent_protected_turns)
                        else context_selection.OLD_HISTORY)
                       for index, (source, turn) in enumerate(zip(sources, turns, strict=True)))
         blocks.append(("current", current_input, True, context_selection.TOPIC))
@@ -1473,6 +1474,7 @@ class Core(Runtime):
                 "conflicts": list(
                     dict.fromkeys(added.get(ref, ref) for ref in resolution["conflicts"])
                 ),
+                "replaces": [added.get(ref, ref) for ref in resolution["replaces"]],
             }
             if resolved["same"] in resolved["conflicts"]:
                 raise CoreError("MEMORY_REVIEW_INVALID", 502)

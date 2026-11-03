@@ -32,8 +32,9 @@ def run_worker(settings_path, now):
                 "evidence_event_id": event["ref"], "evidence_quote": "十二月九日入场",
                 "evidence_reference_id": reference["ref"]}]}, ensure_ascii=False)
         else:
-            text = json.dumps({"relations": [{"same": None, "conflicts": []}
-                                            for _ in data["candidates"]]})
+            text = json.dumps({"relations": [
+                {"supported": True, "same": None, "conflicts": [], "replaces": []}
+                for _ in data["candidates"]]})
         return httpx.Response(200, json=answer(text))
 
     async def scenario():
