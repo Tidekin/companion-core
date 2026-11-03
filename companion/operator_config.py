@@ -151,6 +151,7 @@ LABELS = {
     "web_reading_hosts": "允许读取的网站",
     "semantic_min_score": "记忆相似度下限", "extraction_min_events": "记忆提取最少事件数",
     "extraction_idle_seconds": "记忆提取空闲等待（秒）",
+    "memory_extract_max_output_tokens": "记忆提取输出上限（token）",
     "emerging_min_sessions": "初步偏好最少独立会话数",
     "stable_min_days": "稳定偏好最少观察天数",
     "proactive_interval_seconds": "主动分享最小间隔（秒）",

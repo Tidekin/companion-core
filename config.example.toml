@@ -39,6 +39,8 @@ embedding_cache_dir = "data/embedding-cache"
 semantic_min_score = 0.5
 extraction_min_events = 5
 extraction_idle_seconds = 900
+# Bounded by [paid_model].max_output_tokens; raise that approval to use more than it.
+memory_extract_max_output_tokens = 4096
 proactive_enabled = true
 proactive_interval_seconds = 10800
 proactive_idle_seconds = 3600
