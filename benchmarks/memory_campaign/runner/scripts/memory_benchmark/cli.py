@@ -89,10 +89,10 @@ def configuration(path, preset=None):
     total, inference = config["budget"]["total_cny"], config["budget"]["inference_cny"]
     if (
         not all(type(v) in (int, float) and math.isfinite(v) for v in (total, inference))
-        or not 0 < inference < total <= 50
+        or not 0 < inference < total <= 80
     ):
         raise ValueError(
-            "Budget must satisfy0<inference<total<=50CNY (this round explicitly authorized)"
+            "Budget must satisfy0<inference<total<=80CNY (this round explicitly authorized)"
         )
     price = config["pricing"]
     if not all(

@@ -52,8 +52,11 @@ def test_shared_arms_keep_unknown_and_reserve_judge_headroom(tmp_path):
     assert old.snapshot()[0] == 47.499 + maximum
 
 
-def test_fifty_is_total_not_per_arm_and_new_round_starts_empty(tmp_path):
+@pytest.mark.parametrize("cap", [50, 80])
+def test_cap_is_total_not_per_arm_and_new_round_starts_empty(tmp_path, cap):
     config_old, config_new = config(tmp_path, "old"), config(tmp_path, "new")
+    for settings in (config_old, config_new):
+        settings["budget"] = {"total_cny": cap, "inference_cny": cap - 2.5}
     old, new = Budget.from_context(config_old), Budget.from_context(config_new)
     assert old.snapshot() == (0, {})
     old.append(
@@ -61,7 +64,7 @@ def test_fifty_is_total_not_per_arm_and_new_round_starts_empty(tmp_path):
             "id": "previous-new-round-calls",
             "state": "SETTLED",
             "phase": "inference",
-            "charged_or_held_cny": 49.999,
+            "charged_or_held_cny": cap - .001,
         }
     )
     with pytest.raises(RuntimeError, match="CNY_CAP"):

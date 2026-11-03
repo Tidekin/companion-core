@@ -612,7 +612,8 @@ async def run_profile(directory, persona, max_questions):
 async def main():
     directory = Path(CTX["run_dir"]) / "results"
     directory.mkdir(parents=True, exist_ok=False)  # noqa: ASYNC240 -- local fixture setup
-    await asyncio.gather(*(run_profile(directory / p, p, 0) for p in CTX["personas"]))
+    for persona in CTX["personas"]:
+        await run_profile(directory / persona, persona, 0)
 
 
 if __name__ == "__main__":

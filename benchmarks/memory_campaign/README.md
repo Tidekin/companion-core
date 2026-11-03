@@ -106,3 +106,8 @@ python diagnose.py --round R                  # evidence chain by required field
 
 Spend: every paid call goes through the round's ledgers and caps; failed and uncertain
 calls stay counted. Native inference never resumes; a stopped native run is a new round.
+
+Native arms and personas execute serially so their local pre-provider timings do not
+include competition from other arms/personas in this harness. The CLI accepts an explicitly
+authorized provider total up to80CNY. For a separate smoke ledger, reserve its full cap
+outside the main ledger cap so their sum stays within the user's provider allowance.

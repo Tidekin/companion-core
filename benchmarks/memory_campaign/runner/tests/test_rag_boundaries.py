@@ -3,20 +3,25 @@
 import asyncio
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import httpx
 import numpy as np
 import pytest
 
-spec = importlib.util.spec_from_file_location(
-    "blind_rag", Path(__file__).resolve().parents[2] / "run_rag.py"
-)
-rag = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(rag)
+@pytest.fixture
+def rag(tmp_path, monkeypatch):
+    (tmp_path / "round.json").write_text("{}", "utf-8")
+    monkeypatch.setattr(sys, "argv", ["rag.py", "--round", str(tmp_path)])
+    spec = importlib.util.spec_from_file_location(
+        "blind_rag", Path(__file__).resolve().parents[2] / "rag.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def test_failed_answer_keeps_shared_unknown_and_does_not_retry(tmp_path, monkeypatch):
+def test_failed_answer_keeps_shared_unknown_and_does_not_retry(tmp_path, monkeypatch, rag):
     monkeypatch.setattr(rag, "OUT", tmp_path)
 
     async def run():
@@ -58,10 +63,10 @@ def test_failed_answer_keeps_shared_unknown_and_does_not_retry(tmp_path, monkeyp
     asyncio.run(run())
 
 
-def test_retrieval_and_generator_never_receive_future_turns(tmp_path, monkeypatch):
-    root, out, suite = tmp_path, tmp_path / "rag", tmp_path / "suite"
+def test_retrieval_and_generator_never_receive_future_turns(tmp_path, monkeypatch, rag):
+    root, out, suite = tmp_path, tmp_path / "rag", rag.R.suite
     out.mkdir()
-    suite.mkdir()
+    suite.mkdir(parents=True)
     native = root / "arms/old/results/N99"
     native.mkdir(parents=True)
     monkeypatch.setattr(rag, "ROOT", root)

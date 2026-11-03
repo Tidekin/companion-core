@@ -52,19 +52,17 @@ def native(configs):
     for config in configs.values():
         lifecycle(config)
     state("RUNNING_NATIVE_INFERENCE")
-    workers, logs = {}, {}
-    try:
-        for arm, config in configs.items():
-            logs[arm] = (R.arm_dir(arm) / "inference.log").open("a", encoding="utf-8")
-            workers[arm] = subprocess.Popen(
+    codes = {}
+    # One arm at a time: otherwise local embedding/source checks compete for CPU
+    # and the before-provider timings measure this harness's contention too.
+    for arm, config in configs.items():
+        with (R.arm_dir(arm) / "inference.log").open("a", encoding="utf-8") as log:
+            worker = subprocess.Popen(
                 [sys.executable, "-B", "-m", "scripts.memory_benchmark.worker"], cwd=ROOT,
-                env=environment(config), stdout=logs[arm], stderr=subprocess.STDOUT,
+                env=environment(config), stdout=log, stderr=subprocess.STDOUT,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        state("RUNNING_NATIVE_INFERENCE", workers={a: p.pid for a, p in workers.items()})
-        codes = {a: p.wait() for a, p in workers.items()}
-    finally:
-        for log in logs.values():
-            log.close()
+            state("RUNNING_NATIVE_INFERENCE", arm=arm, worker=worker.pid, schedule="serial")
+            codes[arm] = worker.wait()
     save(ROOT / "native-run-completion.json", {"exit_codes": codes,
                                                "at": datetime.now(UTC).isoformat()})
     for config in configs.values():
