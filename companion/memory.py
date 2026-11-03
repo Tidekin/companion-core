@@ -209,7 +209,8 @@ class Memory:
         """The fused-order rows a configured cross-encoder would rescore, and its model."""
         from companion import reranker
 
-        model = reranker.directory(self.settings)
+        model = reranker.directory(self.settings) if getattr(
+            self.settings, "memory_rerank", False) else None
         if query == "*" or not model or len(ordered) < 2:
             return None, []
         return model, ordered[:limit * 2]

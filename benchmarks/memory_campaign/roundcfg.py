@@ -47,7 +47,7 @@ DEFAULTS = {
             "rerank": "qwen3.7-text-rerank", "top_k": 40, "top_n": 10, "recent_turns": 6,
             "generator": "deepseek-flash", "max_tokens": 3840, "thinking": "high",
             "qwen_rate_cny_per_million": 5, "qwen_key_file": None},
-    "grading": {"rubric": "v2", "batch_size": 8, "concurrency": 3, "max_tokens": 2048},
+    "grading": {"rubric": "v3", "votes": 3, "batch_size": 8, "concurrency": 3, "max_tokens": 2048},
     "review": {"persona": None, "delay_days": 15, "changed_per_family": 2},
     "sensitivity_exclude_categories": [],
     "smoke": {"bank": None, "persona": None, "questions": 6, "budget_cny": 1},

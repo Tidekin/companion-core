@@ -152,6 +152,8 @@ def prepare_review(rows, grades):
     for r in rows:
         for a in ARMS:
             g = r["arms"][a]["auto_grade"]
+            if g.get("agreement", 1) < 1:
+                selected.append((r, a, "split_judge_vote"))
             if g.get("index_annotation_errors") or (not g["pass"] and not g.get("missing")
                                                     and not g.get("violations")
                                                     and not g.get("unsupported")

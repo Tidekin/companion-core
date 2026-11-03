@@ -132,6 +132,7 @@ def test_async_memory_search_rescores_in_a_worker_thread(core, monkeypatch):
                                   evidence_quote="这是一份别人整理的资料"), core.clock(),
                         confirmed=True)
     threads = []
+    core.settings.memory_rerank = True
     monkeypatch.setattr(reranker, "directory", lambda settings: "model-dir")
 
     def scores(model, query, docs):

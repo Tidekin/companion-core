@@ -619,6 +619,9 @@ class Settings(BaseModel):
     # Cross-encoder over raw turns: off by default. Offline round-3 recall@8 was the same
     # with and without it (91.9%) at ~3-6 s per reply; facts keep their own reranker.
     turn_recall_rerank: bool = False
+    # Cross-encoder over fact candidates: also off. Offline round-3: facts citing the
+    # sources were in the top 10 for 360/360 questions either way, at +0.8 s with it.
+    memory_rerank: bool = False
     # Second hop: re-query with the best first-hop evidence (e.g. who holds a key) and add
     # up to this many further turns (their schedule, their place). 0 disables.
     turn_recall_second_hop: int = Field(default=2, ge=0, le=4)
