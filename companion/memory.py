@@ -440,7 +440,8 @@ class Memory:
                 privacy_scope="private",
                 created_at=now,
                 updated_at=now,
-                fact_key=conflicts[0]["fact_key"] if conflicts else candidate.fact_key,
+                fact_key=(candidate.fact_key if replaced else
+                          conflicts[0]["fact_key"] if conflicts else candidate.fact_key),
                 needs_review=int(bool(conflicts)),
             )
         if conflicts:

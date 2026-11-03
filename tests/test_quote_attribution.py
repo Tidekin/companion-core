@@ -52,10 +52,13 @@ def test_exact_delivered_quote_has_self_annotation_without_historical_replay(cor
     assert run(core.run_once())
     messages, scenario = core.model.calls[0]
     assert scenario == "chat"
-    assert [message["role"] for message in messages] == ["system", "user", "user"]
-    assert "本地作者核验：segments中index为[0]" in messages[-2]["content"]
-    assert "来自你先前已发送的回复" in messages[-2]["content"]
-    assert QUOTE in messages[-2]["content"]
+    assert messages[0]["role"] == "system"
+    assert all(message["role"] == "user" for message in messages[1:])
+    annotations = [message["content"] for message in messages
+                   if "本地作者核验：segments中index为[0]" in message["content"]]
+    assert len(annotations) == 1
+    assert "来自你先前已发送的回复" in annotations[0]
+    assert QUOTE in annotations[0]
     assert messages[-1] == {"role": "user", "content": QUESTION}
     prompt = json.dumps(messages, ensure_ascii=False)
     assert "只应留在历史中的旧问题" not in prompt

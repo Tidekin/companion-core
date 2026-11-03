@@ -7,7 +7,7 @@ from datetime import timedelta
 from companion import owner_authority
 from companion.core import Core
 from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
-from companion.model import EXTRACT_RULES, RECALL_RULES
+from companion.model import EXTRACT_RULES, RECALL_RULES, REVIEW_RULES
 from companion.owner_authority_protocol import AuthorityStop
 from companion_onebot_bridge import owner_handoff
 from companion_onebot_bridge.onebot_client import OneBotClient
@@ -40,6 +40,10 @@ def test_queued_owner_input_cancels_proactive_before_dispatch_without_unknown(co
                 "content": "用户喜欢龙井茶", "evidence_event_id": event_id,
                 "evidence_quote": "我喜欢龙井茶",
             }]}, ensure_ascii=False)
+        elif messages[0]["content"] == REVIEW_RULES:
+            data = json.loads(messages[-1]["content"])
+            text = json.dumps({"relations": [{"supported": True, "same": None,
+                "conflicts": [], "replaces": []} for _ in data["candidates"]]})
         elif messages[0]["content"] == RECALL_RULES:
             text = '{"relevant":["m0"]}'
         elif sources:

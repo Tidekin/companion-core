@@ -353,6 +353,8 @@ class MemoryContext:
         if memory_ids is not None and memory_id not in memory_ids:
             return {"privacy_epoch": version[0], "as_of": now,
                     "revisions": [], "truncated": False}
+        # The native replacement edge establishes the attribute relation even if
+        # historical inference used different key spellings for that attribute.
         rows = self.store.rows(
             "WITH RECURSIVE edges(older,newer) AS ("
             "SELECT supersedes_memory_id,memory_id FROM memories "
@@ -361,7 +363,7 @@ class MemoryContext:
             "JOIN memories old ON old.memory_id=a.entity_id "
             "JOIN memories new ON new.memory_id=json_extract(a.safe_detail_json,'$.by') "
             "WHERE a.action='memory.replaced' AND a.created_at<=? "
-            "AND old.subject=new.subject AND old.fact_key=new.fact_key "
+            "AND old.subject=new.subject "
             "AND old.kind<>'episode' AND new.kind<>'episode'), "
             "family(memory_id) AS (SELECT ? UNION "
             "SELECT e.newer FROM edges e JOIN family f ON e.older=f.memory_id UNION "

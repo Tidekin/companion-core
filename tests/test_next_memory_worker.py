@@ -16,7 +16,7 @@ from companion.config import Settings
 from companion.core import Core
 from companion.image_input import ImageInputPolicy
 from companion.memory_context import MemoryContext
-from companion.model import EXTRACT_RULES
+from companion.model import EXTRACT_RULES, REVIEW_RULES
 from companion.store import encode
 from companion_onebot_bridge import pending_media
 from tests.conftest import run
@@ -40,6 +40,11 @@ def run_isolated_worker(settings_path, now):
 
     def provider(request):
         payload = json.loads(request.content)
+        if payload["messages"][0]["content"] == REVIEW_RULES:
+            calls.append("memory_review")
+            candidates = json.loads(payload["messages"][-1]["content"])["candidates"]
+            return provider_response(encode({"relations": [{"supported": True,
+                "same": None, "conflicts": [], "replaces": []} for _ in candidates]}))
         assert payload["messages"][0]["content"] == EXTRACT_RULES
         assert payload["max_tokens"] == min(2048, settings.paid_model.max_output_tokens)
         calls.append("memory_extract")
@@ -143,7 +148,9 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch, o
                     cwd=workspace, capture_output=True, text=True,
                     encoding="utf-8", timeout=30, check=True)
                 result = json.loads(completed.stdout.splitlines()[-1])
-                assert result["calls"] == (["memory_extract"] if attempt == 0 else [])
+                expected = (["memory_extract", *(["memory_review"]
+                            if batch != "only_media" else [])] if attempt == 0 else [])
+                assert result["calls"] == expected
             row = core.store.one("SELECT * FROM memories")
             if batch == "only_media":
                 assert row is None
@@ -167,7 +174,9 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch, o
             assert {r["event_id"] for r in core.store.rows(
                 "SELECT event_id FROM episode_events")} == set(expected_sources)
             assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
-                *chat_usage, {"scenario": "memory_extract", "state": "SETTLED"}]
+                *chat_usage, {"scenario": "memory_extract", "state": "SETTLED"},
+                *([{"scenario": "memory_review", "state": "SETTLED"}]
+                  if batch != "only_media" else [])]
             response = await entry.client.post("/internal/v1/memories/search", json={
                 "query": "青禾项目", "requester_actor_id": "owner"})
             assert response.status_code == 200

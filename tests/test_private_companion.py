@@ -17,7 +17,7 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.diary import DIARY_RULES
-from companion.model import EXTRACT_RULES, RECALL_RULES, ModelClient
+from companion.model import EXTRACT_RULES, RECALL_RULES, REVIEW_RULES, ModelClient
 from companion.owner_authority_protocol import AuthorityStop
 from companion.reflection import REFLECTION_RULES
 from companion.reply_segments import SegmentedReplyConfig
@@ -93,7 +93,7 @@ def test_independent_life_worker_finishes_nightly_memory_diary_reflection_goals(
         calls.append(rules)
         data = (
             json.loads(messages[-1]["content"])
-            if rules in {EXTRACT_RULES, DIARY_RULES, REFLECTION_RULES}
+            if rules in {EXTRACT_RULES, REVIEW_RULES, DIARY_RULES, REFLECTION_RULES}
             else None
         )
         if rules == EXTRACT_RULES:
@@ -112,6 +112,9 @@ def test_independent_life_worker_finishes_nightly_memory_diary_reflection_goals(
                 },
                 ensure_ascii=False,
             )
+        elif rules == REVIEW_RULES:
+            text = json.dumps({"relations": [{"supported": True, "same": None,
+                "conflicts": [], "replaces": []} for _ in data["candidates"]]})
         elif rules == DIARY_RULES:
             source = next(item for item in data["sources"] if item["kind"] == "owner_message")
             text = json.dumps(
@@ -234,7 +237,8 @@ def test_continuous_history_memory_restart_and_followup(core, tmp_path, monkeypa
         payload = json.loads(request.content)
         messages = payload["messages"]
         calls.append(messages)
-        if number == 2 and not any(m["role"] == "tool" for m in messages):
+        if number == 2 and payload.get("tools") and not any(
+            m["role"] == "tool" for m in messages):
             return httpx.Response(200, json=tool_answer(calls=[
                 tool_call("recall-tea", "memory_recall", {"query": "龙井茶"})]))
         if messages[0]["content"] == EXTRACT_RULES:
@@ -254,6 +258,10 @@ def test_continuous_history_memory_restart_and_followup(core, tmp_path, monkeypa
                 },
                 ensure_ascii=False,
             )
+        elif messages[0]["content"] == REVIEW_RULES:
+            data = json.loads(messages[-1]["content"])
+            text = json.dumps({"relations": [{"supported": True, "same": None,
+                "conflicts": [], "replaces": []} for _ in data["candidates"]]})
         elif messages[0]["content"] == RECALL_RULES:
             text = '{"relevant":["m0"]}'
         else:
@@ -358,6 +366,10 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
                 },
                 ensure_ascii=False,
             )
+        elif messages[0]["content"] == REVIEW_RULES:
+            data = json.loads(messages[-1]["content"])
+            text = json.dumps({"relations": [{"supported": True, "same": None,
+                "conflicts": [], "replaces": []} for _ in data["candidates"]]})
         elif messages[0]["content"] == RECALL_RULES:
             text = '{"relevant":["m0"]}'
         elif isinstance(messages[0]["content"], list):
@@ -461,7 +473,7 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
                                 )
                             )
                             await started.wait()
-                assert len(downloads) == 5 and len(calls) == 4 + int(background_inflight)
+                assert len(downloads) == 5 and len(calls) == 5 + int(background_inflight)
                 assert len(sends) == 6
                 assert [item["message"][0]["data"]["text"] for item in sends[1:]] == pieces
                 chat = calls[-1]

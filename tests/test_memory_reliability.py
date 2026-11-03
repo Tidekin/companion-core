@@ -187,3 +187,34 @@ def test_lone_new_identity_claim_still_requires_evidence_review(core):
         {"supported": False, "same": None, "conflicts": [], "replaces": []}]})
     assert run(core.prepare_memories([candidate])) == ([], [])
     assert [kind for _, kind in core.model.calls] == ["memory_review"]
+
+
+def test_explicit_replacement_key_survives_another_unresolved_conflict(core):
+    old = remember(core, 1, "讲座在苇灯厅", subject="project", fact_key="lecture_venue")
+    pending = remember(core, 3, "讲座在松蜜厅", subject="project", fact_key="讲座地点")
+    new = update(core, old, resolution={"same": None, "conflicts": [old, pending],
+                                       "replaces": [old]})
+    row = core.store.one("SELECT * FROM memories WHERE memory_id=?", (new,))
+    assert row["needs_review"] == 1
+    assert row["fact_key"] == "lecture_venue"
+    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=?", (pending,)) == {
+        "valid_to": None}
+    assert [r["memory_id"] for r in core.memory_context.history(
+        old, core.clock())["revisions"]] == [new, old]
+
+
+def test_explicit_replacement_family_keeps_older_attribute_key_aliases(core):
+    first = remember(core, 1, "讲座在苇灯厅", subject="project", fact_key="lecture_venue")
+    core.clock.advance(60)
+    second = remember(core, 3, "讲座在松蜜厅", subject="project", fact_key="讲座地点")
+    core.clock.advance(60)
+    text = "我已核实讲座最终在海盐厅，之前说过的两个地点均作废。"
+    ingest(core, 4, text)
+    candidate = Candidate(subject="project", kind="fact", fact_key="lecture_place",
+        content=text, evidence_event_id="evt_test_4", evidence_quote=text,
+        speaker="owner", update="replaces_previous")
+    new = core.memory.add(candidate, core.clock(), resolution={"same": None,
+        "conflicts": [first, second], "replaces": [first, second]})
+    for selected in (first, second, new):
+        assert [r["memory_id"] for r in core.memory_context.history(
+            selected, core.clock())["revisions"]] == [new, second, first]

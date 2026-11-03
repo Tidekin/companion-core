@@ -29,6 +29,9 @@ Natural updates already record `valid_to` and a native `memory.replaced` relatio
 History now traverses those relations alongside explicit owner correction edges,
 without using the owner correction pointer for natural changes. Every returned
 version still requires live supported provenance and the caller's full allowlist.
+An explicit native replacement relation remains authoritative when older versions
+used different attribute-key spellings. A still-pending conflict cannot overwrite
+the canonical key selected for the explicit replacement.
 Recorded/source timestamps are not invented real-world effective dates.
 
 ## Explicit failed-batch recovery

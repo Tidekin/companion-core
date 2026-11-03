@@ -6,7 +6,6 @@ import pickle
 import sys
 from pathlib import Path
 
-from companion.retrieval import SemanticIndex
 from tests.conftest import Clock
 from tests.sdk_reader_fixture import Provider, worker_for
 
@@ -14,7 +13,6 @@ with open(sys.argv[1], "rb") as stream:
     settings, now, job_id, responses, expected, output = pickle.load(stream)
 clock = Clock()
 clock.now = now
-SemanticIndex.warmup = lambda self: None
 provider = Provider(*responses)
 
 

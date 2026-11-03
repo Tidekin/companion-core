@@ -166,10 +166,11 @@ def test_repaired_short_ref_extraction_commits_and_records_filter_reason(core):
         **candidate, "fact_key": "unsafe", "content": "主人住址在甲路"}]}, ensure_ascii=False)[:-1]
     assert run(core.extract_once())
     assert core.store.one("SELECT content FROM memories")["content"] == candidate["content"]
-    assert len(core.model.calls) == 1
+    assert [kind for _, kind in core.model.calls] == ["memory_extract", "memory_review"]
     assert "interaction_signals" not in core.model.calls[0][0][0]["content"]
     assert core.store.rows("SELECT scenario,state FROM model_usage") == [
-        {"scenario": "memory_extract", "state": "SETTLED"}]
+        {"scenario": "memory_extract", "state": "SETTLED"},
+        {"scenario": "memory_review", "state": "SETTLED"}]
     assert core.store.one("SELECT entity_id FROM audit_log WHERE action='memory.output_repaired'")
     rejected = core.store.one("SELECT entity_id,safe_detail_json FROM audit_log "
                               "WHERE action='memory.candidate_rejected'")

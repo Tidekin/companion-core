@@ -85,7 +85,7 @@ def test_summary_is_a_read_only_model_projection_and_repeat_evidence_is_one_vote
     assert len(saved) == 1
     assert core.store.one("SELECT importance FROM memories")["importance"] == 0.8
     assert core.store.rows("SELECT * FROM model_usage") == usage
-    assert [kind for _, kind in model.calls] == ["memory_extract"]
+    assert [kind for _, kind in model.calls] == ["memory_extract", "memory_review"]
 
 
 @pytest.mark.parametrize("invalid", ["subset", "duplicate", "outside", "sensitive"])
@@ -234,7 +234,7 @@ def test_late_input_gets_its_own_summary_without_replacing_the_n2_episode(core):
         assert core.memory.episode_summary(row["episode_id"], ids, core.clock())
     assert all(row["n"] == 1 for row in core.store.rows(
         "SELECT COUNT(*) AS n FROM episode_events GROUP BY event_id"))
-    assert [kind for _, kind in model.calls] == ["memory_extract"]
+    assert [kind for _, kind in model.calls] == ["memory_extract", "memory_review"]
 
 
 def test_prior_episode_with_unprovided_source_cannot_be_resummarized(core):
