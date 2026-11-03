@@ -47,8 +47,9 @@ def assert_settled_calls(core, count, *, scenario="chat"):
     '{"query":"*","selected":["m0","m0"]}', '{"query":"*","selected":["m999"]}',
 ], ids=["non-json", "missing", "null", "number", "array", "extra", "fenced", "empty", "long",
         "duplicate-selector", "unknown-selector"])
+@pytest.mark.parametrize("prefetched", [False, True], ids=["empty-prefetch", "pinned-prefetch"])
 def test_invalid_memory_tool_arguments_recover_within_sdk_budget_without_candidates(
-    core, tmp_path, arguments,
+    core, tmp_path, monkeypatch, arguments, prefetched,
 ):
     async def scenario():
         calls = []
@@ -60,7 +61,7 @@ def test_invalid_memory_tool_arguments_recover_within_sdk_budget_without_candida
                 return tool_response(arguments)
             assert len(calls) == 2
             assert tool_result(messages)
-            assert FACT not in encode(messages)
+            assert (FACT in encode(messages)) is prefetched
             return httpx.Response(200, json=answer("在想什么呢？"))
 
         async with environment(core, tmp_path) as (admit, _, reference):
@@ -71,6 +72,15 @@ def test_invalid_memory_tool_arguments_recover_within_sdk_budget_without_candida
                     assert await worker.run_once("seed-owner-fact")
                     assert calls == []
                     before = core.store.rows("SELECT * FROM memories")
+                    lookup = worker.memory_context.recall_async
+                    queries = []
+
+                    async def prefetch(query, *args, **kwargs):
+                        queries.append(query)
+                        assert query == "🤔", "Invalid tool arguments reached memory lookup"
+                        return await lookup(query, *args, **kwargs) if prefetched else {"rows": []}
+
+                    monkeypatch.setattr(worker.memory_context, "recall_async", prefetch)
                     source, accepted = await admit(2, "🤔")
                     assert await worker.run_once("invalid-memory-arguments")
                     assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
@@ -79,8 +89,10 @@ def test_invalid_memory_tool_arguments_recover_within_sdk_budget_without_candida
                     assert core.store.rows("SELECT * FROM memories") == before
                     assert not core.store.rows("SELECT * FROM agent_tool_calls WHERE job_id=?",
                                                (accepted["job_id"],))
-                    assert seed.event_id not in {row["event_id"] for row in core.store.rows(
+                    assert queries == ["🤔"]
+                    consumed = {row["event_id"] for row in core.store.rows(
                         "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],))}
+                    assert (seed.event_id in consumed) is prefetched
                     assert_settled_calls(core, 2)
                     assert json.loads(core.store.one(
                         "SELECT content_json FROM outbox WHERE origin_event_id=?",
@@ -163,7 +175,10 @@ def test_emoji_memory_candidates_are_evaluated_in_the_same_sdk_conversation(
     run(scenario())
 
 
-def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(core, tmp_path):
+@pytest.mark.parametrize("prefetched", [False, True], ids=["empty-prefetch", "pinned-prefetch"])
+def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(
+    core, tmp_path, monkeypatch, prefetched,
+):
     async def scenario():
         calls = []
 
@@ -179,6 +194,15 @@ def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(core,
                     seed, _ = await admit(1, "/记住这个 " + FACT)
                     assert await worker.run_once("seed-owner-fact")
                     before = core.store.rows("SELECT * FROM memories")
+                    lookup = worker.memory_context.recall_async
+                    queries = []
+
+                    async def prefetch(query, *args, **kwargs):
+                        queries.append(query)
+                        assert query == "🤔", "Unknown provider usage reached tool lookup"
+                        return await lookup(query, *args, **kwargs) if prefetched else {"rows": []}
+
+                    monkeypatch.setattr(worker.memory_context, "recall_async", prefetch)
                     source, accepted = await admit(2, "🤔")
                     assert await worker.run_once("unknown-tool-accounting")
                     assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
@@ -188,8 +212,10 @@ def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(core,
                         "FROM model_usage u JOIN model_admissions a USING(request_id)")
                     assert usage["state"] == "UNKNOWN"
                     assert usage["billed_micro_usd"] == usage["reserved_micro_usd"] > 0
-                    assert seed.event_id not in {row["event_id"] for row in core.store.rows(
+                    assert queries == ["🤔"]
+                    consumed = {row["event_id"] for row in core.store.rows(
                         "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],))}
+                    assert (seed.event_id in consumed) is prefetched
                     assert core.store.rows("SELECT * FROM memories") == before
                     assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
                                                (source.event_id,))
