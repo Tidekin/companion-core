@@ -24,7 +24,7 @@ R = Round()
 ROOT = R.root
 ARGS = sys.argv[1:]
 GRADING = ROOT / (ARGS[ARGS.index("--grading") + 1] if "--grading" in ARGS else "grading")
-LABELS = {"old": "旧版 Core", "new": "新版 Core", "rag": "千问 RAG"}
+LABELS = {"old": "旧版 Core", "new": "新版 Core", "rag": "千问 RAG", "closed": "闭卷对照"}
 COLORS = {"old": "#7D8798", "new": "#2859E8", "rag": "#008896"}
 HATCH = {"old": "///", "new": "", "rag": ".."}
 
@@ -42,7 +42,7 @@ def load():
     frozen = json.loads((ROOT / "all-answers-frozen.json").read_text("utf-8"))
     for name, digest in frozen["files_sha256"].items():
         assert sha(ROOT / name) == digest, name
-    answers = {a: {r["id"]: r for r in R.arm_answers(a)} for a in ARMS}
+    answers = {a: {r["id"]: r for r in R.arm_answers(a)} for a in R.graded_arms}
     mapping = json.loads((GRADING / "blind-mapping.json").read_text("utf-8"))
     grades = {r["key"]: r for r in read_rows(GRADING / "grades.jsonl")}
     assert len(grades) == len(mapping) == R.answers_total, "grading incomplete"
@@ -56,18 +56,39 @@ def load():
     rows = []
     for q in sorted(R.questions, key=lambda r: r["id"]):
         arms = {}
-        for a in ARMS:
+        for a in R.graded_arms:
             ans, m = answers[a][q["id"]], reverse[a, q["id"]]
             assert m["answer_sha256"] == hashlib.sha256(ans.get("answer", "").encode()).hexdigest()
             arms[a] = dict(key=m["key"], answer=ans.get("answer", ""), status=ans["status"],
                            error=ans.get("error"), auto_grade=grades[m["key"]],
                            passed=final[m["key"]]["pass"], elapsed_seconds=latency(ans),
-                           answer_sha256=m["answer_sha256"])
+                           answer_sha256=m["answer_sha256"],
+                           exact_pass=exact(R.criteria[q["id"]], ans.get("answer", "")))
         op, npass = arms["old"]["passed"], arms["new"]["passed"]
         change = ("gain" if npass else "loss") if op != npass else ("both_pass" if op else "both_fail")
         rows.append({**q, "criteria": R.criteria[q["id"]], "arms": arms, "change": change,
                      "sources": [inputs[s] for s in q["source_ids"]]})
     return rows, grades
+
+
+def exact(criteria, answer):
+    """Mechanical check: every exact group has one alternative verbatim in the answer
+    (spaces and markdown emphasis ignored). None when the criteria define no groups."""
+    groups = criteria.get("exact")
+    if not groups:
+        return None
+    text = "".join(answer.replace("*", "").split())
+    return all(any("".join(alt.split()) in text for alt in group) for group in groups)
+
+
+def z_drop(low, high):
+    """One-sided two-proportion z that `high` (e.g. the longest chains) scores below `low`."""
+    n1, n2 = low["total"], high["total"]
+    if not n1 or not n2:
+        return None
+    pooled = (low["passed"] + high["passed"]) / (n1 + n2)
+    spread = (pooled * (1 - pooled) * (1 / n1 + 1 / n2)) ** 0.5
+    return round((low["rate"] - high["rate"]) / spread, 3) if spread else None
 
 
 def score(rows, arm):
@@ -130,6 +151,38 @@ def summarize(rows):
         kept = [r for r in rows if r["category_id"] not in excluded]
         summary["sensitivity"] = {"excluded_categories": sorted(excluded),
                                   **{a: score(kept, a) for a in ARMS}}
+    if R.controls:
+        guessable = sorted(r["id"] for r in rows if any(r["arms"][c]["passed"] for c in R.controls))
+        kept = [r for r in rows if r["id"] not in set(guessable)]
+        summary["controls"] = {c: score(rows, c) for c in R.controls}
+        summary["guessable_without_memory"] = guessable
+        summary["memory_dependent"] = {a: score(kept, a) for a in ARMS}
+    checked = [r for r in rows if r["arms"]["new"]["exact_pass"] is not None]
+    if checked:
+        summary["exact"] = {a: dict(
+            checked=len(checked), exact_pass=sum(r["arms"][a]["exact_pass"] for r in checked),
+            disagree_with_final=sum(r["arms"][a]["exact_pass"] != r["arms"][a]["passed"]
+                                    for r in checked)) for a in ARMS}
+    names = sorted({k for r in rows for k in r["criteria"].get("strata", {})})
+    if names:
+        summary["strata"] = {}
+        for name in names:
+            values = sorted({r["criteria"]["strata"][name] for r in rows
+                             if name in r["criteria"].get("strata", {})}, key=str)
+            cells = {str(v): {a: score([r for r in rows if r["criteria"].get("strata", {})
+                                        .get(name) == v], a) for a in ARMS} for v in values}
+            entry = {"values": cells}
+            numeric = [v for v in values if isinstance(v, int | float) and not isinstance(v, bool)]
+            if len(numeric) >= 2:
+                low, high = str(min(numeric)), str(max(numeric))
+                entry["drop_z_shortest_vs_longest"] = {
+                    a: z_drop(cells[low][a], cells[high][a]) for a in ARMS}
+            summary["strata"][name] = entry
+    manifest = GRADING / "manifest.json"
+    if manifest.exists():
+        m = json.loads(manifest.read_text("utf-8"))
+        summary["judging"] = {k: m.get(k) for k in ("status", "judges", "votes", "anchor_gates",
+                                                    "anchor_failed_keys", "split_decisions")}
     summary["new_minus_old_points"] = (summary["overall"]["new"]["rate"]
                                        - summary["overall"]["old"]["rate"]) * 100
     summary["latency"] = {a: dict(median_seconds=statistics.median(v),
@@ -150,6 +203,12 @@ def prepare_review(rows, grades):
         for r in pool[:R.cfg["review"]["changed_per_family"]]:
             selected.extend((r, a, "changed_" + family) for a in ARMS)
     for r in rows:
+        for c in R.controls:
+            if r["arms"][c]["auto_grade"]["pass"]:
+                selected.append((r, c, "closed_book_pass"))
+        for a in ARMS:
+            if r["arms"][a]["exact_pass"] not in (None, r["arms"][a]["auto_grade"]["pass"]):
+                selected.append((r, a, "exact_check_disagrees"))
         for a in ARMS:
             g = r["arms"][a]["auto_grade"]
             if g.get("agreement", 1) < 1:
@@ -250,6 +309,31 @@ def charts(rows, summary):
     return figures
 
 
+def extras(summary, e):
+    """Controls, anchor gates, exact checks and strata as short paragraphs."""
+    out = []
+    if "controls" in summary:
+        c = ", ".join(f'{LABELS.get(k, k)} {v["passed"]}/{v["total"]}'
+                      for k, v in summary["controls"].items())
+        md = "；".join(f'{LABELS[a]} {v["passed"]}/{v["total"]}'
+                      for a, v in summary["memory_dependent"].items())
+        out.append(f"<p>无资料对照：{e(c)}。去掉对照组能答对的题后：{e(md)}。</p>")
+    for name, gate in ((summary.get("judging") or {}).get("anchor_gates") or {}).items():
+        if gate:
+            out.append(f'<p>锚点 {e(name)}：准确率 {gate["accuracy"]:.1%}，多数类基线 '
+                       f'{gate["majority_baseline"]:.1%}，作废批次 {gate["discarded_batches"]}/'
+                       f'{gate["batches"]}，{"通过" if gate["passed"] else "未通过"}。</p>')
+    if "exact" in summary:
+        out.append("<p>逐字核对：" + e("；".join(
+            f'{LABELS[a]} {v["exact_pass"]}/{v["checked"]}（与终判不一致 {v["disagree_with_final"]}）'
+            for a, v in summary["exact"].items())) + "</p>")
+    for name, entry in summary.get("strata", {}).items():
+        cells = "；".join(f'{value}: ' + " / ".join(f'{v[a]["passed"]}/{v[a]["total"]}' for a in ARMS)
+                         for value, v in entry["values"].items())
+        out.append(f"<p>分层 {e(name)}（旧/新/RAG）：{e(cells)}</p>")
+    return "".join(out)
+
+
 def render(rows, summary, figures):
     e = lambda s: html.escape(str(s), quote=True)  # noqa: E731
     cards = "".join(f'<div class="kpi"><span>{LABELS[a]}</span><strong>{summary["overall"][a]["rate"]:.1%}'
@@ -287,6 +371,7 @@ def render(rows, summary, figures):
            f'{e(summary["paired_changes"])}。DeepSeek ¥{ds["charged_or_held_cny"]:.2f}/'
            f'¥{ds["cap_cny"]}，千问 ¥{qw["charged_or_held_cny"]:.2f}/¥{qw["cap_cny"]}（保守估算）。'
            f'复核 {summary["review_count"]} 份，改判 {summary["override_count"]} 份，非独立人工。</p>'
+           + extras(summary, e)
            + figs + "<h2>逐题</h2>" + "".join(cards_q) + "<h2>局限</h2>"
            + "".join(f"<p>{e(x)}</p>" for x in summary["limitations"]) + "</main></html>")
     (ROOT / "memory-report.html").write_text(doc, "utf-8")

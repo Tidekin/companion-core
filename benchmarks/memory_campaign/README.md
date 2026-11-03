@@ -34,8 +34,20 @@ Minimal `round.json` (all other keys have defaults in `roundcfg.py`):
 
 Useful optional keys: `bank` (path, default `bank`), `source_checkout`, `history_grant`
 (signed history scope given to both arms), `native` (Core overrides), `rag` (models,
-`top_k`, `top_n`, `observed_arm`, `qwen_key_file`), `grading.rubric` (`v1`|`v2`),
+`top_k`, `top_n`, `observed_arm`, `qwen_key_file`), `grading.rubric` (`v1`|`v2`|`v3`),
 `review` (`persona`, `delay_days`, `changed_per_family`), `parser`, `telemetry`.
+
+Judging and controls:
+- `controls: ["closed"]` adds a closed-book control: the RAG generator and prompt with no
+  history. It is graded blind with the arms; questions it passes are listed as answerable
+  without memory and a memory-dependent score excludes them.
+- `grading.judges: ["deepseek", "deepseek", "qwen"]` names the judge of each vote
+  (definitions under `judges`; Qwen spend goes to the Qwen ledger).
+- `grading.anchors: <file>` mixes `anchors_per_batch` answers with known verdicts into
+  every batch; a batch that misjudges one is discarded and re-judged (up to
+  `anchor_retries`), and each vote must beat the majority-class baseline by
+  `anchor_gate_margin` or the grading manifest says `ANCHOR_GATE_FAILED`. Build the file
+  from an earlier reviewed round: `python make_anchors.py --round <old round> --out <file>`.
 
 ## Bank layout
 
@@ -45,7 +57,8 @@ bank/suite-v1/inputs/<persona>.jsonl   turns 1..n, strictly increasing "now"
 bank/suite-v1/questions.jsonl          id, persona, group_id, now, cutoff_turn, question,
                                        source_ids, category, category_id, family,
                                        delay_days, kind, input_modalities
-bank/suite-v1/review-only/criteria.jsonl  id, required[], forbidden[], source_ids
+bank/suite-v1/review-only/criteria.jsonl  id, required[], forbidden[], source_ids,
+                                       optional exact[[alt, ...]] and strata{}
 bank/suite-v1/assets/                  png / txt / wav referenced by input rows
 ```
 
@@ -61,6 +74,13 @@ Authoring rules that keep answers well defined:
 - no message may describe something that has not happened yet at its own time;
 - answers that depend on "now" (e.g. "next month") must state which time they refer to;
 - test the owner's own corrections and relayed third-party corrections separately.
+
+`authoring.py` also offers `Ask` (more questions on one story's sources), per-story
+`offsets`/`window`, `"{S2}"` date placeholders, `exact` groups checked verbatim beside the
+judge, `strata` for breakdowns, and `chain(...)`: one attribute corrected several times by
+the owner (optionally a later relayed claim), asked as current value, first value, value
+on a given day and full change order. `report.py` adds per-stratum scores and a one-sided
+z for "longest chains score below shortest".
 
 ## Workflow
 

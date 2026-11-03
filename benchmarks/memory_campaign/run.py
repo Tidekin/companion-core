@@ -1,4 +1,5 @@
-"""Run a prepared round: lifecycle checks, both native arms, the RAG reference, answer freeze.
+"""Run a prepared round: lifecycle checks, both native arms, the RAG reference, any
+zero-material controls (round.json "controls"), answer freeze.
 
   python run.py --round DIR            fresh start (DeepSeek ledger must not exist)
   python run.py --round DIR --resume   continue after native completion (RAG / freeze only)
@@ -70,19 +71,27 @@ def native(configs):
         closure(config)
 
 
-def rag():
-    state("RUNNING_QWEN_RAG")
-    with (ROOT / "rag.log").open("a", encoding="utf-8") as log:
-        result = subprocess.run([sys.executable, "-B", str(TOOLS / "rag.py"), "--round", str(ROOT)],
-                                stdout=log, stderr=subprocess.STDOUT, check=False)
-    assert result.returncode == 0, "Qwen RAG needs inspection; rerun with --resume when fixed"
+def completed(name):
+    path = ROOT / name / "manifest.json"
+    return path.exists() and json.loads(path.read_text("utf-8"))["status"] == "COMPLETED"
+
+
+def rag(name="rag"):
+    """The RAG reference, or a zero-material control answered by the same generator."""
+    state("RUNNING_QWEN_RAG" if name == "rag" else "RUNNING_CONTROL_" + name.upper())
+    extra = [] if name == "rag" else ["--control", name]
+    with (ROOT / f"{name}.log").open("a", encoding="utf-8") as log:
+        result = subprocess.run([sys.executable, "-B", str(TOOLS / "rag.py"), "--round", str(ROOT),
+                                 *extra], stdout=log, stderr=subprocess.STDOUT, check=False)
+    assert result.returncode == 0, f"{name} needs inspection; rerun with --resume when fixed"
 
 
 def freeze_answers(configs):
-    assert json.loads((ROOT / "rag/manifest.json").read_text("utf-8"))["status"] == "COMPLETED"
-    rag_answers = read_rows(ROOT / "rag/answers.jsonl")
-    assert len(rag_answers) == len({a["id"] for a in rag_answers}) == R.total
-    assert {a["id"] for a in rag_answers} == {q["id"] for q in R.questions}
+    for name in ("rag", *R.controls):
+        assert completed(name), name
+        answers = read_rows(ROOT / name / "answers.jsonl")
+        assert len(answers) == len({a["id"] for a in answers}) == R.total
+        assert {a["id"] for a in answers} == {q["id"] for q in R.questions}
     held, latest = Budget.from_context(next(iter(configs.values()))).snapshot()
     assert held <= R.cfg["budget"]["deepseek_total_cny"]
     assert not any(v["state"] == "RESERVED" for v in latest.values())
@@ -90,7 +99,7 @@ def freeze_answers(configs):
     assert qwen <= R.cfg["budget"]["qwen_total_cny"]
     assert not any(v["state"] == "RESERVED" for v in qlatest.values())
     files = [p for a in configs for p in (R.arm_dir(a) / "results").glob("*/answers.jsonl")]
-    files.append(ROOT / "rag/answers.jsonl")
+    files += [ROOT / name / "answers.jsonl" for name in ("rag", *R.controls)]
     save(ROOT / "all-answers-frozen.json", {
         "status": "ALL_ANSWERS_CLOSED_BEFORE_GOLD_READ", "answers": R.answers_total,
         "files_sha256": {p.relative_to(ROOT).as_posix(): sha(p) for p in files},
@@ -116,9 +125,9 @@ def main():
             else:
                 assert (ROOT / "native-run-completion.json").exists(), (
                     "Native inference never resumes; start a new round")
-            if not (ROOT / "rag/manifest.json").exists() or json.loads(
-                    (ROOT / "rag/manifest.json").read_text("utf-8"))["status"] != "COMPLETED":
-                rag()
+            for name in ("rag", *R.controls):
+                if not completed(name):
+                    rag(name)
             freeze_answers(configs)
         except BaseException as error:
             state("NEEDS_ATTENTION", error_type=type(error).__name__, error=str(error)[:800])

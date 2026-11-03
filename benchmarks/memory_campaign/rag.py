@@ -1,5 +1,10 @@
 """Qwen embedding/rerank RAG reference with the same DeepSeek generator; settings in round.json.
 
+  python rag.py --round DIR                    the RAG reference -> DIR/rag/
+  python rag.py --round DIR --control closed   closed-book control -> DIR/closed/: the same
+      generator, prompt and question time with no history at all. Questions it passes are
+      answerable without memory and are reported apart.
+
 Only reads questions and old-arm actual observed input. No criteria/authoring/gold.
 No retry of an attempted question. A failed embedding batch pauses the reference.
 """
@@ -22,7 +27,10 @@ from roundcfg import Round  # noqa: E402
 R = Round()
 RAG = R.cfg["rag"]
 ROOT = R.root
-OUT = ROOT / "rag"
+MODE = sys.argv[sys.argv.index("--control") + 1] if "--control" in sys.argv else "rag"
+assert MODE == "rag" or (MODE == "closed" and MODE in R.controls), "unknown or unconfigured control"
+CLOSED = MODE == "closed"
+OUT = ROOT / MODE
 SUITE = R.suite
 from scripts.memory_benchmark.budget import Budget
 from scripts.memory_benchmark.runtime import credential
@@ -67,7 +75,7 @@ class Calls:
         async with self.semaphore:
             is_deep = kind == "answer"
             meter = self.deep if is_deep else self.qwen
-            rid, maximum = meter.reserve(body, "inference:rag:" + kind + ":" + label)
+            rid, maximum = meter.reserve(body, f"inference:{MODE}:{kind}:{label}")
             if is_deep:
                 url, key = "https://api.deepseek.com/chat/completions", self.dkey
             else:
@@ -203,30 +211,47 @@ def block(row):
     )
 
 
+async def choose(calls, q, texts, vectors, query):
+    pool = np.argsort(vectors[: q["cutoff_turn"]] @ query)[::-1][: RAG["top_k"]]
+    rank = await calls.call(
+        "rerank",
+        {
+            "model": RAG["rerank"],
+            "input": {"query": q["question"], "documents": [texts[i] for i in pool]},
+            "parameters": {"top_n": min(RAG["top_n"], len(pool)), "return_documents": False},
+        },
+        q["id"],
+    )
+    selected = sorted(int(pool[r["index"]]) for r in rank["output"]["results"])
+    assert len(selected) <= 10 and all(0 <= i < q["cutoff_turn"] for i in selected)
+    return selected
+
+
 async def persona(calls, pid):
     native = R.arm_dir(RAG["observed_arm"]) / "results" / pid
     assert json.loads((native / "manifest.json").read_text("utf-8"))["status"] == "COMPLETED"
     history = sorted(read(native / "turns-observed.jsonl"), key=lambda r: r["turn"])
     assert [r["turn"] for r in history] == list(range(1, len(history) + 1))
-    texts = [block(r) for r in history]
+    texts = [] if CLOSED else [block(r) for r in history]
     qs = [
         q
         for q in read(SUITE / "questions.jsonl")
         if q["persona"] == pid and q["kind"] == "semantic_memory"
     ]
     assert len(qs) == len(R.per_persona(pid)) and max(q["cutoff_turn"] for q in qs) <= len(history)
-    vectors = np.concatenate(
-        [
-            await calls.embed(texts[i : i + 10], f"{pid}:history:{i}")
-            for i in range(0, len(texts), 10)
-        ]
-    )
-    queries = np.concatenate(
-        [
-            await calls.embed([q["question"] for q in qs[i : i + 10]], f"{pid}:queries:{i}")
-            for i in range(0, len(qs), 10)
-        ]
-    )
+    if not CLOSED:
+        vectors = np.concatenate(
+            [
+                await calls.embed(texts[i : i + 10], f"{pid}:history:{i}")
+                for i in range(0, len(texts), 10)
+            ]
+        )
+        queries = np.concatenate(
+            [
+                await calls.embed([q["question"] for q in qs[i : i + 10]], f"{pid}:queries:{i}")
+                for i in range(0, len(qs), 10)
+            ]
+        )
     done = {a["id"] for a in read(OUT / "answers.jsonl")}
     for qi, q in enumerate(qs):
         if q["id"] in done:
@@ -235,21 +260,11 @@ async def persona(calls, pid):
             "Never replay an attempted question"
         )
         started = time.monotonic()
-        selected, recent = [], list(range(max(0, q["cutoff_turn"] - RAG["recent_turns"]),
-                                          q["cutoff_turn"]))
+        selected, recent = [], [] if CLOSED else list(range(
+            max(0, q["cutoff_turn"] - RAG["recent_turns"]), q["cutoff_turn"]))
         try:
-            pool = np.argsort(vectors[: q["cutoff_turn"]] @ queries[qi])[::-1][: RAG["top_k"]]
-            rank = await calls.call(
-                "rerank",
-                {
-                    "model": RAG["rerank"],
-                    "input": {"query": q["question"], "documents": [texts[i] for i in pool]},
-                    "parameters": {"top_n": min(RAG["top_n"], len(pool)), "return_documents": False},
-                },
-                q["id"],
-            )
-            selected = sorted(int(pool[r["index"]]) for r in rank["output"]["results"])
-            assert len(selected) <= 10 and all(0 <= i < q["cutoff_turn"] for i in selected)
+            if not CLOSED:
+                selected = await choose(calls, q, texts, vectors, queries[qi])
             messages = [
                 {
                     "role": "system",
@@ -331,7 +346,7 @@ async def main():
     else:
         OUT.mkdir()
         (OUT / "vectors").mkdir()
-        manifest = {**RAG, "qwen_key_file": None,
+        manifest = {**RAG, "mode": MODE, "qwen_key_file": None,
                     "deepseek_cap_cny": R.cfg["budget"]["deepseek_inference_cny"],
                     "qwen_cap_cny": R.cfg["budget"]["qwen_total_cny"],
                     "media": "observed arm's actual inputs and native replies; shares its "

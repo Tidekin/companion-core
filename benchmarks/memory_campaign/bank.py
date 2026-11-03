@@ -35,6 +35,9 @@ def validate(r):
     for c in gold.values():
         check(c.get("required") and isinstance(c["required"], list), f"{c['id']}: no required")
         check(isinstance(c.get("forbidden", []), list), f"{c['id']}: forbidden not a list")
+        check(all(isinstance(g, list) and g and all(isinstance(x, str) and x for x in g)
+                  for g in c.get("exact", [])), f"{c['id']}: exact must be non-empty string lists")
+        check(isinstance(c.get("strata", {}), dict), f"{c['id']}: strata not an object")
     personas, audio, sources, per_persona = r.personas, [], Counter(), {}
     for persona in personas:
         path = r.suite / "inputs" / f"{persona}.jsonl"

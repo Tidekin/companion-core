@@ -47,7 +47,21 @@ DEFAULTS = {
             "rerank": "qwen3.7-text-rerank", "top_k": 40, "top_n": 10, "recent_turns": 6,
             "generator": "deepseek-flash", "max_tokens": 3840, "thinking": "high",
             "qwen_rate_cny_per_million": 5, "qwen_key_file": None},
-    "grading": {"rubric": "v3", "votes": 3, "batch_size": 8, "concurrency": 3, "max_tokens": 2048},
+    # Zero-material controls answered by the RAG generator (graded blind, reported apart).
+    "controls": [],
+    # judges: one name per vote (default: the provider model for every vote). anchors: a
+    # jsonl of answers with known verdicts mixed into every batch; a batch that misjudges
+    # one is discarded and its keys re-judged (make_anchors.py builds the file).
+    "grading": {"rubric": "v3", "votes": 3, "batch_size": 8, "concurrency": 3, "max_tokens": 2048,
+                "judges": None, "anchors": None, "anchors_per_batch": 2, "anchor_retries": 2,
+                "anchor_gate_margin": 0.15},
+    "judges": {
+        "deepseek": {"ledger": "deepseek", "extra": {"thinking": {"type": "disabled"}}},
+        "qwen": {"ledger": "qwen", "base_url": "https://maas.qianwenaiapi.com/compatible-mode/v1",
+                 "model": "qwen3.8-flash", "extra": {"enable_thinking": False},
+                 # Conservative upper bound per million tokens; the invoice is not read.
+                 "pricing": {"input_rate": 4.0, "cached_input_rate": 4.0, "output_rate": 24.0,
+                             "safety_factor": 1.5}}},
     "review": {"persona": None, "delay_days": 15, "changed_per_family": 2},
     "sensitivity_exclude_categories": [],
     "smoke": {"bank": None, "persona": None, "questions": 6, "budget_cny": 1},
@@ -133,15 +147,24 @@ class Round:
         return [q for q in self.questions if q["persona"] == persona]
 
     @property
+    def controls(self):
+        return tuple(self.cfg["controls"])
+
+    @property
+    def graded_arms(self):
+        """Every answer set that is blind-graded: the compared arms, then the controls."""
+        return ARMS + self.controls
+
+    @property
     def answers_total(self):
-        return self.total * len(ARMS)
+        return self.total * len(self.graded_arms)
 
     def arm_dir(self, arm):
         return self.root / "arms" / arm
 
     def arm_answers(self, arm):
-        if arm == "rag":
-            return read_rows(self.root / "rag/answers.jsonl")
+        if arm == "rag" or arm in self.controls:
+            return read_rows(self.root / arm / "answers.jsonl")
         return [r for p in sorted((self.arm_dir(arm) / "results").glob("*/answers.jsonl"))
                 for r in read_rows(p)]
 
