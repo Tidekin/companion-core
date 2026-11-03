@@ -14,7 +14,7 @@ CI 为 Core、OneBot Bridge、Source Reader、Console UI 保留已通过容器�
 在源码仓库中使用已有 `gh` 只读连接，指定成功的主分支或 full PR workflow run：
 
 ```bash
-python -B scripts/ci_container_artifacts.py consume --repository yanyuhanyue/companion-core --run-id <successful-run-id> --destination .local/verified-images
+python -B scripts/ci_container_artifacts.py consume --repository Tidekin/companion-core --run-id <successful-run-id> --destination .local/verified-images
 ```
 
 消费者核对原始 full run 的十四项成功 job、源码 tree、attempt、制品身份和 SHA256，
