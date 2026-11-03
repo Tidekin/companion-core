@@ -5,6 +5,7 @@ import json
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -74,7 +75,7 @@ def test_media_wait_does_not_block_new_input_or_recall(core, tmp_path, monkeypat
     downloads, calls = [], []
 
     async def source(ws):
-        await ws.send(json.dumps(original() | {"time": int(datetime.now(UTC).timestamp())}))
+        await ws.send(json.dumps(original() | {"time": int(core.clock.now.timestamp())}))
         await asyncio.wait_for(started.wait(), 15)
         await ws.send(recall_frame() if control == "recall" else frame(
             2, text="请结合刚才的图片继续说明"))
@@ -95,6 +96,13 @@ def test_media_wait_does_not_block_new_input_or_recall(core, tmp_path, monkeypat
         async with media_host(core, tmp_path, source, model_reply=answer, independent_api=True) as (
             window, _, sends, _,
         ):
+            # Signed captures, recall frames and Core admission share this fixture clock.
+            from tests import native_continuous_support
+
+            receipt_clock = SimpleNamespace(now=lambda _: core.clock.now)
+            monkeypatch.setattr(app, "datetime", receipt_clock)
+            monkeypatch.setattr(native_continuous_support, "datetime", receipt_clock)
+
             async def accepted(response):
                 path = response.request.url.path
                 if response.is_success and (
