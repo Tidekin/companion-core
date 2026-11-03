@@ -8,6 +8,7 @@ import pytest
 from companion import mood_appraisals
 from companion.contracts import InteractionSignal
 from companion.model import EXTRACT_RULES
+from companion.store import encode
 from tests.conftest import ingest, run
 from tests.test_mood import erase, feedback
 from tests.test_mood_appraisals import appraise
@@ -42,6 +43,39 @@ def test_extraction_request_asks_for_every_signal_reason(core):
     assert run(core.extract_once())
     system = core.model.calls[0][0][0]["content"]
     assert system == EXTRACT_RULES
+
+
+def test_extraction_request_explains_expectations_expressed_as_requests(core):
+    prepare_extraction(core)
+    assert run(core.extract_once())
+    system = core.model.calls[0][0][0]["content"]
+    # The actual request must distinguish relational wishes from ordinary tool tasks.
+    assert "未来的互动尚未发生，不等于假设" in system
+    assert "明晚回来陪我聊聊吧" in system
+    assert "明早提醒我开会" in system
+    assert "同一事件可以同时写入记忆和互动信号" in system
+
+
+def test_relationship_memory_does_not_consume_its_expectation_appraisal(core):
+    core.settings.memory_enabled = core.settings.mood_enabled = True
+    core.settings.extraction_min_events = 1
+    core.settings.extraction_idle_seconds = 0
+    text = "明天你要第一个跟我说早安哦"
+    key = ingest(core, 1, text)["event_id"]
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.model.extraction = encode({
+        "memories": [{"subject": "relationship", "kind": "preference",
+                      "fact_key": "morning_greeting", "content": "主人希望你明早先来问候。",
+                      "evidence_event_id": key, "evidence_quote": text}],
+        "interaction_signals": [{"event_id": key, "reason": "OWNER_EXPECTATION",
+                                 "quote": text}],
+    })
+    assert run(core.extract_once())
+    assert core.store.one("SELECT event_id,reason FROM mood_appraisals") == {
+        "event_id": key, "reason": "OWNER_EXPECTATION"}
+    assert core.store.one("SELECT event_id FROM memory_evidence WHERE polarity=1") == {
+        "event_id": key}
+    assert [s["reason"] for s in core.mood.snapshot()["signals"]] == ["OWNER_EXPECTATION"]
 
 
 def test_delayed_extraction_decays_from_when_the_owner_spoke(core):
