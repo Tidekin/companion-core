@@ -1037,7 +1037,7 @@ class Core(Runtime):
                         "心情不改变判断；没有新证据不必重新编造观点）：", data, ids,
                         module="interest", priority=related(item["topic"]), proofs=proofs,
                         fact=("self", judgment["take"]) if judgment else None)
-            for h in hits:
+            for rank, h in enumerate(hits):
                 memory = {**{k: h[k] for k in (
                     "subject", "content", "status", "needs_review", "evidence_ids")},
                     **({"origin": h["origin"]} if h.get("origin") else {}),
@@ -1047,7 +1047,8 @@ class Core(Runtime):
                        and (happened := self._memory_happened_on(h, cfg.timezone)) else {})}
                 reference = selection.add(MEMORY_HEADING,
                     {"memories": [memory], "self_observations": [], "memory_status": "available"},
-                    h["evidence_ids"], priority=context_selection.RELATED, required=True,
+                    h["evidence_ids"], priority=context_selection.RELATED,
+                    required=rank < cfg.memory_required_hits,
                     proofs=[{"kind": "memory", "proof": memory_proof}], module="memory",
                     fact=(h["subject"], h["content"]))
                 memory_references.append((reference, h))
@@ -1087,7 +1088,7 @@ class Core(Runtime):
                     required=priority == context_selection.RELATED, module="account_actions",
                     proofs=[{"kind": "account_actions", "proof": actions["proof"]}])
         mark("context_memory")
-        turns = [dialogue_history.turn_messages(source, s) for source in sources]
+        turns = [dialogue_history.turn_messages(source, s, text) for source in sources]
         recalled = None
         if (job["kind"] == "chat" and authority and not bounded_text and text
                 and cfg.memory_enabled and permitted("memory")
@@ -1101,8 +1102,9 @@ class Core(Runtime):
                 s, cfg, job, text, {source["event_id"] for source in sources},
                 lambda ids: available(ids, "memory"), ranked_ids=turn_ranking,
                 max_turns=scope.max_turns - len(sources),
-                max_bytes=scope.max_utf8_bytes - sum(len(message["content"].encode())
-                                                     for turn in turns for message in turn))
+                max_bytes=int(cfg.turn_recall_history_share * (
+                    scope.max_utf8_bytes - sum(len(message["content"].encode())
+                                               for turn in turns for message in turn))))
             if recalled:
                 selection.add(turn_recall.HEADING, recalled["data"], recalled["event_ids"],
                     priority=context_selection.RELATED, module="memory",
@@ -1115,7 +1117,7 @@ class Core(Runtime):
             reserved_bytes=recalled["cost_bytes"] if recalled else 0,
         ):
             sources = continuation["history"]
-            turns = [dialogue_history.turn_messages(source, s) for source in sources]
+            turns = [dialogue_history.turn_messages(source, s, text) for source in sources]
             references.append(continuation["message"])
             reference_sources.append((continuation["message"], continuation["source_event_ids"]))
             reference_proofs.append((continuation["message"],
@@ -1200,7 +1202,7 @@ class Core(Runtime):
                        selection.priorities.get(id(reference), context_selection.BACKGROUND))
                       for reference in references)
         blocks.extend(("history", turn, preserve or source.get("reply_complete") is False,
-                       context_selection.TOPIC if index == len(turns) - 1
+                       context_selection.TOPIC if index >= len(turns) - cfg.recent_protected_turns
                        or related(source.get("user_text", "")) == context_selection.RELATED
                        else context_selection.OLD_HISTORY)
                       for index, (source, turn) in enumerate(zip(sources, turns, strict=True)))

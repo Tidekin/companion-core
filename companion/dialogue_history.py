@@ -19,8 +19,9 @@ def recent_sent_turns(store, conversation_id, current_event_id, max_turns):
     )]
 
 
-def turn_messages(source, store=None):
-    """With a store, quotes of since erased or recalled messages are withdrawn."""
+def turn_messages(source, store=None, query=""):
+    """With a store, quotes of since erased or recalled messages are withdrawn and read
+    attachments are replayed, focused on `query` when one is given."""
     rich = observed = None
     if source.get("body_json"):
         body = json.loads(source["body_json"])
@@ -30,7 +31,7 @@ def turn_messages(source, store=None):
         from companion.memory_references import HISTORY_HEADING, replay
         from companion.qq_rich import encoded
 
-        if notes := replay(store, source["event_id"]):
+        if notes := replay(store, source["event_id"], query):
             observed = {"role": "user", "content": HISTORY_HEADING + encoded(notes)}
     return [*([rich] if rich else []), *([observed] if observed else []),
             {"role": "user", "content": source["user_text"]},

@@ -619,9 +619,17 @@ class Settings(BaseModel):
     # Cross-encoder over raw turns: off by default. Offline round-3 recall@8 was the same
     # with and without it (91.9%) at ~3-6 s per reply; facts keep their own reranker.
     turn_recall_rerank: bool = False
-    # Cross-encoder over fact candidates: also off. Offline round-3: facts citing the
-    # sources were in the top 10 for 360/360 questions either way, at +0.8 s with it.
+    # Cross-encoder over fact candidates: also off; it cost +0.8 s per reply offline and
+    # the round-3 check could not show a gain (that metric counted any cited source).
     memory_rerank: bool = False
+    # Only the best few fact hits are protected from context trimming; the rest compete
+    # with recent dialogue, so a long, weakly related fact cannot push out the owner's
+    # own recent statement. The newest turns are kept at topic priority.
+    memory_required_hits: int = Field(default=3, ge=0, le=20)
+    recent_protected_turns: int = Field(default=2, ge=1, le=20)
+    # Raw-turn recall may use at most this share of the history allowance left after
+    # recent dialogue, so episode continuation keeps room for related earlier turns.
+    turn_recall_history_share: float = Field(default=0.75, gt=0, le=1)
     # Second hop: re-query with the best first-hop evidence (e.g. who holds a key) and add
     # up to this many further turns (their schedule, their place). 0 disables.
     turn_recall_second_hop: int = Field(default=2, ge=0, le=4)

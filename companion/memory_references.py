@@ -32,9 +32,31 @@ HISTORY_ITEM_CHARS = 600
 HISTORY_TURN_CHARS = 1500
 
 
-def replay(store, event_id):
-    """Bounded native perception results of one past owner input, for history replay."""
-    return replay_many(store, [event_id])[event_id]
+def replay(store, event_id, query=""):
+    """Bounded native perception results of one past owner input, for history replay.
+
+    With a query, a long attachment is read in full and cut to its header and the whole
+    lines most related to the query (turn_recall.focus) instead of its first characters;
+    the per-item and per-turn bounds are unchanged."""
+    if not query.strip():
+        return replay_many(store, [event_id])[event_id]
+    from companion.turn_recall import FOCUS_SOURCE_CHARS, focus
+
+    # Signed history byte ceilings are measured on the unfocused replay: a focused item
+    # never takes more UTF-8 bytes than the prefix it replaces.
+    allowance = {(note["kind"], note["slot"]): len(note["text"].encode())
+                 for note in replay_many(store, [event_id])[event_id]}
+    notes = []
+    for note in replay_many(store, [event_id], item_chars=FOCUS_SOURCE_CHARS,
+                            turn_chars=FOCUS_SOURCE_CHARS * 2)[event_id]:
+        limit = allowance.get((note["kind"], note["slot"]), 0)
+        if not limit:
+            continue
+        text, cut = focus(note["text"], query, HISTORY_ITEM_CHARS)
+        if len(text.encode()) > limit:
+            text, cut = text.encode()[:limit].decode("utf-8", "ignore"), True
+        notes.append({**note, "text": text, "excerpt": note["excerpt"] or cut})
+    return notes
 
 
 def replay_many(store, event_ids, *, item_chars=HISTORY_ITEM_CHARS, turn_chars=HISTORY_TURN_CHARS):

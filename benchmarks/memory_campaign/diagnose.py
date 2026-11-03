@@ -4,8 +4,11 @@ For each question and arm:
   executed        terminal SUCCEEDED answer
   sources_read    every source turn perceived (media read, native turn completed)
   extracted       a memory citing a source existed at question time (Core arms)
-  fields_in_prompt  every checkable required item has all its key strings in the prompts
-                  sent for that question (all model calls of the exam)
+  fields_in_prompt  every checkable required item has all its key strings together in one
+                  evidence unit (a line, a turn or a record) of the prompts sent for that
+                  question (all model calls of the exam). The system rules, the question
+                  itself, event IDs and hashes are not evidence; numbers match whole
+                  (the 6 in 2026 does not count).
   answered        final grade (with review overrides)
 Key strings of a required item are its numbers/times plus 2+ character spans that also
 occur in the source material; items without such strings are "unchecked", not assumed.
@@ -29,6 +32,33 @@ ARGS = sys.argv[1:]
 GRADING = ROOT / (ARGS[ARGS.index("--grading") + 1] if "--grading" in ARGS else "grading")
 STAGES = ("executed", "sources_read", "fields_in_prompt", "answered")
 NUMBER = re.compile(r"\d+(?::\d+)?(?:-\d+(?::\d+)?)?")
+NOISE = re.compile(r"(?:evt|mem|trace|ref|job)_[0-9A-Za-z_]+|[0-9a-f]{16,}")
+UNIT = re.compile(r"\n|\\n|\}\s*,\s*\{")
+
+
+def units(messages, question):
+    """Evidence units of one request: every non-system message split into lines and
+    records, without the question text, IDs and hashes."""
+    out = []
+    for message in messages:
+        if message.get("role") == "system":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+        text = str(content or "")
+        if not text.startswith("{") and question and question in text and len(text) < 2 * len(
+                question) + 200:
+            continue  # the current question turn
+        for unit in UNIT.split(NOISE.sub(" ", text.replace(question, " ") if question else text)):
+            if unit := compact(unit):
+                out.append(unit)
+    return out
+
+
+def found(keys, unit):
+    return all(re.search(rf"(?<!\d){re.escape(k)}(?!\d)", unit) if NUMBER.fullmatch(k)
+               else k in unit for k in keys)
 
 
 def compact(text):
@@ -65,15 +95,16 @@ def read_ok(source):
 
 
 def core_prompts(arm):
-    prompts, turns, evidence = defaultdict(str), {}, {}
+    prompts, turns, evidence = defaultdict(list), {}, {}
+    questions = {q["id"]: q["question"] for q in R.questions}
     for persona_dir in sorted((R.arm_dir(arm) / "results").glob("*")):
         if not persona_dir.is_dir():
             continue
         turns.update({r["id"]: r for r in read_rows(persona_dir / "turns-observed.jsonl")})
         for row in read_rows(persona_dir / "requests.jsonl"):
             if row.get("phase") == "exam" and row.get("case"):
-                prompts[row["case"]] += compact(json.dumps(row["payload"].get("messages", []),
-                                                           ensure_ascii=False))
+                prompts[row["case"]] += units(row["payload"].get("messages", []),
+                                              questions.get(row["case"], ""))
         db = sqlite3.connect(f"file:{persona_dir / 'core.sqlite3'}?mode=ro", uri=True)
         by_time = {at[:19]: event for event, at in db.execute(
             "SELECT event_id,occurred_at FROM events WHERE actor_id='owner'")}
@@ -90,11 +121,12 @@ def core_prompts(arm):
 
 
 def rag_prompts():
-    prompts = defaultdict(str)
+    prompts = defaultdict(list)
+    questions = {q["id"]: q["question"] for q in R.questions}
     for row in read_rows(ROOT / "rag/requests.jsonl"):
         if row.get("kind") == "answer":
-            prompts[row["label"]] += compact(json.dumps(row["payload"].get("messages", []),
-                                                        ensure_ascii=False))
+            prompts[row["label"]] += units(row["payload"].get("messages", []),
+                                           questions.get(row["label"], ""))
     return prompts
 
 
@@ -114,8 +146,8 @@ def main():
             material = "".join(source_material(s) for s in sources)
             items = [key_strings(item, material) for item in R.criteria[q["id"]]["required"]]
             checkable = [keys for keys in items if keys]
-            prompt = prompts.get(q["id"], "")
-            present = [all(k in prompt for k in keys) for keys in checkable]
+            prompt = prompts.get(q["id"], [])
+            present = [any(found(keys, unit) for unit in prompt) for keys in checkable]
             item = {
                 "executed": results[q["id"]]["arms"][arm]["status"] == "SUCCEEDED",
                 "sources_read": all(read_ok(s) for s in sources),

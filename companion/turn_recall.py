@@ -36,6 +36,25 @@ def _grams(text):
     return [text[i:i + 2] for i in range(len(text) - 1)] or ([text] if text else [])
 
 
+_WEEKEND = re.compile(r"(?:周|星期|礼拜)[六日天]")
+_WEEKDAY = re.compile(r"(?:周|星期|礼拜)[一二三四五]")
+
+
+def expand(query):
+    """Add the calendar class of named days for the lexical channel only: a rule stated
+    as 工作日/周末 shares no characters with a question about 周六 or 周二."""
+    extra = []
+    if _WEEKEND.search(query):
+        extra.append("周末")
+    if _WEEKDAY.search(query):
+        extra.append("工作日")
+    if "周末" in query:
+        extra += ["周六", "周日"]
+    if "工作日" in query:
+        extra += ["周一", "周五"]
+    return " ".join([query, *extra])
+
+
 def lexical(query, docs):
     """BM25 over character bigrams; Chinese needs no tokenizer for this."""
     terms = set(_grams(query))
@@ -95,8 +114,12 @@ def _ranked(scores):
 
 
 def _fused(settings, query, docs):
+    """RRF of bigram BM25 and embeddings. Docs without a single shared bigram get no
+    lexical vote: ranking them by input order would favour the oldest small talk."""
     fused = Counter()
-    for ranking in (_ranked(lexical(query, docs)), _ranked(semantic(settings, query, docs))):
+    scores = lexical(expand(query), docs)
+    hits = [index for index in _ranked(scores) if scores[index] > 0]
+    for ranking in (hits, _ranked(semantic(settings, query, docs))):
         for rank, index in enumerate(ranking, 1):
             fused[index] += 1 / (60 + rank)
     return [index for index, _ in fused.most_common()]
@@ -108,25 +131,45 @@ def _evidence(doc):
     return body.split("] ", 1)[-1][:SECOND_HOP_CHARS]
 
 
-def select(settings, query, docs, limit):
-    """Indices of the most relevant docs: bigram BM25 + embedding RRF (optional rerank),
-    then a bounded second hop seeded with the two best first-hop docs."""
-    if not docs or limit <= 0 or not query.strip():
-        return []
-    pool = _fused(settings, query, docs)[:CANDIDATES]
+def parts(settings, query, docs, pool_size=CANDIDATES):
+    """(first-hop pool, second-hop indices): bigram BM25 + embedding RRF (optional
+    rerank), then a bounded second hop seeded with the two best first-hop docs."""
+    if not docs or not query.strip():
+        return [], []
+    pool = _fused(settings, query, docs)[:pool_size]
     if getattr(settings, "turn_recall_rerank", False):
         scores = rerank(settings, query, [docs[index][:RERANK_CHARS] for index in pool])
         if scores is not None:
             # Cross-encoder logits far below zero are unrelated small talk; keep them out.
             pool = [pool[index] for index in _ranked(scores) if scores[index] >= RERANK_FLOOR]
     extra = getattr(settings, "turn_recall_second_hop", 0)
-    if extra and pool:
-        seeds = " ".join(_evidence(docs[index]) for index in pool[:2])
-        head = pool[:max(1, limit - extra)]
-        hop = [index for index in _fused(settings, query + " " + seeds, docs)
-               if index not in head][:extra]
-        pool = head + hop + [index for index in pool if index not in head and index not in hop]
-    return pool[:limit]
+    if not extra or not pool:
+        return pool, []
+    seeds = " ".join(_evidence(docs[index]) for index in pool[:2])
+    ranked = _fused(settings, query + " " + seeds, docs)
+    # Enough hop candidates to survive later filtering of the first hop's head.
+    return pool, [index for index in ranked if index not in pool[:2]][:pool_size]
+
+
+def merge(first, hop, limit, extra):
+    """Final picks after filtering: the two seeds, then up to `extra` second-hop docs
+    not already chosen, then the rest of the first hop. Byte trimming drops from the
+    end, so the weakest first-hop docs go before the chained evidence."""
+    if limit <= 0:
+        return []
+    head = first[:max(1, limit - extra)]
+    chained = [index for index in hop if index not in head][:extra]
+    order = head[:2] + chained + head[2:]
+    order += [index for index in first if index not in order]
+    return order[:limit]
+
+
+def select(settings, query, docs, limit):
+    """Indices of the `limit` most relevant docs (first hop plus bounded second hop)."""
+    if limit <= 0:
+        return []
+    first, hop = parts(settings, query, docs)
+    return merge(first, hop, limit, getattr(settings, "turn_recall_second_hop", 0))
 
 
 def _when(value, zone):
@@ -134,9 +177,41 @@ def _when(value, zone):
             ) if value else ""
 
 
+def quoted(store, source):
+    """Text of the QQ quotes/forwards an owner turn carried, without withdrawn replies.
+    Their speakers are named; this is what was quoted, never the owner's own words."""
+    import json
+
+    from companion import qq_quotes, qq_rich
+
+    body = json.loads(source["body_json"]) if source.get("body_json") else {}
+    if not body.get("rich"):
+        return ""
+    withdrawn = qq_quotes.withdrawn(store, source["event_id"], body)
+    texts = []
+
+    def walk(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"text", "name", "nickname"} and isinstance(item, str):
+                    texts.append(item)
+                else:
+                    walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    for segment in qq_rich.validate(body["rich"])["segments"]:
+        if not (segment.get("type") == "reply" and segment.get("index") in withdrawn):
+            walk(segment)
+    return " ".join(text for text in texts if text.strip())[:DISPLAY_CHARS]
+
+
 def _document(source, notes, zone):
     when = _when(source.get("occurred_at"), zone)
     parts = [f"[{when}] 主人：{source.get('user_text') or ''}"]
+    if source.get("quoted_text"):
+        parts.append("引用或转发：" + source["quoted_text"])
     parts += [f"{note['kind']}：{note['text']}" for note in notes]
     if source.get("reply_text"):
         parts.append("你当时回复：" + source["reply_text"])
@@ -159,13 +234,15 @@ def _candidates(store, settings, job, event_ids=None):
     found = replay_many(store, [row["event_id"] for row in rows],
                         item_chars=FOCUS_SOURCE_CHARS, turn_chars=FOCUS_SOURCE_CHARS * 2)
     notes = [found[row["event_id"]] for row in rows]
-    return rows, notes
+    return [{**row, "quoted_text": quoted(store, row)} for row in rows], notes
 
 
 async def prefetch(store, settings, job, query):
     """Rank delivered turns with the CPU models off the event loop.
 
-    Returns event IDs in relevance order (or None when disabled). Store reads stay on the
+    Returns {"first": event IDs, "hop": event IDs} (or None when disabled): the final
+    pick happens in reference() after history and permission filtering, so second-hop
+    turns are not cut by first-hop turns that filtering removes. Store reads stay on the
     caller's thread; context() later re-reads these turns and applies every source,
     authority and ceiling check, so this ranking grants nothing by itself.
     """
@@ -185,12 +262,13 @@ async def prefetch(store, settings, job, query):
         # caches; its late result is discarded, so it can never enter a context.
         # The span includes any wait for the shared model locks, as a reply does.
         with phase("turn_recall_rank", trace_id):
-            ranked = await asyncio.wait_for(
-                asyncio.to_thread(select, settings, query, docs, CANDIDATES),
+            first, hop = await asyncio.wait_for(
+                asyncio.to_thread(parts, settings, query, docs),
                 settings.recall_compute_timeout_seconds)
     except TimeoutError:
         return []  # Not None: context() must not fall back to ranking inline on the loop.
-    return [rows[index]["event_id"] for index in ranked]
+    return {"first": [rows[index]["event_id"] for index in first],
+            "hop": [rows[index]["event_id"] for index in hop]}
 
 
 def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, max_bytes,
@@ -198,6 +276,7 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
     """Return {data, event_ids, cost_bytes} within the turn and UTF-8 allowance, or None.
 
     With `ranked_ids` from prefetch() no model runs here; without it ranking is inline.
+    A plain list of IDs is taken as a first-hop order without second hop.
     """
     from companion.dialogue_history import turn_messages
 
@@ -205,12 +284,19 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
     if limit <= 0 or max_bytes <= 0 or not enabled(settings, query):
         return None
     if ranked_ids is not None:
-        wanted = [key for key in ranked_ids if key not in exclude_ids and allowed([key])]
+        if not isinstance(ranked_ids, dict):
+            ranked_ids = {"first": list(ranked_ids), "hop": []}
+
+        def keep(keys):
+            return [key for key in keys if key not in exclude_ids and allowed([key])]
+
+        first, hop = keep(ranked_ids["first"]), keep(ranked_ids["hop"])
+        wanted = list(dict.fromkeys(first + hop))
         rows, notes = _candidates(store, settings, job, wanted) if wanted else ([], [])
-        order = {key: index for index, key in enumerate(wanted)}
-        pairs = sorted(zip(rows, notes, strict=True), key=lambda pair: order[pair[0]["event_id"]])
-        rows, notes = [pair[0] for pair in pairs], [pair[1] for pair in pairs]
-        ranked = list(range(len(rows)))[:limit]
+        position = {row["event_id"]: index for index, row in enumerate(rows)}
+        ranked = merge([position[k] for k in first if k in position],
+                       [position[k] for k in hop if k in position], limit,
+                       settings.turn_recall_second_hop if ranked_ids["hop"] else 0)
     else:
         rows, notes = _candidates(store, settings, job)
         pairs = [(row, note) for row, note in zip(rows, notes, strict=True)
@@ -238,18 +324,26 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
 
 def focus(text, query, budget):
     """Fit a long attachment by whole lines: title/header lines first, then the lines that
-    share the most bigrams with the query, in original order. Short text is unchanged."""
+    share the most bigrams with the query, in original order. Short text is unchanged.
+
+    The result never exceeds `budget`: header lines take at most a third of it (cut when
+    longer), so an oversized header cannot crowd out the matching rows."""
     if len(text) <= budget:
         return text, False
     lines = text.splitlines()
     terms = set(_grams(query))
-    keep, used = set(range(min(2, len(lines)))), sum(len(line) + 1 for line in lines[:2])
+    shown, used = {}, 0
+    for index in range(min(2, len(lines))):
+        line = lines[index][:max(0, budget // 3 - used - 1)]
+        if line:
+            shown[index] = line
+            used += len(line) + 1
     for index in sorted(range(2, len(lines)), key=lambda i: -len(terms & set(_grams(lines[i])))):
         if used + len(lines[index]) + 1 > budget:
             continue
-        keep.add(index)
+        shown[index] = lines[index]
         used += len(lines[index]) + 1
-    return "\n".join(lines[i] for i in sorted(keep)), True
+    return "\n".join(shown[i] for i in sorted(shown))[:budget], True
 
 
 def _data(rows, notes, chosen, zone, query=""):
@@ -260,6 +354,8 @@ def _data(rows, notes, chosen, zone, query=""):
         row = rows[index]
         item = {"time": _when(row.get("occurred_at"), zone) or None,
                 "owner_said": (row.get("user_text") or "")[:DISPLAY_CHARS]}
+        if row.get("quoted_text"):
+            item["quoted_or_forwarded"] = row["quoted_text"]
         if notes[index]:
             shown = []
             for note in notes[index]:

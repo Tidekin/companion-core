@@ -77,12 +77,12 @@ def test_prefetch_ranks_in_a_worker_thread_without_blocking_the_loop(core, monke
     monkeypatch.setattr(turn_recall, "_candidates", lambda *args, **kwargs: (rows, [[]] * 3))
     seen = {}
 
-    def slow_select(settings, query, docs, limit):
+    def slow_parts(settings, query, docs):
         seen["thread"] = threading.current_thread() is not threading.main_thread()
         time.sleep(0.3)
-        return [2, 0]
+        return [2, 0], [1]
 
-    monkeypatch.setattr(turn_recall, "select", slow_select)
+    monkeypatch.setattr(turn_recall, "parts", slow_parts)
     job = {"conversation_id": "conv", "event_id": "evt_now"}
 
     async def scenario():
@@ -100,7 +100,8 @@ def test_prefetch_ranks_in_a_worker_thread_without_blocking_the_loop(core, monke
         return ranked, ticks
 
     ranked, ticks = asyncio.run(scenario())
-    assert ranked == ["evt_2", "evt_0"] and seen["thread"] and ticks >= 5
+    assert ranked == {"first": ["evt_2", "evt_0"], "hop": ["evt_1"]}
+    assert seen["thread"] and ticks >= 5
 
 
 def test_reference_with_prefetched_ranking_keeps_order_and_skips_models(core, monkeypatch):
@@ -151,7 +152,7 @@ def test_prefetch_gives_up_after_the_compute_timeout(core, monkeypatch):
     rows = [{"event_id": "evt_0", "user_text": "第0条", "reply_text": "好",
              "occurred_at": "2026-05-01T01:00:00+00:00"}]
     monkeypatch.setattr(turn_recall, "_candidates", lambda *args, **kwargs: (rows, [[]]))
-    monkeypatch.setattr(turn_recall, "select", lambda *args: time.sleep(1) or [0])
+    monkeypatch.setattr(turn_recall, "parts", lambda *args: time.sleep(1) or ([0], []))
     core.settings.recall_compute_timeout_seconds = 0.1
     started = time.monotonic()
     ranked = asyncio.run(turn_recall.prefetch(
@@ -244,3 +245,64 @@ def test_focus_keeps_header_and_matching_whole_lines():
     assert turn_recall.focus("短表", "q", 120) == ("短表", False)
 
 
+
+
+def test_docs_without_shared_bigrams_get_no_lexical_vote(core, monkeypatch):
+    # All BM25 scores are zero; only the embedding ranks, so input order cannot win.
+    docs = [f"闲聊{i}" for i in range(30)] + ["工作日喝绿茶，周末喝红茶。"]
+    monkeypatch.setattr(turn_recall, "semantic",
+                        lambda settings, query, docs: [float(i) for i in range(len(docs))])
+    assert turn_recall._fused(core.settings, "周六下午泡什么", docs)[0] == 30
+
+
+def test_prefetched_second_hop_survives_filtering_of_the_first_hop(core, monkeypatch):
+    rows = {f"evt_{i}": {"event_id": f"evt_{i}", "user_text": f"第{i}条", "reply_text": "好",
+                         "occurred_at": "2026-05-01T01:00:00+00:00", "body_json": None}
+            for i in range(14)}
+    monkeypatch.setattr(turn_recall, "_candidates", lambda store, settings, job, ids=None: (
+        [rows[key] for key in sorted(ids)], [[] for _ in ids]))
+    job = {"conversation_id": "conv", "event_id": "evt_now"}
+    ranking = {"first": [f"evt_{i}" for i in range(12)], "hop": ["evt_12", "evt_13"]}
+    result = turn_recall.reference(core.store, core.settings, job, "第条", {"evt_0"},
+                                   lambda ids: True, max_turns=8, max_bytes=32000,
+                                   ranked_ids=ranking)
+    # Eight picks: six first-hop turns after filtering, plus both second-hop turns.
+    assert {"evt_12", "evt_13"} <= set(result["event_ids"]) and len(result["event_ids"]) == 8
+    assert "evt_0" not in result["event_ids"]
+
+
+def test_merge_orders_seeds_then_chain_then_weaker_first_hop():
+    assert turn_recall.merge([5, 6, 7, 8, 9], [6, 1, 2, 3], 4, 2) == [5, 6, 1, 2]
+    assert turn_recall.merge([5, 6, 7], [], 4, 2) == [5, 6, 7]
+
+
+def test_focus_never_exceeds_budget_even_with_a_long_header():
+    lines = ["标题" * 200, "列" * 200, *(f"路人{i}\t周一" for i in range(50)), "顾念\t周五\t东园门"]
+    shown, cut = turn_recall.focus("\n".join(lines), "顾念在哪", 120)
+    assert cut and len(shown) <= 120 and "顾念\t周五\t东园门" in shown
+
+
+def test_history_replay_focuses_long_attachments_within_the_prefix_bytes(core):
+    from companion import memory_references as refs
+    from companion.dialogue_history import turn_messages
+
+    prepared(core, "transcript")
+    rows = "\n".join(f"杂物{i}\t{i}" for i in range(200))
+    table = "清单\n物品\t数量\n" + rows + "\n胶枪\t6"
+    refs.capture(core.memory, "evt_test_1", "transcript", table, {"fixture": "table"},
+                 core.clock())
+    plain = refs.replay(core.store, "evt_test_1")
+    focused = refs.replay(core.store, "evt_test_1", "胶枪有几个")
+    assert not any("胶枪" in note["text"] for note in plain if "清单" in note["text"])
+    assert any("胶枪\t6" in note["text"] for note in focused)
+    for a, b in zip(plain, focused, strict=False):
+        assert len(b["text"].encode()) <= len(a["text"].encode())
+    source = {"event_id": "evt_test_1", "user_text": "清单", "reply_text": "好"}
+    assert "胶枪" in turn_messages(source, core.store, "胶枪有几个")[0]["content"]
+
+
+def test_named_days_reach_rules_stated_as_weekday_or_weekend():
+    docs = ["今天天气挺好的。", "工作日我喝绿茶，周末喝红茶。", "刚洗完衣服。"]
+    assert turn_recall.lexical("周六下午泡什么", docs)[1] == 0
+    scores = turn_recall.lexical(turn_recall.expand("周六下午和周二晚上泡什么"), docs)
+    assert scores[1] > 0 and scores[0] == scores[2] == 0
