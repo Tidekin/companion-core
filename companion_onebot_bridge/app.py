@@ -241,7 +241,11 @@ async def deliver(client, onebot, spool, stop, metrics, *, runtime=None, protoco
             await pause(stop, 1)
             continue
         if not worked:
-            await pause(stop, onebot.config.poll_seconds)
+            delay = onebot.config.poll_seconds
+            if guard is not None and guard.segment_not_before is not None:
+                remaining = (guard.segment_not_before - runtime.clock()).total_seconds()
+                delay = min(delay, max(0.0, remaining))
+            await pause(stop, delay)
 
 
 async def transfer_media(pump, stop):

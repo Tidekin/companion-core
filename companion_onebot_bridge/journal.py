@@ -45,6 +45,10 @@ def stop_marker(path):
 
 
 def read(path, *, maximum=32 * 1048576):
+    return _read(path, maximum=maximum, count_only=False)
+
+
+def _read(path, *, maximum, count_only):
     try:
         info = path.lstat()
         if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_size > maximum
@@ -58,15 +62,29 @@ def read(path, *, maximum=32 * 1048576):
             end = raw.rfind(b"\n", 0, CACHE_MAX_BYTES) + 1
             if not end:
                 _clear()
-                return _decode_lines(raw.decode("utf-8").splitlines())
-        payload, head = _validated_bytes(raw[:end])
+                records, head = _decode_lines(raw.decode("utf-8").splitlines())
+                return (len(records) if count_only else records), head
+        # Keep the exact validated prefix across small appends. Rebuilding its
+        # serialized records on each RESERVED, IO_STARTED and ACK is expensive.
+        prefix = raw[:end]
+        if _previous is not None:
+            last = _previous[0]
+            # Bound repeated tail decoding on both small and large journals.
+            if (0 < end - len(last) <= min(8192, len(last) // 64)
+                    and last.endswith(b"\n") and prefix.startswith(last)):
+                prefix = last
+        end = len(prefix)
+        payload, head, count = _validated_bytes(prefix)
         if len(payload) > CACHE_MAX_BYTES:
             _clear()
-        records = marshal.loads(payload)
+        tail = []
         if end < len(raw):
             tail, head = _decode_lines(raw[end:].decode("utf-8").splitlines(),
-                                       head=head, count=len(records))
-            records.extend(tail)
+                                       head=head, count=count)
+        if count_only:
+            return count + len(tail), head
+        records = marshal.loads(payload)
+        records.extend(tail)
         return records, head
     except Exception:
         _clear()
@@ -106,7 +124,7 @@ def _validated_bytes(raw):
     # or an untrusted marshal input. A caller cannot mutate the cached records.
     payload = marshal.dumps(records)
     _previous = (raw, payload, head, count)
-    return payload, head
+    return payload, head, count
 
 
 def _decode_lines(lines, *, head="0" * 64, count=0):
@@ -121,10 +139,11 @@ def _decode_lines(lines, *, head="0" * 64, count=0):
 
 
 def append(path, kind, data, *, at, expected_head, create=False, maximum=32 * 1048576):
-    records, previous = ([], "0" * 64) if create else read(path, maximum=maximum)
+    count, previous = ((0, "0" * 64) if create else
+                       _read(path, maximum=maximum, count_only=True))
     if previous != expected_head:
         raise ValueError("WINDOW_JOURNAL_RECONCILIATION_REQUIRED")
-    record = {"seq": len(records) + 1, "previous": previous, "at": at,
+    record = {"seq": count + 1, "previous": previous, "at": at,
               "kind": kind, "data": data}
     flags = os.O_WRONLY | (os.O_CREAT | os.O_EXCL if create else os.O_APPEND)
     flags |= getattr(os, "O_NOFOLLOW", 0)
