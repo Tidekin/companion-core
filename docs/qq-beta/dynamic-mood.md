@@ -110,8 +110,11 @@ PAD 依次表示愉悦度、唤醒度、支配感。表达参考为即时值加�
 `rejected`（OUTSIDE_BATCH、DUPLICATE_EVENT、NOT_OWNER_TEXT、QUOTE_NOT_FOUND、
 NO_REPLY_TARGET）和保留信号的 `reasons` 计数，用于定位"没识别"和"识别了被过滤"。
 
-提取后的信号经过 `mood_appraisals.validate` 校验，在 COMMIT 阶段通过 `record` 写入
-`mood_appraisals` 表，投影时与确定性信号一起进入 14 天窗口、256 候选上限和半衰期计算。
+提取费用结算后，Core 在同一事务内复核来源、校验信号并写入 mood_appraisals。
+有合法信号时，mood.appraisals_committed 按提取请求记录实际新增、已存在和功能关闭的数量。
+同批普通事实随后进入记忆审核，审核失败仍保留已提交的信号和原费用。
+当前可用信号以心情投影的 signals 为准；核对表达使用时，还要检查实际请求中的心情参考和对应来源。
+投影仍使用原有的 14 天窗口、256 候选上限和半衰期。
 
 2026-11-03 的 QQ 小样本中，一条早安请求已保存为关系约定，但模型没有输出期待信号，
 审计显示无校验拒绝或截断。独立合成库使用相同 DeepSeek Flash 和原生提取/预算链路重测：

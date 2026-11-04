@@ -67,3 +67,39 @@ def test_guarded_failure_cannot_replay_unknown_extraction(core):
     with pytest.raises(CoreError, match="MEMORY_RECOVERY_UNSETTLED"):
         retry(core, record["batch_id"], "owner-request")
     assert len(core.model.calls) == calls and failures(core.store)[0]["state"] == "FAILED"
+
+
+def test_siblings_sharing_a_quote_need_distinct_attributes_after_repair():
+    from companion.memory_work import _repair_covers
+
+    quote = "值守室空调设为24度，讲座更正到海盐厅。"
+    temp = candidate(quote, key="温度", content="空调设为24度").model_dump()
+    venue = candidate(quote, key="讲座场地", content="讲座地点是海盐厅").model_dump()
+    renamed = {**venue, "fact_key": "lecture_venue"}
+    assert _repair_covers([temp, venue], [renamed, temp])
+    assert not _repair_covers([temp, venue], [renamed])
+    assert not _repair_covers([temp, venue], [venue, renamed])
+
+
+def test_reextraction_with_shared_quote_cannot_commit_venue_without_temperature(core):
+    from tests.conftest import ingest
+
+    setup(core)
+    text = "值守室空调设为24度，讲座更正到海盐厅。"
+    ingest(core, 3, text)
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    temp = candidate(text, number=3, key="温度", content="空调设为24度")
+    venue = candidate(text, number=3, key="场地", content="讲座更正到海盐厅")
+    extraction(core, [temp, venue])
+    relation = {"supported": True, "update_authorized": False, "claims_replacement": False,
+                "same": None, "conflicts": [], "replaces": []}
+    core.model.review = lambda _: encode({"relations": [
+        relation, {**relation, "update_authorized": True, "claims_replacement": True}]})
+    assert run(core.extract_step()).progressed
+    assert not run(core.extract_step()).progressed
+    extraction(core, [venue.model_copy(update={"update": "replaces_previous"})])
+    core.clock.advance(61)
+    assert not run(core.extract_step()).progressed
+    batch = checkpoint_state(core.store)["batch"]
+    assert batch["review_feedback"]["reason"] == "repair_incomplete"
+    assert len(batch["repair_candidates"]) == 2
