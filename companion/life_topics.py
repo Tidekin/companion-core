@@ -859,7 +859,9 @@ class LifeTopics:
         def anchors(text):
             return terms(re.sub(
                 r"(?:的?问题|还没解决|没有解决|已经解决|有新线索|明天再聊|明天继续|"
-                r"我觉得|我今天|我最近|关于|这件事|怎么办)", " ", text))
+                r"我觉得|(?:我)?(?:昨天|今天|前天|明天|昨晚|刚刚|最近)|关于|这件事|怎么办|"
+                r"(?:买|看|听|用|遇到)(?:了|的)(?:一?[个场件本次部张杯])?|"
+                r"^(?:我[的把]?|那个|这个)|[的了])", " ", text))
 
         focus = anchors(source["text"])
         # Explicit feedback and deictic updates refer to the immediately preceding
@@ -897,15 +899,25 @@ class LifeTopics:
                     at=now, allowed=pair, text=source["text"])
                 if mood and any(set(cause["source_event_ids"]) == pair for cause in mood["causes"]):
                     return topic
-            previous_terms = anchors(anchor["text"])
-            shared = focus & previous_terms
-            overlap = len(shared)
-            # A short explicit subject can be enough on its own. Otherwise
-            # require corroboration so common conversational words do not join items.
-            if (overlap >= 2 or shared and shared in (focus, previous_terms)) and (
-                overlap > best_overlap
-            ):
-                best, best_overlap = topic, overlap
+            # A short addendum may contain only new details. Keep the first subject
+            # as well as the most recent authorized turn as an anchor.
+            candidates = [anchor]
+            root_id = topic["source_key"].removeprefix("life:")
+            if root_id != topic["anchor"]:
+                try:
+                    root = _source(self.store, self.settings, root_id, now)
+                    authority(self.store, self.settings, source["conversation_id"], [root],
+                              now, check_limit=False)
+                except CoreError:
+                    pass
+                else:
+                    candidates.append(root)
+            for item in candidates:
+                previous_terms = anchors(item["text"])
+                shared = focus & previous_terms
+                overlap = len(shared)
+                if overlap > best_overlap and (overlap >= 2 or shared in (focus, previous_terms)):
+                    best, best_overlap = topic, overlap
         return best
 
     def synchronize(self):
@@ -920,17 +932,23 @@ class LifeTopics:
             # A known supersession retires only the old wording attempt. Recheck
             # the same item once under the new conversation revision and daily cap.
             for interrupted in s.rows(
-                "SELECT t.topic_id,r.job_id FROM life_topics t JOIN life_activity_results r "
+                "SELECT t.topic_id,t.decision_count,r.job_id FROM life_topics t "
+                "JOIN life_activity_results r "
                 "ON r.topic_id=t.topic_id AND r.topic_revision=t.revision "
-                "JOIN jobs j USING(job_id) WHERE t.state='DUE' AND t.decision_count<2 "
+                "JOIN jobs j USING(job_id) WHERE t.state='DUE' "
                 "AND r.state='PENDING' AND j.state='CANCELLED' AND j.last_error_code=? "
                 "AND NOT EXISTS (SELECT 1 FROM model_usage u WHERE u.job_id=j.job_id "
                 "AND u.state<>'SETTLED') LIMIT 20", (reply_revision.SUPERSEDED,),
             ):
                 s.execute("UPDATE life_activity_results SET state='INVALIDATED' WHERE job_id=?",
                           (interrupted["job_id"],))
-                s.execute("UPDATE life_topics SET revision=revision+1 WHERE topic_id=?",
-                          (interrupted["topic_id"],))
+                if interrupted["decision_count"] >= 2:
+                    s.execute("UPDATE life_topics SET revision=revision+1,state='WAITING',"
+                              "due_at=expires_at,reason_code='WAITING_FOR_NEW_EVIDENCE',"
+                              "updated_at=? WHERE topic_id=?", (now, interrupted["topic_id"]))
+                else:
+                    s.execute("UPDATE life_topics SET revision=revision+1 WHERE topic_id=?",
+                              (interrupted["topic_id"],))
             # A native terminal read failure can inform one more bounded decision.
             # Silence, pending work and uncertain dispatch never reopen a topic.
             for topic in s.rows(
@@ -1057,13 +1075,12 @@ class LifeTopics:
                     due = after(source["occurred_at"], cfg.follow_up_delay_seconds)
                     s.execute(
                         "UPDATE life_topics SET revision=revision+1,state=?,due_at=?,"
-                        "decision_count=CASE WHEN reason_code='WAITING_FOR_NEW_EVIDENCE' "
-                        "THEN 1 ELSE decision_count END,reason_code='REAL_OWNER_INPUT',"
+                        "decision_count=MIN(decision_count,1),"
+                        "reason_code='REAL_OWNER_INPUT',"
                         "updated_at=? WHERE topic_id=?",
                         (
                             "DUE" if due <= now else "WAITING", due,
-                            now,
-                            active["topic_id"],
+                            now, active["topic_id"],
                         ),
                     )
                     continue
@@ -1171,7 +1188,11 @@ class LifeTopics:
             or _paused(s, self.settings, now)
         ):
             raise CoreError(reply_revision.CANCELLED, 409)
-        if _uncertain(s, self.settings):
+        if _uncertain(s, self.settings) or s.one(
+            "SELECT 1 FROM life_activity_results r JOIN model_usage u USING(job_id) "
+            "WHERE r.topic_id=? AND r.topic_revision<? AND u.state IN ('RESERVED','UNKNOWN')",
+            (topic_id, topic["revision"]),
+        ):
             raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
         try:
             sources = self.sources(topic_id)
