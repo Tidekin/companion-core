@@ -1,5 +1,6 @@
 """Core-mode byte adapter faults and native transport custody; no real provider I/O."""
 
+import asyncio
 import base64
 import builtins
 import json
@@ -225,6 +226,51 @@ def test_core_asset_faults_never_prepare_or_release_original_custody(transport_c
                 await runtime.prepare(client, item, check=lambda: None)
         assert not native.spool.db.execute("SELECT 1 FROM meme_pins").fetchone()
         assert not native.spool.db.execute("SELECT 1 FROM meme_runtime_bindings").fetchone()
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("kind", ["meme", "generated"])
+@pytest.mark.parametrize("change", ["stop", "expiry"])
+def test_asset_request_rechecks_lease_after_awaiting_approval(
+    transport_case, monkeypatch, kind, change,
+):
+    from companion_onebot_bridge.generated_image_http import read_image
+    from companion_onebot_bridge.meme_asset_http import read_asset
+
+    native, runtime, item, value, _ = transport_case
+    owner = runtime.window
+    if kind == "generated":
+        item["content"]["generated_image"] = {
+            "image_id": "gimg_" + "a" * 32, "sha256": value["asset_sha256"],
+            "byte_length": value["byte_length"], "mime": value["mime"],
+        }
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def await_approval(client, *, purpose):
+            assert purpose == ("expression" if kind == "generated" else "meme")
+            entered.set()
+            await release.wait()
+            return {"expires_at": None}
+
+        monkeypatch.setattr(owner, "check", await_approval)
+        transport = httpx.MockTransport(lambda request: pytest.fail("Fenced bytes dispatched"))
+        async with private_http_client(owner.config.core_url, owner.config.bridge_token,
+                                       transport=transport) as client:
+            read = read_image if kind == "generated" else read_asset
+            pending = asyncio.create_task(read(owner, client, item, check=lambda: None))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                if change == "stop":
+                    owner.stop()
+                else:
+                    native.core.clock.advance(60)
+            finally:
+                release.set()
+                with pytest.raises(ValueError, match="STOPPED|LEASE_LOST"):
+                    await pending
 
     run(scenario())
 

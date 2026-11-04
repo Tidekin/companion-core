@@ -367,18 +367,7 @@ def read_asset(store, settings, clock, message_id, body):
         permission = owner_delivery.check_delivery(store, settings, clock, message_id)
         owner_authority.current(store, settings, clock, purpose="expression",
                                 authority=body.authority)
-        row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
-        if (
-            row["state"] not in {"LEASED", "SENDING"}
-            or not row["lease_until"]
-            or row["lease_until"] <= clock()
-            or body.lease_token != row["lease_token"]
-            or body.authority != json.loads(row["authority_json"])
-            or body.event_id != row["origin_event_id"]
-            or body.content_sha256 != row["content_sha256"]
-        ):
-            raise CoreError("OWNER_DELIVERY_LEASE_LOST", 409)
-        reply_revision.require_reply_source(store, body.event_id, body.reply_revision)
+        _, receipt = owner_delivery.asset_lease(store, clock, message_id, body, permission)
         image = _deliverable(store, clock, message_id)
         if not enabled(settings, options(store, settings, image["job_id"])):
             raise CoreError("IMAGE_GENERATION_DISABLED", 403)
@@ -387,13 +376,7 @@ def read_asset(store, settings, clock, message_id, body):
                 "byte_length"]:
             raise CoreError("GENERATED_IMAGE_UNAVAILABLE", 410)
         return {
-            "message_id": message_id,
-            "delivery_key": row["delivery_key"],
-            "event_id": body.event_id,
-            "reply_revision": body.reply_revision,
-            "authority": body.authority,
-            "content_sha256": body.content_sha256,
-            "lease_until": permission["lease_until"],
+            **receipt,
             **reference(image),
             "data_base64": base64.b64encode(data).decode(),
         }
