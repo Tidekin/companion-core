@@ -93,26 +93,13 @@ def _rows_key(tables, inputs, attempts, queues):
                   for table, rows in sorted(queues.items())))
 
 
-def closed(runtime, records, references, *, carry_receipt=None, tables=None, memo=None,
-           prefix=None):
-    """Digest of the stopped custody; `memo` reuses it for the same prefix and rows.
-
-    `prefix` is the chain hash of `records` (the next record's `previous`), so it fixes
-    every record read here; the key adds the references, the carry receipt and every
-    selected table value, so an equal key always recomputes the same digest.
-    """
-    hashes = [wire.digest(ref) for ref in references]
+def closed(runtime, records, references, *, carry_receipt=None, tables=None):
+    """Digest of the stopped custody from its original journal and selected rows."""
     if tables is None:
         tables = _Tables(runtime.db)
-    selected = set(hashes)
+    selected = {wire.digest(ref) for ref in references}
     inputs = [row for row in tables.inputs if row["plan_hash"] in selected]
     attempts = [row for row in tables.attempts if row["plan_hash"] in selected]
-    key = None
-    if memo is not None and prefix is not None:
-        key = (prefix, tuple(hashes), wire.digest(carry_receipt),
-               _rows_key(tables, inputs, attempts, _queue_entries(tables, references, selected)))
-        if key in memo:
-            return memo[key]
     receipts = {record["data"]["delivery"]["message_id"]: record["data"] for record in records
                 if record["kind"] == "OWNER_RECONCILED"}
     terminals = {record["data"]["event_id"]: record["data"] for record in records
@@ -176,12 +163,7 @@ def closed(runtime, records, references, *, carry_receipt=None, tables=None, mem
         custody["carried"] = retained
     if carry_receipt is not None:
         custody["carry_receipt"] = carry_receipt
-    value = wire.digest(custody)
-    if key is not None:
-        if len(memo) >= 256:
-            memo.clear()
-        memo[key] = value
-    return value
+    return wire.digest(custody)
 
 
 def _carry_prepared(value, authority):
@@ -234,7 +216,41 @@ _CUSTODY_KINDS = frozenset({"OWNER_RECONCILED", "OWNER_INPUT_TERMINAL", "OWNER_I
 
 
 def verify(runtime, records):
+    """Reuse a completed handoff only while its chain and every custody row match.
+
+    OwnerRuntime supplies a freshly chain-validated journal. Its last rebound's
+    hash commits to the entire historical prefix. Daily current-authority sends
+    add no handoff evidence, so only that prefix's database rows need comparison.
+    STOP, terminal/carry receipts and further handoffs always replay in full.
+    """
+    boundary = next((i for i in range(len(records) - 1, -1, -1)
+                     if records[i]["kind"] == "OWNER_REBOUND"), None)
+    tail_kinds = _CUSTODY_KINDS | {
+        "OWNER_BOUND", "OWNER_STOPPED", "OWNER_HANDOFF_PREPARED",
+        "OWNER_CARRY_HANDOFF_PREPARED", "OWNER_REBOUND",
+    }
+    key = None
     tables = None
+    if boundary is not None and not any(
+        record["kind"] in tail_kinds for record in records[boundary + 1:]
+    ):
+        tables = _Tables(runtime.db)
+        references = [record["data"]["authority"] for record in records[:boundary]
+                      if record["kind"] in {"OWNER_BOUND", "OWNER_REBOUND"}]
+        selected = {wire.digest(ref) for ref in references}
+        inputs = [row for row in tables.inputs if row["plan_hash"] in selected]
+        attempts = [row for row in tables.attempts if row["plan_hash"] in selected]
+        key = (wire.digest(records[boundary]),
+               _rows_key(tables, inputs, attempts,
+                         _queue_entries(tables, references, selected)))
+        if getattr(runtime, "_handoff_verified", None) == key:
+            return
+    runtime._handoff_verified = None
+    _verify(runtime, records, tables=tables)
+    runtime._handoff_verified = key
+
+
+def _verify(runtime, records, *, tables=None):
     digests = {}
     custody_records = 0
 
@@ -245,12 +261,8 @@ def verify(runtime, records):
         tables = tables or _Tables(runtime.db)
         key = (custody_records, len(references), wire.digest(carry_receipt))
         if key not in digests:
-            # A replay after every journal or spool write rechecks each historical
-            # handoff; their rows rarely change, so equal inputs reuse the digest.
-            memo = runtime.__dict__.setdefault("_closed_digests", {})
             digests[key] = closed(runtime, records[:index], references,
-                                  carry_receipt=carry_receipt, tables=tables, memo=memo,
-                                  prefix=records[index]["previous"])
+                                  carry_receipt=carry_receipt, tables=tables)
         return digests[key]
 
     references = []

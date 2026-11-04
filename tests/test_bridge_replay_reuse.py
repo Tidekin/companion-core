@@ -1,6 +1,7 @@
 """Owner replay reuses only work whose exact inputs are unchanged."""
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -119,46 +120,140 @@ def handed_off(config):
     return replace(config, owner_authority=successor)
 
 
-def test_a_reused_handoff_digest_is_keyed_by_every_selected_row(config):
-    successor = handed_off(config)
-    with Spool(successor) as spool:
-        runtime = OwnerRuntime(spool)
-        records = runtime.verify()
-        index = next(i for i, record in enumerate(records)
-                     if record["kind"] == "OWNER_HANDOFF_PREPARED")
-        references = [records[0]["data"]["authority"]]
-        memo = {}
-        args = (runtime, records[:index], references)
-        expected = records[index]["data"]["custody_sha256"]
-        assert owner_handoff.closed(*args, memo=memo, prefix=records[index]["previous"]) == expected
-        assert owner_handoff.closed(*args, memo=memo, prefix=records[index]["previous"]) == expected
-        assert len(memo) == 1
-        spool.db.execute("CREATE TABLE automatic_media(event_id TEXT,plan_hash TEXT,state TEXT)")
-        spool.db.execute("INSERT INTO automatic_media VALUES('event',?,'DONE')",
-                         (journal.digest(references[0]),))
-        spool.db.commit()
-        changed = owner_handoff.closed(*args, memo=memo, prefix=records[index]["previous"])
-        assert changed != expected and len(memo) == 2
-        with pytest.raises(ValueError):
-            runtime.verify()
-
-
-def test_replays_after_writes_reuse_handoff_digests_and_still_pass(config, monkeypatch):
+def test_reused_handoff_history_still_checks_new_historical_table_rows(config):
     successor = handed_off(config)
     with Spool(successor) as spool:
         runtime = OwnerRuntime(spool)
         runtime.verify()
-        computed = []
-        original = owner_handoff.wire.digest
+        assert runtime._handoff_verified is not None
+        spool.db.execute("CREATE TABLE automatic_media(event_id TEXT,plan_hash TEXT,state TEXT)")
+        spool.db.execute("INSERT INTO automatic_media VALUES('event',?,'DONE')",
+                         (journal.digest(config.owner_authority),))
+        spool.db.commit()
+        with pytest.raises(ValueError):
+            runtime.verify()
 
-        def digest(value):
-            if isinstance(value, dict) and "inputs" in value and "attempts" in value:
-                computed.append(value)
-            return original(value)
 
-        monkeypatch.setattr(owner_handoff.wire, "digest", digest)
+def test_daily_appends_reuse_history_but_a_new_stop_replays_it(config, monkeypatch):
+    successor = handed_off(config)
+    with Spool(successor) as spool:
+        runtime = OwnerRuntime(spool)
+        runtime.verify()
+        replayed = []
+        original = owner_handoff._verify
+
+        def verify(*args, **kwargs):
+            replayed.append(True)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(owner_handoff, "_verify", verify)
         for _ in range(2):
             with runtime.db:
                 runtime.append("PROFILE_PROBE_STARTED", {"authority": runtime.authority})
             runtime.verify()
-        assert computed == []
+        from companion_onebot_bridge.event_normalizer import normalize
+        from companion_onebot_bridge.spool import encode
+        from tests.support.onebot_events import raw_event
+
+        now = runtime.clock()
+        raw = encode(raw_event(2, text="current source", time=int(now.timestamp()),
+            self_id=int(successor.bot_qq_id), user_id=int(successor.owner_qq_id),
+            sender={"user_id": int(successor.owner_qq_id)}))
+        event = normalize(raw, successor, now=now.timestamp())
+        runtime.persist_capture(event, raw, received_at=now, peer=("127.0.0.1", 1))
+        runtime.verify()
+        assert replayed == []
+        runtime.stop()
+        runtime.verify(active=False)
+        assert replayed
+
+
+@pytest.mark.parametrize("damage", ["journal", "capture", "inbox"])
+def test_historical_proof_changes_invalidate_warm_history(config, damage):
+    from tests.test_bridge_owner_carry_handoff import (
+        capture,
+        client,
+        handler,
+        prepare,
+        proof,
+        stopped,
+    )
+
+    source = capture(config)
+    retained = proof(source)
+    runtime = stopped(config)
+    successor = config.owner_authority | {"revision": 3, "policy_sha256": "c" * 64}
+
+    async def handoff():
+        async with client(handler(config, retained)) as core:
+            await prepare(runtime, core)
+            await owner_handoff.handoff(runtime, core, successor)
+
+    with runtime.spool:
+        asyncio.run(handoff())
+    with Spool(replace(config, owner_authority=successor)) as spool:
+        runtime = OwnerRuntime(spool)
+        records = runtime.verify()
+        assert runtime._handoff_verified is not None
+        if damage == "journal":
+            # Re-chain the edited prefix, so the cache must reject changed evidence
+            # even when the generic codec accepts the resulting chain.
+            original = next(r for r in records if r["kind"] == "OWNER_INPUT_CARRIED")
+            original["data"]["carry_receipt"]["retained_micro_usd"] += 1
+            previous = "0" * 64
+            for record in records:
+                record["previous"] = previous
+                previous = journal.digest(record)
+            runtime.path.write_text("".join(json.dumps(r) + "\n" for r in records),
+                                    encoding="utf8")
+            spool.db.execute("UPDATE owner_runtime SET journal_head=?", (previous,))
+        elif damage == "capture":
+            spool.db.execute("UPDATE window_inputs SET capture_json='{}'")
+        else:
+            # Attempts/rows are still readable, but the handoff's sealed inbox
+            # custody has changed. This is not an authority/current-send decision.
+            spool.db.execute("UPDATE inbox SET state='changed'")
+        spool.db.commit()
+        with pytest.raises((ValueError, KeyError)):
+            runtime.verify()
+
+
+@pytest.mark.parametrize("damage", ["result_body", "result_state", "missing_result"])
+def test_historical_delivery_receipt_is_rechecked_after_cache_hit(config, damage):
+    from companion_onebot_bridge.owner_send import OwnerSendGuard
+
+    item = {"authority": config.owner_authority, "message_id": "msg_" + "a" * 32,
+        "lease_token": "lease_" + "b" * 32,
+        "lease_until": (datetime.now(UTC) + timedelta(minutes=2)).isoformat(),
+        "origin_event_id": "evt_" + "c" * 64, "action_type": "qq.private.proactive",
+        "content": {"text": "synthetic acknowledgement"}}
+    with Spool(config) as spool:
+        runtime = OwnerRuntime(spool)
+        guard = OwnerSendGuard(runtime, None)
+        guard.reserve(item)
+        spool.start_delivery(item)
+        with spool.db:
+            runtime.append("IO_STARTED", {"message_id": item["message_id"],
+                                         "provider_ack_hash": None})
+            spool.db.execute("UPDATE window_attempts SET state='IO_STARTED'")
+        guard.dispatched = True
+        guard.complete(item, "fixture-provider-id")
+        spool.finish_delivery(item["message_id"], "fixture-provider-id")
+        with spool.db:
+            spool.db.execute("UPDATE results SET state='accepted'")
+    successor = handed_off(config)
+    with Spool(successor) as spool:
+        runtime = OwnerRuntime(spool)
+        runtime.verify()
+        assert runtime._handoff_verified is not None
+        with spool.db:
+            if damage == "result_body":
+                value = json.loads(spool.db.execute("SELECT body FROM results").fetchone()[0])
+                value["provider_message_id"] = "different"
+                spool.db.execute("UPDATE results SET body=?", (json.dumps(value),))
+            elif damage == "result_state":
+                spool.db.execute("UPDATE results SET state='pending'")
+            else:
+                spool.db.execute("DELETE FROM results")
+        with pytest.raises(ValueError, match="OWNER_HANDOFF_RECONCILIATION_REQUIRED"):
+            runtime.verify()
