@@ -17,7 +17,7 @@ from companion.store import after, encode, uid
 from companion.transport import enqueue_reply_parts, reply_group, segment_envelopes
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import event
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 
 

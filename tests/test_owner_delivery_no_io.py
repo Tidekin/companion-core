@@ -108,7 +108,7 @@ def test_zero_send_requires_every_original_no_io_fact(core, tmp_path, change):
         core.store.execute("UPDATE outbox SET content_json='{}',content_sha256='' "
                            "WHERE message_id=?", (proof["message_id"],))
     elif change == "reactivated":
-        from tests.test_owner_authority import activate
+        from tests.support.owner_authority import activate
 
         original = core.store.one("SELECT policy_json FROM owner_authority_revisions "
                                   "WHERE revision=1")

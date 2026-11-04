@@ -13,13 +13,13 @@ from companion.owner_authority_protocol import AuthorityPreview
 from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
 from tests.model_carry_support import migrated
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.test_evaluation_authority_revision import revise, revised_policy, stop
 from tests.test_model_accounting import prepared
 from tests.test_model_carry_lifecycle import current_unknown
 from tests.test_model_renewal import renewal
 from tests.test_model_renewal_native import life_case, source_and_renewal
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
 
 
 def test_discovered_link_and_revision_share_native_terminal_contract(core, tmp_path):

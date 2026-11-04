@@ -16,7 +16,7 @@ from tests.model_carry_support import stranded
 
 
 def test_authenticated_receipt_is_identical_before_and_after_successor(core, tmp_path):
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     case = stranded(core, tmp_path)
     receipt = model_carry.prepare(

@@ -12,12 +12,12 @@ from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.qq_rich import input_digest
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import run
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.test_life_expression_consumption import (
     close_provider_clients as close_provider_clients,
 )
 from tests.test_life_expression_consumption import prepared
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
 
 
 @pytest.mark.parametrize("action,destination", [

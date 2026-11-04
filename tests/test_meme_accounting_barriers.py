@@ -25,7 +25,7 @@ def test_actual_latest_ledger_and_restore_barrier_cannot_be_cleared_by_drain(
 ):
     from companion.backup import backup, restore
     from companion.store import Store
-    from tests.test_onebot_capture import real_core_http
+    from tests.support.core_http import real_core_http
 
     async def scenario():
         async with stopped_case(core, tmp_path, monkeypatch) as c:

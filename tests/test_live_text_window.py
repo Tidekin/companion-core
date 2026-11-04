@@ -41,8 +41,8 @@ async def native_clients(core, tmp_path, *, respond=None, receipt=None, paid_opt
     from companion_onebot_bridge.network import private_http_client
     from companion_onebot_bridge.owner_runtime import OwnerRuntime
     from tests.sdk_reader_fixture import answer
-    from tests.test_onebot_capture import real_core_http
-    from tests.test_owner_authority import activate
+    from tests.support.core_http import real_core_http
+    from tests.support.owner_authority import activate
 
     approved_live(core, tmp_path, **(paid_options or {}))
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")

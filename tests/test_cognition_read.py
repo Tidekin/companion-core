@@ -136,7 +136,7 @@ def test_native_model_measurement_and_unknown(core, tmp_path, response_usage):
     from companion.model import ModelClient
     from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
     from tests.conftest import run
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
     from tests.test_token_measurement import MESSAGES, configure
 
     configure(core, tmp_path)

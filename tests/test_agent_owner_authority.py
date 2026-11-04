@@ -9,7 +9,7 @@ from companion.agent_runtime import check_conversation
 from companion.agent_tools import core_query_tools
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 from tests.test_owner_runtime import chat
 
 

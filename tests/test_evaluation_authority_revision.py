@@ -11,9 +11,9 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityChange, AuthorityPreview, AuthorityStop
 from companion_delivery_protocol import digest
 from tests.model_carry_support import migrated
+from tests.support.owner_authority import activate
 from tests.test_model_carry_lifecycle import current_unknown
 from tests.test_model_renewal import renewal
-from tests.test_owner_authority import activate
 
 
 def stop(core, case, operation="evaluation-revision-stop"):

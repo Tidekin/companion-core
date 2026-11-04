@@ -18,7 +18,7 @@ from companion.social import proactive_counts
 from companion.social_autonomy import SocialAutonomy
 from companion.store import after, encode, uid
 from tests.conftest import run
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import configure
 from tests.test_reply_revision import accept

@@ -190,7 +190,7 @@ def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_module
     from pydantic import SecretStr
 
     from tests import test_owner_input
-    from tests.test_onebot_capture import real_core_http
+    from tests.support.core_http import real_core_http
     from tests.test_owner_input import captured, inbound
 
     monkeypatch.setenv("COMPANION_TELEMETRY", "1")

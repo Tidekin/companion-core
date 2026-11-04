@@ -15,12 +15,12 @@ from companion.life_topics import _source, authority
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from tests.conftest import run
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.test_life_worker_integration import process_worker
 from tests.test_model_carry_native import child, finished
 from tests.test_model_renewal import renewal
 from tests.test_model_renewal_native import life_case, source_and_renewal
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
 
 
 async def selected_then_history(core, tmp_path, case, http):

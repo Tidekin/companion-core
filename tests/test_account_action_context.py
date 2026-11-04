@@ -24,8 +24,10 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer
+from tests.support.core_http import real_core_http
 from tests.support.onebot import provider
 from tests.support.onebot_events import raw_event
+from tests.support.owner_authority import activate
 from tests.test_native_account_host import configure_host
 from tests.test_onebot_account_actions import (
     model_response,
@@ -33,8 +35,6 @@ from tests.test_onebot_account_actions import (
     plan_action,
     pump_account,
 )
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
 from tests.test_social_owner_authority import authorize, close_provider_clients  # noqa: F401
 
 

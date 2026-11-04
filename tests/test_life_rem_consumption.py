@@ -21,11 +21,11 @@ from companion.rem_protocol import RemConfig
 from companion.store import after
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import run
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.support.owner_memory import environment
 from tests.test_life_expression_consumption import request
 from tests.test_life_expression_entrypoint import native_child
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
 from tests.test_owner_recall import receipt
 from tests.test_rem_native import response
 from tests.test_social_owner_authority import stop

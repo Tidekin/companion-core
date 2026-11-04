@@ -12,12 +12,12 @@ from companion import paid_budget
 from companion.api import create_app
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import (
-    AuthorityChange,
     AuthorityPreview,
     AuthorityStop,
     OwnerGrantPolicy,
     OwnerRuntimeConfig,
 )
+from tests.support.owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 
 
@@ -27,14 +27,6 @@ def prepare(core, tmp_path, *, enabled=True):
     return OwnerGrantPolicy(owner_qq_id=core.settings.owner_qq_id, purposes=["evaluation"],
                             authorization_sha256="d" * 64,
                             paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)))
-
-
-def activate(core, policy, *, revision=0, operation="operation-activate-1"):
-    query = AuthorityPreview(expected_revision=revision, policy=policy)
-    preview = authority.preview(core.store, core.settings, core.clock, query)
-    request = AuthorityChange(operation_id=operation, **query.model_dump(),
-                              preview_sha256=preview["preview_sha256"])
-    return authority.activate(core.store, core.settings, core.clock, request), request
 
 
 def test_default_off_and_no_implicit_grant(core, tmp_path):

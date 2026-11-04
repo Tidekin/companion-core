@@ -10,7 +10,7 @@ import httpx
 from companion import api_store
 from companion.store import Store
 from tests.conftest import event
-from tests.test_onebot_capture import real_core_http
+from tests.support.core_http import real_core_http
 
 
 def test_inbox_waiting_for_writer_keeps_health_live_and_deduplicates(core, monkeypatch):

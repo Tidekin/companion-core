@@ -16,8 +16,8 @@ from companion.exploration import ReadItem, ReadResult
 from companion.reading import service_for_store
 from companion.retrieval import SemanticIndex
 from companion.store import Store
+from tests.support.core_http import real_core_http
 from tests.test_exploration import URL, configure
-from tests.test_onebot_capture import real_core_http
 from tests.test_reading_service import queued
 
 

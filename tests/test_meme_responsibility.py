@@ -402,7 +402,7 @@ def test_private_read_requires_bearer_and_a_known_job(core, tmp_path, monkeypatc
 
 async def renewed_caption(core, c, policy):
     """Actual STOP/revision, signed new ingress and original discovery/caption admission."""
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     stopped = await stop(c.client, c.grant)
     assert stopped.status_code == 200, stopped.text
@@ -487,7 +487,7 @@ def test_old_database_and_actual_backup_cannot_replay_or_clear_restore_barriers(
 
     from companion.backup import backup, restore
     from companion.store import Store
-    from tests.test_onebot_capture import real_core_http
+    from tests.support.core_http import real_core_http
 
     async def scenario():
         async with liability_case(core, tmp_path, monkeypatch) as c:

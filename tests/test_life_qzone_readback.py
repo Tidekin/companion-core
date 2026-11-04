@@ -11,10 +11,10 @@ from companion.life_protocol import LifeQZoneDraft
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from tests.conftest import run
+from tests.support.core_http import real_core_http
 from tests.test_life_worker_integration import (
     test_real_http_source_to_independent_worker_shadow as produce,
 )
-from tests.test_onebot_capture import real_core_http
 
 
 def test_tampered_or_revoked_artifacts_are_hidden_individually_without_readback_writes(

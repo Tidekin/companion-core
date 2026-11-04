@@ -16,13 +16,13 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.core_http import real_core_http
 from tests.support.native_context import Capture
 from tests.support.onebot import provider as onebot_provider
 from tests.support.onebot_events import raw_event
 from tests.test_life_worker_integration import process_worker
 from tests.test_model_carry_native import child, finished
 from tests.test_model_renewal_native import life_case, source_and_renewal
-from tests.test_onebot_capture import real_core_http
 
 
 @pytest.mark.parametrize("history_source", [False, True])

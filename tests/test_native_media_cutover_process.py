@@ -23,12 +23,12 @@ from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.core_http import real_core_http
 from tests.support.native_context import Capture, configure
 from tests.support.onebot import provider
 from tests.support.onebot_events import config, raw_event
 from tests.test_astrbot_media_retirement import BOUNDARY, native_file, old_spool
 from tests.test_live_image_input import png
-from tests.test_onebot_capture import real_core_http
 from tests.test_onebot_images import image_segment
 from tests.test_owner_recall_bridge_media import scope
 

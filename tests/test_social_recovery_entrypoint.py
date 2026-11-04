@@ -10,7 +10,7 @@ import httpx
 from pydantic import SecretStr
 
 from tests.conftest import run
-from tests.test_onebot_capture import real_core_http
+from tests.support.core_http import real_core_http
 from tests.test_social_autonomy import background
 from tests.test_social_owner_authority import authorize
 

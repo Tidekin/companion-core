@@ -559,7 +559,7 @@ def test_unknown_voice_owner_resolution_retains_voice_check_and_allows_handoff(
     core, tmp_path, outcome,
 ):
     from companion.owner_authority_protocol import AuthorityStop
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     sent = []
 

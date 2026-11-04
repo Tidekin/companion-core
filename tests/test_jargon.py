@@ -8,8 +8,9 @@ from companion import jargon
 from companion.jargon_config import JargonConfig
 from companion.model import ModelClient
 from tests.conftest import ingest, run
+from tests.support.owner_authority import activate
 from tests.test_exploration import configure
-from tests.test_owner_authority import activate, prepare
+from tests.test_owner_authority import prepare
 from tests.test_watch_ledger import Provider
 
 EXTRACT = {"terms": [{"term": "摸鱼王", "event_ids": ["evt_test_2"]},

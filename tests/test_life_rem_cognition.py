@@ -4,8 +4,8 @@ import httpx
 import pytest
 
 from tests.conftest import run
+from tests.support.core_http import real_core_http
 from tests.test_life_rem_consumption import draft, prepared
-from tests.test_onebot_capture import real_core_http
 
 
 @pytest.mark.parametrize("change", ["none", "source", "output", "recall", "queued"])

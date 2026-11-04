@@ -18,9 +18,9 @@ from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeCon
 from companion.store import encode
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import event, run
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.test_diary import DAY
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 
 

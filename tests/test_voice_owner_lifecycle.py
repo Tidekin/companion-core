@@ -8,7 +8,7 @@ from companion import owner_authority, voice_authority
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.voice_protocol import VoiceCleanup, VoiceLeaseRef, VoiceStopRef, VoiceStopRequest
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 from tests.test_voice_jobs import claim, create_tts, prepared, result
 
 

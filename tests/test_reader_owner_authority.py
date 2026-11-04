@@ -15,8 +15,8 @@ from source_reader import worker_v1
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
 from tests.conftest import run
+from tests.support.owner_authority import activate
 from tests.test_exploration import URL
-from tests.test_owner_authority import activate
 from tests.test_reading_followup import READER_AUTH, admit, window
 from tests.test_source_reader import META, PLAYER, SUBTITLE, Responses, response
 

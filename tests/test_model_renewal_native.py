@@ -17,10 +17,10 @@ from companion_onebot_bridge.config import BridgeConfig
 from tests import owner_model_fixtures
 from tests.conftest import run
 from tests.model_carry_support import migrated
+from tests.support.core_http import real_core_http
 from tests.test_life_worker_integration import process_worker
 from tests.test_model_carry_native import child, finished
 from tests.test_model_renewal import renewal
-from tests.test_onebot_capture import real_core_http
 from tests.test_reading_followup import admit
 
 

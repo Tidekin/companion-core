@@ -17,8 +17,8 @@ from companion import api, api_store, owner_authority, owner_input
 from companion.owner_authority_protocol import AuthorityStop
 from companion.privacy import epoch
 from companion.store import Store
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.test_owner_input import captured, inbound
 
 PREFIX = "/internal/v1"

@@ -7,9 +7,10 @@ from companion.api import create_app
 from companion.cognition_read import CognitionRead
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode, uid
+from tests.support.owner_authority import activate
 from tests.test_goals import setup_goal
 from tests.test_observations import enable_observations, observation
-from tests.test_owner_authority import activate, prepare
+from tests.test_owner_authority import prepare
 
 
 def retained_plan(core):

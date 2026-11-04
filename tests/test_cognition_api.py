@@ -7,8 +7,8 @@ import sys
 import httpx
 from pydantic import SecretStr
 
+from tests.support.core_http import real_core_http
 from tests.test_evaluation_process import process_config
-from tests.test_onebot_capture import real_core_http
 from tests.test_owner_input import captured, inbound
 
 

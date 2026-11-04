@@ -17,7 +17,7 @@ from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import run
 from tests.model_carry_support import MESSAGES, migrated
 from tests.owner_model_fixtures import authorized_job
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 
 
 def test_same_approval_can_resume_after_second_stop(core, tmp_path):

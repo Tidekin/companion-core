@@ -14,11 +14,11 @@ from companion.model import ModelClient
 from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
+from tests.support.core_http import real_core_http
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.native_context import approve_value
 from tests.support.native_context import configure as native_configure
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_capture import real_core_http
 
 MEDIA_REF = "https://gchat.qpic.cn/private-blob?token=never-download"
 MEDIA_SHA = "e" * 64

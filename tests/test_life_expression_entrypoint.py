@@ -11,8 +11,8 @@ import pytest
 from pydantic import SecretStr
 
 from tests.conftest import run
+from tests.support.core_http import real_core_http
 from tests.test_life_expression_consumption import prepared, request
-from tests.test_onebot_capture import real_core_http
 from tests.test_social_owner_authority import stop
 
 

@@ -20,13 +20,13 @@ from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.core_http import real_core_http
 from tests.support.onebot_events import config, raw_event
 from tests.test_content_bridge import (
     bridge_module,  # noqa: F401
     event,
 )
 from tests.test_content_bridge import config as plugin_config
-from tests.test_onebot_capture import real_core_http
 
 ROOT = Path(__file__).resolve().parents[1]
 BOUNDARY = 1792382399

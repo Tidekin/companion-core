@@ -12,9 +12,9 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from tests.conftest import run
 from tests.meme_authority_fixture import admit
+from tests.support.owner_authority import activate
 from tests.test_meme_core import worker
 from tests.test_meme_native_discovery import native_case, release_foreground
-from tests.test_owner_authority import activate
 
 
 @pytest.mark.parametrize("changed", ["key", "epoch"])

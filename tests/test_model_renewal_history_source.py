@@ -14,9 +14,9 @@ from companion.owner_authority_protocol import OwnerCapture, OwnerGrantPolicy
 from tests.conftest import run
 from tests.model_carry_support import MESSAGES
 from tests.owner_model_fixtures import authorized_job
+from tests.support.owner_authority import activate
 from tests.test_model_renewal import renewal
 from tests.test_model_renewal_native import life_case
-from tests.test_owner_authority import activate
 
 
 def attempt(core, job, *, unknown=False):

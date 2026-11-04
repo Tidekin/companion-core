@@ -9,9 +9,9 @@ from companion.core import Core
 from companion_meme_protocol import digest
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.core_http import real_core_http
 from tests.test_meme_asset_migration import original_work
 from tests.test_meme_core_runtime import runtime_case as runtime_case
-from tests.test_onebot_capture import real_core_http
 
 
 async def settled_reply(c):

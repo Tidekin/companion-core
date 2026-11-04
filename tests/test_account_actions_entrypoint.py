@@ -14,7 +14,7 @@ from companion.social_autonomy_protocol import FrozenPlan, SocialAutonomyConfig
 from companion.store import encode
 from tests.conftest import ingest, run
 from tests.social_model_transport import next_social_turn
-from tests.test_onebot_capture import real_core_http
+from tests.support.core_http import real_core_http
 from tests.test_social_autonomy import read_public
 from tests.test_social_owner_authority import authorize
 

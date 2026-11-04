@@ -19,9 +19,9 @@ from companion_delivery_protocol.authority import capture_signing_payload
 from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.rich_input import input_digest
+from tests.support.core_http import real_core_http
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 from tests.test_reading_followup import notice as reader_notice
 

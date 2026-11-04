@@ -22,14 +22,14 @@ from source_reader.network import PublicHTTP
 from source_reader.web import WebHTTP
 from source_reader.worker_v1 import tick
 from tests.conftest import run
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.support.owner_memory import environment
 from tests.test_exploration import URL, configure
 from tests.test_heybox_reader import mock_pool
 from tests.test_life_topics import assert_no_delivery, bug, due, proposal
 from tests.test_life_worker_integration import native_worker
 from tests.test_next_reading import WEB, web_response
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
 from tests.test_source_reader import META, PLAYER, SUBTITLE, response
 
 

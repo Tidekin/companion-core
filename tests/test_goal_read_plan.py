@@ -203,7 +203,7 @@ def test_continuation_cannot_upgrade_authority_or_reuse_another_step_receipt(
 ):
     from companion import owner_authority
     from companion.owner_authority_protocol import AuthorityStop
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     async def scenario():
         async with prepared(core, tmp_path) as (client, source, reference):

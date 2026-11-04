@@ -7,7 +7,8 @@ from companion import owner_authority, owner_stop_receipt
 from companion.api import create_app
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
-from tests.test_owner_authority import activate, prepare
+from tests.support.owner_authority import activate
+from tests.test_owner_authority import prepare
 
 
 @pytest.mark.parametrize("change", ["active", "revised", "restored", "reactivated"])

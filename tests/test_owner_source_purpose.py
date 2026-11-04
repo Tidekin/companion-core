@@ -6,7 +6,7 @@ from companion import owner_authority, owner_input
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import after
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 from tests.test_owner_input import captured, inbound
 
 

@@ -13,8 +13,8 @@ from companion import runtime_config
 from companion.owner_authority_protocol import OwnerCapture
 from companion.store import encode
 from companion_delivery_protocol.authority import CAPTURE_DOMAIN
+from tests.support.core_http import real_core_http
 from tests.test_evaluation_process import process_config
-from tests.test_onebot_capture import real_core_http
 from tests.test_owner_console import ORIGIN, PASSWORD
 from tests.test_owner_input import captured, inbound
 

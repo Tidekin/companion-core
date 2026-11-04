@@ -10,7 +10,8 @@ from companion import owner_authority, release_probe
 from companion.contracts import CoreError
 from companion.store import migrate
 from scripts import release_plan as plan
-from tests.test_owner_authority import activate, prepare
+from tests.support.owner_authority import activate
+from tests.test_owner_authority import prepare
 
 
 def test_probe_on_current_schema_needs_no_migration(core):

@@ -2,7 +2,7 @@
 
 from companion import owner_authority, paid_budget
 from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 
 

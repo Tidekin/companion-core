@@ -108,7 +108,7 @@ def test_background_leaves_a_slot_for_chat(core, tmp_path):
     # Use the current native policy with its independently granted exploration scope.
     core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job,))
     view = owner_authority.current(core.store, core.settings, core.clock)
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     active, _ = activate(core, view.policy.model_copy(update={"purposes": ["chat", "exploration"]}),
                          revision=1, operation="grant-background-capacity-check")

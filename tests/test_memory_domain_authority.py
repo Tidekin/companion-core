@@ -7,9 +7,10 @@ from companion.memory_authority import source_allowed
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import after, encode
 from tests.conftest import run
+from tests.support.owner_authority import activate
 from tests.test_consolidation import enable_nightly
 from tests.test_diary import DAY
-from tests.test_owner_authority import activate, prepare
+from tests.test_owner_authority import prepare
 from tests.test_owner_input import captured, inbound
 
 

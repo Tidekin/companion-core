@@ -17,8 +17,8 @@ from companion.qq_rich import input_digest
 from companion.store import after
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import run
+from tests.support.owner_authority import activate
 from tests.test_input_interrupt_bridge import model_response
-from tests.test_owner_authority import activate
 from tests.test_owner_input import captured, inbound
 from tests.test_owner_recall import receipt
 

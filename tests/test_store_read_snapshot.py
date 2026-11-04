@@ -11,8 +11,8 @@ import pytest
 from companion import paid_budget, runtime_config
 from companion.autonomous_selector import native_selector
 from companion.store import Store
+from tests.support.core_http import real_core_http
 from tests.test_api_store import PREFIX, headers
-from tests.test_onebot_capture import real_core_http
 from tests.test_owner_input import captured
 
 
