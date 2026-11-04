@@ -151,11 +151,7 @@ class ReflectionService:
             )
             if prior:
                 if prior["state"] == "RUNNING" and prior["lease_until"] <= now:
-                    s.execute(
-                        "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=? AND "
-                        "state='RESERVED'",
-                        (prior["model_request_id"],),
-                    )
+                    budget.mark_reservation_unknown(s, prior["model_request_id"])
                     s.execute(
                         "UPDATE reflection_runs SET state='FAILED',lease_token=NULL,"
                         "last_error_code='REFLECTION_LEASE_EXPIRED' WHERE run_id=?",

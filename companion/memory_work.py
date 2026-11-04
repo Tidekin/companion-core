@@ -557,11 +557,7 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
                     else "MEMORY_TIMEZONE_CHANGED",
                 )
                 if unknown:
-                    s.execute(
-                        "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=? "
-                        "AND state='RESERVED'",
-                        (batch["request_id"],),
-                    )
+                    budget.mark_reservation_unknown(s, batch["request_id"])
                     for key in batch.get("event_ids", []):
                         s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (key,))
                 batch.pop("candidates", None)
@@ -740,10 +736,7 @@ def _recover_phase(core, batch, persist):
             batch.pop("request_id", None)
     else:
         if usage["state"] == "RESERVED":
-            core.store.execute(
-                "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=? AND state='RESERVED'",
-                (request_id,),
-            )
+            budget.mark_reservation_unknown(core.store, request_id)
         batch["phase"] = "UNKNOWN" if usage["state"] in {"UNKNOWN", "RESERVED"} else "FAILED"
         batch["error"] = "MEMORY_RESULT_NOT_CHECKPOINTED"
         batch.pop("candidates", None)
