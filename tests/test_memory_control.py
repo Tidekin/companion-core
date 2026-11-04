@@ -42,7 +42,7 @@ from companion_onebot_bridge.window import bridge_code_sha256
 from tests.conftest import ingest, run
 from tests.support.native_http import owned_http_protocol
 from tests.support.onebot import onebot_http
-from tests.test_onebot_direct import config, raw_event
+from tests.support.onebot_events import config, raw_event
 
 
 def bridge(core, **changes):

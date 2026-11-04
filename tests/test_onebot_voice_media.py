@@ -31,7 +31,7 @@ from companion_onebot_bridge import voice_media as voice
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.onebot_client import OneBotClient, http_client
 from tests.conftest import run
-from tests.test_onebot_direct import config, raw_event
+from tests.support.onebot_events import config, raw_event
 
 NOW = datetime(2026, 10, 24, tzinfo=UTC)
 URL = "https://multimedia.nt.qq.com.cn/download/voice?key=private-signed-token"

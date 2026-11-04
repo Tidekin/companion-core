@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from companion.contracts import InboundEvent
 from companion_onebot_bridge.event_normalizer import normalize
-from tests.test_onebot_direct import config, raw_event
+from tests.support.onebot_events import config, raw_event
 from tests.test_onebot_files import segment
 from tests.test_onebot_images import image_segment
 from tests.test_qq_face_images import face

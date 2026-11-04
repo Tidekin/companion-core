@@ -22,10 +22,10 @@ from tests.conftest import run
 from tests.native_continuous_support import Host
 from tests.poke_authority_fixture import environment as native_environment
 from tests.support.onebot import provider
+from tests.support.onebot_events import raw_event
 from tests.test_cumulative_budget import policy as quota_policy
 from tests.test_cumulative_budget import view
 from tests.test_onebot_capture import real_core_http, source_window
-from tests.test_onebot_direct import raw_event
 from tests.test_owner_authority import activate
 from tests.test_poke import native_frame
 from tests.test_private_companion import companion_options
@@ -130,7 +130,7 @@ def queue(window):
 
 
 def test_native_notice_canonicalization_agrees_with_http_contract():
-    from tests.test_onebot_direct import config
+    from tests.support.onebot_events import config
 
     frame = native_frame()
     value = pokes.notice(frame, config())
@@ -159,7 +159,7 @@ def test_poke_intake_is_closed_without_explicit_window_scope(core, tmp_path):
     {"suffix": "private\nline"}, {"target_id": None},
 ])
 def test_unsupported_notices_cannot_become_owner_pokes(change):
-    from tests.test_onebot_direct import config
+    from tests.support.onebot_events import config
 
     with pytest.raises(ValueError, match="PRIVATE_OWNER_POKE_REQUIRED"):
         pokes.notice(native_frame() | change, config())

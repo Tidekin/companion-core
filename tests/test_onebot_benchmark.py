@@ -14,8 +14,8 @@ from companion_onebot_bridge.spool import Spool
 from scripts.benchmark_qq_beta import summarize
 from tests.conftest import run
 from tests.support.onebot import provider
+from tests.support.onebot_events import config, normalized, raw_event
 from tests.test_onebot_delivery import core_client
-from tests.test_onebot_direct import config, normalized, raw_event
 
 
 def test_100_offline_messages_measure_fsync_ingest_and_fifo_while_tools_are_busy(

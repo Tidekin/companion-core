@@ -11,8 +11,8 @@ import pytest
 from companion_onebot_bridge import app, capture
 from companion_onebot_bridge import window as window_module
 from tests.conftest import run
+from tests.support.onebot_events import raw_event
 from tests.test_onebot_capture import bootstrap_frames, source_window
-from tests.test_onebot_direct import raw_event
 
 
 def cli_failure(monkeypatch, capsys, error):

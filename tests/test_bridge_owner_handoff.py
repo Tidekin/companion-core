@@ -10,10 +10,10 @@ from pydantic import SecretStr
 from companion_onebot_bridge import journal, owner_handoff, owner_notices
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool, encode
+from tests.support.onebot_events import raw_event
 from tests.test_bridge_owner_notices import frame
 from tests.test_bridge_owner_resolution import reserve_uncertain
 from tests.test_bridge_owner_runtime import config as config
-from tests.test_onebot_direct import raw_event
 from tests.test_reading_followup import window
 
 

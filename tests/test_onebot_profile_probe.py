@@ -23,10 +23,10 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import bridge_code_sha256, digest
 from tests.conftest import run
+from tests.support.onebot_events import raw_event
 from tests.test_native_account_host import configure_host
 from tests.test_onebot_account_actions import fixture
 from tests.test_onebot_capture import real_core_http
-from tests.test_onebot_direct import raw_event
 from tests.test_onebot_pokes import silent
 from tests.test_social_owner_authority import authorize, close_provider_clients  # noqa: F401
 

@@ -7,6 +7,7 @@ import pytest
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow
 from tests.conftest import run
+from tests.support.onebot_events import raw_event
 from tests.test_live_text_window import (
     live_clients,
     live_fixture,
@@ -14,7 +15,6 @@ from tests.test_live_text_window import (
     native_clients,
     native_send,
 )
-from tests.test_onebot_direct import raw_event
 from tests.test_onebot_window import input_approval
 
 

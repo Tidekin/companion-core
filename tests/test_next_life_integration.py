@@ -20,9 +20,9 @@ from companion_onebot_bridge import owner_notices
 from tests.conftest import run
 from tests.native_continuous_support import host
 from tests.support.native_context import Capture
+from tests.support.onebot_events import raw_event
 from tests.test_diary import DAY
 from tests.test_next_life_diary import seed, withdraw
-from tests.test_onebot_direct import raw_event
 from tests.test_owner_recall_bridge import recall_frame
 from tests.test_private_companion import companion_options
 

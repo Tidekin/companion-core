@@ -24,7 +24,7 @@ from companion_onebot_bridge.window import (
 )
 from tests.conftest import run
 from tests.support.onebot import provider
-from tests.test_onebot_direct import normalized, raw_event
+from tests.support.onebot_events import normalized, raw_event
 from tests.test_onebot_window import input_approval, plan_fixture
 
 

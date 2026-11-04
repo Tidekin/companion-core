@@ -37,8 +37,8 @@ from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
 from tests.support.native_http import owned_http_protocol
 from tests.support.onebot import provider
+from tests.support.onebot_events import config, raw_event
 from tests.test_onebot_capture import real_core_http
-from tests.test_onebot_direct import config, raw_event
 from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 

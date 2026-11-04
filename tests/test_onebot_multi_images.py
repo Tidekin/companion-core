@@ -11,8 +11,8 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.window import digest
 from tests.conftest import run
 from tests.support.native_images import image_host, raw_event, upload
+from tests.support.onebot_events import config
 from tests.test_live_image_input import options
-from tests.test_onebot_direct import config
 from tests.test_onebot_images import image_segment
 
 

@@ -14,7 +14,7 @@ from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, worker_for
 from tests.support.native_context import source_window
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 from tests.test_qq_rich_input import card
 
 

@@ -94,7 +94,7 @@ async def select_tools(core, name, urls):
 async def admit(client, core, entry, number, text, *, reference=None):
     from companion.store import encode
     from companion_onebot_bridge.capture import prepare_owner_input
-    from tests.test_onebot_direct import raw_event
+    from tests.support.onebot_events import raw_event
 
     raw = raw_event(number, time=int(core.clock.now.timestamp()), text=text)
     if reference is not None:

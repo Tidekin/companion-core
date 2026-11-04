@@ -6,8 +6,8 @@ from companion import live_text
 from companion.store import encode
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.rich_input import input_digest
+from tests.support.onebot_events import raw_event
 from tests.test_input_protocol import sign
-from tests.test_onebot_direct import raw_event
 
 
 async def admit(client, core, config, plan, number, text="", *, card=None, reference=None):

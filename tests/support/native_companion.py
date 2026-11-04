@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from companion import private_life
 from companion_onebot_bridge.pending_media import MediaPump
 from tests.native_continuous_support import host
-from tests.test_onebot_direct import raw_event as platform_event
+from tests.support.onebot_events import raw_event as platform_event
 
 
 def raw_event(*args, **kwargs):

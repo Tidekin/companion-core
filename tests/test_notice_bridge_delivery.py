@@ -15,8 +15,8 @@ from companion.reply_segments import SegmentedReplyConfig
 from companion_onebot_bridge.outbound import validate_item
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
+from tests.support.onebot_events import config
 from tests.test_exploration import URL
-from tests.test_onebot_direct import config
 from tests.test_private_companion import companion_options
 
 

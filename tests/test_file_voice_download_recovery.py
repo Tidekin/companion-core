@@ -24,9 +24,9 @@ from tests.conftest import run
 from tests.native_continuous_support import until
 from tests.sdk_reader_fixture import answer
 from tests.support.onebot import provider
+from tests.support.onebot_events import raw_event
 from tests.test_native_file_pipeline import configure
 from tests.test_native_image_pipeline import admit_image
-from tests.test_onebot_direct import raw_event
 from tests.test_onebot_voice_media import URL as VOICE_URL
 from tests.test_onebot_voice_media import segment as voice_segment
 from tests.test_onebot_voice_pipeline import fixture as voice_fixture

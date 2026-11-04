@@ -20,11 +20,11 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.onebot_events import raw_event
 from tests.test_meme_runtime import RULE, item, public_transport
 from tests.test_next_memes_catalog import metadata, png
 from tests.test_next_memes_discovery import resolver
 from tests.test_onebot_capture import real_core_http
-from tests.test_onebot_direct import raw_event
 from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 from tests.test_selector_capabilities import child

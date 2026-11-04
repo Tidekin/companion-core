@@ -16,7 +16,7 @@ from companion_onebot_bridge.onebot_client import OneBotClient
 from tests.conftest import run
 from tests.support import onebot
 from tests.support.native_consumer_entry import environment
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 
 
 async def receive(entry, number, text):

@@ -12,8 +12,8 @@ from companion_onebot_bridge.metrics import Metrics
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.support.native_images import image_host
+from tests.support.onebot_events import config, raw_event
 from tests.test_live_image_input import options
-from tests.test_onebot_direct import config, raw_event
 
 
 @pytest.mark.parametrize("corrupt", [False, True])

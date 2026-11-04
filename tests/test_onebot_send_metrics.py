@@ -15,7 +15,7 @@ from companion_onebot_bridge.outbound import _deliver_item
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.support.astrbot_delivery import deliver_expression, journal
-from tests.test_onebot_direct import config
+from tests.support.onebot_events import config
 from tests.test_onebot_rpc_metrics import CANARY, records
 
 

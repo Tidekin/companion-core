@@ -20,7 +20,7 @@ from companion_onebot_bridge.spool import encode
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, until
 from tests.sdk_reader_fixture import answer
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 from tests.test_onebot_images import image_segment
 from tests.test_prepare_owner_input import native_spool, window
 
@@ -193,7 +193,7 @@ def test_owner_ws_survives_unknown_images_and_replay_with_independent_worker(cor
 @pytest.mark.parametrize("mutation", ["missing_shared", "source", "index"])
 def test_selected_image_reconstruction_rejects_changed_evidence(mutation):
     from companion_onebot_bridge.reference_reader import captured_media
-    from tests.test_onebot_direct import config
+    from tests.support.onebot_events import config
 
     message = [BAD_IMAGES[0], image_segment()]
     event = normalize(encode(raw_event(message=message)), config(),

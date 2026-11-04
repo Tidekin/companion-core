@@ -9,7 +9,7 @@ from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.outbound import validate_item
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
-from tests.test_onebot_direct import config
+from tests.support.onebot_events import config
 
 
 def item():

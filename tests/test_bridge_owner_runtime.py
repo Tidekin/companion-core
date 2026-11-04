@@ -159,7 +159,7 @@ def test_capture_signature_survives_restart_without_a_plaintext_archive(config):
 
     from companion_delivery_protocol.authority import capture_signing_payload
     from companion_onebot_bridge.event_normalizer import normalize
-    from tests.test_onebot_direct import raw_event
+    from tests.support.onebot_events import raw_event
 
     with Spool(config) as spool:
         runtime = OwnerRuntime(spool)
@@ -188,7 +188,7 @@ def test_capture_signature_survives_restart_without_a_plaintext_archive(config):
 @pytest.mark.parametrize("mutation", ["input_hash", "approval_hash", "body"])
 def test_capture_projection_mutation_blocks_upload(config, mutation):
     from companion_onebot_bridge.event_normalizer import normalize
-    from tests.test_onebot_direct import raw_event
+    from tests.support.onebot_events import raw_event
 
     with Spool(config) as spool:
         runtime = OwnerRuntime(spool)

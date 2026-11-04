@@ -25,9 +25,9 @@ from companion.transport import lease_deliveries
 from companion_onebot_bridge import account_actions as leaf
 from companion_onebot_bridge.native_actions import send_account
 from tests.social_profile_support import confirmed_profile_material
+from tests.support.onebot_events import config
 from tests.test_account_owner_transport import prepared
 from tests.test_onebot_account_actions import catalog, model_response, plan_action
-from tests.test_onebot_direct import config
 from tests.test_social_autonomy import background
 from tests.test_social_owner_authority import authorize, close_provider_clients  # noqa: F401
 

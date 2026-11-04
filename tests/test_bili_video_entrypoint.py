@@ -21,6 +21,7 @@ from companion.retrieval import SemanticIndex
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
 from tests.support.native_consumer import source_window
+from tests.support.onebot_events import raw_event
 from tests.test_bili_media import NAV, PLAY, VIEW
 from tests.test_bili_video import (
     model_response,
@@ -33,7 +34,6 @@ from tests.test_bili_video import (
 )
 from tests.test_cloud_budget import native
 from tests.test_onebot_capture import real_core_http
-from tests.test_onebot_direct import raw_event
 from tests.test_source_reader import PLAYER, response
 from tests.test_video_extract import local_media
 

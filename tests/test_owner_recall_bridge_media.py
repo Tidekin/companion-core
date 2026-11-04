@@ -13,10 +13,10 @@ import pytest
 from companion_onebot_bridge import app, pending_media
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, recall_frame, until
+from tests.support.onebot_events import raw_event
 from tests.test_input_interrupt_bridge import model_response
 from tests.test_live_image_input import options as image_options
 from tests.test_live_image_input import png
-from tests.test_onebot_direct import raw_event
 from tests.test_onebot_images import image_segment
 from tests.test_private_companion import companion_options
 

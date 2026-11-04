@@ -8,7 +8,7 @@ from companion import dialogue_history, qq_quotes
 from companion.contracts import InboundEvent
 from companion.input_recall import marker_key
 from companion.store import encode
-from tests.test_onebot_direct import normalized, raw_event
+from tests.support.onebot_events import normalized, raw_event
 from tests.test_quote_attribution import QUOTE, delivered, quoted_job
 
 OWNER_TEXT = "我上周说的那个私事其实是这样的"

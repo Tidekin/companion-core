@@ -29,7 +29,7 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 from tests.test_onebot_voice_media import URL, public, segment, wav
 from tests.test_prepare_owner_input import native_spool
 from tests.test_prepare_owner_input import window as owner_window

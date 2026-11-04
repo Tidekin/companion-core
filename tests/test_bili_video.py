@@ -44,7 +44,7 @@ from companion.store import Store, encode
 from companion.video_media_contract import AssetManifest, MediaAsset
 from tests.conftest import run
 from tests.support.native_consumer import admit, select_tools, source_window
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import queued
 from tests.test_test_fixtures import historical_database

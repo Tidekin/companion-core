@@ -21,11 +21,11 @@ from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
 from tests.support.native_meme_entry import native_entry
 from tests.support.onebot import provider as onebot_provider
+from tests.support.onebot_events import raw_event
 from tests.test_meme_core import CAPTION
 from tests.test_meme_runtime import RULE, public_transport
 from tests.test_next_memes_catalog import png
 from tests.test_next_memes_discovery import resolver
-from tests.test_onebot_direct import raw_event
 from tests.test_private_companion import companion_options
 from tests.test_voice_flow import finish_node
 from tests.test_voice_jobs import voice_config

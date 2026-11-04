@@ -18,7 +18,7 @@ from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
-from tests.test_onebot_direct import config
+from tests.support.onebot_events import config
 from tests.test_owner_authority import activate
 from tests.test_social_autonomy import background, queue
 from tests.test_social_owner_authority import authorize, close_provider_clients, stop  # noqa: F401
@@ -90,7 +90,7 @@ def test_account_host_checked_native_delivery(core, tmp_path, outcome):
                 request.url = request.url.copy_with(path="/set_self_longnick")
             elif outcome == "owner":
                 from companion_onebot_bridge.event_normalizer import normalize
-                from tests.test_onebot_direct import raw_event
+                from tests.support.onebot_events import raw_event
 
                 frame = json.dumps(raw_event(2, text="先回应这里",
                     time=int(datetime.fromisoformat(core.clock()).timestamp())))

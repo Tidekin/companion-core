@@ -9,7 +9,7 @@ from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.support.onebot import provider
-from tests.test_onebot_direct import config, normalized
+from tests.support.onebot_events import config, normalized
 
 
 def core_client(core, transport=None, *, bridge_config=None):

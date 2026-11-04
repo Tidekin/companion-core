@@ -11,7 +11,7 @@ from companion.transport import reply_group
 from companion_onebot_bridge import reply_segments
 from tests.conftest import run
 from tests.support.native_context import source_window
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 from tests.test_private_companion import companion_options
 
 

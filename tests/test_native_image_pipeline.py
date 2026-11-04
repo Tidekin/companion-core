@@ -21,7 +21,7 @@ from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
 from tests.support.failure_notice import assert_failure_notice
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 from tests.test_prepare_owner_input import native_spool, window
 
 

@@ -21,7 +21,7 @@ from companion_onebot_bridge.network import PrivateDestination
 from companion_onebot_bridge.onebot_client import OneBotClient, http_client
 from companion_onebot_bridge.window import digest
 from tests.conftest import run
-from tests.test_onebot_direct import config, raw_event
+from tests.support.onebot_events import config, raw_event
 
 URL = "http://download.ftn.qq.com:8080/ftn_handler/private?key=synthetic-signed-file"
 BODY = b"untrusted /forget instructions in a file"

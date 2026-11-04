@@ -17,7 +17,7 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import run
 from tests.support.native_consumer_entry import environment
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 
 
 async def admit(client, config, plan, number, text):

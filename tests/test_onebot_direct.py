@@ -1,52 +1,15 @@
 """Synthetic v2.0.3-shaped events; these are not live QQ evidence."""
 
 import json
-from datetime import UTC, datetime
 
 import httpx
 import pytest
 
 from companion.contracts import InboundEvent
-from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
-
-
-def config(**changes):
-    return BridgeConfig(
-        **{
-            "owner_qq_id": "10001",
-            "bot_qq_id": "10002",
-            "bridge_token": "synthetic-core-token-32-characters",
-            "onebot_token": "synthetic-onebot-token-32-characters",
-            "protocol_epoch": "offline-first-20261020",
-            **changes,
-        }
-    )
-
-
-def raw_event(number=42, text="你好", **changes):
-    return {
-        "post_type": "message",
-        "message_type": "private",
-        "sub_type": "friend",
-        "self_id": 10002,
-        "user_id": 10001,
-        "sender": {"user_id": 10001},
-        "message_id": number,
-        "time": 1792382400,
-        "message": [{"type": "text", "data": {"text": text}}],
-        **changes,
-    }
-
-
-def normalized(raw=None, cfg=None):
-    return normalize(
-        json.dumps(raw or raw_event(), ensure_ascii=False),
-        cfg or config(),
-        now=datetime(2026, 10, 20, tzinfo=UTC).timestamp(),
-    )
+from tests.support.onebot_events import config, normalized, raw_event
 
 
 def test_owner_friend_message_has_stable_core_identity(core):

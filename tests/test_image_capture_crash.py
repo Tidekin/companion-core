@@ -17,8 +17,8 @@ from companion.contracts import CoreError
 from companion_onebot_bridge.pending_media import MediaPump
 from tests.conftest import run
 from tests.native_continuous_support import host, until
+from tests.support.onebot_events import raw_event
 from tests.test_live_image_input import options, png
-from tests.test_onebot_direct import raw_event
 from tests.test_onebot_images import image_segment
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -17,8 +17,8 @@ from companion_delivery_protocol.authority import capture_signing_payload, recal
 from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.event_normalizer import normalize, normalize_recall
 from companion_onebot_bridge.rich_input import input_digest
+from tests.support.onebot_events import raw_event
 from tests.test_onebot_capture import real_core_http
-from tests.test_onebot_direct import raw_event
 from tests.test_owner_input import captured
 
 BASE = "/internal/v1/owner-authority"

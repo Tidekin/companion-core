@@ -30,11 +30,11 @@ from tests import test_onebot_window as window_fixtures
 from tests.conftest import run
 from tests.native_continuous_support import until
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.onebot_events import config as bridge_config
+from tests.support.onebot_events import raw_event
 from tests.test_live_image_input import options, png
 from tests.test_memory_control import grant
 from tests.test_onebot_capture import pinned_plan
-from tests.test_onebot_direct import config as bridge_config
-from tests.test_onebot_direct import raw_event
 from tests.test_onebot_images import image_segment
 from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
