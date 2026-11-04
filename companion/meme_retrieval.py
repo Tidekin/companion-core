@@ -11,7 +11,7 @@ from pydantic import Field, ValidationError
 from companion import meme_assets, meme_policy, owner_authority, owner_input, reply_revision
 from companion import meme_index as index
 from companion.contracts import CoreError
-from companion.expression import SERIOUS, MemeOffer
+from companion.expression import MemeOffer, query_intent
 from companion.privacy import epoch
 from companion.store import after, encode
 from companion_meme_protocol import (
@@ -93,29 +93,9 @@ def blocked(store, settings, sha, now, *, exclude=None):
 
 def query_for(text):
     text = text[-2000:]
-    intent = (
-        None
-        if SERIOUS.search(text)
-        else next(
-            (
-                name
-                for name, pattern in (
-                    ("comfort", r"抱抱|安慰|难过|委屈"),
-                    ("sleep", r"晚安|要睡了|睡觉了"),
-                    ("morning", r"早安|早上好"),
-                    ("celebrate", r"恭喜|庆祝|成功了|搞定了|太棒了|开心"),
-                    ("surprised", r"没想到|好意外|惊讶"),
-                    ("like", r"好可爱|爱心|(?<!不)喜欢"),
-                    ("playful", r"开玩笑|逗你|调皮|自嘲"),
-                )
-                if re.search(pattern, text)
-            ),
-            None,
-        )
-    )
     return {
         "text": text,
-        "intent": intent,
+        "intent": query_intent(text, explicit_fallback=False),
         "target": "self" if re.search(r"我.{0,8}自嘲|自嘲.{0,8}我", text) else "recipient",
     }
 

@@ -28,6 +28,23 @@ SERIOUS = re.compile(
 )
 
 
+def query_intent(text, *, explicit_fallback=True):
+    if SERIOUS.search(text):
+        return None
+    for name, pattern in (
+        ("comfort", r"抱抱|安慰|难过|委屈"),
+        ("sleep", r"晚安|要睡了|睡觉了"),
+        ("morning", r"早安|早上好"),
+        ("celebrate", r"恭喜|庆祝|成功了|搞定了|太棒了|开心"),
+        ("surprised", r"没想到|好意外|惊讶"),
+        ("like", r"好可爱|爱心|(?<!不)喜欢"),
+        ("playful", r"开玩笑|逗你|调皮|自嘲"),
+    ):
+        if re.search(pattern, text):
+            return name
+    return "playful" if explicit_fallback and explicit_meme_request(text) else None
+
+
 class MemeCandidate(StrictModel):
     candidate_id: str = Field(pattern=r"^[a-f0-9]{64}$")
     description: str = Field(min_length=1, max_length=2000)
