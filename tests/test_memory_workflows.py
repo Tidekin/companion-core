@@ -286,6 +286,30 @@ def test_irrelevant_candidates_are_removed_before_the_chat_call(core):
     assert "茉莉绿茶" not in json.dumps(messages, ensure_ascii=False)
 
 
+@pytest.mark.parametrize("count", [10, 11])
+def test_recall_selection_accepts_the_prompt_limit_and_rejects_overflow(core, monkeypatch, count):
+    from tests.test_m1 import remember
+
+    for number in range(count):
+        remember(core, number, f"项目编号{number:02}偏好是蓝色", confirmed=True)
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.settings.max_recent_messages = 0
+    hits = core.memory.search("*", limit=count)
+    assert len(hits) == count
+
+    async def recall(*_args, **_kwargs):
+        return {"rows": hits}
+
+    monkeypatch.setattr(core.memory_context, "recall_async", recall)
+    job = message(core, 100, "项目偏好", "new:FriendMessage:10001")
+    assert [scenario for _, scenario in core.model.calls] == (
+        ["memory_review", "chat"] if count == 10 else ["memory_review"])
+    assert job["state"] == ("SUCCEEDED" if count == 10 else "RETRY_WAIT")
+    if count > 10:
+        assert job["last_error_code"] == "MEMORY_REVIEW_INVALID"
+        assert core.store.one("SELECT 1 FROM outbox WHERE origin_event_id='evt_test_100'") is None
+
+
 def test_memory_review_daily_limit_does_not_block_normal_chat(core):
     message(core, 1, "/记住这个：用户最喜欢的饮料是茉莉绿茶。")
     core.settings.memory_daily_micro_usd = 0

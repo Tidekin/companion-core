@@ -222,7 +222,7 @@ class MemoryReview(StrictModel):
 
 
 class MemorySelection(StrictModel):
-    relevant: list[str] = Field(max_length=6)
+    relevant: list[str] = Field(max_length=10)
 
 
 class CoreError(Exception):
