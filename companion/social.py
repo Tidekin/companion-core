@@ -33,7 +33,7 @@ def proactive_allowed(store, settings, now):
     return not feedback_paused(store, settings, now)
 
 
-def feedback_paused(store, settings, now):
+def feedback_paused(store, settings, now, source_ids=()):
     """Feedback can regulate autonomy only under its independent current purpose."""
     if not settings.affect_enabled:
         return False
@@ -46,7 +46,7 @@ def feedback_paused(store, settings, now):
             return False
     from companion.affect import AffectEngine
 
-    return AffectEngine(store, settings, lambda: now).snapshot()["state"]["engagement"] == "pause"
+    return AffectEngine(store, settings, lambda: now).contact_paused(source_ids)
 
 
 def proactive_counts(store, settings, now):
@@ -64,7 +64,10 @@ def proactive_counts(store, settings, now):
         "WITH reservations(created_at) AS ("
         "SELECT j.created_at FROM jobs j JOIN events e USING(event_id) "
         "WHERE j.kind='activity' AND COALESCE(json_extract(e.body_json,'$.notice.kind'),'') "
-        "NOT IN ('commitment','life','followup') UNION ALL "
+        "NOT IN ('commitment','life','followup') AND NOT (j.state='SUCCEEDED' AND EXISTS "
+        "(SELECT 1 FROM social_candidates c WHERE c.candidate_id=json_extract(e.body_json,"
+        "'$.notice.ref') AND c.state='SKIPPED' AND c.reason_code='MODEL_SKIPPED') AND NOT EXISTS "
+        "(SELECT 1 FROM outbox o WHERE o.origin_event_id=j.event_id)) UNION ALL "
         "SELECT updated_at FROM social_candidates WHERE message_id IS NOT NULL "
         "AND NOT EXISTS (SELECT 1 FROM outbox o JOIN jobs j ON j.event_id=o.origin_event_id "
         "WHERE o.message_id=social_candidates.message_id AND j.kind='activity') UNION ALL "
@@ -370,13 +373,15 @@ class SocialPlanner:
             count, recent = proactive_counts(s, cfg, now)
             if recent or count >= cfg.proactive_daily_limit:
                 return False
-            candidate = s.one(
+            candidates = s.rows(
                 "SELECT c.*,e.body_json,e.source,o.source_kind,o.result_status,"
                 "o.source_sha256,o.evidence_json,o.canonical_url AS source_url "
                 "FROM social_candidates c JOIN events e USING(event_id) "
                 "JOIN observations o USING(event_id) WHERE c.state='CANDIDATE' "
-                "AND e.redacted=0 AND o.redacted=0 ORDER BY c.created_at LIMIT 1"
+                "AND e.redacted=0 AND o.redacted=0 ORDER BY c.created_at,c.candidate_id LIMIT 32"
             )
+            candidate = next((item for item in candidates if not feedback_paused(
+                s, cfg, now, [item["event_id"]])), None)
             if not candidate:
                 return False
             if expired_sources(
