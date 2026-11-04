@@ -402,6 +402,9 @@ async def prepare_memories(
             ):
                 validation_reason = "invalid_reference"
                 raise ValueError("invalid memory reference")
+            if relation.update_authorized and relation.conflicts and not relation.replaces:
+                validation_reason = "missing_replacement_target"
+                raise ValueError("authorized update cannot leave every conflicting target current")
 
             def resolve(ref):
                 return (catalog[ref]["memory_id"] if ref in catalog

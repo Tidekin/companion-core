@@ -141,6 +141,22 @@ def test_unsupported_replacement_prose_is_repaired_even_without_update_marker(co
     assert len(core.store.rows("SELECT * FROM memories")) == 1
 
 
+def test_authorized_correction_cannot_degrade_to_two_current_conflicting_values(core):
+    old = setup(core)
+    item = candidate(CORRECTION, update="replaces_previous")
+    core.model.review = lambda data: encode({"relations": [{"supported": True,
+        "update_authorized": True, "claims_replacement": True,
+        "same": None, "conflicts": ["m0"], "replaces": []}]})
+    with pytest.raises(CoreError, match="MEMORY_REVIEW_INVALID"):
+        run(core.prepare_memories([item]))
+    audit = core.store.one("SELECT safe_detail_json FROM audit_log "
+                           "WHERE action='memory.review_invalid' ORDER BY rowid DESC LIMIT 1")
+    assert json.loads(audit["safe_detail_json"])["reason"] == "missing_replacement_target"
+    assert len(core.store.rows("SELECT * FROM memories")) == 1
+    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=?", (old,)) == {
+        "valid_to": None}
+
+
 def test_single_same_array_does_not_block_correct_cabinet_in_same_batch(core):
     old = setup(core)
     paper = remember(core, 3, "刚从信箱取了报纸。", subject="user", fact_key="paper")
