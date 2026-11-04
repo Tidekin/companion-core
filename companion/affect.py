@@ -83,7 +83,9 @@ NEUTRAL = {
     "cognitive_load": "normal",
     "novelty_interest": "unknown",
 }
-TOPIC_PAUSE = re.compile(r"先别聊这个|暂停这个话题|换个话题吧")
+TOPIC_PAUSE = re.compile(r"(?:先别聊这个(?:了)?|先不聊这个(?:话题)?了?|暂停这个话题|换个话题吧)")
+TODAY_PAUSE = re.compile(r"今天(?:先)?别主动找我了?")
+TOPIC_RESUME = re.compile(r"(?:可以)?继续(?:聊)?这个话题(?:了)?")
 RULES = (
     (
         r"(?:请)?(?:回答)?(?:简短一点|简洁一点|说短一点|更简短)",
@@ -104,12 +106,12 @@ RULES = (
         "OWNER_REQUESTED_STEPS",
     ),
     (
-        rf"(?:{TOPIC_PAUSE.pattern}|先不聊了|目前不想聊|今天别主动找我|"
-        r"(?:我)?(?:去上课了?|现在忙|在忙)[，,、 ]*(?:晚点聊|稍后聊)?)",
+        rf"(?:{TOPIC_PAUSE.pattern}|先不聊了|目前不想聊|{TODAY_PAUSE.pattern}|"
+        r"(?:我)?(?:去上课了?|要上课了|现在忙|在忙)[，,、 ]*(?:(?:晚点|稍后)(?:再)?聊)?)",
         "engagement", "pause", "OWNER_REQUESTED_PAUSE",
     ),
     (
-        r"(?:继续聊|继续这个话题|可以继续|欢迎继续|我回来了，可以聊了)",
+        rf"(?:继续聊|{TOPIC_RESUME.pattern}|可以继续|欢迎继续|我回来了[，, ]*(?:可以聊了|继续聊))",
         "engagement", "continue", "OWNER_REQUESTED_CONTINUE",
     ),
     (r"(?:想试试新的话题|换个新话题吧)", "novelty_interest", "open", "OWNER_REQUESTED_NOVELTY"),
@@ -152,7 +154,7 @@ def owner_feedback(store, settings, event_id, now):
         return None
     _, dimension, value, cause = matched
     return {
-        **({"until_midnight": True} if text == "今天别主动找我" else {}),
+        **({"until_midnight": True} if TODAY_PAUSE.fullmatch(text) else {}),
         "event_id": event_id,
         "dimension": dimension,
         "new_state": value,
@@ -299,7 +301,7 @@ class AffectEngine:
                                    ("dimension", "new_state", "reason_code", "expires_at")):
                 continue
             wording = row["wording"].strip().rstrip("。！!？? ")
-            if TOPIC_PAUSE.fullmatch(wording) or wording == "继续这个话题":
+            if TOPIC_PAUSE.fullmatch(wording) or TOPIC_RESUME.fullmatch(wording):
                 if ids and topic is None and ids & self._topic_targets(row):
                     topic = row["new_state"] == "pause"
             elif contact is None:

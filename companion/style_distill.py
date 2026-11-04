@@ -22,6 +22,7 @@ from companion.contracts import CoreError
 from companion.store import after, encode
 
 SCENARIO = "style_distill"
+CURSOR = "style_distill_cursor"
 SCAN_LIMIT = 20
 LOOKBACK_DAYS = 30
 LEASE_SECONDS = 300
@@ -53,26 +54,25 @@ def _rows(store, event_ids=None, since=None):
         where = " AND o.event_id IN (SELECT value FROM json_each(?))"
         params.append(json.dumps(sorted(event_ids)))
     if since is not None:
-        where += " AND o.created_at>=?"
+        where += (" AND o.rowid>COALESCE((SELECT CAST(value AS INTEGER) FROM runtime_meta "
+                  "WHERE key=?),0) AND NOT EXISTS (SELECT 1 FROM style_pairs p "
+                  "WHERE p.source_event_id=o.event_id) AND o.created_at>=?")
+        params.append(CURSOR)
         params.append(since)
     return [dict(row) for row in store.rows(
-        "SELECT o.event_id,o.source_kind,o.canonical_url,o.evidence_json,o.redacted,"
-        "o.created_at FROM observations o JOIN events e USING(event_id) WHERE e.redacted=0 "
+        "SELECT o.rowid AS scan_row,o.event_id,o.source_kind,o.canonical_url,o.evidence_json,"
+        "o.redacted,o.created_at FROM observations o JOIN events e USING(event_id) "
+        "WHERE e.redacted=0 "
         "AND e.source='observation.bilibili' AND o.result_status IN ('FETCHED','WATCHED') "
         "AND json_extract(o.evidence_json,'$.reading.comments') IS NOT NULL" + where
-        + " ORDER BY o.created_at LIMIT ?", (*params, SCAN_LIMIT))]
+        + " ORDER BY o.rowid LIMIT ?", (*params, SCAN_LIMIT))]
 
 
 def scan(store, settings, now):
     """Queue new parent/reply pairs from read comment threads; no model call."""
-    store.execute(
-        "UPDATE style_pairs SET state='UNKNOWN',error_code='MODEL_USAGE_UNKNOWN',"
-        "lease_until=NULL,updated_at=? WHERE state='RUNNING' AND lease_until<=? "
-        "AND model_request_id IN (SELECT request_id FROM model_usage WHERE state='UNKNOWN')",
-        (now, now))
+    budget.close_expired_model_work(store, "style_pairs", now)
     since = after(now, -LOOKBACK_DAYS * 86400)
-    fresh = [row for row in _rows(store, since=since) if not store.one(
-        "SELECT 1 FROM style_pairs WHERE source_event_id=? LIMIT 1", (row["event_id"],))]
+    fresh = _rows(store, since=since)
     corpus, _ = style_corpus.build(fresh, datetime.fromisoformat(now))
     added = 0
     for record in corpus["records"]:
@@ -83,7 +83,11 @@ def scan(store, settings, now):
             "created_at,updated_at) VALUES(?,?,?,?,'PENDING',?,?)",
             (record["event_id"] + ":" + record["comment_id"], record["event_id"],
              record["video"], record["comment_id"], now, now)).rowcount
-    return added
+    if fresh:
+        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                      (CURSOR, str(fresh[-1]["scan_row"])))
+    # A full page of unusable records still advances the worker to its next page.
+    return added or int(len(fresh) == SCAN_LIMIT)
 
 
 def pair(store, row, now):
@@ -157,7 +161,16 @@ async def run_once(store, settings, model, clock):
         return bool(added)
     request_id = None
 
+    bound_id = None
+
+    def owns_claim():
+        return store.one("SELECT 1 FROM style_pairs WHERE pair_key=? AND state='RUNNING' "
+                         "AND attempts=? AND model_request_id IS ?",
+                         (row["pair_key"], row["attempts"], bound_id))
+
     def check_source():
+        if not owns_claim():
+            raise CoreError("WORK_CLAIM_CHANGED", 409)
         if pair(store, row, clock()) is None:
             raise CoreError("STYLE_SOURCE_CHANGED", 409)
 
@@ -179,6 +192,7 @@ async def run_once(store, settings, model, clock):
         except BaseException:
             budget.settle(store, settings, request_id)
             raise
+        bound_id = request_id
         response = await budget.complete(model, store, settings, request_id, messages,
                                          SCENARIO, clock, source_check=check_source)
         usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
@@ -225,6 +239,8 @@ async def run_once(store, settings, model, clock):
                      else "FAILED")
             retry_at = after(clock(), 300)
         with store.transaction():
+            if not owns_claim():
+                return False
             if state == "RETRY_WAIT":
                 if (request_id is None and code in ADMISSION_RETRY_CODES
                     or budget.capacity_wait(store, code, request_id=request_id)):

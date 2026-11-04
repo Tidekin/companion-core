@@ -159,3 +159,68 @@ def test_similar_framing_keeps_distinct_subjects(core):
     owner(core, 1, "导出的问题还没解决，明天继续")
     owner(core, 2, "早餐的问题还没解决，明天继续")
     assert core.store.one("SELECT COUNT(*) n FROM life_topics WHERE state='WAITING'")["n"] == 2
+
+
+@pytest.mark.parametrize(("first", "second"), [
+    ("我昨天买了个键盘", "我昨天看了场电影"),
+    ("昨天买的键盘失灵了", "昨天买的牛奶过期了"),
+])
+def test_shared_time_and_sentence_frame_do_not_postpone_topic(core, first, second):
+    setup(core)
+    owner(core, 1, first)
+    old = core.store.one("SELECT * FROM life_topics")
+    core.clock.advance(60)
+    owner(core, 2, second)
+    assert core.store.one("SELECT * FROM life_topics WHERE topic_id=?", (old["topic_id"],)) == old
+    assert core.store.one("SELECT COUNT(*) n FROM life_topics")["n"] == 2
+
+
+def test_original_subject_survives_deictic_addendum(core):
+    setup(core)
+    owner(core, 1, "我昨天买了个键盘")
+    owner(core, 2, "补充一下，是蓝色的")
+    owner(core, 3, "那个键盘按起来挺轻快")
+    assert core.store.one("SELECT COUNT(*) n FROM life_topics")["n"] == 1
+    assert len(core.store.rows("SELECT event_id FROM life_topic_sources")) == 3
+
+
+def test_two_settled_preemptions_park_until_related_input(core):
+    setup(core)
+    owner(core, 1, ROOT)
+    topic = core.store.one("SELECT * FROM life_topics")["topic_id"]
+    core.clock.advance(120)
+    for index, unrelated in enumerate([BREAKFAST, "深夜听了爵士乐"], 2):
+        job = core.life_topics.schedule()
+        assert core.store.one("SELECT topic_id FROM life_activity_results WHERE job_id=?",
+                              (job,))["topic_id"] == topic
+        core.model.callback = lambda i=index, msg=unrelated: ingest(core, i, msg)
+        assert run(core.run_once("replay", job_id=job))
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE kind='chat'")
+        core.life_topics.synchronize()
+        core.clock.advance(61)
+    state = core.store.one("SELECT state,reason_code FROM life_topics WHERE topic_id=?", (topic,))
+    assert state == {"state": "WAITING", "reason_code": "WAITING_FOR_NEW_EVIDENCE"}
+    outcomes = core.store.rows("SELECT state FROM life_activity_results WHERE topic_id=?", (topic,))
+    assert outcomes == [{"state": "INVALIDATED"}] * 2
+    assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}] * 2
+    owner(core, 4, "导出文件的问题有个新线索")
+    assert core.store.one("SELECT decision_count FROM life_topics WHERE topic_id=?", (topic,)) == {
+        "decision_count": 1}
+    core.clock.advance(120)
+    core.life_topics.synchronize()
+    assert core.life_topics.material(topic)["source_events"].keys() == {"evt_test_1", "evt_test_4"}
+
+
+@pytest.mark.parametrize(("text", "paused", "later"), [
+    ("我去上课了，晚点再聊", True, False), ("今天别主动找我了", True, True),
+    ("我不是说今天别主动找我了", False, False), ("她说我去上课了，晚点再聊", False, False),
+    ("“今天别主动找我了”是什么意思？", False, False),
+])
+def test_contact_paraphrases_keep_scope_and_expiration(core, text, paused, later):
+    setup(core)
+    owner(core, 1, text)
+    assert feedback_paused(core.store, core.settings, core.clock()) is paused
+    core.clock.advance(4 * 3600)
+    assert feedback_paused(core.store, core.settings, core.clock()) is later
+    owner(core, 2, "我回来了，继续聊")
+    assert not feedback_paused(core.store, core.settings, core.clock())
