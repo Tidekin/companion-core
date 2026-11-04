@@ -1,9 +1,21 @@
-from companion_voice_node.providers import GPTSoVITSConfig
-from companion_voice_node.speech_service import SpeechServiceConfig
-from tests.test_local_voice_providers import wav_bytes
+import wave
+from io import BytesIO
+
+
+def wav_bytes(seconds=1, *, rate=16000, channels=1, width=2):
+    stream = BytesIO()
+    with wave.open(stream, "wb") as audio:
+        audio.setnchannels(channels)
+        audio.setsampwidth(width)
+        audio.setframerate(rate)
+        audio.writeframes(b"\x00" * (int(seconds * rate) * channels * width))
+    return stream.getvalue()
 
 
 def speech_config(root):
+    from companion_voice_node.providers import GPTSoVITSConfig
+    from companion_voice_node.speech_service import SpeechServiceConfig
+
     root.mkdir(parents=True, exist_ok=True)
     reference = root / "reference.wav"
     reference.write_bytes(wav_bytes(3))

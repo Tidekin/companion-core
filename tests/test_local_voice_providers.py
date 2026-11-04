@@ -2,8 +2,6 @@ import asyncio
 import hashlib
 import json
 import struct
-import wave
-from io import BytesIO
 from types import SimpleNamespace
 
 import httpx
@@ -20,16 +18,7 @@ from companion_voice_node import (
     WAVLimits,
     validate_wav,
 )
-
-
-def wav_bytes(seconds=1, *, rate=16000, channels=1, width=2):
-    stream = BytesIO()
-    with wave.open(stream, "wb") as audio:
-        audio.setnchannels(channels)
-        audio.setsampwidth(width)
-        audio.setframerate(rate)
-        audio.writeframes(b"\x00" * (int(seconds * rate) * channels * width))
-    return stream.getvalue()
+from tests.voice_service_fixtures import wav_bytes
 
 
 @pytest.fixture

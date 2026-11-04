@@ -6,7 +6,7 @@ import uvicorn
 
 from companion_voice_node.providers import validate_wav
 from companion_voice_node.speech_service import create_app, load_service_config
-from tests.test_local_voice_providers import wav_bytes
+from tests.voice_service_fixtures import wav_bytes
 
 
 class Engine:

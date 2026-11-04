@@ -31,7 +31,7 @@ from companion.voice_protocol import (
     verify_voice_lease,
 )
 from companion_voice_node.providers import validate_wav
-from tests.test_local_voice_providers import wav_bytes
+from tests.voice_service_fixtures import wav_bytes
 
 TOKEN = "independent-voice-node-credential-" + "x" * 32
 TEXT = "这是一条待发送的回复。"

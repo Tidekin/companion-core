@@ -28,9 +28,8 @@ from companion_voice_node.speech_service import create_app, normalize_speech, se
 from companion_voice_node.supervisor import ProcessSupervisor, _environment
 from companion_voice_node.worker import VoiceNodeWorker
 from tests.conftest import run
-from tests.test_local_voice_providers import wav_bytes
 from tests.test_voice_node_worker import node as node  # noqa: F401
-from tests.voice_service_fixtures import speech_config
+from tests.voice_service_fixtures import speech_config, wav_bytes
 
 
 class Engine:

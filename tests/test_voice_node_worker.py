@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hashlib
 import json
 import os
@@ -18,7 +17,6 @@ from pydantic import ValidationError
 
 from companion.voice_protocol import (
     ROUTE_PREFIX,
-    VoiceAudioResult,
     VoiceClaimRequest,
     VoiceControlRequest,
     VoiceLease,
@@ -29,12 +27,11 @@ from companion.voice_protocol import (
     digest,
     sign_voice_lease,
 )
-from companion_voice_node.providers import FasterWhisperConfig, OpenAISpeechConfig, validate_wav
+from companion_voice_node.providers import FasterWhisperConfig, OpenAISpeechConfig
 from companion_voice_node.state import NodeState
-from companion_voice_node.supervisor import ProcessSupervisor, child_entry, process_has_exited
+from companion_voice_node.supervisor import ProcessSupervisor, process_has_exited
 from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker, local_manifest, main
-from tests.test_local_voice_providers import wav_bytes
-from tests.voice_service_fixtures import speech_config
+from tests.voice_service_fixtures import speech_config, wav_bytes
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 
@@ -72,62 +69,6 @@ def child_receipts(path):
     return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
 
-def fixture_provider(packet):
-    fixture = packet.pop("_fixture")
-    with Path(fixture["counter"]).open("a", encoding="utf-8") as output:
-        output.write(
-            json.dumps(
-                {
-                    "pid": os.getpid(),
-                    "environment_keys": sorted(os.environ),
-                    "packet_keys": sorted(packet),
-                    "provider_keys": sorted(packet["provider"]),
-                }
-            )
-            + "\n"
-        )
-    if fixture["scenario"] == "block":
-        time.sleep(60)
-        raise RuntimeError("blocked fixture should have been terminated")
-    if fixture["scenario"] == "crash":
-        os._exit(3)
-    if fixture["scenario"] == "bad-result":
-        return {"status": "SUCCEEDED", "payload": {"kind": "tts", "private": "do not echo"}}
-    if fixture["scenario"] == "false-not-started":
-        return {"status": "FAILED", "remote_state": "NOT_STARTED", "error_code": "UNPROVEN_FAILURE"}
-    if packet["operation"] == "tts":
-        audio = validate_wav(
-            wav_bytes(45, rate=44100) if fixture["scenario"] == "large-result" else wav_bytes(0.125)
-        )
-        payload = VoiceAudioResult(
-            audio_base64=base64.b64encode(audio.audio).decode(),
-            audio_sha256=audio.sha256,
-            sample_rate=audio.sample_rate,
-            channels=1,
-            sample_width=2,
-            frames=audio.frames,
-            duration_seconds=audio.duration_seconds,
-        ).model_dump(mode="json")
-    else:
-        audio = validate_wav(base64.b64decode(packet["input_base64"]))
-        payload = {
-            "kind": "asr",
-            "text": "测试结果",
-            "segments": [
-                {
-                    "start_seconds": 0.0,
-                    "end_seconds": audio.duration_seconds,
-                    "text": "测试结果",
-                }
-            ],
-            "language": "zh",
-            "language_probability": 0.9,
-            "duration_seconds": audio.duration_seconds,
-            "partial": packet["source_partial"],
-        }
-    return {"status": "SUCCEEDED", "payload": payload}
-
-
 class FixtureSupervisor(ProcessSupervisor):
     def __init__(self, workspace, temporary, *, counter, scenario="success"):
         super().__init__(
@@ -137,8 +78,7 @@ class FixtureSupervisor(ProcessSupervisor):
                 sys.executable,
                 "-B",
                 "-m",
-                "tests.test_voice_node_worker",
-                "--child-fixture",
+                "tests.support.voice_child",
                 str(os.getpid()),
             ),
         )
@@ -892,7 +832,5 @@ def test_parent_crash_contains_child_and_recovers_resource_conservatively(
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "--child-fixture":
-        raise SystemExit(child_entry(int(sys.argv[2]), runner=fixture_provider))
     if sys.argv[1] == "--parent-fixture":
         asyncio.run(parent_fixture(sys.argv[2]))
