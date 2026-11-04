@@ -263,51 +263,13 @@ def register_link_images(store, settings, clock, options, owner_event_id, source
             )
 
 
-class ContentService:
-    def __init__(
-        self,
-        store,
-        settings,
-        observations,
-        create_read=None,
-        clock=utcnow,
-        *,
-        options=None,
-        provider=None,
-        image_transport=None,
-        model=None,
-    ):
+class ContentIntake:
+    """Schedule incoming shares on the owner's connection without opening media providers."""
+
+    def __init__(self, store, settings, clock, create_read=None, *, options=None):
         self.store, self.settings, self.clock = store, settings, clock
-        self.observations, self.create_read = observations, create_read
+        self.create_read = create_read
         self.options = options or settings.content
-        if self.options.use_chat_model_for_vision:
-            endpoint = MediaEndpoint(
-                url=self.settings.model_url.rstrip("/") + "/chat/completions",
-                key=self.settings.model_key,
-                model=self.settings.model_name,
-                max_request_micro_usd=self.options.vision.max_request_micro_usd,
-            )
-            self.options = self.options.model_copy(update={"vision": endpoint})
-        self.provider = provider or HTTPMediaProvider(self.options)
-        self.image_transport = image_transport
-        self.model = model
-        from companion import agent_images
-
-        image_spool.cleanup(self.store, self.clock(), self.options.max_image_bytes,
-                            retain_completed=agent_images.enabled(self.settings))
-
-    def discard_images(self, event_id):
-        rows = self.store.rows(
-            "SELECT item_id FROM content_items WHERE owner_event_id=? "
-            "AND kind IN ('qq_image','qq_file')",
-            (event_id,),
-        )
-        image_spool.discard(self.store, [row["item_id"] for row in rows])
-        for row in rows:
-            self.store.execute(
-                "DELETE FROM runtime_meta WHERE key IN (?,?)",
-                (qq_images.STAGED + row["item_id"], qq_files.STAGED + row["item_id"]),
-            )
 
     def _source(self, event_id, upload=False):
         return owner_source(self.store, self.settings, self.clock, self.options, event_id, upload)
@@ -505,6 +467,60 @@ class ContentService:
         ):
             return None
         return video.context(row["item_id"])
+
+    def _periods(self):
+        now = datetime.fromisoformat(self.clock()).astimezone(ZoneInfo(self.settings.timezone))
+        day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return tuple(
+            at.astimezone(UTC).isoformat(timespec="microseconds")
+            for at in (day, day.replace(day=1))
+        )
+
+
+class ContentService(ContentIntake):
+    def __init__(
+        self,
+        store,
+        settings,
+        observations,
+        create_read=None,
+        clock=utcnow,
+        *,
+        options=None,
+        provider=None,
+        image_transport=None,
+        model=None,
+    ):
+        super().__init__(store, settings, clock, create_read, options=options)
+        self.observations = observations
+        if self.options.use_chat_model_for_vision:
+            endpoint = MediaEndpoint(
+                url=self.settings.model_url.rstrip("/") + "/chat/completions",
+                key=self.settings.model_key,
+                model=self.settings.model_name,
+                max_request_micro_usd=self.options.vision.max_request_micro_usd,
+            )
+            self.options = self.options.model_copy(update={"vision": endpoint})
+        self.provider = provider or HTTPMediaProvider(self.options)
+        self.image_transport = image_transport
+        self.model = model
+        from companion import agent_images
+
+        image_spool.cleanup(self.store, self.clock(), self.options.max_image_bytes,
+                            retain_completed=agent_images.enabled(self.settings))
+
+    def discard_images(self, event_id):
+        rows = self.store.rows(
+            "SELECT item_id FROM content_items WHERE owner_event_id=? "
+            "AND kind IN ('qq_image','qq_file')",
+            (event_id,),
+        )
+        image_spool.discard(self.store, [row["item_id"] for row in rows])
+        for row in rows:
+            self.store.execute(
+                "DELETE FROM runtime_meta WHERE key IN (?,?)",
+                (qq_images.STAGED + row["item_id"], qq_files.STAGED + row["item_id"]),
+            )
 
     def _article_progress(self, source_event_id):
         rows = self.store.rows(
@@ -856,14 +872,6 @@ class ContentService:
             )["n"]
             if spent + price > self.options.article_image_micro_usd:
                 raise CoreError("CONTENT_ARTICLE_VISION_BUDGET_EXHAUSTED", 429)
-
-    def _periods(self):
-        now = datetime.fromisoformat(self.clock()).astimezone(ZoneInfo(self.settings.timezone))
-        day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        return tuple(
-            at.astimezone(UTC).isoformat(timespec="microseconds")
-            for at in (day, day.replace(day=1))
-        )
 
     def _policy(self, row):
         from companion import runtime_config

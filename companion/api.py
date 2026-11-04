@@ -19,6 +19,7 @@ from companion import (
     __version__,
     account_actions,
     cumulative,
+    inbox,
     input_protocol,
     live_text,
     meme_core,
@@ -690,7 +691,14 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/inbox/events", dependencies=auth, status_code=202)
     async def ingest(event: InboundEvent, x_idempotency_key: str = Header()):
-        return app.state.core.ingest(event, x_idempotency_key)
+        core = app.state.core
+
+        def receive(store):
+            store.configuration_worker = "api"
+            return inbox.receive(store, core.settings, core.clock, core.ledger, event,
+                                 x_idempotency_key, content_options=core.content.options)
+
+        return await app.state.api_store.run(receive)
 
     @app.post(prefix + "/owner-authority/inputs/approve", dependencies=auth)
     async def owner_input_approve(body: OwnerInputApproval, response: Response):
