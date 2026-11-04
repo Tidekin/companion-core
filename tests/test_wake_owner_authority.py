@@ -76,7 +76,7 @@ def test_authorized_wake_without_affect_does_not_read_it(core, tmp_path, monkeyp
     assert core.store.rows("SELECT * FROM outbox") == []
 
 
-def test_authorized_affect_pause_still_stops_wake(core, tmp_path):
+def test_topic_pause_allows_authorized_background_read(core, tmp_path):
     source_before_grant(core)
     core.settings.affect_enabled = True
     ingest(core, 2, "先别聊这个")
@@ -87,12 +87,9 @@ def test_authorized_affect_pause_still_stops_wake(core, tmp_path):
     activate(core, policy)
     goal_id = goal_after_grant(core)
     assert core.wake.affect.snapshot()["state"]["engagement"] == "pause"
-    assert core.wake.evaluate() == []
-    assert core.goals.get(goal_id)["state"] == "CANDIDATE"
-    assert core.store.rows("SELECT * FROM goal_steps") == []
-    assert core.store.one("SELECT reason_code FROM wake_decisions") == {
-        "reason_code": "OWNER_REQUESTED_PAUSE",
-    }
+    assert core.wake.evaluate()
+    assert core.goals.get(goal_id)["state"] == "QUEUED"
+    assert not core.store.rows("SELECT 1 FROM outbox")
 
 
 def regrant(core, tmp_path):

@@ -17,7 +17,7 @@ class LifeLoopConfig(StrictModel):
     source_limit: int = Field(default=8, ge=1, le=8)
     topic_ttl_seconds: int = Field(default=7 * 86400, ge=60, le=7 * 86400)
     follow_up_delay_seconds: int = Field(default=86400, ge=60, le=7 * 86400)
-    max_daily_decisions: int = Field(default=2, ge=0, le=10)
+    max_daily_decisions: int = Field(default=6, ge=0, le=10)
     min_interval_seconds: int = Field(default=3600, ge=60, le=86400)
     read_goals_enabled: bool = False
     autonomy_enabled: bool = False  # Source-bound guidance; native goals own execution.

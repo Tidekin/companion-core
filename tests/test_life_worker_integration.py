@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
 
 from companion import owner_authority, paid_budget
+from companion.conversation_policy import ConversationPolicyConfig
 from companion.life_protocol import (
     LifeLoopConfig,
     LifeQZoneDraft,
@@ -83,6 +84,8 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
     reading = scenario in {"reading", "reading_preempt"}
     preempt = scenario in {"preempt", "reading_preempt"}
     interrupted = preempt or scenario == "pause"
+    core.settings.conversation_policy = ConversationPolicyConfig()
+    core.settings.conversation_guidance = "先说一个具体细节，再聊自己的看法。"
     core.settings.control_token = SecretStr("synthetic-life-control-" * 3)
     core.settings.life_loop = LifeLoopConfig(mode="SHADOW")
     core.settings.wake_enabled = True
@@ -191,6 +194,9 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
             result = core.store.one("SELECT * FROM life_activity_results")
             assert observed["provider_calls"] == 1
             assert observed["materials"][0]["sources"][0]["event_id"] == source_id
+            system = observed["prompts"][0][0]["content"]
+            assert (core.settings.conversation_guidance in system) == (not scenario.startswith(
+                "qzone"))
             assert any(unit["lane"] == "life_topic" and unit["progressed"]
                        for unit in observed["units"])
             assert [(u["lane"], u["admissions"]) for u in observed["units"] if u["admissions"]] == [
