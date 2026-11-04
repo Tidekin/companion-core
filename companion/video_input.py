@@ -166,7 +166,8 @@ def preview(data, mime, policy):
                         + ",".join(str(index - start + 1) for index in selected)
                         + "帧；对应起始时间(ms)=" + ",".join(times)
                         + "。拼图按从左到右、从上到下排列，仅为抽样画面，不能声称看过完整动画；"
-                        "要确认动作、时序或表情变化时调用 understand_video。]")
+                        "普通表情包直接根据抽帧接话；"
+                        "需要确认具体动作或时序时才调用 understand_video。]")
                 return PreparedImage(output.getvalue(), "image/png", note), True
     except (OSError, ValueError, SyntaxError, EOFError, Image.DecompressionBombError, Warning):
         raise CoreError("CONTENT_VIDEO_INPUT_INVALID", 400) from None

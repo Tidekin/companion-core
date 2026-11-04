@@ -4,7 +4,7 @@ import json
 
 from pydantic_ai import DeferredToolRequests
 
-from companion import reply_revision
+from companion import qq_video, reply_revision
 from companion.agent_persistence import ConversationStore
 from companion.agent_reading import deferred_results, reader_tools
 from companion.agent_runtime import check_conversation, run_conversation
@@ -40,7 +40,7 @@ async def reply(core, job, snapshots):
         if (core.settings.content_enabled and core.settings.observation_enabled
             and "content" in view.policy.purposes):
             tools.append(reader_tools(core, job, snapshots, persistence))
-        from companion import qq_video, video_input
+        from companion import video_input
 
         if video_input.enabled(core.settings) and {"content", "image"} <= set(view.policy.purposes):
             tools.append(qq_video.toolset(core, job, snapshots))
@@ -84,11 +84,14 @@ async def reply(core, job, snapshots):
             planning=True, turn_ranking=ranking,
         )
     emit("t_context_ready", job["trace_id"])
-    result = await run_conversation(
-        core, job, messages, toolsets=tools, conversation=conversation,
-        deferred_tool_results=answers,
-        snapshots=snapshots, persistence=persistence,
-    )
+    try:
+        result = await run_conversation(
+            core, job, messages, toolsets=tools, conversation=conversation,
+            deferred_tool_results=answers,
+            snapshots=snapshots, persistence=persistence,
+        )
+    except qq_video.PreviewReplyReady as preview:
+        return str(preview), persistence
     if isinstance(result.output, DeferredToolRequests):
         wait(core, job, persistence)
         return None, persistence

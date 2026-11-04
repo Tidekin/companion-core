@@ -39,7 +39,8 @@ def provider(request):
         if request.url.host == "video.example.test":
             raise httpx.ReadTimeout("synthetic video connection ended", request=request)
         assert len(requests) == 1
-        result = answer(calls=[call("old-motion-call", "understand_video", {"question": "动作？"})])
+        result = answer(calls=[call("old-motion-call", "understand_video", {
+            "question": "动作？", "preview_reply": "抽帧里能看到不同颜色。"})])
     else:
         assert mode == "worker-text" and len(requests) == 1
         result = answer("新独立消息可以正常回复。")

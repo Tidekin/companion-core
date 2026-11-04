@@ -161,9 +161,10 @@ class GenerationOptions:
 class ModelResponseError(CoreError):
     """An unusable provider response whose received usage still needs accounting."""
 
-    def __init__(self, code: str, status: int, response: ModelResponse):
+    def __init__(self, code: str, status: int, response: ModelResponse, *, failure=None):
         super().__init__(code, status)
         self.response = response
+        self.failure = failure
 
 
 class ModelTransportError(CoreError):
@@ -366,7 +367,8 @@ class ModelClient:
                 # Error HTTP without usage retains bounded transport retry semantics.
                 # Explicit usage, even invalid usage, belongs to budget's settlement.
                 if usage_present:
-                    raise ModelResponseError(code, status, received)
+                    raise ModelResponseError(code, status, received,
+                                             failure=f"HTTP_{response.status_code}")
                 raise ModelTransportError(code, status, "HTTP_" + str(response.status_code))
             try:
                 message = body["choices"][0]["message"]
