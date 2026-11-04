@@ -160,3 +160,50 @@ def test_calibration_accepts_a_read_only_connection_and_preserves_cached_usage(c
         "currency": "USD",
         "billing_basis": "configured_rates_not_invoice",
     }
+
+
+def test_calibration_stays_within_the_status_read_budget_with_a_large_audit_log(tmp_path):
+    path = tmp_path / "calibration.db"
+    with closing(sqlite3.connect(path)) as db:
+        db.executescript("""
+            CREATE TABLE model_usage (request_id TEXT PRIMARY KEY, state TEXT,
+                input_tokens INTEGER, output_tokens INTEGER, cached_input_tokens INTEGER,
+                billed_micro_usd INTEGER);
+            CREATE TABLE model_admissions (request_id TEXT PRIMARY KEY, input_bound INTEGER,
+                reserved_micro_usd INTEGER);
+            CREATE TABLE audit_log (action TEXT, entity_id TEXT, safe_detail_json TEXT);
+        """)
+        db.executemany("INSERT INTO model_usage VALUES (?,?,?,?,?,?)", [
+            (str(i), "SETTLED" if i < 512 else ("UNKNOWN" if i == 512 else "RESERVED"),
+             110 + i, 3, 2, 11) for i in range(514)])
+        db.executemany("INSERT INTO model_admissions VALUES (?,?,?)", [
+            (str(i), 100 + i, 10) for i in range(514)])
+        db.executemany("INSERT INTO audit_log VALUES (?,?,?)", [
+            ("event.accepted", str(i), "{}") for i in range(50000)])
+        db.executemany("INSERT INTO audit_log VALUES (?,?,?)", [
+            ("model.video_rate_correction", key, "{}") for key in ("0", "0", "1", None)])
+        db.commit()
+
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as readonly:
+        readonly.execute("PRAGMA query_only=ON")
+        ticks = 0
+
+        def progress():
+            nonlocal ticks
+            ticks += 1
+            return ticks >= 2000  # Same bounded VM budget as ops_status.snapshot.
+
+        readonly.set_progress_handler(progress, 10000)
+        try:
+            summary = budget.usage_diagnostics(readonly)
+        finally:
+            readonly.set_progress_handler(None, 0)
+    assert summary == {
+        "calibrated_calls": 510,
+        "input_estimated_tokens": sum(100 + i for i in range(2, 512)),
+        "input_actual_tokens": sum(110 + i for i in range(2, 512)),
+        "output_actual_tokens": 1530, "cached_input_tokens": 1020,
+        "reserved_micro_usd": 5100, "usage_priced_micro_usd": 5610,
+        "input_error_tokens": 5100, "cost_error_micro_usd": 510, "anomaly_calls": 0,
+        "currency": "USD", "billing_basis": "configured_rates_not_invoice",
+    }
