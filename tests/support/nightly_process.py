@@ -42,7 +42,8 @@ def run_worker(settings_path, now, stop_after_extract):
         elif rules == REVIEW_RULES:
             calls.append("memory_review")
             value = {"relations": [
-                {"supported": True, "same": None, "conflicts": [], "replaces": []}
+                {"supported": True, "update_authorized": False, "claims_replacement": False,
+                    "same": None, "conflicts": [], "replaces": []}
                 for _ in data["candidates"]]}
         elif rules == DIARY_RULES:
             calls.append("diary")

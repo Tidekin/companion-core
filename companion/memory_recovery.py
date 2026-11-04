@@ -91,7 +91,8 @@ def retry(core, batch_id, request_id, *, owner_check=None):
         resumed = deepcopy(record)
         resumed["next_attempt_at"] = None
         work = resumed["batch"]
-        work.update(phase="REVIEW" if "candidates" in work else "EXTRACT", recoveries=1,
+        work.update(phase="REVIEW" if "candidates" in work and not work.get("repair_required")
+                    else "EXTRACT", recoveries=1,
                     review_attempts=0, attempt_key="memory_recovery:" + batch_id,
                     proof=context.pin(now, event_ids=record["source_event_ids"]))
         work.pop("request_id", None)

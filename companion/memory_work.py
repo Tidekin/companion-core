@@ -32,6 +32,23 @@ CHECKPOINT_KEY = "memory_extraction_checkpoint"
 TERMINAL_PHASES = {"COMPLETE", "SKIPPED", "FAILED", "UNKNOWN", "CANCELLED"}
 
 
+class MemoryReviewError(CoreError):
+    """Settled review feedback, consumed only by the original bounded checkpoint."""
+
+    def __init__(self, reason, issues=()):
+        self.feedback = {"reason": reason, "issues": list(issues)}
+        self.reextract = bool(issues)
+        super().__init__("MEMORY_REVIEW_DISAGREEMENT" if issues else "MEMORY_REVIEW_INVALID", 502)
+
+
+def _repair_matches(original, candidate):
+    quote = original["evidence_quote"]
+    return (original["evidence_event_id"] == candidate.evidence_event_id
+            and original.get("evidence_reference_id") == candidate.evidence_reference_id
+            and original["subject"] == candidate.subject and original["kind"] == candidate.kind
+            and (quote in candidate.evidence_quote or candidate.evidence_quote in quote))
+
+
 def checkpoint_state(store):
     row = store.one("SELECT value FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
     return json.loads(row["value"]) if row else None
@@ -164,7 +181,9 @@ def _settled(store, request_id):
 
 
 async def prepare_memories(
-    self, candidates, confirmed=False, job_id=None, logical_request_id=None, request_id=None
+    self, candidates, confirmed=False, job_id=None, logical_request_id=None, request_id=None,
+    review_feedback=None,
+    repair_candidates=(),
 ):
     """Plan semantic matches without holding a SQLite transaction across model I/O."""
     authority = (
@@ -236,16 +255,33 @@ async def prepare_memories(
     sources = MemorySources(self.memory, self.clock())
     quote_chars = min(2000, cfg.context_soft_tokens)
 
-    def quotes(memory_id):
+    def excerpt(text, quote=""):
         nonlocal quote_chars
+        start = max(0, text.find(quote) - 100) if quote else 0
+        value = text[start:start + min(300, quote_chars)]
+        quote_chars -= len(value)
+        return value
+
+    def quotes(memory_id):
         result = []
         for event in sources.evidence(memory_id)[:2]:
-            text = json.loads(event["body_json"]).get("text", "")[:min(300, quote_chars)]
+            text = excerpt(json.loads(event["body_json"]).get("text", ""))
             if text:
                 result.append(text)
-                quote_chars -= len(text)
         return result
 
+    reviewed_candidates = []
+    for i, row in enumerate(candidates):
+        if row.evidence_reference_id:
+            text = memory_references.read(
+                self.memory, row.evidence_reference_id, self.clock())["text"]
+        else:
+            event = s.one("SELECT body_json FROM events WHERE event_id=?", (row.evidence_event_id,))
+            text = json.loads(event["body_json"]).get("text", "")
+        reviewed_candidates.append({"ref": f"c{i}", "subject": row.subject, "kind": row.kind,
+            "content": row.content, "reference": bool(row.evidence_reference_id),
+            "quote": row.evidence_quote, "speaker": row.speaker, "update": row.update,
+            "source_excerpt": excerpt(text, row.evidence_quote)})
     payload = {
         "existing": [
             {"ref": ref, "subject": row["subject"], "kind": row["kind"], "content": row["content"],
@@ -253,13 +289,10 @@ async def prepare_memories(
              "quotes": quotes(row["memory_id"])}
             for ref, row in catalog.items()
         ],
-        "candidates": [
-            {"ref": f"c{i}", "subject": row.subject, "kind": row.kind, "content": row.content,
-             "reference": bool(row.evidence_reference_id), "quote": row.evidence_quote,
-             "speaker": row.speaker, "update": row.update}
-            for i, row in enumerate(candidates)
-        ],
+        "candidates": reviewed_candidates,
     }
+    if review_feedback:
+        payload["review_feedback"] = review_feedback
     messages = [
         {"role": "system", "content": REVIEW_RULES},
         {"role": "user", "content": encode(payload)},
@@ -306,14 +339,18 @@ async def prepare_memories(
     if job:
         reply_revision.check_job(s, job)
     validation_reason = "schema"
+    disagreements = []
     try:
         value = json.loads(response.text)
-        # Only the exact, lossless ref wrapper is repairable. The full strict schema
+        # Only lossless single-reference presentations are repairable. The full strict schema
         # and the catalog/subject/origin checks below still validate every reference.
         if isinstance(value, dict) and isinstance(value.get("relations"), list):
             for relation in value["relations"]:
                 if not isinstance(relation, dict):
                     continue
+                if (isinstance(relation.get("same"), list) and len(relation["same"]) == 1
+                    and isinstance(relation["same"][0], str)):
+                    relation["same"] = relation["same"][0]
                 for field in ("conflicts", "replaces"):
                     if isinstance(relation.get(field), list):
                         relation[field] = [
@@ -326,7 +363,19 @@ async def prepare_memories(
             raise ValueError("relation count mismatch")
         resolutions, supported, positions = [], [], {}
         for i, relation in enumerate(review.relations):
+            unsupported_replacement = relation.claims_replacement and not relation.update_authorized
+            if bool(candidates[i].update) != relation.update_authorized or unsupported_replacement:
+                disagreements.append({"candidate": f"c{i}",
+                    "reason": "unsupported_replacement_claim" if unsupported_replacement
+                    else "update_marker_mismatch",
+                    "expected_update": "replaces_previous" if relation.update_authorized else None})
+                continue
             if not relation.supported:
+                if any(_repair_matches(original, candidates[i]) for original in repair_candidates):
+                    disagreements.append({"candidate": f"c{i}",
+                        "reason": "repair_candidate_rejected",
+                        "expected_update": candidates[i].update})
+                    continue
                 s.audit("memory.candidate_rejected", candidates[i].evidence_event_id, "memory",
                         self.clock(), reason="UNSUPPORTED_MEMORY_CLAIM")
                 continue
@@ -336,7 +385,7 @@ async def prepare_memories(
                 raise ValueError("duplicate relation")
             if (len(set(relation.replaces)) != len(relation.replaces)
                 or not set(relation.replaces) <= set(relation.conflicts)
-                or relation.replaces and candidates[i].update != "replaces_previous"):
+                or relation.replaces and not relation.update_authorized):
                 validation_reason = "invalid_replacement"
                 raise ValueError("invalid replacement relation")
             allowed = {
@@ -367,6 +416,9 @@ async def prepare_memories(
                     "replaces": [resolve(ref) for ref in relation.replaces],
                 }
             )
+        if disagreements:
+            validation_reason = "update_disagreement"
+            raise ValueError("extractor and source review disagree on update authorization")
         return supported, resolutions
     except ValueError as error:
         s.audit(
@@ -376,7 +428,7 @@ async def prepare_memories(
             self.clock(),
             reason=validation_reason,
         )
-        raise CoreError("MEMORY_REVIEW_INVALID", 502) from error
+        raise MemoryReviewError(validation_reason, disagreements) from error
 
 
 def extraction_sources(core, local_day):
@@ -513,6 +565,9 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
                 batch.pop("interaction_signals", None)
                 batch.pop("episode_summaries", None)
                 batch.pop("proof", None)
+                batch.pop("review_feedback", None)
+                batch.pop("repair_required", None)
+                batch.pop("repair_candidates", None)
                 memory_recovery.finish(s, record)
                 record["next_attempt_at"] = None
                 s.execute(
@@ -572,6 +627,9 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
                 batch.pop("interaction_signals", None)
                 batch.pop("episode_summaries", None)
                 batch.pop("proof", None)
+                batch.pop("review_feedback", None)
+                batch.pop("repair_required", None)
+                batch.pop("repair_candidates", None)
                 if batch.get("request_id") and not s.one(
                     "SELECT 1 FROM model_usage WHERE request_id=?",
                     (batch["request_id"],),
@@ -766,6 +824,8 @@ async def extraction_step(core, local_day, lease, batch, persist):
                                  "excerpt": len(text) < len(reference["text"])})
                 item["references"] = kept
             payload, ref_map = short_refs(data)
+            if batch.get("repair_required"):
+                payload["review_feedback"] = batch["review_feedback"]
             batch["ref_map"] = ref_map
             messages = [
                 {"role": "system", "content": EXTRACT_RULES},
@@ -838,6 +898,13 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 except CoreError as error:
                     s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory",
                             now, reason=error.code)
+            if batch.get("repair_candidates") and not all(
+                any(_repair_matches(original, Candidate.model_validate(value))
+                    for value in candidates)
+                for original in batch["repair_candidates"]
+            ):
+                raise MemoryReviewError("repair_incomplete",
+                                        [{"reason": "repair_candidate_missing"}])
             batch.update(
                 phase="REVIEW",
                 candidates=candidates,
@@ -849,6 +916,8 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 ),
                 extraction_request_id=request_id,
             )
+            batch.pop("repair_required", None)
+            batch.pop("review_feedback", None)
             batch.pop("request_id", None)
             persist()
             return UnitResult(True)
@@ -858,6 +927,8 @@ async def extraction_step(core, local_day, lease, batch, persist):
             candidates,
             logical_request_id=batch["attempt_key"],
             request_id=request_id,
+            review_feedback=batch.get("review_feedback"),
+            repair_candidates=batch.get("repair_candidates", ()),
         )
         with s.transaction():
             _validate_batch(core, lease, batch)
@@ -913,6 +984,12 @@ async def extraction_step(core, local_day, lease, batch, persist):
             "UNKNOWN_PRICING",
         }
         with s.transaction():
+            if isinstance(error, MemoryReviewError):
+                batch["review_feedback"] = error.feedback
+                if error.reextract:
+                    batch["repair_required"] = True
+                    batch.setdefault("repair_candidates", batch["candidates"])
+                    batch["review_feedback"]["candidates"] = batch["candidates"]
             if previous_phase == "EXTRACT" and unsent:
                 attempts = max(0, attempts - 1)
                 s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
@@ -930,7 +1007,8 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 s.execute("DELETE FROM runtime_meta WHERE key=?", (batch["attempt_key"],))
                 batch.update(phase="FAILED", error=code)
             else:
-                batch.update(phase=previous_phase, error=code)
+                batch.update(phase="EXTRACT" if batch.get("repair_required") else previous_phase,
+                             error=code)
                 batch.pop("request_id", None)
             if not blocked:
                 s.audit(

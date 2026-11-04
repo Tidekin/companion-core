@@ -37,7 +37,7 @@ def relation(payload, *, same=False, conflict=False):
         {
             "relations": [
                 {
-                    "supported": True,
+                    "supported": True, "update_authorized": False, "claims_replacement": False,
                     "same": ref if same else None,
                     "conflicts": [ref] if conflict else [],
                     "replaces": [],
@@ -199,8 +199,10 @@ def test_same_extraction_batch_detects_conflicting_candidates(core):
     core.model.review = lambda payload: json.dumps(
         {
             "relations": [
-                {"supported": True, "same": None, "conflicts": [], "replaces": []},
-                {"supported": True, "same": None, "conflicts": ["c0"], "replaces": []},
+                {"supported": True, "update_authorized": False, "claims_replacement": False,
+                    "same": None, "conflicts": [], "replaces": []},
+                {"supported": True, "update_authorized": False, "claims_replacement": False,
+                    "same": None, "conflicts": ["c0"], "replaces": []},
             ]
         }
     )
@@ -234,8 +236,10 @@ def test_aliased_review_references_cannot_hide_a_conflict_or_commit_partial_batc
     core.model.review = lambda payload: json.dumps(
         {
             "relations": [
-                {"supported": True, "same": "m0", "conflicts": [], "replaces": []},
-                {"supported": True, "same": "c0", "conflicts": ["m0"], "replaces": []},
+                {"supported": True, "update_authorized": False, "claims_replacement": False,
+                    "same": "m0", "conflicts": [], "replaces": []},
+                {"supported": True, "update_authorized": False, "claims_replacement": False,
+                    "same": "c0", "conflicts": ["m0"], "replaces": []},
             ]
         }
     )

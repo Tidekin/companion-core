@@ -33,7 +33,8 @@ def run_worker(settings_path, now):
                 "evidence_reference_id": reference["ref"]}]}, ensure_ascii=False)
         else:
             text = json.dumps({"relations": [
-                {"supported": True, "same": None, "conflicts": [], "replaces": []}
+                {"supported": True, "update_authorized": False, "claims_replacement": False,
+                    "same": None, "conflicts": [], "replaces": []}
                 for _ in data["candidates"]]})
         return httpx.Response(200, json=answer(text))
 

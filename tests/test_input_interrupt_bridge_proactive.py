@@ -42,7 +42,9 @@ def test_queued_owner_input_cancels_proactive_before_dispatch_without_unknown(co
             }]}, ensure_ascii=False)
         elif messages[0]["content"] == REVIEW_RULES:
             data = json.loads(messages[-1]["content"])
-            text = json.dumps({"relations": [{"supported": True, "same": None,
+            text = json.dumps({"relations": [{"supported": True, "update_authorized": False,
+                "claims_replacement": False,
+                "same": None,
                 "conflicts": [], "replaces": []} for _ in data["candidates"]]})
         elif messages[0]["content"] == RECALL_RULES:
             text = '{"relevant":["m0"]}'

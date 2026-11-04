@@ -44,6 +44,7 @@ def run_isolated_worker(settings_path, now):
             calls.append("memory_review")
             candidates = json.loads(payload["messages"][-1]["content"])["candidates"]
             return provider_response(encode({"relations": [{"supported": True,
+                "update_authorized": False, "claims_replacement": False,
                 "same": None, "conflicts": [], "replaces": []} for _ in candidates]}))
         assert payload["messages"][0]["content"] == EXTRACT_RULES
         assert payload["max_tokens"] == min(2048, settings.paid_model.max_output_tokens)

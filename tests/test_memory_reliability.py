@@ -31,7 +31,9 @@ def test_reviewed_replacement_uses_canonical_target_before_key_lookup(core):
 
 def test_reviewed_nonconflicting_attribute_survives_coarse_key_update(core):
     old = remember(core, 1, "朋友的弟弟做木偶道具", subject="project", fact_key="讲座场地")
-    update(core, old, resolution={"supported": True, "same": None, "conflicts": [], "replaces": []})
+    update(core, old, resolution={"supported": True, "update_authorized": False,
+        "claims_replacement": False,
+        "same": None, "conflicts": [], "replaces": []})
     assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=?", (old,)) == {
         "valid_to": None}
 
@@ -43,7 +45,9 @@ def test_review_accepts_only_lossless_reference_shape(core, wrapped):
     candidate = Candidate(subject="user", kind="preference", fact_key="drink",
                           content="我不喜欢绿茶", evidence_event_id="evt_test_2",
                           evidence_quote="我不喜欢绿茶")
-    core.model.review = lambda data: json.dumps({"relations": [{"supported": True, "same": None,
+    core.model.review = lambda data: json.dumps({"relations": [
+        {"supported": True, "update_authorized": False, "claims_replacement": False,
+        "same": None,
         "conflicts": [{"ref": "m0"}] if wrapped else ["m0"], "replaces": []}]})
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     candidates, resolutions = run(core.prepare_memories([candidate]))
@@ -59,7 +63,9 @@ def test_review_shape_repair_does_not_relax_source_or_schema_checks(core, refs):
     candidate = Candidate(subject="user", kind="preference", fact_key="drink",
                           content="我不喜欢绿茶", evidence_event_id="evt_test_2",
                           evidence_quote="我不喜欢绿茶")
-    core.model.review = lambda data: json.dumps({"relations": [{"supported": True, "same": None,
+    core.model.review = lambda data: json.dumps({"relations": [
+        {"supported": True, "update_authorized": False, "claims_replacement": False,
+        "same": None,
                                                                "conflicts": refs, "replaces": []}]})
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     with pytest.raises(CoreError, match="MEMORY_REVIEW_INVALID"):
@@ -131,9 +137,12 @@ def test_review_rejects_invented_identity_and_preserves_later_candidate_referenc
             evidence_event_id=f"evt_test_{number}", evidence_quote=text))
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     core.model.review = lambda data: json.dumps({"relations": [
-        {"supported": False, "same": None, "conflicts": [], "replaces": []},
-        {"supported": True, "same": None, "conflicts": [], "replaces": []},
-        {"supported": True, "same": None, "conflicts": ["c1"], "replaces": []}]})
+        {"supported": False, "update_authorized": False, "claims_replacement": False,
+            "same": None, "conflicts": [], "replaces": []},
+        {"supported": True, "update_authorized": False, "claims_replacement": False,
+            "same": None, "conflicts": [], "replaces": []},
+        {"supported": True, "update_authorized": False, "claims_replacement": False,
+            "same": None, "conflicts": ["c1"], "replaces": []}]})
     accepted, resolutions = run(core.prepare_memories(candidates))
     assert accepted == candidates[1:]
     assert resolutions[1]["conflicts"] == ["c0"]
@@ -166,14 +175,16 @@ def test_review_original_excerpts_share_one_bounded_allowance(core, monkeypatch)
     def review(payload):
         observed.append(payload)
         return json.dumps({"relations": [
-            {"supported": True, "same": None, "conflicts": [], "replaces": []}
+            {"supported": True, "update_authorized": False, "claims_replacement": False,
+                "same": None, "conflicts": [], "replaces": []}
             for _ in payload["candidates"]]})
 
     monkeypatch.setattr(core.memory, "search_async", existing)
     core.model.review = review
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     assert len(run(core.prepare_memories(candidates))[0]) == 2
-    assert sum(len(q) for row in observed[0]["existing"] for q in row["quotes"]) == 2000
+    assert (sum(len(q) for row in observed[0]["existing"] for q in row["quotes"])
+            + sum(len(row["source_excerpt"]) for row in observed[0]["candidates"])) == 2000
 
 
 def test_lone_new_identity_claim_still_requires_evidence_review(core):
@@ -184,7 +195,8 @@ def test_lone_new_identity_claim_still_requires_evidence_review(core):
         content="主人是汪赫的弟弟", evidence_event_id="evt_test_1", evidence_quote=text)
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     core.model.review = lambda data: json.dumps({"relations": [
-        {"supported": False, "same": None, "conflicts": [], "replaces": []}]})
+        {"supported": False, "update_authorized": False, "claims_replacement": False,
+            "same": None, "conflicts": [], "replaces": []}]})
     assert run(core.prepare_memories([candidate])) == ([], [])
     assert [kind for _, kind in core.model.calls] == ["memory_review"]
 

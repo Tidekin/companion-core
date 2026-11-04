@@ -210,6 +210,8 @@ class Extraction(StrictModel):
 
 class MemoryRelation(StrictModel):
     supported: bool = Field(strict=True)
+    update_authorized: bool = Field(strict=True)
+    claims_replacement: bool = Field(strict=True)
     same: str | None = Field(default=None, pattern=r"^[mc]\d+$")
     conflicts: list[str] = Field(default_factory=list, max_length=40)
     replaces: list[str] = Field(max_length=40)

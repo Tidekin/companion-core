@@ -64,8 +64,10 @@ class FakeModel:
                     else json.dumps(
                         {
                             "relations": [
-                                {"supported": True, "same": None, "conflicts": [], "replaces": []}
-                                for _ in payload["candidates"]
+                                {"supported": True, "update_authorized": bool(row.get("update")),
+                                    "claims_replacement": False,
+                                 "same": None, "conflicts": [], "replaces": []}
+                                for row in payload["candidates"]
                             ]
                         }
                     )

@@ -113,7 +113,9 @@ def test_independent_life_worker_finishes_nightly_memory_diary_reflection_goals(
                 ensure_ascii=False,
             )
         elif rules == REVIEW_RULES:
-            text = json.dumps({"relations": [{"supported": True, "same": None,
+            text = json.dumps({"relations": [{"supported": True, "update_authorized": False,
+                "claims_replacement": False,
+                "same": None,
                 "conflicts": [], "replaces": []} for _ in data["candidates"]]})
         elif rules == DIARY_RULES:
             source = next(item for item in data["sources"] if item["kind"] == "owner_message")
@@ -260,7 +262,9 @@ def test_continuous_history_memory_restart_and_followup(core, tmp_path, monkeypa
             )
         elif messages[0]["content"] == REVIEW_RULES:
             data = json.loads(messages[-1]["content"])
-            text = json.dumps({"relations": [{"supported": True, "same": None,
+            text = json.dumps({"relations": [{"supported": True, "update_authorized": False,
+                "claims_replacement": False,
+                "same": None,
                 "conflicts": [], "replaces": []} for _ in data["candidates"]]})
         elif messages[0]["content"] == RECALL_RULES:
             text = '{"relevant":["m0"]}'
@@ -368,7 +372,9 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
             )
         elif messages[0]["content"] == REVIEW_RULES:
             data = json.loads(messages[-1]["content"])
-            text = json.dumps({"relations": [{"supported": True, "same": None,
+            text = json.dumps({"relations": [{"supported": True, "update_authorized": False,
+                "claims_replacement": False,
+                "same": None,
                 "conflicts": [], "replaces": []} for _ in data["candidates"]]})
         elif messages[0]["content"] == RECALL_RULES:
             text = '{"relevant":["m0"]}'
