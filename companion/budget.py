@@ -246,9 +246,9 @@ def reserve(
             raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
         owner_view = None
         if scenario == "gateway":
-            from companion import gateway
+            from companion import gateway_admission
 
-            gateway.admit(store, settings, clock or (lambda: now), request_id,
+            gateway_admission.admit(store, settings, clock or (lambda: now), request_id,
                           estimate, estimated_input)
         elif scenario == "evaluation":
             from companion import evaluation
@@ -462,7 +462,7 @@ def reserve(
                     "measurement": {"version": 1, "sha256": paid_budget.sha(
                         measurement.receipt())},
                     **({"quota": quota} if quota else {}),
-                    **({"gateway": gateway.binding(store, request_id)}
+                    **({"gateway": gateway_admission.binding(store, request_id)}
                        if scenario == "gateway" else {}),
                 },
             )
@@ -778,7 +778,7 @@ def _actual_limit_violations(store, admission, snapshot, usage, actual):
     month = month.astimezone(UTC).isoformat(timespec="microseconds")
     limits = []
     if usage["scenario"] == "gateway":
-        from companion.gateway import actual_limits
+        from companion.gateway_admission import actual_limits
 
         limits.extend(actual_limits(store, usage, actual))
     if usage["scenario"] == "evaluation":
@@ -987,9 +987,9 @@ def _model_scope(store, settings, clock, request_id, scenario, *, yield_to_chat=
     from companion import evaluation, live_text, owner_authority
 
     if scenario == "gateway":
-        from companion import gateway
+        from companion import gateway_admission
 
-        return gateway.check_model(store, settings, clock, request_id)
+        return gateway_admission.check_model(store, settings, clock, request_id)
     if scenario == "evaluation":
         return evaluation.check_request(store, settings, clock, request_id)
     if owner_authority.required(store, settings):

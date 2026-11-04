@@ -387,14 +387,14 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         raise
     if saved is not None and identity == saved[2]:
         if saved[3].get("gateway_clients"):
-            from companion.gateway import validate_clients
+            from companion.gateway_admission import validate_clients
 
             try:
                 validate_clients(store, saved[3]["gateway_clients"])
             except (ValueError, KeyError, TypeError):
                 raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from None
         if saved[3].get("gateway_bindings"):
-            from companion.gateway import validate_projection
+            from companion.gateway_admission import validate_projection
 
             try:
                 validate_projection(store, saved[3]["gateway_bindings"])
@@ -546,10 +546,10 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
         if gateway_bindings or record and "gateway" in record or store.one(
             "SELECT 1 FROM model_usage WHERE scenario='gateway' LIMIT 1"
         ):
-            from companion.gateway import validate_projection
+            from companion.gateway_admission import validate_projection
 
             gateway_bindings = validate_projection(store, gateway_bindings, record)
-        from companion.gateway import validate_clients
+        from companion.gateway_admission import validate_clients
 
         gateway_clients = validate_clients(store, gateway_clients, record)
         model_carry.validate_projection(store, model_controls, replay=model_control_replay)
