@@ -11,7 +11,7 @@ from companion_onebot_bridge.spool import encode
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.sdk_reader_fixture import Provider, answer, worker_for
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 
 
 @asynccontextmanager

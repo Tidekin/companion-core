@@ -18,8 +18,8 @@ from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.native_continuous_support import host
 from tests.support.onebot import provider
+from tests.support.onebot_events import config, normalized, raw_event
 from tests.test_live_text_window import live_fixture
-from tests.test_onebot_direct import config, normalized, raw_event
 from tests.test_trial_limits import native_quota
 
 PARTS = ["第一条是可以独立阅读的完整句子。", "第二条继续这次回复并保留真实内容。"]
@@ -475,7 +475,7 @@ def test_real_core_one_model_job_keeps_per_piece_approval(core, tmp_path):
 
 def test_stopped_v1_handoff_prepares_segment_schema_without_rewriting_prior_attempts(tmp_path):
     from companion_onebot_bridge.window import SendOperation
-    from tests.test_onebot_direct import raw_event
+    from tests.support.onebot_events import raw_event
     from tests.test_onebot_window import input_approval
     from tests.test_onebot_window_handoff import CoreContract, plan_for
 

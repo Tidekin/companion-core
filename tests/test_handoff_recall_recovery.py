@@ -16,10 +16,10 @@ from companion.store import encode
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import run
+from tests.support.onebot_events import raw_event
 from tests.test_input_protocol import environment, notice, sign
 from tests.test_live_text_handoff import initial, journal_bytes, reference, stop_and_successor
 from tests.test_onebot_delivery import core_client
-from tests.test_onebot_direct import raw_event
 
 HANDOFF = "/internal/v1/live-text/handoff"
 ABORT = HANDOFF + "/abort"

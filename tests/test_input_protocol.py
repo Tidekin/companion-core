@@ -19,8 +19,8 @@ from companion_onebot_bridge.rich_input import input_digest
 from tests import native_input_protocol_fixture as native
 from tests import test_onebot_window as window_fixtures
 from tests.conftest import run
+from tests.support.onebot_events import raw_event
 from tests.test_onebot_capture import pinned_plan
-from tests.test_onebot_direct import raw_event
 from tests.test_private_companion import companion_options
 
 

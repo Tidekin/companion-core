@@ -22,8 +22,8 @@ from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.support.native_context import Capture
 from tests.support.onebot import provider
+from tests.support.onebot_events import raw_event
 from tests.test_file_parser import docx_bytes, pdf_bytes
-from tests.test_onebot_direct import raw_event
 from tests.test_onebot_files import URL, public, segment
 from tests.test_owner_recall_bridge import recall_frame
 from tests.test_prepare_owner_input import window as native_window

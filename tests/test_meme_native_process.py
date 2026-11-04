@@ -18,10 +18,10 @@ from tests.conftest import run
 from tests.meme_authority_fixture import environment
 from tests.support import onebot
 from tests.support.onebot import onebot_http
+from tests.support.onebot_events import raw_event
 from tests.test_evaluation_process import process_config
 from tests.test_meme_core_process import process, until
 from tests.test_meme_pack_files import RULE, Upstream
-from tests.test_onebot_direct import raw_event
 
 
 def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(

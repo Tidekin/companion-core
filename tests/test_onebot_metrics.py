@@ -5,7 +5,7 @@ import pytest
 from companion.contracts import CoreError, InboundEvent
 from scripts.benchmark_qq_beta import summarize
 from tests.conftest import run
-from tests.test_onebot_direct import normalized
+from tests.support.onebot_events import normalized
 
 
 def test_core_emits_real_stage_spans_without_private_content(core, monkeypatch, capsys):

@@ -99,8 +99,8 @@ def test_native_file_bridge_queue_recovery(core, tmp_path, recovery):
     from companion_onebot_bridge.capture import prepare_owner_input
     from companion_onebot_bridge.network import private_http_client
     from companion_onebot_bridge.onebot_client import OneBotClient
+    from tests.support.onebot_events import raw_event
     from tests.test_native_media_queue import row
-    from tests.test_onebot_direct import raw_event
     from tests.test_prepare_owner_input import native_spool
 
     async def scenario():

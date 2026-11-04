@@ -23,8 +23,8 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.support.native_context import Capture
 from tests.support.onebot import onebot_http
+from tests.support.onebot_events import raw_event
 from tests.test_onebot_capture import real_core_http
-from tests.test_onebot_direct import raw_event
 from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 

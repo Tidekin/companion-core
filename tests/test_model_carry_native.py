@@ -25,8 +25,8 @@ from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.model_carry_support import executors
 from tests.support.onebot import provider
+from tests.support.onebot_events import raw_event
 from tests.test_native_video import animation
-from tests.test_onebot_direct import raw_event
 from tests.test_prepare_owner_input import window
 from tests.test_video_understanding import video_policy
 

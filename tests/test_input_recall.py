@@ -20,7 +20,7 @@ from companion.memory import Memory
 from companion.privacy import epoch
 from companion.store import Store, after, encode
 from companion.transport import enqueue
-from tests.test_onebot_direct import config, normalized, raw_event
+from tests.support.onebot_events import config, normalized, raw_event
 
 
 def source(number=42, **changes):

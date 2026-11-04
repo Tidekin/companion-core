@@ -15,7 +15,7 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.rich_input import input_digest
 from companion_onebot_bridge.window import digest
 from tests.conftest import run
-from tests.test_onebot_direct import config, raw_event
+from tests.support.onebot_events import config, raw_event
 
 
 def rich_event(message, **changes):

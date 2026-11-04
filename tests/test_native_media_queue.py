@@ -16,8 +16,8 @@ from companion_onebot_bridge import pending_media
 from companion_onebot_bridge.capture import prepare_owner_input
 from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
+from tests.support.onebot_events import raw_event
 from tests.test_native_image_pipeline import pixels
-from tests.test_onebot_direct import raw_event
 from tests.test_prepare_owner_input import native_spool, window
 
 

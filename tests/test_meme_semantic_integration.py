@@ -22,11 +22,11 @@ from companion_onebot_bridge.meme_catalog import key_hash
 from companion_onebot_bridge.owner_memes import MemePump
 from tests.conftest import run
 from tests.support.native_meme_entry import native_entry
+from tests.support.onebot_events import raw_event
 from tests.test_meme_core import CAPTION
 from tests.test_meme_runtime import RULE, public_transport
 from tests.test_next_memes_catalog import png
 from tests.test_next_memes_discovery import resolver
-from tests.test_onebot_direct import raw_event
 from tests.test_private_companion import companion_options
 
 

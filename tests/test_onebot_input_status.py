@@ -9,9 +9,9 @@ from websockets.exceptions import ConnectionClosed
 from companion_onebot_bridge import capture
 from companion_onebot_bridge.window import request_stop
 from tests.conftest import run
+from tests.support.onebot_events import raw_event
 from tests.test_capture_diagnostics import lifecycle_frames
 from tests.test_onebot_capture import bootstrap_frames, source_window
-from tests.test_onebot_direct import raw_event
 
 
 def input_status(**changes):

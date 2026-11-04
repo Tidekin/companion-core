@@ -12,8 +12,8 @@ from companion.model import ModelClient
 from companion.observation import ObservationEvent
 from companion.privacy import epoch
 from tests.conftest import run
+from tests.support.onebot_events import normalized, raw_event
 from tests.test_exploration import configure
-from tests.test_onebot_direct import normalized, raw_event
 from tests.test_owner_authority import activate, prepare
 from tests.test_paid_model_gate import approved_live
 

@@ -9,7 +9,7 @@ import pytest
 
 from companion_onebot_bridge.onebot_client import OneBotClient, http_client
 from tests.conftest import run
-from tests.test_onebot_direct import config
+from tests.support.onebot_events import config
 
 DATA = {
     "/get_login_info": {"user_id": 10002},

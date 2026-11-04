@@ -9,7 +9,7 @@ from companion.model import ModelClient
 from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.support.native_context import source_window
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 
 
 @asynccontextmanager

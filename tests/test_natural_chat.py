@@ -17,8 +17,8 @@ from tests.conftest import run
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.native_context import approve_value
 from tests.support.native_context import configure as native_configure
+from tests.support.onebot_events import raw_event
 from tests.test_onebot_capture import real_core_http
-from tests.test_onebot_direct import raw_event
 
 MEDIA_REF = "https://gchat.qpic.cn/private-blob?token=never-download"
 MEDIA_SHA = "e" * 64

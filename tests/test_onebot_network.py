@@ -17,7 +17,7 @@ from companion_onebot_bridge.network import private_http_client, resolve_private
 from companion_onebot_bridge.onebot_client import OneBotClient
 from tests.conftest import run
 from tests.support.onebot import onebot_http
-from tests.test_onebot_direct import config
+from tests.support.onebot_events import config
 
 
 def test_real_loopback_http_probe_and_owner_send_are_bounded_and_authenticated():

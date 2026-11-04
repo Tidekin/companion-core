@@ -15,8 +15,8 @@ from companion_onebot_bridge.window import TestWindow, WindowPlan
 from tests.conftest import run
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.onebot import provider
+from tests.support.onebot_events import raw_event
 from tests.test_onebot_delivery import core_client
-from tests.test_onebot_direct import raw_event
 from tests.test_onebot_window import plan_fixture
 from tests.test_paid_model_gate import approved_live
 
@@ -413,7 +413,7 @@ def test_core_requires_its_own_explicit_live_approval(core, tmp_path, approval):
 
 
 def test_live_input_cannot_bypass_individual_approval_through_generic_inbox(core, tmp_path):
-    from tests.test_onebot_direct import normalized
+    from tests.support.onebot_events import normalized
 
     cfg, plan = live_fixture(core, tmp_path)
 

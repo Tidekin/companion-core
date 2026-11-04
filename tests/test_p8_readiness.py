@@ -16,7 +16,7 @@ from companion_onebot_bridge.spool import Spool
 from tests.conftest import ingest, run
 from tests.owner_model_fixtures import authorized_job
 from tests.support.native_consumer_entry import environment
-from tests.test_onebot_direct import config, normalized, raw_event
+from tests.support.onebot_events import config, normalized, raw_event
 
 
 def finish_reply(core, state):

@@ -21,7 +21,7 @@ from companion_onebot_bridge.event_normalizer import normalize, redact
 from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.rich_input import MAX_RICH_BYTES, input_digest
 from tests.conftest import run
-from tests.test_onebot_direct import config, raw_event
+from tests.support.onebot_events import config, raw_event
 
 
 def text(value):

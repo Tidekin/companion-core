@@ -167,8 +167,8 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
     from companion.reflection import REFLECTION_RULES
     from tests.native_continuous_support import host
     from tests.support.native_context import Capture
+    from tests.support.onebot_events import raw_event
     from tests.test_consolidation import ReflectionModel
-    from tests.test_onebot_direct import raw_event
 
     fixture_model = ReflectionModel()
     calls, instances = [], []

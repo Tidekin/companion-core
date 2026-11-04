@@ -28,8 +28,8 @@ from tests.conftest import run
 from tests.journal_assertions import assert_private_journal
 from tests.support.native_http import owned_http_protocol
 from tests.support.onebot import onebot_http, provider
+from tests.support.onebot_events import config, raw_event
 from tests.test_live_text_window import live_fixture
-from tests.test_onebot_direct import config, raw_event
 from tests.test_onebot_window import input_approval, plan_fixture, reply_approval, stage
 
 
@@ -698,7 +698,7 @@ def test_unsigned_staged_json_without_any_ws_or_journal_capture_cannot_reach_cor
             calls,
             sends,
         ):
-            from tests.test_onebot_direct import normalized
+            from tests.support.onebot_events import normalized
 
             event = normalized(raw_event(1), window.plan.config)
             approval = input_approval(window.plan, raw_event(1))
@@ -756,7 +756,7 @@ def test_accepted_or_erased_capture_clears_frame_text_and_repairs_interrupted_pu
             assert len(list(directory.glob("*.json"))) == 1
             if erased:
                 from companion.contracts import InboundEvent
-                from tests.test_onebot_direct import normalized
+                from tests.support.onebot_events import normalized
 
                 event = normalized(raw_event(1), window.plan.config)
                 core.ingest(InboundEvent.model_validate(event), event["event_id"])

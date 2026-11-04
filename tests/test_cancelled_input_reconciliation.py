@@ -12,7 +12,7 @@ from companion_onebot_bridge import owner_handoff
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.native_owner_recovery_support import CONTROL_TOKEN, reopen_host, stop_host
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 
 
 @pytest.mark.parametrize("mutation", [None, "model", "outbox", "source", "active", "proof",
@@ -129,7 +129,7 @@ def test_stopped_input_requires_original_native_materials(
 def test_cancelled_input_proof_survives_handoff_and_cannot_be_forged_in_spool(tmp_path, paid):
     from companion_onebot_bridge.spool import Spool
     from companion_onebot_bridge.window import TestWindow, digest
-    from tests.test_onebot_direct import normalized
+    from tests.support.onebot_events import normalized
     from tests.test_onebot_window import input_approval
     from tests.test_onebot_window_handoff import CoreContract, plan_for
 

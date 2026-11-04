@@ -33,9 +33,9 @@ from source_reader import worker_v1
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
 from tests.conftest import run
+from tests.support.onebot_events import raw_event
 from tests.test_exploration import URL
 from tests.test_onebot_capture import real_core_http
-from tests.test_onebot_direct import raw_event
 from tests.test_owner_authority import activate, prepare
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import TOKEN

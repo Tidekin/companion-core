@@ -10,7 +10,7 @@ from companion import owner_authority
 from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
 from tests.support.native_context import source_window
-from tests.test_onebot_direct import raw_event
+from tests.support.onebot_events import raw_event
 
 
 @asynccontextmanager

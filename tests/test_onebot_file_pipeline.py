@@ -28,8 +28,8 @@ from companion_onebot_bridge.window import (
 )
 from tests.conftest import run
 from tests.support.onebot import provider
+from tests.support.onebot_events import config, raw_event
 from tests.test_onebot_capture import capture_approval
-from tests.test_onebot_direct import config, raw_event
 from tests.test_onebot_files import BODY, segment
 from tests.test_onebot_images import image_segment
 from tests.test_onebot_window_handoff import CoreContract, plan_for

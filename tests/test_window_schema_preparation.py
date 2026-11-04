@@ -9,7 +9,7 @@ from companion_onebot_bridge.outbound import validate_item
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import SendOperation, TestWindow, digest
 from tests.conftest import run
-from tests.test_onebot_direct import normalized, raw_event
+from tests.support.onebot_events import normalized, raw_event
 from tests.test_onebot_window import input_approval
 from tests.test_onebot_window_handoff import CoreContract, plan_for
 

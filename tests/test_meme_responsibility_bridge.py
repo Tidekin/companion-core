@@ -23,9 +23,9 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.onebot_events import raw_event
 from tests.test_meme_core import body, caption_environment, worker
 from tests.test_meme_responsibility import snapshot
-from tests.test_onebot_direct import raw_event
 
 
 @asynccontextmanager
