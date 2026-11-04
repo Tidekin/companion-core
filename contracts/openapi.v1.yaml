@@ -349,7 +349,8 @@ components:
         event_id: {type: string}
         job_id: {type: string}
         duplicate: {type: boolean}
-        state: {enum: [QUEUED, RUNNING, SUCCEEDED, FAILED]}
+        state: {enum: [QUEUED, RUNNING, RETRY_WAIT, SUCCEEDED, FAILED, CANCELLED]}
+        reply_revision: {type: integer, minimum: 0}
     Delivery:
       type: object
       required: [message_id, conversation_platform_session_key, content, lease_token, lease_until, delivery_key]
