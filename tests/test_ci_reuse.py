@@ -139,9 +139,11 @@ def test_run_timestamps_do_not_authorize_or_expire_exact_tree_proof(evidence, up
     main_reuse(evidence)
     profile, proof = evidence["plan"]()
     assert profile == "reuse"
+    evidence["calls"].clear()
     metadata, consumed_proof = images.resolve_source(
         "synthetic/repository", 201, read=evidence["read"],
     )
+    assert len(evidence["calls"]) == len(set(evidence["calls"]))
     assert consumed_proof == proof
     assert metadata["tree"] == evidence["record"]["tree"]
 
@@ -328,7 +330,7 @@ def test_direct_full_push_requires_default_branch_and_original_images(evidence, 
     evidence["record"]["event"] = "push"
     result = ci_reuse.verified_run(
         evidence["run"], "synthetic/repository", evidence["run"]["head_sha"],
-        {"tree": evidence["record"]["tree"]}, evidence["read"],
+        evidence["read"],
         expected_event="push",
     )
     assert (result is not None) == (branch == "main")

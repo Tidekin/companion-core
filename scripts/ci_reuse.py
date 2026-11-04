@@ -55,7 +55,7 @@ def unpack_record(data):
         return json.loads(archive.read(entries[0]))
 
 
-def verified_run(run, repo, head, target, read, *, expected_event="pull_request"):
+def verified_run(run, repo, head, read, *, expected_event="pull_request"):
     """Every condition comes from this repository's API and this run's artifact."""
     if (
         type(run.get("id")) is not int or type(run.get("run_attempt")) is not int
@@ -73,22 +73,21 @@ def verified_run(run, repo, head, target, read, *, expected_event="pull_request"
     artifacts = read(prefix + "/artifacts?per_page=100")
     matches = [item for item in artifacts["artifacts"]
                if item.get("name") == f"ci-full-{run['run_attempt']}"
-               and item.get("expired") is False
-               and type(item.get("id")) is int and item["id"] > 0
-               and type(item.get("size_in_bytes")) is int
-               and 0 < item["size_in_bytes"] <= 16384]
+               and item.get("expired") is False]
     if len(matches) != 1:
         return None
-    record = unpack_record(read(
-        f"repos/{repo}/actions/artifacts/{matches[0]['id']}/zip", binary=True,
-    ))
+    item = matches[0]
+    if (type(item.get("id")) is not int or item["id"] <= 0
+        or type(item.get("size_in_bytes")) is not int or not 0 < item["size_in_bytes"] <= 16384):
+        return None
+    record = unpack_record(read(f"repos/{repo}/actions/artifacts/{item['id']}/zip", binary=True))
     if (
         type(record.get("version")) is not int or record["version"] != 3
         or record.get("profile") != "full"
         or record.get("coverage") != {"windows_product": True, "windows_browser": True}
         or record.get("repository") != repo or record.get("event") != expected_event
         or record.get("run_id") != run["id"] or record.get("attempt") != run["run_attempt"]
-        or record.get("tree") != target["tree"]
+        or not re.fullmatch(r"[0-9a-f]{40}", record.get("tree", ""))
         or not re.fullmatch(r"[0-9a-f]{40}", record.get("commit", ""))
     ):
         return None
@@ -102,12 +101,12 @@ def verified_run(run, repo, head, target, read, *, expected_event="pull_request"
     ):
         return None
     try:
-        images.verified_metadata(record.get("container_images"), artifacts["artifacts"], read,
-                                 repo, {"repository": repo, **{key: record[key] for key in (
-                                     "commit", "tree", "run_id", "attempt")}})
+        expected = {key: record[key] for key in ("commit", "tree", "run_id", "attempt")}
+        metadata = images.verified_metadata(record.get("container_images"), artifacts["artifacts"],
+                                            read, repo, {"repository": repo, **expected})
     except (KeyError, TypeError, ValueError, zipfile.BadZipFile):
         return None
-    return {"run_id": run["id"], "attempt": run["run_attempt"], "tree": target["tree"]}
+    return metadata, {"run_id": run["id"], "attempt": run["run_attempt"], "tree": record["tree"]}
 
 
 def find_verified_run(event_name, ref, event, *, root=ROOT, read=api):
@@ -140,7 +139,11 @@ def find_verified_run(event_name, ref, event, *, root=ROOT, read=api):
     if not candidates:
         return None
     latest = max(candidates, key=lambda run: run["id"])
-    return verified_run(latest, repo, head, target, read)
+    verified = verified_run(latest, repo, head, read)
+    if verified is None:
+        return None
+    _, proof = verified
+    return proof if proof["tree"] == target["tree"] else None
 
 
 def validate_reuse(env=os.environ, *, root=ROOT):

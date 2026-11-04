@@ -710,27 +710,21 @@ def resolve_source(repo, run_id, *, read=None):
             raise ValueError("PUBLIC_IMAGE_FULL_COVERAGE_REQUIRED")
     elif origin["event"] != "pull_request":
         raise ValueError("PUBLIC_IMAGE_SOURCE_EVENT_INVALID")
-    items = artifacts(source)
-    record = small_artifact(items, f"ci-full-{source['run_attempt']}", ci_reuse.RECORD)
-    commit = read(f"repos/{repo}/git/commits/{record['commit']}")
-    if commit["tree"]["sha"] != record["tree"] or target_tree not in (None, record["tree"]):
+    verified = ci_reuse.verified_run(source, repo, source["head_sha"], read,
+                                      expected_event=source["event"])
+    if verified is None:
+        raise ValueError("PUBLIC_IMAGE_ORIGINAL_FULL_RUN_NOT_VERIFIED")
+    metadata, proof = verified
+    commit = read(f"repos/{repo}/git/commits/{metadata['commit']}")
+    if commit["tree"]["sha"] != proof["tree"] or target_tree not in (None, proof["tree"]):
         raise ValueError("PUBLIC_IMAGE_CHECKOUT_TREE_CHANGED")
     if source["event"] == "pull_request":
         parents = commit.get("parents", [])
         if len(parents) != 2 or parents[1].get("sha") != source["head_sha"]:
             raise ValueError("PUBLIC_IMAGE_PR_MERGE_PREVIEW_REQUIRED")
-    elif record["commit"] != source["head_sha"]:
+    elif metadata["commit"] != source["head_sha"]:
         raise ValueError("PUBLIC_IMAGE_PUSH_CHECKOUT_CHANGED")
-    verified = ci_reuse.verified_run(
-        source, repo, source["head_sha"], {"commit": record["commit"], "tree": record["tree"]},
-        read, expected_event=source["event"],
-    )
-    if verified is None:
-        raise ValueError("PUBLIC_IMAGE_ORIGINAL_FULL_RUN_NOT_VERIFIED")
-    expected = {key: record[key] for key in ("commit", "tree", "run_id", "attempt")}
-    expected["repository"] = repo
-    metadata = verified_metadata(record["container_images"], items, read, repo, expected)
-    return metadata, verified
+    return metadata, proof
 
 
 def download_archive(repo, component, destination, *, runner=run):
