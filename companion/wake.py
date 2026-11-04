@@ -1,14 +1,21 @@
 """Persistent, low-cost wake decisions; produces bounded read intentions only."""
 
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from companion import delegation, owner_authority
+from companion import budget, delegation, owner_authority, topic_selection
 from companion.contracts import CoreError
 from companion.goals import AUTHORITY_REJECTIONS
 from companion.store import after, encode, uid
 
 WAKE_PURPOSES = ("wake", "goals", "exploration")
+IDLE_DISCOVERY = "IDLE_BILIBILI_DISCOVERY"
+IDLE_READ = "IDLE_BILIBILI_READ"
+IDLE_READ_RESULTS = (
+    "SELECT g.result_event_id FROM wake_decisions w JOIN goals g USING(goal_id) "
+    "WHERE w.reason_code=? AND g.state='DONE' AND g.redacted=0 AND g.result_event_id IS NOT NULL"
+)
 
 
 class WakePlanner:
@@ -21,12 +28,35 @@ class WakePlanner:
             clock,
         )
 
+    def _idle_reads(self, now):
+        # Only native single-item goals backed by the exact public discovery receipt.
+        rows = self.store.rows(
+            "SELECT g.*,r.query FROM goals g JOIN goal_evidence x USING(goal_id) "
+            "JOIN observations o ON o.event_id=x.event_id JOIN events e ON e.event_id=o.event_id "
+            "JOIN exploration_requests r ON r.request_id=e.trace_id "
+            "WHERE g.kind='self' AND g.state='CANDIDATE' AND g.redacted=0 AND g.next_due_at<=? "
+            "AND g.reflection_suggestion_id IS NULL AND e.source='observation.bilibili' "
+            "AND o.result_status='DISCOVERED' AND e.redacted=0 AND o.redacted=0 "
+            "AND r.operation='discover' AND r.state='DONE' AND r.redacted=0 "
+            "AND json_extract(g.scope_json,'$.operation')='read_content' "
+            "AND json_extract(g.scope_json,'$.url')=o.canonical_url "
+            "AND NOT EXISTS (SELECT 1 FROM goal_evidence x2 WHERE x2.goal_id=g.goal_id "
+            "AND x2.event_id<>x.event_id) "
+            "AND NOT EXISTS (SELECT 1 FROM life_activity_results a WHERE a.goal_id=g.goal_id) "
+            "ORDER BY g.priority DESC,g.created_at DESC,g.rowid LIMIT 64", (now,))
+        interests = topic_selection.interest_topics(self.store, now) if rows else []
+        return sorted(rows, key=lambda row: sum(weight for term, weight in interests
+                      if term == row["query"] or term in row["topic"]), reverse=True)
+
     def evaluate(self, trigger_event_id=None):
         cfg, s, now = self.settings, self.store, self.clock()
         if not cfg.wake_enabled or not cfg.goals_enabled:
             return []
-        if cfg.life_loop.mode != "OFF" and cfg.life_loop.read_goals_enabled:
-            return []  # Life decisions select new self goals; accepted native steps still run.
+        idle = cfg.life_loop.mode != "OFF" and cfg.life_loop.read_goals_enabled
+        if idle and (cfg.life_loop.mode != "SHADOW" or not cfg.life_loop.autonomy_enabled
+                     or trigger_event_id or not cfg.observation_enabled
+                     or not any(a.source == "bilibili" for a in cfg.observation_adapters.values())):
+            return []
         view = None
         if owner_authority.required(s, cfg):
             try:
@@ -35,16 +65,25 @@ class WakePlanner:
                 return []
             if not set(WAKE_PURPOSES) <= set(view.policy.purposes):
                 return []
-        self.goals.expire_sources()
+            if idle and not {"life", "content"} <= set(view.policy.purposes):
+                return []
+        if not idle:
+            self.goals.expire_sources()
         local = datetime.fromisoformat(now).astimezone(ZoneInfo(cfg.timezone))
         # A delegated companion adjustment can only lengthen the interval or lower the count.
         interval = delegation.effective(s, cfg, "wake", "wake_min_interval_minutes", now)
         max_runs = delegation.effective(s, cfg, "wake", "wake_max_daily_runs", now)
         slot = int(local.timestamp()) // (interval * 60)
         key = "event:" + trigger_event_id if trigger_event_id else "slot:" + str(slot)
-        with s.transaction():
-            existing = s.one("SELECT * FROM wake_decisions WHERE idempotency_key=?", (key,))
-            if existing:
+        with nullcontext() if s.db.in_transaction else s.transaction():
+            if s.one("SELECT 1 FROM wake_decisions WHERE idempotency_key=?", (key,)):
+                return []
+            if idle and (budget.chat_pending(s, now) or s.one(
+                "SELECT 1 FROM conversations WHERE platform='qq.onebot' AND scope='private' "
+                "AND owner_actor_id='owner' AND last_event_at>? LIMIT 1",
+                (after(now, -cfg.proactive_idle_seconds),)) or s.one(
+                "SELECT 1 FROM life_topics WHERE state IN ('WAITING','DUE') AND expires_at>? "
+                "AND reason_code<>'WAITING_FOR_NEW_EVIDENCE' LIMIT 1", (now,))):
                 return []
             if trigger_event_id:
                 self.goals.validate_sources([trigger_event_id])
@@ -81,12 +120,15 @@ class WakePlanner:
             elif recent:
                 reason = "COOLDOWN"
             else:
-                for candidate in s.rows(
+                if idle:
+                    self.goals.expire_sources()
+                candidates = self._idle_reads(now) if idle else s.rows(
                     "SELECT * FROM goals WHERE kind='self' AND redacted=0 AND state IN "
                     "('CANDIDATE','ACCEPTED','WAITING_RESOURCE','RETRY_WAIT') AND "
                     "next_due_at<=? ORDER BY priority DESC,created_at LIMIT 64",
                     (now,),
-                ):
+                )
+                for candidate in candidates:
                     try:
                         accepted = self.goals.accept(candidate["goal_id"], autonomous=True)
                     except CoreError as error:
@@ -96,12 +138,13 @@ class WakePlanner:
                         self.goals.reject_authority(candidate["goal_id"], error.code)
                         continue
                     if accepted["state"] == "QUEUED":
-                        reason = "GOAL_DUE"
+                        reason = IDLE_READ if idle else "GOAL_DUE"
                     break
-            goal_id = candidate["goal_id"] if reason == "GOAL_DUE" else None
+            goal_id = candidate["goal_id"] if reason in ("GOAL_DUE", IDLE_READ) else None
             if reason == "NO_CANDIDATE" and cfg.exploration_daily_requests > 0:
-                reason = "DISCOVERY_DUE"
-            decision = "EXPLORE" if goal_id else "OBSERVE" if reason == "DISCOVERY_DUE" else "SKIP"
+                reason = IDLE_DISCOVERY if idle else "DISCOVERY_DUE"
+            decision = ("EXPLORE" if goal_id else
+                        "OBSERVE" if reason in ("DISCOVERY_DUE", IDLE_DISCOVERY) else "SKIP")
             decision_id = uid("wake")
             s.insert(
                 "wake_decisions",
@@ -115,7 +158,8 @@ class WakePlanner:
                 created_at=now,
             )
             return (
-                [{"decision_id": decision_id, "decision": decision, "goal_id": goal_id}]
+                [{"decision_id": decision_id, "decision": decision, "goal_id": goal_id,
+                  "reason_code": reason}]
                 if decision != "SKIP"
                 else []
             )

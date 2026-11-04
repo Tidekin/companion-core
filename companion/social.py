@@ -264,6 +264,8 @@ class SocialPlanner:
         }
 
     def consider(self, event_id):
+        from companion.wake import IDLE_READ, IDLE_READ_RESULTS
+
         if not self.settings.social_enabled or self.settings.life_loop.mode != "OFF":
             return None
         s, now, captured = self.store, self.clock(), epoch(self.store)
@@ -274,8 +276,9 @@ class SocialPlanner:
         event = s.one(
             "SELECT o.*,e.body_json,e.source FROM observations o JOIN events e USING(event_id) "
             "WHERE o.event_id=? AND o.redacted=0 AND e.redacted=0 AND o.result_status='FETCHED' "
-            "AND e.source IN (SELECT value FROM json_each(?))",
-            (event_id, json.dumps(observation_sources("share"))),
+            "AND e.source IN (SELECT value FROM json_each(?)) "
+            f"AND o.event_id NOT IN ({IDLE_READ_RESULTS})",
+            (event_id, json.dumps(observation_sources("share")), IDLE_READ),
         )
         if not event:
             return None

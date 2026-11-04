@@ -24,6 +24,7 @@ from companion.source_policy import web_host_allowed
 from companion.sources import content_target, observation_sources, supports, web_hosts
 from companion.store import after, encode, uid, utcnow
 from companion.transport import digest
+from companion.wake import IDLE_DISCOVERY
 
 METERED_READS_SQL = (
     "SELECT x.*,x.rowid AS queue_order,a.observed_requests,a.observed_bytes,"
@@ -263,9 +264,14 @@ class ExplorationService:
 
         for decision in decisions:
             if decision["decision"] == "OBSERVE":
-                with self.store.transaction():
+                with nullcontext() if self.store.db.in_transaction else self.store.transaction():
+                    idle = decision.get("reason_code") == IDLE_DISCOVERY
+                    pool = [name for name in adapters if not idle or
+                            self.settings.observation_adapters[name].source == "bilibili"]
+                    if not pool:
+                        continue
                     chosen = topic_selection.choose(self.store, self.settings, self.clock(),
-                                                    adapters)
+                                                    pool, own_only=idle)
                     if chosen:
                         self.create(chosen[0], "discover", decision["decision_id"],
                                     query=chosen[1])
@@ -275,7 +281,7 @@ class ExplorationService:
                         " AND query IS NULL"
                     )["n"]
                     self.create(
-                        adapters[count % len(adapters)], "discover", decision["decision_id"]
+                        pool[count % len(pool)], "discover", decision["decision_id"]
                     )
 
     def schedule_goal(self):
@@ -633,6 +639,10 @@ class ExplorationService:
                     "AND result_status='DISCOVERED' AND o.created_at>=?",
                     (encode(observation_sources("discover")), day),
                 )["n"]
+                propose_goals = self.settings.goals_enabled
+                idle_discovery = row["operation"] == "discover" and s.one(
+                    "SELECT 1 FROM wake_decisions WHERE decision_id=? AND reason_code=?",
+                    (row["request_key"], IDLE_DISCOVERY))
                 for index, item in enumerate(result.items):
                     source, canonical = content_target(
                         item.url, web_hosts=self.settings.web_reading_hosts if reading else (),
@@ -705,7 +715,7 @@ class ExplorationService:
                             # Already watched: the ledger keeps one entry per item.
                             "SELECT 1 FROM watch_ledger WHERE item_ref=?", (canonical,),
                         )
-                        if not existing and self.settings.goals_enabled:
+                        if not existing and propose_goals:
                             try:
                                 self.goals.propose(
                                     GoalProposal(
@@ -714,6 +724,8 @@ class ExplorationService:
                                         scope=GoalScope(operation="read_content", url=canonical),
                                     )
                                 )
+                                if idle_discovery:
+                                    propose_goals = False  # One reading goal per idle listing.
                             except CoreError as error:
                                 if error.code != "GOAL_CAPACITY_REACHED":
                                     raise

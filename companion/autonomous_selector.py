@@ -182,8 +182,9 @@ def native_selector(core, worker_id) -> RoundRobin:
         return lane(name, run, purposes, interval=MAINTENANCE_SECONDS, maintenance=True)
 
     async def wake_goal():
-        decisions = core.wake.evaluate()
-        core.exploration.schedule_wake(decisions)
+        with core.store.transaction():
+            decisions = core.wake.evaluate()
+            core.exploration.schedule_wake(decisions)
         return UnitResult(bool(decisions))
 
     async def schedule_goal():
