@@ -839,8 +839,9 @@ def usage_diagnostics(db):
         "COALESCE(SUM(a.reserved_micro_usd),0) AS reserved_micro_usd,"
         "COALESCE(SUM(m.billed_micro_usd),0) AS usage_priced_micro_usd "
         "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE m.state='SETTLED' "
-        "AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.action='model.video_rate_correction' "
-        "AND x.entity_id=m.request_id)"
+        # Read correction IDs once instead of scanning the audit log for every call.
+        "AND m.request_id NOT IN (SELECT entity_id FROM audit_log "
+        "WHERE action='model.video_rate_correction' AND entity_id IS NOT NULL)"
     )
     row = dict(zip((column[0] for column in cursor.description), cursor.fetchone(), strict=True))
     # Diagnostics never reinterpret the reserved tokens of an UNKNOWN as observed usage.
