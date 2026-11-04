@@ -78,21 +78,20 @@ def receive(store, settings, ledger, clock, body):
 
 
 def apply_pending(store, settings, ledger, clock, event):
-    with store.transaction():
-        saved = store.one("SELECT value FROM runtime_meta WHERE key=?",
-                          (input_recall.marker_key(event.source_event_id),))
-        marker = json.loads(saved["value"]) if saved else None
-        if not marker or marker.get("state") != "PENDING_TARGET":
-            return
-        source = input_recall.canonical_source(**{key: marker[key] for key in (
-            "bot_qq_id", "owner_qq_id", "protocol_epoch", "provider_message_id",
-            "platform_session_key")})
-        if (event.source_event_id != source["source_event_id"]
-            or event.event_id != "evt_" + hashlib.sha256(event.source_event_id.encode()).hexdigest()
-            or event.actor.platform_user_id != settings.owner_qq_id
-            or event.conversation.platform_session_key != source["platform_session_key"]
-            or not capture_matches(store, settings, source, event.event_id, marker["occurred_at"])):
-            return
-        input_recall.recall_input(store, ledger, source, clock(), verified=True,
-            occurred_at=marker["occurred_at"], event_id=event.event_id,
-            retention_cutoff=after(clock(), -86400 * settings.raw_event_retention_days))
+    saved = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                      (input_recall.marker_key(event.source_event_id),))
+    marker = json.loads(saved["value"]) if saved else None
+    if not marker or marker.get("state") != "PENDING_TARGET":
+        return
+    source = input_recall.canonical_source(**{key: marker[key] for key in (
+        "bot_qq_id", "owner_qq_id", "protocol_epoch", "provider_message_id",
+        "platform_session_key")})
+    if (event.source_event_id != source["source_event_id"]
+        or event.event_id != "evt_" + hashlib.sha256(event.source_event_id.encode()).hexdigest()
+        or event.actor.platform_user_id != settings.owner_qq_id
+        or event.conversation.platform_session_key != source["platform_session_key"]
+        or not capture_matches(store, settings, source, event.event_id, marker["occurred_at"])):
+        return
+    input_recall.recall_input(store, ledger, source, clock(), verified=True,
+        occurred_at=marker["occurred_at"], event_id=event.event_id,
+        retention_cutoff=after(clock(), -86400 * settings.raw_event_retention_days))

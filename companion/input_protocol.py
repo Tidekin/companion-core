@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -234,35 +235,46 @@ def receive_recall(store, settings, ledger, clock, body):
                 "reply_revision": row["reply_revision"] if row else 0}
 
 
-def apply_pending_input(store, settings, ledger, clock, event):
-    """Commit recall before inbox admission, so a returned 410 cannot roll it back."""
+@contextmanager
+def admit_unrecalled(store, settings, ledger, clock, event):
+    """Hold the write lock from recall reconciliation through inbox acceptance."""
+    with store.transaction():
+        _apply_pending_input(store, settings, ledger, clock, event)
+        if not input_recall.is_recalled(store, event.source_event_id):
+            yield
+            return
+    # A verified recall must commit before the Spool receives its terminal 410.
+    raise CoreError("EVENT_ERASED", 410)
+
+
+def _apply_pending_input(store, settings, ledger, clock, event):
+    """Resolve a pending recall under the inbox admission write lock."""
     from companion import owner_authority, owner_recall
 
     if owner_authority.required(store, settings):
         return owner_recall.apply_pending(store, settings, ledger, clock, event)
     if not private_life.enabled(settings):
         return
-    with store.transaction():
-        marker = live_text._meta(store, input_recall.marker_key(event.source_event_id))
-        if not marker or marker.get("state") != "PENDING_TARGET":
-            return
-        approval = approval_for_receipt(store, settings)
-        source = input_recall.canonical_source(**{key: marker[key] for key in (
-            "bot_qq_id", "owner_qq_id", "protocol_epoch", "provider_message_id",
-            "platform_session_key",
-        )})
-        if (event.source_event_id != source["source_event_id"]
-            or event.event_id != "evt_" + hashlib.sha256(event.source_event_id.encode()).hexdigest()
-            or event.actor.platform_user_id != settings.owner_qq_id
-            or event.conversation.platform_session_key != source["platform_session_key"]
-            or not _capture_matches(store, settings, approval, source, event.event_id,
-                                    marker["occurred_at"])):
-            return
-        input_recall.recall_input(
-            store, ledger, source, clock(), verified=True, occurred_at=marker["occurred_at"],
-            event_id=event.event_id,
-            retention_cutoff=after(clock(), -86400 * settings.raw_event_retention_days),
-        )
+    marker = live_text._meta(store, input_recall.marker_key(event.source_event_id))
+    if not marker or marker.get("state") != "PENDING_TARGET":
+        return
+    approval = approval_for_receipt(store, settings)
+    source = input_recall.canonical_source(**{key: marker[key] for key in (
+        "bot_qq_id", "owner_qq_id", "protocol_epoch", "provider_message_id",
+        "platform_session_key",
+    )})
+    if (event.source_event_id != source["source_event_id"]
+        or event.event_id != "evt_" + hashlib.sha256(event.source_event_id.encode()).hexdigest()
+        or event.actor.platform_user_id != settings.owner_qq_id
+        or event.conversation.platform_session_key != source["platform_session_key"]
+        or not _capture_matches(store, settings, approval, source, event.event_id,
+                                marker["occurred_at"])):
+        return
+    input_recall.recall_input(
+        store, ledger, source, clock(), verified=True, occurred_at=marker["occurred_at"],
+        event_id=event.event_id,
+        retention_cutoff=after(clock(), -86400 * settings.raw_event_retention_days),
+    )
 
 
 def input_state(store, settings, event_id):
