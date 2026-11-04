@@ -23,7 +23,7 @@ from companion.voice_protocol import (
     sign_voice_lease,
     verify_voice_lease,
 )
-from tests.test_local_voice_providers import wav_bytes
+from tests.voice_service_fixtures import wav_bytes
 
 
 def test_delivery_contracts_import_without_runtime_or_bridge_packages(tmp_path):
