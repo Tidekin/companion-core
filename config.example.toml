@@ -31,6 +31,11 @@ memory_daily_micro_usd = 50000
 # To answer every message at once, add `[input_debounce]` with `enabled = false`.
 # A short closing message ("嗯", "好的") right after a reply may go unanswered, and when a
 # lively chat goes quiet for 15 min the bot may add one line (at most 3 checks a day).
+# The opportunity expires 1 hour after the final delivered reply, including time
+# spent waiting for a model or delivery. Explicit goodbyes and mutual short
+# acknowledgements normally close the conversation without another model check.
+# Batched owner messages count as one exchange; a short answer to a question
+# still receives normal attention. A silence alone is never evidence of mood.
 # To turn these off, add `[turn_taking]` with `silence_enabled = false` and/or
 # `follow_up_enabled = false`.
 # Long-term memory is on by default; run life-worker for background memory extraction.

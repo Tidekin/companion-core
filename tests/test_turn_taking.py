@@ -188,7 +188,7 @@ def test_morning_follow_up_keeps_the_owners_class_and_local_time(core):
     assert turn_taking.flush(core.store, core.settings, core.clock())
     job = core.store.one("SELECT j.*,e.body_json FROM jobs j JOIN events e USING(event_id) "
                          "WHERE j.kind='activity'")
-    material = turn_taking.follow_up_material(core.store,
+    material = turn_taking.follow_up_material(core.store, core.settings,
         json.loads(job["body_json"])["notice"]["ref"], core.clock())
     core.model.activity.append(turn_taking.SKIP)
     assert run(run_notice(core))
@@ -206,7 +206,7 @@ def test_morning_follow_up_keeps_the_owners_class_and_local_time(core):
     assert payload["replied_at"] == "11月2日 周一 08:13"
     assert payload["silent_minutes"] == 15
     # Display-time conversion must not rewrite the raw evidence/material hash.
-    assert turn_taking.follow_up_material(core.store,
+    assert turn_taking.follow_up_material(core.store, core.settings,
         json.loads(job["body_json"])["notice"]["ref"], core.clock()) == material
     assert not core.store.rows("SELECT 1 FROM outbox WHERE action_type='qq.private.proactive'")
 
