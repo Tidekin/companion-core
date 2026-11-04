@@ -3,7 +3,8 @@
 import json
 import re
 from contextlib import nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
@@ -82,6 +83,7 @@ NEUTRAL = {
     "cognitive_load": "normal",
     "novelty_interest": "unknown",
 }
+TOPIC_PAUSE = re.compile(r"先别聊这个|暂停这个话题|换个话题吧")
 RULES = (
     (
         r"(?:请)?(?:回答)?(?:简短一点|简洁一点|说短一点|更简短)",
@@ -102,11 +104,12 @@ RULES = (
         "OWNER_REQUESTED_STEPS",
     ),
     (
-        r"(?:先不聊了|先别聊这个|暂停这个话题|目前不想聊)",
+        rf"(?:{TOPIC_PAUSE.pattern}|先不聊了|目前不想聊|今天别主动找我|"
+        r"(?:我)?(?:去上课了?|现在忙|在忙)[，,、 ]*(?:晚点聊|稍后聊)?)",
         "engagement", "pause", "OWNER_REQUESTED_PAUSE",
     ),
     (
-        r"(?:继续聊|继续这个话题|可以继续|欢迎继续)",
+        r"(?:继续聊|继续这个话题|可以继续|欢迎继续|我回来了，可以聊了)",
         "engagement", "continue", "OWNER_REQUESTED_CONTINUE",
     ),
     (r"(?:想试试新的话题|换个新话题吧)", "novelty_interest", "open", "OWNER_REQUESTED_NOVELTY"),
@@ -137,7 +140,8 @@ def owner_feedback(store, settings, event_id, now):
         body = json.loads(event["body_json"])
     except ValueError:
         return None
-    if not isinstance(body, dict) or body.get("diary_command") or body.get("control_command"):
+    if (not isinstance(body, dict) or body.get("diary_command") or body.get("control_command")
+        or body.get("rich") or body.get("quote")):
         return None
     text = body.get("text", "")
     if not isinstance(text, str):
@@ -148,6 +152,7 @@ def owner_feedback(store, settings, event_id, now):
         return None
     _, dimension, value, cause = matched
     return {
+        **({"until_midnight": True} if text == "今天别主动找我" else {}),
         "event_id": event_id,
         "dimension": dimension,
         "new_state": value,
@@ -228,6 +233,14 @@ class AffectEngine:
             after(feedback["created_at"], self.settings.affect_decay_minutes * 60),
             after(feedback["created_at"], self.settings.raw_event_retention_days * 86400),
         )
+        if feedback.get("until_midnight"):
+            local = datetime.fromisoformat(feedback["created_at"]).astimezone(
+                ZoneInfo(self.settings.timezone))
+            tomorrow = (local + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0, microsecond=0)
+            expires = min(tomorrow.astimezone(UTC).isoformat(timespec="microseconds"),
+                          after(feedback["created_at"],
+                                self.settings.raw_event_retention_days * 86400))
         if not feedback["created_at"] <= self.clock() < expires:
             return None
         return {
@@ -239,6 +252,59 @@ class AffectEngine:
             )},
             "expires_at": expires,
         }
+
+    def _topic_targets(self, row):
+        previous = self.store.one(
+            "SELECT event_id,ingested_at FROM events WHERE conversation_id=? AND rowid<? "
+            "AND source='qq.onebot' AND actor_id='owner' AND NOT EXISTS (SELECT 1 FROM "
+            "affect_evidence a WHERE a.event_id=events.event_id AND a.dimension='engagement') "
+            "ORDER BY rowid DESC LIMIT 1",
+            (row["conversation_id"], row["event_row"]),
+        )
+        # A delivered share can be the subject even hours after the last owner turn.
+        sent = self.store.one(
+            "SELECT origin_event_id FROM outbox WHERE conversation_id=? "
+            "AND action_type IN ('qq.private.reply','qq.private.proactive') AND state='SENT' "
+            "AND NOT EXISTS (SELECT 1 FROM affect_evidence a WHERE a.event_id=origin_event_id "
+            "AND a.dimension='engagement') "
+            "AND sent_at>? AND sent_at<=? ORDER BY sent_at DESC,rowid DESC LIMIT 1",
+            (row["conversation_id"], previous["ingested_at"] if previous else "",
+             row["created_at"]),
+        )
+        targets = {row["event_id"]}
+        if sent:
+            targets.add(sent["origin_event_id"])
+            targets.update(item["source_event_id"] for item in self.store.rows(
+                "SELECT source_event_id FROM event_dependencies WHERE event_id=?",
+                (sent["origin_event_id"],)))
+        elif previous:
+            targets.add(previous["event_id"])
+        return targets
+
+    def contact_paused(self, source_ids=()):
+        """Apply the latest explicit feedback for contact and for this exchange separately."""
+        if not self.settings.affect_enabled:
+            return False
+        ids = set(source_ids)
+        contact = topic = None
+        for row in self.store.rows(
+            "SELECT a.*,e.conversation_id,e.rowid AS event_row,json_extract(e.body_json,'$.text') "
+            "AS wording FROM affect_evidence a JOIN events e USING(event_id) "
+            "WHERE a.identity_id='companion' AND a.dimension='engagement' AND e.redacted=0 "
+            "AND a.expires_at>? ORDER BY a.rowid DESC LIMIT ?",
+            (self.clock(), self.settings.affect_max_evidence),
+        ):
+            proposal = self.preview(row["event_id"])
+            if not proposal or any(proposal[key] != row[key] for key in
+                                   ("dimension", "new_state", "reason_code", "expires_at")):
+                continue
+            wording = row["wording"].strip().rstrip("。！!？? ")
+            if TOPIC_PAUSE.fullmatch(wording) or wording == "继续这个话题":
+                if ids and topic is None and ids & self._topic_targets(row):
+                    topic = row["new_state"] == "pause"
+            elif contact is None:
+                contact = row["new_state"] == "pause"
+        return bool(contact or topic)
 
     def observe(self, event_id):
         if not self.settings.affect_enabled:

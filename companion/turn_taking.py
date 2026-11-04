@@ -193,7 +193,7 @@ def follow_up_target(store, settings, now):
 def flush(store, settings, now):
     """Schedule at most one follow-up check; the notice job owns wording and delivery."""
     from companion import notices
-    from companion.social import proactive_allowed
+    from companion.social import feedback_paused, proactive_allowed
 
     if not settings.turn_taking.follow_up_enabled or not settings.pricing_known:
         return False
@@ -211,6 +211,10 @@ def flush(store, settings, now):
             return False
         if store.one("SELECT 1 FROM jobs WHERE idempotency_key=?",
                      ("notice:followup:" + target["message_id"],)):
+            return False
+        source = store.one("SELECT origin_event_id FROM outbox WHERE message_id=?",
+                           (target["message_id"],))
+        if feedback_paused(store, settings, now, [source["origin_event_id"]]):
             return False
         notices.schedule(store, settings, "followup", target["message_id"],
                          target["conversation_id"], now)
