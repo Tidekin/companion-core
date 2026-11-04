@@ -702,7 +702,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         def receive(store):
             store.configuration_worker = "api"
             return inbox.receive(store, core.settings, core.clock, core.ledger, event,
-                                 x_idempotency_key)
+                                 x_idempotency_key, content_options=core.content.options)
 
         return await app.state.api_store.run(receive)
 
