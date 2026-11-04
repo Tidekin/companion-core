@@ -1484,8 +1484,8 @@ function fieldRow(f, label, only) {
   const active = f.active_value !== undefined && !same(f.value, f.active_value) && f.type !== "secret";
   return el("div", { class: "pf" + (wide ? " wide" : "") + (changed ? " changed" : ""), id: "pf-" + f.key },
     el("div", { class: "pf-l" }, el("b", {}, label || f.label), f.description ? el("span", {}, f.description) : null,
-      el("span", {}, f.effect === "task_boundary" ? "下一任务边界生效" : f.effect === "restart_and_reapproval" ? "需要重启并核对审批" : "需要重启"),
-      active ? el("span", { class: "pf-active" }, (f.active_source === "worker" ? "聊天 Worker 新任务值：" : "API 启动值：") + fmtField(f, f.active_value)) : null),
+      el("span", {}, f.key === "turn_taking" && f.hot_members?.includes("silence_enabled") ? "收尾消息可以不回：下一轮聊天生效。其余设置需要重启" : f.effect === "batch_boundary" ? "等待时间从下一批消息生效。合并开关需要重启" : f.effect === "task_boundary" ? "下一任务边界生效" : f.effect === "restart_and_reapproval" ? "需要重启并核对审批" : "需要重启"),
+      active ? el("span", { class: "pf-active" }, (f.active_source === "inbox" ? "最近一批消息的设置：" : f.active_source === "worker" ? "聊天 Worker 新任务值：" : "API 启动值：") + fmtField(f, f.active_value)) : null),
     el("div", { class: "pf-c" }, control(f, only), f.nullable && f.type !== "secret" && !NULL_DEFAULTS[f.key] && draftVal(f) !== null ? btn("设为未配置", () => setDraft(f, null), { cls: "sm quiet" }) : null),
     el("p", { class: "pf-err", role: "alert", hidden: true }));
 }
@@ -1520,9 +1520,14 @@ function saveDraft() {
   const c = state.data.configuration, changes = Object.create(null);
   for (const [k, v] of state.draft) { const f = fieldOf(k); if (f && !(f.type === "secret" && v === "")) changes[k] = v; }
   if (!Object.keys(changes).length) { toast("没有需要保存的修改"); return; }
-  const hot = c.hot_reload_enabled && Object.keys(changes).every(k => fieldOf(k)?.effect === "task_boundary");
+  const hot = c.hot_reload_enabled && (c.restart_fields || []).every(k => Object.hasOwn(changes, k)) &&
+    Object.entries(changes).every(([k, value]) => {
+      const f = fieldOf(k);
+      return ["task_boundary", "batch_boundary"].includes(f?.effect) && (!f.hot_members ||
+        Object.keys(value || {}).every(member => f.hot_members.includes(member) || same(value[member], f.active_value?.[member])));
+    });
   const form = el("form", { class: "dlg-form" }, el("p", { class: "muted" }, hot
-    ? "保存后等待 Worker 在下一任务边界校验。运行中及等待恢复的任务继续使用各自的原版本。"
+    ? "保存后，新任务或新一批消息会校验并使用新设置。已开始的任务和消息批次使用原设置。"
     : "此版本包含需要重启的设置，整版等待重启；涉及费用或能力策略时还需核对原审批。"), diffList(false));
   const submit = el("button", { type: "submit", class: "btn primary" }, "保存 " + Object.keys(changes).length + " 项修改");
   form.append(el("div", { class: "dlg-acts" }, submit));

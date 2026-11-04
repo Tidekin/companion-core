@@ -16,12 +16,14 @@ from companion import operator_config, runtime_config
 from companion.__main__ import worker
 from companion.config import Settings
 from companion.core import Core
+from companion.turn_taking import SILENCE_RULES, SKIP
 
 
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--now", required=True)
+    parser.add_argument("--next-now")
     parser.add_argument("--tasks", type=int, default=2)
     parser.add_argument("--boundary-contention", action="store_true")
     args = parser.parse_args()
@@ -60,8 +62,10 @@ async def main():
 
     def provider(request):
         calls.append(json.loads(request.content))
+        may_skip = SILENCE_RULES in calls[-1]["messages"][0]["content"]
+        reply = SKIP if may_skip else "synthetic configuration reply"
         return httpx.Response(200, json={"choices": [{"message": {
-            "content": "synthetic configuration reply"}, "finish_reason": "stop"}],
+            "content": reply}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 30, "completion_tokens": 2}})
 
     class SyntheticCore(Core):
@@ -82,6 +86,8 @@ async def main():
                 print("COMPLETED", flush=True)
                 if completed < args.tasks:
                     await gate()
+                    if args.next_now:
+                        args.now = args.next_now
             return result
 
     original = httpx.AsyncClient

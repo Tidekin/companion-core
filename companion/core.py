@@ -443,6 +443,7 @@ class Core(Runtime):
                     # A now-invalid source cancels this response, not the companion window.
                     raise CoreError(reply_revision.CANCELLED, 409) from error
                 raise
+        return task_settings
 
     def _owner_job_view(self, job):
         if not owner_authority.required(self.store, self.settings):
@@ -1773,7 +1774,7 @@ class Core(Runtime):
                     and self.settings.quote_policy != "never"):
                 quote_choice, reply = reply_quote.extract(reply)
             with self.store.transaction():
-                self._check_context_snapshots(job, context_snapshots)
+                task_settings = self._check_context_snapshots(job, context_snapshots)
                 if bounded_text:
                     live_text.check_job(self.store, self.settings, self.clock, job)
                 current = self.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
@@ -1795,7 +1796,7 @@ class Core(Runtime):
                 if notice_parts == []:
                     notices.record(self.store, self.settings, job, [], now)
                 silent = (reply_is_current and generated_reply and job["kind"] == "chat"
-                          and turn_taking.skipped(self.store, self.settings, job, reply))
+                          and turn_taking.skipped(self.store, task_settings, job, reply))
                 if reply_is_current and not silent and (
                     job["kind"] != "activity" or should_send
                     or notices.required(self.store, job["job_id"])

@@ -185,7 +185,8 @@ def test_legacy_task_and_model_identity_survive_upgrade_save_and_restart(hot, ve
         request = budget.reserve(old.store, settings, job["job_id"], "chat",
                                  [{"role": "user", "content": "hello"}], old.clock())
         save(old, conversation_policy={"mode": "ENABLED", "strategy": "participation_v2"},
-             conversation_guidance=TEXT, style_live={"enabled": True})
+             conversation_guidance=TEXT, style_live={"enabled": True},
+             turn_taking={"silence_enabled": True}, input_debounce={"quiet_seconds": 5})
         runtime_config.boundary(old.store, settings, old.clock)
         old.store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL WHERE job_id=?",
                           (job["job_id"],))
@@ -198,6 +199,7 @@ def test_legacy_task_and_model_identity_survive_upgrade_save_and_restart(hot, ve
         runtime_config.check_request(resumed.store, reloaded, request)
         original = runtime_config.get(resumed.store, reloaded, "job:" + job["job_id"])
         assert original.format_version == 1 and runtime_config.identity(reloaded, original) == key
+        assert not original.silence_enabled and original.debounce.quiet_seconds == 2
         reloaded.monthly_limit_micro_usd += 1
         with pytest.raises(CoreError, match="CONFIGURATION_STARTUP_IDENTITY_CHANGED"):
             resumed.context(retry)

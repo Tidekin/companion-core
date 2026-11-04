@@ -316,7 +316,7 @@ def load(settings):
                 snapshot = runtime_config.validate_record(settings, saved, lookup=lambda version:
                     db.execute("SELECT * FROM operator_configuration WHERE version=?",
                                (version,)).fetchone())
-                result = _candidate(settings, runtime_config.values(snapshot))
+                result = _candidate(settings, runtime_config.values(settings, snapshot))
                 result._operator_config_version = snapshot.version
                 result._operator_config_base = (settings._operator_config_base
                                                 or encode(_raw(settings)))
@@ -378,6 +378,9 @@ def view(store, settings):
     approval_problem = owner_authority.stored_policy_problem(store, desired)
     workers = runtime_config.workers(store, settings)
     primary = next((w for w in workers if w["worker"] == "worker"), None)
+    inbox = next((w for w in workers if w["worker"] == "inbox"), None)
+    batch_timing = (runtime_config._read(store, settings, inbox["snapshot_id"]).debounce
+                    if inbox else settings.input_debounce.timing())
     active_version = primary["active_version"] if primary else settings._operator_config_version
     active_settings = runtime_config.effective(settings, runtime_config._read(
         store, settings, primary["snapshot_id"])) if primary else settings
@@ -388,20 +391,29 @@ def view(store, settings):
         if key in EXCLUDED:
             continue
         value, active = getattr(desired, key), getattr(settings, key)
-        if key in runtime_config.HOT_FIELDS:
+        if key == "input_debounce":
+            active = settings.input_debounce.model_copy(update=batch_timing.model_dump())
+            source = "inbox" if inbox else "startup"
+        elif key in runtime_config.HOT_FIELDS and primary:
             active = getattr(active_settings, key)
+            source = "worker"
+        else:
+            source = "startup"
         schema = properties[key]
         kind, nullable = _field_type(schema, definitions)
         if isinstance(value, SecretStr):
             kind = "secret"
         item = {"key": key, "label": LABELS.get(key, key), "group": _group(key),
                 "type": kind, "value": _safe(value), "active_value": _safe(active),
-                "active_source": ("worker" if key in runtime_config.HOT_FIELDS and primary
-                                  else "startup"),
+                "active_source": source,
                 "nullable": nullable,
                 "effect": "task_boundary" if key in runtime_config.HOT_FIELDS else (
                     "restart_and_reapproval" if key in runtime_config.REVIEW_FIELDS
                     else "restart_and_window_handoff"), "schema": schema}
+        if key in runtime_config.HOT_OBJECT_FIELDS:
+            item["hot_members"] = sorted(runtime_config.HOT_OBJECT_FIELDS[key])
+        if key == "input_debounce":
+            item["effect"] = "batch_boundary"
         if "description" in schema:
             item["description"] = schema["description"]
         for bound in ("minimum", "maximum"):
@@ -417,7 +429,8 @@ def view(store, settings):
                                       "operator_configuration ORDER BY version DESC LIMIT 20")]
     pending_restart = bool(classification["restart_fields"] or (
         not settings.operator_hot_reload and version != settings._operator_config_version))
-    pending = version != active_version or any(w["active_version"] != version for w in workers)
+    pending = (version != active_version or batch_timing != desired.input_debounce.timing()
+               or any(w["active_version"] != version for w in workers if w["worker"] != "inbox"))
     expected_reasons = {None, "CONFIGURATION_RESTART_REQUIRED", "CONFIGURATION_REAPPROVAL_REQUIRED",
                         "CONFIGURATION_HOT_RELOAD_DISABLED"}
     worker_error = next((w["reason"] for w in workers if w["saved_version"] == version
