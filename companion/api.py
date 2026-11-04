@@ -766,7 +766,8 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
         core = app.state.core
         response.headers["Cache-Control"] = "no-store"
-        return owner_recall.receive(core.store, settings, core.ledger, core.clock, body)
+        return await app.state.api_store.run(lambda store: owner_recall.receive(
+            store, settings, core.ledger, core.clock, body))
 
     @app.post(prefix + "/live-text/open", dependencies=auth)
     async def live_text_open(body: live_text.OpenWindow):
@@ -796,7 +797,8 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post(prefix + "/live-text/inputs/recall", dependencies=auth)
     async def live_text_recall(body: input_protocol.RecallReceipt):
         core = app.state.core
-        return input_protocol.receive_recall(core.store, settings, core.ledger, core.clock, body)
+        return await app.state.api_store.run(lambda store: input_protocol.receive_recall(
+            store, settings, core.ledger, core.clock, body))
 
     @app.get(prefix + "/live-text/inputs/{event_id}/state", dependencies=auth)
     async def live_text_input_state(event_id: str):
