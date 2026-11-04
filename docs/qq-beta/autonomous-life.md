@@ -213,7 +213,8 @@ PRIVATE_MESSAGE_DRAFT or PRIVATE_DIARY; QZONE_DRAFT additionally needs explicit 
 grants. A private diary result reuses the original cited reflection validation and is a private
 SHADOW draft until consumed through DiaryService. Ordinary closed-day diary generation remains
 with DiaryService and the original nightly lanes. SKIP creates no prose. DEFER is bounded by source expiry
-and permits one timer recheck against the same evidence. A second DEFER waits for a related
+and permits one timer recheck against the same evidence. Two superseded drafting attempts also park the item until new evidence, retaining their original
+usage and daily slots. A second DEFER waits for a related
 source change or expires. The previous reason accompanies a timer recheck. Time and silence
 alone never replenish attempts. SKIP closes the item.
 
