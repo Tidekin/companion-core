@@ -9,7 +9,7 @@ approval and live acceptance; the checks described here use synthetic external t
 ## Configuration and inspection
 
 `Settings.life_loop` accepts `mode = OFF | PREVIEW | SHADOW`, at most eight sources per topic,
-a topic lifetime up to seven days, follow-up delay (default one day), at most two daily decisions
+a topic lifetime up to seven days, follow-up delay (default one day), at most six daily decisions
 by default and a one-hour decision interval. `wake_enabled` must also be on to schedule SHADOW.
 Quiet hours, owner pause, current input, idle time, existing budget and uncertain outcomes gate
 generation. No eligible source means no Life model call. PREVIEW makes no new tasks or model calls.
@@ -114,10 +114,12 @@ no view, change history or option is stored, so none can be restored from a back
   is not a candidate.
 
 Topic candidacy means there is an actual experience to consider, not that a model has established
-an unresolved fact. One active conversational topic groups up to eight actual inputs. A newer
-input changes the snapshot and postpones consideration; it cannot commit an older in-flight
-proposal. If the latest owner input cannot fit within the topic source bound, generation stops
-rather than considering an older incomplete context. A read result binds to an owner conversation
+an unresolved fact. Independent items in one conversation keep their own due time and source
+set. An explicit update about the preceding item, or a new turn sharing concrete terms with an
+active item, updates that item. Unrelated input still preempts in-flight wording. If the latest
+input cannot be projected under current source authority, generation waits. Migration
+`0064_life_topic_items` removes the one-active-item restriction and keeps the sources and
+decisions attached to existing items. A read result binds to an owner conversation
 through its source ancestry. Model-derived
 memory, fabricated daily routines, quoted/rich-only inputs, private-group crossovers and management
 commands are not new Life sources. Model selection can always SKIP.
@@ -126,6 +128,40 @@ The new pipeline replaces generic proactive scheduling and new SocialPlanner sha
 while PREVIEW/SHADOW is selected. OFF restores those existing configured paths. Already accepted
 commitments, existing delivered/uncertain actions and their accounting retain their original
 meaning; changing mode does not erase or replay them.
+
+Private notices reuse the configured conversation guidance. Their compact dialogue reference
+admits at most two turns, within the current history/source permission and measured context
+budget. Reading evidence, required commitment wording and the structured Life decision keep
+their own contracts. A prior SENT proactive notice using an admitted source can signal a repeat.
+A QZone-capable decision gets its original source-only material.
+
+With current Affect permission, “先别聊这个” pauses the preceding exchange. “我去上课了，晚点聊”
+pauses private contact for the configured feedback lifetime. “今天别主动找我” ends at the next
+local midnight within retention. Background reads and private records retain their own gates.
+The explicit owner control “/暂停自主活动” uses the existing autonomy pause. The internal daily
+decision limit covers all attempts, including silent ones. The QQ send cap and the separate
+lull-check cap still apply at their original boundaries.
+
+### Offline replay and owner acceptance
+
+The ten timing cases in `tests/test_proactive_replay.py` offer identical wording for the same
+export issue. Each case advances an independent clock, ingests only events visible so far, and
+checks whether the native scheduler permits that particular private draft. Four checkpoints are
+labelled appropriate and six are labelled wait. These labels describe the synthetic fixtures.
+
+| Policy | Appropriate opportunities used (of 4) | Drafts allowed while labelled wait (of 6) |
+| --- | ---: | ---: |
+| Main at 30628cff | 2 | 1 |
+| Wait for 120 seconds of idle time | 2 | 1 |
+| Always silent | 0 | 0 |
+| Independent items and scoped feedback | 4 | 0 |
+
+At a fixed eligible time the content test inspects actual model input for the configured voice,
+a delivered chat turn and the original reading. The provider supplies fixed wording. Further
+checks cover independent internal choices, source recall, foreground preemption and billing.
+For owner acceptance, review a few actual sent and deferred items together. Judge the
+wording, what was repeated or missed, timing and the next two or three turns before tuning
+personal intervals. An unanswered share has no implied preference label.
 
 ## Actions and destinations
 
@@ -177,9 +213,11 @@ PRIVATE_MESSAGE_DRAFT or PRIVATE_DIARY; QZONE_DRAFT additionally needs explicit 
 grants. A private diary result reuses the original cited reflection validation and is a private
 SHADOW draft until consumed through DiaryService. Ordinary closed-day diary generation remains
 with DiaryService and the original nightly lanes. SKIP creates no prose. DEFER is bounded by source expiry
-and permits at most one further decision; it does not loop on an unanswered topic.
+and permits one timer recheck against the same evidence. A second DEFER waits for a related
+source change or expires. The previous reason accompanies a timer recheck. Time and silence
+alone never replenish attempts. SKIP closes the item.
 
-One completed decision consumes its topic. Explicit closure, expiry, mode changes or restart
+A completed expressive choice or SKIP consumes its topic. Explicit closure, expiry, mode changes or restart
 cannot reopen that candidate. New independent owner input can form a new candidate. Direct pressure
 wording is rejected and the prompt excludes guilt, abandonment and demands for replies. Semantic
 appropriateness still needs human evaluation before any live Beta; synthetic outputs do not prove
