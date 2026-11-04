@@ -854,6 +854,7 @@ class LifeTopics:
     def _related_topic(self, source, now, feedback):
         """Compare only actual sources still admitted by the current Life approval."""
         from companion.context_selection import terms
+        from companion.mood import CHAT_SIGNALS, service_for_store
 
         def anchors(text):
             return terms(re.sub(
@@ -873,11 +874,13 @@ class LifeTopics:
             "AND t.state IN ('WAITING','DUE') ORDER BY e.rowid DESC LIMIT 32",
             (source["conversation_id"],),
         )
+        reply_feedback = self.settings.mood_enabled and source["text"].strip().rstrip(
+            "。！! ") in CHAT_SIGNALS
         previous = self.store.one(
             "SELECT event_id FROM events WHERE conversation_id=? AND source='qq.onebot' "
             "AND actor_id='owner' AND rowid<(SELECT rowid FROM events WHERE event_id=?) "
             "ORDER BY rowid DESC LIMIT 1", (source["conversation_id"], source["event_id"]),
-        ) if follows_previous else None
+        ) if follows_previous or reply_feedback else None
         best, best_overlap = None, 0
         for topic in rows:
             try:
@@ -887,7 +890,13 @@ class LifeTopics:
             except CoreError:
                 continue
             if previous and topic["anchor"] == previous["event_id"]:
-                return topic
+                if follows_previous:
+                    return topic
+                pair = {source["event_id"], topic["anchor"]}
+                mood = service_for_store(self.store, self.settings, self.clock).reference(
+                    at=now, allowed=pair, text=source["text"])
+                if mood and any(set(cause["source_event_ids"]) == pair for cause in mood["causes"]):
+                    return topic
             previous_terms = anchors(anchor["text"])
             shared = focus & previous_terms
             overlap = len(shared)
