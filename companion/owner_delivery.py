@@ -383,6 +383,31 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
     return {"approved": True, **({"lease_until": min(deadlines).isoformat()} if deadlines else {})}
 
 
+def asset_lease(store, clock, message_id, body, permission):
+    """Check the asset request inside the caller's authorized delivery transaction."""
+    row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    if (
+        row["state"] not in {"LEASED", "SENDING"}
+        or not row["lease_until"]
+        or row["lease_until"] <= clock()
+        or body.lease_token != row["lease_token"]
+        or body.authority != json.loads(row["authority_json"])
+        or body.event_id != row["origin_event_id"]
+        or body.content_sha256 != row["content_sha256"]
+    ):
+        raise CoreError("OWNER_DELIVERY_LEASE_LOST", 409)
+    reply_revision.require_reply_source(store, body.event_id, body.reply_revision)
+    return row, {
+        "message_id": message_id,
+        "delivery_key": row["delivery_key"],
+        "event_id": body.event_id,
+        "reply_revision": body.reply_revision,
+        "authority": body.authority,
+        "content_sha256": body.content_sha256,
+        "lease_until": permission["lease_until"],
+    }
+
+
 def send_check(store, settings, clock, body):
     from companion.voice_jobs import REPLY_RECEIPT
 
