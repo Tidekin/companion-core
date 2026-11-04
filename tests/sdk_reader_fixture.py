@@ -36,7 +36,10 @@ class Provider:
         assert request.url.path.endswith("/chat/completions")
         self.requests.append(json.loads(request.content))
         assert self.responses, "The harness repeated an already completed provider request"
-        return httpx.Response(200, json=self.responses.pop(0))
+        body = self.responses.pop(0)
+        if isinstance(body, httpx.Response):
+            return body
+        return httpx.Response(200, json=body)
 
 
 @asynccontextmanager

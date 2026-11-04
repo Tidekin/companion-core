@@ -6,6 +6,7 @@ import json
 
 from companion import budget, image_spool, paid_budget, qq_images, video_input
 from companion.contracts import CoreError
+from companion.model import ModelResponseError, ModelTransportError
 from companion.privacy import epoch
 from companion.store import encode, uid
 
@@ -60,29 +61,34 @@ def _inputs(core, job):
     return sources, inputs
 
 
-def _binding(core, job, call_id, question):
+class PreviewReplyReady(Exception):
+    """The settled chat model supplied the final text before optional video I/O."""
+
+
+def _binding(core, job, call_id, args):
     row = core.store.one("SELECT t.*,m.state AS primary_state,m.scenario,m.job_id AS primary_job "
         "FROM agent_tool_calls t JOIN model_usage m ON m.request_id=t.model_request_id "
         "WHERE t.job_id=? AND t.tool_call_id=?", (job["job_id"], call_id))
     if (not row or row["state"] != "STARTED" or row["tool_name"] != "understand_video"
-        or row["args_sha256"] != paid_budget.sha({"question": question})
+        or row["args_sha256"] != paid_budget.sha(args)
         or row["primary_state"] != "SETTLED" or row["scenario"] != "chat"
         or row["primary_job"] != job["job_id"]):
         raise CoreError("CONTENT_VIDEO_TOOL_INVALID", 403)
     return row
 
 
-async def analyze(core, job, snapshots, call_id, question):
+async def analyze(core, job, snapshots, call_id, question, preview_reply):
     """A synchronous SDK tool reuses original image custody and the existing paid ledger."""
     from companion.agent_runtime import check_conversation
     from companion.model import model_payload
     from companion.privacy import redact
 
-    if not question.strip():
+    args = {"question": question, "preview_reply": preview_reply}
+    if not question.strip() or not preview_reply.strip():
         raise CoreError("CONTENT_VIDEO_TOOL_INVALID", 400)
     view = check_conversation(core, job, snapshots, purpose="content")
     policy = video_input.contract(core.settings, job["job_id"], job["job_id"])
-    _binding(core, job, call_id, question)
+    _binding(core, job, call_id, args)
     sources, inputs = _inputs(core, job)
     if not inputs:
         return {"state": "UNAVAILABLE", "error_code": "CONTENT_VIDEO_ANIMATION_REQUIRED"}
@@ -116,10 +122,10 @@ async def analyze(core, job, snapshots, call_id, question):
     metadata = {"kind": "qq_animation", "request_id": request_id,
         "authority": view.authority.as_dict(), "source_sha256": paid_budget.sha(sources),
         "payload_sha256": paid_budget.sha(model_payload(wire, messages, "content_video")),
-        "videos": videos}
+        "videos": videos, "preview_sha256": paid_budget.sha(redact(preview_reply, core.settings))}
     with core.store.transaction():
         check_conversation(core, job, snapshots, purpose="content")
-        binding = _binding(core, job, call_id, question)
+        binding = _binding(core, job, call_id, args)
         if binding["metadata_json"] is not None or core.store.one(
             "SELECT 1 FROM agent_tool_calls WHERE job_id=? AND tool_name='understand_video' "
             "AND metadata_json IS NOT NULL AND tool_call_id<>?", (job["job_id"], call_id),
@@ -134,7 +140,7 @@ async def analyze(core, job, snapshots, call_id, question):
     def check():
         current = check_conversation(core, job, snapshots, current_request=request_id,
                                       purpose="content")
-        binding = _binding(core, job, call_id, question)
+        binding = _binding(core, job, call_id, args)
         if (current.authority.as_dict() != metadata["authority"]
             or json.loads(binding["metadata_json"] or "{}") != metadata
             or paid_budget.sha(_inputs(core, job)[0]) != metadata["source_sha256"]):
@@ -143,9 +149,31 @@ async def analyze(core, job, snapshots, call_id, question):
     budget.reserve(core.store, core.settings, job["job_id"], "content_video", messages,
         core.clock(), request_id=request_id, logical_request_id=job["job_id"],
         clock=core.clock, source_check=check)
-    async with asyncio.timeout(policy.timeout_seconds + 2):
-        response = await budget.complete(core.model, core.store, core.settings, request_id,
-            messages, "content_video", core.clock, source_check=check)
+    try:
+        async with asyncio.timeout(policy.timeout_seconds + 2):
+            response = await budget.complete(core.model, core.store, core.settings, request_id,
+                messages, "content_video", core.clock, source_check=check)
+    except (ModelTransportError, ModelResponseError) as error:
+        if error.failure != "HTTP_503":
+            raise
+        # Settlement (including retained UNKNOWN) precedes this checkpoint. Finish
+        # from the primary response in one commit; never re-enter either provider.
+        with core.store.transaction():
+            check()
+            text = redact(preview_reply, core.settings)
+            proof = {"kind": "video_preview_reply", "request_id": request_id,
+                     "call_id": call_id, "text_sha256": paid_budget.sha(text)}
+            core.store.execute("UPDATE agent_tool_calls SET state='RETURNED',result_json=?,"
+                "updated_at=? WHERE job_id=? AND tool_call_id=?",
+                (encode({"state": "UNAVAILABLE", "reason": "HTTP_503"}), core.clock(),
+                 job["job_id"], call_id))
+            snapshots.append(proof)
+            if core.store.execute("UPDATE agent_conversations SET phase='OUTPUT',output_text=?,"
+                "snapshots_json=?,updated_at=? WHERE job_id=? AND phase='READY' AND request_id=?",
+                (text, encode(snapshots), core.clock(), job["job_id"],
+                 binding["model_request_id"])).rowcount != 1:
+                raise CoreError("CONVERSATION_OUTPUT_REQUIRED", 409) from error
+        raise PreviewReplyReady(text) from error
     check()
     usage = core.store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
     if not usage or usage["state"] != "SETTLED":
@@ -170,12 +198,15 @@ def toolset(core, job, snapshots):
     from pydantic_ai.toolsets import FunctionToolset
 
     async def understand_video(ctx: RunContext,
-        question: Annotated[str, Field(min_length=1, max_length=1000)]) -> dict:
+        question: Annotated[str, Field(min_length=1, max_length=1000)],
+        preview_reply: Annotated[str, Field(min_length=1, max_length=1000)]) -> dict:
         """Analyze motion in the conversation's captured animations using their original timing.
 
         Args:
-            question: The motion, sequence or expression to inspect; never a URL or local path.
+            question: The motion, sequence or expression to inspect.
+            preview_reply: A ready-to-send conversational reply based only on the sampled
+                frames, in the owner's language. Use it if the video service is unavailable.
         """
-        return await analyze(core, job, snapshots, ctx.tool_call_id, question)
+        return await analyze(core, job, snapshots, ctx.tool_call_id, question, preview_reply)
 
     return FunctionToolset([understand_video], sequential=True, max_retries=1)

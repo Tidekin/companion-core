@@ -127,11 +127,18 @@ def _sources(store, settings, clock, job, *, executing=False):
     return view
 
 
-def _usage(store, job, view):
+def _usage(store, job, view, snapshots, message_id, *, group=None):
+    from companion.transport import reply_group
+
+    preview = next((s for s in snapshots if s["kind"] == "video_preview_reply"), None)
+    unavailable = (_preview_request(store, job, group or reply_group(store, message_id), preview)
+                   if preview else None)
     rows = store.rows("SELECT m.request_id,m.state,m.scenario,a.authority_json "
                       "FROM model_usage m LEFT JOIN model_admissions a USING(request_id) "
                       "WHERE m.job_id=? ORDER BY m.rowid", (job["job_id"],))
-    if (any(row["state"] != "SETTLED" or not row["authority_json"]
+    if (any(not (row["state"] == "SETTLED" or (
+            row["state"] == "UNKNOWN" and row["scenario"] == "content_video"
+            and row["request_id"] == unavailable)) or not row["authority_json"]
             or json.loads(row["authority_json"]) != view.authority.as_dict() for row in rows)
         or not reply_revision.control_job(store, job)
         and not any(row["scenario"] == ("qq_poke" if job["kind"] == "poke" else job["kind"])
@@ -140,7 +147,29 @@ def _usage(store, job, view):
     return [row["request_id"] for row in rows]
 
 
-def _material(store, row, job, view, requests, *, meme_binding=None):
+def _preview_request(store, job, group, proof):
+    """Only the settled parent tool call's pre-dispatch text may use this exception."""
+    tool = store.one("SELECT t.metadata_json,t.result_json,c.output_text "
+        "FROM agent_tool_calls t JOIN agent_conversations c USING(job_id) "
+        "JOIN model_usage m ON m.request_id=t.model_request_id AND m.job_id=t.job_id "
+        "JOIN model_usage v ON v.job_id=t.job_id AND v.request_id=? AND v.scenario='content_video' "
+        "WHERE t.job_id=? AND t.tool_call_id=? AND t.tool_name='understand_video' "
+        "AND t.state='RETURNED' AND c.request_id=m.request_id AND m.state='SETTLED' "
+        "AND m.scenario='chat'", (proof["request_id"], job["job_id"], proof["call_id"]))
+    if not tool or not group:
+        raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
+    metadata = json.loads(tool["metadata_json"] or "{}")
+    if (metadata.get("request_id") != proof["request_id"] or metadata.get("kind") != "qq_animation"
+        or metadata.get("preview_sha256") != proof["text_sha256"]
+        or json.loads(tool["result_json"] or "{}") != {"state": "UNAVAILABLE", "reason": "HTTP_503"}
+        or paid_budget.sha(group["text"]) != proof["text_sha256"]
+        or group["text"] != tool["output_text"]
+        or any(set(json.loads(item["content_json"])) != {"text"} for item in group["rows"])):
+        raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
+    return proof["request_id"]
+
+
+def _material(store, row, job, view, requests, snapshots, *, meme_binding=None):
     from companion.agent_output import reply_format, song_choice
 
     event = store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
@@ -156,7 +185,7 @@ def _material(store, row, job, view, requests, *, meme_binding=None):
             "event_sha256": event_digest(event), "content_sha256": row["content_sha256"],
             "delivery_key": row["delivery_key"], "action_type": row["action_type"],
             "history_sha256": paid_budget.sha(_history_proof(store, job)),
-            "context_sha256": paid_budget.sha(_snapshots(store, job)),
+            "context_sha256": paid_budget.sha(snapshots),
             "request_ids": requests,
             **({"reply_format": "voice"} if job["kind"] == "chat"
                and "voice" in view.policy.purposes
@@ -268,10 +297,11 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
     if not message_ids:
         return
     view = _sources(store, settings, clock, job, executing=executing)
-    requests = _usage(store, job, view)
     first = store.one("SELECT action_type FROM outbox WHERE message_id=?", (message_ids[0],))
     group = None if first and first["action_type"] == "qq.private.poke" else reply_group(
         store, message_ids[0])
+    snapshots = _snapshots(store, job)
+    requests = _usage(store, job, view, snapshots, message_ids[0], group=group)
     if group:
         envelopes = segment_envelopes(group)
         if (len(group["text"]) > view.policy.max_reply_chars
@@ -306,7 +336,7 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
         row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
         if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
             raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
-        material = _material(store, row, job, view, requests,
+        material = _material(store, row, job, view, requests, snapshots,
                               meme_binding=_meme_binding(store, settings, clock, job, row))
         if job["kind"] == "poke":
             from companion import poke
@@ -335,9 +365,12 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
             raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     else:
         view = _sources(store, settings, clock, job)
+        snapshots = _snapshots(store, job)
+        requests = _usage(store, job, view, snapshots, message_id)
+
         if (job["state"] != "SUCCEEDED"
             or json.loads(row["authority_json"]) != view.authority.as_dict()
-            or material != _material(store, row, job, view, _usage(store, job, view),
+            or material != _material(store, row, job, view, requests, snapshots,
                 meme_binding=_meme_binding(store, settings, clock, job, row))):
             raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     reply_revision.check_delivery(store, message_id)

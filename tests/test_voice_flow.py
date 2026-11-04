@@ -253,11 +253,12 @@ def test_voice_choice_preserves_existing_picture_expression(core, monkeypatch):
     original = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
         (owner_delivery.DELIVERY + message_id,))["value"])
     updated = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    job = owner_delivery._job(core.store, original["job_id"])
     core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
                        (encode(owner_delivery._material(core.store, updated,
-                            owner_delivery._job(core.store, original["job_id"]),
+                            job,
                             voice_authority.current(core.store, core.settings, core.clock),
-                            original["request_ids"])),
+                            original["request_ids"], owner_delivery._snapshots(core.store, job))),
                         owner_delivery.DELIVERY + message_id))
     assert prepare(core, flow, message_id).state == "TEXT"
     assert not core.store.rows("SELECT * FROM voice_jobs")

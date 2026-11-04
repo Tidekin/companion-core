@@ -12,7 +12,9 @@ import httpx
 import pytest
 
 from companion import owner_authority
+from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
+from companion.reply_segments import SegmentedReplyConfig
 from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
@@ -31,7 +33,8 @@ async def animation(core, client, config, plan, tmp_path, mime, *, number=42):
 
 
 def responses():
-    return [answer(calls=[call("motion-1", "understand_video", {"question": "动作怎样变化？"})]),
+    return [answer(calls=[call("motion-1", "understand_video", {"question": "动作怎样变化？",
+                  "preview_reply": "抽帧里这一团橙色好抢眼。像个小橘子。"})]),
             answer("一轮动图从红色画面变为橙色画面。"), answer("画面由红色变成橙色。")]
 
 
@@ -83,6 +86,44 @@ def test_native_sdk_motion_tool_uses_real_video_and_original_ledger(core, tmp_pa
                 "SELECT request_id FROM model_usage WHERE scenario='content_video'")["request_id"]
             assert "data:video" not in encode(saved)
             assert len(core.store.rows("SELECT * FROM outbox")) == 1
+    run(scenario())
+
+
+@pytest.mark.parametrize("body", [None, {"usage": {"prompt_tokens": 20, "completion_tokens": 1}}])
+def test_video_503_delivers_prepared_preview_without_repeating_io(core, tmp_path, body):
+    async def scenario():
+        from companion import owner_delivery
+
+        core.settings.segmented_reply = SegmentedReplyConfig(min_chars=4)
+        async with window(core, tmp_path, media=True, content=True, video=True) as (
+            client, config, plan,
+        ):
+            event = await animation(core, client, config, plan, tmp_path, "image/gif")
+            job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+            path, output = tmp_path / "worker.pickle", tmp_path / "requests.json"
+            path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
+                [responses()[0], httpx.Response(503, json=body)], "SUCCEEDED", str(output))))
+            process = await asyncio.create_subprocess_exec(sys.executable,
+                str(Path(__file__).with_name("reader_sdk_worker.py")), str(path),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            logs, _ = await asyncio.wait_for(process.communicate(), 60)
+            assert process.returncode == 0, logs.decode(errors="replace")
+            assert len(json.loads(output.read_text(encoding="utf-8"))) == 2
+            usage = core.store.rows(
+                "SELECT scenario,state,billed_micro_usd FROM model_usage ORDER BY rowid")
+            assert [(r["scenario"], r["state"]) for r in usage] == [
+                ("chat", "SETTLED"), ("content_video", "SETTLED" if body else "UNKNOWN")]
+            assert usage[1]["billed_micro_usd"] > 0
+            replies = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
+            assert [json.loads(r["content_json"])["text"] for r in replies] == [
+                "抽帧里这一团橙色好抢眼。", "像个小橘子。"]
+            delivery = core.store, core.settings, core.clock, replies[0]["message_id"]
+            owner_delivery.check_delivery(*delivery)
+            with pytest.raises(CoreError, match="REPLY_SEGMENT_NOT_READY"):
+                owner_delivery.check_delivery(*delivery[:3], replies[1]["message_id"])
+            core.store.execute("UPDATE agent_tool_calls SET metadata_json='{}'")
+            with pytest.raises(CoreError, match="OWNER_DELIVERY"):
+                owner_delivery.check_delivery(*delivery)
     run(scenario())
 
 
