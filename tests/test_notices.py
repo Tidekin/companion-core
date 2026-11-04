@@ -74,6 +74,7 @@ def test_share_skip_keeps_the_real_model_charge_without_an_outbox(core):
     ready_share(core, "[SKIP]")
     assert run(run_notice(core))
     assert core.store.one("SELECT state FROM social_candidates")["state"] == "SKIPPED"
+    assert proactive_counts(core.store, core.settings, core.clock()) == (0, False)
     assert not core.store.rows("SELECT * FROM outbox")
     assert len(core.model.calls) == 1
     assert core.store.one("SELECT billed_micro_usd FROM model_usage")["billed_micro_usd"] > 0
