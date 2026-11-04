@@ -478,14 +478,20 @@ class Core(Runtime):
                     + encode(selected)}, "source_event_ids": sorted(sources),
                 "snapshot": selected}
 
-    def _style_live_reference(self, job, text):
+    def _style_live_reference(self, job, text, *, material=None):
         """Owner-approved B站 style candidates for this owner chat turn, or None."""
         s = self.store
         cfg = runtime_config.effective(self.settings, runtime_config.check(
             s, self.settings, "job:" + job["job_id"]))
-        if (not cfg.style_live.enabled or job["kind"] != "chat"
-            or not reply_revision.owner_input(s, job["event_id"])
-            or reply_revision.control_job(s, job) or private_life.strict(s, cfg)):
+        if not cfg.style_live.enabled or private_life.strict(s, cfg):
+            return None
+        if notices.reference(job):
+            material = material or notices.validate(s, cfg, job, self.clock())
+            if "QZONE_DRAFT" in material.get("allowed_destinations", ()):
+                return None
+            text = notices.subject(material)
+        elif (job["kind"] != "chat" or not reply_revision.owner_input(s, job["event_id"])
+              or reply_revision.control_job(s, job)):
             return None
         from companion import style_observation
 
@@ -586,6 +592,88 @@ class Core(Runtime):
             items = items[:-1]
         return None
 
+    def _notice_context(self, cfg, job, data, authority, snapshots):
+        """Word one notice with shared expression and a small authorized dialogue window."""
+        from companion.token_measurement import measure_request
+
+        public = "QZONE_DRAFT" in data.get("allowed_destinations", ())
+        rules = PRINCIPLES
+        if not public and cfg.conversation_policy.mode == "ENABLED":
+            rules = conversation_policy.apply_strategy(
+                [{"role": "system", "content": rules}], cfg.conversation_policy.strategy,
+                guidance=cfg.conversation_guidance)[0]["content"]
+        contacts = []
+        if not public and (not authority and cfg.mode != "live"
+                           or authority and "history" in authority.policy.purposes):
+            contacts = notices.prior_contacts(self.store, job, data, self.clock(),
+                                              cfg.raw_event_retention_days)
+        messages = notices.messages(self.store, cfg, job, self.clock(), rules,
+                                    data=data, prior_contacts=contacts)
+        retained = []
+        sources = set(data["source_events"]) | {item["event_id"] for item in contacts}
+        if not public and (not authority or "expression" in authority.policy.purposes):
+            style = self._style_live_reference(job, "", material=data)
+            if style:
+                styled = [{"role": "system", "content": messages[0]["content"] + style["text"]},
+                          *messages[1:]]
+                tokens = measure_request(cfg, styled, "activity").reserved_input_tokens
+                if tokens <= cfg.context_soft_tokens:
+                    messages = styled
+                    sources.update(style["source_event_ids"])
+                    retained.append({"kind": "style_observation", "proof": style["proof"]})
+
+        history = []
+        if not public and authority and "history" in authority.policy.purposes:
+            purpose = owner_authority.model_purpose(self.store, job["kind"], job["job_id"])
+            history = owner_input.history_sources(self.store, cfg, self.clock, job, purpose=purpose)
+            if data["kind"] == "life" and (
+                authority.policy.life_shadow.source_scope == "selected"
+                or data["read_goals_enabled"]
+                or set(data["allowed_destinations"]) - {"PRIVATE_MESSAGE_DRAFT"}
+            ):
+                # A goal or saved expression must remain traceable to its approved roots.
+                history = [turn for turn in history if turn["event_id"] in data["source_events"]]
+        elif not public and not authority and cfg.mode != "live":
+            history = dialogue_history.recent_sent_sources(
+                self.store, job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2)
+        # The notice contract stays last. History is optional and yields its space
+        # before the required reading/decision material.
+        focus = context_selection.terms(notices.subject(data))
+        ranked = sorted(reversed(history), key=lambda item: context_selection.relevance(
+            focus, item["user_text"] + (item["reply_text"] or "")), reverse=True)[:2]
+        selected = [item for item in history if item in ranked]
+        while selected:
+            if authority and data["kind"] == "life":
+                scope = authority.policy.history
+                owner_sources = [x for x in data["sources"] if x["kind"] == "owner_message"]
+                ids = {item["event_id"] for item in selected}
+                size = sum(len(x["text"].encode()) for x in owner_sources)
+                size += sum(len(item["user_text"][:300].encode()) +
+                            len((item["reply_text"] or "")[:300].encode()) for item in selected)
+                if (len(ids | {x["event_id"] for x in owner_sources}) > scope.max_turns
+                    or len(ids | set(data["source_events"])) > cfg.life_loop.source_limit
+                    or size > scope.max_utf8_bytes):
+                    selected.remove(ranked.pop())
+                    continue
+            prior = {"role": "user", "content": "近期私聊片段（历史参考）：\n" + encode([
+                {"主人": item["user_text"][:300], "你": (item["reply_text"] or "")[:300]}
+                for item in selected])}
+            candidate = [messages[0], prior, *messages[1:]]
+            tokens = measure_request(cfg, candidate, "activity").reserved_input_tokens
+            if tokens <= cfg.context_soft_tokens:
+                messages = candidate
+                sources.update(item["event_id"] for item in selected)
+                if authority:
+                    retained.append({"kind": "history",
+                                     "proof": owner_input.history_proof(selected)})
+                break
+            selected.remove(ranked.pop())
+        reply_revision.remember_sources(self.store, job, sources)
+        self._check_context_snapshots(job, retained)
+        if snapshots is not None:
+            snapshots.extend(retained)
+        return messages
+
     def context(self, job, memories=None, memory_paused=False, *, snapshots=None, model_tools=(),
                 planning=False, turn_ranking=None):
         s = self.store
@@ -601,12 +689,11 @@ class Core(Runtime):
         if job["kind"] == "chat":
             reply_revision.require_reply_source(s, job["event_id"], job.get("reply_revision"))
         followup = (notices.reference(job) or {}).get("kind") == "followup"
-        notice_messages = notices.messages(s, cfg, job, self.clock(), PRINCIPLES)
-        if notice_messages:
-            material = notices.validate(s, cfg, job, self.clock())
-            reply_revision.remember_sources(s, job, material["source_events"])
+        if (material := notices.validate(s, cfg, job, self.clock())) is not None:
             if not followup:
-                return notice_messages
+                return self._notice_context(cfg, job, material, authority, snapshots)
+            notice_messages = notices.messages(s, cfg, job, self.clock(), PRINCIPLES, data=material)
+            reply_revision.remember_sources(s, job, material["source_events"])
         body = json.loads(job["body_json"])
         text = body.get("text", "")
         expression_rules, expression_data = self.expression.instruction_parts(job["event_id"]) if (
@@ -617,10 +704,10 @@ class Core(Runtime):
             rules += "\n" + turn_taking.FOLLOW_UP_RULES
         affect = self._affect_context(authority)
         rules, policy_data, conversation_decision = conversation_policy.prompt_parts(
-            rules, cfg.conversation_policy if job["kind"] == "chat"
+            rules, cfg.conversation_policy if job["kind"] == "chat" or followup
             else conversation_policy.ConversationPolicyConfig(mode="OFF"),
             current_text=text, affect=affect,
-            guidance=cfg.conversation_guidance if job["kind"] == "chat" else None,
+            guidance=cfg.conversation_guidance if job["kind"] == "chat" or followup else None,
         )
         dynamic_rules = [expression_data, policy_data]
         if job["kind"] == "chat" and not cfg.chat_time_labels:

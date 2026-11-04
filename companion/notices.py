@@ -132,6 +132,12 @@ def _material(store, settings, kind, ref, now, *, mood_at=None):
             sources.append(row["result_event_id"])
     else:
         raise CoreError("NOTICE_SCOPE_INVALID", 403)
+    if kind in {"share", "followup"}:
+        from companion.social import feedback_paused
+
+        focus = sources if kind == "share" else sources[-1:]
+        if feedback_paused(store, settings, now, focus):
+            raise CoreError("PROACTIVE_SEND_PAUSED", 409)
     sources = sorted(set(sources))
     if expired_sources(store, sources, after(now, -86400 * settings.raw_event_retention_days)):
         raise CoreError("NOTICE_SOURCE_EXPIRED", 409)
@@ -241,14 +247,40 @@ def check_request(store, settings, request_id, now):
         validate(store, settings, job, now)
 
 
-def messages(store, settings, job, now, principles):
+def prior_contacts(store, job, data, now, retention_days):
+    """Return only admitted source IDs shared with a previously delivered private notice."""
+    return store.rows(
+        "SELECT DISTINCT e.event_id,d.source_event_id FROM outbox o "
+        "JOIN events e ON e.event_id=o.origin_event_id JOIN event_dependencies d "
+        "ON d.event_id=e.event_id WHERE o.conversation_id=? "
+        "AND o.action_type='qq.private.proactive' "
+        "AND o.state='SENT' AND e.redacted=0 AND e.event_id<>? AND o.sent_at>? AND o.sent_at<=? "
+        "AND d.source_event_id IN (SELECT value FROM json_each(?)) ORDER BY o.sent_at DESC LIMIT 8",
+        (job["conversation_id"], job["event_id"], after(now, -retention_days * 86400),
+         job["created_at"], encode(sorted(data["source_events"]))),
+    )
+
+
+def subject(data):
+    if data["kind"] == "life":
+        return " ".join(item["text"] for item in data["sources"])
+    if data["kind"] == "followup":
+        return data["turns"][-1]["owner"]
+    return data.get("title", data.get("topic", "")) + " " + data["text"][:500]
+
+
+def messages(store, settings, job, now, principles, *, data=None, prior_contacts=()):
     from companion import time_context
     from companion.token_measurement import measure_request
 
-    data = validate(store, settings, job, now)
+    if data is None:
+        data = validate(store, settings, job, now)
     if data is None:
         return None
     payload = {key: value for key, value in data.items() if key != "source_events"}
+    if prior_contacts:
+        payload["previously_used_in_sent_contact"] = sorted(
+            {item["source_event_id"] for item in prior_contacts})
     rules = RULES
     time_messages = []
     if data["kind"] == "life":
@@ -266,6 +298,8 @@ def messages(store, settings, job, now, principles):
         payload["replied_at"] = time_context.stamp(data["replied_at"], settings.timezone)
         time_messages.append(time_context.now_message(
             now, settings.timezone, reference="本次主动跟进的时间"))
+    if prior_contacts:
+        rules += "\n标注的来源也用于此前已送达的主动消息。考虑是否有新内容；沉默不表示负面反馈。"
     result = [{"role": "system", "content": principles + "\n" + rules},
               *time_messages,
               {"role": "user", "content": encode(payload)}]
