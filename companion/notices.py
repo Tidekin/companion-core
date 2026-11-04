@@ -101,7 +101,7 @@ def _material(store, settings, kind, ref, now, *, mood_at=None):
 
         if not settings.turn_taking.follow_up_enabled:
             raise CoreError("NOTICE_SOURCE_UNAVAILABLE", 409)
-        data, sources = follow_up_material(store, ref, now)
+        data, sources = follow_up_material(store, settings, ref, now)
     elif kind == "commitment":
         row = store.one(
             "SELECT c.*,g.topic,g.redacted FROM commitments c JOIN goals g USING(goal_id) "
