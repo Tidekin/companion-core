@@ -41,6 +41,9 @@ Bridge 已收到但 Core 尚未入库的新消息，也会在最终派发边界�
 
 ## 已签名撤回与删除重放
 
+OwnerAuthority 与 live-text 两个撤回入口都使用 ApiStore 的独立连接。等写锁时，
+其他 HTTP 请求可继续执行。撤回回执在原事务完成后返回，重复回执沿用同一删除记录。
+
 Bridge 仅从认证 OneBot 接收链路处理当前机器人的主人私聊 `friend_recall`。
 签名回执绑定窗口、账号身份摘要、`protocol_epoch`、源消息、发生/接收时间和捕获证据摘要。
 Core 校验签名和源身份；标准 notice 不含消息方向，因此必须匹配已签名的主人入站捕获，
