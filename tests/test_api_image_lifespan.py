@@ -374,9 +374,12 @@ def test_exclusive_memory_control_opens_no_image_client_even_with_prior_image_se
     approval = grant(core, config, "/记住这个：合成项目")
     clients = model_clients(monkeypatch, core.settings,
                             lambda request: pytest.fail("Memory controls have no model I/O"))
+    def forbid_full_core(*args, **kwargs):
+        pytest.fail("Exclusive controls must use only the durable runtime")
+
+    monkeypatch.setattr(api, "Core", forbid_full_core)
     app = api.create_app(core.settings, memory_control_grant=approval)
     with TestClient(app) as client:
         assert client.get("/internal/v1/health/live").status_code == 200
         assert client.get("/internal/v1/health/ready").status_code == 403
-        assert app.state.core.model is None
     assert clients == []

@@ -70,6 +70,7 @@ from companion.owner_authority_protocol import (
 from companion.poke_protocol import OwnerPokeCapture, PokeCapture
 from companion.privacy import ErasureLedger
 from companion.reading import service_for_store as reading_service
+from companion.runtime import Runtime
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.voice_jobs import VoiceASRProof
 from companion.voice_node_api import register_voice_node_routes
@@ -170,22 +171,27 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @asynccontextmanager
     async def lifespan(app):
-        with stopped_workers(settings.database) if memory_control_grant else nullcontext():
-            image_model = (
-                memory_control_grant is None and settings.mode == "live"
-                and settings.content_enabled and settings.content.use_chat_model_for_vision
-                and qq_images.enabled(settings)
-            )
-            async with (
-                AsyncClient(timeout=settings.timeout_seconds, trust_env=False)
-                if image_model else nullcontext()
-            ) as client:
-                app.state.core = Core(settings, ModelClient(settings, client) if client else None)
-                app.state.core.store.configuration_worker = "api"
-                try:
-                    yield
-                finally:
-                    app.state.core.store.close()
+        if memory_control_grant is not None:
+            with stopped_workers(settings.database), Runtime(settings) as runtime:
+                runtime.store.configuration_worker = "api"
+                app.state.core = runtime
+                yield
+            return
+        image_model = (
+            settings.mode == "live"
+            and settings.content_enabled and settings.content.use_chat_model_for_vision
+            and qq_images.enabled(settings)
+        )
+        async with (
+            AsyncClient(timeout=settings.timeout_seconds, trust_env=False)
+            if image_model else nullcontext()
+        ) as client:
+            app.state.core = Core(settings, ModelClient(settings, client) if client else None)
+            app.state.core.store.configuration_worker = "api"
+            try:
+                yield
+            finally:
+                app.state.core.store.close()
 
     app = FastAPI(
         title="Companion Core",
