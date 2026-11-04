@@ -96,11 +96,7 @@ def scan(store, settings, now):
     An entry left RUNNING by a stopped worker after its call was reserved follows that
     call: once budget recovery marks it UNKNOWN, so does the entry. It is never retried.
     """
-    store.execute(
-        "UPDATE watch_ledger SET state='UNKNOWN',error_code='MODEL_USAGE_UNKNOWN',"
-        "lease_until=NULL,updated_at=? WHERE state='RUNNING' AND lease_until<=? "
-        "AND model_request_id IN (SELECT request_id FROM model_usage WHERE state='UNKNOWN')",
-        (now, now))
+    budget.close_expired_model_work(store, "watch_ledger", now)
     since = after(now, -settings.watch_ledger.lookback_hours * 3600)
     rows = store.rows(
         "SELECT o.event_id FROM observations o JOIN events e USING(event_id) "
@@ -194,7 +190,16 @@ async def run_once(store, settings, model, clock):
         return bool(added)
     request_id = None
 
+    bound_id = None
+
+    def owns_claim():
+        return store.one("SELECT 1 FROM watch_ledger WHERE entry_id=? AND state='RUNNING' "
+                         "AND attempts=? AND model_request_id IS ?",
+                         (entry["entry_id"], entry["attempts"], bound_id))
+
     def check_source():
+        if not owns_claim():
+            raise CoreError("WORK_CLAIM_CHANGED", 409)
         if _source(store, entry["source_event_id"]) is None:
             raise CoreError("WATCH_SOURCE_CHANGED", 409)
 
@@ -204,6 +209,7 @@ async def run_once(store, settings, model, clock):
             raise CoreError("WATCH_SOURCE_CHANGED", 409)
         if entry["depth"] == "title_only":
             with store.transaction():
+                check_source()
                 finish(store, entry, "SKIPPED", clock(), "WATCH_NOTHING_READ")
             return True
         messages = [{"role": "system", "content": RULES},
@@ -218,6 +224,7 @@ async def run_once(store, settings, model, clock):
         except BaseException:
             budget.settle(store, settings, request_id)
             raise
+        bound_id = request_id
         response = await budget.complete(model, store, settings, request_id, messages,
                                          SCENARIO, clock, source_check=check_source)
         usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
@@ -248,6 +255,8 @@ async def run_once(store, settings, model, clock):
                 "FAILED")
             retry_at = after(clock(), 300)
         with store.transaction():
+            if not owns_claim():
+                return False
             if state == "RETRY_WAIT":
                 if (request_id is None and code in ADMISSION_RETRY_CODES
                     or budget.capacity_wait(store, code, request_id=request_id)):
