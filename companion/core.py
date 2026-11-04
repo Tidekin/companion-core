@@ -1768,8 +1768,9 @@ class Core(Runtime):
                              and reply_format(self.store, job["event_id"]) == "singing")
             mixed_reply = (generated_reply and job["kind"] == "chat"
                            and reply_format(self.store, job["event_id"]) == "mixed")
+            preview_only = any(s["kind"] == "video_preview_reply" for s in context_snapshots)
             quote_choice = None
-            if (authority and generated_reply and job["kind"] == "chat"
+            if (authority and generated_reply and not preview_only and job["kind"] == "chat"
                     and self.settings.quote_policy != "never"):
                 quote_choice, reply = reply_quote.extract(reply)
             with self.store.transaction():
@@ -1803,13 +1804,17 @@ class Core(Runtime):
                     policy = self.settings.segmented_reply
                     intent = (
                         self.expression.intent(job["event_id"], reply, now)
-                        if policy and generated_reply and job["kind"] == "chat"
+                        if policy and generated_reply and job["kind"] == "chat" and not preview_only
                         and not voice_reply and not singing_reply and not mixed_reply
                         and self.settings.expression_enabled
                         and (authority is None or "expression" in authority.policy.purposes)
                         else None
                     )
-                    if mixed_reply:
+                    if preview_only:
+                        parts = split_text(reply, policy) if policy else [reply]
+                        message_ids = enqueue_reply_parts(
+                            self.store, job, parts, policy.interval_ms if policy else 0, now)
+                    elif mixed_reply:
                         from companion import reply_composition
 
                         newer = self.store.one("SELECT 1 FROM events WHERE conversation_id=? "
