@@ -177,8 +177,17 @@ Submission happens in the original activity commit transaction. The Life worker 
 native goal; the independent Reader v3 worker returns its ordinary evidence and usage receipt.
 Migration `0038_life_goal_binding` adds only the nullable native goal ID to the activity result.
 Readback exposes the current native goal state, result event and error code. No extra execution
-queue or retry policy is introduced. Wake's automatic new-goal selection yields while Life
-read-goal submission is enabled; accepted goals and commitments retain their original paths.
+queue or retry policy is introduced. Life owns topic-based read goals. With SHADOW, autonomy
+and read goals enabled, a scheduled Wake slot can browse Bilibili privately when chat is idle
+and there is no open topic needing attention. It uses her own judged interests for search, or
+the configured Bilibili feed for discovery. One listing proposes at most one new goal. A later
+slot can accept a due single-video candidate backed by a matching public discovery receipt.
+The ordinary quiet hours, pause, interval, daily limits and Reader grants still apply.
+
+On a day without approved owner messages, one completed idle read can be offered to the diary
+model. Actual content takes precedence over discovered titles. The source and her judgement
+retain separate citations, and the diary can skip the day when nothing is worth saving.
+This reading does not enqueue a share or start a conversation topic.
 
 Only a completed native step result linked to a successful, settled Life choice under the same
 private approval can supply the next private Life decision. Its original goal evidence must

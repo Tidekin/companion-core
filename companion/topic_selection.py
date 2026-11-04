@@ -92,18 +92,19 @@ def recent_queries(store, now):
         "AND query IS NOT NULL AND created_at>=?", (since,))}
 
 
-def choose(store, settings, now, adapters, rng=None):
+def choose(store, settings, now, adapters, rng=None, *, own_only=False):
     """Return (adapter_id, query) for one discover run, or None for the original rotation."""
     rng = rng or random  # Looked up per call, so tests can substitute the module's source.
     searchable = [name for name in adapters
                   if settings.observation_adapters[name].source in QUERY_SOURCES]
-    if not searchable or rng.random() >= INTEREST_SHARE:
+    if not searchable or (not own_only and rng.random() >= INTEREST_SHARE):
         return None
     used = recent_queries(store, now)
     candidates = [(term, score) for term, score in interest_topics(store, now)
                   if term not in used]
-    candidates += [(term, OWNER_WEIGHT) for term in owner_terms(store, settings, now)
-                   if term not in used and term not in {t for t, _ in candidates}]
+    if not own_only:
+        candidates += [(term, OWNER_WEIGHT) for term in owner_terms(store, settings, now)
+                       if term not in used and term not in {t for t, _ in candidates}]
     if not candidates:
         return None
     total = sum(score for _, score in candidates)

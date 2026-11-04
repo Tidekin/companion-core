@@ -990,14 +990,19 @@ class LifeTopics:
                     s.execute(
                         "UPDATE life_topics SET state='DUE' WHERE topic_id=?", (topic["topic_id"],)
                     )
+            from companion.wake import IDLE_READ, IDLE_READ_RESULTS
+
             rows = s.rows(
                 "SELECT e.event_id FROM events e WHERE e.redacted=0 "
                 "AND e.ingested_at>=? AND (e.source='qq.onebot' OR "
-                "e.source IN ('observation.bilibili','observation.heybox','observation.web',"
-                "'observation.qzone')) "
+                "(e.source IN ('observation.bilibili','observation.heybox','observation.web',"
+                "'observation.qzone') AND EXISTS (SELECT 1 FROM observations o WHERE "
+                "o.event_id=e.event_id AND o.redacted=0 "
+                "AND o.result_status IN ('FETCHED','WATCHED')) "
+                f"AND e.event_id NOT IN ({IDLE_READ_RESULTS}))) "
                 "AND NOT EXISTS (SELECT 1 FROM life_topic_sources t WHERE t.event_id=e.event_id) "
                 "ORDER BY e.rowid DESC LIMIT 32",
-                (after(now, -cfg.topic_ttl_seconds),),
+                (after(now, -cfg.topic_ttl_seconds), IDLE_READ),
             )
             use_feedback = (self.settings.affect_enabled and bool(rows)
                             and permitted(s, self.settings, now, "affect"))
