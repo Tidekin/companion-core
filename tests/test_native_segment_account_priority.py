@@ -28,7 +28,7 @@ def test_segment_interval_does_not_enter_slow_account_poll(core, tmp_path, monke
             usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
             assert len(model.requests) == len(usage) == 1 and usage[0]["state"] == "SETTLED"
             assert await active.pump() and len(sends) == 1
-            core.clock.advance(0.5)
+            core.clock.advance(0.59)
             stop, paused, blocked, release = (asyncio.Event() for _ in range(4))
             requests, intervals = [], []
             original_pause = app.pause
@@ -57,7 +57,8 @@ def test_segment_interval_does_not_enter_slow_account_poll(core, tmp_path, monke
                 await until(lambda: paused.is_set() or blocked.is_set(), tasks=[task])
                 assert not blocked.is_set(), {"requests": requests, "sends": len(sends)}
                 assert intervals and len(sends) == 1 and active.attempts() == {"ACK": 1}
-                core.clock.advance(0.1)
+                assert intervals[0] == 0.01
+                core.clock.advance(0.01)
                 await until(lambda: active.attempts() == {"ACK": 2}, tasks=[task],
                             deadline_seconds=20)
                 assert len(sends) == 2
