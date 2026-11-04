@@ -1161,13 +1161,12 @@ class Core(Runtime):
         if (continuation and continuation["uses_recalled_memory"]
             and not any(message is ref for ref, _ in memory_references for message in messages)):
             messages = [message for message in messages if message is not continuation["message"]]
+        retained_history = [source for source, turn in zip(sources, turns, strict=True)
+                            if any(message is turn[0] for message in messages)]
         if bounded_text:
-            selected = [source for source, turn in zip(sources, turns, strict=True)
-                        if any(message is turn[0] for message in messages)]
             used = [row for ref, row in memory_references if any(ref is m for m in messages)]
-            live_text.freeze_context(s, cfg, self.clock, job, selected, messages, used)
-        actual_sources = {source["event_id"] for source, turn in zip(sources, turns, strict=True)
-                          if any(message is turn[0] for message in messages)}
+            live_text.freeze_context(s, cfg, self.clock, job, retained_history, messages, used)
+        actual_sources = {source["event_id"] for source in retained_history}
         for reference, evidence in reference_sources:
             if any(message is reference for message in messages):
                 actual_sources.update(evidence)
@@ -1186,9 +1185,8 @@ class Core(Runtime):
         if style:
             retained.append({"kind": "style_observation", "proof": style["proof"]})
         if authority and (job["kind"] == "chat" or followup):
-            selected = [source for source, turn in zip(sources, turns, strict=True)
-                        if any(message is turn[0] for message in messages)]
-            retained.append({"kind": "history", "proof": owner_input.history_proof(selected)})
+            retained.append({"kind": "history",
+                             "proof": owner_input.history_proof(retained_history)})
         if conversation_decision.mode == "ENABLED":
             retained.append({"kind": "conversation_policy",
                              "proof": conversation_decision.receipt()})
