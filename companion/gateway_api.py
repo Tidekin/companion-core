@@ -68,7 +68,7 @@ def create_app(settings=None, *, clock=utcnow):
             grant = auth(store, request)
             if request.headers.get("X-Companion-Mode", "passthrough") != "passthrough":
                 raise CoreError("GATEWAY_MODE_NOT_IMPLEMENTED", 403)
-            gateway._reference(store, settings, grant, clock())
+            gateway.require_reference(store, settings, grant, clock())
             aliases = gateway.config().aliases
             return {"object": "list", "data": [{"id": item.model_alias, "object": "model",
                     "created": 0, "owned_by": "companion-core"}
