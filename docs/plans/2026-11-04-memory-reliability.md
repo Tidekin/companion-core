@@ -34,6 +34,11 @@ used different attribute-key spellings. A still-pending conflict cannot overwrit
 the canonical key selected for the explicit replacement.
 Recorded/source timestamps are not invented real-world effective dates.
 
+A mixed review can reject an unsupported claim and request a correction to another
+claim in the same batch. Repair feedback includes the supported and disputed
+candidates in order. Each retained attribute needs its own match on re-extraction.
+The rejected claim keeps its audit record.
+
 ## Explicit failed-batch recovery
 
 The shared native checkpoint remains the execution owner. Before a failed terminal

@@ -35,8 +35,10 @@ TERMINAL_PHASES = {"COMPLETE", "SKIPPED", "FAILED", "UNKNOWN", "CANCELLED"}
 class MemoryReviewError(CoreError):
     """Settled review feedback, consumed only by the original bounded checkpoint."""
 
-    def __init__(self, reason, issues=()):
+    def __init__(self, reason, issues=(), *, candidates=None):
         self.feedback = {"reason": reason, "issues": list(issues)}
+        if candidates is not None:
+            self.feedback["candidates"] = [item.model_dump(mode="json") for item in candidates]
         self.reextract = bool(issues)
         super().__init__("MEMORY_REVIEW_DISAGREEMENT" if issues else "MEMORY_REVIEW_INVALID", 502)
 
@@ -49,23 +51,25 @@ def _repair_matches(original, candidate):
             and (quote in candidate.evidence_quote or candidate.evidence_quote in quote))
 
 
-def _repair_covers(originals, values):
-    """Account for each old attribute once. Shared provenance alone is ambiguous."""
-    remaining = [Candidate.model_validate(value) for value in values]
+def _repair_positions(originals, values):
+    """Identify one distinct current candidate for each retained attribute."""
+    remaining = {i: Candidate.model_validate(value) for i, value in enumerate(values)}
+    required = set()
     for original in originals:
-        related = [item for item in remaining if _repair_matches(original, item)]
-        matches = [item for item in related if original["content"] == item.content]
+        related = [i for i, item in remaining.items() if _repair_matches(original, item)]
+        matches = [i for i in related if original["content"] == remaining[i].content]
         if not matches:
-            matches = [item for item in related
-                       if original["fact_key"].casefold() == item.fact_key.casefold()]
+            matches = [i for i in related
+                       if original["fact_key"].casefold() == remaining[i].fact_key.casefold()]
         if not matches:
             # A paraphrase and a renamed key are fine with a unique source anchor.
-            matches = [item for item in related
-                       if sum(_repair_matches(other, item) for other in originals) == 1]
+            matches = [i for i in related
+                       if sum(_repair_matches(other, remaining[i]) for other in originals) == 1]
         if len(matches) != 1:
-            return False
-        remaining.remove(matches[0])
-    return True
+            return None
+        required.add(matches[0])
+        del remaining[matches[0]]
+    return required
 
 
 def checkpoint_state(store):
@@ -221,6 +225,9 @@ async def prepare_memories(
             s, cfg, self.clock, candidate.evidence_event_id, "memory", allow_commands=True
         )
     ]
+    required = _repair_positions(repair_candidates, candidates) if repair_candidates else set()
+    if required is None:
+        raise MemoryReviewError("repair_incomplete", [{"reason": "repair_candidate_missing"}])
     if not candidates:
         return [], []
     job = s.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)) if job_id else None
@@ -269,7 +276,8 @@ async def prepare_memories(
         # A new reference, update or outstanding repair still needs review.
         replay = (same and item.evidence_event_id in same["evidence_ids"]
                   and item.kind == same["kind"] and item.fact_key == same["fact_key"]
-                  and not item.evidence_reference_id and not item.update and not review_feedback)
+                  and not item.evidence_reference_id and not item.update and not review_feedback
+                  and not required)
         if replay or (confirmed and (same or not catalog)):
             return candidates, [{"same": same["memory_id"] if same else None,
                                  "conflicts": [], "replaces": []}]
@@ -362,7 +370,7 @@ async def prepare_memories(
     if job:
         reply_revision.check_job(s, job)
     validation_reason = "schema"
-    disagreements = []
+    disagreements, retained = [], []
     try:
         value = json.loads(response.text)
         # Only lossless single-reference presentations are repairable. The full strict schema
@@ -387,20 +395,22 @@ async def prepare_memories(
         resolutions, supported, positions = [], [], {}
         for i, relation in enumerate(review.relations):
             unsupported_replacement = relation.claims_replacement and not relation.update_authorized
-            if bool(candidates[i].update) != relation.update_authorized or unsupported_replacement:
-                disagreements.append({"candidate": f"c{i}",
-                    "reason": "unsupported_replacement_claim" if unsupported_replacement
-                    else "update_marker_mismatch",
-                    "expected_update": "replaces_previous" if relation.update_authorized else None})
-                continue
-            if not relation.supported:
-                if any(_repair_matches(original, candidates[i]) for original in repair_candidates):
-                    disagreements.append({"candidate": f"c{i}",
-                        "reason": "repair_candidate_rejected",
-                        "expected_update": candidates[i].update})
-                    continue
+            if unsupported_replacement:
+                reason = "unsupported_replacement_claim"
+            elif bool(candidates[i].update) != relation.update_authorized:
+                reason = "update_marker_mismatch"
+            elif relation.supported:
+                reason = None
+            elif i in required:
+                reason = "repair_candidate_rejected"
+            else:
                 s.audit("memory.candidate_rejected", candidates[i].evidence_event_id, "memory",
                         self.clock(), reason="UNSUPPORTED_MEMORY_CLAIM")
+                continue
+            retained.append(candidates[i])
+            if reason:
+                disagreements.append({"candidate": f"c{len(retained) - 1}", "reason": reason,
+                    "expected_update": "replaces_previous" if relation.update_authorized else None})
                 continue
             refs = ([relation.same] if relation.same else []) + relation.conflicts
             if len(refs) != len(set(refs)):
@@ -442,10 +452,6 @@ async def prepare_memories(
                     "replaces": [resolve(ref) for ref in relation.replaces],
                 }
             )
-        if disagreements:
-            validation_reason = "update_disagreement"
-            raise ValueError("extractor and source review disagree on update authorization")
-        return supported, resolutions
     except ValueError as error:
         s.audit(
             "memory.review_invalid",
@@ -454,7 +460,12 @@ async def prepare_memories(
             self.clock(),
             reason=validation_reason,
         )
-        raise MemoryReviewError(validation_reason, disagreements) from error
+        raise MemoryReviewError(validation_reason) from error
+    if disagreements:
+        s.audit("memory.review_invalid", request_id, "memory", self.clock(),
+                reason="update_disagreement")
+        raise MemoryReviewError("update_disagreement", disagreements, candidates=retained)
+    return supported, resolutions
 
 
 def extraction_sources(core, local_day):
@@ -945,9 +956,9 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 except CoreError as error:
                     s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory",
                             now, reason=error.code)
-            if batch.get("repair_candidates") and not _repair_covers(
+            if batch.get("repair_candidates") and _repair_positions(
                 batch["repair_candidates"], candidates
-            ):
+            ) is None:
                 raise MemoryReviewError("repair_incomplete",
                                         [{"reason": "repair_candidate_missing"}])
             batch.update(
@@ -1040,8 +1051,11 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 batch["review_feedback"] = error.feedback
                 if error.reextract:
                     batch["repair_required"] = True
-                    batch.setdefault("repair_candidates", batch["candidates"])
-                    batch["review_feedback"]["candidates"] = batch["candidates"]
+                    if "candidates" in error.feedback:
+                        batch["repair_candidates"] = error.feedback["candidates"]
+                    else:
+                        # An incomplete extraction still owes the last reviewed set.
+                        error.feedback["candidates"] = batch["repair_candidates"]
             if previous_phase == "EXTRACT" and unsent:
                 attempts = max(0, attempts - 1)
                 s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
