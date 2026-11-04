@@ -63,7 +63,8 @@ def test_every_read_loads_current_bytes_but_reuses_only_successful_codec_work(
     assert reads == [path, path] and len(decodes) == 1
     info = journal._validated_bytes.cache_info()
     assert info.maxsize == info.currsize == info.hits == info.misses == 1
-    payload, _ = journal._validated_bytes(raw)
+    payload, _, count = journal._validated_bytes(raw)
+    assert count == len(rows)
     assert isinstance(payload, bytes) and len(payload) <= journal.CACHE_MAX_BYTES
     assert marshal.loads(payload) == rows
 
@@ -92,6 +93,29 @@ def test_append_and_valid_prefix_truncation_never_return_old_records(tmp_path):
     assert len(extended) == 2 and extended[0] == rows[0] and found == new_head != head
     path.write_bytes(raw)
     assert journal.read(path) == (rows, head)
+
+
+def test_small_appends_do_not_materialize_or_reserialize_a_large_verified_prefix(
+    tmp_path, monkeypatch,
+):
+    path = tmp_path / "journal.jsonl"
+    raw, rows, head = chain(*({"text": "x" * 40000} for _ in range(4)))
+    write(path, raw)
+    assert journal.read(path) == (rows, head)
+
+    def unexpected(*args):
+        pytest.fail("append rebuilt the verified prefix")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(marshal, "loads", unexpected)
+        patch.setattr(marshal, "dumps", unexpected)
+        for i in range(3):
+            head = journal.append(path, "NEXT", {"part": i}, at="later", expected_head=head)
+        changed = path.read_bytes().replace(b'"part":0', b'"part":9')
+        path.write_bytes(changed)
+        with pytest.raises(ValueError, match="INVALID_WINDOW_JOURNAL"):
+            journal.append(path, "NEXT", {}, at="later", expected_head=head)
+        assert path.read_bytes() == changed
 
 
 @pytest.mark.parametrize("damage", ["body", "previous", "seq", "duplicate", "truncated", "utf8"])
