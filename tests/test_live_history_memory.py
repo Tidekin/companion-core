@@ -38,15 +38,22 @@ def combined_options(**changes):
 
 @asynccontextmanager
 async def native_combined(core, tmp_path, *, options=None, core_options=None,
-                          queries=None, paid=None, respond=None):
+                          queries=None, paid=None, respond=None, prefetched=False):
+    """Tool-boundary cases isolate an empty initial prefetch; one case also pins it."""
     memory_id = fact(core, 900, "本次临时项目的验收代号是青竹七号。")
     outsider = fact(core, 901, "未批准的另一个项目代号是紫云三号。")
     # Preserve valid evidence; native owner-private recall excludes public facts.
     core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=?", (outsider,))
     scores = []
     original_recall = core.memory_context.recall_async
+    prefetched_jobs = set()
 
     async def observed_recall(*args, **kwargs):
+        job = core.store.one("SELECT job_id FROM jobs WHERE state='RUNNING' ORDER BY rowid DESC")
+        if job and job["job_id"] not in prefetched_jobs:
+            prefetched_jobs.add(job["job_id"])
+            if not prefetched:
+                return {"rows": []}
         result = await original_recall(*args, **kwargs)
         scores.append([row["memory_id"] for row in result["rows"]])
         return result
@@ -76,6 +83,7 @@ async def native_combined(core, tmp_path, *, options=None, core_options=None,
             byte_limit=options.get("max_history_utf8_bytes", 0),
             texts=queries or ["本次临时项目的验收代号是什么？"] * 5,
             core_options={"memory_enabled": True, **(core_options or {})},
+            soft_limit=type(core.settings).model_fields["context_soft_tokens"].default,
             paid_options={"per_request_calls": 2, **(paid or {})},
             purposes=["chat", "memory", *(["history"] if turns else [])],
             respond=response,
@@ -85,13 +93,17 @@ async def native_combined(core, tmp_path, *, options=None, core_options=None,
         core.memory_context.recall_async = original_recall
 
 
-def test_same_job_review_and_chat_use_authenticated_sent_history_and_native_fact(core, tmp_path):
+@pytest.mark.parametrize("prefetched", [False, True], ids=["empty-prefetch", "pinned-prefetch"])
+def test_same_job_review_and_chat_use_authenticated_sent_history_and_native_fact(
+    core, tmp_path, prefetched,
+):
     async def scenario():
         async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
             core_options={"max_recent_messages": 4},
+            prefetched=prefetched,
             queries=[
                 "本次临时项目在城西旧书店碰头，验收代号仍用已确认的那个。",
                 "刚才这个项目在哪里碰头，长期确认的验收代号又是什么？",
@@ -104,14 +116,16 @@ def test_same_job_review_and_chat_use_authenticated_sent_history_and_native_fact
             assert await core.run_once()
             assert await send()
             assert len(calls) == 4 and len(sends) == 2
-            assert scores == [[memory_id], [memory_id]]
-            assert calls[2]["messages"][1]["role"] == "user"
-            assert "城西旧书店" in calls[2]["messages"][1]["content"]
+            assert scores == [[memory_id]] * (4 if prefetched else 2)
+            assert any(m["role"] == "user" and "城西旧书店" in m["content"]
+                       for m in calls[2]["messages"])
             chat = calls[3]["messages"]
             assert "城西旧书店" in encode(chat)
             assert "青竹七号" in encode(chat)
             assert chat[-3]["content"] == "刚才这个项目在哪里碰头，长期确认的验收代号又是什么？"
-            assert [m["role"] for m in chat] == [
+            layout = [m for m in chat if not (
+                m["role"] == "user" and m["content"].startswith("你记得的事"))]
+            assert [m["role"] for m in layout] == [
                 "system",
                 "user",
                 "assistant",
@@ -375,7 +389,8 @@ def test_both_source_scopes_recheck_before_next_model_io(core, tmp_path, monkeyp
 
             async def recalled(*args, **kwargs):
                 result = await original_recall(*args, **kwargs)
-                change()
+                if result["rows"] and not mutations:
+                    change()
                 return result
 
             async def hook(request):

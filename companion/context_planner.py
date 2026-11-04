@@ -351,6 +351,15 @@ def plan_request(core, job, snapshots, request_context):
     parameters, removed = request_context.model_request_parameters, set()
     groups = list(plan["groups"])
 
+    # Keep semantic claims and tool call/result pairing. Under pressure, repeated
+    # inspection metadata in native memory results is cheaper to remove than the
+    # original conversation's statement, quotation and attribution as a whole.
+    original = measure_request(core.settings, request_wire(messages, parameters), "chat",
+        tools=[*parameters.function_tools, *parameters.output_tools])
+    if pressure(core.settings, original):
+        messages = _compact_memory_tools(messages)
+    base_messages = messages
+
     def measure():
         return measure_request(
             core.settings,
@@ -369,7 +378,7 @@ def plan_request(core, job, snapshots, request_context):
         dropped.append({"group_id": group["group_id"], "kind": group["kind"], "reason": reason,
                         **({"priority": group["priority"]} if plan["version"] == 2 else {})})
         removed.update(range(group["wire_start"], group["wire_start"] + group["wire_count"]))
-        messages = _filter(list(request_context.messages), removed)
+        messages = _filter(base_messages, removed)
         groups = [item for item in groups if item["group_id"] != group["group_id"]]
         measured = measure()
     offset = 0
@@ -391,6 +400,51 @@ def plan_request(core, job, snapshots, request_context):
     }
     check(core, job, snapshots)
     return messages
+
+
+def _compact_memory_tools(messages):
+    """Presentation only: every fact, source ID, version and attribution survives.
+
+    Full provenance stays in the native store and source snapshots. This performs
+    no semantic relevance inference and never removes a call or return part.
+    """
+    from pydantic_ai.messages import ModelRequest, ToolReturnPart
+
+    selected = []
+    for message in messages:
+        if not isinstance(message, ModelRequest):
+            selected.append(message)
+            continue
+        parts = []
+        for part in message.parts:
+            if not isinstance(part, ToolReturnPart) or part.tool_name != "memory_recall":
+                parts.append(part)
+                continue
+            value = part.content
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except ValueError:
+                    parts.append(part)
+                    continue
+            if not isinstance(value, dict):
+                parts.append(part)
+                continue
+            value = deepcopy(value)
+            for field in ("facts", "conflicts"):
+                for fact in value.get(field, []):
+                    if not isinstance(fact, dict):
+                        continue
+                    evidence = fact.pop("evidence", None)
+                    if isinstance(evidence, list):
+                        # IDs already occur in evidence_ids; preserve source dates/type.
+                        fact["source_times"] = [{k: row[k] for k in (
+                            "event_id", "source", "occurred_at")
+                                                 if k in row} for row in evidence]
+                    fact.pop("updated_at", None)
+            parts.append(replace(part, content=value))
+        selected.append(replace(message, parts=parts))
+    return selected
 
 
 def check_request(core, job, snapshots, wire, tools):

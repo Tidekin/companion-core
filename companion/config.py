@@ -477,7 +477,7 @@ class Settings(BaseModel):
     video_model_key: SecretStr = Field(default=SecretStr(""), exclude_if=lambda value: not value)
     timeout_seconds: int = Field(default=45, ge=5, le=180)
     max_output_tokens: int = Field(default=768, ge=128, le=8192)
-    context_soft_tokens: int = Field(default=3200, ge=1000, le=16000)
+    context_soft_tokens: int = Field(default=8000, ge=1000, le=16000)
     max_recent_messages: int = Field(default=12, ge=0, le=30)
     input_rate: int | None = Field(default=None, ge=0)
     cached_input_rate: int | None = Field(default=None, ge=0)
@@ -609,6 +609,34 @@ class Settings(BaseModel):
     )
     embedding_cache_dir: str = "data/embedding-cache"
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
+    # Lexical hits ranked this high survive the semantic floor (short Chinese facts score low).
+    lexical_keep_rank: int = Field(default=3, ge=0, le=20)
+    memory_recall_limit: int = Field(default=10, ge=1, le=20)
+    # Raw past turns retrieved alongside extracted facts; 0 disables.
+    turn_recall_limit: int = Field(default=8, ge=0, le=20)
+    turn_recall_scan_turns: int = Field(default=600, ge=0, le=5000)
+    # Cross-encoder over raw turns: off by default. Offline round-3 recall@8 was the same
+    # with and without it (91.9%) at ~3-6 s per reply; facts keep their own reranker.
+    turn_recall_rerank: bool = False
+    # Cross-encoder over fact candidates: also off; it cost +0.8 s per reply offline and
+    # the round-3 check could not show a gain (that metric counted any cited source).
+    memory_rerank: bool = False
+    # Only the best few fact hits are protected from context trimming; the rest compete
+    # with recent dialogue, so a long, weakly related fact cannot push out the owner's
+    # own recent statement. The newest turns are kept at topic priority.
+    memory_required_hits: int = Field(default=3, ge=0, le=20)
+    recent_protected_turns: int = Field(default=2, ge=1, le=20)
+    # Raw-turn recall may use at most this share of the history allowance left after
+    # recent dialogue, so episode continuation keeps room for related earlier turns.
+    turn_recall_history_share: float = Field(default=0.75, gt=0, le=1)
+    # Second hop: re-query with the best first-hop evidence (e.g. who holds a key) and add
+    # up to this many further turns (their schedule, their place). 0 disables.
+    turn_recall_second_hop: int = Field(default=2, ge=0, le=4)
+    # Upper bound on waiting for off-loop ranking; on expiry the reply proceeds without it.
+    recall_compute_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    # Local ONNX cross-encoder directory (tokenizer.json, onnx/*.onnx). "auto" uses
+    # <embedding_cache_dir>/local-bge-reranker-v2-m3-int8 when present; "" turns it off.
+    reranker_model_dir: str = "auto"
     extraction_min_events: int = Field(default=5, ge=1, le=20)
     extraction_idle_seconds: int = Field(default=900, ge=0)
     # A full 20-event batch with memories, summaries and mood signals can pass 2048.

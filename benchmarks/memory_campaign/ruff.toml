@@ -1,0 +1,6 @@
+extend = "../../pyproject.toml"
+line-length = 120
+
+[lint.per-file-ignores]
+"*.py" = ["E402"]
+"runner/**" = ["I001", "E402"]

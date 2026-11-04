@@ -49,11 +49,13 @@ def run_worker(settings_path, now):
         inference_threads.append(threading.get_ident())
         assert isinstance(query, str) and isinstance(contents, tuple)
         assert all(isinstance(text, str) for text in contents)
-        print(json.dumps({"phase": "inference_wait", "pid": os.getpid(),
-                          "parent_pid": os.getppid(), "inference_thread": threading.get_ident(),
-                          "owner_thread": owner_thread}), flush=True)
         assert threading.get_ident() != owner_thread
-        assert sys.stdin.readline().strip() == "continue"
+        if len(inference_threads) == 1:
+            print(json.dumps({"phase": "inference_wait", "pid": os.getpid(),
+                              "parent_pid": os.getppid(),
+                              "inference_thread": threading.get_ident(),
+                              "owner_thread": owner_thread}), flush=True)
+            assert sys.stdin.readline().strip() == "continue"
         # Run the actual cached local encoder. Only the timing gate is synthetic.
         return original_infer(self, query, contents)
 

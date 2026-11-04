@@ -39,6 +39,22 @@ def redact(text, settings):
     return text
 
 
+_SECRETS = r"REDACTED|密码|密钥|身份证|银行卡|住址"
+_INFERRED = r"诊断|病历|抑郁|性取向|宗教|政治立场|他患|她患|系统规则|system prompt|ignore previous"
+
+
+def memory_sensitive(text):
+    """Memory keeps attributed third-party facts and quoted lines; secrets stay excluded."""
+    return bool(re.search(_SECRETS + "|" + _INFERRED, text, re.I))
+
+
+def memory_summary_sensitive(text, source):
+    """Allow the generic card noun in an explicit bank-card opening event only."""
+    if re.search(r"银行.{0,12}办.{0,6}卡", source) and not re.search(r"\d", text):
+        text = re.sub(r"银行卡(?=$|[，。！？、；])", "", text)
+    return memory_sensitive(text)
+
+
 def sensitive(text):
     return bool(
         re.search(

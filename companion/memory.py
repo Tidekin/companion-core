@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import re
@@ -8,9 +9,16 @@ from zoneinfo import ZoneInfo
 from companion.commands import command_parts
 from companion.contracts import CoreError
 from companion.memory_context import MemoryContext, MemorySources, check_version, read_version
-from companion.privacy import advance_epoch, redact, sensitive
+from companion.privacy import (
+    advance_epoch,
+    memory_sensitive,
+    memory_summary_sensitive,
+    redact,
+)
 from companion.retrieval import SemanticIndex, fuse
 from companion.store import encode, uid
+
+RELAYED = "memory_relayed_update:"
 
 
 class Memory:
@@ -71,17 +79,18 @@ class Memory:
         ) if row["status"] == "CONFIRMED" and not row["needs_review"]]
 
     def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None, now=None,
-               explain=None):
+               explain=None, trace=None):
         """`explain`, when a dict, receives each returned memory's ranking evidence."""
         version, sources, rows, lexical = self._prepare_search(
             query, actor, subjects, limit, memory_ids=memory_ids, now=now,
         )
         similarities = self.index.scores(query, rows) if query != "*" and rows else {}
         return self._finish_search(query, rows, lexical, similarities, limit, version, sources,
-                                   explain=explain)
+                                   explain=explain, trace=trace)
 
     async def search_async(self, query, actor="owner", subjects=(), limit=6, *,
-                           memory_ids=None, now=None, source_check=None, clock=None):
+                           memory_ids=None, now=None, source_check=None, clock=None,
+                           explain=None, trace=None):
         if source_check:
             source_check()
         version, sources, rows, lexical = self._prepare_search(
@@ -106,9 +115,25 @@ class Memory:
                         raise CoreError("PRIVACY_CHANGED", 409)
 
             similarities = await self.index.scores_async(query, rows, revalidate=revalidate)
+        rerank_scores = None
+        model, pool = self._rerank_pool(
+            query, self._fused_order(query, rows, lexical, similarities)[0], limit)
+        if pool:
+            from companion import reranker
+
+            # CPU-bound cross-encoder stays off the event loop; nothing touches the Store there.
+            try:
+                values = await asyncio.wait_for(asyncio.to_thread(
+                    reranker.scores, model, query, [row["content"] for row in pool]),
+                    getattr(self.settings, "recall_compute_timeout_seconds", 15))
+            except TimeoutError:
+                # Keep the fused order; a sync rescore here would block the loop instead.
+                values = [-index for index in range(len(pool))]
+            rerank_scores = dict(zip((row["memory_id"] for row in pool), values, strict=True))
         if clock:
             sources = MemorySources(self, clock())
-        return self._finish_search(query, rows, lexical, similarities, limit, version, sources)
+        return self._finish_search(query, rows, lexical, similarities, limit, version, sources,
+                                   explain=explain, trace=trace, rerank_scores=rerank_scores)
 
     def _prepare_search(self, query, actor="owner", subjects=(), limit=6, *,
                         memory_ids=None, now=None):
@@ -185,17 +210,50 @@ class Memory:
                 )
         return version, sources, rows, lexical
 
+    def _rerank_pool(self, query, ordered, limit):
+        """The fused-order rows a configured cross-encoder would rescore, and its model."""
+        from companion import reranker
+
+        model = reranker.directory(self.settings) if getattr(
+            self.settings, "memory_rerank", False) else None
+        if query == "*" or not model or len(ordered) < 2:
+            return None, []
+        return model, ordered[:limit * 2]
+
     def _finish_search(self, query, rows, lexical, similarities, limit, version, sources, *,
-                       explain=None):
-        s = self.store
+                       explain=None, trace=None, rerank_scores=None):
+        """`rerank_scores` (memory_id -> score) lets async callers rescore off the loop."""
+        eligible, lexical_raw = len(rows), len(lexical)
+        rows, ranks, lexical_count, semantic_count = self._fused_order(
+            query, rows, lexical, similarities)
+        matched = len(rows)
+        model, pool = self._rerank_pool(query, rows, limit)
+        if pool:
+            if rerank_scores is None or any(row["memory_id"] not in rerank_scores
+                                            for row in pool):
+                from companion import reranker
+
+                rerank_scores = dict(zip((row["memory_id"] for row in pool), reranker.scores(
+                    model, query, [row["content"] for row in pool]), strict=True))
+            rows = sorted(pool, key=lambda row: -rerank_scores[row["memory_id"]]) + rows[
+                limit * 2:]
+        return self._complete_search(rows, ranks, eligible, lexical_raw, lexical_count,
+                                     semantic_count, matched, limit, version, sources,
+                                     explain=explain, trace=trace)
+
+    def _fused_order(self, query, rows, lexical, similarities):
         ranks = {}
+        lexical_count = semantic_count = 0
         if query != "*" and rows:
             exact = {row["memory_id"] for row in rows if query in row["content"]}
             # Generic shared phrases (e.g. "most liked") are not enough to change the topic.
+            # Top lexical ranks survive the floor: short Chinese facts embed weakly.
+            keep = getattr(self.settings, "lexical_keep_rank", 0)
             lexical = [
                 key
-                for key in lexical
-                if key in exact or similarities[key] >= self.settings.semantic_min_score
+                for rank, key in enumerate(lexical)
+                if key in exact or rank < keep
+                or similarities[key] >= self.settings.semantic_min_score
             ]
             semantic = sorted(
                 (
@@ -207,6 +265,7 @@ class Memory:
                 reverse=True,
             )
             scores = fuse(lexical, semantic)
+            lexical_count, semantic_count = len(lexical), len(semantic)
             ranks = {key: {"exact": key in exact,
                            "lexical_rank": lexical.index(key) + 1 if key in lexical else None,
                            "semantic_rank": semantic.index(key) + 1 if key in semantic else None,
@@ -222,6 +281,12 @@ class Memory:
                 ),
                 reverse=True,
             )
+        return rows, ranks, lexical_count, semantic_count
+
+    def _complete_search(self, rows, ranks, eligible, lexical_raw, lexical_count,
+                         semantic_count, matched, limit, version, sources, *,
+                         explain=None, trace=None):
+        s = self.store
         rows = rows[:limit]
         check_version(self, version)
         current = []
@@ -235,14 +300,33 @@ class Memory:
         check_version(self, version)
         if explain is not None:
             explain.update({row["memory_id"]: ranks.get(row["memory_id"], {}) for row in current})
+        if trace is not None:
+            trace.update({"eligible_candidates": eligible, "lexical_matches": lexical_raw,
+                "accepted_lexical": lexical_count, "accepted_semantic": semantic_count,
+                "matched_candidates": matched, "limit": limit,
+                "selected": {row["memory_id"]: ranks.get(row["memory_id"], {})
+                             for row in current}})
         return current
 
-    def validate_candidate(self, candidate, confirmed=False, *, now=None):
+    def validate_candidate(self, candidate, confirmed=False, *, now=None, rejection=None):
+        def reject(reason):
+            if rejection is not None:
+                rejection["reason"] = reason
+            return None
+
         event = MemorySources(self, now).event(candidate.evidence_event_id, require_text=False)
         if not event:
             raise CoreError("MISSING_MEMORY_EVIDENCE")
         body = json.loads(event["body_json"])
         text = body.get("text", "")
+        reference = None
+        if candidate.evidence_reference_id:
+            from companion import memory_references
+
+            if confirmed or candidate.subject == "self":
+                raise CoreError("UNSUPPORTED_MEMORY_EVIDENCE")
+            reference = memory_references.candidate(self, candidate, now)
+            text = reference["text"]
         if not text.strip() or candidate.evidence_quote not in text:
             raise CoreError("UNSUPPORTED_MEMORY_EVIDENCE")
         if not confirmed and self.store.one(
@@ -254,14 +338,19 @@ class Memory:
             (candidate.subject, candidate.content, candidate.content, event["ingested_at"]),
         ):
             # A delayed extraction of an old value cannot undo the owner's later correction.
-            return None
-        if not confirmed and sensitive(text + candidate.content):
-            return None
+            return reject("OWNER_CORRECTION_PRECEDES_EXTRACTION")
+        # Check both source and summary; only the generic card noun has a narrow exception.
+        if not confirmed and memory_sensitive(text):
+            return reject("SENSITIVE_SOURCE")
+        if not confirmed and memory_summary_sensitive(candidate.content, text):
+            return reject("SENSITIVE_SUMMARY")
         if candidate.subject == "self" and not re.search(r"你(?:最近|经常|总是|这几次|刚才)", text):
-            return None
+            return reject("UNSUPPORTED_SELF_OBSERVATION")
         content = redact(candidate.content, self.settings)
         if "[REDACTED]" in content:
-            return None
+            return reject("REDACTED_SUMMARY")
+        if reference:
+            content = memory_references.attributed(candidate, reference)
         return event, content
 
     def confirm(self, memory_id, now):
@@ -278,12 +367,13 @@ class Memory:
             return None
         event, content = validated
         s = self.store
+        reference = candidate.evidence_reference_id is not None
         sources = MemorySources(self, now)
         same = next((row for row in s.rows(
             "SELECT * FROM memories WHERE content=? AND subject=? AND status IN "
             "('HYPOTHESIS','CONFIRMED')",
             (content, candidate.subject),
-        ) if sources.current(row)), None)
+        ) if sources.current(row) and (row["origin"] == "event_observed") == reference), None)
         conflicts = []
         if resolution is not None:
             for memory_id in [resolution.get("same"), *resolution.get("conflicts", [])]:
@@ -296,6 +386,8 @@ class Memory:
                 )
                 if not row or not sources.current(row):
                     raise CoreError("MEMORY_MATCH_STALE", 409)
+                if (row["origin"] == "event_observed") != reference:
+                    raise CoreError("MEMORY_MATCH_STALE", 409)
                 if memory_id == resolution.get("same"):
                     same = row
                 else:
@@ -306,7 +398,28 @@ class Memory:
                 "SELECT * FROM memories WHERE subject=? AND fact_key=? AND kind<>'episode' "
                 "AND status IN ('HYPOTHESIS','CONFIRMED') AND content<>?",
                 (candidate.subject, candidate.fact_key, content),
-            ) if sources.current(row)]
+            ) if sources.current(row) and (row["origin"] == "event_observed") == reference]
+        replaced, relayed = [], False
+        if (candidate.update == "replaces_previous" and candidate.kind != "episode" and not same
+                and (candidate.speaker == "owner" or candidate.relayed_by_owner)):
+            # The owner's own update ends the older values' validity (kept for history,
+            # not deleted), across origins. A third party's update the owner only relayed
+            # never does: both stay current and are linked, so the reader sees the later
+            # relayed claim with its source. Owner-confirmed corrections stay untouched.
+            relayed = candidate.speaker != "owner"
+            # Reviewed relations identify the attribute before any mutation. A coarse
+            # or differently spelled candidate key must not replace unrelated facts.
+            targets = ([row for row in conflicts if row["memory_id"] in resolution["replaces"]]
+                       if resolution is not None else s.rows(
+                "SELECT * FROM memories WHERE subject=? AND fact_key=? AND kind<>'episode' "
+                "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0 AND content<>?",
+                (candidate.subject, candidate.fact_key, content)))
+            replaced = [row for row in targets if sources.current(row) and not (
+                row["origin"] == "user_confirmed" and row["status"] == "CONFIRMED")]
+            if replaced:
+                candidate = candidate.model_copy(update={"fact_key": replaced[0]["fact_key"]})
+            ended = {row["memory_id"] for row in replaced}
+            conflicts = [row for row in conflicts if row["memory_id"] not in ended]
         if same:
             memory_id = same["memory_id"]
             if confirmed:
@@ -320,13 +433,15 @@ class Memory:
                 kind=candidate.kind,
                 content=content,
                 status="CONFIRMED" if confirmed else "HYPOTHESIS",
-                origin="user_confirmed" if confirmed else "model_inferred",
+                origin="event_observed" if reference else (
+                    "user_confirmed" if confirmed else "model_inferred"),
                 confidence=1.0 if confirmed else 0.5,
                 importance=0.5,
                 privacy_scope="private",
                 created_at=now,
                 updated_at=now,
-                fact_key=conflicts[0]["fact_key"] if conflicts else candidate.fact_key,
+                fact_key=(candidate.fact_key if replaced else
+                          conflicts[0]["fact_key"] if conflicts else candidate.fact_key),
                 needs_review=int(bool(conflicts)),
             )
         if conflicts:
@@ -340,6 +455,18 @@ class Memory:
                     "UPDATE memories SET needs_review=1 WHERE memory_id=?", (row["memory_id"],)
                 )
             s.audit("memory.conflict", memory_id, event["trace_id"], now)
+        for row in replaced:
+            if relayed:
+                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                          (RELAYED + row["memory_id"], encode({"newer": memory_id})))
+                s.audit("memory.relayed_update", row["memory_id"], event["trace_id"], now,
+                        by=memory_id)
+                continue
+            s.execute("UPDATE memories SET valid_to=?,updated_at=? WHERE memory_id=? "
+                      "AND (valid_to IS NULL OR valid_to>?)",
+                      (event["occurred_at"], now, row["memory_id"], event["occurred_at"]))
+            s.audit("memory.replaced", row["memory_id"], event["trace_id"], now,
+                    by=memory_id)
         s.execute(
             "INSERT OR IGNORE INTO memory_evidence VALUES (?,?,1,?)",
             (memory_id, event["event_id"], now),
@@ -347,8 +474,45 @@ class Memory:
         if candidate.subject == "self":
             key = s.one("SELECT fact_key FROM memories WHERE memory_id=?", (memory_id,))["fact_key"]
             self.observe_trait(key, event, now)
+        if reference:
+            from companion import memory_references
+
+            memory_references.record(self, memory_id, candidate, now)
         advance_epoch(s)
         return memory_id
+
+    def with_relayed_updates(self, rows, now):
+        """Add the other side of each relayed-update link; returns (rows, relations).
+
+        Linked rows pass the same currency and evidence checks as search results, so a
+        forgotten, superseded or erased memory never re-enters through a link.
+        """
+        s, sources = self.store, MemorySources(self, now)
+        ids = {row["memory_id"] for row in rows}
+        links = [(row["key"][len(RELAYED):], json.loads(row["value"])["newer"])
+                 for row in s.rows("SELECT key,value FROM runtime_meta WHERE key LIKE ?",
+                                   (RELAYED + "%",))]
+        out, relations = list(rows), {}
+        for older, newer in links:
+            if not ({older, newer} & ids):
+                continue
+            pair = {}
+            for memory_id in (older, newer):
+                row = next((item for item in out if item["memory_id"] == memory_id), None)
+                if row is None:
+                    row = s.one("SELECT * FROM memories WHERE memory_id=? AND status IN "
+                                "('HYPOTHESIS','CONFIRMED') AND confidence>0", (memory_id,))
+                    evidence = row and sources.current(row) and [
+                        e["event_id"] for e in sources.evidence(memory_id)]
+                    if not evidence:
+                        break
+                    row["evidence_ids"] = evidence
+                    out.append(row)
+                pair[memory_id] = row
+            else:
+                relations.setdefault(older, {})["later_relayed_update"] = pair[newer]["content"]
+                relations.setdefault(newer, {})["relayed_update_of"] = pair[older]["content"]
+        return out, relations
 
     def observe_trait(self, topic, event, now):
         s = self.store

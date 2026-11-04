@@ -117,7 +117,7 @@ def refresh_importance(memory, row, now):
     return value
 
 
-def record(memory, candidates, memory_ids, events, summaries, request_id, now):
+def record(memory, candidates, memory_ids, events, summaries, request_id, now, *, reference_ids=()):
     """Commit only inside the original source-checked EXTRACT/REVIEW transaction."""
     store = memory.store
     if not store.db.in_transaction:
@@ -156,7 +156,12 @@ def record(memory, candidates, memory_ids, events, summaries, request_id, now):
         ordered = sorted((event for event in events if event["event_id"] in ids),
                          key=lambda event: (event["occurred_at"], event["ingested_at"],
                                             event["event_id"]))
-        value = _record(memory, ids, request_id,
+        from companion import memory_references
+
+        extra = {key for reference_id in reference_ids
+                 for key in memory_references.read(memory, reference_id, now)["proof"][
+                     "source_event_ids"]}
+        value = _record(memory, sorted(set(ids) | extra), request_id,
                         {"title": item.title, "summary": item.summary}, now)
         value["event_ids"] = ids
         value["conversation_summary_ids"] = [row["summary_id"] for row in store.rows(

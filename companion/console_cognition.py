@@ -98,6 +98,10 @@ class JargonForget(StrictModel):
     term: str = Field(min_length=1, max_length=12)
 
 
+class MemoryRetry(StrictModel):
+    confirm: Literal[True]
+
+
 class StyleCandidateDecision(StrictModel):
     decision: Literal["APPROVE", "REJECT"]
     reason: str = Field(default="", max_length=200)
@@ -105,6 +109,22 @@ class StyleCandidateDecision(StrictModel):
 
 def register_console_cognition_routes(app, prefix, auth, write, reset_affect, grant_action):
     """Writes reuse the console's isolated connection, owner checks and native receipts."""
+
+    @app.get(prefix + "/memories/failures", dependencies=auth)
+    async def memory_failures():
+        from companion.memory_recovery import failures
+
+        return {"items": failures(app.state.core.store)}
+
+    @app.post(prefix + "/memories/failures/{batch_id}/retry", dependencies=auth)
+    async def memory_retry(batch_id: str, body: MemoryRetry, request: Request,
+                           idempotency_key: str = Header(default="")):
+        from companion.memory_recovery import retry
+
+        def apply(core, owner_check):
+            return retry(core, batch_id, idempotency_key, owner_check=owner_check)
+
+        return await write(request, idempotency_key, body.model_dump(), apply)
 
     @app.get(prefix + "/cognition", dependencies=auth)
     async def cognition(kind: str, before: str | None = None, record_id: str | None = None,

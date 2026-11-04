@@ -531,7 +531,10 @@ def test_source_eligibility_cannot_be_replaced_with_an_approval_hash(core, tmp_p
 @pytest.mark.parametrize("result", [
     '{"relevant":["unapproved"]}', '{"relevant":["m0","m0"]}', "invalid",
 ])
-def test_invalid_memory_tool_arguments_stop_without_facts_or_fallback(core, tmp_path, result):
+@pytest.mark.parametrize("prefetched", [False, True], ids=["empty-prefetch", "pinned-prefetch"])
+def test_invalid_memory_tool_arguments_stop_without_tool_facts_or_fallback(
+    core, tmp_path, monkeypatch, result, prefetched,
+):
     def provider(request, payload, number):
         requested = call("invalid-recall", "memory_recall", {})
         requested["function"]["arguments"] = result
@@ -539,13 +542,25 @@ def test_invalid_memory_tool_arguments_stop_without_facts_or_fallback(core, tmp_
 
     async def scenario():
         async with native_recall(core, tmp_path, respond=provider) as value:
+            lookup = value.worker.memory_context.recall_async
+            queries = []
+
+            async def prefetch(query, *args, **kwargs):
+                queries.append(query)
+                assert query == value.query, "Invalid SDK arguments reached memory lookup"
+                return await lookup(query, *args, **kwargs) if prefetched else {"rows": []}
+
+            monkeypatch.setattr(value.worker.memory_context, "recall_async", prefetch)
             await value.capture()
             assert await value.worker.run_once("invalid-sdk-memory-arguments")
             assert len(value.calls) == 2 and not value.sends
             assert_settled_calls(core, 2)
             assert not core.store.rows("SELECT * FROM agent_tool_calls")
             assert_failure_notice(core)
-            assert "青竹七号" not in encode(value.calls)
+            assert ("青竹七号" in encode(value.calls)) is prefetched
+            assert all("青竹七号" not in m["content"] for payload in value.calls
+                       for m in payload["messages"] if m["role"] == "tool")
+            assert queries == [value.query]
             assert not await value.worker.run_once("no-invalid-tool-replay")
     run(scenario())
 

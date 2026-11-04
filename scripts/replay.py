@@ -23,7 +23,7 @@ class FixtureModel:
         estimate = token_upper_bound(messages)
         if scenario == "memory_extract":
             candidates = []
-            for source in json.loads(messages[-1]["content"]):
+            for source in json.loads(messages[-1]["content"])["events"]:
                 if re.fullmatch(r"我的项目编号\d{2}偏好是蓝色", source["text"]):
                     candidates.append(
                         {
@@ -31,7 +31,7 @@ class FixtureModel:
                             "kind": "preference",
                             "fact_key": source["text"][:9],
                             "content": source["text"],
-                            "evidence_event_id": source["event_id"],
+                            "evidence_event_id": source["ref"],
                             "evidence_quote": source["text"],
                         }
                     )
@@ -41,7 +41,9 @@ class FixtureModel:
             text = encode(
                 {"relevant": [row["ref"] for row in payload["memories"]]}
                 if payload.get("operation") == "recall"
-                else {"relations": [{"same": None, "conflicts": []} for _ in payload["candidates"]]}
+                else {"relations": [{"supported": True, "update_authorized": False,
+                    "claims_replacement": False, "same": None, "conflicts": [], "replaces": []}
+                    for _ in payload["candidates"]]}
             )
         else:
             self.chat_bounds.append(estimate)
@@ -113,7 +115,7 @@ async def replay():
                 "real_model_extraction_accuracy": "not measured",
                 "real_model_hallucination_rate": "not measured",
             }
-            assert extracted == 30 and recall == 30 and report["public_actions"] == 0
+            assert extracted == 30 and recall == 30 and report["public_actions"] == 0, report
             return report
         finally:
             core.store.close()

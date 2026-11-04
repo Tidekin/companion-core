@@ -2,6 +2,9 @@
 
 import asyncio
 import hashlib
+from collections import OrderedDict
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 from threading import Lock
@@ -19,6 +22,44 @@ INDEX_VERSION = f"{MODEL}@{REVISION}"
 def _inference_lock(cache_dir):
     # Keep one inference per cached model, including cancelled callers still finishing CPU work.
     return Lock()
+
+
+_queries = ContextVar("retrieval_queries", default=None)
+
+
+@asynccontextmanager
+async def query_scope():
+    """Bound query reuse to one reply, including its to_thread inference calls."""
+    cache = {"values": OrderedDict(), "lock": Lock(), "closed": False}
+    token = _queries.set(cache)
+    try:
+        yield
+    finally:
+        _queries.reset(token)
+        with cache["lock"]:
+            cache["closed"] = True
+            cache["values"].clear()
+
+
+def query_vector(model, query):
+    """Reuse only within the current reply and encoder. Caller holds its inference lock."""
+    import numpy as np
+
+    cache = _queries.get()
+    key = (model, query)
+    if cache is not None:
+        with cache["lock"]:
+            if key in cache["values"]:
+                cache["values"].move_to_end(key)
+                return cache["values"][key]
+    vector = np.asarray(next(model.query_embed(query)), dtype="<f4")
+    if cache is not None:
+        with cache["lock"]:
+            if not cache["closed"]:
+                cache["values"][key] = vector
+                while len(cache["values"]) > 64:
+                    cache["values"].popitem(last=False)
+    return vector
 
 
 @lru_cache(maxsize=2)
@@ -91,7 +132,7 @@ class SemanticIndex:
             model = self.warmup()
             encoded = tuple(np.asarray(v, dtype="<f4") for v in
                             model.passage_embed(contents, batch_size=32)) if contents else ()
-            return encoded, next(model.query_embed(query))
+            return encoded, query_vector(model, query)
 
     def _finish(self, vectors, missing, inferred):
         import numpy as np

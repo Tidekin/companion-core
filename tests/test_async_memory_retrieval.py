@@ -95,11 +95,40 @@ def test_sync_and_async_share_ranking_and_evidence(core, monkeypatch):
     monkeypatch.setattr(core.memory.index, "_infer", lambda query, texts: (
         tuple(np.array([1., 0.]) for _ in texts), np.array([1., 0.]),
     ))
-    synchronous = core.memory.search("青禾项目", now=core.clock())
-    asynchronous = run(core.memory.search_async("青禾项目", now=core.clock(), clock=core.clock))
+    sync_trace, async_trace, sync_explain, async_explain = {}, {}, {}, {}
+    synchronous = core.memory.search("青禾项目", now=core.clock(),
+                                     trace=sync_trace, explain=sync_explain)
+    asynchronous = run(core.memory.search_async("青禾项目", now=core.clock(), clock=core.clock,
+                                               trace=async_trace, explain=async_explain))
     assert synchronous == asynchronous
+    assert sync_trace == async_trace and sync_explain == async_explain == sync_trace["selected"]
     assert synchronous[0]["memory_id"] == mid
     assert synchronous[0]["evidence_ids"] == ["evt_test_1"]
+
+
+def test_context_trace_only_retains_final_sources_and_marks_project_fallback(core, monkeypatch):
+    ids = {fact(core, i, f"青禾项目采用第{i}号方案") for i in range(1, 4)}
+    core.store.execute("UPDATE memories SET needs_review=1")
+    monkeypatch.setattr(core.memory.index, "_infer", lambda query, texts: (
+        tuple(np.array([1., 0.]) for _ in texts), np.array([1., 0.]),
+    ))
+    trace = {}
+    result = run(core.memory_context.recall_async("青禾项目", core.clock(), trace=trace))
+    final_ids = {row["memory_id"] for row in result["rows"]}
+    assert len(final_ids) == 2 and final_ids < ids
+    assert set(trace["selected"]) == final_ids and trace["conflicts_truncated"]
+    assert not any(mid in str(trace) for mid in ids - final_ids)
+
+    core.store.execute("UPDATE memories SET needs_review=0")
+    monkeypatch.setattr(core.memory.index, "_infer", lambda query, texts: (
+        tuple(np.array([1., 0.]) for _ in texts), np.array([0., 1.]),
+    ))
+    trace = {}
+    result = run(core.memory_context.recall_async("我让你记住的项目事实是什么？", core.clock(),
+                                                project_query="项目上你记得什么？", trace=trace))
+    assert {row["memory_id"] for row in result["rows"]} == ids
+    assert trace["search_selected_count"] == 0
+    assert trace["selected"] == {mid: {"project_fallback": True} for mid in ids}
 
 
 def test_cancelled_inference_keeps_cpu_slot_until_thread_finishes(core, monkeypatch):

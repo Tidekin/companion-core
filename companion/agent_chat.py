@@ -1,15 +1,22 @@
 """The private chat entry point; Core retains its job and final Outbox transaction."""
 
+import json
+
 from pydantic_ai import DeferredToolRequests
 
+from companion import reply_revision
 from companion.agent_persistence import ConversationStore
 from companion.agent_reading import deferred_results, reader_tools
 from companion.agent_runtime import check_conversation, run_conversation
 from companion.agent_tools import core_query_tools
+from companion.contracts import CoreError
+from companion.paid_budget import sha
+from companion.retrieval import query_scope
 from companion.store import after
 from companion.telemetry import emit, phase
 
 
+@query_scope()
 async def reply(core, job, snapshots):
     with phase("context_guard", job["trace_id"]):
         view = check_conversation(core, job, snapshots)
@@ -42,10 +49,39 @@ async def reply(core, job, snapshots):
         if image_generation.available(core, job) and "expression" in view.policy.purposes:
             tools.append(image_generation.toolset(core, job, snapshots))
     with phase("context_build", job["trace_id"]):
+        memories = []
+        query = json.loads(job["body_json"]).get("text", "").strip()
+        if (conversation is None and query and core.settings.memory_enabled
+            and "memory" in view.policy.purposes):
+            trace = {}
+            try:
+                with phase("recall_memory", job["trace_id"]):
+                    result = await core.memory_context.recall_async(query, core.clock(),
+                        project_query=query, clock=core.clock, trace=trace,
+                        source_check=lambda: check_conversation(
+                            core, job, snapshots, purpose="memory"))
+            except CoreError as error:
+                if error.code == "PRIVACY_CHANGED":
+                    raise CoreError(reply_revision.CANCELLED, 409) from error
+                raise
+            memories = result["rows"]
+            proof = core.memory_context.pin(core.clock(), rows=memories,
+                                             event_ids=[job["event_id"]])
+            reply_revision.remember_sources(core.store, job, proof["source_event_ids"])
+            snapshots.append({"kind": "memory", "proof": proof, "retrieval": {
+                "stage": "prefetch", "query_sha256": sha(query), "selection": trace}})
+        ranking = None
+        if (conversation is None and query and core.settings.memory_enabled
+            and {"memory", "history"} <= set(view.policy.purposes)):
+            from companion import turn_recall
+
+            # Embedding and cross-encoder scoring run in a worker thread, not on the loop.
+            with phase("recall_turns", job["trace_id"]):
+                ranking = await turn_recall.prefetch(core.store, core.settings, job, query)
         messages = [] if conversation is not None else core.context(
-            job, memories=[], snapshots=snapshots,
+            job, memories=memories, snapshots=snapshots,
             model_tools=tuple(name for toolset in tools for name in toolset.tools),
-            planning=True,
+            planning=True, turn_ranking=ranking,
         )
     emit("t_context_ready", job["trace_id"])
     result = await run_conversation(

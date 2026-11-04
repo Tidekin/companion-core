@@ -32,6 +32,7 @@ REVIEW_FIELDS = frozenset({
     "input_rate", "cached_input_rate", "output_rate", "max_output_tokens", "chat_thinking",
     "chat_thinking_tokens", "segmented_reply", "token_measurement", "rich_input_scope",
     "monthly_limit_micro_usd", "autonomous_daily_micro_usd", "memory_daily_micro_usd",
+    "memory_extract_max_output_tokens",
     "diary_daily_micro_usd", "reflection_daily_micro_usd", "reflection_monthly_micro_usd",
     "raw_event_retention_days", "private_files", "voice", "social_autonomy", "bili_video",
     "rem", "poke_policy", "content", "meme_catalog_owner", "meme_trusted_sources",

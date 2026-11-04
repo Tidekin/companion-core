@@ -16,7 +16,7 @@ from companion.config import Settings
 from companion.core import Core
 from companion.image_input import ImageInputPolicy
 from companion.memory_context import MemoryContext
-from companion.model import EXTRACT_RULES
+from companion.model import EXTRACT_RULES, REVIEW_RULES
 from companion.store import encode
 from companion_onebot_bridge import pending_media
 from tests.conftest import run
@@ -40,13 +40,21 @@ def run_isolated_worker(settings_path, now):
 
     def provider(request):
         payload = json.loads(request.content)
+        if payload["messages"][0]["content"] == REVIEW_RULES:
+            calls.append("memory_review")
+            candidates = json.loads(payload["messages"][-1]["content"])["candidates"]
+            return provider_response(encode({"relations": [{"supported": True,
+                "update_authorized": False, "claims_replacement": False,
+                "same": None, "conflicts": [], "replaces": []} for _ in candidates]}))
         assert payload["messages"][0]["content"] == EXTRACT_RULES
+        assert payload["max_tokens"] == min(4096, settings.paid_model.max_output_tokens)
         calls.append("memory_extract")
         sources = json.loads(payload["messages"][-1]["content"])
-        source = next((row for row in sources if row["text"] == "青禾项目下一步检查配色"), None)
+        source = next((row for row in sources["events"]
+                       if row["text"] == "青禾项目下一步检查配色"), None)
         candidates = [{
             "subject": "project", "kind": "fact", "fact_key": "next_step",
-            "content": "青禾项目下一步检查配色", "evidence_event_id": source["event_id"],
+            "content": "青禾项目下一步检查配色", "evidence_event_id": source["ref"],
             "evidence_quote": "青禾项目下一步检查配色",
         }] if source else []
         return provider_response(encode({"memories": candidates}))
@@ -70,12 +78,16 @@ def run_isolated_worker(settings_path, now):
     print(encode({"calls": calls}))
 
 
-@pytest.mark.parametrize("batch", ["text", "mixed_image", "mixed_media_caption", "only_media"])
-def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch):
+@pytest.mark.parametrize("batch,output_ceiling", [
+    ("text", 4096), ("text", 1024), ("mixed_image", 4096),
+    ("mixed_media_caption", 4096), ("only_media", 4096),
+])
+def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch, output_ceiling):
     workspace = Path(__file__).resolve().parents[1]
     async def scenario():
         async with environment(core, tmp_path, purposes=("chat", "memory", "image", "content"),
-            paid_options={"image_input": ImageInputPolicy(approval_sha256="e" * 64,
+            paid_options={"max_output_tokens": output_ceiling,
+                "image_input": ImageInputPolicy(approval_sha256="e" * 64,
                 estimated_tokens_per_image=100, max_bytes_per_image=50000,
                 max_pixels_per_image=100)}, core_options={
             "extraction_min_events": 1, "extraction_idle_seconds": 0,
@@ -137,7 +149,9 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch):
                     cwd=workspace, capture_output=True, text=True,
                     encoding="utf-8", timeout=30, check=True)
                 result = json.loads(completed.stdout.splitlines()[-1])
-                assert result["calls"] == (["memory_extract"] if attempt == 0 else [])
+                expected = (["memory_extract", *(["memory_review"]
+                            if batch != "only_media" else [])] if attempt == 0 else [])
+                assert result["calls"] == expected
             row = core.store.one("SELECT * FROM memories")
             if batch == "only_media":
                 assert row is None
@@ -161,7 +175,9 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch):
             assert {r["event_id"] for r in core.store.rows(
                 "SELECT event_id FROM episode_events")} == set(expected_sources)
             assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
-                *chat_usage, {"scenario": "memory_extract", "state": "SETTLED"}]
+                *chat_usage, {"scenario": "memory_extract", "state": "SETTLED"},
+                *([{"scenario": "memory_review", "state": "SETTLED"}]
+                  if batch != "only_media" else [])]
             response = await entry.client.post("/internal/v1/memories/search", json={
                 "query": "青禾项目", "requester_actor_id": "owner"})
             assert response.status_code == 200

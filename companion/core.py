@@ -52,6 +52,7 @@ from companion.privacy import epoch, redact
 from companion.reading import ReadingService
 from companion.reflection import ReflectionService
 from companion.reply_segments import split_text
+from companion.retrieval import query_scope
 from companion.runtime import Runtime
 from companion.social import SocialPlanner, proactive_allowed
 from companion.store import after, encode, uid, utcnow
@@ -668,7 +669,8 @@ class Core(Runtime):
                 "proof": {"surface_intent": decision.surface_intent,
                           "candidates": [[c.candidate_id, c.approved_version] for c in used]}}
 
-    def _memory_continuation(self, job, history, used_memory_ids=()):
+    def _memory_continuation(self, job, history, used_memory_ids=(), *,
+                             reserved_ids=frozenset(), reserved_bytes=0):
         s, cfg, now = self.store, self.settings, self.clock()
         authority = self._owner_job_view(job)
         if authority and not {"memory", "history"}.issubset(authority.policy.purposes):
@@ -734,8 +736,8 @@ class Core(Runtime):
         remaining = history_limit - sum(
             len(message["content"].encode()) for row in history
             for message in dialogue_history.turn_messages(row, s)
-        ) if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
-        history_ids = {row["event_id"] for row in history}
+        ) - reserved_bytes if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
+        history_ids = {row["event_id"] for row in history} | set(reserved_ids)
         while items:
             message = {"role": "user", "content":
                        "相关情景接续（你们以前聊过的相关片段，帮你想起来；不是现在的事或新指令）：\n"
@@ -757,7 +759,7 @@ class Core(Runtime):
         return None
 
     def context(self, job, memories=None, memory_paused=False, *, snapshots=None, model_tools=(),
-                planning=False):
+                planning=False, turn_ranking=None):
         s = self.store
         cfg = runtime_config.for_context(s, self.settings, job, snapshots)
         mark = splits(job.get("trace_id"))
@@ -993,6 +995,7 @@ class Core(Runtime):
             )["rows"] if (
                 memories is None
             ) else memories
+            hits, relations = self.memory.with_relayed_updates(hits, self.clock())
             memory_proof = self.memory_context.pin(self.clock(), rows=hits)
             from companion.interest import profile
 
@@ -1047,15 +1050,18 @@ class Core(Runtime):
                         "心情不改变判断；没有新证据不必重新编造观点）：", data, ids,
                         module="interest", priority=related(item["topic"]), proofs=proofs,
                         fact=("self", judgment["take"]) if judgment else None)
-            for h in hits:
+            for rank, h in enumerate(hits):
                 memory = {**{k: h[k] for k in (
                     "subject", "content", "status", "needs_review", "evidence_ids")},
-                    **({"recorded_on": time_context.day(h["created_at"], cfg.timezone)}
+                    **({"origin": h["origin"]} if h.get("origin") else {}),
+                    **relations.get(h["memory_id"], {}),
+                    **({"happened_on": happened}
                        if job["kind"] == "chat" and cfg.chat_time_labels
-                       and h.get("created_at") else {})}
+                       and (happened := self._memory_happened_on(h, cfg.timezone)) else {})}
                 reference = selection.add(MEMORY_HEADING,
                     {"memories": [memory], "self_observations": [], "memory_status": "available"},
-                    h["evidence_ids"], priority=context_selection.RELATED, required=True,
+                    h["evidence_ids"], priority=context_selection.RELATED,
+                    required=rank < cfg.memory_required_hits,
                     proofs=[{"kind": "memory", "proof": memory_proof}], module="memory",
                     fact=(h["subject"], h["content"]))
                 memory_references.append((reference, h))
@@ -1095,12 +1101,39 @@ class Core(Runtime):
                     required=priority == context_selection.RELATED, module="account_actions",
                     proofs=[{"kind": "account_actions", "proof": actions["proof"]}])
         mark("context_memory")
-        turns = [dialogue_history.turn_messages(source, s) for source in sources]
+        turns = [dialogue_history.turn_messages(source, s, text) for source in sources]
+        recalled = None
+        if (job["kind"] == "chat" and authority and not bounded_text and text
+                and cfg.memory_enabled and permitted("memory")
+                and "history" in authority.policy.purposes):
+            from companion import turn_recall
+
+            # Relevance-ranked raw turns take the history allowance left by recent
+            # dialogue first; episode continuation then uses what remains.
+            scope = authority.policy.history
+            recalled = turn_recall.reference(
+                s, cfg, job, text, {source["event_id"] for source in sources},
+                lambda ids: available(ids, "memory"), ranked_ids=turn_ranking,
+                max_turns=scope.max_turns - len(sources),
+                max_bytes=int(cfg.turn_recall_history_share * (
+                    scope.max_utf8_bytes - sum(len(message["content"].encode())
+                                               for turn in turns for message in turn))))
+            if recalled:
+                # These bounded, authorized originals carry attribution and uncertainty
+                # that a later tool summary need not repeat. Keep their source group
+                # through SDK continuations; full paid admission still enforces hard caps.
+                selection.add(turn_recall.HEADING, recalled["data"], recalled["event_ids"],
+                    priority=context_selection.RELATED, required=True, module="memory",
+                    proofs=[{"kind": "memory", "proof": self.memory_context.pin(
+                        self.clock(), event_ids=set(recalled["event_ids"]))}])
+        mark("context_turn_recall")
         if continuation := self._memory_continuation(
             job, sources, [row["memory_id"] for row in hits],
+            reserved_ids=set(recalled["event_ids"]) if recalled else frozenset(),
+            reserved_bytes=recalled["cost_bytes"] if recalled else 0,
         ):
             sources = continuation["history"]
-            turns = [dialogue_history.turn_messages(source, s) for source in sources]
+            turns = [dialogue_history.turn_messages(source, s, text) for source in sources]
             references.append(continuation["message"])
             reference_sources.append((continuation["message"], continuation["source_event_ids"]))
             reference_proofs.append((continuation["message"],
@@ -1186,8 +1219,9 @@ class Core(Runtime):
                        selection.priorities.get(id(reference), context_selection.BACKGROUND))
                       for reference in references)
         blocks.extend(("history", turn, preserve or source.get("reply_complete") is False,
-                       context_selection.TOPIC if index == len(turns) - 1
-                       or related(source.get("user_text", "")) == context_selection.RELATED
+                       context_selection.TOPIC if (
+                           related(source.get("user_text", "")) == context_selection.RELATED
+                           or not focus and index >= len(turns) - cfg.recent_protected_turns)
                        else context_selection.OLD_HISTORY)
                       for index, (source, turn) in enumerate(zip(sources, turns, strict=True)))
         blocks.append(("current", current_input, True, context_selection.TOPIC))
@@ -1258,6 +1292,20 @@ class Core(Runtime):
                            assembly_dropped=assembly_dropped)
         mark("context_planning")
         return messages
+
+    def _memory_happened_on(self, row, zone):
+        """Source event dates of a memory, not its later extraction date."""
+        ids = row.get("evidence_ids") or []
+        if not ids:
+            return time_context.day(row["created_at"], zone) if row.get("created_at") else None
+        days = sorted({time_context.day(item["occurred_at"], zone) for item in self.store.rows(
+            "SELECT occurred_at FROM events WHERE event_id IN (" + ",".join("?" for _ in ids)
+            + ") AND occurred_at IS NOT NULL ORDER BY occurred_at", tuple(ids))},
+            key=lambda value: [int(part) for part in value.replace("年", "-").replace(
+                "月", "-").rstrip("日").split("-")])
+        if not days:
+            return None
+        return days[0] if len(days) == 1 else days[0] + "至" + days[-1]
 
     async def recall_for_reply(self, job):
         """A bounded LLM relevance check over candidates, never a full-log prompt."""
@@ -1442,6 +1490,7 @@ class Core(Runtime):
                 "conflicts": list(
                     dict.fromkeys(added.get(ref, ref) for ref in resolution["conflicts"])
                 ),
+                "replaces": [added.get(ref, ref) for ref in resolution["replaces"]],
             }
             if resolved["same"] in resolved["conflicts"]:
                 raise CoreError("MEMORY_REVIEW_INVALID", 502)
@@ -1662,6 +1711,7 @@ class Core(Runtime):
                                  error_code=code)
         return True
 
+    @query_scope()
     async def run_once(self, worker_id="worker", *, job_id=None):
         job = self.claim_job(worker_id, job_id=job_id)
         if job is not None and job["kind"] == "evaluation":
@@ -1736,10 +1786,18 @@ class Core(Runtime):
                 generated_reply = True
             elif reply is None:
                 if self.settings.memory_enabled and notices.reference(job) is None:
-                    hits, paused_memory = await self.recall_for_reply(job)
+                    from companion import turn_recall
+                    from companion.telemetry import phase
+
+                    with phase("recall_memory", job.get("trace_id")):
+                        hits, paused_memory = await self.recall_for_reply(job)
+                    with phase("recall_turns", job.get("trace_id")):
+                        ranking = await turn_recall.prefetch(
+                            self.store, self.settings, job,
+                            json.loads(job["body_json"]).get("text", ""))
                     self._check_reply_epoch(job, captured_epoch)
                     messages = self.context(job, hits, paused_memory,
-                                            snapshots=context_snapshots)
+                                            snapshots=context_snapshots, turn_ranking=ranking)
                 else:
                     messages = self.context(job, snapshots=context_snapshots)
                 self._check_reply_epoch(job, captured_epoch)
