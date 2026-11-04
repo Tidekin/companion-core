@@ -222,3 +222,38 @@ def test_memory_extract_cap_never_exceeds_the_paid_approval(core):
 
     assert approved(2048).output_tokens("memory_extract") == 2048
     assert approved(8192).output_tokens("memory_extract") == 4096
+
+
+def test_valid_appraisal_survives_exhausted_unrelated_fact_reviews(core):
+    from tests.test_memory_write_consistency import candidate
+
+    key = prepare_extraction(core)
+    text = "讲座地点是海盐厅"
+    ingest(core, 2, text)
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.model.extraction = encode({
+        "memories": [candidate(text).model_dump(mode="json")],
+        "interaction_signals": [{"event_id": key, "reason": "OWNER_AFFECTION", "quote": "想你了"}],
+    })
+    core.model.review = lambda _: "{}"
+    assert run(core.extract_step()).progressed
+    assert core.mood.snapshot()["signals"][0]["event_id"] == key
+    for _ in range(core.settings.max_attempts):
+        run(core.extract_step())
+        core.clock.advance(61)
+    assert checkpoint_state(core.store)["batch"]["phase"] == "FAILED"
+    assert core.store.rows("SELECT event_id,reason FROM mood_appraisals") == [
+        {"event_id": key, "reason": "OWNER_AFFECTION"}]
+    receipt = core.store.one("SELECT safe_detail_json FROM audit_log "
+                             "WHERE action='mood.appraisals_committed'")
+    assert json.loads(receipt["safe_detail_json"])["inserted"] == 1
+    assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE state='SETTLED'")["n"] == (
+        1 + core.settings.max_attempts)
+    assert core.mood.reference()["proof"]["source_event_ids"] == [key]
+    assert not core.store.rows("SELECT 1 FROM memories")
+    chat = ingest(core, 3, "聊聊电影吧")
+    assert run(core.run_once(job_id=chat["job_id"]))
+    messages, kind = core.model.calls[-1]
+    assert kind == "chat" and any("小肥鱼的心情参考" in m["content"] for m in messages)
+    assert core.store.one("SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
+                          (chat["job_id"], key))

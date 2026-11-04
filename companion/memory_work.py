@@ -49,6 +49,25 @@ def _repair_matches(original, candidate):
             and (quote in candidate.evidence_quote or candidate.evidence_quote in quote))
 
 
+def _repair_covers(originals, values):
+    """Account for each old attribute once. Shared provenance alone is ambiguous."""
+    remaining = [Candidate.model_validate(value) for value in values]
+    for original in originals:
+        related = [item for item in remaining if _repair_matches(original, item)]
+        matches = [item for item in related if original["content"] == item.content]
+        if not matches:
+            matches = [item for item in related
+                       if original["fact_key"].casefold() == item.fact_key.casefold()]
+        if not matches:
+            # A paraphrase and a renamed key are fine with a unique source anchor.
+            matches = [item for item in related
+                       if sum(_repair_matches(other, item) for other in originals) == 1]
+        if len(matches) != 1:
+            return False
+        remaining.remove(matches[0])
+    return True
+
+
 def checkpoint_state(store):
     row = store.one("SELECT value FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
     return json.loads(row["value"]) if row else None
@@ -241,13 +260,13 @@ async def prepare_memories(
             if (row["origin"] == "event_observed") == bool(candidate.evidence_reference_id):
                 existing[row["memory_id"]] = row
     catalog = {f"m{i}": row for i, row in enumerate(existing.values())}
-    if len(candidates) == 1:
+    if confirmed and len(candidates) == 1:
         same = next(
             (row for row in catalog.values() if row["content"] == candidates[0].content), None
         )
         # Explicit owner commands contain the owner's verbatim claim; new model
         # inferences still require review even when there is no existing catalog.
-        if same or (confirmed and not catalog):
+        if same or not catalog:
             return candidates, [{"same": same["memory_id"] if same else None,
                                  "conflicts": [], "replaces": []}]
     from companion.memory_context import MemorySources
@@ -873,7 +892,27 @@ async def extraction_step(core, local_day, lease, batch, persist):
             extraction, repaired = parse_extraction(response.text, batch.get("ref_map", {}))
             if repaired:
                 s.audit("memory.output_repaired", events[0]["event_id"], "memory", now)
-            _validate_batch(core, lease, batch)
+            with s.transaction():
+                _validate_batch(core, lease, batch)
+                _settled(s, request_id)
+                rejected = {}
+                signals = mood_appraisals.validate(
+                    s, extraction.interaction_signals, set(batch["event_ids"]), rejected
+                )
+                # Content-free funnel: did the model answer the field, and what survived.
+                s.audit(
+                    "mood.appraisals_extracted", request_id, "memory", now,
+                    field_present="interaction_signals" in extraction.model_fields_set,
+                    finish_reason=response.finish_reason,
+                    returned=len(extraction.interaction_signals),
+                    kept=len(signals),
+                    rejected=rejected,
+                    reasons={
+                        reason: sum(item["reason"] == reason for item in signals)
+                        for reason in sorted({item["reason"] for item in signals})
+                    },
+                )
+                mood_appraisals.record(s, cfg, signals, request_id, core.clock())
             memory_enrichment.validate_summaries(
                 core.memory, events, extraction.episode_summaries, core.clock()
             )
@@ -902,37 +941,17 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 except CoreError as error:
                     s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory",
                             now, reason=error.code)
-            if batch.get("repair_candidates") and not all(
-                any(_repair_matches(original, Candidate.model_validate(value))
-                    for value in candidates)
-                for original in batch["repair_candidates"]
+            if batch.get("repair_candidates") and not _repair_covers(
+                batch["repair_candidates"], candidates
             ):
                 raise MemoryReviewError("repair_incomplete",
                                         [{"reason": "repair_candidate_missing"}])
-            rejected = {}
-            signals = mood_appraisals.validate(
-                s, extraction.interaction_signals, set(batch["event_ids"]), rejected
-            )
-            # Content-free funnel: did the model answer the field, and what survived.
-            s.audit(
-                "mood.appraisals_extracted", request_id, "memory", now,
-                field_present="interaction_signals" in extraction.model_fields_set,
-                finish_reason=response.finish_reason,
-                returned=len(extraction.interaction_signals),
-                kept=len(signals),
-                rejected=rejected,
-                reasons={
-                    reason: sum(item["reason"] == reason for item in signals)
-                    for reason in sorted({item["reason"] for item in signals})
-                },
-            )
             batch.update(
                 phase="REVIEW",
                 candidates=candidates,
                 episode_summaries=[
                     item.model_dump(mode="json") for item in extraction.episode_summaries
                 ],
-                interaction_signals=signals,
                 extraction_request_id=request_id,
             )
             batch.pop("repair_required", None)
@@ -940,6 +959,19 @@ async def extraction_step(core, local_day, lease, batch, persist):
             batch.pop("request_id", None)
             persist()
             return UnitResult(True)
+        # A pre-upgrade REVIEW checkpoint may still hold validated, uncommitted signals.
+        if batch.get("interaction_signals"):
+            with s.transaction():
+                _validate_batch(core, lease, batch)
+                extraction_id = batch["extraction_request_id"]
+                _settled(s, extraction_id)
+                signals = [item for item in batch["interaction_signals"]
+                           if item["event_id"] in batch["event_ids"]
+                           and mood_appraisals.still_valid(
+                               s, {**item, "request_id": extraction_id})]
+                mood_appraisals.record(s, cfg, signals, extraction_id, core.clock())
+                batch.pop("interaction_signals")
+                persist()
         candidates = [Candidate.model_validate(value) for value in batch["candidates"]]
         candidates, resolutions = await prepare_memories(
             core,
@@ -973,9 +1005,6 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 batch["extraction_request_id"],
                 at,
                 reference_ids=batch.get("reference_ids", []),
-            )
-            mood_appraisals.record(
-                s, cfg, batch.get("interaction_signals", []), batch["extraction_request_id"], at
             )
             s.execute("DELETE FROM runtime_meta WHERE key=?", (batch["attempt_key"],))
             batch.update(

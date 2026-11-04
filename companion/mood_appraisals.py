@@ -136,13 +136,12 @@ def validate(store, signals, event_ids, rejected=None):
 
 
 def record(store, settings, signals, request_id, now):
-    """Inside the memory commit transaction; nothing is kept while mood is off."""
+    """Commit the validated extraction result independently of the fact review."""
     if not store.db.in_transaction:
         raise RuntimeError("MOOD_APPRAISAL_REQUIRES_TRANSACTION")
-    if not settings.mood_enabled:
-        return
-    for item in signals:
-        store.execute(
+    inserted = 0
+    for item in signals if settings.mood_enabled else ():
+        inserted += store.execute(
             "INSERT OR IGNORE INTO mood_appraisals(event_id,reason,quote_start,quote_length,"
             "quote_sha256,request_id,created_at,target_message_id,target_sha256) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
@@ -157,7 +156,11 @@ def record(store, settings, signals, request_id, now):
                 item.get("target_message_id"),
                 item.get("target_sha256"),
             ),
-        )
+        ).rowcount
+    if signals:
+        store.audit("mood.appraisals_committed", request_id, "memory", now, inserted=inserted,
+                    already_recorded=len(signals) - inserted if settings.mood_enabled else 0,
+                    disabled=0 if settings.mood_enabled else len(signals))
 
 
 def erase(store, event_ids):
