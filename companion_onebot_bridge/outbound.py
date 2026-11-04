@@ -31,7 +31,7 @@ def validate_item(item, config, *, companion=False, account_scope=False, voice_s
         raise ValueError("INVALID_DELIVERY_LANE")
     if "voice" in item and (not voice_scope or not companion
         or item.get("action_type") not in {"qq.private.reply", "qq.private.proactive"}
-        or not isinstance(item["voice"], dict) or set(item.get("content", {})) != {"text"}):
+        or not isinstance(item["voice"], dict) or not reply_segments.voice_content(item)):
         raise ValueError("VOICE_SCOPE_REQUIRED")
     if account_actions.is_account(item):
         if not account_scope:
@@ -64,12 +64,16 @@ def validate_item(item, config, *, companion=False, account_scope=False, voice_s
         raise ValueError("INVALID_NOTICE_SCOPE")
     if (
         not isinstance(content, dict)
-        or set(content) - {"reply_to"} not in ({"text"}, {"text", "image"},
+        or set(content) - {"reply_to", "reply_part"} not in ({"text"}, {"text", "image"},
                                                {"text", "generated_image"})
         or not isinstance(content["text"], str)
-        or not 1 <= len(content["text"]) <= 20000
+        or not (1 <= len(content["text"]) <= 20000 or reply_segments.image_only(item))
     ):
         raise ValueError("TEXT_DELIVERY_REQUIRED")
+    if "reply_part" in content:
+        envelope = reply_segments.envelope(item)
+        if not envelope or envelope["version"] != 3:
+            raise ValueError("INVALID_REPLY_SEGMENT")
     if "reply_to" in content:
         reply_segments.quote(item)
     if "generated_image" in content:

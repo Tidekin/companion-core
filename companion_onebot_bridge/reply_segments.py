@@ -3,6 +3,8 @@
 import hashlib
 import re
 
+from companion_delivery_protocol.reply_groups import manifest, mixed_part, part_hash
+
 from .spool import encode
 
 FIELDS = {"version", "group_id", "index", "count", "group_sha256", "total_chars",
@@ -95,7 +97,7 @@ def event_id(item):
 
 
 def envelope(item):
-    """Validate a v2 manifest and its current text; v1 remains byte-compatible."""
+    """Validate the ordered text group or its native content-bound image-tail variant."""
     key = item.get("delivery_key", "")
     present = "reply_segment" in item
     v2 = isinstance(key, str) and ":v2" in key
@@ -105,7 +107,7 @@ def envelope(item):
     match = (re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v2:(0|[1-9][0-9]{0,9})", key)
              if isinstance(key, str) else None)
     if (not match or not isinstance(value, dict) or set(value) != FIELDS
-        or type(value["version"]) is not int or value["version"] != 1
+        or type(value["version"]) is not int or value["version"] not in (1, 2, 3)
         or any(type(value[name]) is not int for name in
                ("index", "count", "total_chars", "interval_ms"))
         or not 1 <= value["count"] <= 2**31 - 1 or not 0 <= value["index"] < value["count"]
@@ -118,14 +120,59 @@ def envelope(item):
                for part in value["part_sha256s"])):
         raise ValueError("INVALID_REPLY_SEGMENT")
     text = item["content"]["text"]
+    version = value["version"]
+    if version == 3:
+        choice = mixed_part(item["content"])
+        if ("authority" not in item or item.get("action_type") != "qq.private.reply"
+            or "reply_to" in item["content"] and value["index"] != 0
+            or "voice" in item and choice["kind"] not in {"voice", "singing"}
+            or choice["kind"] == "singing" and "voice" not in item):
+            raise ValueError("INVALID_REPLY_SEGMENT")
+    if version == 2 and (
+        "authority" not in item or item.get("action_type") != "qq.private.reply"
+        or value["count"] < 2
+        or (value["index"] == value["count"] - 1 and not image_only(item))
+        or (value["index"] < value["count"] - 1 and (
+            not text.strip() or set(item["content"]) - (
+                {"reply_to"} if value["index"] == 0 else set()) != {"text"}))
+    ):
+        raise ValueError("INVALID_REPLY_SEGMENT")
     if (not len(text) <= value["total_chars"] <= 20000
-        or digest(text) != value["part_sha256s"][value["index"]]
-        or value["group_sha256"] != digest({
-            "job_id": value["group_id"], "parts_sha256": value["part_sha256s"],
-            "interval_ms": value["interval_ms"], "total_chars": value["total_chars"],
-        })):
+        or part_hash(item["content"], version) != value["part_sha256s"][value["index"]]
+        or value["group_sha256"] != digest(manifest(value["group_id"], value["part_sha256s"],
+            value["total_chars"], value["interval_ms"], version))):
         raise ValueError("INVALID_REPLY_SEGMENT")
     return value
+
+
+def image_only(item):
+    """The image tail is native-owner-only and must still pass full envelope validation."""
+    value, content = item.get("reply_segment"), item.get("content")
+    if (isinstance(value, dict) and value.get("version") == 3
+        and isinstance(content, dict) and content.get("text") == ""):
+        try:
+            choice = mixed_part(content)
+        except ValueError:
+            return False
+        return ("authority" in item and item.get("action_type") == "qq.private.reply"
+                and choice["kind"] in {"meme", "generated_image"})
+    return ("authority" in item and item.get("action_type") == "qq.private.reply"
+            and isinstance(value, dict) and value.get("version") == 2
+            and type(value.get("index")) is int and type(value.get("count")) is int
+            and isinstance(content, dict) and set(content) == {"text", "image"}
+            and content["text"] == "" and isinstance(content["image"], dict)
+            and value.get("index") == value.get("count", 0) - 1)
+
+
+def voice_content(item):
+    content = item.get("content", {})
+    if set(content) == {"text"}:
+        return True
+    try:
+        return (envelope(item) is not None and item["reply_segment"]["version"] == 3
+                and mixed_part(content)["kind"] in {"voice", "singing"})
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def journal_value(value, text):

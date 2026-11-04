@@ -18,6 +18,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from websockets.exceptions import ConnectionClosed
 
+from companion_meme_protocol import OFFER_QUERY_SECONDS
+
 from . import account_actions, capture, pokes, reply_segments
 from .event_normalizer import decode, identifier, normalize, normalize_recall
 from .metrics import emit
@@ -654,8 +656,8 @@ class MemePump:
 
     async def _query(self, row):
         try:
-            # Core's candidate window is two seconds; retrieval never holds the input loop.
-            async with asyncio.timeout(1.5):
+            # The shared budget finishes before Core's bounded candidate window.
+            async with asyncio.timeout(OFFER_QUERY_SECONDS):
                 self.runtime._admitted_check(row["event_id"])
                 state = await self.window.input_state(self.client, row)
                 await self.runtime.semantic_offer(

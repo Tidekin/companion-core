@@ -240,10 +240,9 @@ class MoodService:
     def _signals(self, at, allowed):
         s, cfg = self.store, self.settings
         if owner_authority.required(s, cfg) and not s.db.in_transaction:
-            # Reuse the native history reader's synchronous transaction boundary.
+            # Reuse the native history reader's synchronous batch on one DB state.
             # This batch never spans an await or a later context revalidation.
-            with s.transaction():
-                return self._signals(at, allowed)
+            return s.read_or_write(lambda: self._signals(at, allowed))
         sources = MemorySources(self.memory, self.clock())
         view = None
         if owner_authority.required(s, cfg):
@@ -254,8 +253,23 @@ class MoodService:
                     after(self.clock(), -view.policy.source_retention_days * 86400)
                 ),
             )
-        transactional, changes = s.in_write_transaction, s.db.total_changes
+        def frozen():
+            return s.in_write_transaction or s.in_read_snapshot
+
+        transactional, changes = frozen(), s.db.total_changes
         originals = {encode(view.authority.as_dict()): view} if view else {}
+
+        def batched():
+            return view and transactional and frozen() and s.db.total_changes == changes
+
+        def permitted(purpose):
+            if not batched():
+                return self._permitted(purpose)
+            # The batch view is the current one on this DB state; the boundary below
+            # rechecks live authority and independent files once for every signal.
+            return (cfg.owner_runtime.mode == "ENABLED" and purpose in view.policy.purposes
+                    and (view.policy.expires_at is None
+                         or datetime.fromisoformat(self.clock()) < view.policy.expires_at))
 
         def evidence(ref):
             key = encode(ref)
@@ -264,8 +278,7 @@ class MoodService:
             return originals[key]
 
         def source_check(event_id):
-            if not (view and transactional and s.in_write_transaction
-                    and s.db.total_changes == changes):
+            if not batched():
                 return source_allowed(s, cfg, self.clock, event_id, "expression")
             now = self.clock()
             if (cfg.owner_runtime.mode != "ENABLED" or "expression" not in view.policy.purposes
@@ -385,7 +398,7 @@ class MoodService:
                 identity = "reply:" + reply["message_id"]
                 detail, reason, delta = sha(reply), rule[0], rule[1]
             elif kind == "watch":
-                if not self._permitted("exploration"):
+                if not permitted("exploration"):
                     continue
                 detail = s.one("SELECT * FROM watch_ledger WHERE source_event_id=?", (key,))
                 observation = s.one("SELECT * FROM observations WHERE event_id=?", (key,))
@@ -411,7 +424,7 @@ class MoodService:
                 reason, delta = "COMPLETED_READ_REVIEW", (detail["rating"] * 0.03, 0.0, 0.0)
                 detail = sha([detail, observation])
             else:
-                if not self._permitted("goals"):
+                if not permitted("goals"):
                     continue
                 from companion.goals import GoalEngine
 
@@ -497,7 +510,7 @@ class MoodService:
             # Independent journals, STOP and time remain live at the batch boundary.
             owner_authority.current(s, cfg, self.clock, purpose="expression",
                                     authority=view.authority)
-            if not s.in_write_transaction or s.db.total_changes != changes:
+            if not frozen() or s.db.total_changes != changes:
                 raise CoreError("PRIVACY_CHANGED", 409)
         ordered = sorted(
             merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
@@ -505,20 +518,21 @@ class MoodService:
         return ordered[-LIMIT:], len(candidates) > LIMIT or len(ordered) > LIMIT
 
     def _appraisals(self, at, allowed, cutoff, sources, taken, source_check=None):
-        """Model-judged owner wording; an exact-phrase signal on the same message wins."""
+        """Model-judged owner wording; an exact-phrase signal on the same message wins.
+
+        A row counts once it was recorded by `at`, but acts from when the owner said it:
+        a delayed extraction neither refreshes old words nor moves them to another day.
+        """
         s = self.store
-        rows = [
-            row
-            for row in s.rows(
-                "SELECT * FROM mood_appraisals WHERE created_at>? AND created_at<=? "
-                "ORDER BY created_at,event_id",
-                (cutoff, at),
-            )
-            if row["event_id"] not in taken and mood_appraisals.still_valid(s, row)
-        ]
         signals = []
-        for row in mood_appraisals.capped(rows, self.settings.timezone):
+        for row in s.rows(
+            "SELECT * FROM mood_appraisals WHERE created_at>? AND created_at<=? "
+            "ORDER BY created_at,event_id",
+            (cutoff, at),
+        ):
             key = row["event_id"]
+            if key in taken or not mood_appraisals.still_valid(s, row):
+                continue
             lineage = self._lineage(key, sources, source_check)
             if not lineage:
                 continue
@@ -528,6 +542,17 @@ class MoodService:
                 or not cutoff < stamp(event["occurred_at"]) <= at
             ):
                 continue
+            if row["target_message_id"]:
+                # Hurt about a reply also rests on that reply's own input.
+                target = s.one(
+                    "SELECT action_type,origin_event_id FROM outbox WHERE message_id=?",
+                    (row["target_message_id"],),
+                )
+                if target["action_type"] == "qq.private.reply":
+                    prior = self._lineage(target["origin_event_id"], sources, source_check)
+                    if not prior:
+                        continue
+                    lineage = lineage + prior
             ids = sorted({item["event_id"] for item in lineage})
             if allowed is not None and not set(ids) <= set(allowed):
                 continue
@@ -536,14 +561,14 @@ class MoodService:
                     "event_id": key,
                     "source_event_ids": ids,
                     "kind": "appraisal",
-                    "at": stamp(row["created_at"]),
+                    "at": stamp(event["occurred_at"]),
                     "reason": row["reason"],
                     "delta": list(mood_appraisals.REASONS[row["reason"]]),
                     "independent_id": "appraisal:" + key,
-                    "fingerprint": sha([lineage, dict(row)]),
+                    "fingerprint": sha([lineage, row]),
                 }
             )
-        return signals
+        return mood_appraisals.capped(signals, self.settings.timezone)
 
     def snapshot(self, *, at=None, allowed=None):
         at = stamp(at or self.clock())

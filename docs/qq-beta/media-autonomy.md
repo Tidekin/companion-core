@@ -180,7 +180,8 @@ Core 不拨入节点，也不把模型/消息投递责任交给节点。
 `voice.enabled` 与旧 `voice_enabled`/`media` 开关是独立合同，后者不能替代语音节点配置。
 
 `voice.reply.mode="model"` 是默认回复策略。模型可直接输出文字，也可使用同一次生成中的
-`reply_with_voice(text)` 最终输出选择语音；它不是额外的模型调用或立即发送工具。
+`reply_with_parts` 的 `voice` 项选择语音，并可与文字、图片、完整歌曲有序组合；
+它不是额外的模型调用或立即发送工具。详见[有序混合回复](../mixed-replies.md)。
 语音选择保存在原 SDK Conversation 的 Core metadata 中，并绑定原 Outbox 发送证明。
 选择语音时整段保留为一条，避免文字分条与语音互相抢占；普通文字仍按原分条设置发送。
 长度、权限、节点任务期限和合成失败继续使用既有检查与文字回退；已经开始 QQ 发送后出现

@@ -27,14 +27,14 @@ from tests.test_voice_node_worker import child_receipts
 from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 
 
-@pytest.mark.parametrize("reply_mode", ["auto", "model"])
+@pytest.mark.parametrize("reply_mode", ["auto", "model", "mixed"])
 def test_real_voice_nodes_feed_and_receive_native_bridge_custody(core, tmp_path, node, reply_mode):
     node_config, signing_key, counter = node
     node_config = node_config.model_copy(update={"node_id": "local",
         "request_timeout_seconds": 10.0, "heartbeat_seconds": 0.5,
         "execution_timeout_seconds": 20.0})
     core.settings.voice = voice_config(signing_private_key=signing_key.private_bytes_raw().hex(),
-        reply=VoiceReplyPolicy(mode=reply_mode),
+        reply=VoiceReplyPolicy(mode="model" if reply_mode == "mixed" else reply_mode),
         nodes={"local": VoiceNode(token=node_config.credential,
                                   manifest_sha256=digest(local_manifest(node_config)))})
     sent, checks = [], []
@@ -76,12 +76,16 @@ def test_real_voice_nodes_feed_and_receive_native_bridge_custody(core, tmp_path,
                     worker_config = node_config.model_copy(update={"core_origin": origin})
                     await independent_node(worker_config, certificate, counter, tmp_path,
                                            core.clock.now.timestamp())
-                    if reply_mode == "model":
+                    if reply_mode in {"model", "mixed"}:
                         job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
                                              (event["event_id"],))
                         args, output = tmp_path / "sdk.pickle", tmp_path / "sdk-requests.json"
+                        parts = [{"kind": "voice", "text": TEXT}]
+                        if reply_mode == "mixed":
+                            parts.append({"kind": "text", "text": "这是语音之后的独立文字。"})
                         response = answer(calls=[call(
-                            "voice-final", "reply_with_voice", {"text": TEXT})])
+                            "voice-final", "reply_with_parts",
+                            {"parts": parts})])
                         args.write_bytes(pickle.dumps((core.settings, core.clock.now,
                             job["job_id"], [response], "SUCCEEDED", str(output))))
                         process = await asyncio.create_subprocess_exec(sys.executable,
@@ -112,8 +116,15 @@ def test_real_voice_nodes_feed_and_receive_native_bridge_custody(core, tmp_path,
                     assert len(base64.b64decode(message[0]["data"]["file"][9:])) > 131072
                     assert checks[0]["authority"] == runtime.authority
                     assert checks[0]["voice"]["audio_bytes"] > 131072
+                    if reply_mode == "mixed":
+                        assert await tick(runtime, client, native)
+                        assert sent[1]["message"] == [{"type": "text", "data": {
+                            "text": "这是语音之后的独立文字。"}}]
+                        assert "voice" not in checks[1]
+                        assert not await tick(runtime, client, native)
                     assert core.store.rows("SELECT state,attempt_count FROM outbox") == [
-                        {"state": "SENT", "attempt_count": 1}]
+                        {"state": "SENT", "attempt_count": 1}] * (
+                            2 if reply_mode == "mixed" else 1)
                     assert core.store.rows(
                         "SELECT operation,state FROM voice_jobs ORDER BY rowid") == [
                         {"operation": "asr", "state": "TRANSCRIBED"},

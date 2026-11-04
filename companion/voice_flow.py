@@ -131,7 +131,7 @@ class VoiceFlow:
             raise CoreError("VOICE_DELIVERY_CHOICE_FROZEN", 409)
         from companion.agent_output import reply_format
 
-        if reply_format(self.store, row["origin_event_id"]) == "singing":
+        if reply_format(self.store, row["origin_event_id"], row) == "singing":
             self._native_delivery(message_id)
             if not value or value.get("state") != "AUDIO":
                 raise CoreError("SINGING_DELIVERY_FENCED", 409)
@@ -162,7 +162,7 @@ class VoiceFlow:
             from companion.agent_output import reply_format
 
             if (policy.mode == "model"
-                and reply_format(self.store, row["origin_event_id"]) != "voice"):
+                and reply_format(self.store, row["origin_event_id"], row) != "voice"):
                 return self._text(row, None, "VOICE_MODEL_TEXT")
             source = self.store.one(
                 "SELECT body_json FROM events WHERE event_id=?", (row["origin_event_id"],)
@@ -170,9 +170,9 @@ class VoiceFlow:
             voice_input = bool(source and _records(json.loads(source["body_json"])))
             if (
                 not policy.enabled
-                or set(content) != {"text"}
+                or set(content) not in ({"text"}, {"text", "reply_part"})
                 or len(text) > policy.max_chars
-                or row["reply_group_id"]
+                or row["reply_group_id"] and content.get("reply_part", {}).get("kind") != "voice"
                 or (row["action_type"] == "qq.private.proactive" and not policy.proactive)
                 or (policy.mode == "voice_input" and not voice_input)
             ):
@@ -230,6 +230,15 @@ class VoiceFlow:
 
     def _freeze_audio(self, outbox, job_id, audio, *, singing_index=None):
         row = self.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job_id,))
+        content = json.loads(outbox["content_json"])
+        choice = content.get("reply_part")
+        if singing_index is not None and choice and (
+            choice.get("kind") != "singing" or choice.get("request_id") != job_id
+        ):
+            raise CoreError("VOICE_DELIVERY_FENCED", 409)
+        expected_index = (choice["singing_segment_index"]
+                          if choice and choice["kind"] == "singing"
+                          and choice["request_id"] == job_id else outbox["segment_index"] or 0)
         if (
             not row
             or row["state"] != "READY"
@@ -239,7 +248,7 @@ class VoiceFlow:
                 or row["outbox_content_sha256"] != outbox["content_sha256"]
                 or row["outbox_delivery_key"] != outbox["delivery_key"]))
             or (singing_index is not None and (row["operation"] != "sing"
-                or singing_index != (outbox["segment_index"] or 0)))
+                or singing_index != expected_index))
         ):
             raise CoreError("VOICE_DELIVERY_FENCED", 409)
         binding = voice_protocol.VoiceDeliveryBinding(

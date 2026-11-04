@@ -6,6 +6,8 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -67,7 +69,12 @@ async def native_trial(core, tmp_path, value, *, paid=None, texts=None, respond=
         grant_options={"max_input_chars": value.max_input_chars,
                        "max_reply_chars": value.max_reply_chars},
     ) as result:
-        yield result
+        # Signed receipts and cumulative accounting share this quota fixture clock.
+        receipt_clock = SimpleNamespace(now=lambda _: core.clock.now)
+        with patch("companion_onebot_bridge.app.datetime", receipt_clock), patch(
+            "tests.native_continuous_support.datetime", receipt_clock,
+        ):
+            yield result
 
 
 def test_profile_projects_independent_limits_without_creating_authority(tmp_path):

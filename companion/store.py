@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -40,6 +41,19 @@ def migrate(path, revision="head"):
     command.upgrade(cfg, revision)
 
 
+def file_identity(path):
+    """Device, inode, size and mtime of a database and its WAL; every commit changes one."""
+    files = []
+    for name in (path, str(path) + "-wal"):
+        try:
+            info = os.stat(name)
+        except OSError:
+            files.append(None)
+        else:
+            files.append((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
+    return tuple(files)
+
+
 def _lock_report(site, started, locked, finished, outcome):
     """Content-free timing of one write transaction, reported only when it is slow."""
     from companion.telemetry import LOCK_REPORT_MS, emit_lock
@@ -64,6 +78,10 @@ class Store:
     def __init__(self, path):
         self.path = path
         self._budget_stops = None
+        # File identity when the current read snapshot began; None outside one.
+        self._snapshot_files = None
+        # Counts write transactions and read snapshots; identifies the current one.
+        self._scope = 0
         self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         try:
             self.db.row_factory = sqlite3.Row
@@ -87,10 +105,54 @@ class Store:
         """Whether this Store owns an active BEGIN IMMEDIATE scope."""
         return self._budget_stops is not None and self.db.in_transaction
 
+    @property
+    def in_read_snapshot(self):
+        """Whether this Store is inside `read_or_write`'s query-only snapshot."""
+        return self._snapshot_files is not None and self.db.in_transaction
+
+    @property
+    def frozen_scope(self):
+        """The current write transaction or read snapshot, in which no other writer's
+        commit is visible; None outside both."""
+        return self._scope if self.in_write_transaction or self.in_read_snapshot else None
+
+    def read_or_write(self, operation):
+        """Run a read-only operation on one WAL snapshot instead of the single writer lock.
+
+        WAL readers never block the writer, and the snapshot is a committed state from
+        within this call. query_only refuses every write statement, including a nested
+        BEGIN IMMEDIATE. A refused write, an external journal ahead of the snapshot, or
+        any other failure repeats the operation once under BEGIN IMMEDIATE; that
+        outcome, success or error, is the authoritative one.
+        """
+        if self.db.in_transaction:
+            return operation()
+        caller = sys._getframe(1)
+        try:
+            self.db.execute("PRAGMA query_only=ON")
+            try:
+                self.db.execute("BEGIN")
+                # Taken before the first read pins the snapshot: equal identities later
+                # mean no commit has happened since the snapshot began.
+                self._snapshot_files = file_identity(self.path)
+                self._txn_changes = self.db.total_changes
+                self._scope += 1
+                return operation()
+            finally:
+                self._snapshot_files = None
+                if self.db.in_transaction:
+                    self.db.rollback()
+                self.db.execute("PRAGMA query_only=OFF")
+        except Exception:
+            pass  # The locked attempt below decides the result.
+        with self.transaction(site=(caller.f_code, caller.f_lineno)):
+            return operation()
+
     @contextmanager
-    def transaction(self):
-        caller = sys._getframe(2)  # 0: this generator, 1: contextlib, 2: the `with` site
-        site = (caller.f_code, caller.f_lineno)
+    def transaction(self, *, site=None):
+        if site is None:
+            caller = sys._getframe(2)  # 0: this generator, 1: contextlib, 2: the `with` site
+            site = (caller.f_code, caller.f_lineno)
         started = time.perf_counter()
         try:
             self.db.execute("BEGIN IMMEDIATE")
@@ -99,6 +161,7 @@ class Store:
             raise
         locked = time.perf_counter()
         self._budget_stops = set()
+        self._scope += 1
         # Lets shared caches tell whether this connection has uncommitted writes.
         self._txn_changes = self.db.total_changes
         outcome = "ROLLBACK"
@@ -239,7 +302,9 @@ class Store:
             "consolidation_runs": {"steps_json", "lease_token", "captured_privacy_epoch"},
             "consolidation_evidence": {"event_id", "run_id"},
             "goals": {"scope_json", "state", "redacted", "reflection_suggestion_id"},
-            "mood_appraisals": {"event_id", "reason", "quote_sha256", "request_id"},
+            "mood_appraisals": {
+                "event_id", "reason", "quote_sha256", "request_id", "target_message_id"
+            },
             "goal_evidence": {"event_id", "goal_id"},
             "goal_steps": {
                 "lease_token",

@@ -279,3 +279,27 @@ def test_a_failed_reply_keeps_its_owner_input_in_history_without_inventing_a_rep
     assert history[0]["reply_text"] == "" and history[0]["reply_complete"] is False
     roles = [message["role"] for message in dialogue_history.turn_messages(history[0])]
     assert roles == ["user"]
+
+
+def test_newer_input_stops_an_old_context_build_midway(core, monkeypatch):
+    first = accept(core)
+    job = core.claim_job("first-worker")
+    assert job["job_id"] == first["job_id"]
+    history = []
+    original = dialogue_history.turn_messages
+
+    def turn_messages(source, store):
+        history.append(source)
+        return original(source, store)
+
+    def newer_input(*_args, **_kwargs):
+        accept(core, 2, "请先听完我的补充")
+        return None
+
+    # The newer message lands while the old job is still collecting references.
+    monkeypatch.setattr(core, "_expression_learning_reference", newer_input)
+    monkeypatch.setattr(dialogue_history, "turn_messages", turn_messages)
+    with pytest.raises(CoreError) as error:
+        core.context(job)
+    assert error.value.code in {reply_revision.CANCELLED, reply_revision.SUPERSEDED}
+    assert history == []  # History and planning never ran for the cancelled job.

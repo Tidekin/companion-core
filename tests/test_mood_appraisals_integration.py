@@ -150,3 +150,75 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path):
             assert core.store.rows("SELECT * FROM mood_appraisals") == []
             assert core.mood.snapshot()["signals"] == []
     run(scenario())
+
+
+def test_extraction_records_a_content_free_appraisal_funnel(core):
+    key = prepare_extraction(core)
+    core.model.extraction = encode({"memories": [], "interaction_signals": [
+        {"event_id": key, "reason": "OWNER_AFFECTION", "quote": "想你了"},
+        {"event_id": key, "reason": "OWNER_PLAYFUL", "quote": "想你了"},
+        {"event_id": "evt_other", "reason": "OWNER_PLAYFUL", "quote": "想你了"},
+        {"event_id": key, "reason": "OWNER_DISTRESS", "quote": "没说过的话"},
+    ]})
+    assert run(core.extract_once())
+    row = core.store.one(
+        "SELECT entity_id,safe_detail_json FROM audit_log WHERE action='mood.appraisals_extracted'"
+    )
+    assert row["entity_id"] == core.store.one("SELECT request_id FROM model_usage")["request_id"]
+    assert json.loads(row["safe_detail_json"]) == {
+        "field_present": True, "finish_reason": None, "returned": 4, "kept": 1,
+        "rejected": {"DUPLICATE_EVENT": 2, "OUTSIDE_BATCH": 1},
+        "reasons": {"OWNER_AFFECTION": 1},
+    }
+    assert "想你" not in row["safe_detail_json"]
+
+
+def test_funnel_distinguishes_a_missing_field_from_an_empty_list(core):
+    prepare_extraction(core)
+    core.model.extraction = encode({"memories": []})
+    assert run(core.extract_once())
+    detail = json.loads(core.store.one(
+        "SELECT safe_detail_json FROM audit_log WHERE action='mood.appraisals_extracted'"
+    )["safe_detail_json"])
+    assert detail["field_present"] is False and detail["returned"] == 0
+
+
+def test_truncated_extraction_leaves_a_content_free_receipt(core):
+    from companion.model import ModelResponse
+
+    prepare_extraction(core)
+    original = core.model.complete
+
+    async def cut(messages, scenario):
+        response = await original(messages, scenario)
+        if scenario == "memory_extract":
+            return ModelResponse('{"memories":[{"subject":"us', 100, 4096, 0,
+                                 finish_reason="length")
+        return response
+
+    core.model.complete = cut
+    run(core.extract_step())
+    row = core.store.one(
+        "SELECT safe_detail_json FROM audit_log WHERE action='memory.extract_truncated'"
+    )
+    assert json.loads(row["safe_detail_json"]) == {
+        "output_tokens": 4096, "max_tokens": 4096, "events": 1,
+    }
+    assert core.store.rows("SELECT * FROM mood_appraisals") == []
+
+
+def test_memory_extract_has_its_own_output_cap(core):
+    core.settings.max_output_tokens = 2048
+    assert core.settings.output_tokens("memory_extract") == 4096
+    assert core.settings.output_tokens("chat") == 2048
+    core.settings.memory_extract_max_output_tokens = 3000
+    assert core.settings.output_tokens("memory_extract") == 3000
+
+
+def test_memory_extract_cap_never_exceeds_the_paid_approval(core):
+    def approved(limit):
+        return core.settings.model_copy(
+            update={"paid_model": SimpleNamespace(max_output_tokens=limit)})
+
+    assert approved(2048).output_tokens("memory_extract") == 2048
+    assert approved(8192).output_tokens("memory_extract") == 4096

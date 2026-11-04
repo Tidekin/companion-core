@@ -160,14 +160,23 @@ def _material(store, row, job, view, requests, *, meme_binding=None):
             "request_ids": requests,
             **({"reply_format": "voice"} if job["kind"] == "chat"
                and "voice" in view.policy.purposes
-               and reply_format(store, job["event_id"]) == "voice" else {}),
+                and reply_format(store, job["event_id"], row) == "voice" else {}),
             **({"reply_format": "singing",
-                "singing_request_id": song_choice(store, job["event_id"])}
-               if job["kind"] == "chat" and reply_format(store, job["event_id"]) == "singing"
+                 "singing_request_id": song_choice(store, job["event_id"], row)}
+                if job["kind"] == "chat" and reply_format(store, job["event_id"], row) == "singing"
                else {}),
+            **_composition_material(store, job),
             **({"meme_binding_version": meme_binding["version"],
                 "meme_binding_sha256": paid_budget.sha(meme_binding)}
                if meme_binding is not None else {})}
+
+
+def _composition_material(store, job):
+    from companion.agent_output import composition
+
+    output = composition(store, job["event_id"]) if job["kind"] == "chat" else None
+    return ({"reply_composition_sha256": paid_budget.sha(output.model_dump(mode="json"))}
+            if output is not None else {})
 
 
 def _meme_binding(store, settings, clock, job, row):
@@ -271,7 +280,14 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
         policy = settings.segmented_reply
         from companion.agent_output import reply_format, song_choice
 
+        mixed = job["kind"] == "chat" and reply_format(store, job["event_id"]) == "mixed"
         is_song = job["kind"] == "chat" and reply_format(store, job["event_id"]) == "singing"
+        if mixed:
+            from companion.reply_composition import check_group, check_item
+
+            check_group(store, settings, clock, job, group["rows"])
+            for part in group["rows"]:
+                check_item(store, settings, job, part)
         if is_song:
             from companion.agent_singing import selected
 
@@ -279,9 +295,12 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
             if (len(message_ids) != len(manifest["segments"])
                 or any(item["interval_ms"] != 0 for item in envelopes.values())):
                 raise CoreError("OWNER_DELIVERY_GROUP_CHANGED", 403)
-        elif group["segmented"] and (policy is None
-            or policy.max_segments != "unlimited" and len(message_ids) > policy.max_segments
-            or any(item["interval_ms"] != policy.interval_ms for item in envelopes.values())):
+        elif group["segmented"] and (
+            policy is None and not mixed
+            or policy is not None and policy.max_segments != "unlimited"
+            and len(message_ids) > policy.max_segments
+            or any(item["interval_ms"] != (policy.interval_ms if policy else 0)
+                   for item in envelopes.values())):
             raise CoreError("OWNER_DELIVERY_GROUP_CHANGED", 403)
     for message_id in message_ids:
         row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))

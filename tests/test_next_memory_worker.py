@@ -47,7 +47,7 @@ def run_isolated_worker(settings_path, now):
                 "update_authorized": False, "claims_replacement": False,
                 "same": None, "conflicts": [], "replaces": []} for _ in candidates]}))
         assert payload["messages"][0]["content"] == EXTRACT_RULES
-        assert payload["max_tokens"] == min(2048, settings.paid_model.max_output_tokens)
+        assert payload["max_tokens"] == min(4096, settings.paid_model.max_output_tokens)
         calls.append("memory_extract")
         sources = json.loads(payload["messages"][-1]["content"])
         source = next((row for row in sources["events"]

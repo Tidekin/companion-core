@@ -26,8 +26,6 @@ output_rate = 1200000
 monthly_limit_micro_usd = 20000000
 autonomous_daily_micro_usd = 200000
 memory_daily_micro_usd = 50000
-# Structured evidence needs its own allowance; the approved paid output ceiling still applies.
-memory_extract_max_output_tokens = 2048
 # Owner bursts are answered once: a new message waits 2 s (5 s while the chat is active),
 # each further message 2 s more, at most 8 s per batch. Commands are never delayed.
 # To answer every message at once, add `[input_debounce]` with `enabled = false`.
@@ -42,6 +40,8 @@ embedding_cache_dir = "data/embedding-cache"
 semantic_min_score = 0.5
 extraction_min_events = 5
 extraction_idle_seconds = 900
+# Bounded by [paid_model].max_output_tokens; raise that approval to use more than it.
+memory_extract_max_output_tokens = 4096
 proactive_enabled = true
 proactive_interval_seconds = 10800
 proactive_idle_seconds = 3600

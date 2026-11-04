@@ -680,21 +680,8 @@ class Core(Runtime):
             and reply_revision.owner_input(s, job["event_id"]))
             or reply_revision.control_job(s, job)):
             return None
-        source_check = None
         if authority:
             allowed = None
-
-            def source_check(event_id):
-                try:
-                    owner_input.source(s, cfg, authority, event_id, self.clock(), history=True,
-                                       purpose="proactive" if followup else "chat")
-                    return bool(s.one(
-                        "SELECT 1 FROM events WHERE event_id=? AND conversation_id=? "
-                        "AND rowid<(SELECT rowid FROM events WHERE event_id=?)",
-                        (event_id, job["conversation_id"], job["event_id"]),
-                    ))
-                except CoreError:
-                    return False
         elif private_life.strict(s, cfg):
             if cfg.live_text_window.history_scope != "approved_window":
                 return None
@@ -714,11 +701,34 @@ class Core(Runtime):
                 (job["conversation_id"], after(now, -cfg.raw_event_retention_days * 86400),
                  now, job["event_id"]),
             )}
-        result = self.memory_context.continuation(
-            job["conversation_id"], now, event_ids=allowed,
-            current_event_ids=[row["event_id"] for row in history],
-            used_memory_ids=used_memory_ids, source_check=source_check,
-        )
+
+        def collect():
+            source_check = finish = None
+            if authority:
+                # Episodes share their sources; check them all against one job view.
+                _, check, finish = owner_input.history_batch(
+                    s, cfg, self.clock, job, purpose="proactive" if followup else "chat")
+
+                def source_check(event_id):
+                    try:
+                        check(event_id)
+                        return bool(s.one(
+                            "SELECT 1 FROM events WHERE event_id=? AND conversation_id=? "
+                            "AND rowid<(SELECT rowid FROM events WHERE event_id=?)",
+                            (event_id, job["conversation_id"], job["event_id"]),
+                        ))
+                    except CoreError:
+                        return False
+            found = self.memory_context.continuation(
+                job["conversation_id"], now, event_ids=allowed,
+                current_event_ids=[row["event_id"] for row in history],
+                used_memory_ids=used_memory_ids, source_check=source_check,
+            )
+            if finish is not None:
+                finish()
+            return found
+
+        result = s.read_or_write(collect) if authority else collect()
         items = result["items"]
         history_limit = authority.policy.history.max_utf8_bytes if authority else (
             cfg.live_text_window.max_history_utf8_bytes if live_text.active(s, cfg)
@@ -971,6 +981,8 @@ class Core(Runtime):
         learned = self._expression_learning_reference(job, affect) if (
             permitted("expression")) else None
         mark("context_references")
+        # A newer owner message cancels this job at ingestion; stop building for it.
+        reply_revision.check_job(s, job)
         if learned:
             references.append(learned["message"])
             reference_sources.append((learned["message"], learned["source_event_ids"]))
@@ -1127,6 +1139,7 @@ class Core(Runtime):
             reference_proofs.append((continuation["message"],
                                      {"kind": "memory", "proof": continuation["proof"]}))
         mark("context_history")
+        reply_revision.check_job(s, job)
         if job["kind"] == "chat" and any(source.get("reply_complete") is False
                                          and not source.get("reply_text") for source in sources):
             add_rules("\n历史里主人连着发了几条、中间没有你的回复时，前面那几条你还没回上；"
@@ -1840,6 +1853,8 @@ class Core(Runtime):
                            and reply_format(self.store, job["event_id"]) == "voice")
             singing_reply = (generated_reply and job["kind"] == "chat"
                              and reply_format(self.store, job["event_id"]) == "singing")
+            mixed_reply = (generated_reply and job["kind"] == "chat"
+                           and reply_format(self.store, job["event_id"]) == "mixed")
             quote_choice = None
             if (authority and generated_reply and job["kind"] == "chat"
                     and self.settings.quote_policy != "never"):
@@ -1876,12 +1891,21 @@ class Core(Runtime):
                     intent = (
                         self.expression.intent(job["event_id"], reply, now)
                         if policy and generated_reply and job["kind"] == "chat"
-                        and not voice_reply and not singing_reply
+                        and not voice_reply and not singing_reply and not mixed_reply
                         and self.settings.expression_enabled
                         and (authority is None or "expression" in authority.policy.purposes)
                         else None
                     )
-                    if singing_reply:
+                    if mixed_reply:
+                        from companion import reply_composition
+
+                        newer = self.store.one("SELECT 1 FROM events WHERE conversation_id=? "
+                            "AND actor_id='owner' AND source='qq.onebot' "
+                            "AND event_type IN ('message.received','message.media_received') "
+                            "AND rowid>(SELECT rowid FROM events WHERE event_id=?) LIMIT 1",
+                            (job["conversation_id"], job["event_id"]))
+                        message_ids = [] if newer else reply_composition.enqueue(self, job, now)
+                    elif singing_reply:
                         from companion.agent_singing import selected
 
                         song_id = song_choice(self.store, job["event_id"])
@@ -1903,9 +1927,20 @@ class Core(Runtime):
                         ) if notice_parts else []
                         notices.record(self.store, self.settings, job, message_ids, now)
                     elif policy and generated_reply and job["kind"] == "chat" and (
-                        intent is None or intent.image is None
+                        intent is None or intent.image is None or authority is not None
+                        and not self.store.one(
+                            "SELECT 1 FROM generated_images WHERE job_id=? AND state='SUCCEEDED' "
+                            "AND message_id IS NULL", (job["job_id"],),
+                        )
                     ):
                         parts = split_text(intent.text if intent else reply, policy)
+                        image = (intent.image.model_dump(exclude_none=True)
+                                 if intent is not None and intent.image is not None else None)
+                        if image is not None and policy.max_segments != "unlimited":
+                            # The picture occupies one of the existing visible-message slots.
+                            text_slots = policy.max_segments - 1
+                            if len(parts) > text_slots:
+                                parts = parts[:text_slots - 1] + ["".join(parts[text_slots - 1:])]
                         if bounded_text:
                             approval, _ = live_text.check_job(
                                 self.store, self.settings, self.clock, job,
@@ -1917,7 +1952,7 @@ class Core(Runtime):
                                 raise CoreError("LIVE_TEXT_SEND_ATTEMPT_CAP", 403)
                             if len(parts) > available:
                                 parts = [reply]
-                        if len(parts) > 1 and self.store.one(
+                        if (len(parts) > 1 or image is not None) and self.store.one(
                             "SELECT 1 FROM events WHERE conversation_id=? AND actor_id='owner' "
                             "AND event_type IN ('message.received','message.media_received') "
                             "AND source='qq.onebot' AND rowid>(SELECT rowid FROM events "
@@ -1929,6 +1964,7 @@ class Core(Runtime):
                         ) if authority and parts else None
                         message_ids = enqueue_reply_parts(
                             self.store, job, parts, policy.interval_ms, now, reply_to=quote_to,
+                            image=image,
                         ) if parts else []
                     else:
                         create_reply = self.expression.enqueue if (
@@ -1940,7 +1976,7 @@ class Core(Runtime):
                             else "qq.private.reply",
                         )]
                     if (authority and message_ids and generated_reply
-                            and not voice_reply and not singing_reply
+                            and not voice_reply and not singing_reply and not mixed_reply
                             and job["kind"] == "chat"):
                         from companion import image_generation
 

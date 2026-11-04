@@ -15,6 +15,8 @@ from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.image_input import ImageInputPolicy
 from companion.model import ModelClient
+from companion.reply_segments import SegmentedReplyConfig
+from companion_meme_protocol import OFFER_WAIT_SECONDS
 from companion_onebot_bridge import app
 from companion_onebot_bridge.meme_catalog import key_hash
 from companion_onebot_bridge.owner_memes import MemePump
@@ -28,10 +30,12 @@ from tests.test_onebot_direct import raw_event
 from tests.test_private_companion import companion_options
 
 
-@pytest.mark.parametrize("handoff,deferred", [(False, False), (True, False), (False, True)],
-                         ids=["ordinary", "cancelled-before-usage", "query-unavailable"])
+@pytest.mark.parametrize("handoff,deferred,delayed", [
+    (False, False, False), (True, False, False), (False, True, False),
+    (False, False, True),
+], ids=["ordinary", "cancelled-before-usage", "query-unavailable", "delayed-authority-hops"])
 def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
-    core, tmp_path, handoff, deferred,
+    core, tmp_path, handoff, deferred, delayed, explicit=False, segmented=False, segment_cap=3,
 ):
     now = datetime.now(UTC).replace(microsecond=0)
     core.clock.now = now
@@ -45,9 +49,9 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
         "description": "绿色庆祝图片，适合分享成功的开心心情",
         "visible_text": "",
         "tone": "celebratory",
-        "suitable": ["celebrate"],
+        "suitable": ["celebrate", "playful"],
         "use_when": ["庆祝成功"],
-        "tags": ["庆祝", "成功", "开心"],
+        "tags": ["庆祝", "成功", "开心", "表情包"],
     }
 
     async def source(ws):
@@ -80,6 +84,8 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                 candidate = offers[0]["candidates"][0]["candidate_id"]
                 assert candidate == asset_sha
                 selected.append((offers[0]["offer_key"], candidate))
+                if segmented:
+                    answer = "第一段合成文字。\n第二段合成文字。"
                 answer += "⬡" + candidate + "⬡"
         return httpx.Response(200, json={
             "choices": [{"finish_reason": "stop", "message": {"content": answer}}],
@@ -93,7 +99,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
         meme_discovery_daily_download_bytes=32 * 1024 * 1024,
         meme_discovery_daily_storage_bytes=8 * 1024 * 1024,
         meme_caption_daily_micro_usd=50000,
-        expression_selection_probability=1.0,
+        expression_selection_probability=0.0 if explicit else 1.0,
     )
     options["paid_options"].update(
         max_output_tokens=4096,
@@ -105,6 +111,9 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
             max_images_per_request=5,
         ),
     )
+    if segmented:
+        options["core_options"]["segmented_reply"] = SegmentedReplyConfig(
+            mode="semantic", max_segments=segment_cap, interval_ms=0)
 
     async def scenario():
         nonlocal number, text
@@ -120,6 +129,13 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                        for feature in private_life.FEATURES)
             runtime = window.runtime.memes
             pump = MemePump(window.runtime, client)
+
+            async def delayed_authority_hops(request):
+                # The native offer has several independently authorized HTTP hops.
+                # Keep all those gates, and exercise more than the old 1.5 s total.
+                if request.url.path.startswith(("/internal/v1/owner-authority/",
+                                                "/internal/v1/memes/")):
+                    await asyncio.sleep(0.4)
 
             async def unavailable_query(request):
                 if request.url.path == "/internal/v1/memes/query":
@@ -139,6 +155,8 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
 
                 await app.upload(client, window.spool, wake, stop,
                     SimpleNamespace(accepted=accepted), runtime=window.runtime, memes=pump)
+                if delayed:
+                    client.event_hooks["request"].append(delayed_authority_hops)
                 event_id = pump.latest()[0]
                 row = window.db.execute(
                     "SELECT state,capture_json FROM window_inputs WHERE event_id=?", (event_id,),
@@ -153,6 +171,8 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                 assert task is not None
                 pump.tick(idle=False)
                 await task
+                if delayed:
+                    client.event_hooks["request"].remove(delayed_authority_hops)
                 pump.tick(idle=False)
                 offered = window.db.execute(
                     "SELECT state,offer_json FROM meme_runtime_semantic_offers WHERE event_id=?",
@@ -178,7 +198,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                         client.event_hooks["request"].remove(unavailable_query)
                         assert api_core.store.one("SELECT value FROM runtime_meta WHERE key=?",
                             ("meme_offer:" + first,)) is None
-                        core.clock.advance(2)
+                        core.clock.advance(OFFER_WAIT_SECONDS)
                     assert await worker.run_once("meme-integration-chat")
                     assert (await window.send(client, protocol))["worked"]
                     assert len(sends) == 1 and len(sends[0]["message"]) == 1
@@ -267,19 +287,34 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     assert caption_row["usage_request_id"] == usage["request_id"]
                     cached = window.db.execute("SELECT * FROM meme_caption_cache").fetchone()
 
-                    number, text = 2 + handoff, "今天又成功了，太开心了"
+                    number = 2 + handoff
+                    text = "请发一张表情包" if explicit else "今天又成功了，太开心了"
                     second, offer = await admit_current()
                     assert 1 <= len(offer["candidates"]) <= 8
                     assert offer["candidates"][0]["candidate_id"] == asset_sha
                     assert await worker.run_once("meme-integration-selection")
                     assert selected == [("meme:" + second, asset_sha)]
                     assert (await window.send(client, protocol))["worked"]
-                    assert len(sends) == 2 + handoff
-                    image = sends[-1]["message"][1]
+                    if segmented:
+                        # Independent leases and real OneBot requests, in group order.
+                        texts = (["第一段合成文字。", "第二段合成文字。"] if segment_cap == 3 else
+                                 ["第一段合成文字。\n第二段合成文字。"])
+                        assert sends[-1]["message"] == [
+                            {"type": "text", "data": {"text": texts[0]}}]
+                        for part in texts[1:]:
+                            assert (await window.send(client, protocol))["worked"]
+                            assert sends[-1]["message"] == [
+                                {"type": "text", "data": {"text": part}}]
+                        assert (await window.send(client, protocol))["worked"]
+                        assert len(sends[-1]["message"]) == 1
+                    extra = len(texts) if segmented else 0
+                    assert len(sends) == 2 + handoff + extra
+                    image = sends[-1]["message"][0 if segmented else 1]
                     assert image["type"] == "image"
                     encoded = image["data"]["file"].removeprefix("base64://")
                     assert base64.b64decode(encoded) == asset
-                    assert "⬡" not in sends[-1]["message"][0]["data"]["text"]
+                    if not segmented:
+                        assert "⬡" not in sends[-1]["message"][0]["data"]["text"]
                     assert window.db.execute(
                         "SELECT state FROM meme_pins WHERE key=?", (key_hash("meme:" + second),),
                     ).fetchone()[0] == "SENT"
@@ -289,7 +324,8 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     assert absent is None
                     assert await worker.run_once("meme-integration-text-only")
                     assert (await window.send(client, protocol))["worked"]
-                    assert len(sends) == len(chat_calls) == len(handshakes) == 3 + handoff
+                    assert len(sends) == 3 + handoff + extra
+                    assert len(chat_calls) == len(handshakes) == 3 + handoff
                     assert len(sends[-1]["message"]) == 1
                     assert len(visual_calls) == 1 and len(public_calls) == 5 * (1 + handoff)
                     assert tuple(window.db.execute(
@@ -300,7 +336,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     )) == 1
                     assert window.db.execute(
                         "SELECT state,count(*) FROM window_attempts GROUP BY state",
-                    ).fetchall() == [("ACK", 3 + handoff)]
+                    ).fetchall() == [("ACK", 3 + handoff + extra)]
                     vector = json.loads(window.db.execute(
                         "SELECT vector_json FROM meme_semantic_vectors").fetchone()[0])
                     assert len(vector) == 512 and any(value != 0 for value in vector)
@@ -315,3 +351,53 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                 await pump.close()
 
     run(scenario())
+
+
+def test_explicit_request_uses_native_image_offer_without_spontaneous_sampling(core, tmp_path):
+    test_signed_capture_caption_index_current_offer_and_original_image_delivery(
+        core, tmp_path, handoff=False, deferred=False, delayed=False, explicit=True)
+
+
+@pytest.mark.parametrize("cap", [2, 3])
+def test_native_meme_text_bubbles_then_original_image_keep_visible_count_cap(core, tmp_path, cap):
+    test_signed_capture_caption_index_current_offer_and_original_image_delivery(
+        core, tmp_path, handoff=False, deferred=False, delayed=False,
+        explicit=True, segmented=True, segment_cap=cap)
+
+
+@pytest.mark.parametrize("boundary", ["missing", "stop"])
+def test_native_image_tail_never_sends_empty_or_replays_text(core, tmp_path, monkeypatch, boundary):
+    from companion import owner_authority
+    from companion.owner_authority_protocol import AuthorityStop
+    from companion_onebot_bridge import reply_segments
+    from companion_onebot_bridge.owner_send import OwnerOneBot
+
+    original = OwnerOneBot.prepare_delivery
+    intercepted = []
+
+    async def prepare(self, item):
+        if reply_segments.image_only(item):
+            intercepted.append(item["message_id"])
+            if boundary == "missing":
+                db = self.guard.runtime.memes.catalog.db
+                with db:
+                    db.execute("UPDATE meme_assets SET active=0 WHERE sha=?",
+                               (item["content"]["image"]["candidate_id"],))
+            else:
+                authority = owner_authority.current(core.store, core.settings, core.clock).authority
+                owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                    operation_id="meme-tail-stop", authority=authority.as_dict()))
+        return await original(self, item)
+
+    monkeypatch.setattr(OwnerOneBot, "prepare_delivery", prepare)
+    error = ValueError if boundary == "missing" else httpx.HTTPStatusError
+    with pytest.raises(error):
+        test_signed_capture_caption_index_current_offer_and_original_image_delivery(
+            core, tmp_path, handoff=False, deferred=False, delayed=False,
+            explicit=True, segmented=True)
+    assert len(intercepted) == 1
+    rows = core.store.rows("SELECT state,attempt_count,content_json FROM outbox ORDER BY rowid")
+    assert [row["state"] for row in rows[:-1]] == ["SENT", "SENT", "SENT"]
+    assert rows[-1]["state"] == ("LEASED" if boundary == "missing" else "CANCELLED")
+    assert rows[-1]["attempt_count"] == 0
+    assert json.loads(rows[-1]["content_json"])["text"] == ""

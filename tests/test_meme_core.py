@@ -358,7 +358,7 @@ def test_offer_wait_expires_without_bridge_response(core, tmp_path, monkeypatch)
             _, accepted, _, _, _, _, _ = values
             core.store.execute(
                 "UPDATE jobs SET state='QUEUED',created_at=? WHERE job_id=?",
-                (after(core.clock(), -3), accepted["job_id"]),
+                (after(core.clock(), -meme_core.OFFER_WAIT_SECONDS - 1), accepted["job_id"]),
             )
             with Core(core.settings, clock=core.clock) as independent:
                 assert independent.claim_job("chat")["job_id"] == accepted["job_id"]

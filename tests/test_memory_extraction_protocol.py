@@ -167,7 +167,9 @@ def test_repaired_short_ref_extraction_commits_and_records_filter_reason(core):
     assert run(core.extract_once())
     assert core.store.one("SELECT content FROM memories")["content"] == candidate["content"]
     assert [kind for _, kind in core.model.calls] == ["memory_extract", "memory_review"]
-    assert "interaction_signals" not in core.model.calls[0][0][0]["content"]
+    funnel = core.store.one("SELECT safe_detail_json FROM audit_log "
+                            "WHERE action='mood.appraisals_extracted'")
+    assert json.loads(funnel["safe_detail_json"])["field_present"] is False
     assert core.store.rows("SELECT scenario,state FROM model_usage") == [
         {"scenario": "memory_extract", "state": "SETTLED"},
         {"scenario": "memory_review", "state": "SETTLED"}]
@@ -176,6 +178,30 @@ def test_repaired_short_ref_extraction_commits_and_records_filter_reason(core):
                               "WHERE action='memory.candidate_rejected'")
     assert rejected["entity_id"] == key
     assert json.loads(rejected["safe_detail_json"]) == {"reason": "SENSITIVE_SUMMARY"}
+
+
+@pytest.mark.parametrize("mood_enabled", [True, False])
+def test_repaired_short_refs_preserve_appraisal_validation(core, mood_enabled):
+    from tests.conftest import ingest, run
+
+    core.settings.memory_enabled = True
+    core.settings.mood_enabled = mood_enabled
+    core.settings.extraction_min_events = 1
+    core.settings.extraction_idle_seconds = 0
+    key = ingest(core, 1, "想你了，什么时候再聊")["event_id"]
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.model.extraction = json.dumps({"memories": [], "interaction_signals": [
+        {"event_id": "e0", "reason": "OWNER_AFFECTION", "quote": "想你了"},
+    ]}, ensure_ascii=False)[:-1]
+
+    assert run(core.extract_once())
+    funnel = core.store.one("SELECT safe_detail_json FROM audit_log "
+                            "WHERE action='mood.appraisals_extracted'")
+    detail = json.loads(funnel["safe_detail_json"])
+    assert detail["field_present"] is True and detail["returned"] == detail["kept"] == 1
+    assert core.store.rows("SELECT event_id,reason FROM mood_appraisals") == (
+        [{"event_id": key, "reason": "OWNER_AFFECTION"}] if mood_enabled else [])
+    assert [kind for _, kind in core.model.calls] == ["memory_extract"]
 
 
 def test_unrepairable_extraction_uses_only_existing_bounded_retries(core):

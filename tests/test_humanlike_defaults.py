@@ -117,7 +117,7 @@ def test_thinking_payload_only_for_chat():
     assert chat["max_tokens"] == settings.max_output_tokens + settings.chat_thinking_tokens
     extract = model_payload(settings, MESSAGES, "memory_extract")
     assert extract["thinking"] == {"type": "disabled"} and "reasoning_effort" not in extract
-    assert extract["max_tokens"] == settings.memory_extract_max_output_tokens == 2048
+    assert extract["max_tokens"] == settings.memory_extract_max_output_tokens
     off = model_payload(plain(chat_thinking="disabled"), MESSAGES, "chat")
     assert off["thinking"] == {"type": "disabled"} and "reasoning_effort" not in off
     other = plain(provider="openai", model_url="https://example.com/v1")

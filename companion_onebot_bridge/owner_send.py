@@ -3,6 +3,7 @@
 import base64
 from dataclasses import replace
 from datetime import datetime, timedelta
+from time import monotonic
 
 import httpx
 
@@ -12,6 +13,10 @@ from . import account_actions, journal, owner_notices, reply_segments
 from .event_normalizer import decode
 from .network import checked_http_client, private_request_matches, seal_protocol_content
 from .onebot_client import OneBotClient, bounded_post
+
+# Segments of one reply are leased seconds apart. A ready probe this recent is reused for
+# them; every send still passes before_dispatch's authority, lease and binding fences.
+PROBE_REUSE_SECONDS = 10.0
 
 
 class OwnerSendGuard:
@@ -330,7 +335,18 @@ class OwnerOneBot:
     async def probe(self):
         # Reuse the authority-bound health check without a leased-item guard.
         # The actual send retains before_dispatch's current-item/lease fences.
-        return await self.guard.runtime.probe(self.guard.client, self.protocol)
+        runtime = self.guard.runtime
+        reused = getattr(runtime, "_ready_probe", None)
+        if (reused is not None and reused[1] == self.guard.authority
+                and monotonic() < reused[0]):
+            runtime.verify()
+            return dict(reused[2])
+        runtime._ready_probe = None
+        result = await runtime.probe(self.guard.client, self.protocol)
+        if result["connection_ready"]:
+            runtime._ready_probe = (monotonic() + PROBE_REUSE_SECONDS,
+                                    dict(self.guard.authority), dict(result))
+        return result
 
     def release_prepared(self):
         prepared = self.guard.prepared_message
@@ -369,8 +385,9 @@ class OwnerOneBot:
                 if journal.digest(item) != original:
                     raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
 
-            message = reply_segments.quote(item) + [
-                {"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
+            message = reply_segments.quote(item)
+            if not reply_segments.image_only(item):
+                message.append({"type": "text", "data": {"text": reply_segments.wire_text(item)}})
             try:
                 image = await read_image(self.guard.runtime, self.guard.client, item,
                                          check=fence)
@@ -380,6 +397,8 @@ class OwnerOneBot:
                 if error.response.status_code != 410:
                     raise
                 image = None
+            if image is None and reply_segments.image_only(item):
+                raise ValueError("GENERATED_IMAGE_UNAVAILABLE")
             if image is not None:
                 message.append({"type": "image", "data": {
                     "file": "base64://" + base64.b64encode(image.data).decode("ascii")}})
@@ -398,10 +417,13 @@ class OwnerOneBot:
             else:
                 image = self.guard.runtime.memes.prepare(item, check=fence)
             self.guard.meme_prepared = image is not None
-            message = reply_segments.quote(item) + [
-                {"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
+            message = reply_segments.quote(item)
+            if not reply_segments.image_only(item):
+                message.append({"type": "text", "data": {"text": reply_segments.wire_text(item)}})
             if image is None:
                 self.guard.runtime.memes.cancel(reply_segments.event_id(item))
+                if reply_segments.image_only(item):
+                    raise ValueError("MEME_SELECTED_ASSET_UNAVAILABLE")
             else:
                 message.append({"type": "image", "data": {
                     "file": "base64://" + base64.b64encode(image.data).decode("ascii")}})
@@ -411,6 +433,16 @@ class OwnerOneBot:
                 {"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
 
     async def send_content(self, content):
+        try:
+            provider_id = await self._send_content(content)
+        except BaseException:
+            self.guard.runtime._ready_probe = None  # The next item probes OneBot again.
+            raise
+        if not provider_id:
+            self.guard.runtime._ready_probe = None
+        return provider_id
+
+    async def _send_content(self, content):
         item = self.guard.current_item
         if content != item["content"]:
             raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
