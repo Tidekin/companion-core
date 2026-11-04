@@ -260,16 +260,16 @@ def test_social_and_life_do_not_read_feedback_without_affect_purpose(
     authorize(core, tmp_path, account=False,
               additional_purposes=["proactive", *(["affect"] if allow_affect else [])])
     calls = []
-    snapshot = AffectEngine.snapshot
+    check_contact = AffectEngine.contact_paused
 
-    def observed_snapshot(engine):
-        calls.append(True)
-        return snapshot(engine)
+    def observed_contact(engine, source_ids=()):
+        calls.append(tuple(source_ids))
+        return check_contact(engine, source_ids)
 
-    monkeypatch.setattr(AffectEngine, "snapshot", observed_snapshot)
+    monkeypatch.setattr(AffectEngine, "contact_paused", observed_contact)
     assert proactive_allowed(core.store, core.settings, core.clock()) is (not allow_affect)
-    assert _paused(core.store, core.settings, core.clock()) is allow_affect
-    assert len(calls) == (2 if allow_affect else 0)
+    assert not _paused(core.store, core.settings, core.clock())
+    assert calls == ([()] if allow_affect else [])
     core.clock.advance(core.settings.affect_decay_minutes * 60 + 1)
     assert proactive_allowed(core.store, core.settings, core.clock())
     assert core.model.calls == []

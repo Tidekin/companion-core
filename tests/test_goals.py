@@ -277,16 +277,13 @@ def test_wake_dedup_cooldown_and_daily_limit_survive_restart(core):
         restarted.store.close()
 
 
-@pytest.mark.parametrize("reason", ["quiet", "pause", "affect", "unknown_price", "empty"])
+@pytest.mark.parametrize("reason", ["quiet", "pause", "unknown_price", "empty"])
 def test_wake_can_skip_without_model_or_message(core, reason):
     setup_goal(core)
     if reason == "quiet":
         core.clock.now = datetime.fromisoformat("2026-10-19T16:00:00+00:00")
     elif reason == "pause":
         core.goals.pause_autonomy(True)
-    elif reason == "affect":
-        core.settings.affect_enabled = True
-        ingest(core, 2, "先别聊这个")
     elif reason == "unknown_price":
         core.settings.input_rate = None
     else:
