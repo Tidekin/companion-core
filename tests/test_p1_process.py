@@ -16,9 +16,9 @@ from companion.conversation_policy import ConversationPolicyConfig
 from companion.owner_authority_protocol import OwnerCapture, OwnerGrantPolicy
 from companion.qq_rich import input_digest
 from companion_delivery_protocol.authority import capture_signing_payload
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.test_evaluation_process import process_config
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
 from tests.test_owner_input import captured, inbound
 
 

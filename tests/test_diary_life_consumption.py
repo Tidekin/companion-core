@@ -15,11 +15,11 @@ from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import ModelClient
 from tests.conftest import ingest, run
+from tests.support.owner_authority import activate
 from tests.test_life_expression_consumption import (
     close_provider_clients as close_provider_clients,
 )
 from tests.test_life_expression_consumption import prepared, request
-from tests.test_owner_authority import activate
 
 
 def draft(core, tmp_path):

@@ -11,8 +11,8 @@ import pytest
 from companion import paid_budget
 from tests.conftest import run
 from tests.poke_authority_fixture import environment, signed
+from tests.support.core_http import real_core_http
 from tests.test_evaluation_process import process_config
-from tests.test_onebot_capture import real_core_http
 from tests.test_reading_service import queued
 
 

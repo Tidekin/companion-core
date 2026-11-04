@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from companion.api import create_app
 from companion.contracts import LeaseRequest
 from companion.model import ModelClient
-from tests.test_onebot_capture import real_core_http
+from tests.support.core_http import real_core_http
 from tests.test_social_autonomy import background, queue
 from tests.test_social_owner_authority import (
     authorize,

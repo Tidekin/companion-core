@@ -25,12 +25,12 @@ from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.conftest import ingest, run
 from tests.native_continuous_support import Host
 from tests.social_profile_support import confirmed_profile_material
+from tests.support.core_http import real_core_http
 from tests.support.onebot import provider
 from tests.support.onebot_events import config
 from tests.test_cumulative_budget import policy as quota_policy
 from tests.test_cumulative_budget import view
 from tests.test_native_account_host import configure_host
-from tests.test_onebot_capture import real_core_http
 from tests.test_private_companion import companion_options
 from tests.test_social_autonomy import avatar, read_public
 from tests.test_social_owner_authority import authorize

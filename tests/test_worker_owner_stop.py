@@ -11,9 +11,10 @@ from companion import owner_authority, owner_input
 from companion.owner_authority_protocol import AuthorityStop, OwnerCapture
 from companion.store import utcnow
 from tests.conftest import run
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.test_meme_core import body, caption_environment, worker
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate, prepare
+from tests.test_owner_authority import prepare
 from tests.test_owner_input import captured
 from tests.test_worker_wakeup_process import close_child, finish, ready, signed_input, start, state
 

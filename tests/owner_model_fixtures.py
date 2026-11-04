@@ -13,7 +13,7 @@ from tests.conftest import event
 
 def authorized_job(core, *, lease_seconds=None, purposes=("chat",), number=1, renew=False):
     """Keep the test's paid policy and return one genuinely admitted, leased job."""
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     if core.settings.mode != "live":
         return None

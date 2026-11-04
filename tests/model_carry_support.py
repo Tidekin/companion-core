@@ -156,7 +156,7 @@ def stranded(core, tmp_path, **approval_changes):
 
 
 def migrated(core, tmp_path, **approval_changes):
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     case = stranded(core, tmp_path, **approval_changes)
     case.receipt = model_carry.prepare(

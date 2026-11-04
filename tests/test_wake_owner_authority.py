@@ -5,9 +5,10 @@ import pytest
 from companion.autonomous_selector import native_selector
 from companion.goals import GoalProposal
 from tests.conftest import ingest, run
+from tests.support.owner_authority import activate
 from tests.test_goals import setup_goal
 from tests.test_observations import enable_observations
-from tests.test_owner_authority import activate, prepare
+from tests.test_owner_authority import prepare
 
 
 def invoke(core, entry):

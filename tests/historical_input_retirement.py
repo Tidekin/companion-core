@@ -25,8 +25,9 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow
+from tests.support.core_http import real_core_http
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_capture import pinned_plan, real_core_http
+from tests.test_onebot_capture import pinned_plan
 from tests.test_private_companion import companion_options
 
 

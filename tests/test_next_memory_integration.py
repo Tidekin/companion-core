@@ -11,9 +11,9 @@ from companion.core import Core
 from companion.model import EXTRACT_RULES, ModelClient
 from companion.store import after, encode
 from tests.conftest import ingest, run
+from tests.support.core_http import real_core_http
 from tests.support.owner_memory import environment as owner_memory_environment
 from tests.test_next_life_growth import feedback_days
-from tests.test_onebot_capture import real_core_http
 
 FACT = "青禾项目下一步检查配色"
 

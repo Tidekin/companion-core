@@ -20,12 +20,12 @@ from tests import owner_model_fixtures
 from tests.conftest import run
 from tests.meme_authority_fixture import admit
 from tests.model_carry_support import migrated
+from tests.support.owner_authority import activate
 from tests.test_evaluation_process import process_config
 from tests.test_meme_core_process import process
 from tests.test_meme_pack_files import RULE
 from tests.test_model_carry_lifecycle import current_unknown, stop_current
 from tests.test_model_renewal import renewal
-from tests.test_owner_authority import activate
 from tests.test_voice_jobs import voice_config
 from tests.test_voice_node_api import tls_core
 

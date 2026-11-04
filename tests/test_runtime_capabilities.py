@@ -40,7 +40,7 @@ def grant_native(core, purposes, *, capabilities=()):
 
     from companion import owner_authority, paid_budget
     from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
     hashes = owner_authority.capability_hashes(core.settings)
@@ -250,7 +250,7 @@ def test_tools_argument_never_bypasses_native_video_approval(core):
 
 def test_native_video_requires_actual_tool_exposure(core, tmp_path):
     from companion import owner_authority
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     private_images(core, tmp_path)
     denied = rows(core, model_tools=("understand_video",))
@@ -281,7 +281,7 @@ def test_native_bili_tool_requires_current_permission_and_actual_exposure(core, 
 
 def test_native_bili_tool_requires_content_even_when_given_as_exposed(core, tmp_path):
     from companion import owner_authority
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     native_capabilities(core, tmp_path)
     view = owner_authority.current(core.store, core.settings, core.clock)
@@ -725,7 +725,7 @@ def test_native_capabilities_are_local_facts_without_guard_or_external_io(
 ])
 def test_feature_toggle_without_original_scope_never_claims_ready(core, tmp_path, feature, scope):
     from companion import owner_authority
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     native_capabilities(core, tmp_path)
     purpose = {"file_scope": "file", "bili_video_scope": "bili_video", "voice_scope": "voice",

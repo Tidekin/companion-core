@@ -9,7 +9,7 @@ from pydantic import SecretStr
 from companion.social_autonomy_protocol import SocialAutonomyConfig
 from companion.store import after
 from tests.conftest import run
-from tests.test_onebot_capture import real_core_http
+from tests.support.core_http import real_core_http
 from tests.test_social_autonomy import avatar
 from tests.test_social_owner_authority import authorize
 

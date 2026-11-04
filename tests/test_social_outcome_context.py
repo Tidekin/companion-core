@@ -9,8 +9,8 @@ from companion.contracts import CoreError
 from companion.social_autonomy import SocialAutonomy, _sha
 from companion.store import encode
 from tests.conftest import run
+from tests.support.core_http import real_core_http
 from tests.test_life_expression_consumption import prepared, request
-from tests.test_onebot_capture import real_core_http
 from tests.test_social_owner_authority import close_provider_clients as close_provider_clients
 
 

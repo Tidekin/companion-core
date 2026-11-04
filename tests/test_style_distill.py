@@ -8,8 +8,9 @@ import pytest
 from companion import paid_budget, style_distill, style_observation
 from companion.model import ModelClient
 from tests.conftest import run
+from tests.support.owner_authority import activate
 from tests.test_exploration import configure
-from tests.test_owner_authority import activate, prepare
+from tests.test_owner_authority import prepare
 from tests.test_watch_ledger import Provider, observe
 
 PATTERN = {

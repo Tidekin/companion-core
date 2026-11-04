@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -12,7 +11,6 @@ from dataclasses import asdict, replace
 
 import httpx
 import pytest
-import uvicorn
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
 from websockets.asyncio.server import serve
@@ -26,7 +24,6 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import SendOperation, TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.journal_assertions import assert_private_journal
-from tests.support.native_http import owned_http_protocol
 from tests.support.onebot import onebot_http, provider
 from tests.support.onebot_events import config, raw_event
 from tests.test_live_text_window import live_fixture
@@ -162,34 +159,6 @@ async def source_window(
                 window = TestWindow(spool, plan, clock=lambda: core.clock.now)
                 await window.open(client, protocol if approved else None)
                 yield window, client, protocol, handshakes, sends
-
-
-@asynccontextmanager
-async def real_core_http(core):
-    ready = asyncio.Event()
-
-    class Server(uvicorn.Server):
-        async def startup(self, sockets=None):
-            await super().startup(sockets=sockets)
-            ready.set()
-
-    api = create_app(core.settings)
-    api.state.core = core
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    # Native children have a 30s deadline. Keep server idle expiry beyond the
-    # client's 5s pool expiry to avoid Windows timer/connection-close races.
-    server = Server(uvicorn.Config(api, lifespan="off", log_config=None, access_log=False,
-                                   http=owned_http_protocol(lambda: server.servers),
-                                   timeout_keep_alive=60))
-    task = asyncio.create_task(server.serve(sockets=[listener]))
-    try:
-        await asyncio.wait_for(ready.wait(), 5)
-        yield listener.getsockname()[1]
-    finally:
-        server.should_exit = True
-        await asyncio.wait_for(task, 5)
-        listener.close()
 
 
 @pytest.mark.parametrize("restart", [False, True])

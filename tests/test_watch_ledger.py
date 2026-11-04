@@ -13,8 +13,9 @@ from companion.observation import ObservationEvent
 from companion.privacy import epoch
 from tests.conftest import run
 from tests.support.onebot_events import normalized, raw_event
+from tests.support.owner_authority import activate
 from tests.test_exploration import configure
-from tests.test_owner_authority import activate, prepare
+from tests.test_owner_authority import prepare
 from tests.test_paid_model_gate import approved_live
 
 JUDGEMENT = {"rating": 1, "take": "猫卡在纸箱里那段特别好笑", "topic_tags": ["猫", "日常"]}

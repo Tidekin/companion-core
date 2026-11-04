@@ -24,8 +24,8 @@ from companion_onebot_bridge.window import config_matches
 from companion_onebot_bridge.window import digest as bridge_digest
 from tests.conftest import run
 from tests.meme_authority_fixture import admit
+from tests.support.owner_authority import activate
 from tests.test_meme_core import CAPTION, body, caption_environment, worker
-from tests.test_owner_authority import activate
 
 RULE = dict(
     repo="synthetic/pack",
@@ -190,7 +190,7 @@ def runtime_case(core, tmp_path, monkeypatch, request):
             # it later for Core-mode endpoint checks; ingress itself is unchanged.
             import httpx
 
-            from tests.test_onebot_capture import real_core_http
+            from tests.support.core_http import real_core_http
 
             current = job = None
             if getattr(request, "param", None) == "no_current":

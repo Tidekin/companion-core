@@ -16,9 +16,9 @@ from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from tests.model_carry_support import MESSAGES, migrated, stranded
 from tests.owner_model_fixtures import authorized_job
+from tests.support.owner_authority import activate
 from tests.test_model_carry_lifecycle import current_unknown
 from tests.test_model_renewal import renewal
-from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 
 

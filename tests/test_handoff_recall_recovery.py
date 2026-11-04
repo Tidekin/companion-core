@@ -347,7 +347,7 @@ def test_abort_refuses_a_successor_with_real_settled_model_admission(core, tmp_p
         OwnerGrantPolicy,
         OwnerRuntimeConfig,
     )
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     initial(core, tmp_path)
     _, new = stop_and_successor(core, tmp_path)

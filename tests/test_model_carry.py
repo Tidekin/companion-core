@@ -20,7 +20,7 @@ from companion_delivery_protocol import digest
 from companion_delivery_protocol import model_carry as wire
 from tests.model_carry_support import MESSAGES, executors, migrated, observer, stranded
 from tests.owner_model_fixtures import authorized_job
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 
 
 def test_explicit_carry_preserves_unknown_nonterminal_and_original_caps(core, tmp_path):

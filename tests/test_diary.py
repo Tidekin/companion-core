@@ -550,7 +550,8 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
         )
 
     async def execute():
-        from tests.test_owner_authority import activate, prepare
+        from tests.support.owner_authority import activate
+        from tests.test_owner_authority import prepare
 
         policy = prepare(core, tmp_path).model_copy(update={"purposes": ["diary"]})
         activate(core, policy)

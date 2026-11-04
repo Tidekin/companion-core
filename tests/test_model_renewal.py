@@ -26,7 +26,7 @@ from companion_delivery_protocol import digest
 from companion_delivery_protocol import model_carry as wire
 from tests.model_carry_support import MESSAGES, executors, migrated, observer
 from tests.owner_model_fixtures import authorized_job
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 
 
 def renewal(core, case, *, number=1, offset=timedelta(seconds=1), open_ended=False,

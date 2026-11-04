@@ -8,7 +8,7 @@ import jsonschema
 import yaml
 
 from tests.conftest import event
-from tests.test_onebot_capture import real_core_http
+from tests.support.core_http import real_core_http
 
 
 def test_published_ingest_reply_accepts_live_replay_states(core):

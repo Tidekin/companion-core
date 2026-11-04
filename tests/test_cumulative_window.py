@@ -93,7 +93,7 @@ async def renew_native(core, bridge, number, **limits):
     from companion_onebot_bridge import owner_handoff
     from companion_onebot_bridge.onebot_client import OneBotClient
     from companion_onebot_bridge.owner_runtime import OwnerRuntime
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     original = owner_authority.current(core.store, core.settings, core.clock)
     bridge.runtime.stop()

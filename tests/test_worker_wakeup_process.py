@@ -20,8 +20,9 @@ from companion.owner_authority_protocol import OwnerCapture, OwnerGrantPolicy
 from companion.store import after, utcnow
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import ingest, run
-from tests.test_onebot_capture import pinned_plan, real_core_http
-from tests.test_owner_authority import activate
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
+from tests.test_onebot_capture import pinned_plan
 from tests.test_owner_input import captured, inbound
 from tests.test_private_companion import companion_options
 

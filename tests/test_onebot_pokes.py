@@ -21,12 +21,13 @@ from companion_onebot_bridge.owner_send import OwnerSendGuard
 from tests.conftest import run
 from tests.native_continuous_support import Host
 from tests.poke_authority_fixture import environment as native_environment
+from tests.support.core_http import real_core_http
 from tests.support.onebot import provider
 from tests.support.onebot_events import raw_event
+from tests.support.owner_authority import activate
 from tests.test_cumulative_budget import policy as quota_policy
 from tests.test_cumulative_budget import view
-from tests.test_onebot_capture import real_core_http, source_window
-from tests.test_owner_authority import activate
+from tests.test_onebot_capture import source_window
 from tests.test_poke import native_frame
 from tests.test_private_companion import companion_options
 from tests.test_social_owner_authority import stop

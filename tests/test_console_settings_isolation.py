@@ -12,9 +12,9 @@ from pydantic import SecretStr
 
 from companion import api_store, cloud_budget
 from companion.store import Store
+from tests.support.core_http import real_core_http
 from tests.test_cloud_budget import charge
 from tests.test_console_reset_isolation import configure, login
-from tests.test_onebot_capture import real_core_http
 
 
 def request(core, target):

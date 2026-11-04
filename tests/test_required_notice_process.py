@@ -14,7 +14,7 @@ from companion import owner_authority
 from companion.store import encode
 from tests import native_input_protocol_fixture as native
 from tests.conftest import run
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 
 
 @pytest.mark.parametrize("first_text,delivery", [("[SKIP]", "SENT"), (" ", "DELIVERY_UNCERTAIN")])

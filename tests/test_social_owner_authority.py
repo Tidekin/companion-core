@@ -14,8 +14,8 @@ from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy, 
 from companion.store import after, uid
 from tests.conftest import ingest, run
 from tests.social_model_transport import NativeTestModel
+from tests.support.owner_authority import activate
 from tests.test_life_topics import bug, due, proposal
-from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 from tests.test_social_autonomy import background, planned, queue
 

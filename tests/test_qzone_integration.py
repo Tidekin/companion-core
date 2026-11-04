@@ -26,8 +26,8 @@ from source_reader.qzone import QZoneHTTP, QZoneReader
 from source_reader.reading import ReadingContext, read_observation
 from tests.conftest import run
 from tests.support.native_consumer_entry import environment
+from tests.support.owner_authority import activate
 from tests.test_life_worker_integration import process_worker
-from tests.test_owner_authority import activate
 from tests.test_qzone_reader import TOKEN, URL, account_file, pool_for, response
 
 

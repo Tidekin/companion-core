@@ -13,7 +13,8 @@ from companion.owner_authority_protocol import AuthorityStop, OwnerCapture, Owne
 from companion.qq_rich import input_digest
 from companion.store import encode
 from companion_delivery_protocol.authority import CAPTURE_DOMAIN
-from tests.test_owner_authority import activate, prepare
+from tests.support.owner_authority import activate
+from tests.test_owner_authority import prepare
 
 
 def captured(core, tmp_path):

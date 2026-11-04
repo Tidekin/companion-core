@@ -15,8 +15,8 @@ import pytest
 
 from source_reader.migrate_astrbot import READER_KEYS, export, plan
 from tests.conftest import ingest, run
+from tests.support.core_http import real_core_http
 from tests.test_exploration import configure
-from tests.test_onebot_capture import real_core_http
 
 ROOT = Path(__file__).resolve().parents[1]
 

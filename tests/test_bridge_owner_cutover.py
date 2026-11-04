@@ -12,9 +12,9 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool, encode
 from tests.support.onebot_events import raw_event
+from tests.support.owner_authority import activate
 from tests.test_onebot_capture import source_window
 from tests.test_onebot_pokes import silent
-from tests.test_owner_authority import activate
 
 
 @pytest.mark.parametrize("pending", [None, "unknown", "recall", "media"])

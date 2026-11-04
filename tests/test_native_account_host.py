@@ -19,7 +19,7 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
 from tests.support.onebot_events import config
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 from tests.test_social_autonomy import background, queue
 from tests.test_social_owner_authority import authorize, close_provider_clients, stop  # noqa: F401
 
@@ -167,7 +167,7 @@ def test_account_host_checked_native_delivery(core, tmp_path, outcome):
 
 @pytest.mark.parametrize("fence", [False, True])
 def test_production_delivery_loop_in_independent_process(core, tmp_path, fence):
-    from tests.test_onebot_capture import real_core_http
+    from tests.support.core_http import real_core_http
 
     cfg, frozen = prepared_host(core, tmp_path)
 

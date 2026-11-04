@@ -15,7 +15,7 @@ from companion import api_store, console_api
 from companion.console_api import COOKIE
 from companion.privacy import epoch
 from companion.store import Store
-from tests.test_onebot_capture import real_core_http
+from tests.support.core_http import real_core_http
 
 ORIGIN = "https://console.example.test"
 PASSWORD = "synthetic-console-reset-" * 2

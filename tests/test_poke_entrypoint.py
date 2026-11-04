@@ -20,7 +20,7 @@ from companion.store import encode
 from tests.conftest import run
 from tests.poke_authority_fixture import environment as native_environment
 from tests.poke_authority_fixture import refresh
-from tests.test_onebot_capture import real_core_http
+from tests.support.core_http import real_core_http
 from tests.test_poke import native_frame
 
 

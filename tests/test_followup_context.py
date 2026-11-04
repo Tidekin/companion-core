@@ -14,9 +14,9 @@ from companion.store import after
 from companion.transport import enqueue
 from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.test_life_worker_integration import process_worker
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 from tests.test_reading_followup import admit
 from tests.test_turn_taking import enable, history_messages

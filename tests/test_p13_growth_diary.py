@@ -10,12 +10,12 @@ from companion.diary import DiaryDraft, render_draft
 from companion.goals import GoalProposal, GoalScope
 from companion.source_grants import ReaderReadValidation
 from tests.conftest import ingest, run
+from tests.support.owner_authority import activate as activate_owner
 from tests.test_consolidation import enable_nightly
 from tests.test_diary import DAY
 from tests.test_growth_foundations import complete_read, view
 from tests.test_heybox_reader import URL
 from tests.test_observations import enable_observations, observation
-from tests.test_owner_authority import activate as activate_owner
 from tests.test_owner_authority import prepare as prepare_owner
 from tests.test_source_grants import prepare, receipt
 

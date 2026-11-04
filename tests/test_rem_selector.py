@@ -12,8 +12,8 @@ from companion.model import ModelClient
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.rem_protocol import RemConfig
 from tests.conftest import run
+from tests.support.owner_authority import activate
 from tests.test_autonomous_selector import drain
-from tests.test_owner_authority import activate
 from tests.test_owner_input import captured, inbound
 
 

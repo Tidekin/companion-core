@@ -16,11 +16,11 @@ from tests import owner_model_fixtures
 from tests.conftest import run
 from tests.model_carry_support import migrated
 from tests.owner_model_fixtures import authorized_job
+from tests.support.core_http import real_core_http
+from tests.support.owner_authority import activate
 from tests.test_evaluation_process import process_config
 from tests.test_model_carry_lifecycle import current_unknown, stop_current
 from tests.test_model_renewal import renewal
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate
 
 
 def carried_memory(core, tmp_path, monkeypatch, *, memory=True):

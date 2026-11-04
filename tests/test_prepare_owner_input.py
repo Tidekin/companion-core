@@ -22,9 +22,10 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.core_http import real_core_http
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_capture import real_core_http
-from tests.test_owner_authority import activate, prepare
+from tests.support.owner_authority import activate
+from tests.test_owner_authority import prepare
 
 
 @asynccontextmanager

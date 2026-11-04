@@ -20,10 +20,10 @@ from companion.config import ObservationAdapterConfig
 from companion.core import Core
 from tests.conftest import event, run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+from tests.support.core_http import real_core_http
 from tests.support.native_consumer_entry import environment
 from tests.support.native_http import owned_http_protocol
 from tests.test_next_reading import HTML, WEB
-from tests.test_onebot_capture import real_core_http
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import TOKEN, configure
 from tests.test_source_reader import ITEM, META, PLAYER, SUBTITLE

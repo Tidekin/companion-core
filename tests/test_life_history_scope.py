@@ -11,9 +11,9 @@ from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.life_topics import _source, authority
 from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy
 from tests.conftest import run
+from tests.support.owner_authority import activate
 from tests.support.owner_memory import environment
 from tests.test_life_worker_integration import process_worker
-from tests.test_owner_authority import activate
 
 
 def scope(core, conversation, ids=(), *, mode="owner_private_history"):

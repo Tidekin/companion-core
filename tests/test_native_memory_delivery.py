@@ -9,8 +9,8 @@ from companion.store import after
 from companion_delivery_protocol import digest
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+from tests.support.core_http import real_core_http
 from tests.support.owner_memory import environment
-from tests.test_onebot_capture import real_core_http
 
 FACT = "青禾项目已经选择蓝色配色。"
 

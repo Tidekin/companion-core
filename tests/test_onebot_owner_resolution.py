@@ -26,7 +26,7 @@ from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.native_continuous_support import answer, frame, host
 from tests.native_owner_recovery_support import CONTROL_TOKEN, reopen_host, stop_host
-from tests.test_owner_authority import activate
+from tests.support.owner_authority import activate
 from tests.test_poke import native_frame
 
 

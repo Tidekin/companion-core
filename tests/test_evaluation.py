@@ -33,7 +33,7 @@ def prepare(core, tmp_path, *, chat=False, **limits):
                   max_output_tokens=2048, input_rate=300000, cached_input_rate=6000,
                   output_rate=1200000, **limits)
     from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
-    from tests.test_owner_authority import activate
+    from tests.support.owner_authority import activate
 
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
     key = Ed25519PrivateKey.generate() if chat else None
@@ -177,8 +177,8 @@ def test_expired_source_is_not_reauthorized_by_fresh_consent(core, tmp_path):
 def test_preexisting_cumulative_liability_blocks_evaluation(core, tmp_path):
     from companion import owner_authority
     from companion.owner_authority_protocol import OwnerGrantPolicy
+    from tests.support.owner_authority import activate
     from tests.test_cumulative_budget import policy
-    from tests.test_owner_authority import activate
 
     manifest = prepare(core, tmp_path, chat=True)
     policy(core, account={"model_attempts": 1})

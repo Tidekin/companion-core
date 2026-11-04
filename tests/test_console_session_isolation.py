@@ -12,8 +12,8 @@ from pydantic import SecretStr
 
 from companion import api_store
 from companion.store import Store, after
+from tests.support.core_http import real_core_http
 from tests.test_console_reset_isolation import ORIGIN, PASSWORD, configure, login
-from tests.test_onebot_capture import real_core_http
 
 PATH = "/v1/console/session"
 

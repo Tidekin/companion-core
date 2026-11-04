@@ -11,8 +11,8 @@ from pydantic import SecretStr
 
 from companion import evaluation, owner_authority
 from companion.store import after
+from tests.support.core_http import real_core_http
 from tests.test_evaluation import admitted_chat, authorize, prepare, result, work
-from tests.test_onebot_capture import real_core_http
 
 
 def process_config(core, path):

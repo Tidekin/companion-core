@@ -12,7 +12,7 @@ from pydantic import SecretStr
 from companion.console_api import COOKIE
 from tests.conftest import run
 from tests.social_profile_support import confirmed_profile_material
-from tests.test_onebot_capture import real_core_http
+from tests.support.core_http import real_core_http
 from tests.test_owner_console import ORIGIN, PASSWORD
 from tests.test_social_autonomy import background
 from tests.test_social_owner_authority import authorize
