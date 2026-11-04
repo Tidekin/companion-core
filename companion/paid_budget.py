@@ -18,7 +18,8 @@ from pathlib import Path
 from companion.contracts import CoreError
 from companion.store import encode, file_identity, uid
 
-# One complete input plus at most its length + 2 of immutable JSON payload.
+# The chain codec retains at most this many source bytes. Whole custody views
+# retain only their digest key and at most this many serialized result bytes.
 CACHE_MAX_BYTES = 1048576
 
 
@@ -372,7 +373,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         except OSError:
             raw = None
         key = shared = saved = None
-        if raw is not None and len(raw) <= CACHE_MAX_BYTES:
+        if raw is not None:
             key = _view_key(store, path, raw)
             shared = _shared_key(store, key)
             saved = getattr(store, "_journal_view", None)
@@ -385,7 +386,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
     except BaseException:
         _validated_bytes.cache_clear()
         raise
-    if saved is not None and identity == saved[2]:
+    if saved is not None and len(saved[1]) <= CACHE_MAX_BYTES and identity == saved[2]:
         if saved[3].get("gateway_clients"):
             from companion.gateway_admission import validate_clients
 
@@ -410,6 +411,9 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         try:
             blob = marshal.dumps(view)
         except ValueError:
+            return view
+        if len(blob) > CACHE_MAX_BYTES:
+            forget_views(store)
             return view
         after = _view_key(store, path, raw)
         entry = (after, blob, store.one(IDENTITY), marshal.loads(blob))
