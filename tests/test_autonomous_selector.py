@@ -151,7 +151,7 @@ def test_native_life_fences_remain_silent_when_selector_revisits(core, fence):
     assert not core.store.rows("SELECT * FROM outbox")
 
 
-def test_native_defer_waits_for_cooldown_and_closes_after_bounded_revisit(core):
+def test_native_defer_waits_for_cooldown_then_requires_new_evidence(core):
     bug(core)
     proposal(core, "DEFER", "NONE", text="", defer_seconds=60)
     core.clock.advance(86400)
@@ -166,7 +166,12 @@ def test_native_defer_waits_for_cooldown_and_closes_after_bounded_revisit(core):
     selector.resume()
     run(drain(selector))
     assert len(core.model.calls) == 2
-    assert core.store.one("SELECT state FROM life_topics")["state"] == "CLOSED"
+    assert core.store.one("SELECT state,reason_code FROM life_topics") == {
+        "state": "WAITING", "reason_code": "WAITING_FOR_NEW_EVIDENCE"}
+    core.clock.advance(3601)
+    selector.resume()
+    run(drain(selector))
+    assert len(core.model.calls) == 2
     assert not core.store.rows("SELECT * FROM outbox")
 
 

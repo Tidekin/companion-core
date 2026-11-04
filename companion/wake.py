@@ -74,9 +74,6 @@ class WakePlanner:
                 reason = "COMPANION_PAUSED"
             elif quiet:
                 reason = "QUIET_HOURS"
-            elif (cfg.affect_enabled and (view is None or "affect" in view.policy.purposes)
-                  and self.affect.snapshot()["state"]["engagement"] == "pause"):
-                reason = "OWNER_REQUESTED_PAUSE"
             elif not cfg.pricing_known or not cfg.exploration_enabled:
                 reason = "RESOURCE_UNAVAILABLE"
             elif count >= max_runs:

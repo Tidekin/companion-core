@@ -340,12 +340,12 @@ def test_serious_context_uses_existing_expression_guard(core):
 def test_life_job_revalidates_frozen_mood_during_model_and_readback(core):
     import json
 
-    from tests.test_life_topics import bug, due, proposal
+    from tests.test_life_topics import configure, due, proposal
 
-    bug(core)
-    feedback(core, 2)
+    configure(core)
+    feedback_id = feedback(core, 2)
     core.life_topics.synchronize()
-    proposal(core)
+    proposal(core, source_event_ids=["evt_test_4", feedback_id])
 
     def elapsed():
         material = json.loads(core.model.calls[-1][0][-1]["content"])

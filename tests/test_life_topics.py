@@ -128,6 +128,15 @@ def test_inflight_change_rejects_stale_shadow_without_refunding_usage(core, chan
     assert not core.store.rows("SELECT * FROM life_activity_results WHERE text<>''")
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
     assert_no_delivery(core)
+    if change == "new_input":
+        core.model.callback = None
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE kind='chat'")
+        core.clock.advance(max(3601, core.settings.proactive_idle_seconds + 1))
+        reconsider = core.life_topics.schedule()
+        assert reconsider and reconsider != job
+        assert run(core.run_once(job_id=reconsider))
+        assert core.store.one("SELECT state FROM life_activity_results WHERE job_id=?",
+                              (reconsider,))["state"] == "SHADOW"
 
 
 @pytest.mark.parametrize("destination", ["PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "QZONE_DRAFT"])
@@ -244,7 +253,14 @@ def test_bounded_choices_do_not_dispatch_and_defer_cannot_loop_forever(core, act
         assert run(core.run_once(job_id=second))
         core.clock.advance(3601)
         assert core.life_topics.schedule() is None
-    assert core.store.one("SELECT state FROM life_topics")["state"] == "CLOSED"
+    if action == "DEFER":
+        assert core.store.one("SELECT state,reason_code FROM life_topics") == {
+            "state": "WAITING", "reason_code": "WAITING_FOR_NEW_EVIDENCE"}
+        ingest(core, 2, "导出时还有一个新线索")
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE kind='chat'")
+        assert due(core)
+    else:
+        assert core.store.one("SELECT state FROM life_topics")["state"] == "CLOSED"
     assert not core.store.rows("SELECT * FROM exploration_requests")
     assert_no_delivery(core)
 
