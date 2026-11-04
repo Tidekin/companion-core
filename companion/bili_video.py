@@ -879,12 +879,15 @@ class BiliVideoService:
             _, observed = _source(s, self.settings, row["source_event_id"], now)
             messages = self._messages(observed, selection, assets, phase)
             from companion.model import model_payload
+            from companion.runtime_config import video_settings
 
-            payload_sha256 = json_sha256(model_payload(self.settings, messages, SCENARIOS[phase]))
             model_id = uid("model")
             content_item = s.one("SELECT * FROM content_items WHERE item_id=?", (row["item_id"],))
             model_job_id = _owner(s, self.settings, content_item, self.clock,
                                    request_id=request_id)["job_id"]
+            wire = video_settings(s, self.settings, "job:" + model_job_id, SCENARIOS[phase],
+                                  clock=self.clock)
+            payload_sha256 = json_sha256(model_payload(wire, messages, SCENARIOS[phase]))
             s.insert(
                 "bili_video_phases",
                 request_id=request_id,
@@ -949,7 +952,7 @@ class BiliVideoService:
                 ).model_validate_json(response.text)
             except ValidationError as error:
                 raise CoreError("BILI_VIDEO_ANALYSIS_INVALID", 400) from error
-            if not analysis.analysis.strip() or redact(analysis.analysis, self.settings) != (
+            if not analysis.analysis.strip() or redact(analysis.analysis, wire) != (
                 analysis.analysis
             ):
                 raise CoreError("BILI_VIDEO_ANALYSIS_INVALID", 400)
@@ -1054,7 +1057,9 @@ class BiliVideoService:
             "SELECT * FROM bili_video_items WHERE request_id=?", (row["request_id"],)
         )
         download = json.loads(current["download_json"])
-        model = self.settings.paid_model.video_input.model
+        model = self.store.one("SELECT m.model FROM model_usage m JOIN bili_video_phases p "
+            "ON p.model_request_id=m.request_id WHERE p.request_id=? ORDER BY p.rowid DESC LIMIT 1",
+            (row["request_id"],))["model"]
         sources = {row["owner_event_id"], row["source_event_id"]}
         sources.update(item["event_id"] for item in self.store.rows(
             "SELECT j.event_id FROM jobs j JOIN bili_video_phases p ON p.model_job_id=j.job_id "

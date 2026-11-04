@@ -8,10 +8,11 @@ import re
 import warnings
 from dataclasses import dataclass
 from fractions import Fraction
+from typing import Annotated
 from urllib.parse import urlsplit
 
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from companion.contracts import CoreError
 from companion.image_frames import FORMATS, MAX_DECODED_PIXELS, MAX_FRAMES, PreparedImage
@@ -19,24 +20,14 @@ from companion.image_frames import FORMATS, MAX_DECODED_PIXELS, MAX_FRAMES, Prep
 SCENARIOS = {"content_video", "content_video_preview"}
 
 
-class VideoInputPolicy(BaseModel):
+class VideoProvider(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    approval_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     provider: str = Field(min_length=1, max_length=64)
     model: str = Field(min_length=1, max_length=128)
     endpoint: str
     input_rate: int = Field(strict=True, gt=0)
     cached_input_rate: int = Field(strict=True, gt=0)
     output_rate: int = Field(strict=True, gt=0)
-    max_output_tokens: int = Field(default=1000, strict=True, ge=128, le=4096)
-    max_context_tokens: int | None = Field(
-        default=None, strict=True, gt=0, le=1000000, exclude_if=lambda value: value is None,
-    )
-    timeout_seconds: int = Field(default=45, strict=True, ge=5, le=60)
-    estimated_tokens_per_second: int = Field(strict=True, ge=1, le=10000)
-    estimated_tokens_per_image: int = Field(default=1024, strict=True, ge=1, le=1000000)
-    max_seconds: int = Field(default=30, strict=True, ge=1, le=60)
-    max_bytes: int = Field(default=4_000_000, strict=True, ge=1024, le=16_000_000)
 
     @model_validator(mode="after")
     def valid_endpoint(self):
@@ -48,6 +39,55 @@ class VideoInputPolicy(BaseModel):
             raise ValueError("video cached rate cannot exceed input rate")
         return self
 
+
+
+class ApprovedVideoProvider(VideoProvider):
+    credential_tag: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class VideoCandidate(VideoProvider):
+    key: SecretStr = Field(min_length=1, max_length=4096)
+
+    def approval(self, window_id):
+        import hashlib
+        import hmac
+
+        from companion.store import encode
+
+        tag = hmac.new(self.key.get_secret_value().encode(),
+            encode([window_id, self.provider, self.endpoint]).encode(), hashlib.sha256).hexdigest()
+        return ApprovedVideoProvider(**self.model_dump(exclude={"key"}), credential_tag=tag)
+
+
+ProfileName = Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]{1,48}$")]
+
+
+class VideoModels(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    selected: ProfileName | None = None
+    candidates: dict[ProfileName, VideoCandidate] = Field(default_factory=dict, max_length=16)
+
+    def selected_route(self, paid):
+        if self.selected is None:
+            return None
+        route = self.candidates.get(self.selected)
+        if (not route or not paid or not paid.video_input
+                or paid.video_routes.get(self.selected) != route.approval(paid.window_id)):
+            raise ValueError("video model requires paid authorization")
+        return route
+
+
+class VideoInputPolicy(VideoProvider):
+    approval_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    max_output_tokens: int = Field(default=1000, strict=True, ge=128, le=4096)
+    max_context_tokens: int | None = Field(
+        default=None, strict=True, gt=0, le=1000000, exclude_if=lambda value: value is None,
+    )
+    timeout_seconds: int = Field(default=45, strict=True, ge=5, le=60)
+    estimated_tokens_per_second: int = Field(strict=True, ge=1, le=10000)
+    estimated_tokens_per_image: int = Field(default=1024, strict=True, ge=1, le=1000000)
+    max_seconds: int = Field(default=30, strict=True, ge=1, le=60)
+    max_bytes: int = Field(default=4_000_000, strict=True, ge=1024, le=16_000_000)
 
 TOOL = {"type": "function", "function": {
     "name": "understand_video",

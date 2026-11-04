@@ -158,7 +158,7 @@ const CAP_FIELDS = {
   exploration: ["exploration_enabled", "exploration_daily_candidate_limit", "exploration_daily_deep_reads", "exploration_daily_requests", "exploration_monthly_requests", "exploration_max_response_bytes", "exploration_daily_bytes"],
   social: ["social_enabled", "social_semantic_threshold"], "qq.poke": ["poke_policy"], "qq.poke.native": ["poke_policy"],
   "reading.web": ["web_reading_enabled", "web_reading_hosts", "content_enabled"], "reading.bilibili": ["observation_enabled", "content_enabled"], "reading.heybox": ["observation_enabled", "content_enabled"],
-  "bilibili.video": ["bili_video"], "model.understand_video": ["bili_video", "video_model_key"], "qq.images": ["content"], "qq.animation": ["content"], "qq.files": ["private_files"],
+  "bilibili.video": ["bili_video"], "model.understand_video": ["bili_video", "video_models"], "qq.images": ["content"], "qq.animation": ["content"], "qq.files": ["private_files"],
   expression: ["expression_enabled", "expression_cooldown_minutes", "expression_selection_probability", "expression_meme_categories"],
   expression_learning: ["expression_learning_enabled"], "unicode.emoji": ["expression_enabled"], "qq.face_names": ["expression_enabled"], "qq.face_images": ["expression_enabled"],
   "memes.catalog": ["meme_discovery_enabled"], "memes.search": ["meme_discovery_enabled", "meme_discovery_daily_queries"],
@@ -1371,6 +1371,7 @@ function control(f, only) {
     "aria-label": f.label, maxlength: f.schema?.anyOf?.find(x => x.type === "string")?.maxLength,
     placeholder: "留空使用所选内置策略的交流指导", value: v ?? "",
     oninput: e => setDraft(f, e.target.value.trim() ? e.target.value : null) });
+  if (f.key === "video_models") return videoModelsControl(f, v);
   if (f.key === "expression_meme_categories") return categoryPicker(f, v || []);
   if (f.key === "web_reading_hosts") return hostPicker(f, v || []);
   if (f.type === "boolean") return el("button", { type: "button", class: "switch", role: "switch", id, "aria-checked": String(Boolean(v)), "data-k": id, "aria-label": f.label, onclick: () => setDraft(f, !draftVal(f)) });
@@ -1501,6 +1502,8 @@ function saveBar() {
     btn("保存为 v" + next, saveDraft, { cls: "primary" }));
 }
 function diffLines(f, v) {
+  if (f.key === "video_models") return [[f.label, f.value.selected || "部署默认",
+    (v.selected || "部署默认") + " · " + Object.keys(v.candidates).length + " 个候选配置"]];
   if (f.type === "object" && f.value && v && typeof v === "object" && !Array.isArray(v)) {
     const out = [], walk = (a, b, path) => { for (const k of new Set([...Object.keys(a || {}), ...Object.keys(b || {})])) {
       const x = a?.[k], y = b?.[k];
@@ -1610,7 +1613,7 @@ const CAP_DEPLOY = {
   "media.voice": "网页语音会话的服务商地址、费用上限和会话时长在服务器部署配置的 [media] 段设置。",
   executive: "执行任务的端点和凭据在服务器部署配置的 [executive] 段设置，控制台不能修改。",
   "reading.bilibili": "B 站读取适配器和账号授权在部署环境里配置。", "reading.heybox": "小黑盒读取适配器在部署环境里配置。",
-  "model.understand_video": "视频理解模型的审批窗口（paid_model）在部署配置里设置。",
+  "model.understand_video": "视频模型在「模型与密钥」中配置，新任务可切换到已授权的模型。",
   "qq.images": "付费图片理解的审批窗口（paid_model.image_input）在部署配置里设置。",
 };
 PAGES.caps = data => {
@@ -1841,19 +1844,50 @@ function restoreConfiguration(version) {
   });
   openDialog("重新选择配置版本", form);
 }
+function videoModelsControl(f, config) {
+  const candidates = config.candidates, saved = f.value.candidates, approved = f.authorized || [];
+  const active = name => approved.includes(name) && same(candidates[name], saved[name]);
+  const update = (name, field, value) => setDraft(f, { ...config,
+    candidates: { ...candidates, [name]: { ...candidates[name], [field]: value } } });
+  const nameInput = el("input", { class: "input", placeholder: "候选名称", "aria-label": "新候选名称" });
+  const labels = { provider: "提供方", model: "模型名称", endpoint: "HTTPS 请求地址", key: "密钥",
+    input_rate: "输入费率", cached_input_rate: "缓存输入费率", output_rate: "输出费率" };
+  return el("div", { class: "obj" },
+    el("label", {}, "新任务使用", el("select", { class: "input", onchange: e =>
+      setDraft(f, { ...config, selected: e.target.value || null }) },
+      el("option", { value: "", selected: !config.selected }, "部署默认 · " + (f.default_model || "未配置")),
+      Object.keys(candidates).map(name => el("option", { value: name, selected: config.selected === name,
+        disabled: !active(name) }, name + (active(name) ? " · 已授权" : " · 待授权"))))),
+    Object.entries(candidates).map(([name, route]) => el("fieldset", { class: "obj" },
+      el("legend", {}, name + (active(name) ? " · 已授权" : " · 待授权")),
+      Object.entries(labels).map(([key, label]) => el("label", {}, label,
+        el("input", { class: "input", type: key === "key" ? "password" : key.endsWith("_rate") ? "number" : "text",
+          value: key === "key" ? "" : route[key], autocomplete: key === "key" ? "new-password" : "off",
+          placeholder: key === "key" && saved[name] ? "留空保留已保存的密钥" : undefined,
+          onchange: e => update(name, key, key.endsWith("_rate") ? Number(e.target.value) : e.target.value) }))),
+      f.approvals?.[name] && !active(name) ? el("details", {}, el("summary", {}, "已保存候选的付费授权参数"),
+        el("pre", {}, JSON.stringify(f.approvals[name], null, 2))) : null)),
+    el("div", { class: "actions" }, nameInput, btn("添加候选", () => {
+      const name = nameInput.value.trim();
+      if (!/^[a-zA-Z0-9_-]{1,48}$/.test(name) || name in candidates) {
+        fieldError(nameInput, "请输入唯一的英文、数字、下划线或连字符名称"); return;
+      }
+      setDraft(f, { ...config, candidates: { ...candidates, [name]: { provider: "", model: "",
+        endpoint: "", key: "", input_rate: 1, cached_input_rate: 1, output_rate: 1 } } });
+    }, { cls: "sm" })), el("p", { class: "note" }, "费率单位为微美元／百万 token。先保存候选，授权后可切换。"));
+}
 function modelSection(other) {
   const rate = k => fieldOf(k), rates = RATE_KEYS.map(rate).filter(Boolean);
   const ctx = fieldOf("context_soft_tokens"), out = fieldOf("max_output_tokens"), inR = rate("input_rate"), outR = rate("output_rate");
   const est = ctx && out && inR && outR ? (draftVal(ctx) * draftVal(inR) + draftVal(out) * draftVal(outR)) / 1e6 : null;
-  // 请求地址和密钥放在一起；视频模型的请求地址属于部署保管的 paid_model，这里只能换密钥。
-  const order = ["provider", "model_url", "model_name"], main = [...order.map(fieldOf), ...other.filter(f => !order.includes(f.key))].filter(Boolean);
+  const order = ["provider", "model_url", "model_name"], main = [...order.map(fieldOf), ...other.filter(f => !order.includes(f.key) && f.key !== "video_models")].filter(Boolean);
   const key = fieldOf("model_key"), videoKey = fieldOf("video_model_key");
   return el("section", { class: "sheet cfg-sec", id: "cfg-model" }, el("div", { class: "sheet-head" }, el("h2", {}, "模型与密钥"), el("span", { class: "note" }, "主回复只使用这一个模型")),
     el("div", { class: "sheet-body" }, el("h3", { class: "sub first" }, "对话模型"),
       el("div", { class: "pf-list" }, main.map(f => fieldRow(f, f.key === "model_url" ? "请求地址" : f.key === "model_name" ? "模型名称" : f.key === "provider" ? "服务类型" : undefined)),
         key ? fieldRow(key, "密钥") : null),
-      videoKey ? [el("h3", { class: "sub" }, "视频理解模型"), el("div", { class: "pf-list" }, fieldRow(videoKey, "密钥"),
-        el("div", { class: "pf" }, el("div", { class: "pf-l" }, el("b", {}, "请求地址"), el("span", {}, "在服务器部署配置的 paid_model.video_input 里设置，控制台不能修改。"))))] : null,
+      videoKey ? [el("h3", { class: "sub" }, "视频理解模型"), el("div", { class: "pf-list" }, fieldRow(videoKey, "部署默认密钥"),
+        fieldOf("video_models") ? fieldRow(fieldOf("video_models")) : null)] : null,
       el("p", { class: "note mt" }, "密钥只能写入，任何地方都不会显示原值。传输令牌、主人控制令牌和读取适配器凭据在部署环境里更换；主人控制令牌同时用来加密配置版本，直接更换会导致旧版本无法解密。"),
       rates.length ? [el("h3", { class: "sub" }, "费率", el("span", {}, "按服务商公布的峰值价格填写，价格未知时会停止自主活动。")),
         el("div", { class: "prices" }, rates.map(f => el("div", { class: "price" + (state.draft.has(f.key) ? " changed" : "") }, el("span", {}, ({ input_rate: "输入", cached_input_rate: "缓存命中输入", output_rate: "输出" })[f.key]), control(f))))] : null,
