@@ -143,6 +143,48 @@ def test_disabled_learning_does_nothing(core, tmp_path):
     assert not step(core) and provider.calls == []
 
 
+def test_owner_forget_while_inference_is_in_flight(core, tmp_path):
+    from fastapi.testclient import TestClient
+    from pydantic import SecretStr
+
+    from companion.api import create_app
+    from tests.test_console_cognition import ORIGIN, PASSWORD, login
+
+    for number, text in enumerate(["今天好累", "摸鱼王又上线了", "开会", "下班了"], 1):
+        say(core, number, text)
+    provider = ready(core, tmp_path, EXTRACT, INFER)
+    assert step(core)
+    for number in (5, 6, 7):
+        say(core, number, f"摸鱼王第{number}次")
+    core.settings.console.enabled = True
+    core.settings.console.public_origin = ORIGIN
+    core.settings.control_token = SecretStr(PASSWORD)
+    with TestClient(create_app(core.settings), base_url=ORIGIN) as client:
+        headers = {**login(client), "Idempotency-Key": "forget-in-flight"}
+
+        def respond_after_forget(request):
+            result = client.post("/v1/console/jargon/forget",
+                                 json={"term": "摸鱼王"}, headers=headers)
+            result.raise_for_status()
+            return provider(request)
+
+        core.model = ModelClient(core.settings,
+                                 httpx.AsyncClient(transport=httpx.MockTransport(respond_after_forget)))
+        assert step(core)
+        row = terms(core)["摸鱼王"]
+        assert (row["state"], row["meaning"]) == ("FORGOTTEN", None)
+        assert client.get("/v1/console/jargon").json()["items"] == []
+    assert jargon.context(core.store, "摸鱼王", 5) == ([], set())
+    work = core.store.one("SELECT * FROM jargon_work WHERE kind='infer'")
+    assert work["state"] == "CANCELLED" and work["error_code"] == "JARGON_SOURCE_CHANGED"
+    assert not step(core) and len(provider.calls) == 2
+    assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE scenario=?",
+                          (jargon.SCENARIO,))["n"] == 2  # One extraction and one inference.
+    usage = core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                           (work["model_request_id"],))
+    assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
+
+
 def test_chat_context_carries_meanings_only_for_terms_in_the_message(core):
     core.settings.jargon = JargonConfig()
     say(core, 1, "摸鱼王又上线了")

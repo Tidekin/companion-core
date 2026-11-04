@@ -210,14 +210,14 @@ def _apply_extract(store, settings, raw, texts, now):
 
 def _apply_infer(store, row, raw, now):
     result = Inference.model_validate(raw)
-    term = store.one("SELECT * FROM jargon_terms WHERE term=?", (row["term"],))
-    if term is None:
-        return
     jargon = result.is_jargon and result.confident and not sensitive(result.owner_meaning)
-    store.execute(
-        "UPDATE jargon_terms SET state=?,meaning=?,inferred_uses=?,updated_at=? WHERE term=?",
+    updated = store.execute(
+        "UPDATE jargon_terms SET state=?,meaning=?,inferred_uses=uses,updated_at=? "
+        "WHERE term=? AND state<>'FORGOTTEN'",
         ("INFERRED" if jargon else "NOT_JARGON", result.owner_meaning if jargon else None,
-         term["uses"], now, row["term"]))
+         now, row["term"]))
+    if not updated.rowcount:
+        raise CoreError("JARGON_SOURCE_CHANGED", 409)
 
 
 async def run_once(store, settings, model, clock):
@@ -244,7 +244,8 @@ async def run_once(store, settings, model, clock):
             raise CoreError("WORK_CLAIM_CHANGED", 409)
         if not _texts(store, sources) or (
                 row["kind"] == "infer"
-                and not store.one("SELECT 1 FROM jargon_terms WHERE term=?", (row["term"],))):
+                and not store.one("SELECT 1 FROM jargon_terms WHERE term=? AND state<>'FORGOTTEN'",
+                                  (row["term"],))):
             raise CoreError("JARGON_SOURCE_CHANGED", 409)
 
     try:
