@@ -61,13 +61,43 @@ async def start(
 
 
 async def ready(child):
-    process, path, _ = child
-    async with asyncio.timeout(15):
-        while not path.exists():
-            if process.returncode is not None:
-                _, error = await process.communicate()
-                raise AssertionError(error.decode(errors="replace"))
-            await asyncio.sleep(0.02)
+    await wait_progress(child, child[1].exists, "ready", 15)
+
+
+async def wait_progress(child, observed, expected, seconds):
+    process, ready_path, report = child
+    try:
+        async with asyncio.timeout(seconds):
+            while process.returncode is None:
+                if observed():
+                    return
+                await asyncio.sleep(0.02)
+    except TimeoutError:
+        pass
+    exit_at_failure = process.returncode
+    # Let the bounded child snapshot its last native phase before draining stderr.
+    ready_path.with_name("release").touch()
+    drain = asyncio.create_task(process.communicate())
+    try:
+        _, stderr = await asyncio.wait_for(asyncio.shield(drain), 2)
+    except TimeoutError:
+        if process.returncode is None:
+            process.kill()
+        _, stderr = await drain
+    result = json.loads(report.read_text(encoding="utf-8")) if report.exists() else {}
+    scans = ready_path.with_name("scans")
+    raise AssertionError({
+        "expected": expected, "exit_at_failure": exit_at_failure, "returncode": process.returncode,
+        "ready": ready_path.exists(), "phase": result.get("phase", "no final report"),
+        "last_completed_scan": scans.read_text() if scans.exists() else None,
+        "counters": result.get("total"), "stderr": stderr.decode(errors="replace")[-4000:],
+    })
+
+
+async def next_scan(child, previous):
+    path = child[1].with_name("scans")
+    await wait_progress(child, lambda: int(path.read_text()) > previous,
+                        f"completed scan after {previous}", 5)
 
 
 async def finish(child, *, code=0):
@@ -303,6 +333,24 @@ def test_independent_retry_due_without_new_write(core, tmp_path):
     run(scenario())
 
 
+def test_controlled_worker_reports_idle_phase_on_progress_timeout(core, tmp_path):
+    async def scenario():
+        child = await start(core, tmp_path / "diagnostic", duration=30, settle=60, controlled=True)
+        try:
+            await ready(child)
+            with pytest.raises(AssertionError) as caught:
+                await wait_progress(child, lambda: False, "unreachable scan", 0.05)
+            detail = caught.value.args[0]
+            assert detail["expected"] == "unreachable scan" and detail["ready"]
+            assert detail["exit_at_failure"] is None and detail["returncode"] == 0
+            assert detail["phase"] == "waiting" and detail["counters"]["wait_entries"] >= 1
+            assert int(detail["last_completed_scan"]) >= 1 and "stderr" in detail
+        finally:
+            await close_child(child)
+
+    run(scenario())
+
+
 def test_real_http_forget_wakes_native_control_without_provider(core, tmp_path):
     core.clock = utcnow
     core.settings.memory_enabled = True
@@ -335,11 +383,7 @@ def test_real_http_forget_wakes_native_control_without_provider(core, tmp_path):
             child = await start(core, directory, duration=30, controlled=True)
             try:
                 await ready(child)
-                async with asyncio.timeout(5):
-                    # Readiness is time-based; take the baseline after the startup scan.
-                    while not (directory / "scans").exists():  # noqa: ASYNC110 - independent worker progress
-                        await asyncio.sleep(0.02)
-                scans = (directory / "scans").read_text(encoding="utf-8")
+                scans = int((directory / "scans").read_text())
                 async with httpx.AsyncClient(
                     base_url=f"http://127.0.0.1:{port}", trust_env=False
                 ) as api:
@@ -352,9 +396,7 @@ def test_real_http_forget_wakes_native_control_without_provider(core, tmp_path):
                         },
                     )
                     assert response.status_code == 200, response.text
-                async with asyncio.timeout(5):
-                    while (directory / "scans").read_text(encoding="utf-8") == scans:  # noqa: ASYNC110 - independent worker progress
-                        await asyncio.sleep(0.02)
+                await next_scan(child, scans)
                 (directory / "release").touch()
                 result = await finish(child)
                 assert result["total"]["provider_calls"] == 0
@@ -408,14 +450,12 @@ def test_stop_api_wakes_independent_worker_and_lock_remains_exclusive(core, tmp_
                     duplicate = await start(core, tmp_path / "duplicate", duration=1)
                     denied = await finish(duplicate, code=2)
                     assert denied["watchers"] == 0
-                    scans = (directory / "scans").read_text(encoding="utf-8")
+                    scans = int((directory / "scans").read_text())
                     stopped = await api.post(
                         "/internal/v1/live-text/stop", json={"window_sha256": plan.sha256}
                     )
                     assert stopped.status_code == 200, stopped.text
-                    async with asyncio.timeout(5):
-                        while (directory / "scans").read_text(encoding="utf-8") == scans:  # noqa: ASYNC110 - independent worker progress
-                            await asyncio.sleep(0.02)
+                    await next_scan(child, scans)
                 finally:
                     (directory / "release").touch()
                     await child[0].communicate()

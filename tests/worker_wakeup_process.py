@@ -73,6 +73,9 @@ def main():
     service = getattr(importlib.import_module(service_module), service_class)
     native_scan = getattr(service, method)
 
+    idle = asyncio.Event()
+    phase = "startup"
+
     def report_scan():
         path = Path(args["scan_progress"])
         pending = path.with_suffix(".next")
@@ -80,11 +83,14 @@ def main():
         pending.replace(path)
 
     async def scan(self, *a, **kw):
+        nonlocal phase
+        phase = "scanning"
         stats["scans"] += 1
         result = await native_scan(self, *a, **kw)
         if role == "life-worker":
             assert isinstance(result.result, UnitResult)
             stats["native_units"] += int(result.lane is not None)
+        phase = "scan_complete"
         if args.get("scan_progress"):
             await asyncio.to_thread(report_scan)
         return result
@@ -121,8 +127,14 @@ def main():
     native_wait = worker_wakeup.Wakeup.wait
 
     async def wait(self, *a):
+        nonlocal phase
+        phase = "waiting"
         stats["wait_entries"] += 1
-        return await native_wait(self, *a)
+        if stats["scans"]:
+            idle.set()
+        reason = await native_wait(self, *a)
+        phase = f"wake_{reason}"
+        return reason
 
     worker_wakeup.Wakeup.wait = wait
     native_client = httpx.AsyncClient
@@ -150,7 +162,10 @@ def main():
         stop = asyncio.get_running_loop().call_later(args.get("duration", 6), task.cancel)
 
         async def ready():
-            await asyncio.sleep(args.get("settle", 1))
+            if args.get("release"):
+                await idle.wait()
+            else:
+                await asyncio.sleep(args.get("settle", 1))
             stats["hints"] = sum(w.notifications for w in wakeups)
             start.update(stats)
             start["cpu"] = process_time()
@@ -191,6 +206,7 @@ def main():
         "role": role,
         "exit_code": code,
         "total": stats,
+        "phase": phase,
         "steady": {key: stats[key] - start.get(key, 0) for key in stats},
         "steady_seconds": monotonic() - start.get("at", monotonic()),
         "steady_cpu_seconds": process_time() - start.get("cpu", process_time()),
