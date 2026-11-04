@@ -31,6 +31,7 @@ READ = ("e.source IN ('observation.bilibili','observation.heybox','observation.w
         "(e.source<>'observation.web' OR EXISTS (SELECT 1 FROM goal_steps st "
         "WHERE st.outcome_event_id=o.event_id AND st.state='DONE'))")
 SCAN_LIMIT = 8
+DEEPEN_CURSOR = "watch_ledger_deepen_cursor"
 MAX_TEXT = 2400
 LEASE_SECONDS = 300
 CONTEXT_ITEMS = 3
@@ -126,13 +127,15 @@ def deepen(store, since, now):
     text read) re-points its settled entry and judges again; a shallower one never does.
     Entries with a call in flight or an UNKNOWN call are left alone."""
     rows = store.rows(
-        "SELECT o.event_id,w.entry_id,w.depth FROM observations o JOIN events e USING(event_id) "
+        "SELECT o.rowid AS scan_row,o.event_id,w.entry_id,w.depth "
+        "FROM observations o JOIN events e USING(event_id) "
         "JOIN watch_ledger w ON w.item_ref=o.canonical_url "
         "WHERE e.redacted=0 AND o.redacted=0 AND o.result_status IN ('FETCHED','WATCHED') "
         "AND " + READ + " AND o.created_at>=? "
         "AND w.source_event_id<>o.event_id AND w.state IN (SELECT value FROM json_each(?)) "
         "AND NOT EXISTS (SELECT 1 FROM watch_ledger x WHERE x.source_event_id=o.event_id) "
-        "ORDER BY o.created_at LIMIT ?", (since, encode(SETTLED_STATES), SCAN_LIMIT))
+        "AND o.rowid>COALESCE((SELECT CAST(value AS INTEGER) FROM runtime_meta WHERE key=?),0) "
+        "ORDER BY o.rowid LIMIT ?", (since, encode(SETTLED_STATES), DEEPEN_CURSOR, SCAN_LIMIT))
     changed = 0
     for row in rows:
         source = _source(store, row["event_id"])
@@ -141,12 +144,17 @@ def deepen(store, since, now):
         found = depth(json.loads(source["body_json"]), json.loads(source["evidence_json"] or "{}"))
         if DEPTHS.index(found) <= DEPTHS.index(row["depth"]):
             continue
-        store.execute(
+        changed += store.execute(
             "UPDATE watch_ledger SET source_event_id=?,depth=?,state='PENDING',attempts=0,"
             "model_request_id=NULL,next_attempt_at=NULL,lease_until=NULL,error_code=NULL,"
             "updated_at=? WHERE entry_id=? AND state IN (SELECT value FROM json_each(?))",
-            (row["event_id"], found, now, row["entry_id"], encode(SETTLED_STATES)))
-        changed += 1
+            (row["event_id"], found, now, row["entry_id"], encode(SETTLED_STATES))).rowcount
+    # Start another pass at the end: an entry skipped while in flight may now be settled.
+    if len(rows) == SCAN_LIMIT:
+        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                      (DEEPEN_CURSOR, str(rows[-1]["scan_row"])))
+    else:
+        store.execute("DELETE FROM runtime_meta WHERE key=?", (DEEPEN_CURSOR,))
     return changed
 
 

@@ -110,6 +110,29 @@ def test_depth_comes_from_evidence_not_from_the_model():
     assert watch_ledger.depth({}, {"bili_video": {"request_id": "x"}}) == "media_sampled"
 
 
+def test_deeper_read_after_a_full_page_of_shallow_rereads(core, tmp_path):
+    provider = ready(core, tmp_path, json.dumps(JUDGEMENT), json.dumps(JUDGEMENT))
+    first = observe(core, 1)
+    assert step(core)
+    [entry] = entries(core)
+    for number in range(2, 2 + watch_ledger.SCAN_LIMIT):
+        core.clock.advance(1)
+        observe(core, number, url=entry["item_ref"])
+    core.clock.advance(1)
+    deeper = observe(core, 2 + watch_ledger.SCAN_LIMIT, url=entry["item_ref"])
+    evidence = {"reading": {"subtitle_status": "available", "spans": [{"text": "字幕"}]}}
+    core.store.execute("UPDATE observations SET evidence_json=? WHERE event_id=?",
+                       (json.dumps(evidence), deeper))
+    step(core)
+    assert entries(core)[0]["source_event_id"] == first and len(provider.calls) == 1
+    assert step(core)
+    [updated] = entries(core)
+    assert updated["entry_id"] == entry["entry_id"] and updated["source_event_id"] == deeper
+    assert (updated["depth"], updated["state"]) == ("subtitle", "JUDGED")
+    step(core)
+    assert len(provider.calls) == 2
+
+
 def test_invalid_judgements_retry_with_a_new_request_then_fail(core, tmp_path):
     model = ready(core, tmp_path, "不是 JSON", json.dumps({**JUDGEMENT, "rating": 5}))
     observe(core, 6)
