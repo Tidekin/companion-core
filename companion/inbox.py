@@ -25,10 +25,11 @@ from companion.store import encode, uid
 from companion.transport import cancel_interrupted_replies, cancel_proactive_work, digest
 
 
-def receive(store, settings, clock, ledger, event, key):
+def receive(store, settings, clock, ledger, event, key, *, content_options):
     """Bind the same admission path to the HTTP request's independent connection."""
     reading = service_for_store(store, settings, clock)
-    content = ContentIntake(store, settings, clock, reading.exploration.create)
+    content = ContentIntake(store, settings, clock, reading.exploration.create,
+                            options=content_options)
     content.video = reading.video
     return ingest(
         store, settings, clock, ledger, event, key, content=content,
