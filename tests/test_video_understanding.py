@@ -174,7 +174,8 @@ def test_sdk_selects_video_tool_then_independent_worker_chats(
             result = answer("红色先变成绿色，再变成蓝色，连续发生。synthetic-video-provider-key")
             result["usage"]["completion_tokens"] = 895 if different_rates else 20
         elif len(calls) == 1 and selected:
-            tool = call("motion-1", "understand_video", {"question": "描述颜色变化过程"})
+            tool = call("motion-1", "understand_video", {
+                "question": "描述颜色变化过程", "preview_reply": "抽帧里看得到几种颜色。"})
             if tool_index is not None:
                 tool["index"] = tool_index
             result = answer(calls=[tool])
@@ -236,7 +237,7 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp
                 core.settings.paid_model = core.settings.paid_model.model_copy(
                     update={"video_input": None})
         else:
-            arguments = {"question": "描述动作"}
+            arguments = {"question": "描述动作", "preview_reply": "我看到的是抽样画面。"}
             if boundary == "invalid_question":
                 arguments["question"] = 1
             elif boundary == "boolean_question":
