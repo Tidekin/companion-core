@@ -9,12 +9,12 @@ from functools import lru_cache
 from .event_normalizer import decode
 from .spool import encode
 
-# One entry retains at most 8 MiB of input and 8 MiB of serialized records.
+# One entry retains at most 16 MiB of input and 16 MiB of serialized records.
 # The immutable in-process view follows Core's paid-journal cache: each reader gets
 # fresh objects. Larger files reuse a bounded LF-terminated prefix and validate
 # the remaining lines, rather than dropping all codec reuse at the size boundary.
 # Every read checks the actual bytes; no file metadata or authority is cached.
-CACHE_MAX_BYTES = 8 * 1048576
+CACHE_MAX_BYTES = 16 * 1048576
 
 
 def digest(value):
