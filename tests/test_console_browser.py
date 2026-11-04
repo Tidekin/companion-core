@@ -103,6 +103,36 @@ async def navigate(page, name):
     await page.locator("#page[aria-busy=false]").wait_for()
 
 
+def test_owner_can_save_a_video_candidate_before_paid_authorization(core, tmp_path):
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            await navigate(page, "配置")
+            await page.get_by_label("新候选名称").fill("demo")
+            await page.get_by_role("button", name="添加候选", exact=True).click()
+            form = page.get_by_role("group", name="demo · 待授权")
+            for label, value in (("提供方", "test"), ("模型名称", "motion"),
+                    ("HTTPS 请求地址", "https://video.example.test/v1"),
+                    ("密钥", "synthetic-browser-provider")):
+                field = form.get_by_label(label, exact=True)
+                await field.fill(value)
+                await field.press("Tab")
+            option = page.get_by_label("新任务使用").locator("option[value=demo]")
+            assert await option.get_attribute("disabled") is not None
+            await page.get_by_role("button", name="保存为 v1", exact=True).click()
+            dialog = page.get_by_role("dialog")
+            assert "synthetic-browser-provider" not in await dialog.inner_text()
+            async with page.expect_response(lambda r: r.url.endswith("/v1/console/configuration")
+                    and r.request.method == "PUT") as response:
+                await dialog.get_by_role("button", name="保存 1 项修改", exact=True).click()
+            saved = await response.value
+            assert saved.status == 200, await saved.text()
+            assert "synthetic-browser-provider" not in await saved.text()
+            await dialog.wait_for(state="hidden")
+            assert await form.get_by_label("模型名称").input_value() == "motion"
+            assert await form.get_by_label("密钥", exact=True).input_value() == ""
+    run(scenario())
+
+
 async def submit_dialog(page, label, path):
     async with page.expect_response(lambda r: r.url.endswith(path)
         and r.request.method == "POST") as response:

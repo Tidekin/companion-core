@@ -43,7 +43,7 @@ from companion.style_live_config import StyleLiveConfig
 from companion.token_measurement import TokenMeasurementConfig
 from companion.trial_limits import TrialCount, TrialText
 from companion.turn_taking import TurnTakingConfig
-from companion.video_input import VideoInputPolicy
+from companion.video_input import ApprovedVideoProvider, ProfileName, VideoInputPolicy, VideoModels
 from companion.voice_config import VoiceConfig
 from companion.watch_ledger_config import WatchLedgerConfig
 
@@ -140,6 +140,8 @@ class PaidModelApproval(BaseModel):
     meme_input: ImageInputPolicy | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
+    video_routes: dict[ProfileName, ApprovedVideoProvider] = Field(
+        default_factory=dict, max_length=16, exclude_if=lambda value: not value)
     video_input: VideoInputPolicy | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
@@ -474,6 +476,8 @@ class Settings(BaseModel):
         default=None, exclude_if=lambda value: value is None,
     )
     model_key: SecretStr = SecretStr("")
+    video_models: VideoModels = Field(default_factory=VideoModels,
+        exclude_if=lambda value: not value.candidates and value.selected is None)
     video_model_key: SecretStr = Field(default=SecretStr(""), exclude_if=lambda value: not value)
     timeout_seconds: int = Field(default=45, ge=5, le=180)
     max_output_tokens: int = Field(default=768, ge=128, le=8192)
@@ -719,6 +723,10 @@ class Settings(BaseModel):
                 raise ValueError("video_model_key is required for approved video input")
             if self.video_model_key.get_secret_value() in tokens:
                 raise ValueError("video_model_key must be separate from management credentials")
+        self.video_models.selected_route(self.paid_model)
+        if any(route.key.get_secret_value() in tokens
+               for route in self.video_models.candidates.values()):
+            raise ValueError("video provider keys must be separate from management credentials")
         if self.image_generation.enabled:
             if self.image_generation.endpoint.key.get_secret_value() in tokens:
                 raise ValueError("image generation key must be separate from management tokens")

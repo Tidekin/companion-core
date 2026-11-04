@@ -162,7 +162,10 @@ def reserve(
     generation=None,
 ):
     from companion import owner_authority
+    from companion.runtime_config import video_settings
 
+    wire = (video_settings(store, settings, "job:" + job_id, scenario, clock=clock or (lambda: now))
+            if job_id else settings)
     native_image_chat = False
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
@@ -185,7 +188,7 @@ def reserve(
             from companion.model import model_payload
 
             if (video_binding["payload_sha256"] != paid_budget.sha(
-                model_payload(settings, messages, scenario, tools=tools))
+                model_payload(wire, messages, scenario, tools=tools))
                 or cloud_task_kind not in {None, "video"}
                 or cloud_task_id not in {None, video_binding["task_id"]}):
                 raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
@@ -211,11 +214,14 @@ def reserve(
     local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
     month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
     day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-    measurement = measure_request(settings, messages, scenario, tools=tools, generation=generation)
+    measurement = measure_request(wire, messages, scenario, tools=tools, generation=generation)
     estimated_input = measurement.reserved_input_tokens
     output_tokens = measurement.output_allowance
-    check_request_limits(approval, measurement, scenario)
-    estimate = cost(settings, estimated_input, output_tokens, scenario=scenario)
+    check_request_limits(wire.paid_model, measurement, scenario)
+    receipt = measurement.receipt()
+    if wire is not settings:
+        receipt["video_profile"] = wire.video_models.selected
+    estimate = cost(wire, estimated_input, output_tokens, scenario=scenario)
     with store.transaction():
         from companion import live_text, owner_authority, runtime_config
 
@@ -392,7 +398,7 @@ def reserve(
             logical_request_id = logical_request_id or job_id or uid("logical")
             _admit(store, settings, approval, logical_request_id, estimate, now, day, month,
                    scenario=scenario, job_id=job_id)
-        cloud_pricing = (settings.paid_model.video_input if scenario in VIDEO_SCENARIOS
+        cloud_pricing = (wire.paid_model.video_input if scenario in VIDEO_SCENARIOS
                          and settings.paid_model and settings.paid_model.video_input else settings)
         cloud_budget.reserve(
             store, settings, reference_type="model", reference_id=request_id,
@@ -418,9 +424,9 @@ def reserve(
             request_id=request_id,
             job_id=job_id,
             scenario=scenario,
-            provider=(approval.video_input.provider if scenario in VIDEO_SCENARIOS
+            provider=(wire.paid_model.video_input.provider if scenario in VIDEO_SCENARIOS
                       else settings.provider),
-            model=(approval.video_input.model if scenario in VIDEO_SCENARIOS
+            model=(wire.paid_model.video_input.model if scenario in VIDEO_SCENARIOS
                    else settings.model_name),
             input_tokens=estimated_input,
             output_tokens=output_tokens,
@@ -451,9 +457,9 @@ def reserve(
                 window_id=approval.window_id,
                 contract_sha256=contract_hash,
                 payload_sha256=paid_budget.sha(model_payload(
-                    settings, messages, scenario, tools=tools, generation=generation)),
+                    wire, messages, scenario, tools=tools, generation=generation)),
                 snapshot_json=encode(snapshot),
-                measurement_json=encode(measurement.receipt()),
+                measurement_json=encode(receipt),
                 reserved_micro_usd=estimate,
                 input_bound=estimated_input,  # Historical SQL column; this is a local estimate.
                 output_bound=output_tokens,
@@ -474,7 +480,7 @@ def reserve(
                     "minimum_micro_usd": estimate,
                     "contract_sha256": contract_hash,
                     "measurement": {"version": 1, "sha256": paid_budget.sha(
-                        measurement.receipt())},
+                        receipt)},
                     **({"quota": quota} if quota else {}),
                     **({"gateway": gateway_admission.binding(store, request_id)}
                        if scenario == "gateway" else {}),
@@ -677,7 +683,13 @@ def _settle_paid(store, settings, admission, response, *, transport_failure=None
             True,
         )
         return
+    profile = json.loads(admission["measurement_json"] or "{}").get("video_profile")
     rates = snapshot["video_input"] if usage["scenario"] in VIDEO_SCENARIOS else snapshot
+    if profile is not None:
+        rates = snapshot.get("video_routes", {}).get(profile)
+        if not rates or (rates["provider"], rates["model"]) != (usage["provider"], usage["model"]):
+            _persist_accounting(store, admission, admission["reserved_micro_usd"], "UNKNOWN", True)
+            return
     pricing = SimpleNamespace(
         pricing_known=True,
         **{name: rates[name] for name in ("input_rate", "cached_input_rate", "output_rate")},
@@ -750,6 +762,8 @@ def _settle_paid(store, settings, admission, response, *, transport_failure=None
     current_pricing = settings
     if usage["scenario"] in VIDEO_SCENARIOS:
         current_pricing = settings.paid_model.video_input if settings.paid_model else None
+        if profile is not None and settings.paid_model:
+            current_pricing = settings.paid_model.video_routes.get(profile)
     if current_pricing is None or (
         current_pricing.input_rate, current_pricing.cached_input_rate, current_pricing.output_rate,
     ) != (pricing.input_rate, pricing.cached_input_rate, pricing.output_rate):
@@ -939,14 +953,18 @@ def _persist_accounting(
     cloud_budget.sync_reference(store, "model", admission["request_id"])
 
 
-def _check_measurement(settings, admission, messages, scenario, *, tools=(), generation=None):
+def _check_measurement(settings, admission, messages, scenario, *, tools=(), generation=None,
+                       video_profile=None):
     measured = measure_request(settings, messages, scenario, tools=tools, generation=generation)
     check_request_limits(settings.paid_model, measured, scenario)
     if measured.reserved_input_tokens != admission["input_bound"]:
         raise CoreError("MODEL_INPUT_ESTIMATE_CHANGED", 503)
     saved = json.loads(admission["measurement_json"])
     if saved:
-        if saved != measured.receipt() or saved["payload_sha256"] != admission["payload_sha256"]:
+        expected = measured.receipt()
+        if video_profile is not None:
+            expected["video_profile"] = video_profile
+        if saved != expected or saved["payload_sha256"] != admission["payload_sha256"]:
             raise CoreError("MODEL_TOKEN_MEASUREMENT_CHANGED", 503)
     elif settings.token_measurement is not None:
         # Empty migrated rows mean historical estimates; never upgrade their evidence.
@@ -1038,11 +1056,14 @@ async def _dispatch(
     now = clock()
     from companion.model import ModelAdmission, ModelClient, model_payload
 
+    wire = runtime_config.video_settings(store, settings, "model:" + request_id, scenario)
+    profile = wire.video_models.selected if wire is not settings else None
+
     if (owner_authority.required(store, settings) or live_text.active(store, settings)
         or scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption", "gateway"}):
         if not isinstance(model, ModelClient):
             raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
-        target_url = (settings.paid_model.video_input.endpoint if scenario in VIDEO_SCENARIOS
+        target_url = (wire.paid_model.video_input.endpoint if scenario in VIDEO_SCENARIOS
                       else settings.model_url)
         if live_text.active(store, settings) and (
             settings.live_text_window.execution == "local_synthetic"
@@ -1092,9 +1113,10 @@ async def _dispatch(
         if row["contract_sha256"] != paid_budget.sha(snapshot):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
         if row["payload_sha256"] != paid_budget.sha(model_payload(
-            settings, messages, scenario, tools=tools, generation=generation)):
+            wire, messages, scenario, tools=tools, generation=generation)):
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-        _check_measurement(settings, row, messages, scenario, tools=tools, generation=generation)
+        _check_measurement(wire, row, messages, scenario, tools=tools, generation=generation,
+                           video_profile=profile)
         if store.one(
             "SELECT 1 FROM runtime_meta WHERE key IN "
             "('model_budget_blocked','model_budget_restore_required')"
@@ -1190,11 +1212,11 @@ async def _dispatch(
                 if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
                     raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
                 if row["payload_sha256"] != paid_budget.sha(
-                    model_payload(settings, messages, scenario, tools=tools, generation=generation),
+                    model_payload(wire, messages, scenario, tools=tools, generation=generation),
                 ):
                     raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-                _check_measurement(settings, current, messages, scenario, tools=tools,
-                                   generation=generation)
+                _check_measurement(wire, current, messages, scenario, tools=tools,
+                                   generation=generation, video_profile=profile)
             if source_check is not None:
                 # Caller-owned evidence may expire while an HTTP hook awaits.
                 # Keep this synchronous proof inside the existing transport fence.
@@ -1243,6 +1265,8 @@ async def _dispatch(
             dispatch["admission"] = admission
     if isinstance(model, ModelClient):
         try:
+            if wire is not settings:
+                model = ModelClient(wire, model.client)
             return await model.complete(messages, scenario, admission=admission,
                                         **({"tools": tools} if tools else {}),
                                         **({"generation": generation} if generation else {}))

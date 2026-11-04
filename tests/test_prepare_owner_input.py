@@ -31,7 +31,7 @@ from tests.test_owner_authority import prepare
 @asynccontextmanager
 async def window(core, tmp_path, *, media=False, content=False, history=False, video=False,
                  bili=False, voice=False, model=None, video_config=None, image_count=1, meme=False,
-                 expression=False):
+                 expression=False, video_candidates=None):
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     policy = prepare(core, tmp_path)
     core.settings.rich_input_scope = "references_v1"
@@ -53,6 +53,8 @@ async def window(core, tmp_path, *, media=False, content=False, history=False, v
 
         core.settings.video_model_key = SecretStr("synthetic-video-provider-key")
         core.settings.paid_model = core.settings.paid_model.model_copy(update={
+            "video_routes": {name: candidate.approval(core.settings.paid_model.window_id)
+                             for name, candidate in (video_candidates or {}).items()},
             "video_input": video_config or video_policy()})
         core.settings.content = core.settings.content.model_copy(update={
             "image_daily_micro_usd": 10000})

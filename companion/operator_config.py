@@ -85,7 +85,8 @@ LABELS = {
     "meme_catalog_owner": "表情目录归属", "meme_cooldown_seconds": "表情素材冷却（秒）",
     "meme_trusted_sources": "可信表情来源",
     "model_url": "聊天模型服务地址", "model_name": "聊天模型名称", "model_key": "聊天模型密钥",
-    "video_model_key": "视频模型密钥", "provider": "模型服务类型",
+    "video_models": "视频理解模型",
+    "video_model_key": "默认视频模型密钥", "provider": "模型服务类型",
     "input_rate": "输入价格（微美元／百万 token）",
     "cached_input_rate": "缓存输入价格（微美元／百万 token）",
     "output_rate": "输出价格（微美元／百万 token）", "max_output_tokens": "最大回复 token",
@@ -264,6 +265,13 @@ def _endpoint_changes(before, after, changes):
         pairs.append((before.image_generation.endpoint.url, after.image_generation.endpoint.url,
                       before.image_generation.endpoint.key, endpoint.get("key"),
                       "url" in endpoint))
+    candidate_changes = changes.get("video_models", {}).get("candidates", {})
+    for name, config in candidate_changes.items():
+        old = before.video_models.candidates.get(name)
+        if old:
+            new = after.video_models.candidates[name]
+            pairs.append((old.endpoint, new.endpoint, old.key, config.get("key"),
+                          "endpoint" in config))
     for old_url, new_url, old_key, supplied_key, edited in pairs:
         if not edited or not new_url:
             continue
@@ -341,6 +349,8 @@ GROUPS = {"chat_thinking": "model", "chat_thinking_tokens": "model",
 def _group(key):
     if key in GROUPS:
         return GROUPS[key]
+    if key == "video_models":
+        return "model"
     if key.startswith(("model", "provider", "input_rate", "cached_input", "output_rate")):
         return "model"
     if key.startswith(("content", "web_reading", "voice", "camera", "video")):
@@ -421,6 +431,14 @@ def view(store, settings):
                 item[bound] = schema[bound]
         if kind == "secret":
             item["configured"] = bool(value.get_secret_value())
+        if key == "video_models":
+            paid = settings.paid_model
+            item["default_model"] = paid.video_input.model if paid and paid.video_input else None
+            item["approvals"] = {name: route.approval(paid.window_id).model_dump()
+                for name, route in value.candidates.items()} if paid else {}
+            item["authorized"] = [name for name, route in value.candidates.items()
+                if paid and paid.video_input
+                and route.approval(paid.window_id) == paid.video_routes.get(name)]
         fields.append(item)
     version = row["version"] if row else 0
     history = [{"version": item["version"], "created_at": item["created_at"],

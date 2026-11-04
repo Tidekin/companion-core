@@ -22,8 +22,8 @@ from tests.test_native_image_pipeline import admit_image, claim, pixels, upload_
 from tests.test_prepare_owner_input import window
 
 
-async def animation(core, client, config, plan, tmp_path, mime):
-    event, image = await admit_image(core, client, config, plan, tmp_path)
+async def animation(core, client, config, plan, tmp_path, mime, *, number=42):
+    event, image = await admit_image(core, client, config, plan, tmp_path, number=number)
     lease = await claim(client, event, image)
     data = pixels(mime)
     response = await client.post("/internal/v2/content/" + event["event_id"] + "/image",

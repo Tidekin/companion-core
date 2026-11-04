@@ -115,9 +115,13 @@ async def analyze(core, job, snapshots, call_id, question, preview_reply):
     messages = [{"role": "user", "content": [{"type": "text", "text": prompt}, *parts]}]
     video_input.text_and_estimate(policy, messages, core.settings.paid_model.image_input)
     request_id = uid("model")
+    from companion.runtime_config import video_settings
+
+    wire = video_settings(core.store, core.settings, "job:" + job["job_id"], "content_video",
+                          clock=core.clock)
     metadata = {"kind": "qq_animation", "request_id": request_id,
         "authority": view.authority.as_dict(), "source_sha256": paid_budget.sha(sources),
-        "payload_sha256": paid_budget.sha(model_payload(core.settings, messages, "content_video")),
+        "payload_sha256": paid_budget.sha(model_payload(wire, messages, "content_video")),
         "videos": videos, "preview_sha256": paid_budget.sha(redact(preview_reply, core.settings))}
     with core.store.transaction():
         check_conversation(core, job, snapshots, purpose="content")
@@ -174,7 +178,7 @@ async def analyze(core, job, snapshots, call_id, question, preview_reply):
     usage = core.store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
     if not usage or usage["state"] != "SETTLED":
         raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
-    text = redact(response.text, core.settings)
+    text = redact(response.text, wire)
     for secret in (core.settings.model_key, core.settings.video_model_key):
         if secret.get_secret_value():
             text = text.replace(secret.get_secret_value(), "[REDACTED]")

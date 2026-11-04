@@ -23,10 +23,11 @@ from companion.input_debounce import DebounceTiming
 from companion.media_config import ImageGenerationConfig
 from companion.store import encode
 from companion.style_live_config import StyleLiveConfig
+from companion.video_input import VideoModels
 
 EXPRESSION_FIELDS = frozenset({"chat_time_labels", "conversation_policy", "style_live",
                                "conversation_guidance", "image_generation"})
-HOT_FIELDS = EXPRESSION_FIELDS | {"turn_taking", "input_debounce"}
+HOT_FIELDS = EXPRESSION_FIELDS | {"turn_taking", "input_debounce", "video_models"}
 HOT_OBJECT_FIELDS = {"input_debounce": frozenset(DebounceTiming.model_fields),
                      "turn_taking": frozenset({"silence_enabled"}),
                      "conversation_policy": frozenset({"mode", "strategy"}),
@@ -57,7 +58,7 @@ class ExpressionValues(BaseModel):
 
 class StoredExpression(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    format_version: Literal[2, 3, 4]
+    format_version: Literal[2, 3, 4, 5]
     silence_enabled: bool | None = None
     debounce: DebounceTiming | None = None
     conversation_policy: ConversationPolicyConfig
@@ -65,6 +66,7 @@ class StoredExpression(BaseModel):
     encrypted_guidance: str | None
     # Format 3: the complete image provider choice, including its key, encrypted.
     encrypted_image_generation: str | None = None
+    encrypted_video_models: str | None = None
 
 
 class Snapshot(BaseModel):
@@ -72,11 +74,12 @@ class Snapshot(BaseModel):
     version: int = Field(ge=0)
     base_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     chat_time_labels: bool
-    format_version: Literal[1, 2, 3, 4]
+    format_version: Literal[1, 2, 3, 4, 5]
     silence_enabled: bool
     debounce: DebounceTiming
     expression: ExpressionValues
     image_generation: ImageGenerationConfig | None = None
+    video_models: VideoModels | None = None
 
 
 def _digest(settings, value):
@@ -87,7 +90,11 @@ def _digest(settings, value):
 
 def _cold(settings, format_version=4):
     values = operator_config._raw(settings)
-    hot = HOT_FIELDS
+    # Unused video options did not exist in prior signed cold identities.
+    values.pop("video_models", None)
+    if values.get("paid_model") and not values["paid_model"].get("video_routes"):
+        values["paid_model"].pop("video_routes", None)
+    hot = HOT_FIELDS - {"video_models"}
     if format_version == 1:
         hot = {"chat_time_labels", "conversation_guidance"}
     elif format_version < 4:
@@ -119,16 +126,23 @@ def _snapshot(settings, version=None, *, candidate=None):
     # The startup provider needs no snapshot copy; only a Console change is pinned.
     image = (candidate.image_generation
              if candidate.image_generation != settings.image_generation else None)
+    videos = candidate.video_models if candidate.video_models.candidates else None
     return Snapshot(version=settings._operator_config_version if version is None else version,
                     base_sha256=_cold(settings),
                     chat_time_labels=candidate.chat_time_labels,
-                    format_version=4, silence_enabled=candidate.turn_taking.silence_enabled,
+                    format_version=5 if videos else 4, video_models=videos,
+                    silence_enabled=candidate.turn_taking.silence_enabled,
                     debounce=candidate.input_debounce.timing(),
                     expression=_expression(candidate), image_generation=image)
 
 
 def identity(settings, snapshot):
     value = snapshot.model_dump()
+    if snapshot.format_version < 5:
+        if value.pop("video_models") is not None:
+            raise CoreError("CONFIGURATION_SNAPSHOT_INVALID", 409)
+    else:
+        value["video_models"] = operator_config._raw(snapshot.video_models)
     if snapshot.format_version < 4:
         value.pop("silence_enabled")
         value.pop("debounce")
@@ -148,6 +162,7 @@ def identity(settings, snapshot):
 def values(settings, snapshot):
     expression = snapshot.expression
     result = {"chat_time_labels": snapshot.chat_time_labels,
+              "video_models": snapshot.video_models or VideoModels(),
               "input_debounce": settings.input_debounce.model_copy(
                   update=snapshot.debounce.model_dump()),
               "turn_taking": settings.turn_taking.model_copy(update={
@@ -191,6 +206,7 @@ def _persist(store, settings, snapshot, now):
     if conflict:
         raise CoreError("CONFIGURATION_VERSION_CONFLICT", 409)
     expression, image = snapshot.expression, snapshot.image_generation
+    videos = snapshot.video_models
     stored = StoredExpression(format_version=max(snapshot.format_version, 2),
         silence_enabled=snapshot.silence_enabled if snapshot.format_version >= 4 else None,
         debounce=snapshot.debounce if snapshot.format_version >= 4 else None,
@@ -201,7 +217,9 @@ def _persist(store, settings, snapshot, now):
         if expression.conversation_guidance is not None else None,
         encrypted_image_generation=operator_config._cipher(settings).encrypt(
             encode(operator_config._raw(image)).encode()).decode()
-        if image is not None else None)
+        if image is not None else None,
+        encrypted_video_models=operator_config._cipher(settings).encrypt(
+            encode(operator_config._raw(videos)).encode()).decode() if videos is not None else None)
     store.insert("operator_runtime_snapshots", snapshot_id=key, version=snapshot.version,
         base_sha256=snapshot.base_sha256, chat_time_labels=int(snapshot.chat_time_labels),
         created_at=now, expression_json=stored.model_dump_json()
@@ -221,7 +239,7 @@ def validate_record(settings, row, *, lookup=None):
         raise CoreError("CONFIGURATION_SNAPSHOT_MISSING", 409)
     row = dict(row)
     key, legacy = row["snapshot_id"], row.get("expression_json") is None
-    image = None
+    image = videos = None
     try:
         stored = None if legacy else StoredExpression.model_validate_json(row["expression_json"])
         version = stored.format_version if stored else 1
@@ -260,18 +278,24 @@ def validate_record(settings, row, *, lookup=None):
             image = (ImageGenerationConfig.model_validate_json(operator_config._cipher(settings)
                      .decrypt(stored.encrypted_image_generation.encode()))
                      if stored.encrypted_image_generation is not None else None)
+            if stored.encrypted_video_models is not None:
+                videos = VideoModels.model_validate_json(operator_config._cipher(settings)
+                    .decrypt(stored.encrypted_video_models.encode()))
+                videos.selected_route(settings.paid_model)
+            if (version == 5) != (videos is not None):
+                raise ValueError
             if version < 4 and (version == 3) != (image is not None):
                 raise ValueError
-            if (version == 4) != (stored.silence_enabled is not None):
+            if (version >= 4) != (stored.silence_enabled is not None):
                 raise ValueError
-            if (version == 4) != (stored.debounce is not None):
+            if (version >= 4) != (stored.debounce is not None):
                 raise ValueError
-            if version == 4:
+            if version >= 4:
                 silence, timing = stored.silence_enabled, stored.debounce
         snapshot = Snapshot(version=row["version"], base_sha256=row["base_sha256"],
                             chat_time_labels=bool(row["chat_time_labels"]),
                             format_version=version, silence_enabled=silence, debounce=timing,
-                            expression=expression, image_generation=image)
+                            expression=expression, image_generation=image, video_models=videos)
         if row["chat_time_labels"] not in (0, 1) or not hmac.compare_digest(
             identity(settings, snapshot), key,
         ):
@@ -437,6 +461,26 @@ def for_context(store, settings, job, snapshots):
         if not entries:
             snapshots.append(marker)
     return effective(settings, snapshot)
+
+
+def video_settings(store, settings, task_key, scenario, *, clock=None):
+    """Resolve transport and pricing for a pinned task; authority keeps its startup contract."""
+    from companion.video_input import SCENARIOS
+
+    if scenario not in SCENARIOS or not settings.paid_model or not settings.paid_model.video_routes:
+        return settings
+    snapshot = (bind(store, settings, clock, task_key) if clock is not None
+                else check(store, settings, task_key))
+    models = (snapshot.video_models or VideoModels()) if snapshot else settings.video_models
+    try:
+        selected = models.selected_route(settings.paid_model)
+    except ValueError:
+        raise CoreError("VIDEO_MODEL_APPROVAL_REQUIRED", 403) from None
+    if selected is None:
+        return settings
+    route = settings.paid_model.video_input.model_copy(update=selected.model_dump(exclude={"key"}))
+    return settings.model_copy(update={"paid_model": settings.paid_model.model_copy(
+        update={"video_input": route}), "video_model_key": selected.key, "video_models": models})
 
 
 def check_request(store, settings, request_id):
