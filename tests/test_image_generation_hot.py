@@ -82,10 +82,48 @@ def test_console_view_marks_the_key_write_only_and_task_boundary(hot):
     assert KEY_A not in encode(view)
 
 
+@pytest.mark.parametrize("version", [2, 3])
+def test_previous_snapshot_keeps_original_timing_and_signature_after_restart(hot, version):
+    # Construct the pre-timing signed record, independently of the current snapshot writer.
+    cfg = hot.settings
+    raw = operator_config._raw(cfg)
+    fields = ("chat_time_labels", "conversation_policy", "style_live",
+              "conversation_guidance", "image_generation")
+    deployment = {key: raw.pop(key) for key in fields}
+    raw.pop("operator_hot_reload")
+    raw["deployment_expression"] = deployment
+    base = runtime_config._digest(cfg, raw)
+    expression = {"conversation_policy": deployment["conversation_policy"],
+                  "conversation_guidance": None, "style_live_enabled": False}
+    original = {"version": 0, "format_version": version, "base_sha256": base,
+                "chat_time_labels": cfg.chat_time_labels, "expression": expression}
+    stored = {"format_version": version, "conversation_policy": deployment["conversation_policy"],
+              "style_live_enabled": False, "encrypted_guidance": None}
+    if version == 3:
+        image = operator_config._candidate(cfg, provider(FIRST, KEY_A)).image_generation
+        original["image_generation"] = operator_config._raw(image)
+        stored["encrypted_image_generation"] = operator_config._cipher(cfg).encrypt(
+            encode(original["image_generation"]).encode()).decode()
+    key = runtime_config._digest(cfg, original)
+    row = {"snapshot_id": key, "version": 0, "base_sha256": base,
+           "chat_time_labels": int(cfg.chat_time_labels), "expression_json": encode(stored)}
+
+    save(hot, turn_taking={"silence_enabled": True}, input_debounce={"quiet_seconds": 6})
+    restarted = operator_config.load(cfg)
+    pinned = runtime_config.validate_record(restarted, row)
+    assert runtime_config.identity(restarted, pinned) == key
+    assert not pinned.silence_enabled and pinned.debounce.quiet_seconds == 2
+    if version == 3:
+        assert pinned.image_generation.endpoint.key.get_secret_value() == KEY_A
+    restarted.turn_taking.follow_up_daily_checks += 1
+    with pytest.raises(CoreError, match="CONFIGURATION_STARTUP_IDENTITY_CHANGED"):
+        runtime_config.validate_record(restarted, row)
+
+
 def test_snapshot_with_provider_survives_restart_validation(hot):
     save(hot, **provider(FIRST, KEY_A))
     job = task(hot, 1)
     reloaded = operator_config.load(hot.settings)
     snapshot = runtime_config.get(hot.store, reloaded, "job:" + job["job_id"])
-    assert snapshot.format_version == 3
+    assert snapshot.format_version == 4
     assert snapshot.image_generation.endpoint.key.get_secret_value() == KEY_A

@@ -1,6 +1,6 @@
 """Task-pinned runtime values over the startup configuration's unchanged cold identity.
 
-Only reviewed chat expression values and the image generation provider are dynamic. Services
+Reviewed chat expression, batch timing and image provider values are dynamic. Services
 and ModelClient retain their original settings, clients and stores. No permission, source,
 budget or delivery check is cached.
 """
@@ -19,13 +19,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from companion import operator_config, shutdown
 from companion.contracts import CoreError
 from companion.conversation_policy import ConversationPolicyConfig
+from companion.input_debounce import DebounceTiming
 from companion.media_config import ImageGenerationConfig
 from companion.store import encode
 from companion.style_live_config import StyleLiveConfig
 
-HOT_FIELDS = frozenset({"chat_time_labels", "conversation_policy", "style_live",
-                        "conversation_guidance", "image_generation"})
-HOT_OBJECT_FIELDS = {"conversation_policy": frozenset({"mode", "strategy"}),
+EXPRESSION_FIELDS = frozenset({"chat_time_labels", "conversation_policy", "style_live",
+                               "conversation_guidance", "image_generation"})
+HOT_FIELDS = EXPRESSION_FIELDS | {"turn_taking", "input_debounce"}
+HOT_OBJECT_FIELDS = {"input_debounce": frozenset(DebounceTiming.model_fields),
+                     "turn_taking": frozenset({"silence_enabled"}),
+                     "conversation_policy": frozenset({"mode", "strategy"}),
                      "style_live": frozenset({"enabled"})}
 REVIEW_FIELDS = frozenset({
     "owner_runtime", "model_url", "model_name", "model_key", "video_model_key", "provider",
@@ -53,7 +57,9 @@ class ExpressionValues(BaseModel):
 
 class StoredExpression(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-    format_version: Literal[2, 3]
+    format_version: Literal[2, 3, 4]
+    silence_enabled: bool | None = None
+    debounce: DebounceTiming | None = None
     conversation_policy: ConversationPolicyConfig
     style_live_enabled: bool
     encrypted_guidance: str | None
@@ -66,7 +72,9 @@ class Snapshot(BaseModel):
     version: int = Field(ge=0)
     base_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     chat_time_labels: bool
-    format_version: Literal[1, 2, 3]
+    format_version: Literal[1, 2, 3, 4]
+    silence_enabled: bool
+    debounce: DebounceTiming
     expression: ExpressionValues
     image_generation: ImageGenerationConfig | None = None
 
@@ -77,12 +85,15 @@ def _digest(settings, value):
                     hashlib.sha256).hexdigest()
 
 
-def _cold(settings, *, legacy=False):
+def _cold(settings, format_version=4):
     values = operator_config._raw(settings)
-    for key in ({"chat_time_labels", "conversation_guidance"} if legacy else HOT_FIELDS) | {
-        "operator_hot_reload",
-    }:
-        if not legacy and key in HOT_OBJECT_FIELDS:
+    hot = HOT_FIELDS
+    if format_version == 1:
+        hot = {"chat_time_labels", "conversation_guidance"}
+    elif format_version < 4:
+        hot = EXPRESSION_FIELDS
+    for key in hot | {"operator_hot_reload"}:
+        if key in HOT_OBJECT_FIELDS:
             values[key] = {name: value for name, value in values[key].items()
                            if name not in HOT_OBJECT_FIELDS[key]}
             if values[key]:
@@ -90,10 +101,10 @@ def _cold(settings, *, legacy=False):
         values.pop(key)
     base = json.loads(settings._operator_config_base) if settings._operator_config_base else (
         operator_config._raw(settings))
-    if legacy:
+    if format_version == 1:
         values["deployment_chat_time_labels"] = base["chat_time_labels"]
     else:
-        values["deployment_expression"] = {key: base.get(key) for key in sorted(HOT_FIELDS)}
+        values["deployment_expression"] = {key: base.get(key) for key in sorted(hot)}
     return _digest(settings, values)
 
 
@@ -111,12 +122,16 @@ def _snapshot(settings, version=None, *, candidate=None):
     return Snapshot(version=settings._operator_config_version if version is None else version,
                     base_sha256=_cold(settings),
                     chat_time_labels=candidate.chat_time_labels,
-                    format_version=2 if image is None else 3,
+                    format_version=4, silence_enabled=candidate.turn_taking.silence_enabled,
+                    debounce=candidate.input_debounce.timing(),
                     expression=_expression(candidate), image_generation=image)
 
 
 def identity(settings, snapshot):
     value = snapshot.model_dump()
+    if snapshot.format_version < 4:
+        value.pop("silence_enabled")
+        value.pop("debounce")
     if snapshot.format_version == 1:
         # Original evidence is never re-signed. Its cold hash authenticates these
         # reconstructed expression values instead of a new payload field.
@@ -130,9 +145,13 @@ def identity(settings, snapshot):
     return _digest(settings, value)
 
 
-def values(snapshot):
+def values(settings, snapshot):
     expression = snapshot.expression
     result = {"chat_time_labels": snapshot.chat_time_labels,
+              "input_debounce": settings.input_debounce.model_copy(
+                  update=snapshot.debounce.model_dump()),
+              "turn_taking": settings.turn_taking.model_copy(update={
+                  "silence_enabled": snapshot.silence_enabled}),
               "conversation_policy": expression.conversation_policy,
               "style_live": StyleLiveConfig(enabled=expression.style_live_enabled),
               "conversation_guidance": expression.conversation_guidance}
@@ -142,7 +161,9 @@ def values(snapshot):
 
 
 def effective(settings, snapshot):
-    return settings.model_copy(update=values(snapshot)) if snapshot is not None else settings
+    if snapshot is None:
+        return settings
+    return settings.model_copy(update=values(settings, snapshot))
 
 
 def classify(before, after):
@@ -171,6 +192,8 @@ def _persist(store, settings, snapshot, now):
         raise CoreError("CONFIGURATION_VERSION_CONFLICT", 409)
     expression, image = snapshot.expression, snapshot.image_generation
     stored = StoredExpression(format_version=max(snapshot.format_version, 2),
+        silence_enabled=snapshot.silence_enabled if snapshot.format_version >= 4 else None,
+        debounce=snapshot.debounce if snapshot.format_version >= 4 else None,
         conversation_policy=expression.conversation_policy,
         style_live_enabled=expression.style_live_enabled,
         encrypted_guidance=operator_config._cipher(settings).encrypt(
@@ -200,26 +223,35 @@ def validate_record(settings, row, *, lookup=None):
     key, legacy = row["snapshot_id"], row.get("expression_json") is None
     image = None
     try:
+        stored = None if legacy else StoredExpression.model_validate_json(row["expression_json"])
+        version = stored.format_version if stored else 1
+        original = settings
+        cold = _cold(settings, version)
+        if version < 4 and cold != row["base_sha256"]:
+            # Recover newly hot leaves from the original version. The old cold HMAC
+            # still has to verify with today's credentials, budget and permissions.
+            base = (type(settings).model_validate_json(settings._operator_config_base)
+                    if settings._operator_config_base else settings)
+            record = lookup(row["version"]) if lookup and row["version"] else None
+            if row["version"] and record is None:
+                raise CoreError("CONFIGURATION_STARTUP_IDENTITY_CHANGED", 409)
+            historical = operator_config._candidate(base, operator_config._decode(record, settings))
+            times = historical.input_debounce.timing().model_dump()
+            updates = {
+                "input_debounce": settings.input_debounce.model_copy(update=times),
+                "turn_taking": settings.turn_taking.model_copy(update={
+                    "silence_enabled": historical.turn_taking.silence_enabled}),
+            }
+            if legacy:
+                updates.update(conversation_policy=historical.conversation_policy,
+                               style_live=historical.style_live)
+            original = settings.model_copy(update=updates)
+            cold = _cold(original, version)
+        silence = original.turn_taking.silence_enabled
+        timing = original.input_debounce.timing()
         if legacy:
-            original = settings
-            if row["base_sha256"] != _cold(original, legacy=True):
-                # Only newly hot leaves may come from history. All authorization,
-                # credentials, paid contracts and deployment baselines stay current.
-                base = (type(settings).model_validate_json(settings._operator_config_base)
-                        if settings._operator_config_base else settings)
-                record = lookup(row["version"]) if lookup and row["version"] else None
-                if row["version"] and record is None:
-                    raise CoreError("CONFIGURATION_STARTUP_IDENTITY_CHANGED", 409)
-                historical = operator_config._candidate(
-                    base, operator_config._decode(record, settings))
-                original = settings.model_copy(update={
-                    "conversation_policy": historical.conversation_policy,
-                    "style_live": historical.style_live,
-                })
-            cold = _cold(original, legacy=True)
             expression = _expression(original).model_copy(update={"conversation_guidance": None})
         else:
-            stored = StoredExpression.model_validate_json(row["expression_json"])
             guidance = (operator_config._cipher(settings).decrypt(
                 stored.encrypted_guidance.encode()).decode()
                 if stored.encrypted_guidance is not None else None)
@@ -228,12 +260,17 @@ def validate_record(settings, row, *, lookup=None):
             image = (ImageGenerationConfig.model_validate_json(operator_config._cipher(settings)
                      .decrypt(stored.encrypted_image_generation.encode()))
                      if stored.encrypted_image_generation is not None else None)
-            if (stored.format_version == 3) != (image is not None):
+            if version < 4 and (version == 3) != (image is not None):
                 raise ValueError
-            cold = _cold(settings)
+            if (version == 4) != (stored.silence_enabled is not None):
+                raise ValueError
+            if (version == 4) != (stored.debounce is not None):
+                raise ValueError
+            if version == 4:
+                silence, timing = stored.silence_enabled, stored.debounce
         snapshot = Snapshot(version=row["version"], base_sha256=row["base_sha256"],
                             chat_time_labels=bool(row["chat_time_labels"]),
-                            format_version=1 if legacy else stored.format_version,
+                            format_version=version, silence_enabled=silence, debounce=timing,
                             expression=expression, image_generation=image)
         if row["chat_time_labels"] not in (0, 1) or not hmac.compare_digest(
             identity(settings, snapshot), key,

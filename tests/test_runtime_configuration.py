@@ -165,8 +165,8 @@ def test_workers_switch_independently_and_idle_observation_does_not_write(hot):
     {"segmented_reply": {"mode": "semantic"}}, {"model_name": "other-model"},
     {"monthly_limit_micro_usd": 123456}, {"expression_selection_probability": 0.7},
     {"quote_policy": "often"}, {"timeout_seconds": 60},
-    {"mood_enabled": True}, {"input_debounce": {"quiet_seconds": 3}},
-    {"turn_taking": {"silence_enabled": True}},
+    {"mood_enabled": True}, {"input_debounce": {"enabled": True, "quiet_seconds": 3}},
+    {"turn_taking": {"silence_enabled": True, "follow_up_daily_checks": 4}},
 ])
 def test_mixed_version_never_partially_applies(hot, changes):
     baseline = runtime_config.boundary(hot.store, hot.settings, hot.clock)

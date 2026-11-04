@@ -8,6 +8,8 @@ from companion.config import Settings
 from companion.input_debounce import InputDebounceConfig
 from companion.store import after
 from tests.conftest import ingest
+from tests.test_runtime_configuration import hot as hot
+from tests.test_runtime_configuration import save
 
 
 def enable(core, **values):
@@ -83,6 +85,38 @@ def test_the_whole_batch_is_bounded(core):
     assert core.claim_job("worker") is None  # 7.5 s: still inside the batch.
     core.clock.advance(0.5)  # Claimed at the 8 s bound, not 2 s after the last input.
     assert core.claim_job("worker")["event_id"] == "evt_test_5"
+
+
+def test_hot_edit_between_messages_preserves_open_batch_wait_and_cap(hot):
+    enable(hot, continue_seconds=3, batch_seconds=4)
+    start = hot.clock()
+    _, due = accept(hot, 1)
+    assert due == after(start, 2)
+    save(hot, input_debounce={"active_seconds": 6, "continue_seconds": 1, "batch_seconds": 10})
+    hot.clock.advance(1)
+    _, due = accept(hot, 2)
+    assert due == after(start, 4)
+    hot.clock.advance(1)
+    _, due = accept(hot, 3)
+    assert due == after(start, 4)  # Original cap, even after another extension.
+    hot.clock.advance(3)
+    _, due = accept(hot, 4)
+    assert seconds(hot, due) == 6
+    hot.clock.advance(1)
+    _, due = accept(hot, 5)
+    assert seconds(hot, due) == 1
+
+
+def test_legacy_timestamp_batch_finishes_with_startup_timing(hot):
+    enable(hot)
+    first, _ = accept(hot, 1)
+    row = hot.store.one("SELECT conversation_id FROM events WHERE event_id=?", (first["event_id"],))
+    hot.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                      (hot.clock(), input_debounce.BATCH_KEY + row["conversation_id"]))
+    save(hot, input_debounce={"continue_seconds": 7})
+    hot.clock.advance(1)
+    _, due = accept(hot, 2)
+    assert seconds(hot, due) == 2
 
 
 def test_bare_media_waits_longer_and_commands_are_not_delayed(core):

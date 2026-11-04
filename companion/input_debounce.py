@@ -8,24 +8,31 @@ the new chat job only gets a later `next_attempt_at`, and the existing reply rev
 already supersedes the earlier job and carries its unanswered input into the next context.
 """
 
+import json
 from datetime import datetime
 
 from pydantic import Field
 
 from companion.contracts import StrictModel
-from companion.store import after
+from companion.store import after, encode
 
 BATCH_KEY = "input_debounce_batch:"
 
 
-class InputDebounceConfig(StrictModel):
-    enabled: bool = True
+class DebounceTiming(StrictModel):
     quiet_seconds: float = Field(default=2.0, ge=0, le=10)
     active_seconds: float = Field(default=5.0, ge=0, le=15)
     continue_seconds: float = Field(default=2.0, ge=0, le=10)
     media_seconds: float = Field(default=4.0, ge=0, le=15)
     batch_seconds: float = Field(default=8.0, ge=0, le=30)
     active_window_seconds: float = Field(default=30.0, ge=0, le=600)
+
+
+class InputDebounceConfig(DebounceTiming):
+    enabled: bool = True
+
+    def timing(self):
+        return DebounceTiming(**self.model_dump(include=set(DebounceTiming.model_fields)))
 
 
 def eligible(body):
@@ -50,9 +57,21 @@ def due(store, settings, conversation_id, event_id, body, now):
         "AND j.next_attempt_at>?", (conversation_id, event_id, now))
     start = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
     if waiting and start:
-        wait, opened = config.continue_seconds, start["value"]
+        opened = start["value"]
+        if opened.startswith("{"):
+            batch = json.loads(opened)
+            opened = batch["opened"]
+            timing = DebounceTiming.model_validate(batch["timing"])
+        else:
+            # A batch opened before this upgrade stored only its opening time.
+            timing = config.timing()
+        wait = timing.continue_seconds
     else:
-        since = after(now, -config.active_window_seconds)
+        from companion import runtime_config
+
+        timing = (runtime_config.boundary(store, settings, lambda: now, worker="inbox").debounce
+                  if settings.operator_hot_reload else config.timing())
+        since = after(now, -timing.active_window_seconds)
         active = store.one(
             "SELECT 1 FROM events WHERE conversation_id=? AND event_id!=? AND actor_id='owner' "
             "AND ingested_at>=? LIMIT 1", (conversation_id, event_id, since),
@@ -60,11 +79,12 @@ def due(store, settings, conversation_id, event_id, body, now):
             "SELECT 1 FROM outbox WHERE conversation_id=? AND sent_at>=? LIMIT 1",
             (conversation_id, since),
         )
-        wait = config.active_seconds if active else config.quiet_seconds
+        wait = timing.active_seconds if active else timing.quiet_seconds
         opened = now
-        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, now))
+        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode({
+            "opened": now, "timing": timing.model_dump()})))
     if not (body.get("text") or "").strip():
-        wait = max(wait, config.media_seconds)
-    limit = after(opened, config.batch_seconds)
+        wait = max(wait, timing.media_seconds)
+    limit = after(opened, timing.batch_seconds)
     result = min(after(now, wait), limit, key=datetime.fromisoformat)
     return result if datetime.fromisoformat(result) > datetime.fromisoformat(now) else None
