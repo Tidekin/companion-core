@@ -164,8 +164,8 @@ def test_large_journal_reuses_a_bounded_prefix_and_validates_the_tail(tmp_path, 
     small, _, _ = chain({"value": "small"})
     write(path, small)
     journal.read(path)
-    large, rows, head = chain(*({"text": "x" * 60000} for _ in range(150)))
-    assert journal.CACHE_MAX_BYTES == 8 * 1048576 < len(large) < 32 * 1048576
+    large, rows, head = chain(*({"text": "x" * 60000} for _ in range(290)))
+    assert journal.CACHE_MAX_BYTES == 16 * 1048576 < len(large) < 32 * 1048576
     path.write_bytes(large)
     decodes = []
     native = journal._decode_lines
