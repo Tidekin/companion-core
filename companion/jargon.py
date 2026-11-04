@@ -126,11 +126,7 @@ def _queue_inference(store, term, now):
 
 def scan(store, settings, now):
     """Count known terms in new owner messages and queue an extraction batch; no model."""
-    store.execute(
-        "UPDATE jargon_work SET state='UNKNOWN',error_code='MODEL_USAGE_UNKNOWN',"
-        "lease_until=NULL,updated_at=? WHERE state='RUNNING' AND lease_until<=? "
-        "AND model_request_id IN (SELECT request_id FROM model_usage WHERE state='UNKNOWN')",
-        (now, now))
+    budget.close_expired_model_work(store, "jargon_work", now)
     cursor = store.one("SELECT value FROM runtime_meta WHERE key=?", (CURSOR,))
     start = int(cursor["value"]) if cursor else 0
     rows = store.rows(
@@ -236,7 +232,16 @@ async def run_once(store, settings, model, clock):
     request_id = None
     sources = json.loads(row["source_event_ids_json"])
 
+    bound_id = None
+
+    def owns_claim():
+        return store.one("SELECT 1 FROM jargon_work WHERE work_key=? AND state='RUNNING' "
+                         "AND attempts=? AND model_request_id IS ?",
+                         (row["work_key"], row["attempts"], bound_id))
+
     def check_source():
+        if not owns_claim():
+            raise CoreError("WORK_CLAIM_CHANGED", 409)
         if not _texts(store, sources) or (
                 row["kind"] == "infer"
                 and not store.one("SELECT 1 FROM jargon_terms WHERE term=?", (row["term"],))):
@@ -256,6 +261,7 @@ async def run_once(store, settings, model, clock):
         except BaseException:
             budget.settle(store, settings, request_id)
             raise
+        bound_id = request_id
         response = await budget.complete(model, store, settings, request_id, messages,
                                          SCENARIO, clock, source_check=check_source)
         usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
@@ -291,6 +297,8 @@ async def run_once(store, settings, model, clock):
                      else "FAILED")
             retry_at = after(clock(), 300)
         with store.transaction():
+            if not owns_claim():
+                return False
             if state == "RETRY_WAIT":
                 if (request_id is None and code in ADMISSION_RETRY_CODES
                     or budget.capacity_wait(store, code, request_id=request_id)):

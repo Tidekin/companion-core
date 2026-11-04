@@ -2,6 +2,7 @@
 
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 import httpx
 import pytest
@@ -37,6 +38,10 @@ async def group(core, tmp_path, period, allowance):
         bridge, _, sends, calls,
     ):
         await bridge.capture()
+        # Approval follows receipt. The fixture clock can lag the WebSocket wall clock.
+        capture, = bridge.db.execute("SELECT capture_json FROM window_inputs").fetchone()
+        received_at = datetime.fromisoformat(json.loads(capture)["received_at"])
+        core.clock.now = max(core.clock.now, received_at)
         await bridge.flush()
         with Core(core.settings, core.model, core.clock) as worker:
             assert worker.store is not core.store

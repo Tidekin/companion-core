@@ -230,3 +230,19 @@ def test_explicit_replacement_family_keeps_older_attribute_key_aliases(core):
     for selected in (first, second, new):
         assert [r["memory_id"] for r in core.memory_context.history(
             selected, core.clock())["revisions"]] == [new, second, first]
+
+
+def test_same_summary_with_new_negated_evidence_requires_support(core):
+    old = remember(core, 1, "主人喜欢绿茶", fact_key="饮料")
+    ingest(core, 2, "我不喜欢绿茶了")
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    item = Candidate(subject="user", kind="preference", fact_key="饮料", content="主人喜欢绿茶",
+                     evidence_event_id="evt_test_2", evidence_quote="不喜欢绿茶了")
+    core.model.review = lambda data: json.dumps({"relations": [{"supported": False,
+        "update_authorized": False, "claims_replacement": False, "same": "m0",
+        "conflicts": [], "replaces": []}]})
+    candidates, resolutions = run(core.prepare_memories([item]))
+    assert candidates == resolutions == []
+    assert [kind for _, kind in core.model.calls] == ["memory_review"]
+    assert core.store.rows("SELECT event_id,polarity FROM memory_evidence WHERE memory_id=?",
+                           (old,)) == [{"event_id": "evt_test_1", "polarity": 1}]
