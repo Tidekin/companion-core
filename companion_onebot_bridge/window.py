@@ -24,7 +24,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from . import account_actions, cumulative, reply_segments
 from .event_normalizer import decode, normalize
-from .journal import digest
+from .journal import digest, stop_marker
 from .network import (
     checked_http_client,
     private_http_client,
@@ -227,25 +227,7 @@ def request_stop(directory, *, plan=None):
         plan_hash = row[0]
     else:
         value, plan_hash = plan.value, plan.sha256
-    path = stop_path(directory, value, plan_hash)
-    try:
-        descriptor = os.open(
-            path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
-        )
-    except FileExistsError:
-        if path.is_symlink() or path.read_bytes() != b"OWNER_STOP\n":
-            raise ValueError("INVALID_WINDOW_STOP_REQUEST") from None
-        return
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(b"OWNER_STOP\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    if os.name != "nt":
-        descriptor = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    stop_marker(stop_path(directory, value, plan_hash))
 
 
 def instant(value):
