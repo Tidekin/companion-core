@@ -115,3 +115,23 @@ def test_original_history_changes_never_send_or_repeat_model_work(core, tmp_path
             assert len(usage) == 2 and all(row["state"] == "SETTLED" for row in usage)
             assert all(row["billed_micro_usd"] > 0 for row in usage)
     run(scenario())
+
+
+def test_large_journal_enters_independent_worker_and_checked_delivery(core, tmp_path):
+    from tests.support.native_consumer_entry import environment
+
+    async def scenario():
+        async with environment(core, tmp_path) as (entry, sends):
+            path = Path(core.settings.paid_model.journal_path)
+            raw = await asyncio.to_thread(path.read_bytes)
+            await asyncio.to_thread(
+                path.write_bytes, b" " * (paid_budget.CACHE_MAX_BYTES + 1) + raw)
+            paid_budget.forget_views(core.store)
+            source = await entry.admit(1, "合成大账本输入")
+            await sdk_step(core, tmp_path, source["event_id"], 1)
+            assert (await entry.send(entry.client, entry.protocol))["worked"]
+            assert len(sends) == 1
+            assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]
+            assert core.store.rows("SELECT state FROM outbox") == [{"state": "SENT"}]
+
+    run(scenario())

@@ -1,6 +1,7 @@
 """Chain bytes are reusable; a whole view only while journal bytes and the DB are unchanged."""
 
 import json
+import marshal
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -171,6 +172,49 @@ def test_over_limit_read_bypasses_and_clears_cache(core, tmp_path, monkeypatch):
     assert paid_budget._validated_bytes.cache_info().currsize == 0
 
 
+def test_large_source_reuses_only_a_small_verified_view(core, tmp_path, monkeypatch):
+    approval, request = settled(core, tmp_path)
+    path = Path(approval.journal_path)
+    # Whitespace preserves each parsed record and chain hash while crossing the
+    # codec's source-byte limit with the original accounting state.
+    raw = path.read_bytes().rstrip(b"\n") + b" " * (paid_budget.CACHE_MAX_BYTES + 1) + b"\n"
+    path.write_bytes(raw)
+    paid_budget.forget_views(core.store)
+    calls = []
+    original = paid_budget._journal
+
+    def replay(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(paid_budget, "_journal", replay)
+    with core.store.transaction():
+        first = paid_budget.journal(core.store, approval)
+        assert len(marshal.dumps(first)) < paid_budget.CACHE_MAX_BYTES < path.stat().st_size
+        first["model_latest"][request]["minimum_micro_usd"] = 0
+        second = paid_budget.journal(core.store, approval)
+        assert second["model_latest"][request]["minimum_micro_usd"] > 0
+        assert len(calls) == 1
+        assert paid_budget._validated_bytes.cache_info().currsize == 0
+
+    # Every subsequent use reads the original bytes again.
+    path.write_bytes(path.read_bytes() + b"corrupt")
+    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+        paid_budget.journal(core.store, approval)
+
+
+def test_oversized_folded_result_is_not_retained(core, tmp_path, monkeypatch):
+    approval, _ = settled(core, tmp_path)
+    with core.store.transaction():
+        expected = paid_budget.journal(core.store, approval)
+    paid_budget.forget_views(core.store)
+    monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", 1)
+    with core.store.transaction():
+        assert paid_budget.journal(core.store, approval) == expected
+        assert core.store._journal_view is None
+        assert not paid_budget._SHARED
+
+
 @pytest.mark.parametrize("separator", ["\r\n", "\r", "\u2028"])
 def test_cached_codec_keeps_existing_newline_and_duplicate_key_rules(core, tmp_path, separator):
     approval, _ = settled(core, tmp_path)
@@ -296,10 +340,16 @@ def test_payload_decode_failure_uses_original_line_decoder(core, tmp_path, monke
     assert paid_budget._validated_bytes.cache_info().currsize == 0
 
 
-def test_a_new_connection_reuses_the_shared_view_until_any_commit(core, tmp_path):
+@pytest.mark.parametrize("large", [False, True])
+def test_a_new_connection_reuses_the_shared_view_until_any_commit(core, tmp_path, large):
     from companion.store import Store
 
     approval, request = settled(core, tmp_path)
+    if large:
+        path = Path(approval.journal_path)
+        path.write_bytes(b" " * (paid_budget.CACHE_MAX_BYTES + 1) + path.read_bytes())
+        paid_budget.forget_views(core.store)
+
     with core.store.transaction():
         expected = paid_budget.journal(core.store, approval)
     other = Store(core.settings.database)
