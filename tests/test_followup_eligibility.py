@@ -9,9 +9,10 @@ from companion import notices, reply_revision, turn_taking
 from companion.contracts import CoreError, LeaseRequest
 from companion.input_debounce import InputDebounceConfig
 from companion.transport import begin_send, enqueue, lease_deliveries
-from tests.conftest import ingest, run
+from tests.conftest import run
 from tests.notice_owner_fixtures import run_notice
 from tests.social_model_transport import NativeTestModel
+from tests.test_input_debounce import accept as accept_batched
 from tests.test_social_owner_authority import authorize
 from tests.test_turn_taking import enable, lease, lively, system, turn
 
@@ -121,9 +122,13 @@ def test_batched_owner_messages_use_the_preceding_delivered_reply(
     turn(core, 1, "我刚看完那部电影", "那个配角挺有意思。" if batch_ack else "结局你喜欢吗？")
     core.settings.input_debounce = InputDebounceConfig(enabled=True)
     core.clock.advance(answer_delay)
-    first = ingest(core, 2, "今天有点难过，想聊聊" if batch_ack else "还行，就是有点仓促")
+    # The legacy Core fixture needs the existing native-order debounce helper.
+    # It runs real scheduling and reply supersession; no mocked jobs or delays.
+    first, first_due = accept_batched(
+        core, 2, "今天有点难过，想聊聊" if batch_ack else "还行，就是有点仓促")
     core.clock.advance(1)
-    last = ingest(core, 3, "嗯" if batch_ack else "那个配角倒是挺有意思")
+    last, last_due = accept_batched(core, 3, "嗯" if batch_ack else "那个配角倒是挺有意思")
+    assert first_due is not None and last_due > core.clock()
     assert not run(core.run_once("still-writing"))
     core.clock.advance(8)
     core.model.chat.append("好的" if batch_ack else "我也觉得，那个角色的选择比结局更耐琢磨。")
