@@ -307,3 +307,20 @@ def test_offline_samples_script_prints_the_segment_read_only(core, tmp_path, cap
     assert PATTERN["response_action"] in shared and "暂停键" not in shared
     assert "无追加段落" in help_request
     assert candidates(core) == before
+
+
+@pytest.mark.parametrize("roots_only", [False, True])
+def test_scan_passes_full_page_of_previously_seen_or_unusable_comments(core, roots_only):
+    configure(core)
+    for number in range(1, 22):
+        items = [comment("1", f"第{number}篇独立合成资料的根评论")]
+        if not roots_only or number == 21:
+            items.append(comment("2", f"第{number}个有足够内容的独立回复", "1"))
+        thread(core, number, items)
+    for _ in range(3):
+        with core.store.transaction():
+            style_distill.scan(core.store, core.settings, core.clock())
+    selected = pairs(core)
+    assert len(selected) == (1 if roots_only else 21)
+    assert any(row["source_event_id"] == "watch_obs_21" for row in selected)
+    assert not core.store.rows("SELECT * FROM model_usage")

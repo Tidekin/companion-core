@@ -112,6 +112,20 @@ def not_dispatched(store, request_id):
     ))
 
 
+def close_expired_model_work(store, table, now):
+    """Close the interrupted business result; the original usage row owns the charge."""
+    if table not in {"watch_ledger", "style_pairs", "jargon_work"}:
+        raise ValueError("unknown model work table")
+    store.execute(
+        f"UPDATE {table} SET state=CASE u.state WHEN 'UNKNOWN' THEN 'UNKNOWN' ELSE 'FAILED' END,"
+        "error_code=CASE u.state WHEN 'UNKNOWN' THEN 'MODEL_USAGE_UNKNOWN' "
+        "ELSE 'MODEL_RESULT_NOT_CHECKPOINTED' END,lease_until=NULL,updated_at=? "
+        f"FROM model_usage u WHERE {table}.state='RUNNING' AND lease_until<=? "
+        "AND model_request_id=u.request_id AND u.state IN ('UNKNOWN','SETTLED')",
+        (now, now),
+    )
+
+
 def reader_video_binding(store, settings, clock, request_id, *, job_id=None, scenario=None,
                          logical_request_id=None):
     if not request_id or not store.one(
