@@ -260,13 +260,17 @@ async def prepare_memories(
             if (row["origin"] == "event_observed") == bool(candidate.evidence_reference_id):
                 existing[row["memory_id"]] = row
     catalog = {f"m{i}": row for i, row in enumerate(existing.values())}
-    if confirmed and len(candidates) == 1:
+    if len(candidates) == 1:
+        item = candidates[0]
         same = next(
-            (row for row in catalog.values() if row["content"] == candidates[0].content), None
+            (row for row in catalog.values() if row["content"] == item.content), None
         )
-        # Explicit owner commands contain the owner's verbatim claim; new model
-        # inferences still require review even when there is no existing catalog.
-        if same or not catalog:
+        # A recorded positive link permits replay of the same fact and source.
+        # A new reference, update or outstanding repair still needs review.
+        replay = (same and item.evidence_event_id in same["evidence_ids"]
+                  and item.kind == same["kind"] and item.fact_key == same["fact_key"]
+                  and not item.evidence_reference_id and not item.update and not review_feedback)
+        if replay or (confirmed and (same or not catalog)):
             return candidates, [{"same": same["memory_id"] if same else None,
                                  "conflicts": [], "replaces": []}]
     from companion.memory_context import MemorySources
