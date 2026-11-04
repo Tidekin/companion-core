@@ -13,7 +13,7 @@ Owner decision 2026-10-29: distillation runs in-system (option A), off until ena
 
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 
 from pydantic import ValidationError
 
@@ -216,7 +216,7 @@ async def run_once(store, settings, model, clock):
         elif (request_id is None and code in ADMISSION_RETRY_CODES
               or budget.capacity_wait(store, code, request_id=request_id)):
             state = "RETRY_WAIT"
-            retry_at = (_next_day(settings, clock()) if "DAILY" in code
+            retry_at = (budget.next_local_midnight(settings, clock()) if "DAILY" in code
                         else after(clock(), 60))
         elif code in {"STYLE_SOURCE_CHANGED", "PRIVACY_CHANGED"}:
             state = "CANCELLED"
@@ -234,14 +234,6 @@ async def run_once(store, settings, model, clock):
                               (row["pair_key"],))
             finish(store, row, state, clock(), code, retry_at=retry_at)
     return True
-
-
-def _next_day(settings, now):
-    from zoneinfo import ZoneInfo
-
-    local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
-    start = (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return start.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 def erase(store, event_ids):

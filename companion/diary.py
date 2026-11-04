@@ -563,11 +563,7 @@ class DiaryRepository:
                 "SELECT * FROM diary_runs WHERE state='RUNNING' AND lease_until<=?", (now,)
             )
             for row in expired:
-                s.execute(
-                    "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=? "
-                    "AND state='RESERVED'",
-                    (row["model_request_id"],),
-                )
+                budget.mark_reservation_unknown(s, row["model_request_id"])
                 stale = row["captured_privacy_epoch"] != epoch(s)
                 unknown = s.one("SELECT 1 FROM model_usage WHERE request_id=? AND state='UNKNOWN'",
                                 (row["model_request_id"],))

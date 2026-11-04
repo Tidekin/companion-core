@@ -34,6 +34,12 @@ def cost(settings, input_tokens, output_tokens, cached=0, *, scenario=None):
     return (numerator + 999999) // 1000000
 
 
+def next_local_midnight(settings, now):
+    local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
+    start = (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.astimezone(UTC).isoformat(timespec="microseconds")
+
+
 def total_monthly(store, month, before=None):
     """Shared cost ceiling includes unknown/reserved model and isolated tool charges."""
     total = store.one(
@@ -560,6 +566,13 @@ def _admit(store, settings, approval, logical, estimate, now, day, month, *, sce
                           carry_view["model_closures"] if carry_view else (),
                           scenario=scenario, job_id=job_id):
         raise CoreError("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", 429)
+
+
+def mark_reservation_unknown(store, request_id):
+    store.execute(
+        "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=? AND state='RESERVED'",
+        (request_id,),
+    )
 
 
 def settle(store, settings, request_id, response=None, *, transport_failure=None):
