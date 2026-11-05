@@ -627,7 +627,8 @@ class Settings(BaseModel):
     memory_rerank: bool = False
     # Only the best few fact hits are protected from context trimming; the rest compete
     # with recent dialogue, so a long, weakly related fact cannot push out the owner's
-    # own recent statement. The newest turns are kept at topic priority.
+    # own recent statement. The newest complete pairs that fit alongside current
+    # input are required context; original full-request hard admission still applies.
     memory_required_hits: int = Field(default=3, ge=0, le=20)
     recent_protected_turns: int = Field(default=2, ge=1, le=20)
     # Raw-turn recall may use at most this share of the history allowance left after
