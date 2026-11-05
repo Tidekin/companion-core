@@ -90,7 +90,9 @@ def semantic(settings, query, docs):
     index = SemanticIndex(None, settings)
     with _inference_lock(str(Path(settings.embedding_cache_dir).resolve())):
         model = index.warmup()
-        encoded = list(model.passage_embed([doc for _, doc in missing], batch_size=32)) if (
+        # Short and long turns share this CPU encoder; small batches avoid padding
+        # every cold-cache document to the longest turn in a large batch.
+        encoded = list(model.passage_embed([doc for _, doc in missing], batch_size=4)) if (
             missing) else []
         question = query_vector(model, query)
     with _lock:
