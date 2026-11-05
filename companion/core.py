@@ -974,7 +974,7 @@ class Core(Runtime):
                         fact=("self", judgment["take"]) if judgment else None)
             for rank, h in enumerate(hits):
                 memory = {**{k: h[k] for k in (
-                    "subject", "content", "status", "needs_review", "evidence_ids")},
+                    "subject", "kind", "content", "status", "needs_review", "evidence_ids")},
                     **({"origin": h["origin"]} if h.get("origin") else {}),
                     **relations.get(h["memory_id"], {}),
                     **({"happened_on": happened}
@@ -1136,16 +1136,20 @@ class Core(Runtime):
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and hits
         )
         preserve = bool(protected or continuation)
+        # Count delivered pairs, not pending image/text inputs. A burst of unanswered
+        # images must not evict the answer that the owner's follow-up refers to.
+        recent = context_selection.protected_recent(cfg, sources, turns, current_input, job["kind"])
         blocks = [("rules", [rules], True, context_selection.TOPIC)]
         blocks.extend(("reference", [reference], preserve or id(reference) in selection.required,
                        selection.priorities.get(id(reference), context_selection.BACKGROUND))
                       for reference in references)
-        blocks.extend(("history", turn, preserve or source.get("reply_complete") is False,
+        blocks.extend(("history", turn, preserve or source.get("reply_complete") is False
+                       or source["event_id"] in recent,
                        context_selection.TOPIC if (
                            related(source.get("user_text", "")) == context_selection.RELATED
-                           or not focus and index >= len(turns) - cfg.recent_protected_turns)
+                           or source["event_id"] in recent)
                        else context_selection.OLD_HISTORY)
-                      for index, (source, turn) in enumerate(zip(sources, turns, strict=True)))
+                      for source, turn in zip(sources, turns, strict=True))
         blocks.append(("current", current_input, True, context_selection.TOPIC))
         assembly_dropped = []
         if protected:
@@ -1297,7 +1301,9 @@ class Core(Runtime):
                                 "ref": ref,
                                 **{
                                     key: row[key]
-                                    for key in ("subject", "content", "status", "needs_review")
+                                    for key in (
+                                        "subject", "kind", "content", "status", "origin",
+                                        "needs_review")
                                 },
                             }
                             for ref, row in catalog.items()

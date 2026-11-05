@@ -40,6 +40,7 @@ from companion.contracts import CoreError
 from companion.media_config import ContentConfig
 from companion.model import ModelClient
 from companion.reading_protocol import ReadObservation
+from companion.source_grants import SourceGrantSnapshot
 from companion.store import Store, encode
 from companion.video_media_contract import AssetManifest, MediaAsset
 from tests.conftest import run
@@ -51,9 +52,9 @@ from tests.test_test_fixtures import historical_database
 from tests.test_video_understanding import scope_options
 
 
-def metadata(core, *, deadline=None, duration=60, enabled=True):
+def metadata(core, *, deadline=None, duration=60, enabled=True, grant=None):
     core.settings.bili_video = BiliVideoConfig(enabled=enabled)
-    adapter, item, body = queued(core, "bilibili")
+    adapter, item, body = queued(core, "bilibili", grant=grant)
     core.settings.exploration_daily_bytes = 200_000_000
     core.settings.exploration_daily_requests = 100
     core.settings.exploration_monthly_requests = 1000
@@ -419,6 +420,23 @@ def test_prepare_freezes_exact_playinfo_duration_and_only_bounded_native_selecti
         "response": result,
     }
     assert not core.store.rows("SELECT * FROM model_usage")
+
+
+@pytest.mark.parametrize("grant_seconds", [None, 10])
+def test_account_media_lease_respects_content_and_grant_deadlines(core, grant_seconds):
+    from source_reader.protocol import decode_lease
+
+    expiry = core.clock.now + timedelta(seconds=grant_seconds) if grant_seconds else None
+    grant = SourceGrantSnapshot(grant_id="grant_" + "a" * 32, epoch=2,
+                                fingerprint="b" * 64, expires_at=expiry)
+    cutoff = core.clock.now + timedelta(seconds=20)
+    module, item_id, source = metadata(core, deadline=cutoff.isoformat(), grant=grant)
+    request = module.schedule(item_id, source)
+    item = core.reading.lease("bili", grant, capabilities=[CAPABILITY])
+    assert item["request_id"] == request and item["source_grant"] == grant.snapshot()
+    _, _, _, until = decode_lease({"item": item}, "bilibili", core.clock.now,
+                                  media_limits=core.settings.bili_video.media)
+    assert until == (expiry or cutoff)
 
 
 def test_offset_content_deadline_is_normalized_before_comparing_to_utc_policy(core):

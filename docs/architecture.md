@@ -40,6 +40,11 @@ Life Worker → 有界自主选择 → 原生 Life / Diary / Social / Memory 队
 9. 明确记忆命令与自动抽取共用语义核对流程：查找已有事实，验证模型返回的相同/冲突引用，再在一个事务中合并证据或标记冲突。模型不能直接删除或覆写旧事实；未知引用、跨主体引用和失效结果会被拒绝。再次要求记住已有候选会保留原 ID，并升级为 `CONFIRMED`。
 10. 相关性筛选与冲突核对记入 `memory_review`，与 `memory_extract` 共用每日记忆预算。每日记忆预算耗尽时，普通聊天仍可继续，但上下文会明确标记记忆核对暂不可用。开启 M1 后，任务租约必须覆盖一次核对与一次主回复的超时上限。新增、确认、纠正和遗忘都会使旧的在途记忆判断失效。
 
+聊天与相关性复核携带记忆原有的 `kind`、`status` 和 `origin`，保留单次经历与长期事实的区别。
+临时扮演、玩笑称呼有回想价值时沿用 `episode`，抽取和关系复核须保留当时语境；
+它们不能自行更改长期称呼或替换已确认事实。回答按原始说话人归属，主人指出前后矛盾时
+结合近期原文纠正助手自己的说法。推断记忆不升级为主人确认，既有来源验证、纠正和遗忘流程保持有效。
+
 实现依据：[FastEmbed CPU 推理](https://qdrant.tech/documentation/tutorials-basics/generate-embeddings-fastembed/)、[RRF](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/reciprocal-rank-fusion)、[LLM 列表相关性筛选](https://reference.langchain.com/python/langchain-classic/retrievers/document_compressors/listwise_rerank)、[Mem0 的检索与事实核对流程](https://arxiv.org/abs/2504.19413)。仅复用适合现有模块边界的依赖和流程。
 
 ## 并发和恢复合同

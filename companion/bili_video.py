@@ -12,6 +12,7 @@ import math
 import re
 from contextlib import nullcontext
 from dataclasses import asdict, replace
+from datetime import UTC
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -434,7 +435,8 @@ class BiliVideoService:
                 SourceGrantService(s, self.settings, self.clock).require(
                     source["adapter_id"], grant
                 )
-                deadlines.append(instant(grant.snapshot()["expires_at"]))
+                if grant.expires_at is not None:
+                    deadlines.append(grant.expires_at.astimezone(UTC))
             if view is not None and view.policy.expires_at is not None:
                 deadlines.append(view.policy.expires_at)
             elif view is None and self.settings.mode == "live":
