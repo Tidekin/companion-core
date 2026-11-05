@@ -137,7 +137,18 @@ A QZone-capable decision gets its original source-only material.
 
 With current Affect permission, “先别聊这个” pauses the preceding exchange. “我去上课了，晚点聊”
 pauses private contact for the configured feedback lifetime. “今天别主动找我” ends at the next
-local midnight within retention. Background reads and private records retain their own gates.
+local midnight within retention. Feedback is recognized per clause of the owner's own message,
+so “我在开会，晚点再聊” also pauses contact, while quoted, reported (“她说，…”), joking or
+contradictory wording is ignored. Each feedback dimension keeps its own bounded history, so
+later wording feedback cannot evict a current pause. Background reads and private records retain
+their own gates.
+
+A Life decision receives the current local time, and source times in local time. A long owner
+message keeps its opening and ending with an explicit omission marker. Term overlap joins a new
+message to an open item only when they also share the leading subject; an immediate
+“搞定啦” or “那件事…” updates the preceding item. A due item whose material is unavailable no
+longer hides later items: the next scan resumes after it. A queued Life draft that expires or
+changes before delivery is cancelled with its cost retained.
 The explicit owner control “/暂停自主活动” uses the existing autonomy pause. The internal daily
 decision limit covers all attempts, including silent ones. The QQ send cap and the separate
 lull-check cap still apply at their original boundaries.

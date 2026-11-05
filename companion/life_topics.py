@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import unicodedata
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -23,6 +24,7 @@ from companion.paid_budget import sha
 from companion.privacy import epoch, redact, sensitive
 from companion.social import SocialPlanner, feedback_paused, quiet_hours
 from companion.store import after, encode
+from companion.turn_taking import excerpt
 
 RULES = """依据真实来源作一次有界生活判断，只输出JSON，不执行工具或发送。
 action只能是SKIP/CONTINUE/EXPLORE/FOLLOW_UP/SHARE/DEFER。
@@ -57,7 +59,13 @@ why是依据，changes是看法变化及原因，options只是可选方向，可
 仅用于PRIVATE_DIARY记录，且source_event_ids要包含该兴趣的全部来源。
 FAILED只表示执行未完成，应据原因作有限调整或放弃，不能声称读过内容。
 UNKNOWN表示待核对，不能解释为失败、成功或主人的评价，也不能续行或重试。
-已经解决或表示不再跟进的内容选SKIP。一个候选最多消费一次，无回复不产生新候选。"""
+已经解决或表示不再跟进的内容选SKIP。一个候选最多消费一次，无回复不产生新候选。
+text_truncated为true的来源中间有省略，“…”处缺失的内容不能当作不存在；
+看不出事情是否已解决或取消时，不要跟进。
+时间以当前时间参考为准；来源的occurred_at是本地时间，据此判断事情过去了多久。"""
+SOURCE_CHARS = 500
+SCAN_LIMIT = 20
+SCAN_CURSOR = "life_schedule_cursor"
 
 
 def interest_shift_supported(decision, context):
@@ -269,7 +277,9 @@ def _source(store, settings, event_id, now):
         "conversation_id": row["conversation_id"],
         "source_id": "event:" + event_id,
         "kind": kind,
-        "text": text[:500],
+        # An owner's last words often settle or cancel the matter, so keep both ends.
+        "text": excerpt(text, SOURCE_CHARS) if kind == "owner_message" else text[:SOURCE_CHARS],
+        "text_truncated": len(text) > SOURCE_CHARS,
         "occurred_at": row["occurred_at"],
         "source": row["source"],
         **({"url": preview["url"]} if kind in {"observed_content", "social_content"} else {}),
@@ -867,19 +877,30 @@ class LifeTopics:
         from companion.context_selection import terms
         from companion.mood import CHAT_SIGNALS, service_for_store
 
-        def anchors(text):
-            return terms(re.sub(
+        def stripped(text):
+            return re.sub(
                 r"(?:的?问题|还没解决|没有解决|已经解决|有新线索|明天再聊|明天继续|"
                 r"我觉得|(?:我)?(?:昨天|今天|前天|明天|昨晚|刚刚|最近)|关于|这件事|怎么办|"
                 r"(?:买|看|听|用|遇到)(?:了|的)(?:一?[个场件本次部张杯])?|"
-                r"^(?:我[的把]?|那个|这个)|[的了])", " ", text))
+                r"^(?:我[的把]?|那个|这个)|[的了])", " ", text)
+
+        def anchors(text):
+            return terms(stripped(text))
+
+        def lead(text):
+            # Shared predicates ("打不开", "还在等结果") alone do not make one matter.
+            first = re.search(r"[㐀-鿿]{2,}|[a-z][a-z0-9]+",
+                              unicodedata.normalize("NFKC", stripped(text)).casefold())
+            return first and first.group()[:2 if "㐀" <= first.group()[0] else None]
 
         focus = anchors(source["text"])
         # Explicit feedback and deictic updates refer to the immediately preceding
         # owner turn. Never attach them to whichever item happens to be due first.
         follows_previous = feedback or re.match(
             r"^(?:[这那](?:件事|个问题|个故障)|刚才[那这]|补充一下|"
-            r"还有(?:一[条个点])?(?:新信息|线索|进展))", source["text"])
+            r"还有(?:一[条个点])?(?:新信息|线索|进展)|"
+            r"(?:(?:已经|终于)?(?:搞定|解决|修好|弄好)(?:了|啦)|没事了|不用(?:管|跟进)了))",
+            source["text"])
         rows = self.store.rows(
             "SELECT t.*,e.event_id AS anchor FROM life_topics t JOIN events e ON e.rowid=("
             "SELECT MAX(a.rowid) FROM life_topic_sources ts JOIN events a USING(event_id) "
@@ -927,7 +948,9 @@ class LifeTopics:
                 previous_terms = anchors(item["text"])
                 shared = focus & previous_terms
                 overlap = len(shared)
-                if overlap > best_overlap and (overlap >= 2 or shared in (focus, previous_terms)):
+                if (overlap > best_overlap
+                    and (overlap >= 2 or shared in (focus, previous_terms))
+                    and {lead(source["text"]), lead(item["text"])} & shared):
                     best, best_overlap = topic, overlap
         return best
 
@@ -1158,16 +1181,27 @@ class LifeTopics:
                 (after(now, -cfg.min_interval_seconds),),
             ):
                 return None
-            for topic in s.rows(
-                "SELECT * FROM life_topics t WHERE state='DUE' AND decision_count<2 "
-                "AND NOT EXISTS (SELECT 1 FROM life_activity_results r WHERE r.topic_id=t.topic_id "
-                "AND r.topic_revision=t.revision) "
-                "ORDER BY due_at,topic_id LIMIT 20"
-            ):
+            # Unavailable candidates must not hide later ones: a scan that schedules
+            # nothing resumes after its last checked row, wrapping to the front.
+            cursor = s.one("SELECT value FROM runtime_meta WHERE key=?", (SCAN_CURSOR,))
+            start = json.loads(cursor["value"]) if cursor else ["", ""]
+            query = ("SELECT * FROM life_topics t WHERE state='DUE' AND decision_count<2 "
+                     "AND NOT EXISTS (SELECT 1 FROM life_activity_results r "
+                     "WHERE r.topic_id=t.topic_id AND r.topic_revision=t.revision) "
+                     "AND (due_at,topic_id)>(?,?) ORDER BY due_at,topic_id LIMIT ?")
+            candidates = s.rows(query, (*start, SCAN_LIMIT))
+            if len(candidates) < SCAN_LIMIT and cursor:
+                seen = {row["topic_id"] for row in candidates}
+                candidates += [row for row in s.rows(query, ("", "", SCAN_LIMIT - len(candidates)))
+                               if row["topic_id"] not in seen]
+            for topic in candidates:
                 try:
                     material = self.material(topic["topic_id"])
                 except CoreError:
+                    s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                              (SCAN_CURSOR, encode([topic["due_at"], topic["topic_id"]])))
                     continue
+                s.execute("DELETE FROM runtime_meta WHERE key=?", (SCAN_CURSOR,))
                 from companion.notices import schedule
 
                 job_id = schedule(

@@ -288,6 +288,11 @@ def messages(store, settings, job, now, principles, *, data=None, prior_contacts
         from companion.life_topics import RULES as LIFE_RULES
 
         rules = LIFE_RULES
+        # The decision time is frozen per call and kept out of the material hash.
+        payload["sources"] = [{**item, "occurred_at": time_context.stamp(
+            item["occurred_at"], settings.timezone)} for item in data["sources"]]
+        time_messages.append(time_context.now_message(
+            now, settings.timezone, reference="本次生活判断的时间"))
     elif data["kind"] == "followup":
         from companion.turn_taking import FOLLOW_UP_RULES, silent_minutes
 

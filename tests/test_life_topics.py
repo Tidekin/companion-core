@@ -369,3 +369,63 @@ def test_ineligible_inputs_never_enter_topic_context(core, bad):
     assert due(core) is None
     assert not core.store.rows("SELECT * FROM life_topics")
     assert not core.model.calls
+
+
+def test_long_owner_source_keeps_its_ending_and_decision_sees_current_time(core):
+    configure(core)
+    ending = "现在已经解决了，不用再跟进。"
+    text = "导出时一直报错，" + "日志里反复出现同一个超时。" * 43 + ending
+    assert len(text) > 500
+    ingest(core, 1, text)
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.life_topics.synchronize()
+    proposal(core, action="SKIP", destination="NONE", text="")
+    job = due(core)
+    assert job and run(core.run_once("life-test", job_id=job))
+
+    messages = core.model.calls[-1][0]
+    material = json.loads(messages[-1]["content"])
+    source = material["sources"][0]
+    assert source["text"].startswith("导出时一直报错") and source["text"].endswith(ending)
+    assert "…" in source["text"] and len(source["text"]) == 500
+    assert source["text_truncated"] is True
+    clock = [m["content"] for m in messages if m["content"].startswith("当前时间参考")]
+    assert len(clock) == 1 and "本次生活判断的时间" in clock[0]
+    # The moving decision time is prompt context only, never part of the frozen material.
+    frozen = json.loads(core.store.one(
+        "SELECT body_json FROM events e JOIN jobs j USING(event_id) WHERE j.job_id=?",
+        (job,))["body_json"])["life_material"]
+    assert frozen["sources"][0]["occurred_at"] == core.store.one(
+        "SELECT occurred_at FROM events WHERE event_id='evt_test_1'")["occurred_at"]
+
+
+def test_unavailable_due_candidates_cannot_hide_a_later_one(core, monkeypatch):
+    topic = bug(core)
+    proposal(core)
+    core.clock.advance(86400)
+    core.life_topics.synchronize()
+    assert core.store.one("SELECT state FROM life_topics")["state"] == "DUE"
+    # Twenty earlier synthetic candidates whose material is unavailable this round.
+    for index in range(20):
+        core.store.execute(
+            "INSERT INTO life_topics SELECT ?,conversation_id,?,'reading','DUE',?,expires_at,"
+            "reason_code,revision,0,NULL,created_at,updated_at FROM life_topics WHERE topic_id=?",
+            (f"blocked_{index:02d}", f"blocked:{index}", f"2000-01-01T00:00:{index:02d}+00:00",
+             topic["topic_id"]))
+    monkeypatch.setattr(core.life_topics, "synchronize", lambda: None)
+    material = core.life_topics.material
+    checked = []
+
+    def blocked(topic_id, **options):
+        checked.append(topic_id)
+        if topic_id.startswith("blocked_"):
+            raise CoreError("LIFE_SOURCE_UNAVAILABLE", 409)
+        return material(topic_id, **options)
+
+    monkeypatch.setattr(core.life_topics, "material", blocked)
+    assert core.life_topics.schedule() is None
+    assert len(checked) == 20 and all(item.startswith("blocked_") for item in checked)
+    job = core.life_topics.schedule()
+    assert job and checked[-1] == topic["topic_id"]
+    assert core.store.one("SELECT topic_id FROM life_activity_results WHERE job_id=?",
+                          (job,))["topic_id"] == topic["topic_id"]

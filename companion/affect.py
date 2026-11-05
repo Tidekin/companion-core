@@ -83,8 +83,11 @@ NEUTRAL = {
     "cognitive_load": "normal",
     "novelty_interest": "unknown",
 }
-TOPIC_PAUSE = re.compile(r"(?:先别聊这个(?:了)?|先不聊这个(?:话题)?了?|暂停这个话题|换个话题吧)")
-TODAY_PAUSE = re.compile(r"今天(?:先)?别主动找我了?")
+TOPIC_PAUSE = re.compile(
+    r"(?:先别聊这个(?:了)?|先不聊这个(?:话题)?了?|暂停这个话题|换个话题吧"
+    r"|这个话题(?:先)?(?:别|不要|不)(?:再)?聊了?)")
+TODAY_PAUSE = re.compile(
+    r"(?:今天|今晚)(?:先)?(?:别|不要|不用)(?:再)?主动(?:找|联系|打扰|发消息给)我(?:了|啦)?")
 TOPIC_RESUME = re.compile(r"(?:可以)?继续(?:聊)?这个话题(?:了)?")
 RULES = (
     (
@@ -106,8 +109,9 @@ RULES = (
         "OWNER_REQUESTED_STEPS",
     ),
     (
-        rf"(?:{TOPIC_PAUSE.pattern}|先不聊了|目前不想聊|{TODAY_PAUSE.pattern}|"
-        r"(?:我)?(?:去上课了?|要上课了|现在忙|在忙)[，,、 ]*(?:(?:晚点|稍后)(?:再)?聊)?)",
+        rf"(?:{TOPIC_PAUSE.pattern}|(?:我)?先不聊了|目前不想聊|{TODAY_PAUSE.pattern}|"
+        r"(?:我)?(?:去上课了?|要上课了|现在(?:很)?忙|在忙|(?:正)?在开会|要开会了|去开会了?)"
+        r"[，,、 ]*(?:(?:晚点|稍后)(?:再)?聊)?)",
         "engagement", "pause", "OWNER_REQUESTED_PAUSE",
     ),
     (
@@ -116,6 +120,34 @@ RULES = (
     ),
     (r"(?:想试试新的话题|换个新话题吧)", "novelty_interest", "open", "OWNER_REQUESTED_NOVELTY"),
 )
+# Clauses are split only at sentence punctuation. Colons and quotes stay inside a
+# clause, so quoted or reported wording never fully matches a rule.
+CLAUSE_BREAK = re.compile(r"[，,。！!？?；;~～]+")
+NOT_OWN_REQUEST = re.compile(r"[“”\"「」『』]|开玩笑|逗你|不是说|没说|假如|如果")
+REPORTING = re.compile(r"(?:说|讲|问|道|写着|提到)$")
+
+
+def _feedback_clause(text):
+    """One unambiguous explicit request among the owner's own clauses, or None."""
+    if NOT_OWN_REQUEST.search(text):
+        return None
+    clauses = [part for part in CLAUSE_BREAK.split(text) if part]
+    matches = []
+    for index, clause in enumerate(clauses):
+        rule = next((rule for rule in RULES if re.fullmatch(rule[0], clause)), None)
+        if rule is None:
+            continue
+        if index and REPORTING.search(clauses[index - 1]):
+            return None
+        matches.append((clause, rule))
+    if not matches:
+        return None
+    # Contact control outranks wording style; contradictory controls are ignored.
+    engagement = [item for item in matches if item[1][1] == "engagement"]
+    chosen = engagement or matches
+    if len({rule[1:3] for _, rule in chosen}) != 1:
+        return None
+    return chosen[-1]
 
 
 def owner_feedback(store, settings, event_id, now):
@@ -148,13 +180,13 @@ def owner_feedback(store, settings, event_id, now):
     text = body.get("text", "")
     if not isinstance(text, str):
         return None
-    text = text.strip().rstrip("。！!？? ")
-    matched = next((rule for rule in RULES if re.fullmatch(rule[0], text)), None)
+    matched = _feedback_clause(text.strip())
     if not matched:
         return None
-    _, dimension, value, cause = matched
+    clause, (_, dimension, value, cause) = matched
     return {
-        **({"until_midnight": True} if TODAY_PAUSE.fullmatch(text) else {}),
+        **({"until_midnight": True} if TODAY_PAUSE.fullmatch(clause) else {}),
+        "topic": bool(TOPIC_PAUSE.fullmatch(clause) or TOPIC_RESUME.fullmatch(clause)),
         "event_id": event_id,
         "dimension": dimension,
         "new_state": value,
@@ -199,9 +231,11 @@ class AffectEngine:
         if not self.settings.affect_enabled:
             return result
         rows = self.store.rows(
-            "SELECT a.* FROM affect_evidence a JOIN events e USING(event_id) "
+            "SELECT * FROM (SELECT a.*,a.rowid AS evidence_row,row_number() OVER "
+            "(PARTITION BY a.dimension ORDER BY a.rowid DESC) AS rank "
+            "FROM affect_evidence a JOIN events e USING(event_id) "
             "WHERE identity_id='companion' AND e.redacted=0 AND a.expires_at>? "
-            "AND a.created_at<=? ORDER BY a.rowid DESC LIMIT ?",
+            "AND a.created_at<=?) WHERE rank<=? ORDER BY evidence_row DESC",
             (self.clock(), self.clock(), self.settings.affect_max_evidence),
         )
         seen = set()
@@ -250,7 +284,7 @@ class AffectEngine:
             "mode": "SHADOW",
             "event_id": event_id,
             **{key: feedback[key] for key in (
-                "dimension", "new_state", "reason_code", "created_at",
+                "dimension", "new_state", "reason_code", "created_at", "topic",
             )},
             "expires_at": expires,
         }
@@ -290,8 +324,8 @@ class AffectEngine:
         ids = set(source_ids)
         contact = topic = None
         for row in self.store.rows(
-            "SELECT a.*,e.conversation_id,e.rowid AS event_row,json_extract(e.body_json,'$.text') "
-            "AS wording FROM affect_evidence a JOIN events e USING(event_id) "
+            "SELECT a.*,e.conversation_id,e.rowid AS event_row "
+            "FROM affect_evidence a JOIN events e USING(event_id) "
             "WHERE a.identity_id='companion' AND a.dimension='engagement' AND e.redacted=0 "
             "AND a.expires_at>? ORDER BY a.rowid DESC LIMIT ?",
             (self.clock(), self.settings.affect_max_evidence),
@@ -300,8 +334,7 @@ class AffectEngine:
             if not proposal or any(proposal[key] != row[key] for key in
                                    ("dimension", "new_state", "reason_code", "expires_at")):
                 continue
-            wording = row["wording"].strip().rstrip("。！!？? ")
-            if TOPIC_PAUSE.fullmatch(wording) or TOPIC_RESUME.fullmatch(wording):
+            if proposal["topic"]:
                 if ids and topic is None and ids & self._topic_targets(row):
                     topic = row["new_state"] == "pause"
             elif contact is None:
@@ -326,10 +359,13 @@ class AffectEngine:
             ).rowcount
             if not changed:
                 return False
+            # Each dimension keeps its own bounded window, so frequent wording
+            # feedback cannot evict a still-current contact or topic pause.
             s.execute(
                 "DELETE FROM affect_evidence WHERE identity_id='companion' AND rowid NOT IN "
-                "(SELECT rowid FROM affect_evidence WHERE identity_id='companion' "
-                "ORDER BY rowid DESC LIMIT ?)",
+                "(SELECT rowid FROM (SELECT rowid,row_number() OVER (PARTITION BY dimension "
+                "ORDER BY rowid DESC) AS rank FROM affect_evidence "
+                "WHERE identity_id='companion') WHERE rank<=?)",
                 (self.settings.affect_max_evidence,),
             )
             current = self.snapshot()

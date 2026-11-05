@@ -346,7 +346,7 @@ def test_changing_omitted_text_still_withholds_the_follow_up(core):
     assert turn_taking.flush(core.store, core.settings, core.clock())
     assert run(run_notice(core))
     changed = original[:200] + "改" + original[201:]
-    assert turn_taking._excerpt(original) == turn_taking._excerpt(changed)
+    assert turn_taking.excerpt(original) == turn_taking.excerpt(changed)
     core.store.execute("UPDATE events SET body_json=json_set(body_json,'$.text',?) "
                        "WHERE event_id='evt_test_2'", (changed,))
     assert lease(core) == []
