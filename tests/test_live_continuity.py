@@ -263,7 +263,9 @@ def test_selected_history_changed_in_final_preflight_causes_zero_new_io(
     monkeypatch.setattr(owner_input, "_history_sources", sources)
 
     def snapshot(tag):
+        import time
         return {"tag": tag, "core": core.clock(), "wall": datetime.now(UTC).isoformat(),
+                "mono": time.monotonic(), "probe": dict(getattr(core.clock, "probe", {})),
                 "outbox": core.store.rows("SELECT state,sent_at,created_at,updated_at,"
                                           "last_error_code,attempt_count FROM outbox"),
                 "jobs": core.store.rows("SELECT kind,state,last_error_code,attempts,"
@@ -297,7 +299,16 @@ def test_selected_history_changed_in_final_preflight_causes_zero_new_io(
             diag.append(snapshot("run2"))
             diag.append({"prompts": [[m["content"][:20] for m in c["messages"]] for c in calls]})
             import warnings
-            warnings.warn("MARGINS " + json.dumps(margins[:8]), stacklevel=1)
+            probe = getattr(core.clock, "probe", {})
+            start = probe.get("tick_start")
+            clocks = {
+                "gap": round(start[0] - probe["anchor"][0], 4),
+                "tick_start_core_minus_wall": round((datetime.fromisoformat(start[2])
+                    - datetime.fromisoformat(start[1])).total_seconds(), 4),
+                "max_delta": round(probe["max_delta"], 4),
+            } if start else {}
+            warnings.warn("MARGINS " + json.dumps(margins[:4]) + " CLOCKS "
+                          + json.dumps(clocks), stacklevel=1)
             assert len(calls) == len(sends) == 1, "PROBE " + json.dumps(diag, ensure_ascii=False,
                                                                          default=str)
             assert changed == [kind]

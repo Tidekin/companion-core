@@ -242,9 +242,15 @@ async def host(core, tmp_path, source, *, policy=None, protocol_reply=None, mode
 
     async def tick():
         previous = time.monotonic()
+        probe = getattr(core.clock, "probe", None)
+        if probe is not None:
+            probe["tick_start"] = (previous, datetime.now(UTC).isoformat(), core.clock())
+            probe["max_delta"] = 0
         while True:
             await asyncio.sleep(0.01)
             now = time.monotonic()
+            if probe is not None:
+                probe["max_delta"] = max(probe["max_delta"], now - previous)
             core.clock.now += timedelta(seconds=now - previous)
             previous = now
 
@@ -266,6 +272,7 @@ async def host(core, tmp_path, source, *, policy=None, protocol_reply=None, mode
             active.api_core = api_core
             # SDK/client startup can exceed the capture clock-drift bound.
             core.clock.now = datetime.now(UTC)
+            core.clock.probe = {"anchor": (time.monotonic(), core.clock())}
             ticker = asyncio.create_task(tick()) if ticking else None
             try:
                 yield active, handshakes, sends, calls
