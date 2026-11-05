@@ -222,7 +222,7 @@ def mutate_source(core, kind):
     "unsigned", "no_capture", "window", "receipt_epoch", "conversation", "action",
     "capture_identity",
 ])
-@pytest.mark.parametrize("repeat", range(6))
+@pytest.mark.parametrize("repeat", range(12))
 def test_selected_history_changed_in_final_preflight_causes_zero_new_io(
     core, tmp_path, kind, repeat, monkeypatch,
 ):
@@ -252,7 +252,7 @@ def test_selected_history_changed_in_final_preflight_causes_zero_new_io(
                 "jobs": core.store.rows("SELECT kind,state,last_error_code,attempts,"
                                         "event_id FROM jobs"),
                 "captures": [
-                    {k: json.loads(r["value"]).get("capture", {}).get(k)
+                    {k: (json.loads(r["value"]).get("capture") or {}).get(k)
                      for k in ("occurred_at", "received_at")}
                     for r in core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE ?",
                                              (owner_input.INPUT + "%",))],
