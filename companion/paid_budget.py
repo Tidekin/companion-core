@@ -38,10 +38,23 @@ def _validated_bytes(raw):
 
 
 def _journal_records(raw):
-    if len(raw) <= CACHE_MAX_BYTES:
+    end = len(raw)
+    if end > CACHE_MAX_BYTES:
+        # As in the Bridge codec, LF terminates a prefix in every splitlines()
+        # reading. Keep its exact bytes bounded; every later line is still checked.
+        end = raw.rfind(b"\n", 0, CACHE_MAX_BYTES) + 1
+    if end:
         try:
-            payload = _validated_bytes(raw)
+            payload = _validated_bytes(raw[:end])
             records = json.loads(payload)
+            previous = records[-1]["sha256"] if records else "0" * 64
+            for line in raw[end:].decode("utf-8").splitlines():
+                row = json.loads(line)
+                digest = row.pop("sha256")
+                if row.get("previous") != previous or sha(row) != digest:
+                    raise ValueError("journal chain")
+                previous = row["sha256"] = digest
+                records.append(row)
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
             _validated_bytes.cache_clear()
             # A damaged later line must not skip an earlier fold/error. Replay
