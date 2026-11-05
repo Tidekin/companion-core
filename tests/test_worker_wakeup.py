@@ -97,7 +97,8 @@ def test_missed_notification_is_reconciled_without_repeated_business_scans(
             class Missed:
                 def watch(self, debounce, step, timeout_ms, stop):
                     # Simulate a backend losing hints while keeping native timeout semantics.
-                    assert 0 < timeout_ms <= timeout * 1000
+                    # Monotonic deadline subtraction is rounded up to a whole millisecond.
+                    assert 0 < timeout_ms <= round(timeout * 1000) + 1
                     wake.stop.wait(timeout_ms / 1000)
                     return "timeout"
 
