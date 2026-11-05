@@ -38,6 +38,9 @@ CHAT_PHRASES = {"我是谁", "错了", "情绪", "接下一句", "你也学一�
                 "这是谁的手臂", "比我能串", "宝宝你醒了", "中国人能不能飞", "你现在什么人格"}
 SENTENCE = re.compile(r"怎么样|怎么|多少|为什么|能不能|是不是|什么|了吗|了没|一下|你说|要不要|"
                       r"有没有")
+# Addressing the companion or asking a plain question is not a bare meme name.
+# A complete title/alias (e.g. 你是我的神) may still be an intentional meme phrase.
+EXACT_SENTENCE = re.compile(r"^你.{0,4}(?:是|叫|算|变成|成了)|[吗呢]$")
 EDGE = " ，,。.！!？?"
 CLAUSES = re.compile(r"[\s，,。！!？?；;：:~～…、“”\"（）()【】\[\]]+")
 MAX_CLAUSES = 8
@@ -239,7 +242,7 @@ def context(settings, text):
         searched = _search(term, partial=whole)
         if searched is None:
             return None
-        if searched[1]:
+        if searched[1] and not (searched[1]["step"] > 1 and EXACT_SENTENCE.search(term)):
             hits.append(searched)
     if not hits:
         return None

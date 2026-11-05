@@ -97,6 +97,7 @@ def decode_lease(payload, source, now, *, media_limits=None):
             raise ValueError("Web reads require public DNS names")
         if source == "web" and (not hosts or item["operation"] != "read"):
             raise ValueError("Web reads require an explicit host scope")
+        grant_expiry = None
         if item.get("source_grant") is not None:
             grant = item["source_grant"]
             if (not isinstance(grant, dict)
@@ -107,7 +108,10 @@ def decode_lease(payload, source, now, *, media_limits=None):
                 or not isinstance(grant["fingerprint"], str)
                 or not re.fullmatch(r"[0-9a-f]{64}", grant["fingerprint"])):
                 raise ValueError("Invalid grant snapshot")
-            instant(grant["expires_at"])
+            if grant["expires_at"] is not None:
+                grant_expiry = instant(grant["expires_at"])
+            elif source != "bilibili":
+                raise ValueError("grant expiry required")
         until = instant(item["lease_until"])
         if media is not None and (
             item["operation"] != "read" or item["max_items"] != 1
@@ -115,7 +119,7 @@ def decode_lease(payload, source, now, *, media_limits=None):
             or media["source_event_id"] not in context["source_event_ids"]
             or instant(media["deadline"]) != until
             or (until - now).total_seconds() > MAX_DEADLINE_SECONDS
-            or item.get("source_grant") and instant(item["source_grant"]["expires_at"]) < until
+            or grant_expiry is not None and grant_expiry < until
         ):
             raise ValueError("media source or deadline differs from its lease")
     except (TypeError, ValueError, KeyError, OverflowError):

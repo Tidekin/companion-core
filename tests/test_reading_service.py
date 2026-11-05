@@ -1,6 +1,5 @@
 """Reader receipts must retain their original authority through native Core commits."""
 
-import copy
 import json
 from datetime import datetime
 
@@ -14,7 +13,7 @@ from companion.exploration import ReadResult
 from companion.goals import GoalProposal, GoalScope
 from companion.privacy import advance_epoch
 from companion.reading_protocol import ReadObservation
-from companion.source_grants import ReaderReadValidation
+from companion.source_grants import ReaderReadValidation, SourceGrantRegistration
 from companion.store import after
 from source_reader import worker_v1
 from source_reader.web import WebHTTP
@@ -35,14 +34,18 @@ def configure(core):
     core.settings.observation_adapters["web"] = ObservationAdapterConfig(source="web", token=TOKEN)
 
 
-def queued(core, source="web", *, owner=True, hosts=None):
+def queued(core, source="web", *, owner=True, hosts=None, grant=None):
     configure(core)
     if hosts is not None:
         core.settings.web_reading_hosts = hosts
-    body = envelope(source)
+    adapter = {"web": "web", "bilibili": "bili", "heybox": "heybox"}[source]
+    if grant is not None:
+        core.settings.observation_adapters[adapter].source_grant_required = True
+        core.observations.grants.register(
+            SourceGrantRegistration(adapter_id=adapter, **grant.snapshot()))
+    body = envelope(source, grant=grant.snapshot() if grant else None)
     if owner:
         accept(core, text="请阅读 " + body["observations"][0]["url"])
-    adapter = {"web": "web", "bilibili": "bili", "heybox": "heybox"}[source]
     row = core.store.one("SELECT request_id FROM exploration_requests ORDER BY rowid DESC")
     if not row:
         with core.store.transaction():
@@ -52,10 +55,10 @@ def queued(core, source="web", *, owner=True, hosts=None):
             )
     else:
         request = row["request_id"]
-    item = core.reading.lease(adapter)
+    item = core.reading.lease(adapter, grant)
     assert item and item["request_id"] == request
     body["lease_token"] = item["lease_token"]
-    body["observations"][0]["provenance"] = copy.deepcopy(item["context"])
+    body["observations"][0]["provenance"].update(item["context"])
     body["observations"][0]["fetched_at"] = core.clock()
     body["observations"][0]["evidence"]["fetched_at"] = core.clock()
     return adapter, item, body

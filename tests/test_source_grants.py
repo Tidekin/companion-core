@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 
 import httpx
 import pytest
+from alembic import command
 from cryptography.fernet import Fernet
 from pydantic import SecretStr, ValidationError
 
@@ -23,6 +24,7 @@ from source_reader.worker import read_result, tick
 from tests.conftest import run
 from tests.test_exploration import configure
 from tests.test_heybox_reader import URL, mock_pool
+from tests.test_input_reply_migration import config_for
 from tests.test_observations import observation
 from tests.test_plugin_readonly import NOW_DT, grant
 from tests.test_test_fixtures import historical_database
@@ -256,6 +258,52 @@ def test_owner_registry_cannot_be_forged_by_reader_or_bridge_and_contains_no_cre
     run(scenario())
     columns = {row["name"] for row in core.store.rows("PRAGMA table_info(source_grant_revisions)")}
     assert columns == {"grant_id", "epoch", "fingerprint", "expires_at", "created_at"}
+
+
+def test_open_ended_expiry_requires_explicit_registered_bilibili_authority(core, tmp_path):
+    bounded = prepare(core).snapshot()
+    unbounded = {**bounded, "expires_at": None}
+    registry = core.observations.grants
+    with pytest.raises(CoreError, match="SOURCE_GRANT_EXPIRY_REQUIRED"):
+        registry.register(SourceGrantRegistration(adapter_id="heybox", **unbounded))
+    with pytest.raises(CoreError, match="SOURCE_GRANT_REVISION_CHANGED"):
+        registry.require("heybox", SourceGrantSnapshot(**unbounded))
+    authority = {key: value for key, value in bounded.items() if key != "expires_at"}
+    with pytest.raises(ValidationError):
+        SourceGrantRegistration(adapter_id="bili", **authority)
+    for source, extra in (("heybox", {"authorization": authority}), ("bilibili", {})):
+        path = grant(tmp_path, source, expires_at=None, **extra)
+        with pytest.raises(ReadFailure, match="OWNER_ACCOUNT_AUTHORIZATION_REQUIRED"):
+            source_grant(path, NOW_DT, source)
+
+
+def test_grant_migration_preserves_historical_revision_and_event_binding(core, tmp_path):
+    snapshot = prepare(core)
+    event_id = accepted(core, snapshot)
+    prior = "0064_life_topic_items"
+    db = historical_database(core.store, tmp_path / "history.db", prior)
+    revision = core.store.one("SELECT * FROM source_grant_revisions")
+    for target in ("head", prior, "head"):
+        if target == prior:
+            command.downgrade(config_for(db), prior)
+        else:
+            migrate(db)
+        with closing(Store(db)) as store:
+            assert store.rows("SELECT * FROM source_grant_revisions") == [revision]
+            assert store.one("SELECT * FROM source_grant_events") == {
+                "event_id": event_id, "grant_id": snapshot.grant_id, "grant_epoch": snapshot.epoch,
+            }
+            assert not store.rows("PRAGMA foreign_key_check")
+    with closing(Store(db)) as store:
+        store.insert("source_grants", grant_id="grant_" + "2" * 32, source="bilibili",
+                     adapter_id="bili", created_at=core.clock())
+        store.insert("source_grant_revisions", grant_id="grant_" + "2" * 32, epoch=1,
+                     fingerprint="b" * 64, expires_at=None, created_at=core.clock())
+    with pytest.raises(RuntimeError, match="BILI_GRANT_DOWNGRADE_REQUIRES"):
+        command.downgrade(config_for(db), prior)
+    with closing(Store(db)) as store:
+        assert store.one("SELECT count(*) n FROM source_grant_revisions")["n"] == 2
+        assert not store.rows("PRAGMA foreign_key_check")
 
 
 def test_registered_revision_and_adapter_are_exact_and_monotonic(core):

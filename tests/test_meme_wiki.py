@@ -61,6 +61,21 @@ def test_longer_message_skips_truncated_name_steps():
     assert meme_wiki.context(settings(), "周末一起去看电影吧，好不好") is None
 
 
+@pytest.mark.parametrize("text", [
+    "你不是鲸鱼娘吗", "你是鲸鱼娘", "你现在叫鲸鱼娘", "鲸鱼娘吗",
+])
+def test_identity_sentences_do_not_prefetch_an_unrelated_name(text):
+    # This is a real homonym in the pinned glossary, not an absent-term fixture.
+    assert meme_wiki.find(meme_wiki._connection(), text)["title"] == "鲸鱼娘"
+    assert meme_wiki.context(settings(), text) is None
+
+
+@pytest.mark.parametrize("text", ["鲸鱼娘是什么梗", "鲸鱼娘", "你是我的神"])
+def test_explicit_name_lookup_and_complete_meme_phrases_remain_available(text):
+    reference = meme_wiki.context(settings(), text)
+    assert reference is not None and reference["content"].count("[梗百科]「") == 1
+
+
 @pytest.mark.parametrize(("query", "title"), [
     ("去码头整点薯条", "去码头整点薯条"),          # exact
     ("去码头整点薯条是谁说的", "去码头整点薯条"),  # query contains title
@@ -144,7 +159,7 @@ def test_chat_context_carries_the_entry_without_memory_evidence(core):
     assert not any(m["role"] == "system" and "[梗百科]「" in str(m["content"])
                    for m in messages)
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    ingest(core, 2, "周末要不要一起去看电影")
+    ingest(core, 2, "你不是鲸鱼娘吗")
     assert "[梗百科]" not in json.dumps(core.context(core.claim_job("worker")),
                                        ensure_ascii=False)
 

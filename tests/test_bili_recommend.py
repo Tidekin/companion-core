@@ -7,8 +7,9 @@ import sys
 from contextlib import closing
 from datetime import datetime
 
+import httpx
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
@@ -165,10 +166,25 @@ def test_invalid_recommendation_lease_is_rejected_before_io(change):
 def test_real_http_and_independent_cli_commit_recommendations_once(core, tmp_path, tools):
     configure_recommend(core)
     path = registered_grant(core, tmp_path, "bilibili")
-    request = core.exploration.create("bili", "discover", "independent-recommend")
+    owner_token = "synthetic-owner-control-" * 3
+    core.settings.control_token = SecretStr(owner_token)
+    owner = {"Authorization": "Bearer " + owner_token}
+    account = json.loads(path.read_text("utf-8"))
+    account["authorization"].update(epoch=2, fingerprint="e" * 64)
+    account["expires_at"] = None
+    path.write_text(json.dumps(account), encoding="utf-8")
+    snapshot = {**account["authorization"], "expires_at": None}
 
     async def scenario():
-        async with real_core_http(core) as port:
+        async with real_core_http(core) as port, httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{port}", trust_env=False,
+        ) as client:
+            core.clock.advance(3601)
+            response = await client.post("/internal/v2/source-grants", headers=owner,
+                                         json={"adapter_id": "bili", **snapshot})
+            assert response.status_code == 201, response.text
+            core.clock.advance(30 * 86400)
+            request = core.exploration.create("bili", "discover", "independent-recommend")
             for expected_calls in (2, 0):
                 process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
                     "tests.bili_recommend_reader_process", f"http://127.0.0.1:{port}", str(path),
@@ -186,6 +202,13 @@ def test_real_http_and_independent_cli_commit_recommendations_once(core, tmp_pat
                     if process.returncode is None:
                         process.kill()
                         await process.wait()
+            revoke = await client.post(
+                f"/internal/v2/source-grants/{snapshot['grant_id']}/revoke", headers=owner)
+            assert revoke.status_code == 200
+            denied = await client.post("/internal/v3/readers/bili/lease",
+                headers={"Authorization": "Bearer " + "bili-reader-token-" * 3},
+                json={"source_grant": snapshot})
+            assert denied.status_code == 403 and "SOURCE_GRANT_REVOKED" in denied.text
         row = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?", (request,))
         assert row["state"] == "DONE" and row["used_requests"] == 2, (
             row["state"], row["last_error_code"], row["used_requests"])
@@ -193,7 +216,7 @@ def test_real_http_and_independent_cli_commit_recommendations_once(core, tmp_pat
         assert len(observed) == 1 and observed[0]["result_status"] == "DISCOVERED"
         evidence = json.loads(observed[0]["evidence_json"])["read_observation"]
         assert evidence["evidence"] == {"discovery_mode": "recommend"}
-        assert evidence["provenance"]["source_grant"]["grant_id"] == "grant_" + "2" * 32
+        assert evidence["provenance"]["source_grant"] == snapshot
         assert not core.store.rows("SELECT * FROM outbox")
     run(scenario())
 
