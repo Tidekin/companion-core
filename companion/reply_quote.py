@@ -13,7 +13,7 @@ import re
 from companion import input_recall, reply_revision
 
 CHOICE = re.compile(r"【引用\s*(m[0-9a-f]{4})】")
-LABEL = re.compile(r"\[编号 m[0-9a-f]{4}\] ?")
+LABEL = re.compile(r"[\[【]编号[ \t]+m(?:[0-9a-f]{4}|\.{3}|…{1,2})[\]】] ?")
 MESSAGE_ID = re.compile(r"-?[1-9][0-9]{0,19}")
 RULES = (
     "\n主人消息和你先前回复开头的[编号 m加四位字符]是本地编号，不是原话的一部分。"
