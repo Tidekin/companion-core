@@ -21,13 +21,14 @@ def test_partial_download_is_closed_once_without_model_or_fallback_reply(
 
     class PartialBody(httpx.AsyncByteStream):
         async def __aiter__(self):
-            yield png()[:16]
+            prefix = png()[:16]
+            yield prefix
             core.clock.advance(61)
             await core.content.run_once()
             if failure == "read_timeout":
                 raise httpx.ReadTimeout(URL)
-            # The actual stream exceeds the approved 50,000 bytes, despite a small header.
-            yield b"x" * 50000
+            # Cross the original download limit by one byte despite the small header.
+            yield b"x" * (core.settings.content.max_image_bytes + 1 - len(prefix))
             raise AssertionError("The rejected image stream must not be consumed further")
 
         async def aclose(self):

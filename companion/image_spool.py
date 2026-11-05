@@ -11,6 +11,7 @@ from pathlib import Path
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.store import encode
+from companion_delivery_protocol.authority import MAX_OWNER_IMAGE_BYTES
 
 # Covers one vision pass, bounded memory review, and final answer; never history.
 RETENTION_SECONDS = 300
@@ -197,7 +198,7 @@ def discard_window(store, plan_sha256):
             )
 
 
-def cleanup(store, now, max_bytes=4_000_000, *, retain_completed=False):
+def cleanup(store, now, max_bytes=MAX_OWNER_IMAGE_BYTES, *, retain_completed=False):
     root = directory(store)
     if not root.exists():
         return

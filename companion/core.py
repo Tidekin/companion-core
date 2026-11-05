@@ -155,7 +155,8 @@ class Core(Runtime):
         recover_interrupted(s, now)
         from companion import agent_images
 
-        image_spool.cleanup(s, now, retain_completed=agent_images.enabled(self.settings))
+        image_spool.cleanup(s, now, self.settings.content.max_image_bytes,
+                            retain_completed=agent_images.enabled(self.settings))
         from companion import image_generation
 
         image_generation.cleanup(s, now)

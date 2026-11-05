@@ -6,7 +6,7 @@ import math
 import warnings
 from dataclasses import dataclass
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from companion.contracts import CoreError
 
@@ -29,13 +29,37 @@ class PreparedImage:
         }}
 
 
-def prepare(data, mime, policy):
+def _compressed_static(image, limit):
+    """Preserve orientation and full resolution where the model byte allowance permits."""
+    rgba = ImageOps.exif_transpose(image).convert("RGBA")
+    output = io.BytesIO()
+    rgba.info.clear()
+    rgba.save(output, format="PNG", compress_level=1)
+    if output.tell() <= limit:
+        return PreparedImage(output.getvalue(), "image/png")
+
+    rgb = Image.new("RGB", rgba.size, "white")
+    rgb.paste(rgba, mask=rgba.getchannel("A"))
+    while True:
+        output = io.BytesIO()
+        rgb.save(output, format="JPEG", quality=88)
+        if output.tell() <= limit:
+            return PreparedImage(output.getvalue(), "image/jpeg")
+        if rgb.size == (1, 1):
+            raise CoreError("CONTENT_IMAGE_TOO_LARGE", 413)
+        ratio = min(0.8, math.sqrt(limit / output.tell()))
+        rgb = rgb.resize(tuple(max(1, int(side * ratio)) for side in rgb.size),
+                         Image.Resampling.LANCZOS)
+
+
+def prepare(data, mime, policy, *, original_limit=None):
     """Represent each animation by one ordered sheet, within its existing image allowance.
 
     Pillow composites GIF/APNG disposal and WebP alpha before each selected frame.
     Cap the complete decode work, output pixels and bytes before provider admission.
     """
-    if not data or len(data) > policy.max_bytes_per_image:
+    limit = policy.max_bytes_per_image if original_limit is None else original_limit
+    if not data or len(data) > limit:
         raise CoreError("CONTENT_IMAGE_TOO_LARGE", 413)
     if mime not in FORMATS:
         raise CoreError("CONTENT_IMAGE_TYPE_UNSUPPORTED", 415)
@@ -54,6 +78,8 @@ def prepare(data, mime, policy):
                     image.verify()
                     with Image.open(io.BytesIO(data)) as original:
                         original.load()
+                        if len(data) > policy.max_bytes_per_image:
+                            return _compressed_static(original, policy.max_bytes_per_image)
                     return PreparedImage(data, mime)
                 # APNG may carry a poster outside its animation timeline.
                 start = int(bool(image.info.get("default_image", False)))

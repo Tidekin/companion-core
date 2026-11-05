@@ -94,12 +94,13 @@ async def analyze(core, job, snapshots, call_id, question, preview_reply):
         return {"state": "UNAVAILABLE", "error_code": "CONTENT_VIDEO_ANIMATION_REQUIRED"}
     parts, videos = [], []
     for row, _, _ in inputs:
-        data, mime = image_spool.get(core.store, row, core.clock(),
-                                     core.settings.paid_model.image_input.max_bytes_per_image)
-        prepared, animated = video_input.preview(data, mime, core.settings.paid_model.image_input)
+        limit = min(core.settings.content.max_image_bytes, row["reserved_bytes"])
+        data, mime = image_spool.get(core.store, row, core.clock(), limit)
+        prepared, animated = video_input.preview(data, mime, core.settings.paid_model.image_input,
+                                                 original_limit=limit)
         if animated:
             video = video_input.encode_animation(data, mime,
-                core.settings.paid_model.image_input, policy)
+                core.settings.paid_model.image_input, policy, original_limit=limit)
             videos.append({"item_id": row["item_id"], "seconds": video.seconds,
                            "media_sha256": hashlib.sha256(video.data).hexdigest()})
             parts.append(video.part())

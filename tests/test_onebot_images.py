@@ -13,6 +13,24 @@ from tests.conftest import run
 URL = "https://multimedia.nt.qq.com.cn/download?appid=1407&rkey=synthetic-private-reference"
 
 
+def test_qq_cdn_rejects_one_byte_over_32_mib():
+    limit = 32 * 1024**2
+
+    async def resolve(*_):
+        return ["1.1.1.1"]
+
+    async def check():
+        pass
+
+    def get(request):
+        return httpx.Response(200, headers={"Content-Type": "image/png",
+                                            "Content-Length": str(limit + 1)})
+
+    with pytest.raises(ValueError, match="IMAGE_TOO_LARGE"):
+        run(images.fetch_image(images.original_images([image_segment()])[0], limit,
+            check=check, resolver=resolve, transport=httpx.MockTransport(get)))
+
+
 @pytest.mark.parametrize("failure", ["authority", "transport", "storage"])
 def test_core_guard_errors_are_not_relabelled_as_download_failure(failure):
     error = (httpx.HTTPStatusError("denied", request=httpx.Request("POST", "https://core/check"),
