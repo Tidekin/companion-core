@@ -26,8 +26,17 @@ journal, and the shared journal view is neither filled nor reused once the datab
 files differ from those at the snapshot's start. Inside one write transaction or
 snapshot, the journal view key reuses its table summary until this connection writes.
 
-The owner check, an unchanged configuration boundary, history sources, mood signals and
-memory continuation use it. Leases and every other mutation keep their transactions.
+The owner check, an unchanged configuration boundary, history sources, mood signals,
+original input-state receipts and memory continuation use it. Empty delivery and meme
+polls also use a snapshot when no row needs leasing, expiry recovery or cancellation;
+they retain their original scope checks. Real leases and every other mutation keep
+their transactions. Input-state and Bridge meme-lease HTTP calls use the existing
+`ApiStore` executor and independent connections, so a journal or lock wait does not
+block the API event loop. The executor still joins a submitted operation on cancellation.
+Concurrent query-only readers use the existing journal-view lock while constructing a
+cold shared view, then recheck the full byte/database key when they acquire it. The lock
+is released before any failed snapshot retries under the SQLite write transaction;
+mutation paths retain their original transaction and cache invalidation boundaries.
 Maintenance lanes report progress only when they changed rows, so the Life worker no
 longer restarts a full sweep after bookkeeping that wrote nothing.
 

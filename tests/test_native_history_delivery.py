@@ -117,15 +117,18 @@ def test_original_history_changes_never_send_or_repeat_model_work(core, tmp_path
     run(scenario())
 
 
-def test_large_journal_enters_independent_worker_and_checked_delivery(core, tmp_path):
+@pytest.mark.parametrize("padding", ["leading", "trailing"])
+def test_large_journal_enters_independent_worker_and_checked_delivery(core, tmp_path, padding):
     from tests.support.native_consumer_entry import environment
 
     async def scenario():
         async with environment(core, tmp_path) as (entry, sends):
             path = Path(core.settings.paid_model.journal_path)
             raw = await asyncio.to_thread(path.read_bytes)
-            await asyncio.to_thread(
-                path.write_bytes, b" " * (paid_budget.CACHE_MAX_BYTES + 1) + raw)
+            whitespace = b" " * (paid_budget.CACHE_MAX_BYTES + 1)
+            large = (whitespace + raw if padding == "leading"
+                     else raw.rstrip(b"\n") + whitespace + b"\n")
+            await asyncio.to_thread(path.write_bytes, large)
             paid_budget.forget_views(core.store)
             source = await entry.admit(1, "合成大账本输入")
             await sdk_step(core, tmp_path, source["event_id"], 1)

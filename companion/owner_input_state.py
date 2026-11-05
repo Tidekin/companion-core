@@ -69,6 +69,11 @@ def _deliveries(store, rows, jobs, *, erased):
 
 
 def read(store, settings, capture, *, model_requests=None):
+    return store.read_or_write(lambda: _read(store, settings, capture,
+                                           model_requests=model_requests))
+
+
+def _read(store, settings, capture, *, model_requests=None):
     with nullcontext() if store.db.in_transaction else store.transaction():
         native_poke = isinstance(capture, OwnerPokeCapture)
         if native_poke:

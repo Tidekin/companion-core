@@ -38,10 +38,23 @@ def _validated_bytes(raw):
 
 
 def _journal_records(raw):
-    if len(raw) <= CACHE_MAX_BYTES:
+    end = len(raw)
+    if end > CACHE_MAX_BYTES:
+        # As in the Bridge codec, LF terminates a prefix in every splitlines()
+        # reading. Keep its exact bytes bounded; every later line is still checked.
+        end = raw.rfind(b"\n", 0, CACHE_MAX_BYTES) + 1
+    if end:
         try:
-            payload = _validated_bytes(raw)
+            payload = _validated_bytes(raw[:end])
             records = json.loads(payload)
+            previous = records[-1]["sha256"] if records else "0" * 64
+            for line in raw[end:].decode("utf-8").splitlines():
+                row = json.loads(line)
+                digest = row.pop("sha256")
+                if row.get("previous") != previous or sha(row) != digest:
+                    raise ValueError("journal chain")
+                previous = row["sha256"] = digest
+                records.append(row)
         except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
             _validated_bytes.cache_clear()
             # A damaged later line must not skip an earlier fold/error. Replay
@@ -278,7 +291,7 @@ SUMMARY = ("SELECT (SELECT count(*) FROM runtime_meta),"
            "(SELECT total(length(state)+billed_micro_usd) FROM model_usage)")
 # Views shared by every connection of this process, for callers such as the API that open
 # one connection per request. Keyed by the journal path.
-_SHARED, _SHARED_LOCK = {}, threading.Lock()
+_SHARED, _SHARED_LOCK = {}, threading.RLock()
 
 
 def _view_key(store, path, raw):
@@ -366,6 +379,18 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                         initialize=initialize, resolution_replay=resolution_replay,
                         model_control_replay=model_control_replay,
                         accounting_replay=accounting_replay)
+    if getattr(store, "in_read_snapshot", False):
+        # Concurrent API readers otherwise each rebuild the same cold view.
+        # These scopes are query-only WAL snapshots: they cannot wait for a DB
+        # write while holding this lock. read_or_write releases it before any
+        # authoritative write retry. Keys are still checked after acquiring it.
+        with _SHARED_LOCK:
+            return _read_journal(store, approval, allow_settlement=allow_settlement,
+                                 initialize=initialize)
+    return _read_journal(store, approval, allow_settlement=allow_settlement, initialize=initialize)
+
+
+def _read_journal(store, approval, *, allow_settlement, initialize):
     try:
         path = Path(approval.journal_path)
         try:

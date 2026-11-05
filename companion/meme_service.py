@@ -185,6 +185,8 @@ def submit_native(store, settings, clock, body, *, origin_job):
 
 
 def lease_native(store, settings, clock, body):
+    if store.read_or_write(lambda: _empty_lease_poll(store, settings, clock, _native_scope)):
+        return {"item": None}
     recover(store, settings, clock())
     with store.transaction():
         approval = _native_scope(store, settings, clock)
@@ -313,7 +315,21 @@ def recover(store, settings, now):
                               "attempts=0,updated_at=? WHERE job_id=?", (now, job["job_id"]))
 
 
+def _empty_lease_poll(store, settings, clock, scope):
+    # A cancelled/failed reservation can still require UNKNOWN accounting. Such
+    # work goes through the original recovery and write transaction below.
+    if store.one("SELECT 1 FROM jobs j WHERE kind='meme_discovery' AND "
+                 "(state IN ('QUEUED','RUNNING') OR (state IN ('CANCELLED','FAILED') "
+                 "AND lease_until<=? AND EXISTS (SELECT 1 FROM meme_discovery_reservations r "
+                 "WHERE r.job_id=j.job_id AND r.state='RESERVED'))) LIMIT 1", (clock(),)):
+        return False
+    scope(store, settings, clock)
+    return True
+
+
 def lease(store, settings, clock, body):
+    if store.read_or_write(lambda: _empty_lease_poll(store, settings, clock, _scope)):
+        return {"item": None}
     recover(store, settings, clock())
     with store.transaction():
         return _lease(store, settings, clock, body, _scope(store, settings, clock),
