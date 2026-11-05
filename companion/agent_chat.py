@@ -1,6 +1,8 @@
 """The private chat entry point; Core retains its job and final Outbox transaction."""
 
+import asyncio
 import json
+import sqlite3
 
 from pydantic_ai import DeferredToolRequests
 
@@ -21,16 +23,26 @@ async def reply(core, job, snapshots):
     with phase("context_guard", job["trace_id"]):
         view = check_conversation(core, job, snapshots)
     with phase("context_restore", job["trace_id"]):
-        persistence = ConversationStore(core, job, snapshots)
-        conversation = persistence.load()
-        saved = persistence.row()
-        if saved and saved["phase"] == "OUTPUT":
-            return saved["output_text"], persistence
-        ready, answers = deferred_results(core, job, snapshots, conversation) if conversation else (
-            True, None)
-    if not ready:
-        wait(core, job, persistence)
-        return None, persistence
+        while True:
+            try:
+                persistence = ConversationStore(core, job, snapshots)
+                conversation = persistence.load()
+                saved = persistence.row()
+                if saved and saved["phase"] == "OUTPUT":
+                    return saved["output_text"], persistence
+                ready, answers = (deferred_results(core, job, snapshots, conversation)
+                                  if conversation else (True, None))
+                if not ready:
+                    wait(core, job, persistence)
+                    return None, persistence
+                break
+            except sqlite3.OperationalError as error:
+                if (getattr(error, "sqlite_errorcode", 0) & 0xFF != sqlite3.SQLITE_BUSY
+                    or core.store.db.in_transaction):
+                    raise
+                # Restore only revalidates saved inputs and original Reader/voice
+                # results. Model requests and tool execution remain outside retry.
+                await asyncio.sleep(0.1)
     with phase("context_tools", job["trace_id"]):
         tools = [core_query_tools(core, job, snapshots)]
         from companion.agent_singing import toolset

@@ -4,8 +4,6 @@ The event owns its revision. Jobs and deliveries inherit it rather than keeping
 independent version counters. Callers still own admission, accounting and I/O.
 """
 
-from contextlib import nullcontext
-
 from companion.contracts import CoreError
 
 SUPERSEDED = "REPLY_SUPERSEDED"
@@ -140,9 +138,19 @@ def remember_sources(store, job, event_ids):
     if not job or job.get("event_id") is None:
         return
     sources = set(event_ids) | {job["event_id"]}
-    with nullcontext() if store.db.in_transaction else store.transaction():
+
+    def remember():
         check_job(store, job)
         if any(not source_active(store, event_id) for event_id in sources):
             raise CoreError(SOURCE_RECALLED, 409)
-        store.db.executemany("INSERT OR IGNORE INTO job_sources(job_id,event_id) VALUES (?,?)",
-                             [(job["job_id"], event_id) for event_id in sorted(sources)])
+        recorded = {row["event_id"] for row in store.rows(
+            "SELECT event_id FROM job_sources WHERE job_id=?", (job["job_id"],),
+        )}
+        missing = sources - recorded
+        if missing:
+            store.db.executemany("INSERT OR IGNORE INTO job_sources(job_id,event_id) VALUES (?,?)",
+                                 [(job["job_id"], event_id) for event_id in sorted(missing)])
+
+    # A restored checkpoint usually already owns every source. Revalidate it on
+    # a WAL snapshot; only new provenance needs the authoritative writer scope.
+    store.read_or_write(remember)
