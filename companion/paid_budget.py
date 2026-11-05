@@ -291,7 +291,7 @@ SUMMARY = ("SELECT (SELECT count(*) FROM runtime_meta),"
            "(SELECT total(length(state)+billed_micro_usd) FROM model_usage)")
 # Views shared by every connection of this process, for callers such as the API that open
 # one connection per request. Keyed by the journal path.
-_SHARED, _SHARED_LOCK = {}, threading.Lock()
+_SHARED, _SHARED_LOCK = {}, threading.RLock()
 
 
 def _view_key(store, path, raw):
@@ -379,6 +379,18 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                         initialize=initialize, resolution_replay=resolution_replay,
                         model_control_replay=model_control_replay,
                         accounting_replay=accounting_replay)
+    if getattr(store, "in_read_snapshot", False):
+        # Concurrent API readers otherwise each rebuild the same cold view.
+        # These scopes are query-only WAL snapshots: they cannot wait for a DB
+        # write while holding this lock. read_or_write releases it before any
+        # authoritative write retry. Keys are still checked after acquiring it.
+        with _SHARED_LOCK:
+            return _read_journal(store, approval, allow_settlement=allow_settlement,
+                                 initialize=initialize)
+    return _read_journal(store, approval, allow_settlement=allow_settlement, initialize=initialize)
+
+
+def _read_journal(store, approval, *, allow_settlement, initialize):
     try:
         path = Path(approval.journal_path)
         try:

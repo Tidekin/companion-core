@@ -3,7 +3,10 @@
 import json
 import marshal
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import sleep
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +14,7 @@ import pytest
 from companion import budget, cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelResponse
+from companion.store import Store
 from tests.owner_model_fixtures import authorized_job
 from tests.test_paid_model_gate import approved_live
 
@@ -415,3 +419,47 @@ def test_uncommitted_writes_never_fill_or_use_the_shared_view(core, tmp_path):
         core.store.execute("INSERT INTO runtime_meta VALUES ('synthetic_pending','1')")
         paid_budget.journal(core.store, approval)
         assert paid_budget._SHARED == {}
+
+
+def test_simultaneous_snapshots_build_one_view_and_keep_results_private(
+    core, tmp_path, monkeypatch,
+):
+    approval, request = settled(core, tmp_path)
+    paid_budget.forget_views(core.store)
+    starting = threading.Barrier(3)
+    calls = []
+    original = paid_budget._journal
+
+    def build(*args, **kwargs):
+        calls.append(True)
+        # Make overlapping cold misses observable without relying on a large fixture.
+        sleep(0.05)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(paid_budget, "_journal", build)
+
+    def read():
+        store = Store(core.settings.database)
+        try:
+            def operation():
+                starting.wait(timeout=3)
+                return paid_budget.journal(store, approval)
+            return store.read_or_write(operation)
+        finally:
+            store.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reads = [pool.submit(read) for _ in range(2)]
+        starting.wait(timeout=3)
+        values = [future.result(timeout=3) for future in reads]
+    assert values[0] == values[1] and len(calls) == 1
+    values[0]["model_latest"][request]["minimum_micro_usd"] = 0
+    assert values[1]["model_latest"][request]["minimum_micro_usd"] > 0
+    # A different connection's later edit must never inherit that shared proof.
+    core.store.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=?", (request,))
+    other = Store(core.settings.database)
+    try:
+        with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+            other.read_or_write(lambda: paid_budget.journal(other, approval))
+    finally:
+        other.close()

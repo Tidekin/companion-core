@@ -734,7 +734,8 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         from companion import owner_input_state
 
         response.headers["Cache-Control"] = "no-store"
-        return owner_input_state.read(app.state.core.store, settings, body)
+        return await app.state.api_store.run(lambda store: owner_input_state.read(
+            store, settings, body))
 
     @app.post(prefix + "/owner-authority/stop-receipt", dependencies=auth)
     async def owner_stop_receipt(body: AuthorityReference, response: Response):
@@ -915,8 +916,9 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/memes/discovery/lease", dependencies=auth)
     async def meme_lease(body: meme_service.DiscoveryLeaseRequest):
-        core = app.state.core
-        return meme_service.lease(core.store, settings, core.clock, body)
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: meme_service.lease(
+            store, settings, clock, body))
 
     @app.post(prefix + "/memes/discovery/{job_id}/check", dependencies=auth)
     async def meme_check(job_id: str, body: meme_service.DiscoveryCheck):

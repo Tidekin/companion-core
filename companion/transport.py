@@ -347,21 +347,45 @@ def cancel_proactive_work(store, now):
     )
 
 
+def _delivery_scope(store, settings, request, now):
+    from companion import account_actions, owner_authority
+
+    owner = owner_authority.required(store, settings)
+    if owner:
+        if request.authority is None:
+            raise CoreError("OWNER_AUTHORITY_REFERENCE_REQUIRED", 403)
+        owner_authority.current(store, settings, lambda: now, authority=request.authority)
+    account = request.delivery_lane == "qq_account"
+    approval = (account_actions.scope(store, settings, lambda: now,
+        request.authority, request.account_actions_authorization_sha256) if account else None)
+    return owner, account, approval
+
+
+def _empty_delivery_poll(store, settings, request, now):
+    from companion.social import proactive_allowed
+
+    # No recovery, tail cancellation or proactive cancellation can write in this
+    # state. A committed WAL snapshot is sufficient to return an empty batch.
+    if store.one("SELECT 1 FROM outbox WHERE state IN "
+                 "('PENDING','RETRY_WAIT','LEASED','SENDING') LIMIT 1") or store.one(
+        "SELECT 1 FROM jobs WHERE kind='activity' "
+        "AND state IN ('QUEUED','RUNNING','RETRY_WAIT') LIMIT 1"
+    ):
+        return False
+    _delivery_scope(store, settings, request, now)
+    proactive_allowed(store, settings, now)
+    return True
+
+
 def lease_deliveries(store, settings, request, now):
     from companion import account_actions, owner_authority, owner_delivery, poke, private_life
     from companion.social import proactive_allowed, share_delivery_problem
 
+    if store.read_or_write(lambda: _empty_delivery_poll(store, settings, request, now)):
+        return {"items": []}
     with store.transaction():
         recover_deliveries(store, now)
-        owner = owner_authority.required(store, settings)
-        if owner:
-            if request.authority is None:
-                raise CoreError("OWNER_AUTHORITY_REFERENCE_REQUIRED", 403)
-            owner_authority.current(store, settings, lambda: now, authority=request.authority)
-        account = request.delivery_lane == "qq_account"
-        approval = (account_actions.scope(store, settings, lambda: now,
-            request.authority, request.account_actions_authorization_sha256)
-            if account else None)
+        owner, account, approval = _delivery_scope(store, settings, request, now)
         if not proactive_allowed(store, settings, now):
             cancel_proactive_work(store, now)
         # One delivery at a time per conversation. Uncertain items are never replayed;
