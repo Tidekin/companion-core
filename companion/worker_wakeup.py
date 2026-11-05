@@ -11,7 +11,7 @@ from watchfiles._rust_notify import RustNotify
 from watchfiles.main import _default_force_polling, _default_poll_delay_ms
 
 from companion import shutdown
-from companion.worker_deadlines import PROVIDERS
+from companion.worker_deadlines import CHAT_WAIT_RESCAN_SECONDS, PROVIDERS
 from companion.worker_schedule import ScanContext, UnitResult
 
 # Existing once-per-minute scheduling/retention cadence, measured in elapsed time.
@@ -78,9 +78,11 @@ class Wakeup:
         if result.next_deadline is not None and result.next_deadline >= scan.started_at:
             deadline = min(deadline, result.next_deadline)
         started = monotonic()
-        # Reconcile potentially missed hints using the existing maintenance horizon;
-        # a timeout with no commit/deadline does not run the business scan or Recorder.
-        reconcile_at = started + MAINTENANCE_SECONDS
+        # A quiet WAL can miss the notification for the first incoming chat.
+        # Poll only the connection's change counter; an idle timeout never claims work.
+        interval = (min(CHAT_WAIT_RESCAN_SECONDS, MAINTENANCE_SECONDS)
+                    if self.kind == "worker" else MAINTENANCE_SECONDS)
+        reconcile_at = started + interval
         while True:
             if shutdown.requested():
                 return "shutdown"
@@ -94,7 +96,7 @@ class Wakeup:
             if abs((now - wall).total_seconds() - (mono - started)) > 2:
                 return "clock"
             if mono >= reconcile_at:
-                reconcile_at = mono + MAINTENANCE_SECONDS
+                reconcile_at = mono + interval
             delay = reconcile_at - mono
             if maintenance_at is not None:
                 delay = min(delay, maintenance_at - mono)
