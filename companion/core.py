@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 from datetime import datetime
@@ -64,6 +65,9 @@ from companion.transport import (
 )
 from companion.voice_flow import VoiceFlow
 from companion.wake import WakePlanner
+from companion.worker_schedule import claim_scope
+
+MEDIA_CLEANUP_BATCH = 32
 
 
 def _bubble_text(text):
@@ -79,6 +83,7 @@ def _bubble_text(text):
 class Core(Runtime):
     def __init__(self, settings, model=None, clock=utcnow):
         super().__init__(settings, clock)
+        self._media_scans = {}
         self.model = model
         try:
             self.memory = Memory(self.store, settings, self.ledger)
@@ -153,13 +158,6 @@ class Core(Runtime):
         from companion.rem import recover_interrupted
 
         recover_interrupted(s, now)
-        from companion import agent_images
-
-        image_spool.cleanup(s, now, self.settings.content.max_image_bytes,
-                            retain_completed=agent_images.enabled(self.settings))
-        from companion import image_generation
-
-        image_generation.cleanup(s, now)
         # The autonomous selector no longer consumes old fixed-timer greetings.
         # Only unadmitted queued work can be retired; retain all model/send custody.
         for job in s.rows(
@@ -195,10 +193,48 @@ class Core(Runtime):
         expire_voice_jobs(s, now)
         recover_deliveries(s, now)
 
+    def cleanup_media(self):
+        """One bounded directory batch per spool in the existing maintenance cadence."""
+        from companion import agent_images, image_generation
+
+        processed = 0
+        for module, kwargs in (
+            (image_spool, {"max_bytes": self.settings.content.max_image_bytes,
+                           "retain_completed": agent_images.enabled(self.settings)}),
+            (image_generation, {}),
+        ):
+            root = module.directory(self.store)
+            if root.is_symlink():
+                raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
+            scan = self._media_scans.get(module)
+            if scan is None:
+                if not root.is_dir():
+                    continue
+                scan = self._media_scans[module] = os.scandir(root)
+            try:
+                count = module.cleanup(self.store, self.clock(), entries=scan,
+                                       limit=MEDIA_CLEANUP_BATCH, **kwargs)
+            except BaseException:
+                scan.close()
+                del self._media_scans[module]
+                raise
+            processed += count
+            if count < MEDIA_CLEANUP_BATCH:
+                scan.close()
+                del self._media_scans[module]
+        return processed
+
+    def close(self):
+        for scan in getattr(self, "_media_scans", {}).values():
+            scan.close()
+        if hasattr(self, "_media_scans"):
+            self._media_scans.clear()
+        super().close()
+
     def claim_job(self, worker_id, *, job_id=None):
         s, now = self.store, self.clock()
-        # Recovery can retire files as well as rows; run it once before the
-        # retryable snapshot. A claim rechecks every fence under its writer lock.
+        # Keep native recovery before the retryable snapshot. A claim rechecks
+        # every fence under its writer lock; spool scans use idle maintenance.
         with s.transaction():
             self.recover(now)
         return s.read_or_write(lambda: self._claim_job(worker_id, job_id, now))
@@ -1602,7 +1638,8 @@ class Core(Runtime):
         if not poke.enabled(self.settings):
             return False
         try:
-            job = poke.claim_ready(self.store, self.settings, self.clock, worker_id)
+            with claim_scope(self.store):
+                job = poke.claim_ready(self.store, self.settings, self.clock, worker_id)
         except CoreError:
             return False
         if job is None:
@@ -1644,7 +1681,8 @@ class Core(Runtime):
 
     @query_scope()
     async def run_once(self, worker_id="worker", *, job_id=None):
-        job = self.claim_job(worker_id, job_id=job_id)
+        with claim_scope(self.store):
+            job = self.claim_job(worker_id, job_id=job_id)
         if job is not None and job["kind"] == "evaluation":
             from companion.evaluation import run as run_evaluation
 

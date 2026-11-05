@@ -69,3 +69,15 @@ def test_disabled_telemetry_emits_nothing(store, capsys, monkeypatch):
     with store.transaction():
         pass
     assert records(capsys) == []
+
+
+def test_full_capture_includes_fast_transactions_for_complete_percentiles(
+    store, capsys, monkeypatch,
+):
+    monkeypatch.setenv("COMPANION_TELEMETRY_ALL_LOCKS", "1")
+    with store.transaction():
+        store.execute("INSERT INTO t VALUES ('secret value')")
+    rows = records(capsys)
+    assert len(rows) == 1 and rows[0]["outcome"] == "COMMIT"
+    assert rows[0]["wait_ms"] >= 0 and rows[0]["held_ms"] >= 0
+    assert "secret" not in json.dumps(rows)

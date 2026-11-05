@@ -116,8 +116,8 @@ class Memory:
 
             similarities = await self.index.scores_async(query, rows, revalidate=revalidate)
         rerank_scores = None
-        model, pool = self._rerank_pool(
-            query, self._fused_order(query, rows, lexical, similarities)[0], limit)
+        fused = self._fused_order(query, rows, lexical, similarities)
+        model, pool = self._rerank_pool(query, fused[0], limit)
         if pool:
             from companion import reranker
 
@@ -133,7 +133,8 @@ class Memory:
         if clock:
             sources = MemorySources(self, clock())
         return self._finish_search(query, rows, lexical, similarities, limit, version, sources,
-                                   explain=explain, trace=trace, rerank_scores=rerank_scores)
+                                   explain=explain, trace=trace, rerank_scores=rerank_scores,
+                                   fused=fused)
 
     def _prepare_search(self, query, actor="owner", subjects=(), limit=6, *,
                         memory_ids=None, now=None):
@@ -221,11 +222,11 @@ class Memory:
         return model, ordered[:limit * 2]
 
     def _finish_search(self, query, rows, lexical, similarities, limit, version, sources, *,
-                       explain=None, trace=None, rerank_scores=None):
+                       explain=None, trace=None, rerank_scores=None, fused=None):
         """`rerank_scores` (memory_id -> score) lets async callers rescore off the loop."""
         eligible, lexical_raw = len(rows), len(lexical)
-        rows, ranks, lexical_count, semantic_count = self._fused_order(
-            query, rows, lexical, similarities)
+        rows, ranks, lexical_count, semantic_count = (
+            fused if fused is not None else self._fused_order(query, rows, lexical, similarities))
         matched = len(rows)
         model, pool = self._rerank_pool(query, rows, limit)
         if pool:
@@ -266,9 +267,13 @@ class Memory:
             )
             scores = fuse(lexical, semantic)
             lexical_count, semantic_count = len(lexical), len(semantic)
+            lexical_ranks = {}
+            for rank, key in enumerate(lexical, 1):
+                lexical_ranks.setdefault(key, rank)
+            semantic_ranks = {key: rank for rank, key in enumerate(semantic, 1)}
             ranks = {key: {"exact": key in exact,
-                           "lexical_rank": lexical.index(key) + 1 if key in lexical else None,
-                           "semantic_rank": semantic.index(key) + 1 if key in semantic else None,
+                           "lexical_rank": lexical_ranks.get(key),
+                           "semantic_rank": semantic_ranks.get(key),
                            "similarity": round(similarities[key], 4),
                            "fused_score": round(scores[key], 5)} for key in scores}
             rows = sorted(

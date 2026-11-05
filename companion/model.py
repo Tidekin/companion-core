@@ -1,4 +1,5 @@
 import json
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -219,6 +220,7 @@ class _AdmissionTransport(httpx.AsyncBaseTransport):
             raise ModelDispatchRefused(error, self.admission) from error
         # Emit after the delegate returns, never print between the final admission
         # fence and its no-await transport handoff. This excludes body decoding.
+        request.extensions["companion_model_http_started_ns"] = time.perf_counter_ns()
         with phase("model_transport", self.admission.trace_id):
             return await self.client._transport_for_url(request.url).handle_async_request(request)
 
@@ -351,7 +353,15 @@ class ModelClient:
                     "POST", endpoint, headers={"Authorization": authorization}, json=payload,
                 )
                 content = request.content
-                response = await scoped.send(request)
+                try:
+                    response = await scoped.send(request)
+                finally:
+                    started = request.extensions.pop("companion_model_http_started_ns", None)
+                    if type(started) is int and admission.trace_id is not None:
+                        from companion.telemetry import emit
+
+                        emit("model_http", admission.trace_id,
+                             elapsed_ms=(time.perf_counter_ns() - started) / 1e6)
             try:
                 body = response.json()
             except ValueError:

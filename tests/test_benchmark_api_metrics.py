@@ -97,6 +97,19 @@ def test_legacy_unknown_fields_are_still_rejected():
         benchmark.summarize([stage("t_model_done", route="/API_PRIVATE_CANARY")], "OFFLINE_FIXTURE")
 
 
+def test_transport_body_timings_mix_with_existing_stage_metrics():
+    rpc = {"schema_version": 1, "evidence_type": "OFFLINE_FIXTURE", "stage": "onebot_http",
+           "monotonic_ns": 123, "elapsed_ms": 18, "error_class": "none"}
+    report = benchmark.summarize([rpc, stage("t_reply_group_ack", elapsed_ms=50)],
+                                 "OFFLINE_FIXTURE")
+    assert report["latency"]["onebot_http"]["p95_ms"] == 18
+    assert report["latency"]["t_reply_group_ack"]["p95_ms"] == 50
+    with pytest.raises(ValueError, match="UNRECOGNIZED_RPC_METRIC_FIELDS"):
+        benchmark.summarize([{**rpc, "body": "PRIVATE_RPC_CANARY"}], "OFFLINE_FIXTURE")
+    with pytest.raises(ValueError, match="INVALID_RPC_METRIC"):
+        benchmark.summarize([{**rpc, "error_class": "PRIVATE_RPC_CANARY"}], "OFFLINE_FIXTURE")
+
+
 def test_count_only_output_never_echoes_route_and_cli_never_constructs_app(tmp_path, monkeypatch):
     private = api_record(route="/API_PRIVATE_CANARY", method="OTHER", status=405,
                          error_class="HTTPError")

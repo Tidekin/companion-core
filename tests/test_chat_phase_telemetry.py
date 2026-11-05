@@ -103,10 +103,68 @@ def test_native_request_wire_and_ledger_are_unchanged(core, tmp_path, monkeypatc
             "agent_guard", "agent_setup", "request_guard", "request_plan", "request_checkpoint",
             "request_validate", "request_reserve", "request_sources", "dispatch_journal",
             "transport_custody", "transport_payload", "transport_sources", "model_transport",
+            "model_http",
         }
         assert summarize(rows, "OFFLINE_FIXTURE")["model_budget_estimate_complete"]
     else:
         assert not rows
+
+
+@pytest.mark.parametrize("failure", [None, "guard", "transport", "body", "cancelled"])
+def test_model_http_excludes_admission_and_includes_body_receipt(
+    core, monkeypatch, capsys, failure,
+):
+    from companion.contracts import CoreError
+    from companion.paid_budget import sha
+    from tests.conftest import run
+
+    core.settings.mode = "live"
+    clock = [0]
+    monkeypatch.setenv("COMPANION_TELEMETRY", "1")
+    monkeypatch.setenv("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")
+    monkeypatch.setattr(telemetry.time, "perf_counter_ns", lambda: clock[0])
+    messages = [{"role": "user", "content": "PRIVATE_TIMING_CANARY"}]
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            clock[0] += 11_000_000
+            if failure == "body":
+                raise httpx.ReadTimeout("PRIVATE_BODY_CANARY")
+            if failure == "cancelled":
+                raise asyncio.CancelledError()
+            yield json.dumps({"choices": [{"message": {"content": "synthetic reply"}}],
+                              "usage": {"prompt_tokens": 2, "completion_tokens": 1}}).encode()
+
+    async def guard(request):
+        clock[0] += 5_000_000
+        if failure == "guard":
+            raise CoreError("SYNTHETIC_LOCAL_REFUSAL", 403)
+
+    async def provider(request):
+        clock[0] += 7_000_000
+        if failure == "transport":
+            raise httpx.ReadTimeout("PRIVATE_TRANSPORT_CANARY", request=request)
+        return httpx.Response(200, stream=Body())
+
+    async def scenario():
+        admission = model.ModelAdmission(sha(model.model_payload(core.settings, messages, "chat")),
+                                         guard, trace_id=TRACE)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            operation = model.ModelClient(core.settings, client).complete(
+                messages, "chat", admission=admission)
+            if failure:
+                with pytest.raises(asyncio.CancelledError if failure == "cancelled" else CoreError):
+                    await operation
+            else:
+                assert (await operation).text == "synthetic reply"
+
+    run(scenario())
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    spans = [row for row in records if row["stage"] == "model_http"]
+    assert len(spans) == int(failure != "guard")
+    if spans:
+        assert spans[0]["elapsed_ms"] == (7 if failure == "transport" else 18)
+    assert "CANARY" not in json.dumps(records)
 
 
 CONTEXT_SPANS = ["context_rules", "context_references", "context_memory", "context_history",
