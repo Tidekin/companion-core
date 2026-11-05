@@ -13,6 +13,7 @@ import pytest
 from PIL import Image
 
 from companion import image_spool, owner_authority
+from companion.media_config import ContentConfig
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from companion_onebot_bridge.capture import prepare_owner_input
@@ -72,14 +73,27 @@ def upload_headers(plan, event, image, lease, body, mime="image/png"):
             "X-Content-Lease": lease["lease_token"], "X-Content-Proof": encode(value)}
 
 
-@pytest.mark.parametrize("mime", ["image/png", "image/gif", "image/apng"])
-def test_native_upload_is_one_shot_and_sdk_consumes_original_bytes(core, tmp_path, mime):
+@pytest.mark.parametrize("mime,at_limit", [
+    ("image/png", False), ("image/gif", False), ("image/apng", False), ("image/png", True),
+])
+def test_native_upload_is_one_shot_and_sdk_consumes_image(core, tmp_path, mime, at_limit):
     async def scenario():
+        if at_limit:
+            core.settings.content = ContentConfig(max_image_bytes=32 * 1024**2,
+                                                 max_daily_image_bytes=800 * 1024**2)
         async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
             event, image = await admit_image(core, client, config, plan, tmp_path)
             job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
             assert core.claim_job("wait-for-original", job_id=job["job_id"]) is None
             body = pixels(mime)
+            if at_limit:
+                # A valid PNG with an ancillary chunk just before IEND.
+                import zlib
+
+                padding = bytes(core.settings.content.max_image_bytes - len(body) - 12)
+                chunk = b"paDd" + padding
+                body = (body[:-12] + len(padding).to_bytes(4, "big") + chunk
+                        + zlib.crc32(chunk).to_bytes(4, "big") + body[-12:])
             url = "/internal/v2/content/" + event["event_id"] + "/image"
             downloads, phases = [], []
 
@@ -135,7 +149,14 @@ def test_native_upload_is_one_shot_and_sdk_consumes_original_bytes(core, tmp_pat
             assert len(images) == 1
             from companion.image_frames import prepare
 
-            expected = prepare(body, mime, core.settings.paid_model.image_input)
+            model_policy = core.settings.paid_model.image_input
+            expected = prepare(body, mime, model_policy,
+                               original_limit=core.settings.content.max_image_bytes)
+            if at_limit:
+                assert row["reserved_bytes"] == len(body) == 32 * 1024**2
+                assert len(expected.data) <= model_policy.max_bytes_per_image
+                with Image.open(io.BytesIO(expected.data)) as decoded:
+                    assert decoded.convert("RGB").getpixel((0, 0)) == (0, 128, 128)
             assert base64.b64decode(images[0]["image_url"]["url"].split(",", 1)[1]) == expected.data
             assert core.store.rows("SELECT scenario,state FROM model_usage") == [
                 {"scenario": "chat", "state": "SETTLED"}]
@@ -145,7 +166,7 @@ def test_native_upload_is_one_shot_and_sdk_consumes_original_bytes(core, tmp_pat
             assert len(core.store.rows("SELECT * FROM outbox")) == 1
             image_spool.cleanup(core.store, core.clock(), retain_completed=True)
             row = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
-            assert image_spool.get(core.store, row, core.clock(), 100000)[0] == body
+            assert image_spool.get(core.store, row, core.clock(), len(body))[0] == body
     run(scenario())
 
 

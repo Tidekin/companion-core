@@ -154,12 +154,31 @@ def test_static_image_keeps_the_original_result_and_animated_flag():
     assert not animated and prepared == prepare(original, "image/png", policy())
 
 
+def test_large_static_preview_resizes_only_the_model_copy():
+    import random
+
+    original = io.BytesIO()
+    image = Image.frombytes("RGB", (192, 128), random.Random(32).randbytes(192 * 128 * 3))
+    image.save(original, format="PNG")
+    data = original.getvalue()
+    image_policy = policy().model_copy(update={"max_bytes_per_image": 5000,
+                                               "max_pixels_per_image": 192 * 128})
+    preview, animated = video_input.preview(data, "image/png", image_policy,
+                                           original_limit=len(data))
+    assert not animated and preview.mime == "image/jpeg"
+    assert len(preview.data) <= 5000 < len(data)
+    with Image.open(io.BytesIO(preview.data)) as decoded:
+        assert decoded.format == "JPEG" and 1 < decoded.width < image.width
+        decoded.load()
+
+
 def test_final_sheet_byte_limit_is_checked_after_resize(monkeypatch):
     from companion import image_frames
 
     output = io.BytesIO()
     Image.new("RGB", (600, 200), "red").save(output, format="PNG")
-    monkeypatch.setattr(image_frames, "prepare", lambda *_: SimpleNamespace(data=output.getvalue()))
+    monkeypatch.setattr(image_frames, "prepare",
+                        lambda *_, **__: SimpleNamespace(data=output.getvalue()))
     image_policy = policy().model_copy(update={"max_bytes_per_image": len(animation("WEBP"))})
     with pytest.raises(CoreError, match="CONTENT_VIDEO_INPUT_INVALID"):
         video_input.preview(animation("WEBP"), "image/webp", image_policy)

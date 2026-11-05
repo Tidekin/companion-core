@@ -149,8 +149,9 @@ def preview_text_and_estimate(video_policy, image_policy, messages):
     return text, video_policy.estimated_tokens_per_image * (len(messages[0]["content"]) - 1)
 
 
-def _animation(data, mime, policy):
-    if not data or len(data) > policy.max_bytes_per_image or mime not in FORMATS:
+def _animation(data, mime, policy, original_limit):
+    limit = policy.max_bytes_per_image if original_limit is None else original_limit
+    if not data or len(data) > limit or mime not in FORMATS:
         raise ValueError()
     image = Image.open(io.BytesIO(data))
     count = getattr(image, "n_frames", 1)
@@ -163,17 +164,17 @@ def _animation(data, mime, policy):
     return image, count, start
 
 
-def preview(data, mime, policy):
+def preview(data, mime, policy, *, original_limit=None):
     """Reuse the ordered frame sheet within the original one-image, 512-edge preview."""
     from companion.image_frames import SAMPLE_FRAMES, prepare
 
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            image, count, start = _animation(data, mime, policy)
+            image, count, start = _animation(data, mime, policy, original_limit)
             with image:
                 if count - start <= 1:
-                    return prepare(data, mime, policy), False
+                    return prepare(data, mime, policy, original_limit=original_limit), False
                 # Match prepare's existing sample positions; retain fractional APNG times.
                 frames = count - start
                 selected = sorted({start + round(i * (frames - 1) / max(
@@ -190,7 +191,7 @@ def preview(data, mime, policy):
                         raise ValueError()
                     duration += Fraction(str(value))
                 try:
-                    prepared = prepare(data, mime, policy)
+                    prepared = prepare(data, mime, policy, original_limit=original_limit)
                 except CoreError:
                     raise ValueError() from None
                 output = io.BytesIO()
@@ -224,14 +225,14 @@ class PreparedVideo:
         }}
 
 
-def encode_animation(data, mime, image_policy, video_policy):
+def encode_animation(data, mime, image_policy, video_policy, *, original_limit=None):
     """Encode composited frames as H.264, preserving time within one 25fps interval."""
     import av
 
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            image, count, start = _animation(data, mime, image_policy)
+            image, count, start = _animation(data, mime, image_policy, original_limit)
             with image:
                 if count - start < 2:
                     raise ValueError()

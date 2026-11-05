@@ -4,6 +4,8 @@ import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
+MAX_OWNER_IMAGE_BYTES = 32 * 1024 * 1024
+
 CAPTURE_DOMAIN = b"companion-core/owner-capture/v2\x00"
 DELIVERY_DOMAIN = b"companion-core/owner-delivery/v2\x00"
 QUIESCENCE_DOMAIN = b"companion-core/owner-quiescence/v2\x00"

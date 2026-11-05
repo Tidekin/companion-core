@@ -147,8 +147,7 @@ def claim(service, event_id, request_key, source_sha256):
         store.execute("UPDATE content_items SET state='FETCHING',lease_token=?,lease_until=?,"
                       "updated_at=? WHERE item_id=?", (token, until, clock(), row["item_id"]))
         return {"state": "FETCHING", "lease_token": token, "lease_until": until,
-                "max_bytes": min(row["reserved_bytes"], service.options.max_image_bytes,
-                                 settings.paid_model.image_input.max_bytes_per_image)}
+                "max_bytes": min(row["reserved_bytes"], service.options.max_image_bytes)}
 
 
 def check_upload(service, event_id, lease_token, source_sha256):
@@ -176,8 +175,7 @@ def stage(service, event_id, request_key, data, mime, lease_token, proof):
             if (not saved or saved["proof_json"] != encode(proof) or saved["mime"] != mime
                 or saved["expires_at"] <= clock()):
                 raise CoreError("OWNER_IMAGE_UPLOAD_INVALID", 403)
-            maximum = min(service.options.max_image_bytes,
-                          settings.paid_model.image_input.max_bytes_per_image)
+            maximum = min(service.options.max_image_bytes, row["reserved_bytes"])
             original, original_mime = image_spool.get(store, row, clock(), maximum)
             if original != data or original_mime != mime:
                 raise CoreError("OWNER_IMAGE_UPLOAD_INVALID", 403)
@@ -214,10 +212,8 @@ def accept(service, original, data, mime, lease_token, proof):
         view, row, image = lease(store, settings, clock, original["owner_event_id"], lease_token)
         if row["item_id"] != original["item_id"]:
             raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
-        policy = settings.paid_model.image_input
-        policy = policy.model_copy(update={"max_bytes_per_image": min(
-            policy.max_bytes_per_image, service.options.max_image_bytes)})
-        prepare(data, mime, policy)
+        prepare(data, mime, settings.paid_model.image_input,
+                original_limit=min(row["reserved_bytes"], service.options.max_image_bytes))
         media_hash = hashlib.sha256(data).hexdigest()
         upload_proof(store, settings, view.authority.as_dict(), row["owner_event_id"], image,
                      lease_token, media_hash, mime, proof)
@@ -283,8 +279,7 @@ def _prepared(store, settings, clock, job, item_id, *, executing=True):
     row, image = _source(store, settings, clock, job, item_id, executing=executing)
     if row["expires_at"] <= clock():
         raise CoreError("LIVE_IMAGE_ORIGINAL_UNAVAILABLE", 410)
-    maximum = min(settings.content.max_image_bytes,
-                  settings.paid_model.image_input.max_bytes_per_image)
+    maximum = min(row["reserved_bytes"], settings.content.max_image_bytes)
     data, mime = image_spool.get(store, row, clock(), maximum)
     if (mime != row["mime"] or hashlib.sha256(data).hexdigest() != row["media_sha256"]
         or hashlib.sha256(mime.encode() + b"\0" + data).hexdigest() != row["fingerprint"]
@@ -292,9 +287,11 @@ def _prepared(store, settings, clock, job, item_id, *, executing=True):
         raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
     from companion import video_input
 
-    prepared = (video_input.preview(data, mime, settings.paid_model.image_input)[0]
-                if video_input.enabled(settings) else
-                prepare(data, mime, settings.paid_model.image_input))
+    policy = settings.paid_model.image_input
+    if video_input.enabled(settings):
+        prepared, _ = video_input.preview(data, mime, policy, original_limit=maximum)
+    else:
+        prepared = prepare(data, mime, policy, original_limit=maximum)
     return row, image, prepared
 
 

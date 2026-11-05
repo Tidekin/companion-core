@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from companion.trial_limits import CountLimit
+from companion_delivery_protocol.authority import MAX_OWNER_IMAGE_BYTES
 
 
 class MediaEndpoint(BaseModel):
@@ -93,8 +94,8 @@ class ContentConfig(BaseModel):
     max_images_per_article: int = Field(default=32, ge=1, le=32)
     article_image_micro_usd: int = Field(default=50_000, ge=0)
     use_chat_model_for_vision: bool = False
-    max_image_bytes: int = Field(default=1_000_000, ge=1024, le=4_000_000)
-    max_daily_image_bytes: int = Field(default=32_000_000, ge=0, le=100_000_000)
+    max_image_bytes: int = Field(default=1_000_000, ge=1024, le=MAX_OWNER_IMAGE_BYTES)
+    max_daily_image_bytes: int = Field(default=32_000_000, ge=0, le=800 * 1024 * 1024)
     max_daily_images: int = Field(default=32, ge=0, le=50)
     image_daily_micro_usd: int = Field(default=0, ge=0)
     wait_seconds: int = Field(default=30, ge=1, le=90)

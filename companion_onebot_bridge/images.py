@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from companion_delivery_protocol.authority import MAX_OWNER_IMAGE_BYTES
 from companion_meme_sources.fetch import global_address, resolve_public
 
 from . import face_graphics
@@ -210,7 +211,8 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
     same ten-second lease. No dispatched GET is repeated; there are no redirects,
     Authorization/Cookie headers or disk writes here.
     """
-    if type(max_bytes) is not int or not 1 <= max_bytes <= 4_000_000 or not callable(check):
+    if (type(max_bytes) is not int or not 1 <= max_bytes <= MAX_OWNER_IMAGE_BYTES
+        or not callable(check)):
         raise ValueError("INVALID_IMAGE_DOWNLOAD_GRANT")
     if image.face_id is not None:
         await check()
