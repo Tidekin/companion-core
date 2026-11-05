@@ -196,95 +196,101 @@ class Core(Runtime):
 
     def claim_job(self, worker_id, *, job_id=None):
         s, now = self.store, self.clock()
+        # Recovery can retire files as well as rows; run it once before the
+        # retryable snapshot. A claim rechecks every fence under its writer lock.
         with s.transaction():
             self.recover(now)
-            if (owner_authority.required(s, self.settings)
-                or private_life.enabled(self.settings)):
-                foreground_only = bool(owner_authority.required(s, self.settings)
-                                       and self.settings.paid_model
-                                       and self.settings.paid_model.concurrency > 1)
-                if private_life.busy(s, now, foreground_only=foreground_only) or s.one(
-                    "SELECT 1 FROM outbox WHERE state='SENDING' LIMIT 1",
-                ):
-                    # Input admission and tail cancellation proceed independently;
-                    # chat waits for its existing model/send responsibility. Separate
-                    # background work shares admission capacity when more slots exist.
-                    return None
-            if not proactive_allowed(s, self.settings, now):
-                cancel_proactive_work(s, now)
-            row = s.one(
-                "SELECT j.*,e.conversation_id,e.body_json,e.trace_id,e.redacted,e.reply_revision "
-                "FROM jobs j "
-                "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
-                "AND j.kind IN ('chat','activity','evaluation','rem') "
-                "AND ((? IS NULL AND j.kind IN ('chat','evaluation')) OR j.job_id=?) "
-                "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) AND e.redacted=0 "
-                "AND NOT EXISTS (SELECT 1 FROM jobs b JOIN events be ON be.event_id=b.event_id "
-                "WHERE be.conversation_id=e.conversation_id AND b.rowid<j.rowid "
-                "AND (b.kind='chat' OR (b.kind='activity' "
-                "AND (j.kind<>'chat' OR b.state='RUNNING'))) "
-                "AND b.state IN ('QUEUED','RUNNING','RETRY_WAIT')) "
-                "ORDER BY CASE WHEN j.kind='evaluation' THEN 1 ELSE 0 END,j.rowid LIMIT 1",
-                (job_id, job_id, now),
-            )
-            if not row:
-                return None
-            if row["kind"] in {"activity", "rem"} and (
-                budget.chat_pending(s, now) or private_life.enabled(self.settings)
-                and private_life.owner_waiting(s, self.settings, now)
-            ):
-                return None
-            if owner_authority.required(s, self.settings):
-                try:
-                    owner_authority.check_job(s, self.settings, self.clock, row,
-                        purpose=owner_authority.model_purpose(s, row["kind"], row["job_id"]))
-                except CoreError as error:
-                    s.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                              "last_error_code=? WHERE job_id=?", (now, error.code, row["job_id"]))
-                    return None
-            if self.memes.waiting_offer(row, now):
-                return None
-            body = json.loads(row["body_json"])
-            if (self.settings.voice.enabled and row["kind"] == "chat"
-                and self.voice.input_status(row["event_id"], row["job_id"]).state == "WAITING"):
-                return None
-            if (
-                self.settings.content_enabled
-                and row["kind"] == "chat"
-                and not body.get("diary_command")
-                and not body.get("control_command")
-            ):
-                from companion import agent_images
+        return s.read_or_write(lambda: self._claim_job(worker_id, job_id, now))
 
-                if row.get("authority_json") and agent_images.waiting(self, row):
-                    return None
-                if qq_images.enabled(self.settings):
-                    inflight = s.one(
-                        "SELECT m.request_id FROM model_usage m JOIN model_admissions a "
-                        "USING(request_id) WHERE m.job_id=? AND m.scenario='content_vision' "
-                        "AND m.state='RESERVED' AND a.window_id=? AND a.lease_until>?",
-                        (row["job_id"], self.settings.live_text_window.window_id, self.clock()),
-                    )
-                    if inflight:
-                        # The API owns this image request. Validate its existing fences,
-                        # then wait without claiming the chat job or authorizing more I/O.
-                        live_text.check_model(s, self.settings, self.clock, inflight["request_id"])
-                        return None
-                if self.content.status(row["event_id"])["pending"]:
-                    return None
-            token = uid("lease")
-            try:
-                runtime_config.bind(s, self.settings, self.clock, "job:" + row["job_id"])
-            except CoreError as error:
-                s.execute("UPDATE jobs SET state='FAILED',last_error_code=?,updated_at=? "
-                          "WHERE job_id=?", (error.code, now, row["job_id"]))
+    def _claim_job(self, worker_id, job_id, now):
+        s = self.store
+        if (owner_authority.required(s, self.settings)
+            or private_life.enabled(self.settings)):
+            foreground_only = bool(owner_authority.required(s, self.settings)
+                                   and self.settings.paid_model
+                                   and self.settings.paid_model.concurrency > 1)
+            if private_life.busy(s, now, foreground_only=foreground_only) or s.one(
+                "SELECT 1 FROM outbox WHERE state='SENDING' LIMIT 1",
+            ):
+                # Input admission and tail cancellation proceed independently;
+                # chat waits for its existing model/send responsibility. Separate
+                # background work shares admission capacity when more slots exist.
                 return None
-            s.execute(
-                "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
-                "attempts=attempts+1,updated_at=? WHERE job_id=?",
-                (worker_id, token, after(now, self.settings.lease_seconds), now, row["job_id"]),
-            )
-            return {**row, "lease_token": token, "attempts": row["attempts"] + 1}
+        if not proactive_allowed(s, self.settings, now):
+            cancel_proactive_work(s, now)
+        row = s.one(
+            "SELECT j.*,e.conversation_id,e.body_json,e.trace_id,e.redacted,e.reply_revision "
+            "FROM jobs j "
+            "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
+            "AND j.kind IN ('chat','activity','evaluation','rem') "
+            "AND ((? IS NULL AND j.kind IN ('chat','evaluation')) OR j.job_id=?) "
+            "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) AND e.redacted=0 "
+            "AND NOT EXISTS (SELECT 1 FROM jobs b JOIN events be ON be.event_id=b.event_id "
+            "WHERE be.conversation_id=e.conversation_id AND b.rowid<j.rowid "
+            "AND (b.kind='chat' OR (b.kind='activity' "
+            "AND (j.kind<>'chat' OR b.state='RUNNING'))) "
+            "AND b.state IN ('QUEUED','RUNNING','RETRY_WAIT')) "
+            "ORDER BY CASE WHEN j.kind='evaluation' THEN 1 ELSE 0 END,j.rowid LIMIT 1",
+            (job_id, job_id, now),
+        )
+        if not row:
+            return None
+        if row["kind"] in {"activity", "rem"} and (
+            budget.chat_pending(s, now) or private_life.enabled(self.settings)
+            and private_life.owner_waiting(s, self.settings, now)
+        ):
+            return None
+        if owner_authority.required(s, self.settings):
+            try:
+                owner_authority.check_job(s, self.settings, self.clock, row,
+                    purpose=owner_authority.model_purpose(s, row["kind"], row["job_id"]))
+            except CoreError as error:
+                s.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+                          "last_error_code=? WHERE job_id=?", (now, error.code, row["job_id"]))
+                return None
+        if self.memes.waiting_offer(row, now):
+            return None
+        body = json.loads(row["body_json"])
+        if (self.settings.voice.enabled and row["kind"] == "chat"
+            and self.voice.input_status(row["event_id"], row["job_id"]).state == "WAITING"):
+            return None
+        if (
+            self.settings.content_enabled
+            and row["kind"] == "chat"
+            and not body.get("diary_command")
+            and not body.get("control_command")
+        ):
+            from companion import agent_images
+
+            if row.get("authority_json") and agent_images.waiting(self, row):
+                return None
+            if qq_images.enabled(self.settings):
+                inflight = s.one(
+                    "SELECT m.request_id FROM model_usage m JOIN model_admissions a "
+                    "USING(request_id) WHERE m.job_id=? AND m.scenario='content_vision' "
+                    "AND m.state='RESERVED' AND a.window_id=? AND a.lease_until>?",
+                    (row["job_id"], self.settings.live_text_window.window_id, self.clock()),
+                )
+                if inflight:
+                    # The API owns this image request. Validate its existing fences,
+                    # then wait without claiming the chat job or authorizing more I/O.
+                    live_text.check_model(s, self.settings, self.clock, inflight["request_id"])
+                    return None
+            if self.content.status(row["event_id"])["pending"]:
+                return None
+        token = uid("lease")
+        try:
+            runtime_config.bind(s, self.settings, self.clock, "job:" + row["job_id"])
+        except CoreError as error:
+            s.execute("UPDATE jobs SET state='FAILED',last_error_code=?,updated_at=? "
+                      "WHERE job_id=?", (error.code, now, row["job_id"]))
+            return None
+        s.execute(
+            "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
+            "attempts=attempts+1,updated_at=? WHERE job_id=?",
+            (worker_id, token, after(now, self.settings.lease_seconds), now, row["job_id"]),
+        )
+        return {**row, "lease_token": token, "attempts": row["attempts"] + 1}
 
     def _self_quote_indices(self, job, body):
         """Attribute only the current captured quote, without retrieving extra history."""
@@ -435,8 +441,8 @@ class Core(Runtime):
                 elif snapshot["kind"] == "images":
                     from companion import agent_images
 
-                    rows = agent_images.inputs(self.store, self.settings, self.clock, job)
-                    if [row["item_id"] for row, _, _ in rows] != snapshot["item_ids"]:
+                    rows = agent_images.input_sources(self.store, self.settings, self.clock, job)
+                    if [row["item_id"] for row, _ in rows] != snapshot["item_ids"]:
                         raise CoreError("PRIVACY_CHANGED", 409)
             except CoreError as error:
                 if error.code == "PRIVACY_CHANGED":
