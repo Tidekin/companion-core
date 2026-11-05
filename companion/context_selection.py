@@ -47,6 +47,25 @@ def drop_order(groups):
                   key=lambda group: (group["priority"], group["wire_start"]))
 
 
+def protected_recent(settings, sources, turns, current_input, scenario):
+    """Keep a bounded tail of complete pairs alongside the current input.
+
+    Pending inputs do not consume the pair count. Oversized pairs remain optional;
+    static rules, attached media and actual tools still face full hard admission.
+    """
+    from companion.token_measurement import measure_request
+
+    pairs = [(source, turn) for source, turn in zip(sources, turns, strict=True)
+             if source.get("reply_text") and source.get("reply_complete") is not False]
+    retained, messages = set(), list(current_input)
+    for source, turn in reversed(pairs[-settings.recent_protected_turns:]):
+        measured = measure_request(settings, [*turn, *messages], scenario)
+        if measured.reserved_input_tokens <= settings.context_soft_tokens:
+            retained.add(source["event_id"])
+            messages = [*turn, *messages]
+    return retained
+
+
 def _without_fact(value, text):
     if isinstance(value, list):
         return [_without_fact(item, text) for item in value]

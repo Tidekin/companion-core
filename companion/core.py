@@ -1035,11 +1035,10 @@ class Core(Runtime):
                     scope.max_utf8_bytes - sum(len(message["content"].encode())
                                                for turn in turns for message in turn))))
             if recalled:
-                # These bounded, authorized originals carry attribution and uncertainty
-                # that a later tool summary need not repeat. Keep their source group
-                # through SDK continuations; full paid admission still enforces hard caps.
+                # Older retrieved originals retain their attribution as one atomic
+                # group, but must not displace the ongoing delivered conversation.
                 selection.add(turn_recall.HEADING, recalled["data"], recalled["event_ids"],
-                    priority=context_selection.RELATED, required=True, module="memory",
+                    priority=context_selection.RELATED, module="memory",
                     proofs=[{"kind": "memory", "proof": self.memory_context.pin(
                         self.clock(), event_ids=set(recalled["event_ids"]))}])
         mark("context_turn_recall")
@@ -1130,16 +1129,20 @@ class Core(Runtime):
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and hits
         )
         preserve = bool(protected or continuation)
+        # Count delivered pairs, not pending image/text inputs. A burst of unanswered
+        # images must not evict the answer that the owner's follow-up refers to.
+        recent = context_selection.protected_recent(cfg, sources, turns, current_input, job["kind"])
         blocks = [("rules", [rules], True, context_selection.TOPIC)]
         blocks.extend(("reference", [reference], preserve or id(reference) in selection.required,
                        selection.priorities.get(id(reference), context_selection.BACKGROUND))
                       for reference in references)
-        blocks.extend(("history", turn, preserve or source.get("reply_complete") is False,
+        blocks.extend(("history", turn, preserve or source.get("reply_complete") is False
+                       or source["event_id"] in recent,
                        context_selection.TOPIC if (
                            related(source.get("user_text", "")) == context_selection.RELATED
-                           or not focus and index >= len(turns) - cfg.recent_protected_turns)
+                           or source["event_id"] in recent)
                        else context_selection.OLD_HISTORY)
-                      for index, (source, turn) in enumerate(zip(sources, turns, strict=True)))
+                      for source, turn in zip(sources, turns, strict=True))
         blocks.append(("current", current_input, True, context_selection.TOPIC))
         assembly_dropped = []
         if protected:
