@@ -27,7 +27,7 @@ def prepare(store, custody, proof, now):
         raise CoreError("DELIVERY_NOT_SENT_STOP_REQUIRED", 409)
     row = recovery._row(store, proof["message_id"])
     if (row["state"] != "CANCELLED" or row["attempt_count"] != 0
-        or row["lease_token"] is not None or row["provider_message_id"] is not None
+        or row["provider_message_id"] is not None
         or row["native_ack_json"] is not None
         or recovery._meta(store, recovery.PREPARED + proof["message_id"]) is not None
         or recovery._meta(store, recovery.PROJECTION + proof["message_id"]) is not None
@@ -38,6 +38,8 @@ def prepare(store, custody, proof, now):
         or owner_authority._meta(store, owner_authority.GENERATION)
         != proof["authority"]["restore_generation"]):
         raise CoreError("DELIVERY_NOT_SENT_UNPROVEN", 409)
+    # Supersession retains an unstarted lease as evidence. The original binding
+    # validates any retained token against the signed lease and send-check hashes.
     _, _, original = owner_delivery_reconciliation.binding(
         store, proof, row, recovery._authority(store, proof["message_id"]),
         prior["delivery"] if prior else None, not_sent=True)
