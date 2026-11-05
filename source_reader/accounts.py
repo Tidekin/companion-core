@@ -1,4 +1,4 @@
-"""Explicit, expiring grants in isolated Reader storage; never discover browser/App cookies."""
+"""Explicit account grants in isolated Reader storage; never discover browser/App cookies."""
 
 import hashlib
 import json
@@ -59,9 +59,15 @@ def account_grant(path, now, source="heybox"):
             fields |= {"account_id", "device_id"}
         if not isinstance(data, dict) or set(data) not in (fields, fields | {"authorization"}):
             raise ValueError("schema")
-        expires = datetime.fromisoformat(data["expires_at"])
-        if data["enabled"] is not True or expires.tzinfo is None or expires <= now:
-            raise ValueError("expired")
+        if data["enabled"] is not True:
+            raise ValueError("disabled")
+        if data["expires_at"] is None:
+            if source != "bilibili" or "authorization" not in data:
+                raise ValueError("expiry required")
+        else:
+            expires = datetime.fromisoformat(data["expires_at"])
+            if expires.tzinfo is None or expires <= now:
+                raise ValueError("expired")
         expected = {"heybox": HEYBOX_COMMIT, "bilibili": BILIBILI_COMMIT,
                     "qzone": QZONE_COMMIT}[source]
         if data["upstream_commit"] != expected:
@@ -112,5 +118,7 @@ def source_grant(path, now, source, required=False):
         if required:
             raise ReadFailure("SOURCE_GRANT_METADATA_REQUIRED")
         return None
-    return {**authorization, "expires_at": datetime.fromisoformat(data["expires_at"])
-            .astimezone(UTC).isoformat(timespec="microseconds")}
+    expiry = data["expires_at"]
+    if expiry is not None:
+        expiry = datetime.fromisoformat(expiry).astimezone(UTC).isoformat(timespec="microseconds")
+    return {**authorization, "expires_at": expiry}

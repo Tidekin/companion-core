@@ -2554,11 +2554,12 @@ function grantsView(grants) {
       el("thead", {}, el("tr", {}, el("th", {}, "来源"), el("th", {}, "状态"), el("th", {}, "版本"), el("th", {}, "有效期至"), el("th", { class: "r" }, "操作"))),
       el("tbody", {}, items.map(g => {
         const [st, label] = grantState(g);
+        const expiry = g.source === "bilibili" && g.expires_at === null ? "直到撤销" : fmtDate(g.expires_at);
         return el("tr", { class: "static" },
           el("td", { class: "title-cell" }, grantName(g), el("small", {}, "读取程序 " + (g.adapter_id || "—") + "，编号 " + shortId(g.grant_id))),
           el("td", {}, tag(st, label)),
           el("td", { class: "num" }, "第 " + count(g.epoch) + " 版"),
-          el("td", { class: "muted" }, g.forgotten_at ? "遗忘于 " + fmtDate(g.forgotten_at) : g.revoked_at ? "撤回于 " + fmtDate(g.revoked_at) : fmtDate(g.expires_at)),
+          el("td", { class: "muted" }, g.forgotten_at ? "遗忘于 " + fmtDate(g.forgotten_at) : g.revoked_at ? "撤回于 " + fmtDate(g.revoked_at) : expiry),
           el("td", { class: "r" }, el("span", { class: "row-gap end" },
             !g.revoked_at && !g.forgotten_at ? btn("撤回", () => grantAction(g, "revoke"), { cls: "sm" }) : null,
             !g.forgotten_at ? btn("遗忘", () => grantAction(g, "forget"), { cls: "sm danger" }) : null)));

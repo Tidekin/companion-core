@@ -12,14 +12,15 @@ class SourceGrantSnapshot(StrictModel):
     grant_id: str = Field(pattern=r"^grant_[0-9a-f]{32}$")
     epoch: int = Field(ge=1, le=2147483647, strict=True)
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    expires_at: AwareDatetime
+    expires_at: AwareDatetime | None
 
     def snapshot(self):
         return {
             "grant_id": self.grant_id,
             "epoch": self.epoch,
             "fingerprint": self.fingerprint,
-            "expires_at": self.expires_at.astimezone(UTC).isoformat(timespec="microseconds"),
+            "expires_at": (self.expires_at.astimezone(UTC).isoformat(timespec="microseconds")
+                           if self.expires_at is not None else None),
         }
 
 
@@ -34,6 +35,14 @@ class ReaderLeaseRequest(StrictModel):
 class ReaderReadValidation(StrictModel):
     lease_token: str = Field(min_length=8, max_length=128)
     source_grant: SourceGrantSnapshot | None = None
+
+
+def _check_expiry(source, expires_at, now):
+    if expires_at is None:
+        if source != "bilibili":
+            raise CoreError("SOURCE_GRANT_EXPIRY_REQUIRED", 400)
+    elif expires_at <= now:
+        raise CoreError("SOURCE_GRANT_EXPIRED", 403)
 
 
 def grant_tombstone(grant_id):
@@ -79,8 +88,7 @@ class SourceGrantService:
             policy = self.settings.observation_adapters.get(request.adapter_id)
             if policy is None or not supports(policy.source, "source_grant"):
                 raise CoreError("SOURCE_GRANT_ADAPTER_INVALID", 400)
-            if data["expires_at"] <= now:
-                raise CoreError("SOURCE_GRANT_EXPIRED", 403)
+            _check_expiry(policy.source, data["expires_at"], now)
             if s.one(
                 "SELECT 1 FROM runtime_meta WHERE key=?", (grant_tombstone(request.grant_id),)
             ):
@@ -154,8 +162,7 @@ class SourceGrantService:
         policy = self.settings.observation_adapters.get(adapter_id)
         if not policy or policy.source != row["source"]:
             raise CoreError("SOURCE_GRANT_IDENTITY_CHANGED", 409)
-        if row["expires_at"] <= self.clock():
-            raise CoreError("SOURCE_GRANT_EXPIRED", 403)
+        _check_expiry(row["source"], row["expires_at"], self.clock())
         if any(row[key] != data[key] for key in data):
             raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
         return data

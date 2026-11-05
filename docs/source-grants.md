@@ -11,7 +11,11 @@ Core stores an owner-issued `grant_id`, immutable revisions (`epoch`, `fingerpri
 `expires_at`), adapter/source binding, revocation timestamps, and event attribution.
 `fingerprint` is an independently generated opaque revision identifier, not a cookie hash.
 Use a fresh random `grant_<32 lowercase hex>` ID, a positive integer epoch and 64 random
-lowercase hex characters for a revision fingerprint. The owner chooses a bounded expiry.
+lowercase hex characters for a revision fingerprint. The owner chooses an expiry timestamp or, for a registered Bilibili account,
+explicit `"expires_at": null` to allow reads until revoked. Both the registration and the
+private Reader file require this field. Heybox and QZone require a timestamp.
+To renew an expired Bilibili grant, use the same grant ID with a higher epoch and a fresh
+fingerprint in both places. Each read still has a finite lease and requires a valid login.
 Increasing the epoch replaces the revision used for new reads; previous revisions remain
 available to explain historical provenance.
 
