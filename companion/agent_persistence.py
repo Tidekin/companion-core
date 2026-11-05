@@ -55,6 +55,7 @@ class ConversationStore:
     def __init__(self, core, job, snapshots):
         self.core, self.job, self.snapshots = core, job, snapshots
         self.store = core.store
+        self._image_inputs = None
 
     def check(self, *, current_request=None):
         check_conversation(self.core, self.job, self.snapshots, current_request=current_request)
@@ -86,14 +87,17 @@ class ConversationStore:
                 raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
         from companion.agent_images import restored_conversation
 
-        return restored_conversation(self.core, self.job, conversation)
+        return restored_conversation(self.core, self.job, conversation,
+                                     originals=row["phase"] != "OUTPUT")
 
     def _save(self, conversation, phase, *, output=None):
         self.check()
         now = self.core.clock()
-        from companion.agent_images import stored_conversation
+        from companion.agent_images import inputs, stored_conversation
 
-        stored = stored_conversation(self.core, self.job, conversation)
+        if self._image_inputs is None:
+            self._image_inputs = inputs(self.store, self.core.settings, self.core.clock, self.job)
+        stored = stored_conversation(self.core, self.job, conversation, bindings=self._image_inputs)
         from pydantic_ai.messages import ModelResponse, ThinkingPart
 
         for message in stored.messages:
