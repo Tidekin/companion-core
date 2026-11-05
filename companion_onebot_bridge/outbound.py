@@ -4,7 +4,7 @@ from datetime import datetime
 
 from companion_delivery_protocol.authority import validate_authority_ref
 
-from . import account_actions, reply_segments
+from . import account_actions, owner_preflight, reply_segments
 from .metrics import send_finished
 from .native_actions import prepare
 from .onebot_client import bounded_post
@@ -144,6 +144,10 @@ async def deliver_item(client, onebot, spool, item, *, metrics=None, guard=None,
     try:
         return await _deliver_item(client, onebot, spool, item, metrics=metrics, guard=guard,
                                    delivery_lane=delivery_lane)
+    except owner_preflight.Expired as expiry:
+        owner_preflight.save(guard, item, expiry.stage)
+        await spool.flush_result(client, runtime=guard.runtime)
+        return True
     finally:
         release = getattr(onebot, "release_prepared", None)
         if release is not None:
@@ -180,13 +184,16 @@ async def _deliver_item(client, onebot, spool, item, *, metrics=None, guard=None
     try:
         if not probe_before_reservation and not (await onebot.probe())["connection_ready"]:
             raise ValueError("ONEBOT_NOT_READY")
-        started = await bounded_post(
-            client,
-            f"/internal/v1/deliveries/{message_id}/begin-send",
-            {"lease_token": item["lease_token"]},
-        )
+        path = f"/internal/v1/deliveries/{message_id}/begin-send"
+        body = {"lease_token": item["lease_token"]}
+        if guard is not None and hasattr(guard, "preflight_post"):
+            started = await guard.preflight_post(path, body)
+        else:
+            started = await bounded_post(client, path, body)
         if started != {"state": "SENDING"}:
             raise ValueError("INVALID_BEGIN_SEND_ACK")
+    except owner_preflight.Expired:
+        raise
     except Exception:
         if guard is not None and await guard.cancel_before_send(item):
             return True
@@ -206,6 +213,8 @@ async def _deliver_item(client, onebot, spool, item, *, metrics=None, guard=None
             raise
         else:
             send_finished(send_start)
+    except owner_preflight.Expired:
+        raise
     except Exception:
         if guard is not None and await guard.cancel_before_send(item):
             return True

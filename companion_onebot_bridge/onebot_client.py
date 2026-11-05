@@ -8,16 +8,21 @@ from .event_normalizer import decode, identifier
 from .metrics import core_rpc_finished, probe_finished
 
 
+class PreflightBusy(Exception):
+    """Core could not acquire its writer and did not enter the business transaction."""
+
+
 async def bounded_post(
     client, path, body, *, headers=None, statuses=(200,), with_status=False, max_depth=8,
-    max_bytes=65536,
+    max_bytes=65536, preflight=False,
 ):
     if type(max_bytes) is not int or not 1 <= max_bytes <= 6000000:
         raise ValueError("INVALID_RESPONSE_LIMIT")
     started, error = time.perf_counter_ns(), None
     try:
         async with client.stream("POST", path, json=body, headers=headers) as response:
-            if response.status_code not in statuses:
+            busy_response = preflight and response.status_code == 503
+            if not busy_response and response.status_code not in statuses:
                 response.raise_for_status()
                 raise ValueError("UNEXPECTED_HTTP_STATUS")
             content = bytearray()
@@ -26,6 +31,12 @@ async def bounded_post(
                 if len(content) > max_bytes:
                     raise ValueError("RESPONSE_TOO_LARGE")
         result = decode(bytes(content), max_bytes, max_depth=max_depth)
+        if busy_response:
+            from companion_delivery_protocol.preflight import BUSY
+
+            if result == {"error": BUSY}:
+                raise PreflightBusy
+            response.raise_for_status()
         return (response.status_code, result) if with_status else result
     except BaseException as failure:
         error = failure

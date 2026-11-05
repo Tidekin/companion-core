@@ -127,10 +127,21 @@ class OwnerRuntime:
                 self.db.execute("INSERT INTO owner_runtime VALUES(1,?,'ACTIVE',?)",
                                 (encode(self.authority), head))
         self.verify(active=False)
-        if self.db.execute("SELECT 1 FROM window_attempts WHERE plan_hash=? AND state IN "
-                           "('RESERVED','IO_STARTED','UNKNOWN') LIMIT 1",
-                           (journal.digest(self.authority),)).fetchone():
+        from companion_delivery_protocol.preflight import KIND
+
+        for message_id, attempt, body, state in self.db.execute(
+            "SELECT a.message_id,a.state,r.body,r.state FROM window_attempts a "
+            "LEFT JOIN results r USING(message_id) WHERE a.plan_hash=? "
+            "AND a.state IN ('RESERVED','IO_STARTED','UNKNOWN')", (journal.digest(self.authority),)
+        ):
+            if (attempt == "RESERVED" and state == "pending"
+                and json.loads(body).get("result") == KIND):
+                from . import owner_preflight
+
+                owner_preflight.validate(self, message_id, json.loads(body))
+                continue  # Only its signed cancellation RPC can be resumed.
             self.stop()
+            break
 
     def row(self):
         row = self.db.execute(

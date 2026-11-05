@@ -7,6 +7,7 @@ from datetime import datetime
 from companion import reply_revision
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
+from companion_delivery_protocol import preflight
 from companion_delivery_protocol.reply_groups import manifest, mixed_part, part_hash
 
 
@@ -527,6 +528,13 @@ def lease_deliveries(store, settings, request, now):
                         "SELECT reply_revision FROM events WHERE event_id=?",
                         (row["origin_event_id"],),
                     )["reply_revision"]
+                if preflight.eligible(items[-1]):
+                    # Recovery clears expired LEASED tokens. Only the most recently
+                    # issued envelope can settle a retired, unstarted lease.
+                    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                        ("owner_preflight_lease:" + row["message_id"], encode({
+                            "item_sha256": digest(items[-1]), "lease_sha256": digest(token),
+                            "lease_until": items[-1]["lease_until"]})))
                 continue
             from companion.private_life import enabled
 
@@ -548,7 +556,7 @@ def lease_deliveries(store, settings, request, now):
 
 def begin_send(store, message_id, token, now, settings=None, *, clock=None):
     problem = None
-    with store.transaction():
+    with store.transaction(delivery_preflight=True):
         from companion import live_text, owner_authority, owner_delivery
 
         if not store.one("SELECT 1 FROM outbox WHERE message_id=? AND state='LEASED' "
@@ -693,6 +701,8 @@ def delivery_result(store, settings, message_id, result, now):
                 message_id,
             ),
         )
+        store.execute("DELETE FROM runtime_meta WHERE key=?",
+                      ("owner_preflight_lease:" + message_id,))
         store.audit("delivery.result", message_id, "delivery", now, state=state)
         if account:
             from companion.social_autonomy import SocialAutonomy

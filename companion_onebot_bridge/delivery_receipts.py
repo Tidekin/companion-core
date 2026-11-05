@@ -104,10 +104,20 @@ class DeliveryReceipts:
         row = pending_result(self, runtime=runtime)
         if not row:
             return False
+        value = json.loads(row[1])
+        from companion_delivery_protocol.preflight import KIND
+
+        if value["result"] == KIND:
+            from . import owner_preflight
+
+            if runtime is None or runtime.spool is not self:
+                raise ValueError("OWNER_RECEIPT_SPOOL_REQUIRED")
+            await owner_preflight.flush(runtime, client, row[0], value)
+            return True
         status, result = await bounded_post(
             client,
             f"/internal/v1/deliveries/{row[0]}/result",
-            json.loads(row[1]),
+            value,
             statuses=(200, 409),
             with_status=True,
         )
