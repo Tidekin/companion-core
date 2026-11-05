@@ -19,6 +19,7 @@ async def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--now", required=True)
     parser.add_argument("--fence", action="store_true")
+    parser.add_argument("--reply", default="SYNTHETIC owner runtime reply")
     args = parser.parse_args()
     raw = await asyncio.to_thread(Path(args.config).read_text, "utf-8")
     settings = Settings.model_validate_json(raw)
@@ -31,7 +32,7 @@ async def main():
     def provider(request):
         calls.append(json.loads(request.content))
         return httpx.Response(200, json={"choices": [{"message": {
-            "content": "SYNTHETIC owner runtime reply"}, "finish_reason": "stop"}],
+            "content": args.reply}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 30, "completion_tokens": 2}})
 
     async def hook(request):

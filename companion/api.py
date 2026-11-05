@@ -27,6 +27,7 @@ from companion import (
     owner_authority,
     owner_delivery,
     owner_input,
+    owner_preflight,
     poke,
     qq_images,
     qq_rich,
@@ -815,6 +816,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         core = app.state.core
         response.headers["Cache-Control"] = "no-store"
         return input_protocol.cancel_before_send(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/owner-authority/expired-preflight", dependencies=auth)
+    async def expired_preflight(body: owner_preflight.ExpiredPreflight, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return await app.state.api_store.run(lambda store: owner_preflight.settle(
+            store, settings, app.state.core.clock, body))
 
     @app.post(prefix + "/live-text/send-check", dependencies=auth)
     async def live_text_send(body: live_text.SendCheck):

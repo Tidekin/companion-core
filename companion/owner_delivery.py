@@ -444,7 +444,7 @@ def asset_lease(store, clock, message_id, body, permission):
 def send_check(store, settings, clock, body):
     from companion.voice_jobs import REPLY_RECEIPT
 
-    with store.transaction():
+    with store.transaction(delivery_preflight=True):
         result = check_delivery(store, settings, clock, body.message_id, check=body)
         content = json.loads(store.one("SELECT content_json FROM outbox WHERE message_id=?",
                                         (body.message_id,))["content_json"])

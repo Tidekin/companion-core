@@ -313,3 +313,11 @@ Bridge 的 `owner-handoff-prepare` 记录该回执；`owner-handoff` 只接受 r
 AuthorityRef v2 和 capture v2 保持各自原合同。Bridge 复用原独占锁、原 fsync Journal、
 原停止与 reconciliation 机制；wire DTO 与摘要规则由 Core 的
 `companion_delivery_protocol/model_carry.py` 统一维护。
+
+### 普通文字回复等待数据库写锁
+
+Core 的 begin-send 和 owner send-check 仅在 SQLite 的 BEGIN IMMEDIATE 返回 SQLITE_BUSY、事务尚未开始时返回专用 503。Bridge 在原消息、原租约内重试该检查，每次重试仍核对本地撤回、权限及截止时间。OneBot 的发送调用只执行一次。
+
+租约用尽时，独占 Spool 用原 capture 密钥签署 RESERVED 记录、原租约及内容信封的摘要。Core 将签名与最后签发的租约、原授权和实际 Outbox 状态逐一核对，关闭本段及同组余段，保留先前成功回执和用量。Bridge 重启或结清回执丢失时只重放这份证明。涉及实际 QQ 调用的未知结果继续走人工对账。
+
+SQLite 对写锁等待和扩展错误码的定义见 [busy timeout](https://www.sqlite.org/c3ref/busy_timeout.html) 和 [result codes](https://www.sqlite.org/rescode.html)。

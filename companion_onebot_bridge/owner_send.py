@@ -188,6 +188,11 @@ class OwnerSendGuard:
             raise ValueError("OWNER_PROTOCOL_REQUEST_CHANGED")
         return True
 
+    async def preflight_post(self, path, body):
+        from .owner_preflight import checked_post
+
+        return await checked_post(self, path, body)
+
     async def before_dispatch(self, request):
         self._local()
         sending = self._request(request)
@@ -213,7 +218,7 @@ class OwnerSendGuard:
         if journal.digest(check) != self.delivery_binding["send_check_sha256"]:
             raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
         path = "/internal/v1/" + ("account-actions" if account else "owner-authority")
-        result = await bounded_post(self.client, path + "/send-check", check)
+        result = await self.preflight_post(path + "/send-check", check)
         fields = {"approved", "lease_until"} | ({"content_sha256", "payload_sha256"}
                                                if account else set())
         if (set(result) != fields or result["approved"] is not True

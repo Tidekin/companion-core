@@ -149,15 +149,22 @@ class Store:
             return operation()
 
     @contextmanager
-    def transaction(self, *, site=None):
+    def transaction(self, *, site=None, delivery_preflight=False):
         if site is None:
             caller = sys._getframe(2)  # 0: this generator, 1: contextlib, 2: the `with` site
             site = (caller.f_code, caller.f_lineno)
         started = time.perf_counter()
         try:
             self.db.execute("BEGIN IMMEDIATE")
-        except BaseException:
+        except BaseException as error:
             _lock_report(site, started, time.perf_counter(), None, "BUSY")
+            if (delivery_preflight and isinstance(error, sqlite3.OperationalError)
+                and getattr(error, "sqlite_errorcode", 0) & 0xff == sqlite3.SQLITE_BUSY
+                and not self.db.in_transaction):
+                from companion.contracts import CoreError
+                from companion_delivery_protocol.preflight import BUSY
+
+                raise CoreError(BUSY, 503) from error
             raise
         locked = time.perf_counter()
         self._budget_stops = set()
