@@ -83,17 +83,22 @@ def test_due_retry_wakes_without_a_writer_and_native_claim_succeeds(core, before
     run(scenario())
 
 
-def test_missed_notification_is_reconciled_without_repeated_business_scans(core, monkeypatch):
-    monkeypatch.setattr(worker_wakeup, "MAINTENANCE_SECONDS", 0.12)
+@pytest.mark.parametrize(("kind", "timeout"), [("worker", 1.0), ("executive-worker", 0.12)])
+def test_missed_notification_is_reconciled_without_repeated_business_scans(
+    core, monkeypatch, kind, timeout,
+):
+    if kind == "executive-worker":
+        monkeypatch.setattr(worker_wakeup, "MAINTENANCE_SECONDS", timeout)
 
     async def scenario():
-        with Wakeup(core.store, core.settings, "executive-worker", utcnow) as wake:
+        with Wakeup(core.store, core.settings, kind, utcnow) as wake:
             real = wake.watcher
 
             class Missed:
-                def watch(self, *_):
+                def watch(self, debounce, step, timeout_ms, stop):
                     # Simulate a backend losing hints while keeping native timeout semantics.
-                    wake.stop.wait(0.12)
+                    assert 0 < timeout_ms <= timeout * 1000
+                    wake.stop.wait(timeout_ms / 1000)
                     return "timeout"
 
                 def close(self):
@@ -105,7 +110,7 @@ def test_missed_notification_is_reconciled_without_repeated_business_scans(core,
             await asyncio.sleep(0.02)
             with closing(Store(core.settings.database)) as other:
                 other.execute("INSERT INTO runtime_meta VALUES ('missed','1')")
-            assert await asyncio.wait_for(pending, 1) == "commit"
+            assert await asyncio.wait_for(pending, timeout + 1) == "commit"
             assert wake.version_checks <= 4
     run(scenario())
 
