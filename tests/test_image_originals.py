@@ -221,6 +221,7 @@ def test_erasure_replay_also_removes_copied_originals_from_restored_database(cor
         core.ledger.expire_events(core.store, [row["owner_event_id"]], core.clock())
     assert list(cached.glob("*.raw")) == []
     restore(archive, destination, key, core.settings.erasure_ledger)
+    assert list(restored_cache.glob("*.raw")) == []
     restored = Core(
         core.settings.model_copy(update={"database": str(destination)}), clock=core.clock,
     )

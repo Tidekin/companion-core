@@ -23,15 +23,15 @@ FILE_MIMES = frozenset({
 })
 
 
-def directory(store):
-    database = Path(store.path).resolve()
+def directory(store, *, database=None):
+    database = Path(store.path if database is None else database).resolve()
     return database.parent / (database.name + ".owner-images")
 
 
-def _path(store, item_id):
+def _path(store, item_id, *, database=None):
     if not re.fullmatch(r"content_[a-f0-9]{32}", item_id):
         raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
-    root = directory(store)
+    root = directory(store, database=database)
     if root.is_symlink() or (root.exists() and (
         root.resolve() != root or not root.is_dir()
         or (os.name != "nt" and root.stat().st_mode & 0o077)
@@ -177,9 +177,9 @@ def deadline(store, row):
         raise CoreError("LIVE_IMAGE_ORIGINAL_UNAVAILABLE", 410) from None
 
 
-def discard(store, item_ids):
+def discard(store, item_ids, *, database=None):
     for item_id in item_ids:
-        target = _path(store, item_id)
+        target = _path(store, item_id, database=database)
         target.unlink(missing_ok=True)
         if target.parent.exists():
             _sync_directory(target.parent)

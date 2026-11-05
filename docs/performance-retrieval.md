@@ -14,6 +14,8 @@ committing its row cannot be mistaken for an orphan. Valid originals need only a
 and file-size check during maintenance; `get()` retains full validation at actual use. Generated
 partial/final bytes belonging to a DISPATCHED job with its original live lease are retained until
 the result commits or that lease ends. Erasure and live Outbox state remain authoritative.
+Backup restore deletes copied originals by their erased image/file IDs at the final database
+path before publishing the restored database, without a startup directory scan.
 
 `claim_scope` classifies only real SQLite BUSY errors after rollback at explicitly pre-I/O
 chat/poke/content claim boundaries. Native chat/content loops yield 50–150ms with jitter and
