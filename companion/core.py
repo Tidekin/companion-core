@@ -968,7 +968,7 @@ class Core(Runtime):
                         fact=("self", judgment["take"]) if judgment else None)
             for rank, h in enumerate(hits):
                 memory = {**{k: h[k] for k in (
-                    "subject", "content", "status", "needs_review", "evidence_ids")},
+                    "subject", "kind", "content", "status", "needs_review", "evidence_ids")},
                     **({"origin": h["origin"]} if h.get("origin") else {}),
                     **relations.get(h["memory_id"], {}),
                     **({"happened_on": happened}
@@ -1294,7 +1294,9 @@ class Core(Runtime):
                                 "ref": ref,
                                 **{
                                     key: row[key]
-                                    for key in ("subject", "content", "status", "needs_review")
+                                    for key in (
+                                        "subject", "kind", "content", "status", "origin",
+                                        "needs_review")
                                 },
                             }
                             for ref, row in catalog.items()
