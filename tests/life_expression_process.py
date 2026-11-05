@@ -27,7 +27,7 @@ async def main():
             "choices": [{"message": {"content": json.dumps({
                 "action": "SHARE", "destination": args["destination"],
                 "source_event_ids": [args["source_id"]], "reason": "真实来源的合成表达",
-                "text": "读过的恒星介绍让我想继续了解光谱与温度的关系。",
+                "text": args.get("wording") or "读过的恒星介绍让我想继续了解光谱与温度的关系。",
             })}}], "usage": {"prompt_tokens": 100, "completion_tokens": 20},
         })
 
