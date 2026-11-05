@@ -28,21 +28,64 @@ SERIOUS = re.compile(
 )
 
 
+INTENT_PATTERNS = (
+    ("comfort", r"抱抱|安慰|难过|委屈"),
+    ("sleep", r"晚安|要睡了|睡觉了"),
+    ("morning", r"早安|早上好"),
+    ("celebrate", r"恭喜|庆祝|成功了|搞定了|太棒了|开心"),
+    ("surprised", r"没想到|好意外|惊讶"),
+    ("like", r"好可爱|爱心|喜欢"),
+    ("playful", r"开玩笑|逗你|调皮|搞笑|自嘲|哈哈哈|笑死|\bhhh+\b|\blol\b"),
+)
+# A cue directly after a negation describes its absence ("我一点也不开心", "不想睡觉了").
+NEGATED = re.compile(r"(?:不|没|别|无|未)(?:太|很|怎么|是很|那么|想|要|会)?$")
+# Praise next to a fresh setback is usually irony ("太棒了，又加班到凌晨").
+SETBACK = r"(?:加班|熬夜|通宵|答错|错了|搞砸|砸了|坏了|挂了|失败|崩了|扣钱|罚款|迟到|被骂)"
+PRAISE = r"(?:太棒了|真棒|好棒|真厉害|好极了)"
+IRONY = re.compile(
+    PRAISE + r"[^。！？!?\n]{0,16}" + SETBACK + "|" + SETBACK + r"[^。！？!?\n]{0,16}" + PRAISE
+)
+THIRD_PARTY = r"(?:他|她|它|他们|她们|别人|朋友|同事|室友|同学|老板|对方)"
+
+
+def _affirmed(pattern, text):
+    return any(not NEGATED.search(text[max(0, m.start() - 6):m.start()])
+               for m in re.finditer(pattern, text, re.IGNORECASE))
+
+
 def query_intent(text, *, explicit_fallback=True):
     if SERIOUS.search(text):
         return None
-    for name, pattern in (
-        ("comfort", r"抱抱|安慰|难过|委屈"),
-        ("sleep", r"晚安|要睡了|睡觉了"),
-        ("morning", r"早安|早上好"),
-        ("celebrate", r"恭喜|庆祝|成功了|搞定了|太棒了|开心"),
-        ("surprised", r"没想到|好意外|惊讶"),
-        ("like", r"好可爱|爱心|(?<!不)喜欢"),
-        ("playful", r"开玩笑|逗你|调皮|自嘲"),
-    ):
-        if re.search(pattern, text):
+    for name, pattern in INTENT_PATTERNS:
+        if name == "celebrate" and IRONY.search(text):
+            continue
+        if _affirmed(pattern, text):
             return name
     return "playful" if explicit_fallback and explicit_meme_request(text) else None
+
+
+def query_target(text):
+    """Whom a sticker may point at; ordinary turns address the recipient."""
+    if re.search(THIRD_PARTY + r"[^。！？!?\n，,]{0,6}自嘲|自嘲的(?:是)?" + THIRD_PARTY, text):
+        return "third_party"
+    return "self" if re.search(r"自嘲", text) else "recipient"
+
+
+def meme_query(text):
+    """Parse one current owner message into the retrieval query.
+
+    ``request`` marks an explicit sticker request: ``any`` when no theme was named, so the
+    legal catalog may answer it; ``themed`` when a theme cue also matched.
+    """
+    text = text[-2000:]
+    explicit = explicit_meme_request(text) and not SERIOUS.search(text)
+    themed = query_intent(text, explicit_fallback=False)
+    return {
+        "text": text,
+        "intent": themed or ("playful" if explicit else None),
+        "target": query_target(text),
+        "request": ("themed" if themed else "any") if explicit else None,
+    }
 
 
 class MemeCandidate(StrictModel):

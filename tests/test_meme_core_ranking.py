@@ -85,7 +85,7 @@ def test_partial_index_batches_32_and_never_reranks_after_later_cache_fill(
     from companion.meme_retrieval import MemeRetrieval
 
     monkeypatch.setattr(c.core.store, "rows", rows)
-    monkeypatch.setattr(MemeRetrieval, "_resolve", lambda self, asset, job: sources[asset])
+    monkeypatch.setattr(MemeRetrieval, "_resolve", lambda self, asset, job, **_: sources[asset])
     cache, writes = {}, []
     monkeypatch.setattr(index, "cached", lambda store, identity: cache.get(identity.key))
 
@@ -105,7 +105,7 @@ def test_partial_index_batches_32_and_never_reranks_after_later_cache_fill(
         8,
     )
     assert head["mode"] == "HYBRID" and len(writes) == 32 and len(calls) == 1
-    assert head["profile"]["coverage_policy"] == "per-candidate-bounded-v1"
+    assert head["profile"]["coverage_policy"] == "per-candidate-bounded-v2"
     selected = [v["candidate_id"] for v in saved["offer"]["candidates"]]
     # Equal semantic scores use physical SHA ascending within the indexed batch.
     assert selected == sorted(b.asset_sha256 for b, *_ in list(sources.values())[:32])[:8]
@@ -196,7 +196,7 @@ def test_unindexed_selected_candidate_records_actual_batch_limit(runtime_case, m
             return (vector(0, 1) for _ in texts)
 
     monkeypatch.setattr(c.core.store, "rows", rows)
-    monkeypatch.setattr(MemeRetrieval, "_resolve", lambda self, asset, job: sources[asset])
+    monkeypatch.setattr(MemeRetrieval, "_resolve", lambda self, asset, job, **_: sources[asset])
     monkeypatch.setattr(index, "cached", lambda *args: None)
     monkeypatch.setattr(index, "persist", lambda *args: None)
     local_encoder(monkeypatch, Orthogonal)

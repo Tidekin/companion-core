@@ -107,6 +107,9 @@ def trusted_source(metadata, rules):
     return False
 
 
+EXPLICIT_FLOOR = 0.01
+
+
 def caption_eligible(result, minimum=0.8):
     if (
         result.confidence < minimum
@@ -124,7 +127,16 @@ def caption_eligible(result, minimum=0.8):
 
 
 def context_allows(caption, query):
-    if query["intent"] not in caption.suitable or query["intent"] in caption.avoid:
+    # Asking for a sticker is not asking to be mocked.
+    if (query.get("request") and caption.target == "recipient"
+            and caption.tone in {"mocking", "sarcastic", "angry"}):
+        return False
+    # An explicit request without a theme accepts any legal light use; object/tone stay strict.
+    if query.get("request") == "any":
+        if (not set(caption.suitable) - {"morning", "sleep"}
+                or query["intent"] in caption.avoid):
+            return False
+    elif query["intent"] not in caption.suitable or query["intent"] in caption.avoid:
         return False
     if caption.target not in {"neutral", query["target"]}:
         return False
@@ -149,4 +161,7 @@ def lexical_score(caption, query):
     if not caption_eligible(caption) or not context_allows(caption, query):
         return 0.0
     overlap = len(tokens(query["text"]) & tokens(caption_text(caption)))
-    return min(0.49, overlap / 20) if overlap else 0.0
+    if overlap:
+        return min(0.49, overlap / 20)
+    # A legal candidate for an explicit request stays rankable without word overlap.
+    return EXPLICIT_FLOOR if query.get("request") else 0.0

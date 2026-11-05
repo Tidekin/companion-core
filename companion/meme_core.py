@@ -23,7 +23,7 @@ from companion import (
     reply_revision,
 )
 from companion.contracts import CoreError, StrictModel
-from companion.expression import MemeOffer, query_intent
+from companion.expression import MemeOffer, query_intent, query_target
 from companion.privacy import epoch
 from companion.retrieval import INDEX_VERSION, encoder
 from companion.store import after, encode, uid, utcnow
@@ -999,7 +999,7 @@ class MemeCaptionService:
             return json.loads(saved["value"])
         text = value["text"][-2000:]
         intent = query_intent(text)
-        target = "self" if re.search(r"我.{0,8}自嘲|自嘲.{0,8}我", text) else "recipient"
+        target = query_target(text)
         query = {"text": text, "intent": intent, "target": target}
         result = {
             "job_id": job["job_id"],

@@ -42,6 +42,28 @@ class MemeDiscovery:
                 or s.one("SELECT 1 FROM outbox WHERE state IN ('PENDING','LEASED','SENDING')")):
                 raise CoreError("MEME_DISCOVERY_PREEMPTED", 409)
 
+    def _held(self, event_id):
+        """Approved file URLs already staged under this attempt's custody.
+
+        Erased records and assets of a rotated capture custody are not skipped, so they are
+        neither reused nor allowed to block acquisition under the current custody.
+        """
+        try:
+            custody = meme_assets.custody_digest(
+                meme_assets.original_custody(self.store, self.settings, event_id))
+        except (CoreError, ValueError):
+            return set()  # The original commit path still refuses an unattributed source.
+        # Only material that is captioned or still awaiting its caption counts as held; a
+        # failed or UNKNOWN caption keeps its original refusal path on re-acquisition.
+        return {json.loads(row["metadata_json"])["asset_url"] for row in self.store.rows(
+            "SELECT DISTINCT a.metadata_json FROM meme_assets a "
+            "JOIN meme_asset_sources src USING(asset_id) "
+            "JOIN jobs j ON j.job_id=src.caption_job_id "
+            "JOIN meme_captions c ON c.job_id=src.caption_job_id "
+            "WHERE a.state='STAGED' AND a.custody_sha256=? AND (j.state IN "
+            "('QUEUED','RUNNING','RETRY_WAIT') OR (j.state='SUCCEEDED' "
+            "AND c.result_json IS NOT NULL))", (custody,))}
+
     def _result(self, claim, outcome, usage):
         return meme_service.DiscoveryResult(**self._witness(claim), outcome=outcome,
             usage=meme_service.DiscoveryUsage(**asdict(usage)))
@@ -170,7 +192,7 @@ class MemeDiscovery:
                                 transport=self.transport, resolver=self.resolver)
         rules = [r.model_dump() for r in meme_policy.source_rules(self.settings)]
         reviewer = TrustedReviewer(rules, require_semantics=False)
-        provider = CommunityPacks(reviewer.license_files)
+        provider = CommunityPacks(reviewer.license_files, known=self._held(claim["event_id"]))
         candidates = []
         try:
             await fence()

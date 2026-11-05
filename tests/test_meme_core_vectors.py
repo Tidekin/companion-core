@@ -204,14 +204,22 @@ def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypat
                 )
         finally:
             release.set()
+        if change == "caption":
+            await request  # An item not offered yet is left out, never re-captioned in place.
+            return
         with pytest.raises(CoreError):
             await request
 
     run(scenario())
     assert c.core.store.rows("SELECT * FROM meme_vectors") == corrected
-    assert not c.core.store.one(
-        "SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],)
-    )
+    if change == "caption":
+        saved = c.retrieval.check(c.job)
+        assert saved["offer"]["candidates"] == [] and saved["catalog_bindings"] == {}
+        assert saved["ranking"]["selected"] == {}
+    else:
+        assert not c.core.store.one(
+            "SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],)
+        )
     if change != "usage":
         assert c.core.store.rows("SELECT * FROM model_usage") == before
 

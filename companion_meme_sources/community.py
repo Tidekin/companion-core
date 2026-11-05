@@ -165,8 +165,11 @@ def archive_images(data, pack, revision, intent, *, license_path=None):
 
 
 class CommunityPacks:
-    def __init__(self, license_files=None):
+    def __init__(self, license_files=None, known=()):
         self.license_files = dict(license_files or {})
+        # Exact approved raw URLs already held; skipped before download so each run's
+        # image limit counts new material and a later run reaches the next files.
+        self.known = frozenset(known)
 
     async def discover(self, intent, fetcher):
         await fetcher.begin_query()
@@ -270,6 +273,8 @@ class CommunityPacks:
             endpoint = f"https://api.github.com/repos/{repo}/contents/{quote(directory)}"
             listing = await fetcher.get(endpoint + "?ref=" + revision, 256 * 1024, redirects=False)
             for entry in file_entries(listing.data, directory):
+                if prefix + quote(entry["path"]) in self.known:
+                    continue
                 resource = await fetcher.get(prefix + quote(entry["path"]),
                                              IMAGE_LIMIT, redirects=False)
                 candidate = SearchImage(
