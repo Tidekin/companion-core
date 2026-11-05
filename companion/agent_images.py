@@ -383,10 +383,18 @@ def check_payload(store, settings, clock, job, messages):
         raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
 
 
-def stored_conversation(core, job, conversation):
+def stored_conversation(core, job, conversation, *, bindings=None):
     from pydantic_ai.messages import BinaryContent, ImageUrl, ModelRequest, UserPromptPart
 
-    bindings = inputs(core.store, core.settings, core.clock, job)
+    if bindings is None:
+        bindings = inputs(core.store, core.settings, core.clock, job)
+    # The request already holds these exact prepared pixels in memory. Check its
+    # signed sources again without reopening a spool that may expire in flight.
+    sources = input_sources(core.store, core.settings, core.clock, job)
+    keys = ("item_id", "fingerprint", "media_sha256", "mime")
+    if ([[row[key] for key in keys] for row, _ in sources]
+        != [[row[key] for key in keys] for row, _, _ in bindings]):
+        raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
     value, index = deepcopy(conversation), 0
     for message in value.messages:
         if not isinstance(message, ModelRequest):
@@ -402,7 +410,7 @@ def stored_conversation(core, job, conversation):
                     raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
                 row, _, prepared = bindings[index]
                 uri = item.data_uri if isinstance(item, BinaryContent) else item.url
-                if uri != prepared.part()["image_url"]["url"]:
+                if uri not in {prepared.part()["image_url"]["url"], REFERENCE + row["item_id"]}:
                     raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
                 content[position] = ImageUrl(REFERENCE + row["item_id"], media_type=prepared.mime)
                 index += 1
@@ -412,10 +420,11 @@ def stored_conversation(core, job, conversation):
     return value
 
 
-def restored_conversation(core, job, conversation):
+def restored_conversation(core, job, conversation, *, originals=True):
     from pydantic_ai.messages import BinaryContent, ImageUrl, ModelRequest, UserPromptPart
 
-    bindings = inputs(core.store, core.settings, core.clock, job)
+    bindings = ((inputs if originals else input_sources)(
+        core.store, core.settings, core.clock, job))
     index = 0
     for message in conversation.messages:
         if not isinstance(message, ModelRequest):
@@ -429,8 +438,10 @@ def restored_conversation(core, job, conversation):
                     continue
                 if index >= len(bindings) or item.url != REFERENCE + bindings[index][0]["item_id"]:
                     raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
-                prepared = bindings[index][2]
-                content[position] = BinaryContent.from_data_uri(prepared.part()["image_url"]["url"])
+                if originals:
+                    prepared = bindings[index][2]
+                    content[position] = BinaryContent.from_data_uri(
+                        prepared.part()["image_url"]["url"])
                 index += 1
             part.content = content
     if index != len(bindings):
