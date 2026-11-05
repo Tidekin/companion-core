@@ -60,6 +60,11 @@ async def native_continuity(core, tmp_path, *, turns=4, byte_limit=16000, texts=
             nonlocal captures
             captures += 1
             await active.capture(captures)
+            # app.receive stamps received_at with the wall clock, and owner history
+            # rejects a source received after Core's now. The ticking Core clock may
+            # trail that wall clock (Windows CI measured about 0.9s), so never let
+            # it lag a receipt it is about to admit; a clock set ahead is kept.
+            core.clock.now = max(core.clock.now, datetime.now(UTC))
             await active.flush()
 
         async def finish():
@@ -223,31 +228,50 @@ def mutate_source(core, kind):
     "capture_identity",
 ])
 def test_selected_history_changed_in_final_preflight_causes_zero_new_io(core, tmp_path, kind):
-    async def scenario():
-        async with native_continuity(core, tmp_path) as (
-            _, _, calls, sends, capture_input, finish,
-        ):
-            await capture_input()
-            await finish()
-            await capture_input()
-            changed = []
+    run(selected_history_changed_in_final_preflight(core, tmp_path, kind))
 
-            async def mutate(_request):
-                mutate_source(core, kind)
-                changed.append(kind)
 
-            core.model.client.event_hooks["request"].append(mutate)
-            assert await core.run_once()
-            assert len(calls) == len(sends) == 1
-            assert changed == [kind]
-            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
-            job = core.store.one(
-                "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1",
-            )
-            assert job["state"] in {"CANCELLED", "FAILED"}, job
-            assert len(history_snapshot(core)) == 1
+async def selected_history_changed_in_final_preflight(core, tmp_path, kind, *, core_lag=0):
+    from datetime import timedelta
 
-    run(scenario())
+    async with native_continuity(core, tmp_path) as (
+        _, _, calls, sends, capture_input, finish,
+    ):
+        core.clock.now -= timedelta(seconds=core_lag)
+        await capture_input()
+        await finish()
+        await capture_input()
+        changed, requested = [], []
+
+        async def mutate(request):
+            requested.append(json.loads(request.content)["messages"])
+            mutate_source(core, kind)
+            changed.append(kind)
+
+        core.model.client.event_hooks["request"].append(mutate)
+        assert await core.run_once()
+        # Precondition: the blocked request really carried the selected history.
+        assert [messages[1:3] for messages in requested] == [[
+            {"role": "user", "content": "选了茉莉绿茶"},
+            {"role": "assistant", "content": "合成回答1"},
+        ]]
+        assert len(calls) == len(sends) == 1
+        assert changed == [kind]
+        assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
+        job = core.store.one(
+            "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1",
+        )
+        assert job["state"] in {"CANCELLED", "FAILED"}, job
+        assert len(history_snapshot(core)) == 1
+
+
+def test_final_preflight_zero_io_survives_core_clock_trailing_receive_wall_clock(
+    core, tmp_path,
+):
+    # Windows CI: Core's ticking clock trailed the receive wall clock by 0.82-0.94s,
+    # so the first turn was "received in the future", silently left out of history,
+    # and the unguarded request reached the provider.
+    run(selected_history_changed_in_final_preflight(core, tmp_path, "source", core_lag=0.9))
 
 
 def test_unrelated_privacy_epoch_keeps_original_history_source_and_scope(core, tmp_path):
