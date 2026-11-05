@@ -244,6 +244,23 @@ def test_selected_history_changed_in_final_preflight_causes_zero_new_io(
                 raise
         return view, logged, done
     monkeypatch.setattr(owner_input, "history_batch", batch)
+    margins = []
+    original_sources = owner_input._history_sources
+
+    def sources(store, settings, clock, job, **kwargs):
+        now = datetime.fromisoformat(clock())
+        for row in store.rows("SELECT sent_at FROM outbox WHERE sent_at IS NOT NULL"):
+            margins.append(("sent", round((now - datetime.fromisoformat(row["sent_at"]))
+                                          .total_seconds(), 4)))
+        for row in store.rows("SELECT value FROM runtime_meta WHERE key LIKE ?",
+                              (owner_input.INPUT + "%",)):
+            capture = json.loads(row["value"]).get("capture") or {}
+            if capture.get("received_at"):
+                margins.append(("recv", round((now - datetime.fromisoformat(
+                    capture["received_at"])).total_seconds(), 4)))
+        margins.append(("core-wall", round((now - datetime.now(UTC)).total_seconds(), 4)))
+        return original_sources(store, settings, clock, job, **kwargs)
+    monkeypatch.setattr(owner_input, "_history_sources", sources)
 
     def snapshot(tag):
         return {"tag": tag, "core": core.clock(), "wall": datetime.now(UTC).isoformat(),
@@ -279,6 +296,8 @@ def test_selected_history_changed_in_final_preflight_causes_zero_new_io(
             assert await core.run_once()
             diag.append(snapshot("run2"))
             diag.append({"prompts": [[m["content"][:20] for m in c["messages"]] for c in calls]})
+            import warnings
+            warnings.warn("MARGINS " + json.dumps(margins[:8]), stacklevel=1)
             assert len(calls) == len(sends) == 1, "PROBE " + json.dumps(diag, ensure_ascii=False,
                                                                          default=str)
             assert changed == [kind]
