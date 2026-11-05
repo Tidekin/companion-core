@@ -59,6 +59,10 @@ def protected_recent(settings, sources, turns, current_input, scenario):
              if source.get("reply_text") and source.get("reply_complete") is not False]
     retained, messages = set(), list(current_input)
     for source, turn in reversed(pairs[-settings.recent_protected_turns:]):
+        # turn_messages prepends source references (cards, quotes or observations)
+        # to the pair. Keep that richer group atomic under its normal budget.
+        if len(turn) != 2:
+            continue
         measured = measure_request(settings, [*turn, *messages], scenario)
         if measured.reserved_input_tokens <= settings.context_soft_tokens:
             retained.add(source["event_id"])
