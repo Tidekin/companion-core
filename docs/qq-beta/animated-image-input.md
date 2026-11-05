@@ -12,8 +12,13 @@
 
 已批准的 `owner_image_v1` 识图链路支持 GIF、动态 WebP 和 APNG（`image/png` 或
 `image/apng`），也保留普通静态 PNG、JPEG、WebP。SnowLuma 顶层 `image` 段的
-普通子类型 0 与动画表情子类型 11 使用同一来源校验；闪照、market-face 扩展及未知字段
+子类型 0、1、7、11 使用同一来源校验；闪照、market-face 扩展及未知字段
 仍不进入这条下载链路。文件名扩展名不决定格式。
+
+子类型 7 沿用已有 `image` 解析、下载和签名上传，不把表情的 `summary` 当作识图结果。
+固定 SnowLuma 版本的[图片转换器](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/event-converter/element-codecs.ts#L374-L406)
+保留原 `subType`；闪照另外带 `type="flash"`，商城表情另外带 `emoji_id` 等字段，
+这些扩展仍被严格字段校验拒绝。
 
 Bridge 领取原租约后只向固定 QQ CDN 发起有界下载，签名覆盖实际原文件字节、MIME、
 消息、窗口、来源与租约。Core 校验解码格式和资源限制，再从时间序列均匀抽取至多六帧，

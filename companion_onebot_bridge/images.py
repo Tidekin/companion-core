@@ -128,13 +128,13 @@ def _original_image(index, slot, value):
     data = value.get("data")
     if set(value) != {"type", "data"} or not isinstance(data, dict):
         raise ValueError("INVALID_IMAGE_SEGMENT")
-    # SnowLuma uses subtype 1 for custom/favorite stickers and 11 for animated
-    # image emoji. Both keep the original CDN bytes and signed upload boundary;
-    # flash/market-face carry extra fields and remain unsupported.
+    # SnowLuma emits ordinary image descriptors for subtypes 0/1/7/11.
+    # All keep the original CDN bytes and signed upload boundary; flash and
+    # market-face carry extra fields and remain unsupported.
     if (
         not set(data) <= {"url", "file", "sub_type", "summary"}
         or type(data.get("sub_type", 0)) is not int
-        or data.get("sub_type", 0) not in {0, 1, 11}
+        or data.get("sub_type", 0) not in {0, 1, 7, 11}
         or any(
             not isinstance(data[key], str) or (key != "url" and "\x00" in data[key])
             for key in ("url", "file", "summary") if key in data

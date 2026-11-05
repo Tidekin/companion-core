@@ -441,8 +441,8 @@ class Core(Runtime):
                 elif snapshot["kind"] == "images":
                     from companion import agent_images
 
-                    rows = agent_images.inputs(self.store, self.settings, self.clock, job)
-                    if [row["item_id"] for row, _, _ in rows] != snapshot["item_ids"]:
+                    rows = agent_images.input_sources(self.store, self.settings, self.clock, job)
+                    if [row["item_id"] for row, _ in rows] != snapshot["item_ids"]:
                         raise CoreError("PRIVACY_CHANGED", 409)
             except CoreError as error:
                 if error.code == "PRIVACY_CHANGED":
