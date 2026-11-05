@@ -369,7 +369,7 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
         snapshots = _snapshots(store, job)
         # Reuse only inside this exact transaction/snapshot. Every later RPC
         # still re-reads current authorization, sources, lease and segment state.
-        if store.frozen_scope is not None:
+        if row["reply_group_id"] and store.frozen_scope is not None:
             group = reply_group(store, message_id)
         requests = _usage(store, job, view, snapshots, message_id, group=group)
 

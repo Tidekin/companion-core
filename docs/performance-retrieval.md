@@ -8,6 +8,8 @@ idle chat maintenance and Life maintenance lane, consuming at most 32 directory 
 spool per turn. Unrecognized filenames consume the same allowance. A standard `os.scandir`
 iterator continues the next batch and is closed at exhaustion, error or Core shutdown; after
 restart a new scan begins. Actual source/expiry checks still happen when media is used.
+Expired bytes are excluded immediately; their physical unlink follows the bounded maintenance
+scan. Explicit erasure continues to remove its targeted originals synchronously.
 
 Each raw-file decision takes its own write transaction, so an upload that created a file before
 committing its row cannot be mistaken for an orphan. Valid originals need only a bounded header
