@@ -76,10 +76,16 @@ def test_warm_chain_reads_complete_bytes_and_skips_only_chain_hashes(core, tmp_p
     assert first["head_sha256"] == second["head_sha256"]
 
 
+@pytest.mark.parametrize("bounded_prefix", [False, True])
 @pytest.mark.parametrize("damage", ["same_size", "truncate", "json", "missing"])
-def test_warm_chain_rejects_changed_complete_bytes(core, tmp_path, damage):
+def test_warm_chain_rejects_changed_complete_bytes(
+    core, tmp_path, monkeypatch, damage, bounded_prefix,
+):
     approval, _ = settled(core, tmp_path)
     path = Path(approval.journal_path)
+    if bounded_prefix:
+        monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES",
+                            len(path.read_bytes().splitlines(keepends=True)[0]))
     with core.store.transaction():
         paid_budget.journal(core.store, approval)
     raw, stamp = path.read_bytes(), path.stat()
@@ -124,13 +130,19 @@ def test_warm_bytes_never_cache_current_database(core, tmp_path, damage):
     assert paid_budget._validated_bytes.cache_info().currsize == 0
 
 
+@pytest.mark.parametrize("bounded_prefix", [False, True])
 @pytest.mark.parametrize("tail", ["json", "hash", "depth"])
-def test_bad_tail_preserves_earlier_fold_error_and_durable_stop(core, tmp_path, monkeypatch, tail):
+def test_bad_tail_preserves_earlier_fold_error_and_durable_stop(
+    core, tmp_path, monkeypatch, tail, bounded_prefix,
+):
     approval, _ = settled(core, tmp_path)
     path = Path(approval.journal_path)
     with core.store.transaction():
         view = paid_budget.journal(core.store, approval)
     raw = path.read_bytes()
+    if bounded_prefix:
+        monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES",
+                            len(raw.splitlines(keepends=True)[0]))
     if tail == "json":
         path.write_bytes(raw + b"{\n")
     elif tail == "depth":
@@ -195,7 +207,7 @@ def test_large_source_reuses_only_a_small_verified_view(core, tmp_path, monkeypa
         second = paid_budget.journal(core.store, approval)
         assert second["model_latest"][request]["minimum_micro_usd"] > 0
         assert len(calls) == 1
-        assert paid_budget._validated_bytes.cache_info().currsize == 0
+        assert paid_budget._validated_bytes.cache_info().currsize == 1
 
     # Every subsequent use reads the original bytes again.
     path.write_bytes(path.read_bytes() + b"corrupt")
@@ -213,6 +225,31 @@ def test_oversized_folded_result_is_not_retained(core, tmp_path, monkeypatch):
         assert paid_budget.journal(core.store, approval) == expected
         assert core.store._journal_view is None
         assert not paid_budget._SHARED
+
+
+def test_bounded_chain_prefix_survives_appends_without_reusing_mutable_records(
+    core, tmp_path, monkeypatch,
+):
+    approval, _ = settled(core, tmp_path)
+    path = Path(approval.journal_path)
+    raw = path.read_bytes()
+    prefix = b"".join(raw.splitlines(keepends=True)[:-1])
+    monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", len(prefix))
+    records, checked = paid_budget._journal_records(raw)
+    assert checked
+    records[0]["kind"] = "mutated caller copy"
+    before = paid_budget._validated_bytes.cache_info()
+    request = budget.reserve(core.store, core.settings, authorized_job(core), "chat",
+                             [{"role": "user", "content": "another"}], core.clock())
+    budget.settle(core.store, core.settings, request, ModelResponse("ok", 90, 4))
+    with core.store.transaction():
+        view = paid_budget.journal(core.store, approval)
+    assert view["model_latest"][request]["state"] == "SETTLED"
+    assert path.read_bytes().startswith(prefix)
+    after = paid_budget._validated_bytes.cache_info()
+    assert after.misses == before.misses and after.hits > before.hits
+    decoded, checked = paid_budget._journal_records(path.read_bytes())
+    assert checked and decoded[0]["kind"] == "header"
 
 
 @pytest.mark.parametrize("separator", ["\r\n", "\r", "\u2028"])
