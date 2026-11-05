@@ -27,8 +27,8 @@ PROFILE = {
     "dimensions": DIMENSIONS,
     "vector_encoding": "f32le-512",
     "caption_text": "companion_meme_protocol.caption_text/v1:2000-chars",
-    "query_text": "current-query_for/v1:2000-chars",
-    "ranker": "caption-hybrid-cosine-f32-v1",
+    "query_text": "current-query_for/v2:2000-chars",
+    "ranker": "caption-hybrid-cosine-f32-v2",
     "lexical_divisor": 20,
     "lexical_ceiling": 0.49,
     "cosine_threshold": 0.5,
@@ -38,7 +38,7 @@ PROFILE = {
     "offer_limit": 8,
     "cold_batch_limit": BATCH,
     "optional_budget_ms": 2000,
-    "coverage_policy": "per-candidate-bounded-v1",
+    "coverage_policy": "per-candidate-bounded-v2",
 }
 Fallback = Literal["LOCAL_WEIGHTS_MISSING", "INFERENCE_BUSY", "LOCAL_DEADLINE"]
 

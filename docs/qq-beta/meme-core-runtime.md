@@ -27,9 +27,16 @@ lazy factory 直接构造 CoreMemeTransport，只创建原 pin 和 delivery bind
 
 ## Core 后台 FILE 获取
 
-当前 chat 首次冻结 offer 时，只有存在意图、eligible=0、候选为空且没有检索 fallback，
-并满足原 paid meme_input、expression、meme、exact 来源规则时，才在同一事务创建原
-`meme_discovery` job。相同冻结 offer 不重复入队。前台不联网、不等待、不回填本轮候选。
+当前 chat 首次冻结 offer 时，有意图但候选为空会在同一事务写入 `meme.offer_empty`
+审计，理由为 NO_ASSETS（无可用素材）、NOT_RELEVANT（有合法素材但都不相关）、COOLDOWN、
+INDEX_<fallback> 或 SOURCE_CHANGED（排序后、冻结前来源变化）。只有 NO_ASSETS 或
+NOT_RELEVANT、满足原 paid meme_input、expression、meme、exact 来源规则，且没有排队或
+运行中的 `meme_discovery` job 时，才创建原 discovery job；每日查询、下载和存储配额不变。
+相同冻结 offer 不重复入队。前台不联网、不等待、不回填本轮候选。
+
+发现器在下载前跳过当前 STAGED 资产已持有的同一批准 raw URL，因此每轮图片上限计算新增
+素材，下一轮会到达同目录后面的文件；不会重新下载或重复保存已持有的原图。ERASED 记录
+不参与跳过，也不会被复用或恢复。
 实际后台工作沿用 `MemeCaptionService.run_once` 和原 selector 的 meme_caption 调度入口，
 进展返回布尔值；数据库 job kind、租约、attempt、预算、来源检查仍为原 discovery 合同。
 有主人待处理、有效模型预留时让出执行。原 Outbox 为 PENDING/LEASED/SENDING 时，
@@ -100,8 +107,20 @@ caption identity/content、固定模型 revision 和 512 维；不共享同字�
 固定 profile 绑定 BAAI/bge-small-zh-v1.5 的现有 pinned revision、f32 编码、caption_text/
 query_for 的 2000 字符边界、词法上限 0.49/除数 20、cosine 门槛 0.5、score 降序与物理
 SHA 升序、4096 扫描、8 offer、32 cold batch、2000ms 可选预算，以及
-`coverage_policy=per-candidate-bounded-v1`。Core capability hash 包含 profile，Bridge
+`coverage_policy=per-candidate-bounded-v2`（query_for/ranker 为 v2）。Core capability hash 包含 profile，变更须重新授权；Bridge
 模式的策略输入和默认/历史 golden 保持原形状。
+
+query 由 `expression.meme_query` 从当前主人原文生成：意图线索跳过紧邻否定（“不开心”）
+和“表扬+挫折”的反讽，明确索图在没有主题时以 request=any 进入合法目录（不含只适合
+早晚问候的素材），自嘲按第三方/本人区分对象；严肃或拒绝表情的语境不产生意图。
+明确索图时，指向接收者的嘲讽/讥讽/愤怒素材不入候选；合法候选即使无字面重合也有 0.01
+词法下限。候选卡给最终选图模型附上前两条 use_when 与 avoid_when；avoid_when 不参与召回。
+
+扫描阶段不解码原图，只核验来源、caption、费用与策略；冻结阶段对入选与新算向量的条目
+完整重解析并解码。尚未冻结的库存条目若来源已过期、原始收据已清理、来源撤回、caption
+未结算或内容变化，只被跳过或移出本轮候选，不使当前聊天失败；当前聊天自身的权限、来源、
+revision 或 privacy epoch 变化仍按原规则停止。已冻结 offer 的严格复核不变。扫描到达
+两秒可选预算时保留已核验条目，并以 LOCAL_DEADLINE 记录部分覆盖。
 
 每个物理 SHA 先按 asset_id/caption_job_id 选定合法来源，再检查该来源的语境与自身缓存。
 有 query 和自身 passage vector 时沿用词法分数加 cosine（仅 cosine>=0.5 时加入）；
@@ -250,3 +269,12 @@ B1b 历史回执保留原 fixture/进程等待失败与修复；B2a 唯一
 `.local/b2a-validation/receipt.json` 记录当前源树、逐项最新检查、已修失败及复用范围。
 合成、真人及发布门禁分列；不声明真人 QQ、生产切换、付费模型、独立镜像或完整 CI
 已通过。原 ACK/UNKNOWN/fence/独立遗忘账本仍由既有机制负责。
+
+## 候选阶段基准
+
+`scripts/evaluate_meme_retrieval.py` 读取 `tests/fixtures/meme_quality_cases.json`
+（合成主人消息与合成 caption 库，不含真实聊天），用生产 query 解析与候选规则离线计算：
+明确索图候选率、候选召回 @5/@8、拒绝语境出图率、否定/反讽误触发率、含不可接受候选的
+offer 比例，均报告分子与分母。`--embeddings <cache_dir>` 用本地 BGE 权重加入 cosine，
+并输出标注对的 cosine 分布与该库上的最佳 F1 门槛，仅作调参线索。它不测最终模型选图、
+图文一致性或 QQ 送达；这些需要主人真实图库与真实模型的另行评测。
