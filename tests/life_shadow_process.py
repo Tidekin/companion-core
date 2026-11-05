@@ -91,7 +91,8 @@ async def main():
             "reason": "仍未结束" if scenario == "bug" else "实际来源",
             "text": "昨天那个导出问题有新线索了吗？" if scenario == "bug"
             else "这段资料留下了一个值得继续探索的想法。"}
-        content = ("对了，里面那个配角其实挺出彩的。" if scenario == "followup"
+        content = ((args.get("wording") or "对了，里面那个配角其实挺出彩的。")
+                   if scenario == "followup"
                    else json.dumps(proposal, ensure_ascii=False))
         body = {"choices": [{"message": {"role": "assistant", "content": content},
                              "finish_reason": "stop"}]}

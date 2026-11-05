@@ -8,6 +8,7 @@ import pytest
 from companion import budget
 from companion.contracts import DeliveryResult, LeaseRequest
 from companion.model import ModelResponse
+from companion.reply_segments import SegmentedReplyConfig
 from companion.social import proactive_counts
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from tests.conftest import run
@@ -68,6 +69,21 @@ def test_share_uses_generated_wording_then_a_link_only_bubble(core, wording):
     second = lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
                               core.clock())["items"]
     assert len(second) == 1 and second[0]["content"] == {"text": BILI}
+
+
+@pytest.mark.parametrize("limit,expected", [("unlimited", 4), (3, 3), (2, 2), (None, 2)])
+def test_share_segments_prose_with_a_reserved_link_slot(core, limit, expected):
+    core.settings.segmented_reply = (SegmentedReplyConfig(mode="semantic", max_segments=limit)
+                                     if limit is not None else None)
+    wording = "看到了一个有趣的细节。\n\n镜头转向窗外。\n\n这个安排让我想起另一部片子。"
+    ready_share(core, wording)
+    assert run(run_notice(core))
+    rows = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
+    texts = [json.loads(row["content_json"])["text"] for row in rows]
+    assert len(texts) == expected and texts[-1] == BILI
+    assert "".join(texts[:-1]) == wording
+    assert len(core.model.calls) == 1
+    assert proactive_counts(core.store, core.settings, core.clock())[0] == 1
 
 
 def test_share_skip_keeps_the_real_model_charge_without_an_outbox(core):

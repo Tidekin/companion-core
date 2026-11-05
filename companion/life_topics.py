@@ -586,6 +586,7 @@ class LifeTopics:
     def consume(self, job_id, body: LifeConsumeRequest, *, diary=None):
         """Release exact retained wording through its independently authorized native channel."""
         from companion import owner_delivery
+        from companion.reply_segments import split_text
         from companion.social import proactive_counts
         from companion.transport import enqueue_reply_parts
 
@@ -635,8 +636,11 @@ class LifeTopics:
                 record = getattr(owner_delivery, "record_life_draft", None)
                 if not callable(record):
                     raise CoreError("NATIVE_LIFE_DELIVERY_REQUIRED", 503)
-                messages = enqueue_reply_parts(s, data["job"], [data["result"]["text"]], 0,
-                                                now, action="qq.private.proactive")
+                policy = self.settings.segmented_reply
+                text = data["result"]["text"]
+                parts = split_text(text, policy) if policy else [text]
+                messages = enqueue_reply_parts(s, data["job"], parts,
+                    policy.interval_ms if policy else 0, now, action="qq.private.proactive")
                 record(s, self.settings, self.clock, data["job"], messages)
                 s.audit("life.draft_consumed", job_id, job_id, now,
                         channel_action=body.action, message_ids=messages)
@@ -644,7 +648,14 @@ class LifeTopics:
                                   "AND action_type='qq.private.proactive' ORDER BY rowid",
                                   (data["job"]["event_id"],))
             for delivery in existing:
-                owner_delivery.check_delivery(s, self.settings, self.clock, delivery["message_id"])
+                try:
+                    owner_delivery.check_delivery(s, self.settings, self.clock,
+                                                  delivery["message_id"])
+                except CoreError as error:
+                    # Consumption admits the whole group; later bubbles wait for ACKs.
+                    # Each send still runs the full readiness and authority checks.
+                    if error.code != "REPLY_SEGMENT_NOT_READY":
+                        raise
             return {"job_id": job_id, "action": body.action, "deliveries": existing}
 
     def advance(self, *, diary=None):

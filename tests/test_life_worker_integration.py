@@ -40,12 +40,13 @@ async def native_worker(core, provider, monkeypatch):
     await run_native(core.settings, core.clock, provider)
 
 
-async def process_worker(core, tmp_path, scenario, source_id, *, interrupt=None, restart=False):
+async def process_worker(core, tmp_path, scenario, source_id, *, interrupt=None, restart=False,
+                         wording=None):
     label = "restart" if restart else "worker"
     config, result = tmp_path / f"life-{label}.json", tmp_path / f"life-{label}-result.json"
     value = {"settings": core.settings.model_dump(mode="python"), "now": core.clock(),
              "scenario": scenario, "source_id": source_id, "result_path": str(result),
-             "restart": restart}
+             "restart": restart, "wording": wording}
     encoded = json.dumps(value, default=lambda item: item.get_secret_value()
                          if isinstance(item, SecretStr) else str(item))
     await asyncio.to_thread(config.write_text, encoded, encoding="utf-8")

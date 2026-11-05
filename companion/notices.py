@@ -9,9 +9,10 @@ from companion import owner_authority
 from companion.contracts import CoreError
 from companion.observation import expired_sources
 from companion.paid_budget import sha
+from companion.reply_segments import SEMANTIC_RULES, split_text
 from companion.store import after, encode, uid
 
-RULES = """根据给定的真实资料，自然地向主人发一条简短私聊。自己组织措辞和开场，
+RULES = """根据给定的真实资料，自然地向主人发起一次简短私聊。自己组织措辞和开场，
 不要使用固定开场，不要逐字段报告，不输出内部状态、错误码或读取范围说明。
 share 是分享实际读到的内容：提到标题或主题，用自己的话说值得分享的地方；
 只有标题和简介时不能推测视频内容，有字幕时只据已读字幕概括，不声称看过画面或听过音频。
@@ -300,6 +301,9 @@ def messages(store, settings, job, now, principles, *, data=None, prior_contacts
             now, settings.timezone, reference="本次主动跟进的时间"))
     if prior_contacts:
         rules += "\n标注的来源也用于此前已送达的主动消息。考虑是否有新内容；沉默不表示负面反馈。"
+    if (data["kind"] == "share" and settings.segmented_reply is not None
+        and settings.segmented_reply.mode == "semantic"):
+        rules += SEMANTIC_RULES
     result = [{"role": "system", "content": principles + "\n" + rules},
               *time_messages,
               {"role": "user", "content": encode(payload)}]
@@ -332,7 +336,16 @@ def parts(store, settings, job, text, now):
     prose = prose.replace(url, "").strip() if url else prose.strip()
     if not prose or re.search(r"https?://", prose, re.IGNORECASE):
         raise CoreError("NOTICE_MODEL_REPLY_INVALID", 409)
-    return [prose, url] if url else [prose]
+    policy = settings.segmented_reply
+    chunks = (split_text(prose, policy)
+              if policy and data["kind"] != "commitment" else [prose])
+    if url:
+        if policy and policy.max_segments != "unlimited":
+            text_slots = policy.max_segments - 1
+            if len(chunks) > text_slots:
+                chunks = chunks[:text_slots - 1] + ["".join(chunks[text_slots - 1:])]
+        chunks.append(url)
+    return chunks
 
 
 def record(store, settings, job, message_ids, now):
@@ -457,10 +470,14 @@ def delivery_problem(store, settings, message_id, now, *, job=None):
             or delivery["content_sha256"] != sha(json.loads(delivery["content_json"]))
             or not _settled(store, job["job_id"])):
             raise CoreError("NOTICE_JOB_UNSETTLED", 409)
-        if data["kind"] == "life" and json.loads(delivery["content_json"]) != {
-            "text": data["text"],
-        }:
-            raise CoreError("LIFE_DRAFT_CHANGED", 409)
+        if data["kind"] == "life":
+            from companion.transport import reply_group
+
+            group = reply_group(store, message_id)
+            if (group["text"] != data["text"]
+                or any(set(json.loads(row["content_json"])) != {"text"}
+                       for row in group["rows"])):
+                raise CoreError("LIFE_DRAFT_CHANGED", 409)
     except (CoreError, KeyError, TypeError, ValueError) as error:
         return error.code if isinstance(error, CoreError) else "NOTICE_SOURCE_CHANGED"
     return None
