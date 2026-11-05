@@ -52,4 +52,4 @@ async def life_worker(settings):
                     # and newly arrived input a boundary before the next selection.
                     await asyncio.sleep(0)
         finally:
-            core.store.close()
+            core.close()

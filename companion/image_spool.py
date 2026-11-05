@@ -6,6 +6,7 @@ import re
 import stat
 from contextlib import nullcontext
 from datetime import datetime, timedelta
+from itertools import islice
 from pathlib import Path
 
 from companion.contracts import CoreError
@@ -198,16 +199,26 @@ def discard_window(store, plan_sha256):
             )
 
 
-def cleanup(store, now, max_bytes=MAX_OWNER_IMAGE_BYTES, *, retain_completed=False):
+def cleanup(store, now, max_bytes=MAX_OWNER_IMAGE_BYTES, *, retain_completed=False,
+            entries=None, limit=None):
     root = directory(store)
     if not root.exists():
-        return
+        return 0
     if root.is_symlink() or root.resolve() != root:
         raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
-    # put() runs under the event's write transaction. Serialize startup/recovery
-    # cleanup with it so another API process cannot delete an uncommitted upload.
-    with nullcontext() if store.db.in_transaction else store.transaction():
-        for path in root.glob("content_*.raw"):
+    # Enumerate outside the writer. Each decision still serializes with put():
+    # an upload's file may exist before its content row has committed.
+    if entries is None:
+        with os.scandir(root) as entries:
+            return cleanup(store, now, max_bytes, retain_completed=retain_completed,
+                           entries=entries, limit=limit)
+    processed = 0
+    for entry in islice(entries, limit):
+        processed += 1
+        path = Path(entry.path)
+        if path.suffix != ".raw":
+            continue
+        with nullcontext() if store.db.in_transaction else store.transaction():
             item_id = path.stem
             if not re.fullmatch(r"content_[a-f0-9]{32}", item_id):
                 continue
@@ -233,9 +244,18 @@ def cleanup(store, now, max_bytes=MAX_OWNER_IMAGE_BYTES, *, retain_completed=Fal
             )
             if not expired:
                 try:
-                    limit = _file_limits(row)[1] if row["kind"] == "qq_file" else max_bytes
-                    get(store, row, now, limit)
-                except (CoreError, ValueError, KeyError, TypeError):
+                    payload_limit = _file_limits(row)[1] if row["kind"] == "qq_file" else max_bytes
+                    # get() still validates/reads the full payload at actual use.
+                    # Maintenance needs only the bounded header and payload size.
+                    with _open(_path(store, item_id)) as stream:
+                        header = _header(stream, row)
+                        size = os.fstat(stream.fileno()).st_size - stream.tell()
+                    if not 0 < size <= payload_limit or _timestamp(header["expires_at"]) <= (
+                        datetime.fromisoformat(now)
+                    ):
+                        expired = True
+                except (CoreError, OSError, ValueError, KeyError, TypeError):
                     expired = True
             if expired:
                 discard(store, [item_id])
+    return processed

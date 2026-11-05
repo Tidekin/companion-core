@@ -504,10 +504,7 @@ class ContentService(ContentIntake):
         self.provider = provider or HTTPMediaProvider(self.options)
         self.image_transport = image_transport
         self.model = model
-        from companion import agent_images
 
-        image_spool.cleanup(self.store, self.clock(), self.options.max_image_bytes,
-                            retain_completed=agent_images.enabled(self.settings))
 
     def discard_images(self, event_id):
         rows = self.store.rows(
@@ -1347,17 +1344,8 @@ class ContentService(ContentIntake):
                 raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
             return {"approved": True, "lease_until": row["lease_until"]}
 
-    async def run_once(self):
-        from companion import agent_images
-
-        if not self.settings.content_enabled:
-            return False
-        agent_images.expire_downloads(self)
-        if await content_files.run_file_once(self):
-            return True
+    def _claim_link_image(self):
         s, now = self.store, self.clock()
-        image_spool.cleanup(s, now, self.options.max_image_bytes,
-                            retain_completed=agent_images.enabled(self.settings))
         day, _ = self._periods()
         for lost in s.rows(
             "SELECT m.request_id FROM model_usage m JOIN content_items c "
@@ -1436,6 +1424,23 @@ class ContentService(ContentIntake):
                 "WHERE item_id=?",
                 (self.options.max_image_bytes, after(now, 15), now, row["item_id"]),
             )
+        return row
+
+    async def run_once(self):
+        from companion import agent_images
+        from companion.worker_schedule import claim_scope
+
+        if not self.settings.content_enabled:
+            return False
+        with claim_scope(self.store):
+            agent_images.expire_downloads(self)
+        if await content_files.run_file_once(self):
+            return True
+        with claim_scope(self.store):
+            row = self._claim_link_image()
+        if not isinstance(row, dict):
+            return bool(row)
+        s = self.store
         try:
             _, policy = self._policy(row)
             data, mime = await fetch_public_image(

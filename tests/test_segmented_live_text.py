@@ -233,6 +233,35 @@ def test_any_changed_segment_manifest_invalidates_delivery_and_history(
     run(scenario())
 
 
+def test_native_delivery_reuses_group_only_in_the_current_snapshot(core, tmp_path, monkeypatch):
+    from companion import transport
+
+    async def scenario():
+        async with session(core, tmp_path) as host:
+            await host.admit()
+            assert await core.run_once()
+            first = core.store.one("SELECT message_id FROM outbox ORDER BY segment_index LIMIT 1")
+            original, reads = transport.reply_group, []
+
+            def group(*args, **kwargs):
+                reads.append(1)
+                return original(*args, **kwargs)
+
+            monkeypatch.setattr(transport, "reply_group", group)
+            with core.store.transaction():
+                owner_delivery.check_delivery(core.store, core.settings, core.clock,
+                                              first["message_id"])
+            assert reads == [1]
+            # A different transaction cannot use a prior authorization/group result.
+            core.store.execute("UPDATE outbox SET reply_group_sha256=? WHERE message_id=?",
+                               ("f" * 64, first["message_id"]))
+            with pytest.raises(CoreError), core.store.transaction():
+                owner_delivery.check_delivery(core.store, core.settings, core.clock,
+                                              first["message_id"])
+
+    run(scenario())
+
+
 @pytest.mark.parametrize("state", ["PENDING", "LEASED", "SENDING", "FAILED", "CANCELLED",
                                       "DELIVERY_UNCERTAIN", "RETRY_WAIT"])
 def test_partial_group_is_absent_before_history_limit_and_complete_group_is_one_turn(core, state):

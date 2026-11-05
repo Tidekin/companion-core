@@ -358,6 +358,7 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
         raise CoreError("OWNER_DELIVERY_BINDING_REQUIRED", 403)
     material = json.loads(saved["value"])
     job = _job(store, material["job_id"])
+    group = None
     if material.get("kind") == FAILURE_NOTICE:
         view = _failure_view(store, settings, clock, job)
         if (json.loads(row["authority_json"]) != view.authority.as_dict()
@@ -366,7 +367,11 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
     else:
         view = _sources(store, settings, clock, job)
         snapshots = _snapshots(store, job)
-        requests = _usage(store, job, view, snapshots, message_id)
+        # Reuse only inside this exact transaction/snapshot. Every later RPC
+        # still re-reads current authorization, sources, lease and segment state.
+        if store.frozen_scope is not None:
+            group = reply_group(store, message_id)
+        requests = _usage(store, job, view, snapshots, message_id, group=group)
 
         if (job["state"] != "SUCCEEDED"
             or json.loads(row["authority_json"]) != view.authority.as_dict()
@@ -386,10 +391,10 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
         raise CoreError("PROACTIVE_SEND_PAUSED", 409)
     if row["reply_group_id"]:
         now = clock()
-        check_segment_ready(store, message_id, now)
+        check_segment_ready(store, message_id, now, group=group)
         state = cumulative.check(store, settings, now)
         if state["policy"]:
-            group = reply_group(store, message_id)
+            group = group if group is not None else reply_group(store, message_id)
             remaining = sum(part["state"] in {"PENDING", "RETRY_WAIT", "LEASED", "SENDING"}
                 and "send:" + cumulative.digest(part["message_id"]) not in state["operations"]
                 for part in group["rows"])

@@ -60,7 +60,8 @@ def _lock_report(site, started, locked, finished, outcome):
 
     wait_ms = (locked - started) * 1000
     held_ms = 0 if finished is None else (finished - locked) * 1000
-    if wait_ms + held_ms < LOCK_REPORT_MS:
+    if (wait_ms + held_ms < LOCK_REPORT_MS
+        and os.environ.get("COMPANION_TELEMETRY_ALL_LOCKS") != "1"):
         return
     code, line = site
     try:

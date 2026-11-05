@@ -321,6 +321,7 @@ def native_selector(core, worker_id) -> RoundRobin:
 
     return RoundRobin((
         maintenance("retention", core.expire_raw_events),
+        maintenance("media_cleanup", core.cleanup_media),
         maintenance("diary_schedule", core.diary.schedule_due, ("diary",)),
         maintenance("consolidation_schedule", core.consolidation.schedule_due, ("consolidation",)),
         maintenance("commitment_expiry", core.goals.expire_commitments, ("goals",)),

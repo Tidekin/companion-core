@@ -1,7 +1,10 @@
 """Idle chat polls must leave the SQLite writer available to delivery."""
 
+import asyncio
 import sqlite3
 from contextlib import closing
+
+import pytest
 
 from companion.core import proactive_allowed
 from tests.conftest import event
@@ -56,3 +59,80 @@ def test_claim_rechecks_job_after_snapshot_changes(core, monkeypatch):
     row = core.store.one("SELECT * FROM jobs WHERE job_id=?", (admitted["job_id"],))
     assert (row["lease_owner"], row["lease_token"]) == ("other", "original-token")
     assert checked == [False, True]
+
+
+@pytest.mark.parametrize("boundary", ["recovery", "claim", "poke"])
+@pytest.mark.parametrize("stop_while_busy", [False, True])
+def test_chat_worker_survives_busy_before_claim_without_repeating_a_job(
+    core, monkeypatch, boundary, stop_while_busy,
+):
+    from companion import __main__, shutdown
+    from companion import core as core_module
+    from tests.conftest import run
+    from tests.test_worker_shutdown import NoNetworkClient
+
+    admitted = core.ingest(event(core), "busy-claim") if boundary != "poke" else None
+    original = (core.recover if boundary == "recovery" else core._claim_job
+                if boundary == "claim" else core_module.poke.claim_ready)
+    calls, attempts = [], []
+    shutdown.reset()
+    core.store.db.execute("PRAGMA busy_timeout=1")
+    with closing(sqlite3.connect(core.settings.database, isolation_level=None)) as writer:
+        def contend(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                # The caller already owns the recovery writer; claim contention
+                # is introduced at its own snapshot-to-writer boundary instead.
+                if boundary == "recovery":
+                    return original(*args, **kwargs)
+                writer.execute("BEGIN IMMEDIATE")
+                asyncio.get_running_loop().call_soon(writer.rollback)
+                if stop_while_busy:
+                    asyncio.get_running_loop().call_soon(shutdown.request)
+            return original(*args, **kwargs)
+
+        if boundary == "recovery":
+            claim = core.claim_job
+
+            def claim_once(*args, **kwargs):
+                attempts.append(1)
+                if len(attempts) == 1:
+                    writer.execute("BEGIN IMMEDIATE")
+                    try:
+                        return claim(*args, **kwargs)
+                    finally:
+                        writer.rollback()
+                        if stop_while_busy:
+                            shutdown.request()
+                return claim(*args, **kwargs)
+
+            monkeypatch.setattr(core, "claim_job", claim_once)
+        elif boundary == "claim":
+            monkeypatch.setattr(core, "_claim_job", contend)
+        else:
+            core.settings.mode = "live"
+            monkeypatch.setattr(core_module.poke, "enabled", lambda _: True)
+            monkeypatch.setattr(core_module.poke, "claim_ready", contend)
+
+        monkeypatch.setattr(core_module, "Core", lambda *_: core)
+        monkeypatch.setattr(__main__.httpx, "AsyncClient", lambda **_: NoNetworkClient())
+        completed = __main__.Recorder.completed
+
+        def stop_after_unit(recorder, **kwargs):
+            completed(recorder, **kwargs)
+            shutdown.request()
+
+        monkeypatch.setattr(__main__.Recorder, "completed", stop_after_unit)
+        try:
+            run(asyncio.wait_for(__main__.worker(core.settings), 5))
+        finally:
+            shutdown.reset()
+    if admitted:
+        with closing(sqlite3.connect(core.settings.database)) as observed:
+            job = observed.execute("SELECT state,attempts FROM jobs WHERE job_id=?",
+                                   (admitted["job_id"],)).fetchone()
+        assert job == (("QUEUED", 0) if stop_while_busy else ("SUCCEEDED", 1))
+        assert len(core.model.calls) == int(not stop_while_busy)
+    else:
+        assert len(calls) == (1 if stop_while_busy else 2)
+        assert not core.model.calls

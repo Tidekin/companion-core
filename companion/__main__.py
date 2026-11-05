@@ -5,6 +5,8 @@ import ipaddress
 import json
 import logging
 import os
+import random
+import sqlite3
 import sys
 from contextlib import ExitStack, closing
 from pathlib import Path
@@ -22,7 +24,7 @@ from companion.runtime import Runtime
 from companion.store import Store, encode, migrate, uid, utcnow
 from companion.worker_lock import single_worker
 from companion.worker_loop import Recorder
-from companion.worker_schedule import run_native_unit
+from companion.worker_schedule import ClaimBusy, run_native_unit
 from companion.worker_wakeup import Maintenance, Wakeup
 
 
@@ -42,17 +44,33 @@ async def worker(settings):
                     if not await runtime_config.worker_boundary(core.store, settings, core.clock):
                         break
                     scan = wake.before_scan()
-                    result = await run_native_unit(core.run_once, worker_id)
+                    try:
+                        result = await run_native_unit(core.run_once, worker_id)
+                    except ClaimBusy:
+                        # Yield this scan only. Never replay a business unit that
+                        # already dispatched a model request or QQ operation.
+                        await asyncio.sleep(random.uniform(0.05, 0.15))
+                        continue
                     maintenance = not result.progressed and maintenance_clock.due()
                     if maintenance:
-                        core.expire_raw_events()
+                        try:
+                            core.expire_raw_events()
+                            core.cleanup_media()
+                        except sqlite3.OperationalError as error:
+                            if (getattr(error, "sqlite_errorcode", 0) & 0xFF != sqlite3.SQLITE_BUSY
+                                or core.store.db.in_transaction):
+                                raise
+                            # This is native local maintenance, without model or
+                            # delivery dispatch. Its own durable recovery remains authoritative.
+                            await asyncio.sleep(random.uniform(0.05, 0.15))
+                            continue
                         maintenance_clock.completed()
                     loop.completed(maintenance=maintenance,
                                    waiting=not result.progressed and not maintenance)
                     if not result.progressed and not maintenance:
                         await wake.wait(scan, result, maintenance_clock.next_at)
         finally:
-            core.store.close()
+            core.close()
 
 
 def trusted_proxy_ips(value):
