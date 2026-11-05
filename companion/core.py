@@ -646,6 +646,7 @@ class Core(Runtime):
                 self.store, job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2)
         # The notice contract stays last. History is optional and yields its space
         # before the required reading/decision material.
+        clip = turn_taking.excerpt
         focus = context_selection.terms(notices.subject(data))
         ranked = sorted(reversed(history), key=lambda item: context_selection.relevance(
             focus, item["user_text"] + (item["reply_text"] or "")), reverse=True)[:2]
@@ -656,16 +657,19 @@ class Core(Runtime):
                 owner_sources = [x for x in data["sources"] if x["kind"] == "owner_message"]
                 ids = {item["event_id"] for item in selected}
                 size = sum(len(x["text"].encode()) for x in owner_sources)
-                size += sum(len(item["user_text"][:300].encode()) +
-                            len((item["reply_text"] or "")[:300].encode()) for item in selected)
+                size += sum(len(clip(item["user_text"]).encode())
+                            + len(clip(item["reply_text"] or "").encode()) for item in selected)
                 if (len(ids | {x["event_id"] for x in owner_sources}) > scope.max_turns
                     or len(ids | set(data["source_events"])) > cfg.life_loop.source_limit
                     or size > scope.max_utf8_bytes):
                     selected.remove(ranked.pop())
                     continue
+            clipped = any(clip(item["user_text"]) != item["user_text"]
+                          or clip(item["reply_text"] or "") != (item["reply_text"] or "")
+                          for item in selected)
             prior = {"role": "user", "content": "近期私聊片段（历史参考）：\n" + encode([
-                {"主人": item["user_text"][:300], "你": (item["reply_text"] or "")[:300]}
-                for item in selected])}
+                {"主人": clip(item["user_text"]), "你": clip(item["reply_text"] or "")}
+                for item in selected]) + ("\n“…”处为省略。" if clipped else "")}
             candidate = [messages[0], prior, *messages[1:]]
             tokens = measure_request(cfg, candidate, "activity").reserved_input_tokens
             if tokens <= cfg.context_soft_tokens:

@@ -224,3 +224,25 @@ def test_contact_paraphrases_keep_scope_and_expiration(core, text, paused, later
     assert feedback_paused(core.store, core.settings, core.clock()) is later
     owner(core, 2, "我回来了，继续聊")
     assert not feedback_paused(core.store, core.settings, core.clock())
+
+
+@pytest.mark.parametrize(("first", "second"), [
+    ("电脑打不开了", "门打不开了"),
+    ("面试结束了，还在等结果", "体检结束了，还在等结果"),
+])
+def test_shared_predicate_without_shared_subject_keeps_topics_apart(core, first, second):
+    setup(core)
+    owner(core, 1, first)
+    core.clock.advance(60)
+    owner(core, 2, second)
+    assert core.store.one("SELECT COUNT(*) n FROM life_topics")["n"] == 2
+
+
+@pytest.mark.parametrize("update", ["那台打印机又连不上了", "搞定啦，多谢"])
+def test_same_subject_or_resolution_reply_updates_the_previous_topic(core, update):
+    setup(core)
+    owner(core, 1, "打印机连不上WiFi")
+    core.clock.advance(60)
+    owner(core, 2, update)
+    assert core.store.one("SELECT COUNT(*) n FROM life_topics")["n"] == 1
+    assert len(core.store.rows("SELECT event_id FROM life_topic_sources")) == 2
