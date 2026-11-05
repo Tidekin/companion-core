@@ -93,7 +93,7 @@ def _rows_key(tables, inputs, attempts, queues):
                   for table, rows in sorted(queues.items())))
 
 
-def closed(runtime, records, references, *, carry_receipt=None, tables=None):
+def closed(runtime, records, references, *, carry_receipt=None, tables=None, expected=None):
     """Digest of the stopped custody from its original journal and selected rows."""
     if tables is None:
         tables = _Tables(runtime.db)
@@ -154,7 +154,8 @@ def closed(runtime, records, references, *, carry_receipt=None, tables=None):
     for table, entries in _queue_entries(tables, references, selected).items():
         if any(row["state"] not in done_states[table] for row in entries):
             raise ValueError("OWNER_HANDOFF_QUEUE_RECONCILIATION_REQUIRED")
-        queues[table] = sorted(entries, key=wire.canonical)
+        if entries:
+            queues[table] = sorted(entries, key=wire.canonical)
     custody = {"inputs": inputs, "attempts": attempts, "results": results,
                "inbox": inbox, "queues": queues}
     retained = [carried_inputs[source["event_id"]] for source in inputs
@@ -163,7 +164,19 @@ def closed(runtime, records, references, *, carry_receipt=None, tables=None):
         custody["carried"] = retained
     if carry_receipt is not None:
         custody["carry_receipt"] = carry_receipt
-    return wire.digest(custody)
+    digest = wire.digest(custody)
+    if expected is not None and expected != digest:
+        # Old seals included an empty array only when the lazy queue table already
+        # existed. New tables carry no predecessor custody. Match that original
+        # serialization without changing any row, journal record or nonempty queue.
+        empty = [table for table in ("automatic_recalls", "automatic_media")
+                 if table not in queues]
+        for mask in range(1, 1 << len(empty)):
+            old_queues = {**queues, **{table: [] for bit, table in enumerate(empty)
+                                      if mask & (1 << bit)}}
+            if wire.digest({**custody, "queues": old_queues}) == expected:
+                return expected
+    return digest
 
 
 def _carry_prepared(value, authority):
@@ -259,10 +272,11 @@ def _verify(runtime, records, *, tables=None):
         # PREPARED/REBOUND pair over the same prefix shares one digest.
         nonlocal tables
         tables = tables or _Tables(runtime.db)
-        key = (custody_records, len(references), wire.digest(carry_receipt))
+        expected = records[index]["data"]["custody_sha256"]
+        key = (custody_records, len(references), wire.digest(carry_receipt), expected)
         if key not in digests:
             digests[key] = closed(runtime, records[:index], references,
-                                  carry_receipt=carry_receipt, tables=tables)
+                                  carry_receipt=carry_receipt, tables=tables, expected=expected)
         return digests[key]
 
     references = []
