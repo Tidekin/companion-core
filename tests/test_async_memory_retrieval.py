@@ -168,3 +168,40 @@ def test_cancelled_inference_keeps_cpu_slot_until_thread_finishes(core, monkeypa
             await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
 
     run(scenario())
+
+
+def test_async_recall_builds_fused_ranks_once(core, monkeypatch):
+    fact(core, 1, "青禾项目使用蓝色配色")
+    monkeypatch.setattr(core.memory.index, "_infer", lambda query, texts: (
+        tuple(np.array([1., 0.]) for _ in texts), np.array([1., 0.]),
+    ))
+    original, calls = core.memory._fused_order, []
+
+    def ranked(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(core.memory, "_fused_order", ranked)
+    result = run(core.memory.search_async("青禾项目", now=core.clock(), clock=core.clock))
+    assert result and calls == [1]
+
+
+@pytest.mark.parametrize("count", [100, 400])
+def test_rank_explanation_identifier_comparisons_grow_linearly(core, count):
+    comparisons = []
+
+    class Identifier(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other):
+            comparisons.append(1)
+            return super().__eq__(other)
+
+    ids = [Identifier(f"memory_{index}") for index in range(count)]
+    rows = [{"memory_id": key, "content": "original fact", "importance": 1} for key in ids]
+    scores = {key: 1.0 for key in ids}
+    ordered, ranks, lexical, semantic = core.memory._fused_order("original", rows, ids, scores)
+    assert len(ordered) == len(ranks) == lexical == semantic == count
+    assert ranks[ids[0]]["lexical_rank"] == 1
+    assert ranks[ids[-1]]["semantic_rank"] == count
+    assert len(comparisons) < count * 40

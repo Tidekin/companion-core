@@ -12,7 +12,9 @@ import hashlib
 import json
 import os
 import re
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
+from itertools import islice
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -96,22 +98,36 @@ def _read(store, image_id, max_bytes):
     return data
 
 
-def cleanup(store, now):
+def cleanup(store, now, *, entries=None, limit=None):
     """Delete spooled bytes that no live, unexpired Outbox item can still send."""
     root = directory(store)
     if root.is_symlink() or not root.is_dir() or not _table(store):
-        return
-    for entry in root.iterdir():
-        image_id = entry.name.split(".", 1)[0]
-        row = store.one(
-            "SELECT g.state,g.expires_at,g.message_id,o.state AS outbox_state "
-            "FROM generated_images g LEFT JOIN outbox o USING(message_id) WHERE image_id=?",
-            (image_id,),
-        ) if IMAGE_ID.fullmatch(image_id) and entry.suffix == ".img" else None
-        keep = (row and row["state"] == "SUCCEEDED" and row["expires_at"] > now
-                and (row["message_id"] is None or row["outbox_state"] in LIVE_OUTBOX))
-        if not keep and not entry.is_dir():
-            entry.unlink(missing_ok=True)
+        return 0
+    if entries is None:
+        with os.scandir(root) as entries:
+            return cleanup(store, now, entries=entries, limit=limit)
+    processed = 0
+    for entry in islice(entries, limit):
+        processed += 1
+        path = Path(entry.path)
+        image_id = path.name.split(".", 1)[0]
+        with nullcontext() if store.db.in_transaction else store.transaction():
+            row = store.one(
+                "SELECT g.state,g.expires_at,g.message_id,o.state AS outbox_state,"
+                "j.state AS job_state,j.lease_until FROM generated_images g "
+                "JOIN jobs j USING(job_id) LEFT JOIN outbox o USING(message_id) WHERE image_id=?",
+                (image_id,),
+            ) if IMAGE_ID.fullmatch(image_id) and path.suffix in {".img", ".tmp"} else None
+            # _write() prepares bytes before the final result transaction. A live
+            # dispatch owns its partial/final file until that original lease ends.
+            writing = (row and row["state"] == "DISPATCHED" and row["job_state"] == "RUNNING"
+                       and row["lease_until"] and row["lease_until"] > now)
+            keep = writing or (row and path.suffix == ".img" and row["state"] == "SUCCEEDED"
+                    and row["expires_at"] > now and (row["message_id"] is None
+                    or row["outbox_state"] in LIVE_OUTBOX))
+            if not keep and not path.is_dir():
+                path.unlink(missing_ok=True)
+    return processed
 
 
 def _table(store):

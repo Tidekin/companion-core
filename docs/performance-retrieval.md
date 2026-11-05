@@ -1,5 +1,73 @@
 # Responsive memory retrieval and stable prompt prefixes
 
+## Foreground claims, maintenance and reply timing
+
+Chat recovery and ContentService construction/polling no longer enumerate media directories.
+Native lease/accounting recovery remains before claiming. Media cleanup runs in the existing
+idle chat maintenance and Life maintenance lane, consuming at most 32 directory entries per
+spool per turn. Unrecognized filenames consume the same allowance. A standard `os.scandir`
+iterator continues the next batch and is closed at exhaustion, error or Core shutdown; after
+restart a new scan begins. Actual source/expiry checks still happen when media is used.
+Expired bytes are excluded immediately; their physical unlink follows the bounded maintenance
+scan. Explicit erasure continues to remove its targeted originals synchronously.
+
+Each raw-file decision takes its own write transaction, so an upload that created a file before
+committing its row cannot be mistaken for an orphan. Valid originals need only a bounded header
+and file-size check during maintenance; `get()` retains full validation at actual use. Generated
+partial/final bytes belonging to a DISPATCHED job with its original live lease are retained until
+the result commits or that lease ends. Erasure and live Outbox state remain authoritative.
+Backup restore deletes copied originals by their erased image/file IDs at the final database
+path before publishing the restored database, without a startup directory scan.
+
+`claim_scope` classifies only real SQLite BUSY errors after rollback at explicitly pre-I/O
+chat/poke/content claim boundaries. Native chat/content loops yield 50–150ms with jitter and
+recheck shutdown/configuration before another scan. Their business attempts, original request
+IDs and provider/delivery I/O remain outside that retry scope. Disk-full, I/O, corruption,
+LOCKED, cancellation and errors with an active transaction still propagate. Native local idle
+maintenance handles rolled-back BUSY separately. This does not add retries after external I/O.
+
+Memory fusion builds rank maps in linear identifier work and async search reuses its fused
+result for final ranking. Candidate eligibility, the candidate pool, rank explanations, source
+revalidation and final selection remain the same. Owner delivery can reuse a parsed reply group
+within one exact DB transaction/snapshot; later requests still check current sources, authority,
+STOP, leases, reply revision, previous ACK and interval.
+
+Timing boundaries are distinct:
+
+| Stage | Measured interval |
+| --- | --- |
+| `t_model_request` → `t_model_done` | Existing logical model operation, including local admission/settlement |
+| `model_transport` | Final model transport handoff through response headers |
+| `model_http` | Final model handoff through response-body receipt, before JSON decoding |
+| `t_onebot_send_result`, `t_onebot_send_ack` | Existing send operation, including local guard/preflight |
+| `onebot_http` | Checked OneBot action transport through bounded body receipt, excluding its guard and JSON decoding |
+| `t_bridge_send_ack` | Original input reception through first platform ACK |
+| `t_reply_group_ack` | Original input reception through final platform ACK |
+| `t_reply_segments_ack` | First platform ACK through final platform ACK, including configured spacing |
+
+Transport timings describe local HTTP boundaries, not server-only compute or phone display.
+`onebot_http` is emitted for checked send/profile/QZone transports; a guard refusal has no
+transport timing. New model/OneBot timings include failed/cancelled attempts and are not success
+or billing receipts. The benchmark reader accepts these fixed content-free RPC fields. Group
+completion is emitted only after the final ACK; uncertain sends discard the in-memory timing
+start. Interrupted/restarted groups without a retained start have no invented elapsed time.
+
+Default write-lock diagnostics still select scopes taking at least 500ms. For a bounded
+diagnostic capture, set both `COMPANION_TELEMETRY=1` and `COMPANION_TELEMETRY_ALL_LOCKS=1` on
+the measured processes. That includes fast commit/rollback/BUSY scopes; otherwise the samples
+cannot establish all-transaction percentiles. Lock records remain on stderr, separate from stage
+records. Disable full lock capture after measurement and apply the deployment log limits.
+
+Regression checks use comparison counts rather than wall-clock thresholds for fusion growth,
+real SQLite writers for contention, actual WS/HTTP ingress plus an independent native worker,
+and checked native segmented delivery. Only the external model and OneBot transport are
+synthetic. Candidate/recall-quality changes, full-history ledger checkpoints and sustained
+1x/10x/24–72h latency acceptance remain separate work; this change reports no production P95.
+
+Implementation references: existing Core/Life maintenance and Store rollback scopes;
+[Python scandir lifecycle](https://docs.python.org/3.12/library/os.html#os.scandir);
+[SQLite primary/extended result codes](https://www.sqlite.org/rescode.html).
+
 ## Chat validation and Bridge decoding
 
 Mood source validation, recent history and episodic continuation share one batch,

@@ -229,3 +229,27 @@ def test_consumed_public_plan_rechecks_before_native_dispatch(core, tmp_path, mu
     assert core.store.one("SELECT dispatched_at FROM social_autonomy_reservations") == {
         "dispatched_at": None,
     }
+
+
+def test_expired_private_life_draft_retires_instead_of_failing_every_lease(core, tmp_path):
+    from datetime import datetime
+
+    from companion.contracts import LeaseRequest
+    from companion.transport import lease_deliveries
+
+    job_id, _, ref, _ = prepared(core, tmp_path, destination="PRIVATE_MESSAGE_DRAFT")
+    core.life_topics.consume(job_id, request(core, job_id, ref, "qq.private.proactive"))
+    usage = core.store.rows("SELECT * FROM model_usage")
+    expires = core.store.one(
+        "SELECT t.expires_at FROM life_topics t JOIN life_activity_results r USING(topic_id) "
+        "WHERE r.job_id=?", (job_id,))["expires_at"]
+    core.clock.advance((datetime.fromisoformat(expires)
+                        - datetime.fromisoformat(core.clock())).total_seconds() + 1)
+    lease = LeaseRequest(worker_id="owner-bridge", authority=ref)
+
+    assert lease_deliveries(core.store, core.settings, lease, core.clock())["items"] == []
+    assert core.store.rows("SELECT state,last_error_code FROM outbox") == [
+        {"state": "CANCELLED", "last_error_code": "LIFE_DRAFT_EXPIRED"}]
+    assert lease_deliveries(core.store, core.settings, lease, core.clock())["items"] == []
+    # Known model cost and its audit stay; only the stale delivery leaves the queue.
+    assert core.store.rows("SELECT * FROM model_usage") == usage

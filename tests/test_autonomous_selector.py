@@ -259,8 +259,8 @@ def test_owner_pending_blocks_all_autonomous_lanes_but_not_native_chat(core):
     ingest(core)
     selector = native_selector(core, "life-test")
     maintenance = {lane.name for lane in selector.lanes if lane.maintenance}
-    assert maintenance == {"retention", "diary_schedule", "consolidation_schedule",
-                           "commitment_expiry"}
+    assert maintenance == {"retention", "media_cleanup", "diary_schedule",
+                           "consolidation_schedule", "commitment_expiry"}
     turns = [run(selector.step()) for _ in range(len(selector.lanes) + 1)]
     assert all(turn.blocked for turn in turns)
     # Only local bookkeeping ran while the owner was waiting; no autonomous model lane.

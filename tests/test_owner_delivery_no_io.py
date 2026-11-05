@@ -17,7 +17,7 @@ from tests.test_owner_delivery_reconciliation import delivery_proof
 from tests.test_owner_input import captured, inbound
 
 
-def reserved(core, tmp_path, *, reserve_send=False):
+def reserved(core, tmp_path, *, reserve_send=False, retained_lease=False):
     capture, key = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
     core.ingest(inbound(core, capture), "native-reserved-no-send")
@@ -36,12 +36,32 @@ def reserved(core, tmp_path, *, reserve_send=False):
     recover_deliveries(core.store, core.clock())
     stopped = owner_authority.stop(core.store, core.settings, core.clock,
         AuthorityStop(operation_id="stop-native-reserved", authority=capture.authority))
+    if retained_lease:
+        # Historical supersession keeps the authentic unstarted lease as evidence.
+        core.store.execute("UPDATE outbox SET lease_token=? WHERE message_id=?",
+                           (item["lease_token"], item["message_id"]))
     proof = delivery_proof(core, capture, key, item, check,
         DeliveryResult(lease_token=item["lease_token"], result="DELIVERY_UNCERTAIN"), stopped)
     proof.update(attempt_state="RESERVED", original_result_sha256=None,
                  attempt_record_sha256=proof["reserved_record_sha256"])
     proof["signature"] = key.sign(wire.signing_payload(proof)).hex()
     return proof, key
+
+
+def test_superseded_retained_lease_closes_with_original_signed_no_io_proof(core, tmp_path):
+    proof, _ = reserved(core, tmp_path, retained_lease=True)
+    before = core.store.one("SELECT * FROM outbox WHERE message_id=?", (proof["message_id"],))
+    fees = core.store.rows("SELECT * FROM model_usage")
+    journal = Path(core.settings.paid_model.journal_path).read_bytes()
+    result = delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock())
+    assert result["state"] == "NOT_SENT"
+    assert result["receipt"]["quiescence"] == proof
+    assert wire.digest(before["lease_token"]) == proof["lease_sha256"]
+    assert core.store.one("SELECT * FROM outbox WHERE message_id=?",
+                          (proof["message_id"],)) == before
+    assert delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock()) == result
+    assert core.store.rows("SELECT * FROM model_usage") == fees
+    assert Path(core.settings.paid_model.journal_path).read_bytes() == journal
 
 
 def test_zero_send_is_native_not_sent_and_preserves_costs_and_original_attempt(core, tmp_path):
@@ -72,7 +92,7 @@ def test_zero_send_is_native_not_sent_and_preserves_costs_and_original_attempt(c
 @pytest.mark.parametrize("change", [
     "io_started", "result", "attempt", "provider", "ack", "delivery_result", "content",
     "source", "signature", "restore", "different_proof", "cleared_without_erasure",
-    "reactivated",
+    "reactivated", "retained_lease_mismatch",
 ])
 def test_zero_send_requires_every_original_no_io_fact(core, tmp_path, change):
     proof, key = reserved(core, tmp_path)
@@ -96,6 +116,9 @@ def test_zero_send_requires_every_original_no_io_fact(core, tmp_path, change):
     elif change == "delivery_result":
         core.store.audit("delivery.result", proof["message_id"], "delivery", core.clock(),
                          state="UNKNOWN")
+    elif change == "retained_lease_mismatch":
+        core.store.execute("UPDATE outbox SET lease_token=? WHERE message_id=?",
+                           ("lease_" + "f" * 32, proof["message_id"]))
     elif change == "content":
         proof["content_sha256"] = "d" * 64
     elif change == "source":

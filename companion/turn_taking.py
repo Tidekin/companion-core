@@ -322,8 +322,8 @@ def follow_up_material(store, settings, ref, now):
             "AND action_type='qq.private.reply' AND state='SENT' ORDER BY rowid",
             (row["event_id"],))
         answer = "".join(json.loads(part["content_json"]).get("text", "") for part in parts)
-        turns.append({"owner": _excerpt(text) or "（非文字消息）",
-                      "you": _excerpt(answer), "owner_at": row["occurred_at"],
+        turns.append({"owner": excerpt(text) or "（非文字消息）",
+                      "you": excerpt(answer), "owner_at": row["occurred_at"],
                       "owner_truncated": len(text) > TURN_CHARS,
                       "you_truncated": len(answer) > TURN_CHARS})
         sources.append(row["event_id"])
@@ -335,12 +335,12 @@ def follow_up_material(store, settings, ref, now):
     return data, sources
 
 
-def _excerpt(text):
+def excerpt(text, limit=TURN_CHARS):
     """Keep both the setup and the final stance/ending within the existing bound."""
-    if len(text) <= TURN_CHARS:
+    if len(text) <= limit:
         return text
-    head = TURN_CHARS // 2
-    return text[:head] + "…" + text[-(TURN_CHARS - head - 1):]
+    head = limit // 2
+    return text[:head] + "…" + text[-(limit - head - 1):]
 
 
 def silent_minutes(data, now):

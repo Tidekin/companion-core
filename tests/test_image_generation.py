@@ -3,6 +3,7 @@
 import base64
 import io
 import json
+from contextlib import closing
 
 import httpx
 import pytest
@@ -13,6 +14,7 @@ from companion import image_generation
 from companion.contracts import CoreError
 from companion.media_config import ImageGenerationConfig, MediaEndpoint
 from companion.media_provider import HTTPImageGenerator
+from companion.store import Store
 from companion_onebot_bridge.generated_image_http import read_image
 from companion_onebot_bridge.outbound import validate_item
 from tests.conftest import run
@@ -43,6 +45,45 @@ def config(**changes):
 def image_reply(data):
     return httpx.Response(200, json={"created": 1, "data": [
         {"b64_json": base64.b64encode(data).decode()}]})
+
+
+def test_maintenance_preserves_bytes_between_dispatch_and_result_commit(
+    core, tmp_path, monkeypatch,
+):
+    original_write, observed = image_generation._write, []
+
+    def write(store, image_id, data):
+        root = image_generation.directory(store)
+        root.mkdir(mode=0o700, exist_ok=True)
+        partial = root / (image_id + ".tmp")
+        partial.write_bytes(data[:10])
+        with closing(Store(store.path)) as other:
+            image_generation.cleanup(other, core.clock())
+            assert partial.exists()
+            partial.unlink()
+            original_write(store, image_id, data)
+            image_generation.cleanup(other, core.clock())
+            assert (root / (image_id + ".img")).exists()
+        observed.append(image_id)
+
+    async def scenario():
+        async with window(core, tmp_path, expression=True) as (client, config_, plan):
+            core.settings.image_generation = config()
+            await owner_text(core, client, config_, plan, tmp_path, "合成生图请求")
+            selected = Provider(draw(), answer("画好啦，给你。"))
+
+            def provider(request):
+                return (image_reply(png()) if request.url.host == "images.example.test"
+                        else selected(request))
+
+            async with worker_for(core, provider) as worker:
+                worker.image_transport = httpx.MockTransport(provider)
+                assert await worker.run_once("generated-image-maintenance")
+            assert len(observed) == 1
+            assert core.store.one("SELECT state FROM generated_images")["state"] == "SUCCEEDED"
+
+    monkeypatch.setattr(image_generation, "_write", write)
+    run(scenario())
 
 
 def draw(prompt="一只在窗边晒太阳的橘猫", size="1024x1024", call_id="draw-1"):

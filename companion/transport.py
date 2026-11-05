@@ -278,8 +278,8 @@ def segment_envelopes(group):
     }
 
 
-def check_segment_ready(store, message_id, now):
-    group = reply_group(store, message_id)
+def check_segment_ready(store, message_id, now, *, group=None):
+    group = group if group is not None else reply_group(store, message_id)
     if not group["segmented"]:
         return
     row = next(part for part in group["rows"] if part["message_id"] == message_id)
@@ -425,7 +425,9 @@ def lease_deliveries(store, settings, request, now):
                                       "OWNER_DELIVERY_SOURCE_CHANGED", "SINGING_RESULT_CHANGED",
                                       "SINGING_ORIGINAL_SOURCE_CHANGED",
                                       "SINGING_ORIGINAL_TOOL_REQUIRED",
-                                      "SINGING_DISABLED", "SINGING_SOURCE_UNAVAILABLE"}:
+                                      "SINGING_DISABLED", "SINGING_SOURCE_UNAVAILABLE",
+                                      "LIFE_DRAFT_EXPIRED", "LIFE_DRAFT_CHANGED",
+                                      "LIFE_PRIVATE_DELIVERY_PAUSED"}:
                     raise
                 store.execute(
                     "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
