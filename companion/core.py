@@ -737,7 +737,7 @@ class Core(Runtime):
         if style:
             # Per-turn guidance stays dynamic so the static prompt prefix is unchanged.
             dynamic_rules.append(style["text"])
-        if (job["kind"] == "chat" and cfg.segmented_reply is not None
+        if ((job["kind"] == "chat" or followup) and cfg.segmented_reply is not None
             and cfg.segmented_reply.mode == "semantic"):
             from companion.reply_segments import SEMANTIC_RULES
 

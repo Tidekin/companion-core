@@ -1,6 +1,7 @@
 """Source-bound Life wording reaches native channel custody without a second model."""
 
 import copy
+import json
 
 import pytest
 
@@ -14,6 +15,7 @@ from companion.life_protocol import (
 )
 from companion.life_topics import _source
 from companion.reading_protocol import ReadObservation
+from companion.reply_segments import SegmentedReplyConfig
 from companion.social import proactive_counts
 from companion.social_autonomy import SocialAutonomy
 from companion.store import after, encode, uid
@@ -103,6 +105,37 @@ def request(core, job_id, ref, action="qzone.publish"):
                           (job_id,))["text"]
     return LifeConsumeRequest(authority=ref, action=action,
                               expected_content_sha256=paid_budget.sha({"text": text}))
+
+
+def test_private_life_segments_preserve_the_retained_draft_and_recheck_every_part(core, tmp_path):
+    from companion import notices
+
+    core.settings.segmented_reply = SegmentedReplyConfig(
+        mode="semantic", max_segments="unlimited", interval_ms=600)
+    _, _, ref, _ = prepared(core, tmp_path, destination="PRIVATE_MESSAGE_DRAFT", execute=False)
+    proposal = json.loads(core.model.activity)
+    proposal["text"] = "恒星的颜色真有意思。\n\n想再看看光谱。\n\n温度的关系也值得聊。"
+    core.model.activity = encode(proposal)
+    job_id = core.life_topics.schedule()
+    assert run(core.run_once(job_id=job_id))
+    body = request(core, job_id, ref, "qq.private.proactive")
+    usage = core.store.rows("SELECT * FROM model_usage")
+    consumed = core.life_topics.consume(job_id, body)
+    assert len(consumed["deliveries"]) == 3
+    assert core.life_topics.consume(job_id, body) == consumed
+    rows = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
+    assert "".join(json.loads(row["content_json"])["text"] for row in rows) == proposal["text"]
+    assert proactive_counts(core.store, core.settings, core.clock())[0] == 1
+    for row in rows:
+        assert notices.delivery_problem(core.store, core.settings, row["message_id"],
+                                        core.clock()) is None
+    # A matching per-message digest must not hide a changed member of the frozen draft.
+    changed = {"text": "被替换的尾段"}
+    core.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+                       (encode(changed), paid_budget.sha(changed), rows[-1]["message_id"]))
+    assert notices.delivery_problem(core.store, core.settings, rows[0]["message_id"],
+                                    core.clock()) is not None
+    assert core.store.rows("SELECT * FROM model_usage") == usage
 
 
 def test_public_life_draft_reuses_wording_and_native_outbox_once(core, tmp_path):

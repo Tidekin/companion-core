@@ -8,9 +8,10 @@ import pytest
 
 from companion import time_context, turn_taking
 from companion.config import Settings
-from companion.contracts import LeaseRequest
+from companion.contracts import DeliveryResult, LeaseRequest
 from companion.model import ModelResponse
-from companion.transport import lease_deliveries
+from companion.reply_segments import SEMANTIC_RULES, SegmentedReplyConfig
+from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.turn_taking import SILENCE_RULES, TurnTakingConfig
 from tests.conftest import event, ingest, run
 from tests.notice_owner_fixtures import run_notice
@@ -163,6 +164,52 @@ def test_a_lull_after_a_lively_chat_gets_one_follow_up(core):
                        (core.clock(),))
     core.clock.advance(900)
     assert not turn_taking.flush(core.store, core.settings, core.clock())  # No double text.
+
+
+@pytest.mark.parametrize("outcome", ["SENT", "UNKNOWN", "INTERRUPT", "DISABLED"])
+def test_follow_up_paragraphs_share_one_ordered_delivery_group(core, outcome):
+    enable(core)
+    core.settings.segmented_reply = (None if outcome == "DISABLED" else
+        SegmentedReplyConfig(mode="semantic", max_segments="unlimited", interval_ms=600))
+    lively(core)
+    core.clock.advance(900)
+    wording = "刚想起那个配角。\n\n最后没有回头。\n\n这一笔还挺有意思。"
+    core.model.activity.append(wording)
+    before = len(core.model.calls)
+    assert turn_taking.flush(core.store, core.settings, core.clock())
+    assert run(run_notice(core))
+    rows = core.store.rows("SELECT * FROM outbox WHERE action_type='qq.private.proactive' "
+                           "ORDER BY segment_index")
+    assert len(rows) == (1 if outcome == "DISABLED" else 3)
+    assert "".join(json.loads(row["content_json"])["text"] for row in rows) == wording
+    assert len(core.model.calls) == before + 1
+    assert (SEMANTIC_RULES in core.model.calls[-1][0][0]["content"]) is (outcome != "DISABLED")
+    usage = core.store.rows("SELECT * FROM model_usage")
+    first = lease(core)[0]
+    assert first["message_id"] == rows[0]["message_id"]
+    begin_send(core.store, first["message_id"], first["lease_token"], core.clock(), core.settings)
+    delivery_result(core.store, core.settings, first["message_id"], DeliveryResult(
+        lease_token=first["lease_token"],
+        result="DELIVERY_UNCERTAIN" if outcome == "UNKNOWN" else "SENT"), core.clock())
+    if outcome == "INTERRUPT":
+        ingest(core, 3, "先聊另一件事")
+    if outcome in {"UNKNOWN", "INTERRUPT"}:
+        core.clock.advance(1)
+        assert not lease(core)
+        assert [r["state"] for r in core.store.rows(
+            "SELECT state FROM outbox WHERE action_type='qq.private.proactive' "
+            "ORDER BY segment_index")][1:] == ["CANCELLED", "CANCELLED"]
+    else:
+        for row in rows[1:]:
+            assert not lease(core)
+            core.clock.advance(0.6)
+            item = lease(core)[0]
+            assert item["message_id"] == row["message_id"]
+            begin_send(core.store, item["message_id"], item["lease_token"],
+                       core.clock(), core.settings)
+            delivery_result(core.store, core.settings, item["message_id"], DeliveryResult(
+                lease_token=item["lease_token"], result="SENT"), core.clock())
+    assert core.store.rows("SELECT * FROM model_usage") == usage
 
 
 def test_morning_follow_up_keeps_the_owners_class_and_local_time(core):
@@ -399,8 +446,17 @@ def test_the_life_worker_selector_schedules_and_words_the_follow_up(core):
         "SELECT scenario FROM model_usage WHERE state='SETTLED'")} == {"chat", "activity"}
 
 
-def test_real_http_and_independent_worker_settle_one_follow_up_across_restart(core, tmp_path):
+@pytest.mark.parametrize("segmented", [False, True])
+def test_real_http_and_independent_worker_settle_one_follow_up_across_restart(
+        core, tmp_path, segmented):
     enable(core)
+    if segmented:
+        core.settings.segmented_reply = SegmentedReplyConfig(
+            mode="semantic", max_segments="unlimited", interval_ms=600)
+    wording = ("对了，里面那个配角其实挺出彩的。\n\n最后没有回头。\n\n这一笔还挺有意思。"
+               if segmented else "对了，里面那个配角其实挺出彩的。")
+    expected = (["对了，里面那个配角其实挺出彩的。\n\n", "最后没有回头。\n\n", "这一笔还挺有意思。"]
+                if segmented else [wording])
 
     async def exercise():
         async with real_core_http(core) as port, httpx.AsyncClient(
@@ -425,7 +481,8 @@ def test_real_http_and_independent_worker_settle_one_follow_up_across_restart(co
             _, authority = authorize(core, tmp_path, account=False,
                                      additional_purposes=("proactive",))
             core.clock.advance(900)
-            observed = await process_worker(core, tmp_path, "followup", "evt_test_2")
+            observed = await process_worker(core, tmp_path, "followup", "evt_test_2",
+                                             wording=wording)
             assert observed["provider_calls"] == 1
             assert observed["materials"][0]["kind"] == "followup"
             material = observed["materials"][0]
@@ -445,13 +502,37 @@ def test_real_http_and_independent_worker_settle_one_follow_up_across_restart(co
             assert leased.status_code == 200, leased.text
             items = leased.json()["items"]
             assert [item["action_type"] for item in items] == ["qq.private.proactive"]
-            assert [item["content"] for item in items] == [
-                {"text": "对了，里面那个配角其实挺出彩的。"},
-            ]
+            assert [item["content"] for item in items] == [{"text": expected[0]}]
             restarted = await process_worker(core, tmp_path, "followup", "evt_test_2", restart=True)
             assert restarted["provider_calls"] == 0
             assert len(core.store.rows("SELECT 1 FROM model_usage WHERE scenario='activity'")) == 1
             assert len(core.store.rows("SELECT 1 FROM outbox WHERE action_type="
-                                       "'qq.private.proactive'")) == 1
+                                       "'qq.private.proactive'")) == len(expected)
+            for index, text in enumerate(expected):
+                item = items[0]
+                assert item["content"] == {"text": text}
+                path = "/internal/v1/deliveries/" + item["message_id"]
+                begun = await http.post(path + "/begin-send",
+                                        json={"lease_token": item["lease_token"]})
+                assert begun.status_code == 200, begun.text
+                checked = await http.post("/internal/v1/owner-authority/send-check", json={
+                    "authority": authority, "event_id": item["origin_event_id"],
+                    "message_id": item["message_id"], "lease_token": item["lease_token"],
+                    "content_sha256": item["content_sha256"]})
+                assert checked.status_code == 200, checked.text
+                ack = await http.post(path + "/result", json={
+                    "lease_token": item["lease_token"], "result": "SENT"})
+                assert ack.status_code == 200, ack.text
+                if index + 1 < len(expected):
+                    lease_body = {"worker_id": "bridge", "authority": authority}
+                    waiting = await http.post("/internal/v1/deliveries/lease", json=lease_body)
+                    assert waiting.status_code == 200 and waiting.json()["items"] == []
+                    core.clock.advance(0.6)
+                    following = await http.post("/internal/v1/deliveries/lease", json=lease_body)
+                    assert following.status_code == 200, following.text
+                    items = following.json()["items"]
+            assert all(row["state"] == "SENT" for row in core.store.rows(
+                "SELECT state FROM outbox WHERE action_type='qq.private.proactive'"))
+            assert core.store.rows("SELECT * FROM model_usage WHERE scenario='activity'") == usage
 
     run(exercise())

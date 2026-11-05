@@ -10,6 +10,7 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from companion.reply_segments import SegmentedReplyConfig
 from tests.conftest import run
 from tests.support.core_http import real_core_http
 from tests.test_life_expression_consumption import prepared, request
@@ -24,12 +25,13 @@ def close_provider_clients(core):
         run(client.aclose())
 
 
-async def native_child(core, tmp_path, source, destination, number):
+async def native_child(core, tmp_path, source, destination, number, *, wording=None):
     config = tmp_path / f"life-{number}.json"
     result = tmp_path / f"life-{number}-result.json"
     config.write_text(json.dumps({
         "settings": core.settings.model_dump(mode="python"), "now": core.clock(),
         "source_id": source, "destination": destination, "result_path": str(result),
+        "wording": wording,
     }, default=lambda value: value.get_secret_value()
        if isinstance(value, SecretStr) else str(value)), encoding="utf-8")
     process = await asyncio.to_thread(subprocess.run,
@@ -39,6 +41,82 @@ async def native_child(core, tmp_path, source, destination, number):
     outcome = json.loads(result.read_text(encoding="utf-8"))
     assert outcome["pid"] != os.getpid()
     return outcome
+
+
+@pytest.mark.parametrize("outcome", ["SENT", "ERASE", "UNKNOWN"])
+def test_segmented_life_draft_actual_http_and_independent_worker(core, tmp_path, outcome):
+    core.settings.segmented_reply = SegmentedReplyConfig(
+        mode="semantic", max_segments="unlimited", interval_ms=600)
+    _, _, authority, source = prepared(core, tmp_path,
+                                       destination="PRIVATE_MESSAGE_DRAFT", execute=False)
+    core.settings.control_token = SecretStr("synthetic-owner-life-consumption-control")
+    texts = ["恒星的颜色真有意思。\n\n", "想再看看光谱。\n\n", "温度的关系也值得聊。"]
+
+    async def scenario():
+        async with real_core_http(core) as port, httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{port}", trust_env=False,
+        ) as client:
+            observed = await native_child(core, tmp_path, source, "PRIVATE_MESSAGE_DRAFT", 1,
+                                           wording="".join(texts))
+            assert observed["provider_calls"] == 1
+            result = next(row for row in observed["results"] if row["state"] == "SHADOW")
+            job_id = result["job_id"]
+            body = request(core, job_id, authority, "qq.private.proactive").model_dump(mode="json")
+            client.headers["Authorization"] = (
+                "Bearer " + core.settings.control_token.get_secret_value())
+            path = f"/internal/v2/life/results/{job_id}/consume"
+            consumed = await client.post(path, json=body)
+            assert consumed.status_code == 200, consumed.text
+            assert len(consumed.json()["deliveries"]) == 3
+            assert (await client.post(path, json=body)).json() == consumed.json()
+            usage = core.store.rows("SELECT * FROM model_usage")
+            assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
+            restarted = await native_child(core, tmp_path, source, "PRIVATE_MESSAGE_DRAFT", 2)
+            assert restarted["provider_calls"] == 0
+            client.headers["Authorization"] = (
+                "Bearer " + core.settings.bridge_token.get_secret_value())
+            lease_body = {"worker_id": "life-segments", "authority": authority}
+            for index, text in enumerate(texts):
+                leased = await client.post("/internal/v1/deliveries/lease", json=lease_body)
+                assert leased.status_code == 200, leased.text
+                items = leased.json()["items"]
+                if index and outcome != "SENT":
+                    assert items == []
+                    break
+                assert len(items) == 1 and items[0]["content"] == {"text": text}
+                item = items[0]
+                delivery_path = "/internal/v1/deliveries/" + item["message_id"]
+                begun = await client.post(delivery_path + "/begin-send",
+                                          json={"lease_token": item["lease_token"]})
+                assert begun.status_code == 200, begun.text
+                checked = await client.post("/internal/v1/owner-authority/send-check", json={
+                    "authority": authority, "event_id": item["origin_event_id"],
+                    "message_id": item["message_id"], "lease_token": item["lease_token"],
+                    "content_sha256": item["content_sha256"]})
+                assert checked.status_code == 200, checked.text
+                ack = await client.post(delivery_path + "/result", json={
+                    "lease_token": item["lease_token"],
+                    "result": "DELIVERY_UNCERTAIN" if outcome == "UNKNOWN" else "SENT"})
+                assert ack.status_code == 200, ack.text
+                if outcome == "ERASE":
+                    with core.store.transaction():
+                        core.ledger.expire_events(core.store, [source], core.clock())
+                if index < 2:
+                    waiting = await client.post("/internal/v1/deliveries/lease", json=lease_body)
+                    if outcome == "ERASE":
+                        # Erasing an approved source revokes the native grant as well.
+                        assert waiting.status_code == 403, waiting.text
+                        break
+                    assert waiting.status_code == 200 and waiting.json()["items"] == []
+                    core.clock.advance(0.6)
+            states = [row["state"] for row in core.store.rows(
+                "SELECT state FROM outbox ORDER BY segment_index")]
+            assert states == (["SENT"] * 3 if outcome == "SENT" else
+                ["DELIVERY_UNCERTAIN" if outcome == "UNKNOWN" else "SENT",
+                 "CANCELLED", "CANCELLED"])
+            assert core.store.rows("SELECT * FROM model_usage") == usage
+
+    run(scenario())
 
 
 @pytest.mark.parametrize("action,destination", [
