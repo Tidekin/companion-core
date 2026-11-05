@@ -26,8 +26,9 @@ from tests.test_reading_followup import window
 
 
 @pytest.mark.parametrize("lost_ack", [False, True])
+@pytest.mark.parametrize("superseded", [False, True])
 def test_reserved_before_begin_send_closes_and_handoffs_without_owner_guess(
-    core, tmp_path, monkeypatch, lost_ack,
+    core, tmp_path, monkeypatch, lost_ack, superseded,
 ):
     core.settings.control_token = SecretStr("synthetic-owner-control-token")
     owner = {"Authorization": "Bearer synthetic-owner-control-token"}
@@ -61,13 +62,21 @@ def test_reserved_before_begin_send_closes_and_handoffs_without_owner_guess(
                 item = leased.json()["items"][0]
                 OwnerSendGuard(runtime, client).reserve(item)
                 assert not spool.db.execute("SELECT 1 FROM results").fetchone()
-            # The stopped process lost its in-memory item. Core's normal lease
-            # expiry has already removed the original plaintext token.
+                if superseded:
+                    newer = encode(raw_event(91, time=int(core.clock.now.timestamp()),
+                                             text="先等一下，我补充一句"))
+                    received = normalize(newer, config, now=core.clock.now.timestamp())
+                    runtime.persist_capture(received, newer, received_at=core.clock.now,
+                                            peer=("127.0.0.1", 1))
+                    assert await runtime.flush_one(client)
+            # The stopped process lost its in-memory item. Lease expiry clears
+            # the token; supersession retains the original token as evidence.
             core.clock.advance(core.settings.lease_seconds + 1)
             recover_deliveries(core.store, core.clock())
             assert core.store.one("SELECT state,attempt_count,lease_token FROM outbox "
                 "WHERE message_id=?", (item["message_id"],)) == {
-                    "state": "PENDING", "attempt_count": 0, "lease_token": None}
+                    "state": "CANCELLED" if superseded else "PENDING", "attempt_count": 0,
+                    "lease_token": item["lease_token"] if superseded else None}
             stopped = await client.post("/internal/v1/owner-authority/stop", headers=owner,
                 json={"authority": plan.authority, "operation_id": "stop-reserved-process"})
             assert stopped.status_code == 200, stopped.text

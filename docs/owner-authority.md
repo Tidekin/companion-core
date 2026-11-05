@@ -178,6 +178,8 @@ capture key 签名的 v2 quiescence 证明及 Core STOP 回执。对于原日志
 `attempt_count=0`、没有 provider/native ACK、投递结果审计或独立账本 send 责任时，
 返回 `owner_delivery_not_sent_v1` 回执。原授权、来源、内容及 delivery 绑定须完整匹配。
 已过期的明文 lease 不重建；回执保留原签名 lease 哈希，原模型费用和尝试记录保持原值。
+后续输入取消旧回复时保留的原 lease，须与签名证明中的 lease 和 send-check 哈希一致；
+完成未发送结算后继续保留这份原证据。
 
 该分支复用 `/internal/v1/deliveries/reconciliation/prepare`，返回 `NOT_SENT`。
 Bridge 将原尝试记为 `NOT_SENT`，保存 accepted 收口结果；丢失 HTTP 响应可用同一证明
