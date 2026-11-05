@@ -24,6 +24,7 @@ Life Worker → 有界自主选择 → 原生 Life / Diary / Social / Memory 队
 - ModelClient 只处理 HTTP 协议和标准化响应。它不读记忆库、不决定发送、不具备工具执行权限。以后替换提供商只需满足 `complete(messages, scenario)` 返回 `ModelResponse` 的合同。
 - Memory 拥有证据、检索、冲突、修订与自我观察；Transport 拥有 Outbox 状态转换；Budget 独立预留与结算。模型输出不能直接更新权限或配置。
 - Store 提供事务和 SQL 基础设施。跨模块保持一个本地数据库，重要多表变更仍在同一事务内。SQLite 使用 WAL、FULL synchronous、外键与 busy timeout。
+- 聊天 worker 的任务领取先在写事务中完成一次恢复，再以既有 `read_or_write` 快照检查待领任务和权限；空闲校验不占用 SQLite 写锁。领取、取消或其他写入会在独立写事务中重做完整校验，恢复中的文件清理不参与只读重试。
 - Diary 拥有日期调度、真实对话来源、结构化验证、私人正文及其修订。它不写发送 Outbox，也不自动修改 Memory/traits；主人主动读取沿用普通私聊回复。协议后端差异仍留在 Bridge，Core 不依赖 NapCat 或 SnowLuma 的 SDK。
 
 ## 这次明确采用的调整
