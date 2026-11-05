@@ -80,7 +80,7 @@ def check_conversation(core, job, snapshots=(), *, current_request=None, purpose
     from companion import agent_images, agent_reading
 
     agent_reading.check_results(core, job, snapshots)
-    agent_images.inputs(core.store, core.settings, core.clock, job)
+    agent_images.input_sources(core.store, core.settings, core.clock, job)
     return view
 
 

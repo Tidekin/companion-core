@@ -40,7 +40,7 @@ def policy(**changes):
                             max_bytes_per_image=50000, max_pixels_per_image=10000, **changes)
 
 
-@pytest.mark.parametrize("subtype", [0, 1, 11])
+@pytest.mark.parametrize("subtype", [0, 1, 7, 11])
 def test_normal_gif_and_qq_animated_emoji_keep_original_source_proof(subtype):
     segment = image_segment("https://gchat.qpic.cn/animated.gif")
     segment["data"].update(sub_type=subtype, file="synthetic.gif",
@@ -111,6 +111,7 @@ def test_apng_poster_is_not_an_animation_frame_and_sampling_includes_the_last_fr
     ("PNG", "image/apng", 3, 11), ("GIF", "image/gif", 3, 1),
     ("WEBP", "image/webp", 3, 1), ("PNG", "image/apng", 3, 1),
     ("PNG", "image/png", 1, 1),
+    ("GIF", "image/gif", 3, 7), ("PNG", "image/png", 1, 7),
 ])
 def test_real_api_and_independent_worker_reply_to_animation_then_continue_semantic_chat(
     core, tmp_path, monkeypatch, format, mime, count, subtype,
