@@ -5,7 +5,7 @@ import time
 import httpx
 
 from .event_normalizer import decode, identifier
-from .metrics import core_rpc_finished, probe_finished
+from .metrics import core_rpc_finished, http_finished, probe_finished
 
 
 class PreflightBusy(Exception):
@@ -21,15 +21,22 @@ async def bounded_post(
     started, error = time.perf_counter_ns(), None
     try:
         async with client.stream("POST", path, json=body, headers=headers) as response:
-            busy_response = preflight and response.status_code == 503
-            if not busy_response and response.status_code not in statuses:
-                response.raise_for_status()
-                raise ValueError("UNEXPECTED_HTTP_STATUS")
-            content = bytearray()
-            async for chunk in response.aiter_bytes(chunk_size=8192):
-                content.extend(chunk)
-                if len(content) > max_bytes:
-                    raise ValueError("RESPONSE_TOO_LARGE")
+            http_error = None
+            try:
+                busy_response = preflight and response.status_code == 503
+                if not busy_response and response.status_code not in statuses:
+                    response.raise_for_status()
+                    raise ValueError("UNEXPECTED_HTTP_STATUS")
+                content = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    content.extend(chunk)
+                    if len(content) > max_bytes:
+                        raise ValueError("RESPONSE_TOO_LARGE")
+            except BaseException as failure:
+                http_error = failure
+                raise
+            finally:
+                http_finished(response.request, http_error)
         result = decode(bytes(content), max_bytes, max_depth=max_depth)
         if busy_response:
             from companion_delivery_protocol.preflight import BUSY

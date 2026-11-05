@@ -156,6 +156,14 @@ def restore(source, destination, key, ledger_path):
                 raise CoreError("BACKUP_INTEGRITY_FAILED")
             if store.rows("PRAGMA foreign_key_check"):
                 raise CoreError("BACKUP_FOREIGN_KEYS_FAILED")
+            from companion import image_spool
+
+            # Replay operates on a staged DB, while copied originals live beside
+            # the final path. Remove exactly its erased image/file IDs before
+            # publishing it; ordinary worker startup must not scan this directory.
+            image_spool.discard(store, (row["item_id"] for row in store.rows(
+                "SELECT item_id FROM content_items WHERE kind IN ('qq_image','qq_file') "
+                "AND (redacted=1 OR state='ERASED')")), database=dest)
             store.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             # Compact erased cells out of the newly restored file before exposing it.
             store.execute("VACUUM")

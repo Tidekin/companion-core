@@ -85,3 +85,41 @@ def test_worker_boundary_propagates_other_failures(core, monkeypatch, failure):
     with pytest.raises(type(failure)):
         run(runtime_config.worker_boundary(core.store, core.settings, core.clock))
     assert calls == [1]
+
+
+@pytest.mark.parametrize("code", [sqlite3.SQLITE_FULL, sqlite3.SQLITE_IOERR,
+                                 sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_LOCKED])
+def test_claim_scope_never_relabels_other_sqlite_failures(core, code):
+    from companion.worker_schedule import claim_scope
+
+    failure = sqlite3.OperationalError("synthetic database failure")
+    failure.sqlite_errorcode = code
+    with pytest.raises(sqlite3.OperationalError) as caught, claim_scope(core.store):
+        raise failure
+    assert caught.value is failure
+
+
+def test_content_worker_yields_before_expiry_claim_and_stays_alive(core, monkeypatch):
+    from companion import agent_images, content_worker
+
+    core.settings.content_enabled = True
+    original, calls = agent_images.expire_downloads, []
+    shutdown.reset()
+    with closing(sqlite3.connect(core.settings.database, isolation_level=None)) as writer:
+        def expire(service):
+            calls.append(1)
+            service.store.db.execute("PRAGMA busy_timeout=1")
+            if len(calls) == 1:
+                writer.execute("BEGIN IMMEDIATE")
+                asyncio.get_running_loop().call_soon(writer.rollback)
+            else:
+                shutdown.request()
+            return original(service)
+
+        monkeypatch.setattr(agent_images, "expire_downloads", expire)
+        try:
+            run(asyncio.wait_for(content_worker.content_worker(core.settings), 5))
+        finally:
+            shutdown.reset()
+    assert calls == [1, 1]
+    assert not core.store.rows("SELECT * FROM model_usage")

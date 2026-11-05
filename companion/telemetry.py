@@ -37,7 +37,7 @@ PHASES = {
     "dispatch_sources", "dispatch_scope", "dispatch_journal", "dispatch_recheck",
     "transport_custody", "transport_payload", "transport_sources", "model_transport",
     "recall_memory", "recall_turns", "turn_recall_candidates", "turn_recall_rank",
-    "context_turn_recall",
+    "context_turn_recall", "model_http",
 }
 STAGES.update(PHASES)
 
@@ -114,8 +114,9 @@ LOCK_REPORT_MS = 500
 
 
 def emit_lock(site, *, wait_ms, held_ms, outcome):
-    """One slow write transaction: where it was opened, never what it wrote."""
-    if not api_enabled() or wait_ms + held_ms < LOCK_REPORT_MS:
+    """One selected write transaction: its call site, never what it wrote."""
+    if not api_enabled() or (wait_ms + held_ms < LOCK_REPORT_MS
+                            and os.environ.get("COMPANION_TELEMETRY_ALL_LOCKS") != "1"):
         return
     record = {
         "schema_version": 1,

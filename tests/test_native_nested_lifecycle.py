@@ -72,6 +72,11 @@ def test_native_nested_original_is_reused_or_retired_without_renewal(core, tmp_p
             provider = Provider(answer("按现有资料继续回答。"))
             async with worker_for(core, provider) as worker:
                 assert await worker.run_once("nested-followup")
+                if lifecycle == "expiry":
+                    # The foreground refuses expired bytes; physical retirement
+                    # belongs to the bounded native maintenance lane.
+                    assert path.exists()
+                    assert worker.cleanup_media() == 1
             assert len(provider.requests) == 1
             messages = provider.requests[0]["messages"]
             images = [part for message in messages if isinstance(message["content"], list)

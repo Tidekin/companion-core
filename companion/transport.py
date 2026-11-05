@@ -278,8 +278,8 @@ def segment_envelopes(group):
     }
 
 
-def check_segment_ready(store, message_id, now):
-    group = reply_group(store, message_id)
+def check_segment_ready(store, message_id, now, *, group=None):
+    group = group if group is not None else reply_group(store, message_id)
     if not group["segmented"]:
         return
     row = next(part for part in group["rows"] if part["message_id"] == message_id)

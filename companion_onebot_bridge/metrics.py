@@ -36,7 +36,11 @@ STAGES = {
     "send_unavailable",
     "media_unavailable",
     "t_bridge_send_ack",
+    "t_reply_group_ack",
+    "t_reply_segments_ack",
 }
+
+HTTP_STARTED = "companion_onebot_http_started_ns"
 
 
 def probe_finished(name, started_ns, error=None):
@@ -46,6 +50,13 @@ def probe_finished(name, started_ns, error=None):
 def send_finished(started_ns, error=None):
     """The send call includes its guard/preflight work and provider transport."""
     _request_finished("t_onebot_send_result", started_ns, error)
+
+
+def http_finished(request, error=None):
+    """One delegated OneBot HTTP attempt, including body reads, excluding its guard."""
+    started = request.extensions.pop(HTTP_STARTED, None)
+    if type(started) is int:
+        _request_finished("onebot_http", started, error)
 
 
 def core_rpc_finished(path, started_ns, error=None):
@@ -100,6 +111,7 @@ class Metrics:
         self.sink = sink or (lambda record: print(json.dumps(record), flush=True))
         self.session = uuid.uuid4().hex
         self.received = {}
+        self.first_acks = {}
 
     def emit(self, stage, trace=None, *, elapsed_ms=None, at_ns=None):
         if stage not in STAGES:
@@ -117,14 +129,16 @@ class Metrics:
             record["elapsed_ms"] = round(max(0, elapsed_ms), 4)
         try:
             self.sink(record)
-        except OSError:
+        except Exception:
             pass  # Telemetry cannot change delivery state or request a retry.
 
     def start(self, payload, received_ns):
         key = payload["event_id"]
         if key not in self.received:
             if len(self.received) >= 1000:
-                self.received.pop(next(iter(self.received)))
+                oldest = next(iter(self.received))
+                self.received.pop(oldest)
+                self.first_acks.pop(oldest, None)
             self.received[key] = (received_ns, payload["trace_id"])
         self.emit("t_onebot_received", payload["trace_id"], at_ns=received_ns)
 
@@ -133,16 +147,25 @@ class Metrics:
         duration = (time.perf_counter_ns() - previous[0]) / 1e6 if previous else None
         self.emit("t_core_ingest_ack", payload["trace_id"], elapsed_ms=duration)
 
-    def delivered(self, delivery_key, provider_id, ack_ns):
+    def delivered(self, delivery_key, provider_id, ack_ns, *, segment=None):
         key = delivery_key.split(":")[1] if delivery_key.startswith("reply:") else ""
-        previous = self.received.pop(key, None)
+        previous = self.received.get(key)
         if previous and provider_id:
-            self.emit(
-                "t_bridge_send_ack",
-                previous[1],
-                elapsed_ms=(ack_ns - previous[0]) / 1e6,
-                at_ns=ack_ns,
-            )
+            if segment is None or segment["index"] == 0:
+                self.first_acks[key] = ack_ns
+                self.emit("t_bridge_send_ack", previous[1],
+                          elapsed_ms=(ack_ns - previous[0]) / 1e6, at_ns=ack_ns)
+            if segment is None or segment["index"] == segment["count"] - 1:
+                self.emit("t_reply_group_ack", previous[1],
+                          elapsed_ms=(ack_ns - previous[0]) / 1e6, at_ns=ack_ns)
+                first = self.first_acks.get(key)
+                if first is not None:
+                    self.emit("t_reply_segments_ack", previous[1],
+                              elapsed_ms=(ack_ns - first) / 1e6, at_ns=ack_ns)
+            else:
+                return
+        self.received.pop(key, None)
+        self.first_acks.pop(key, None)
 
 
 def emit(kind, **values):

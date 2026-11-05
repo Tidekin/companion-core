@@ -228,7 +228,8 @@ async def _deliver_item(client, onebot, spool, item, *, metrics=None, guard=None
             elapsed_ms=(ack_ns - send_start) / 1e6,
             at_ns=ack_ns,
         )
-        metrics.delivered(item.get("delivery_key", ""), provider_id, ack_ns)
+        metrics.delivered(item.get("delivery_key", ""), provider_id, ack_ns,
+                          segment=item.get("reply_segment"))
     await spool.flush_result(client, runtime=getattr(guard, "runtime", None))
     if guard is not None:
         guard.complete(item, provider_id)

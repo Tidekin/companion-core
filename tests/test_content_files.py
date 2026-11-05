@@ -319,6 +319,7 @@ def test_erasure_replay_removes_copied_file_spool_and_metadata(core, monkeypatch
     with core.store.transaction():
         core.ledger.expire_events(core.store, [event_id], core.clock())
     restore(archive, destination, key, core.settings.erasure_ledger)
+    assert list(copied.glob("*.raw")) == []
     with Core(core.settings.model_copy(update={"database": str(destination)}),
               clock=core.clock) as recovered:
         row = recovered.store.one("SELECT * FROM content_items")

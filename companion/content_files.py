@@ -344,13 +344,16 @@ def _record(service, row, snapshot, result, config):
 
 
 async def run_file_once(service, *, config=None, parse=None):
+    from companion.worker_schedule import claim_scope
+
     config = _config(service, config)
     if not config.enabled:
         return False
-    if expire_downloads(service, config=config):
-        return True
+    with claim_scope(service.store):
+        if expire_downloads(service, config=config):
+            return True
     s, now = service.store, service.clock()
-    with _transaction(s):
+    with claim_scope(s), _transaction(s):
         lost = s.one("SELECT * FROM content_items WHERE kind='qq_file' AND redacted=0 "
                      "AND state IN ('FETCHING','RUNNING') AND lease_until<=? "
                      "ORDER BY rowid LIMIT 1",

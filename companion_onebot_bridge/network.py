@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import socket
+import time
 from dataclasses import dataclass
 from ipaddress import ip_address
 from urllib.parse import urlsplit
@@ -60,7 +61,17 @@ class CheckedTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request):
         await self.check(request)
-        return await self.delegate.handle_async_request(request)
+        from .metrics import HTTP_STARTED, http_finished
+
+        if (not isinstance(self.delegate, CheckedTransport)
+            and request.url.path in {"/send_private_msg", "/set_qq_profile", "/set_qq_avatar",
+                                     "/send_qzone_msg"}):
+            request.extensions[HTTP_STARTED] = time.perf_counter_ns()
+        try:
+            return await self.delegate.handle_async_request(request)
+        except BaseException as error:
+            http_finished(request, error)
+            raise
 
     async def aclose(self):
         if self.owns_delegate:
