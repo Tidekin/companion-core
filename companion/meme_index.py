@@ -20,6 +20,7 @@ from companion_meme_protocol import canonical, digest
 SHA = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 JOB = Annotated[str, Field(pattern=r"^job_[a-f0-9]{32}$")]
 LIMIT, BATCH, DIMENSIONS = 4096, 32, 512
+AMBIENT_LIMIT = 4
 VECTOR_BYTES, RANKING_BYTES, OFFER_BYTES = 2048, 48 * 1024, 192 * 1024
 PROFILE = {
     "version": 1,
@@ -27,8 +28,8 @@ PROFILE = {
     "dimensions": DIMENSIONS,
     "vector_encoding": "f32le-512",
     "caption_text": "companion_meme_protocol.caption_text/v1:2000-chars",
-    "query_text": "current-query_for/v2:2000-chars",
-    "ranker": "caption-hybrid-cosine-f32-v2",
+    "query_text": "current-query_for/v3:2000-chars",
+    "ranker": "caption-hybrid-cosine-f32-v3",
     "lexical_divisor": 20,
     "lexical_ceiling": 0.49,
     "cosine_threshold": 0.5,
@@ -36,6 +37,8 @@ PROFILE = {
     "source_order": "asset-id-asc,exact-caption-job-id-asc",
     "scan_limit": LIMIT,
     "offer_limit": 8,
+    "ambient_offer_limit": AMBIENT_LIMIT,
+    "ambient_selection": "light-tone-category-diverse-v1",
     "cold_batch_limit": BATCH,
     "optional_budget_ms": 2000,
     "coverage_policy": "per-candidate-bounded-v2",

@@ -225,7 +225,9 @@ def runtime_case(core, tmp_path, monkeypatch, request):
                         new_grant,
                         now,
                         2,
-                        text="合成闲聊，没有意图词" if variant == "no_match" else "想要温暖的抱抱",
+                        # A one-character reply is neither cued nor an ambient light turn.
+                        text={"no_match": "嗯", "ambient": "周末去公园走走",
+                              "ambient_low": "今天好累"}.get(variant, "想要温暖的抱抱"),
                     )
                     assert accepted.status_code == 202, accepted.text
             with Core(core.settings, clock=core.clock) as claimant:

@@ -107,12 +107,19 @@ caption identity/content、固定模型 revision 和 512 维；不共享同字�
 固定 profile 绑定 BAAI/bge-small-zh-v1.5 的现有 pinned revision、f32 编码、caption_text/
 query_for 的 2000 字符边界、词法上限 0.49/除数 20、cosine 门槛 0.5、score 降序与物理
 SHA 升序、4096 扫描、8 offer、32 cold batch、2000ms 可选预算，以及
-`coverage_policy=per-candidate-bounded-v2`（query_for/ranker 为 v2）。Core capability hash 包含 profile，变更须重新授权；Bridge
+`coverage_policy=per-candidate-bounded-v2`（query_for/ranker 为 v3，含 ambient 菜单上限 4 与 light-tone-category-diverse-v1）。Core capability hash 包含 profile，变更须重新授权；Bridge
 模式的策略输入和默认/历史 golden 保持原形状。
 
 query 由 `expression.meme_query` 从当前主人原文生成：意图线索跳过紧邻否定（“不开心”）
 和“表扬+挫折”的反讽，明确索图在没有主题时以 request=any 进入合法目录（不含只适合
 早晚问候的素材），自嘲按第三方/本人区分对象；严肃或拒绝表情的语境不产生意图。
+没有任何线索（含被否定或反讽的线索）、非严肃、非命令或纯链接的轻松轮次得到 intent=ambient：
+先用原有确定性选用概率抽签，未抽中时按无意图处理且不扫描；抽中时只取 warm/neutral/
+celebratory/playful 且对象为 neutral/接收者的素材，低落语气（加班、累、困等）只取
+warm/neutral，非低落时不给以安慰为首要用途的素材。按分类各取最高分一张，最多 4 张，
+词法固定为 0.01、cosine 只影响顺序；提示说明这些是可选点缀，由聊天模型决定用或不用。
+ambient 未命中不写空 offer 审计，也不触发补库。原始文本与 caption 的向量相似度在合成
+基准上无法区分无线索语境的合适与否，因此不用它作 ambient 门槛。
 明确索图时，指向接收者的嘲讽/讥讽/愤怒素材不入候选；合法候选即使无字面重合也有 0.01
 词法下限。候选卡给最终选图模型附上前两条 use_when 与 avoid_when；avoid_when 不参与召回。
 
@@ -275,6 +282,6 @@ B1b 历史回执保留原 fixture/进程等待失败与修复；B2a 唯一
 `scripts/evaluate_meme_retrieval.py` 读取 `tests/fixtures/meme_quality_cases.json`
 （合成主人消息与合成 caption 库，不含真实聊天），用生产 query 解析与候选规则离线计算：
 明确索图候选率、候选召回 @5/@8、拒绝语境出图率、否定/反讽误触发率、含不可接受候选的
-offer 比例，均报告分子与分母。`--embeddings <cache_dir>` 用本地 BGE 权重加入 cosine，
+offer 比例，以及 ambient 菜单是否含可接受项、是否不含不可接受项，均报告分子与分母。`--embeddings <cache_dir>` 用本地 BGE 权重加入 cosine，
 并输出标注对的 cosine 分布与该库上的最佳 F1 门槛，仅作调参线索。它不测最终模型选图、
 图文一致性或 QQ 送达；这些需要主人真实图库与真实模型的另行评测。

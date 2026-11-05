@@ -15,13 +15,13 @@ from types import SimpleNamespace
 
 from companion import meme_policy
 from companion.meme_index import PROFILE
-from companion.meme_retrieval import query_for
+from companion.meme_retrieval import diverse, query_for
 from companion_meme_protocol import caption_text
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CASES = ROOT / "tests" / "fixtures" / "meme_quality_cases.json"
 CAPTION_DEFAULTS = {"confidence": 0.95, "content_status": "clear", "temporal_status": "static"}
-EXPECTATIONS = {"must_offer", "may", "must_not", "must_not_celebrate"}
+EXPECTATIONS = {"must_offer", "may", "must_not", "must_not_celebrate", "ambient"}
 
 
 def library(value):
@@ -50,6 +50,7 @@ def candidates(text, stickers, *, similarity=None, threshold=PROFILE["cosine_thr
     query = query_for(text)
     if not query["intent"]:
         return query, []
+    ambient = query["intent"] == "ambient"
     scored = []
     for label, caption in stickers.items():
         if not meme_policy.caption_eligible(caption) or not meme_policy.context_allows(
@@ -62,7 +63,10 @@ def candidates(text, stickers, *, similarity=None, threshold=PROFILE["cosine_thr
             score += cosine
         if score > 0:
             scored.append((-score, label))
-    return query, [label for _, label in sorted(scored)[:limit]]
+    ranked = [label for _, label in sorted(scored)]
+    if ambient:  # Category stands in for the pack directory a real asset comes from.
+        ranked = diverse(ranked, {label: stickers[label].suitable[0] for label in ranked})
+    return query, ranked[:limit]
 
 
 def ratio(numerator, denominator):
@@ -73,6 +77,7 @@ def ratio(numerator, denominator):
 def evaluate(value, stickers, **options):
     rows, recall5, recall8 = [], [0, 0], [0, 0]
     completed, leaked, misfired, unacceptable = [0, 0], [0, 0], [0, 0], [0, 0]
+    ambient_covered, ambient_safe = [0, 0], [0, 0]
     for case in value["cases"]:
         query, offered = candidates(case["text"], stickers, **options)
         good, bad = set(case["acceptable"]), set(case["unacceptable"])
@@ -90,6 +95,12 @@ def evaluate(value, stickers, **options):
         if case["expect"] == "must_not_celebrate":
             misfired[1] += 1
             misfired[0] += bool(bad & set(offered))
+        if case["expect"] == "ambient":
+            if good:
+                ambient_covered[1] += 1
+                ambient_covered[0] += bool(good & set(offered))
+            ambient_safe[1] += 1
+            ambient_safe[0] += not bad & set(offered)
         if offered:
             unacceptable[1] += 1
             unacceptable[0] += bool(bad & set(offered))
@@ -107,6 +118,9 @@ def evaluate(value, stickers, **options):
             "refused_context_offer_rate": ratio(*leaked),
             "negated_or_ironic_misfire_rate": ratio(*misfired),
             "offers_with_unacceptable_candidate": ratio(*unacceptable),
+            # The ambient menu is judged by the chat model; these measure only its contents.
+            "ambient_menu_contains_acceptable": ratio(*ambient_covered),
+            "ambient_menu_free_of_unacceptable": ratio(*ambient_safe),
         },
         "rows": rows,
     }
