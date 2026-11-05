@@ -222,14 +222,53 @@ def mutate_source(core, kind):
     "unsigned", "no_capture", "window", "receipt_epoch", "conversation", "action",
     "capture_identity",
 ])
-def test_selected_history_changed_in_final_preflight_causes_zero_new_io(core, tmp_path, kind):
+@pytest.mark.parametrize("repeat", range(6))
+def test_selected_history_changed_in_final_preflight_causes_zero_new_io(
+    core, tmp_path, kind, repeat, monkeypatch,
+):
+    from datetime import UTC, datetime
+
+    from companion.contracts import CoreError
+
+    reasons = []
+    original_batch = owner_input.history_batch
+
+    def batch(*args, **kwargs):
+        view, check, done = original_batch(*args, **kwargs)
+
+        def logged(event_id):
+            try:
+                return check(event_id)
+            except CoreError as error:
+                reasons.append((event_id[:12], str(error), core.clock()))
+                raise
+        return view, logged, done
+    monkeypatch.setattr(owner_input, "history_batch", batch)
+
+    def snapshot(tag):
+        return {"tag": tag, "core": core.clock(), "wall": datetime.now(UTC).isoformat(),
+                "outbox": core.store.rows("SELECT state,sent_at,created_at,updated_at,"
+                                          "last_error_code,attempt_count FROM outbox"),
+                "jobs": core.store.rows("SELECT kind,state,last_error_code,attempts,"
+                                        "event_id FROM jobs"),
+                "captures": [
+                    {k: json.loads(r["value"]).get("capture", {}).get(k)
+                     for k in ("occurred_at", "received_at")}
+                    for r in core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE ?",
+                                             (owner_input.INPUT + "%",))],
+                "reasons": list(reasons)}
+
     async def scenario():
         async with native_continuity(core, tmp_path) as (
             _, _, calls, sends, capture_input, finish,
         ):
+            diag = []
             await capture_input()
-            await finish()
+            diag.append(snapshot("cap1"))
+            delivered = await finish()
+            diag.append(snapshot(f"fin1 pump={delivered}"))
             await capture_input()
+            diag.append(snapshot("cap2"))
             changed = []
 
             async def mutate(_request):
@@ -238,7 +277,10 @@ def test_selected_history_changed_in_final_preflight_causes_zero_new_io(core, tm
 
             core.model.client.event_hooks["request"].append(mutate)
             assert await core.run_once()
-            assert len(calls) == len(sends) == 1
+            diag.append(snapshot("run2"))
+            diag.append({"prompts": [[m["content"][:20] for m in c["messages"]] for c in calls]})
+            assert len(calls) == len(sends) == 1, "PROBE " + json.dumps(diag, ensure_ascii=False,
+                                                                         default=str)
             assert changed == [kind]
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
             job = core.store.one(
