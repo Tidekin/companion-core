@@ -93,7 +93,7 @@ def image_segment(url=URL, *, subtype=0):
     }
 
 
-@pytest.mark.parametrize("subtype", [0, 1, 11])
+@pytest.mark.parametrize("subtype", [0, 1, 7, 11])
 def test_top_level_images_keep_source_order_and_hash_without_url_projection(subtype):
     raw = image_segment(subtype=subtype)
     values = images.original_images(
@@ -127,9 +127,10 @@ def test_top_level_images_keep_source_order_and_hash_without_url_projection(subt
 
 
 @pytest.mark.parametrize("data", [
-    {"sub_type": value} for value in (True, False, "1", 1.0, None, -1, 2, 7, 12)
+    {"sub_type": value} for value in (True, False, "1", 1.0, None, -1, 2, 8, 12)
 ] + [
     {"type": "flash"}, {"emoji_id": "fake"}, {"emoji_package_id": "fake"},
+    {"sub_type": 7, "type": "flash"}, {"sub_type": 7, "emoji_id": "fake"},
     {"key": "fake"}, {"file_size": 100}, {"summary": ["fake"]},
     {"file": {"url": URL}}, {"url": [URL]}, {"file": "file\x00name"},
     {"summary": "summary\x00text"},
@@ -175,7 +176,7 @@ def test_skipping_images_does_not_skip_invalid_face_or_unexpected_internal_error
         images.original_images([image_segment(subtype=1)], skip_unsupported=True)
 
 
-@pytest.mark.parametrize("subtype", [0, 1, 11])
+@pytest.mark.parametrize("subtype", [0, 1, 7, 11])
 @pytest.mark.parametrize(
     "url",
     [
@@ -200,7 +201,7 @@ def test_unknown_or_confused_image_destinations_are_rejected_before_io(url, subt
     "addresses",
     [[], ["127.0.0.1"], ["1.1.1.1", "10.0.0.1"], ["::1"], ["224.0.0.1"], ["::ffff:127.0.0.1"]],
 )
-@pytest.mark.parametrize("subtype", [0, 1, 11])
+@pytest.mark.parametrize("subtype", [0, 1, 7, 11])
 def test_dns_private_or_mixed_answers_never_get(addresses, subtype):
     calls = []
 
@@ -230,7 +231,7 @@ def test_dns_private_or_mixed_answers_never_get(addresses, subtype):
 @pytest.mark.parametrize(
     "failure", [None, "source", "redirect", "bytes", "mime", "encoding", "error"]
 )
-@pytest.mark.parametrize("subtype", [0, 1, 11])
+@pytest.mark.parametrize("subtype", [0, 1, 7, 11])
 def test_single_bounded_get_is_pinned_source_checked_and_never_logs_url(caplog, failure, subtype):
     calls = []
     caplog.set_level(logging.DEBUG)
