@@ -181,3 +181,73 @@ def test_one_queued_discovery_at_a_time(core, tmp_path, monkeypatch):
             assert reasons == ["NO_ASSETS", "NO_ASSETS"]
 
     run(scenario())
+
+
+@pytest.mark.parametrize("text,intent,mood", [
+    ("周末去公园走走", "ambient", None),
+    ("今天好累", "ambient", "low"),
+    ("嗯", None, None),
+    ("/help", None, None),
+    ("https://example.com/a", None, None),
+    ("我一点也不开心", None, None),
+    ("太棒了，又加班到凌晨", None, None),
+    ("我妈住院了", None, None),
+])
+def test_cue_less_light_turns_become_ambient(text, intent, mood):
+    query = query_for(text)
+    assert (query["intent"], query["mood"]) == (intent, mood)
+
+
+def test_ambient_menu_keeps_light_tones_and_reads_low_mood():
+    warm_comfort = caption(description="小猫抱抱", visible_text="", tone="warm",
+                           target="recipient", suitable=("comfort", "like"), tags=("猫",))
+    cheer = caption(description="欢呼", visible_text="", tone="celebratory", target="neutral",
+                    suitable=("celebrate",), tags=("欢呼",))
+    light, low = query_for("周末去公园走走"), query_for("今天好累")
+    assert not meme_policy.context_allows(warm_comfort, light)
+    assert meme_policy.context_allows(cheer, light)
+    assert meme_policy.context_allows(warm_comfort, low)
+    assert not meme_policy.context_allows(cheer, low)
+    for query in (light, low):
+        assert not meme_policy.context_allows(caption(), query)  # self-deprecating
+    assert meme_policy.lexical_score(cheer, light) == meme_policy.AMBIENT_FLOOR
+
+
+@pytest.mark.parametrize("runtime_case", ["ambient_low"], indirect=True)
+def test_low_mood_ambient_turn_offers_the_gentle_sticker_as_optional(runtime_case):
+    c = runtime_case
+    run(c.service.prepare_offer(c.job))
+    saved = c.retrieval.check(c.job)
+    assert saved["offer"]["intent"] == "ambient"
+    assert [x["candidate_id"] for x in saved["offer"]["candidates"]] == [c.item["asset_sha256"]]
+    _, data = ExpressionEngine(c.core.store, c.core.settings, c.core.clock).instruction_parts(
+        c.job["event_id"])
+    assert "可选点缀" in data
+
+
+@pytest.mark.parametrize("runtime_case", ["ambient"], indirect=True)
+def test_ambient_miss_is_routine_and_lost_draw_stays_text_only(runtime_case, monkeypatch):
+    c = runtime_case
+    run(c.service.prepare_offer(c.job))
+    saved = c.retrieval.check(c.job)
+    # The only asset is comfort-first, which a plain light turn does not get.
+    assert saved["offer"]["intent"] == "ambient" and saved["offer"]["candidates"] == []
+    assert not c.core.store.one("SELECT 1 FROM audit_log WHERE action='meme.offer_empty'")
+    assert not c.core.store.one("SELECT 1 FROM jobs WHERE kind='meme_discovery' AND event_id=?",
+                                (c.job["event_id"],))
+    from companion import expression
+
+    monkeypatch.setattr(expression, "selection_draw", lambda *args: False)
+    with pytest.raises(CoreError):
+        c.retrieval.check(c.job)  # The frozen ambient offer no longer matches a lost draw.
+
+
+@pytest.mark.parametrize("runtime_case", ["ambient"], indirect=True)
+def test_lost_ambient_draw_freezes_a_null_offer_without_scanning(runtime_case, monkeypatch):
+    from companion import expression
+
+    c = runtime_case
+    monkeypatch.setattr(expression, "selection_draw", lambda *args: False)
+    run(c.service.prepare_offer(c.job))
+    saved = c.retrieval.check(c.job)
+    assert saved["offer"] is None and saved["ranking"]["header"]["scanned"] == 0

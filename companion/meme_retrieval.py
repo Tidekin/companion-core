@@ -100,6 +100,23 @@ def query_for(text):
     return meme_query(text)
 
 
+def ambient_selected(event_id, settings):
+    """The existing deterministic selection draw, taken before any ambient scan."""
+    from companion.expression import selection_draw
+
+    return selection_draw(event_id, "meme:" + event_id, settings)
+
+
+def diverse(ranked, categories):
+    """A short light menu: the best item of each category first, at most AMBIENT_LIMIT."""
+    first, rest, seen = [], [], set()
+    for sha in ranked:
+        (rest if categories[sha] in seen else first).append(sha)
+        seen.add(categories[sha])
+    chosen = set((first + rest)[:index.AMBIENT_LIMIT])
+    return [sha for sha in ranked if sha in chosen]
+
+
 # Only a missing or irrelevant library is a reason to fetch more material.
 REPLENISH = frozenset({"NO_ASSETS", "NOT_RELEVANT"})
 
@@ -167,6 +184,12 @@ class MemeRetrieval:
             or not self.settings.expression_enabled
             or not {"meme", "expression"} <= set(view.policy.purposes)
         )
+
+    def _query(self, job, body):
+        query = query_for(body["text"])
+        if query["intent"] == "ambient" and not ambient_selected(job["event_id"], self.settings):
+            return {**query, "intent": None}  # Lost the existing draw: a text-only turn.
+        return query
 
     def _scope(self, job, *, executing):
         view, event, body = self._chat(job, executing=executing)
@@ -343,9 +366,10 @@ class MemeRetrieval:
             if s.one("SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)):
                 self.check(job)
                 return
-            query = query_for(body["text"])
+            query = self._query(job, body)
             snapshot = (view.policy.capability_policies["meme"], epoch(s), event["reply_revision"],
                         digest(query))
+            ambient = query["intent"] == "ambient"
             seen = set()
             if query["intent"]:
                 rows = s.rows(
@@ -419,7 +443,10 @@ class MemeRetrieval:
                 vector_sha256=index.vector_sha(vector) if vector is not None else None,
                 vector_base64=index.vector_text(vector) if vector is not None else None,
             )
-        ranked = sorted(proofs, key=lambda sha: (-proofs[sha].score, sha))[:8]
+        ranked = sorted(proofs, key=lambda sha: (-proofs[sha].score, sha))
+        if ambient:
+            ranked = diverse(ranked, {sha: facts[sha][2]["category"] for sha in ranked})
+        ranked = ranked[:8]
         unindexed = len(facts) - len(vectors) if query_vector is not None else len(facts)
         header = index.RankingHeader(
             profile=index.PROFILE, profile_sha256=digest(index.PROFILE),
@@ -435,7 +462,7 @@ class MemeRetrieval:
                 self.check(job)
                 return  # A competing first offer is never overwritten.
             if snapshot != (current.policy.capability_policies["meme"], epoch(s),
-                            event["reply_revision"], digest(query_for(body["text"]))):
+                            event["reply_revision"], digest(self._query(job, body))):
                 raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
             fresh = cold if computed else []
             resolved, dropped = {}, 0
@@ -492,8 +519,8 @@ class MemeRetrieval:
             self._bounded(value)
             s.insert("runtime_meta", key=OFFER + job["event_id"], value=encode(value))
             self.check(job)
-            if not query["intent"] or selected:
-                return
+            if not query["intent"] or selected or ambient:
+                return  # Optional ambient misses are routine, never a replenish signal.
             reason = empty_reason(seen, facts, proofs, skipped, fallback, dropped)
             s.audit("meme.offer_empty", job["job_id"], event["trace_id"], self.clock(),
                     reason=reason, scanned=scanned, eligible=len(facts), **skipped)
@@ -533,7 +560,7 @@ class MemeRetrieval:
             frozen = FrozenOffer.model_validate(value)
         except (ValueError, TypeError, ValidationError) as error:
             raise CoreError("MEME_OFFER_BINDING_INVALID", 403) from error
-        query = query_for(body["text"])
+        query = self._query(job, body)
         offer, ranking = frozen.offer, frozen.ranking
         if (frozen.job_id != job["job_id"] or frozen.event_id != job["event_id"]
             or frozen.privacy_epoch != epoch(self.store)

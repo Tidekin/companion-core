@@ -107,7 +107,9 @@ def trusted_source(metadata, rules):
     return False
 
 
-EXPLICIT_FLOOR = 0.01
+EXPLICIT_FLOOR = AMBIENT_FLOOR = 0.01
+# Optional stickers on cue-less turns: light tones only, never self-deprecation or mockery.
+AMBIENT_TONES = frozenset({"warm", "neutral", "celebratory", "playful"})
 
 
 def caption_eligible(result, minimum=0.8):
@@ -131,6 +133,14 @@ def context_allows(caption, query):
     if (query.get("request") and caption.target == "recipient"
             and caption.tone in {"mocking", "sarcastic", "angry"}):
         return False
+    if query["intent"] == "ambient":
+        low = query.get("mood") == "low"
+        # Comfort-first stickers answer low spirits; on other turns they misread the mood.
+        if not caption.suitable or not low and caption.suitable[0] == "comfort":
+            return False
+        return (caption.tone in ({"warm", "neutral"} if low else AMBIENT_TONES)
+                and caption.target in {"neutral", "recipient"}
+                and caption.target in {"neutral", query["target"]})
     # An explicit request without a theme accepts any legal light use; object/tone stay strict.
     if query.get("request") == "any":
         if (not set(caption.suitable) - {"morning", "sleep"}
@@ -160,6 +170,9 @@ def tokens(text):
 def lexical_score(caption, query):
     if not caption_eligible(caption) or not context_allows(caption, query):
         return 0.0
+    if query["intent"] == "ambient":
+        # Word overlap with a cue-less turn is noise; the chat model judges the short menu.
+        return AMBIENT_FLOOR
     overlap = len(tokens(query["text"]) & tokens(caption_text(caption)))
     if overlap:
         return min(0.49, overlap / 20)

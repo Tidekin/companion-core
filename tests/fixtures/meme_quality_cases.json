@@ -1,6 +1,6 @@
 {
-  "name": "meme-quality-v1",
-  "description": "Synthetic owner messages and a synthetic caption library for the deterministic retrieval stage. Labels say which stickers are acceptable or unacceptable for each message; final model choice and real QQ delivery are outside this fixture. Real owner chats are never copied here.",
+  "name": "meme-quality-v2",
+  "description": "Synthetic owner messages and a synthetic caption library for the deterministic retrieval stage. Ambient cases have no cue word; an empty acceptable list means no sticker is the right offer. Labels say which stickers are acceptable or unacceptable for each message; final model choice and real QQ delivery are outside this fixture. Real owner chats are never copied here.",
   "library": {
     "hug": {"description": "小猫张开双臂送上温暖的抱抱", "visible_text": "抱抱", "tone": "warm", "target": "recipient", "suitable": ["comfort", "like"], "avoid": ["celebrate"], "use_when": ["对方难过或委屈", "需要安慰"], "avoid_when": ["对方在庆祝"], "tags": ["抱抱", "温暖", "安慰"]},
     "pat": {"description": "小狗轻轻拍拍对方的头", "visible_text": "摸摸头", "tone": "warm", "target": "recipient", "suitable": ["comfort"], "avoid": [], "use_when": ["对方累了", "安慰鼓励"], "avoid_when": [], "tags": ["摸头", "安慰", "辛苦"]},
@@ -55,8 +55,24 @@
     {"name": "breakup", "group": "serious", "text": "我们分手了", "expect": "must_not", "acceptable": [], "unacceptable": []},
     {"name": "funeral", "group": "serious", "text": "明天要去参加葬礼", "expect": "must_not", "acceptable": [], "unacceptable": []},
     {"name": "fraud", "group": "serious", "text": "我好像被诈骗了怎么办", "expect": "must_not", "acceptable": [], "unacceptable": []},
-    {"name": "weather", "group": "neutral", "text": "明天天气预报温度多少", "expect": "may", "acceptable": [], "unacceptable": []},
-    {"name": "question", "group": "neutral", "text": "这段代码为什么报错", "expect": "may", "acceptable": [], "unacceptable": []},
-    {"name": "plan", "group": "neutral", "text": "周末我们去哪里玩", "expect": "may", "acceptable": [], "unacceptable": []}
+    {"name": "weather", "group": "neutral", "text": "明天天气预报温度多少", "expect": "ambient", "acceptable": [], "unacceptable": []},
+    {"name": "question", "group": "neutral", "text": "这段代码为什么报错", "expect": "ambient", "acceptable": [], "unacceptable": []},
+    {"name": "plan", "group": "neutral", "text": "周末我们去哪里玩", "expect": "ambient", "acceptable": [], "unacceptable": []},
+    {"name": "off_work", "group": "ambient", "text": "终于下班了", "expect": "ambient", "acceptable": ["dance", "cheer", "pat", "facepalm"], "unacceptable": ["mock"]},
+    {"name": "hotpot", "group": "ambient", "text": "今天吃了超好吃的火锅", "expect": "ambient", "acceptable": ["dance", "heart"], "unacceptable": ["hug", "pat", "shock"]},
+    {"name": "tired", "group": "ambient", "text": "累死了，今天跑了一整天", "expect": "ambient", "acceptable": ["pat", "hug"], "unacceptable": ["cheer", "dance", "laugh", "tease"]},
+    {"name": "praised", "group": "ambient", "text": "刚被老板夸了", "expect": "ambient", "acceptable": ["cheer", "dance"], "unacceptable": ["hug", "pat"]},
+    {"name": "guess", "group": "ambient", "text": "你猜怎么着", "expect": "ambient", "acceptable": ["shock", "tease"], "unacceptable": []},
+    {"name": "rain", "group": "ambient", "text": "外面下大雨了", "expect": "ambient", "acceptable": [], "unacceptable": []},
+    {"name": "cat_video", "group": "ambient", "text": "我在看猫猫视频", "expect": "ambient", "acceptable": ["heart"], "unacceptable": []},
+    {"name": "weekend", "group": "ambient", "text": "周末一起去玩吧", "expect": "ambient", "acceptable": ["dance", "heart", "tease"], "unacceptable": ["pat", "hug"]},
+    {"name": "traffic", "group": "ambient", "text": "又堵车了", "expect": "ambient", "acceptable": ["facepalm"], "unacceptable": ["cheer", "dance"]},
+    {"name": "short_ok", "group": "ambient", "text": "嗯嗯", "expect": "ambient", "acceptable": [], "unacceptable": []},
+    {"name": "short_fine", "group": "ambient", "text": "好的", "expect": "ambient", "acceptable": [], "unacceptable": []},
+    {"name": "bug_found", "group": "ambient", "text": "这个bug我找到了", "expect": "ambient", "acceptable": ["cheer", "dance"], "unacceptable": ["hug", "pat"]},
+    {"name": "nice_day", "group": "ambient", "text": "今天天气真好", "expect": "ambient", "acceptable": ["dance", "heart", "morning"], "unacceptable": ["pat", "hug"]},
+    {"name": "what_doing", "group": "ambient", "text": "你在干嘛呀", "expect": "ambient", "acceptable": ["tease", "heart"], "unacceptable": []},
+    {"name": "sleepy", "group": "ambient", "text": "我好困", "expect": "ambient", "acceptable": ["night", "pat"], "unacceptable": ["cheer", "dance"]},
+    {"name": "exam_bad", "group": "ambient", "text": "考试考砸了", "expect": "ambient", "acceptable": ["hug", "pat"], "unacceptable": ["mock", "laugh", "cheer", "dance", "tease"]}
   ]
 }

@@ -11,6 +11,9 @@ def test_candidate_stage_benchmark_holds_its_recorded_floor():
     assert rate["offers_with_unacceptable_candidate"] == 0.0
     # Lexical-only recall; the miss is a third-party case that needs semantic similarity.
     assert metrics["candidate_recall_at_5"]["numerator"] >= 21
+    # The ambient menu is judged by the chat model; its contents must still be safe.
+    assert rate["ambient_menu_free_of_unacceptable"] == 1.0
+    assert metrics["ambient_menu_contains_acceptable"]["numerator"] >= 11
 
 
 def test_benchmark_uses_the_production_parser_not_injected_labels():
@@ -18,4 +21,5 @@ def test_benchmark_uses_the_production_parser_not_injected_labels():
     query, offered = benchmark.candidates("自嘲把工作搞砸了", stickers)
     assert query["target"] == "self" and offered == ["self_fail"]
     assert benchmark.candidates("我一点也不开心", stickers) == (
-        {"text": "我一点也不开心", "intent": None, "target": "recipient", "request": None}, [])
+        {"text": "我一点也不开心", "intent": None, "mood": None, "target": "recipient",
+         "request": None}, [])

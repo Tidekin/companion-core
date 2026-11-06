@@ -17,6 +17,8 @@ from companion_meme_protocol import explicit_meme_request
 MARKER = re.compile(r"⬡([^⬡\r\n]{1,80})⬡")
 CATEGORY = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 MemeIntent = Literal["celebrate", "comfort", "like", "surprised", "morning", "sleep", "playful"]
+# A light turn without a cue may still get a short optional menu of light stickers.
+OfferIntent = MemeIntent | Literal["ambient"]
 SERIOUS = re.compile(
     r"严肃|认真说|(?:不要|不用|别|不发|不需要|禁止).{0,12}(?:表情|图片|发图)|"
     r"自杀|自残|想死|不想活|伤害自己|去世|逝世|葬礼|丧亲|失去亲人|"
@@ -45,6 +47,8 @@ PRAISE = r"(?:太棒了|真棒|好棒|真厉害|好极了)"
 IRONY = re.compile(
     PRAISE + r"[^。！？!?\n]{0,16}" + SETBACK + "|" + SETBACK + r"[^。！？!?\n]{0,16}" + PRAISE
 )
+# Cue-less but low-spirited turns only get gentle stickers on the ambient menu.
+LOW_MOOD = re.compile(SETBACK + r"|累|困|烦|难受|郁闷|失落|想哭|哭了|倒霉|讨厌|无聊|生气|堵车|头疼")
 THIRD_PARTY = r"(?:他|她|它|他们|她们|别人|朋友|同事|室友|同学|老板|对方)"
 
 
@@ -71,21 +75,42 @@ def query_target(text):
     return "self" if re.search(r"自嘲", text) else "recipient"
 
 
+def ambient_eligible(text):
+    """Light ordinary chat that may carry an optional sticker; commands and links do not."""
+    stripped = text.strip()
+    # A negated or ironic cue ("一点也不开心") already said this is not a plain light turn.
+    cued = IRONY.search(text) or any(re.search(p, text, re.IGNORECASE)
+                                     for _, p in INTENT_PATTERNS)
+    return (len(stripped) >= 2 and not stripped.startswith("/") and not SERIOUS.search(text)
+            and not cued and not re.fullmatch(r"\s*https?://\S+\s*", text))
+
+
 def meme_query(text):
     """Parse one current owner message into the retrieval query.
 
     ``request`` marks an explicit sticker request: ``any`` when no theme was named, so the
-    legal catalog may answer it; ``themed`` when a theme cue also matched.
+    legal catalog may answer it; ``themed`` when a theme cue also matched. A light turn with
+    neither gets intent ``ambient``: a short light menu the chat model may ignore.
     """
     text = text[-2000:]
     explicit = explicit_meme_request(text) and not SERIOUS.search(text)
     themed = query_intent(text, explicit_fallback=False)
+    intent = themed or ("playful" if explicit else "ambient" if ambient_eligible(text) else None)
     return {
         "text": text,
-        "intent": themed or ("playful" if explicit else None),
+        "intent": intent,
+        "mood": "low" if intent == "ambient" and LOW_MOOD.search(text) else None,
         "target": query_target(text),
         "request": ("themed" if themed else "any") if explicit else None,
     }
+
+
+def selection_draw(event_id, offer_key, settings):
+    """Deterministic per-turn draw against the configured selection probability."""
+    probability = getattr(settings, "expression_selection_probability", 0.35)
+    if probability <= 0 or probability >= 1:
+        return probability >= 1
+    return int(digest([event_id, offer_key]), 16) / (1 << 256) < probability
 
 
 class MemeCandidate(StrictModel):
@@ -99,7 +124,7 @@ class MemeCandidate(StrictModel):
 
 class MemeOffer(StrictModel):
     offer_key: str = Field(pattern=r"^meme:[A-Za-z0-9_-]+$", max_length=133)
-    intent: MemeIntent
+    intent: OfferIntent
     candidates: list[MemeCandidate] = Field(max_length=8)
 
     @model_validator(mode="after")
@@ -223,11 +248,7 @@ class ExpressionEngine:
             if (not body.get("control_command") and not body.get("diary_command")
                 and explicit_meme_request(text) and not SERIOUS.search(text)):
                 return True
-        probability = getattr(self.settings, "expression_selection_probability", 0.35)
-        if probability <= 0 or probability >= 1:
-            return probability >= 1
-        sample = int(digest([event_id, offer_key]), 16) / (1 << 256)
-        return sample < probability
+        return selection_draw(event_id, offer_key, self.settings)
 
     def instruction(self, event_id=None):
         return "".join(self.instruction_parts(event_id))
@@ -249,7 +270,9 @@ class ExpressionEngine:
             if (offer is None or not offer.candidates
                 or not self._selection_allowed(event_id, offer.offer_key)):
                 return rules, "本轮只回复文字，不添加表情标记。"
-            return rules, (
+            optional = ("本轮候选只是可选点缀：只有图意与你这句回复的语气自然相符时才用，"
+                        "大多数时候不用。") if offer.intent == "ambient" else ""
+            return rules, optional + (
                 "如有合适候选，只在回复末尾附一个⬡候选ID⬡；也可选择none并省略标记。"
                 "只能使用本轮列表的candidate_id，不能用类别名或自造ID。"
             ) + "\n候选数据：\n" + encode(offer.model_dump())
