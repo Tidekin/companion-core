@@ -26,7 +26,7 @@ class DiscoveryRequest(StrictModel):
     event_id: str = Field(min_length=8, max_length=128)
     reply_revision: int = Field(ge=0, strict=True)
     intent: MemeIntent
-    provider: Literal["community", "brave"]
+    provider: Literal["community", "brave", "gallery"]
 
 
 class DiscoveryLeaseRequest(StrictModel):
@@ -128,24 +128,34 @@ def policy_hash(settings):
     owner = getattr(settings, "meme_catalog_owner", "bridge")
     rules = getattr(settings, "meme_trusted_sources", ())
     cooldown = getattr(settings, "meme_cooldown_seconds", 1800)
+    excluded = getattr(settings, "meme_excluded_sha256", ())
+    gallery = getattr(settings, "meme_gallery_source", None)
     if owner != "bridge" or rules or cooldown != 1800:
         from companion.meme_policy import source_rules
 
         value["catalog"] = {"owner": owner, "sources": [r.model_dump(mode="json")
             for r in source_rules(settings)], "cooldown_seconds": cooldown}
+    if excluded:
+        value["excluded_sha256"] = sorted(set(excluded))
+    if gallery is not None:
+        value["gallery_selection_sha256"] = gallery.selection().sha256
     if owner == "core":
         from companion.meme_index import PROFILE
 
         value["catalog"]["retrieval"] = {"binding_version": 2, "profile": PROFILE}
         if settings.meme_discovery_enabled:
-            value["catalog"]["acquisition"] = acquisition_profile()
+            value["catalog"]["acquisition"] = acquisition_profile(settings)
     return digest(value)
 
 
 
-def acquisition_profile():
+def acquisition_profile(settings=None):
     from companion_meme_sources.community import INDEX_REVISION
 
+    if getattr(settings, "meme_gallery_source", None) is not None:
+        return {"version": 1, "provider": "gallery", "source_format": "aigengtu-selection-v1",
+                "limits": DiscoveryLimits().model_dump(),
+                "license_policy": "owner-selected-personal-chat-v1"}
     return {"version": 1, "provider": "community", "source_format": "repository-files-v1",
             "index_revision": INDEX_REVISION, "limits": DiscoveryLimits().model_dump(),
             "license_policy": "exact-local-TrustedSource-v1"}
@@ -162,7 +172,7 @@ def _native_scope(store, settings, clock):
     if (getattr(settings, "meme_catalog_owner", "bridge") != "core"
         or not settings.meme_discovery_enabled or not settings.expression_enabled
         or not settings.paid_model or not settings.paid_model.meme_input
-        or not meme_policy.source_rules(settings)):
+        or not (meme_policy.source_rules(settings) or settings.meme_gallery_source)):
         raise CoreError("MEME_DISCOVERY_DISABLED", 403)
     paid_budget.contract(settings, clock())
     approval = meme_core.scope(store, settings, clock)
@@ -177,7 +187,8 @@ def submit_native(store, settings, clock, body, *, origin_job):
     approval = _native_scope(store, settings, clock)
     original = store.one("SELECT * FROM jobs WHERE job_id=?", (origin_job["job_id"],))
     if (not original or original["kind"] != "chat" or original["state"] != "RUNNING"
-        or original["event_id"] != body.event_id or body.provider != "community"):
+        or original["event_id"] != body.event_id
+        or body.provider != acquisition_profile(settings)["provider"]):
         raise CoreError("MEME_DISCOVERY_SOURCE_CHANGED", 403)
     owner_authority.check_job(store, settings, clock, original, purpose="chat", executing=True)
     reply_revision.check_job(store, original)
@@ -195,13 +206,13 @@ def lease_native(store, settings, clock, body):
         ):
             return {"item": None}
         return _lease(store, settings, clock, body, approval,
-                      providers=("community",))
+                      providers=(acquisition_profile(settings)["provider"],))
 
 
 def _check_native(store, settings, clock, job_id, body):
     job, value = _check_current(store, settings, clock, job_id, body,
                                 _native_scope(store, settings, clock))
-    if value["provider"] != "community":
+    if value["provider"] != acquisition_profile(settings)["provider"]:
         raise CoreError("MEME_DISCOVERY_PROVIDER_UNAVAILABLE", 403)
     return job, value
 
@@ -267,6 +278,8 @@ def _check_current(store, settings, clock, job_id, body, approval):
 
 def submit(store, settings, clock, body):
     with store.transaction():
+        if body.provider == "gallery":
+            raise CoreError("MEME_DISCOVERY_PROVIDER_UNAVAILABLE", 403)
         return _submit(store, settings, clock, body, _scope(store, settings, clock))
 
 

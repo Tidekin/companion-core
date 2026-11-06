@@ -12,6 +12,7 @@ from companion.core import Core
 from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
 from tests.test_meme_core import CAPTION
+from tests.test_meme_gallery import GalleryUpstream
 from tests.test_meme_pack_files import Upstream
 from tests.test_next_memes_discovery import resolver
 
@@ -20,7 +21,7 @@ assert control in ([], ["gate"])
 settings = Settings.model_validate_json(Path(config).read_text("utf-8"))
 SemanticIndex.warmup = lambda self: None  # Existing fixture: never download chat index weights.
 calls = []
-upstream = Upstream(count=1)
+upstream = GalleryUpstream() if settings.meme_gallery_source else Upstream(count=1)
 
 
 def provider(request):
@@ -47,7 +48,10 @@ async def main():
                 assert await asyncio.to_thread(sys.stdin.readline) == "run\n"
             worked = await core.run_once("native-file-process")
             return {"worked": worked, "calls": calls, "requests": len(upstream.calls),
-                    "download_bytes": sum(map(len, upstream.bodies)),
+                    "download_bytes": (sum(map(len, upstream.bodies))
+                                       if isinstance(upstream, Upstream) else
+                                       len(upstream.terms) + len(upstream.image)
+                                       if upstream.calls else 0),
                     "jobs": core.store.rows("SELECT kind,state,last_error_code FROM jobs")}
 
 

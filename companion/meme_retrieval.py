@@ -230,7 +230,8 @@ class MemeRetrieval:
 
         s = self.store
         asset = s.one("SELECT * FROM meme_assets WHERE asset_id=?", (asset_id,))
-        if not asset or asset["state"] != "STAGED":
+        if (not asset or asset["state"] != "STAGED"
+            or asset["asset_sha256"] in self.settings.meme_excluded_sha256):
             raise CoreError("MEME_ASSET_UNAVAILABLE", 409)
         meta = meme_assets.metadata(json.loads(asset["metadata_json"]))
         item = {
@@ -332,7 +333,7 @@ class MemeRetrieval:
             )
         ):
             raise CoreError("MEME_CAPTION_UNSETTLED", 403)
-        if not meme_policy.trusted_source(meta, meme_policy.source_rules(self.settings)):
+        if not meme_policy.source_allowed(meta, self.settings):
             raise CoreError("MEME_SOURCE_POLICY_CHANGED", 403)
         result = parse(CaptionResult, caption["result_json"])
         if not meme_policy.caption_eligible(result):
@@ -525,14 +526,16 @@ class MemeRetrieval:
             s.audit("meme.offer_empty", job["job_id"], event["trace_id"], self.clock(),
                     reason=reason, scanned=scanned, eligible=len(facts), **skipped)
             if (reason in REPLENISH
-                and self.settings.meme_discovery_enabled and self.settings.meme_trusted_sources
+                and self.settings.meme_discovery_enabled
+                and (self.settings.meme_trusted_sources or self.settings.meme_gallery_source)
                 and self.settings.paid_model and self.settings.paid_model.meme_input
                 and not s.one("SELECT 1 FROM jobs WHERE kind='meme_discovery' "
                               "AND state IN ('QUEUED','RUNNING','RETRY_WAIT') LIMIT 1")):
                 meme_service.submit_native(s, self.settings, self.clock,
                     meme_service.DiscoveryRequest(event_id=job["event_id"],
                         reply_revision=event["reply_revision"], intent=query["intent"],
-                        provider="community"), origin_job=job)
+                        provider=meme_service.acquisition_profile(self.settings)["provider"]),
+                    origin_job=job)
 
     @staticmethod
     def _bounded(value):

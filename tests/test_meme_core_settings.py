@@ -89,6 +89,7 @@ def test_default_fields_preserve_previous_settings_paid_and_owner_hashes(core, t
         {"meme_catalog_owner": "core"},
         {"meme_cooldown_seconds": 0},
         {"meme_trusted_sources": [RULE]},
+        {"meme_catalog_owner": "core", "meme_excluded_sha256": ["e" * 64]},
         {"meme_catalog_owner": "core", "meme_cooldown_seconds": 30, "meme_trusted_sources": [RULE]},
     ],
 )
@@ -121,6 +122,7 @@ def test_cooldown_is_strict_and_bounded(core, value):
         {"meme_catalog_owner": "core"},
         {"meme_cooldown_seconds": 1},
         {"meme_trusted_sources": [TrustedSource(**RULE)]},
+        {"meme_catalog_owner": "core", "meme_excluded_sha256": ["e" * 64]},
     ],
 )
 def test_old_native_owner_grant_does_not_authorize_changed_catalog_policy(

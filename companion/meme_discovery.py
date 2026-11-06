@@ -20,6 +20,7 @@ from companion_meme_sources import (
 )
 from companion_meme_sources.community import CommunityPacks, verify_repository_image
 from companion_meme_sources.fetch import PublicFetcher, resolve_public
+from companion_meme_sources.gallery import AigengtuGallery, GalleryImage
 from companion_meme_sources.review import TrustedReviewer
 
 
@@ -53,6 +54,23 @@ class MemeDiscovery:
                 meme_assets.original_custody(self.store, self.settings, event_id))
         except (CoreError, ValueError):
             return set()  # The original commit path still refuses an unattributed source.
+        if self.settings.meme_gallery_source is not None:
+            from companion.meme_policy import source_allowed
+
+            # The operator selection is an import list. A retained failed/uncertain
+            # caption is not permission to re-download that entry or charge it again;
+            # leave its original responsibility intact and advance to other entries.
+            retained = self.store.rows(
+                "SELECT DISTINCT a.metadata_json FROM meme_assets a "
+                "JOIN meme_asset_sources src USING(asset_id) "
+                "JOIN meme_captions c ON c.job_id=src.caption_job_id "
+                "WHERE a.state='STAGED' AND a.custody_sha256=?", (custody,))
+            result = set()
+            for row in retained:
+                meta = json.loads(row["metadata_json"])
+                if source_allowed(meta, self.settings):
+                    result.add(meta["asset_url"])
+            return result
         # Only material that is captioned or still awaiting its caption counts as held; a
         # failed or UNKNOWN caption keeps its original refusal path on re-acquisition.
         return {json.loads(row["metadata_json"])["asset_url"] for row in self.store.rows(
@@ -192,27 +210,39 @@ class MemeDiscovery:
                                 transport=self.transport, resolver=self.resolver)
         rules = [r.model_dump() for r in meme_policy.source_rules(self.settings)]
         reviewer = TrustedReviewer(rules, require_semantics=False)
-        provider = CommunityPacks(reviewer.license_files, known=self._held(claim["event_id"]))
+        known = self._held(claim["event_id"])
+        provider = (AigengtuGallery(self.settings.meme_gallery_source.selection(), known=known)
+                    if claim["provider"] == "gallery"
+                    else CommunityPacks(reviewer.license_files, known=known))
         candidates = []
         try:
             await fence()
             async for candidate, supplied in provider.discover(claim["intent"], fetcher):
                 await fence()
-                if not isinstance(supplied, RepositoryImage):
+                if not isinstance(supplied, (RepositoryImage, GalleryImage)):
                     raise ValueError("MEME_NATIVE_FILE_REQUIRED")
-                for resource in (supplied.resource, supplied.manifest,
-                                 supplied.license, supplied.listing):
+                resources = ((supplied.resource, supplied.terms)
+                             if isinstance(supplied, GalleryImage) else
+                             (supplied.resource, supplied.manifest, supplied.license,
+                              supplied.listing))
+                for resource in resources:
                     fetcher.verify(resource)
-                verify_repository_image(candidate, supplied)
+                if isinstance(supplied, RepositoryImage):
+                    verify_repository_image(candidate, supplied)
                 image = media(self.settings, supplied.resource.data)
-                if image is None:
+                if image is None or image.sha256 in self.settings.meme_excluded_sha256:
                     continue
-                evidence = ReviewEvidence(candidate.source_page, candidate.asset_url,
-                    candidate.revision, supplied.resource.evidence, image.sha256,
-                    source_files={role: getattr(supplied, role).evidence
-                                  for role in ("manifest", "license", "listing")})
-                reviewed = await reviewer(replace(candidate,
-                    asset_url=supplied.resource.evidence.final_url), image, evidence)
+                if isinstance(supplied, GalleryImage):
+                    if not isinstance(provider, AigengtuGallery):
+                        raise ValueError("MEME_NATIVE_FILE_REQUIRED")
+                    reviewed, evidence = provider.review(candidate, supplied, image, fetcher)
+                else:
+                    evidence = ReviewEvidence(candidate.source_page, candidate.asset_url,
+                        candidate.revision, supplied.resource.evidence, image.sha256,
+                        source_files={role: getattr(supplied, role).evidence
+                                      for role in ("manifest", "license", "listing")})
+                    reviewed = await reviewer(replace(candidate,
+                        asset_url=supplied.resource.evidence.final_url), image, evidence)
                 await fence()
                 if reviewed is None:
                     continue
@@ -232,7 +262,8 @@ class MemeDiscovery:
                 # These are local document/license validation failures after bounded
                 # fetch completion. Transport/partial-body/cancellation remains UNKNOWN.
                 known_rejection = (isinstance(error, json.JSONDecodeError)
-                    or isinstance(error, ValueError) and str(error).startswith("MEME_PACK_"))
+                    or isinstance(error, ValueError)
+                    and str(error).startswith(("MEME_PACK_", "MEME_GALLERY_")))
                 self._close(claim, usage, complete or known_rejection)
             if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise

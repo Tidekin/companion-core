@@ -250,7 +250,7 @@ def _proof(value, asset_sha, source_sha):
         _public_url(value["asset_url"])
         acquired = value["acquisition"]
         if (
-            set(acquired) - {"source_files"}
+            set(acquired) - {"source_files", "gallery_selection"}
             != {
                 "source_page",
                 "discovered_asset_url",
@@ -289,6 +289,11 @@ def _proof(value, asset_sha, source_sha):
             raise ValueError()
         if "source_files" in acquired:
             _source_files_proof(value, acquired)
+        if "gallery_selection" in acquired:
+            from companion_meme_sources.gallery import proof
+
+            _fetch_proof(acquired["gallery_selection"]["terms"])
+            proof(value, acquired)
     except (ValueError, TypeError, KeyError, AttributeError) as error:
         raise CoreError("MEME_SOURCE_EVIDENCE_INVALID", 403) from error
 
@@ -756,7 +761,7 @@ class MemeCaptionService:
         if (getattr(self.settings, "meme_catalog_owner", "bridge") == "core"
             and self.settings.meme_discovery_enabled and self.settings.expression_enabled
             and self.settings.paid_model and self.settings.paid_model.meme_input
-            and self.settings.meme_trusted_sources
+            and (self.settings.meme_trusted_sources or self.settings.meme_gallery_source)
             and not s.one("SELECT 1 FROM jobs j JOIN meme_captions c USING(job_id) "
                           "WHERE j.state='QUEUED' LIMIT 1")):
             if await self.discovery.run_once(worker_id):

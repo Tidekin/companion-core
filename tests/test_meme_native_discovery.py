@@ -146,7 +146,7 @@ def test_acquisition_profile_change_fences_the_existing_core_grant(core, tmp_pat
             release_foreground(c)
             profile = meme_service.acquisition_profile()
             monkeypatch.setattr(meme_service, "acquisition_profile",
-                                lambda: {**profile, "version": 2})
+                                lambda settings=None: {**profile, "version": 2})
             with pytest.raises(CoreError):
                 await c.service.run_once("old-grant")
             assert not c.upstream.calls

@@ -1,5 +1,41 @@
 # Core 素材运行时合同
 
+## 梗鲸的主人选定清单
+
+`meme_catalog_owner=core` 时可以配置 `meme_gallery_source`，使用原生 discovery、caption、
+预算、素材 BLOB、向量和 Outbox。Bridge 只保留取图及投递职责。新字段默认为空，未启用时
+不改变原策略、来源证明或已签名运行配置的默认形状。
+
+清单包含 `version=1`、原始 `gallery-index.json` 的 `index_sha256`、上游说明的
+`terms_revision`（40 位提交）、`terms_sha256`、`usage_basis` 和最多 512 个
+`images=[{path,intents}]`。`path` 只接受数字编号及 PNG/JPEG/GIF 扩展名，`intents` 只接受
+既有七类发现意图。清单由运营方依据主人确认的来源准备；站点文字不是授权或识图结果。
+清单摘要进入现有 meme capability；修改清单须使用现有原生配置续期流程。
+
+运行时不下载可变的站点全量索引，也不声称它是本次网络获取证据。原索引摘要保留运营选图
+来源；实际每次原生获取先下载 pinned README 并核对已批准摘要，再从
+`https://img.aigengtu.com/meme/<编号>.<扩展名>` 获取原图，均要求单跳 200、原公网 DNS/Host/SNI
+和预算检查。一次仍为最多 3 张、12 请求、16 MiB 下载、4 MiB 新写入，不增加付费额度。
+已保管且属于当前清单的 URL 不重复导入；识图失败或结果不明保留原责任，不借重新导入重付费。
+
+新证明使用显式 `gallery_selection`，保存原索引、选图清单摘要、编号与实际说明文件的
+FetchEvidence。它与旧 `source_files` 互斥。Core 在识图入队、资产保管、检索冻结、取图与
+最终发送时仍验证原 capture、来源、费用和当前策略；只有合格且费用已结算的 caption 可选。
+修改说明、重定向或来源不匹配不能入库。完整已读的本地审核拒绝只结算实际获取计数；
+部分响应、取消和不明结果仍为 UNKNOWN。
+
+`meme_excluded_sha256` 是最多 4096 个物理原图摘要的隔离列表，只允许 Core 模式。
+它进入原策略摘要，在获取、保管、排序及冻结复核中拒绝相同字节，不能换来源绕过。
+隔离不清除既有 Core 原图、caption、来源关联或费用；历史撤回和删除仍通过独立 Ledger 重放。
+
+来源研究：梗鲸的 [固定版本使用说明](https://github.com/the-beating-light-of-the-nail/deepseek-chan-meme-pack/blob/c82a0fb1c8958c2f0d6ea7fa7c12128027cfd7c6/README.md)
+提供个人聊天用途与原图/索引地址；其声明不被改写为通用开源许可证。
+已检查 [DSH meme 的目录与选图实现](https://github.com/yyh-001/dsh-meme/blob/32e0282b9a3aa4fb4793ad836e3c17b4180dc2c4/memes.js)：
+沿用明确选定图库、原图保管与识图后检索的分离；项目自身原生授权、计量及投递合同继续负责执行。
+
+合成验证覆盖实际签名 WS、私有 API、独立 Core worker、下载/模型 Mock 和原生 Bridge，
+第二轮从新素材发送相同原图并取得 OneBot ACK；不代表生产或真人 QQ 已验收。
+
 Core 运行时以 B1b 原生来源、费用和投递合同为基础，B2a 增加有界本地向量排序，
 B2b 增加已批准 community FILE 来源的后台获取。
 当前候选只作本地合成验证；完整 PR CI、生产切换、真人 QQ 和检索质量验收分别记录。

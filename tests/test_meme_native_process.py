@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from websockets.asyncio.server import serve
 
 from companion import meme_policy
@@ -21,17 +22,21 @@ from tests.support.onebot import onebot_http
 from tests.support.onebot_events import raw_event
 from tests.test_evaluation_process import process_config
 from tests.test_meme_core_process import process, until
+from tests.test_meme_gallery import SELECTION, GalleryUpstream
 from tests.test_meme_pack_files import RULE, Upstream
 
 
+@pytest.mark.parametrize("gallery", [False, True])
 def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
-    core, tmp_path, monkeypatch
+    core, tmp_path, monkeypatch, gallery,
 ):
     core.settings = core.settings.model_copy(update={
         "meme_catalog_owner": "core", "meme_discovery_enabled": True,
         "meme_semantics_enabled": True, "meme_trusted_sources": [meme_policy.TrustedSource(**RULE)],
         "meme_caption_daily_micro_usd": 50000, "expression_selection_probability": 1.0,
         "embedding_cache_dir": str(tmp_path / "empty-local-weights"),
+        **({"meme_gallery_source": meme_policy.GallerySource(**SELECTION),
+            "meme_trusted_sources": []} if gallery else {}),
     })
     paid = {"max_output_tokens": 4096, "meme_input": ImageInputPolicy(
         approval_sha256="e" * 64, estimated_tokens_per_image=100,
@@ -159,7 +164,8 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         assert json.loads(frozen)["offer"]["candidates"] == []
                         assert len(sent) == 1 and len(sent[0]["message"]) == 1
                         acquired = await work("acquire")
-                        assert acquired["calls"] == [] and acquired["requests"] == 5
+                        assert acquired["calls"] == []
+                        assert acquired["requests"] == (2 if gallery else 5)
                         reservation = core.store.one("SELECT * FROM meme_discovery_reservations")
                         assert reservation["job_id"] == discovery_before["job_id"]
                         assert len(core.store.rows(
@@ -187,7 +193,8 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         data = base64.b64decode(sent[1]["message"][1]["data"]["file"]
                                                 .removeprefix("base64://"))
                         assert data == asset["data"]
-                        assert data == next(iter(Upstream(count=1).images.values()))
+                        assert data == (GalleryUpstream().image if gallery else
+                                        next(iter(Upstream(count=1).images.values())))
                         delivery = core.store.one("SELECT message_id FROM outbox "
                             "WHERE origin_event_id=?", (last["event_id"],))
                         binding = json.loads(core.store.one("SELECT value FROM runtime_meta "
@@ -224,7 +231,7 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
             usage = core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid")
             assert len(usage) == 3 and all(u["state"] == "SETTLED" for u in usage)
             assert len([c for r in reports for c in r["calls"] if c == "caption"]) == 1
-            assert sum(r["requests"] for r in reports) == 5
+            assert sum(r["requests"] for r in reports) == (2 if gallery else 5)
             assert not core.store.rows("SELECT 1 FROM outbox WHERE state='DELIVERY_UNCERTAIN'")
             with sqlite3.connect(Path(config.data_dir) / "spool.sqlite3") as db:
                 tables = {r[0] for r in db.execute(

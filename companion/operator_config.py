@@ -84,6 +84,7 @@ LABELS = {
     "token_measurement": "Token 精确计数",
     "meme_catalog_owner": "表情目录归属", "meme_cooldown_seconds": "表情素材冷却（秒）",
     "meme_trusted_sources": "可信表情来源",
+    "meme_gallery_source": "梗鲸导入清单", "meme_excluded_sha256": "隔离的表情素材",
     "model_url": "聊天模型服务地址", "model_name": "聊天模型名称", "model_key": "聊天模型密钥",
     "video_models": "视频理解模型",
     "video_model_key": "默认视频模型密钥", "provider": "模型服务类型",

@@ -41,6 +41,7 @@ REVIEW_FIELDS = frozenset({
     "diary_daily_micro_usd", "reflection_daily_micro_usd", "reflection_monthly_micro_usd",
     "raw_event_retention_days", "private_files", "voice", "social_autonomy", "bili_video",
     "rem", "poke_policy", "content", "meme_catalog_owner", "meme_trusted_sources",
+    "meme_gallery_source", "meme_excluded_sha256",
     "meme_cooldown_seconds", "expression_enabled", "meme_discovery_enabled",
     "meme_semantics_enabled", "meme_caption_daily_micro_usd", "meme_discovery_daily_queries",
     "meme_discovery_daily_download_bytes", "meme_discovery_daily_storage_bytes",
@@ -90,6 +91,10 @@ def _digest(settings, value):
 
 def _cold(settings, format_version=4):
     values = operator_config._raw(settings)
+    # Defaults predate gallery/isolation support in retained signed snapshots.
+    for name in ("meme_gallery_source", "meme_excluded_sha256"):
+        if not values.get(name):
+            values.pop(name, None)
     # Unused video options did not exist in prior signed cold identities.
     values.pop("video_models", None)
     if values.get("paid_model") and not values["paid_model"].get("video_routes"):

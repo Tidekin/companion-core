@@ -150,12 +150,15 @@ class ReviewEvidence:
     image_sha256: str
     archive_member: str = ""
     source_files: dict[str, FetchEvidence] | None = None
+    gallery_selection: dict | None = None
 
     @property
     def json(self):
         value = asdict(self)
         if self.source_files is None:
             del value["source_files"]  # Preserve every historical source/cache identity.
+        if self.gallery_selection is None:
+            del value["gallery_selection"]
         return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     @property

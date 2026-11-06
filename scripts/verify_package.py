@@ -29,7 +29,7 @@ FORBIDDEN = {
 }
 MEME_SOURCE_FILES = {
     "companion_meme_sources/" + name
-    for name in ("__init__.py", "fetch.py", "community.py", "review.py")
+    for name in ("__init__.py", "fetch.py", "community.py", "review.py", "gallery.py")
 }
 
 
@@ -133,12 +133,13 @@ def verify_meme_sources(destination, env=None):
         import companion_meme_sources as sources
         assert not blocked.intersection(sys.modules)
         blocked.difference_update({"httpx", "pydantic", "PIL", "companion_meme_protocol"})
-        from companion_meme_sources import community, fetch, review
+        from companion_meme_sources import community, fetch, gallery, review
         assert fetch.FetchedResource is sources.FetchedResource
         assert community.RepositoryImage is sources.RepositoryImage
         assert review.Metadata is sources.Metadata
         assert review.ReviewApproval is sources.ReviewApproval
         assert callable(fetch.PublicFetcher) and callable(community.CommunityPacks)
+        assert callable(gallery.AigengtuGallery)
         assert review.TrustedReviewer([], require_semantics=False).rules == ()
         for name, module in tuple(sys.modules.items()):
             if name.split(".", 1)[0] in {"companion_meme_sources", "companion_meme_protocol"}:
