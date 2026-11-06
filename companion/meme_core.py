@@ -27,6 +27,7 @@ from companion.expression import MemeOffer, query_intent, query_target
 from companion.privacy import epoch
 from companion.retrieval import INDEX_VERSION, encoder
 from companion.store import after, encode, uid, utcnow
+from companion.worker_schedule import claim_scope
 from companion_meme_protocol import (
     CAPTION_INSTRUCTIONS,
     OFFER_WAIT_SECONDS,
@@ -781,7 +782,7 @@ class MemeCaptionService:
                 )
         job = None
         try:
-            with s.transaction():
+            with claim_scope(s), s.transaction():
                 if (
                     private_life.busy(s, now)
                     or s.one(

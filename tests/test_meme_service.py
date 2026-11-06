@@ -101,7 +101,7 @@ async def discovery_environment(core, tmp_path, monkeypatch, *, paid=None, purpo
         "meme_discovery_daily_queries": 2,
         "meme_discovery_daily_download_bytes": 32 * 1024 * 1024,
         "meme_discovery_daily_storage_bytes": 8 * 1024 * 1024,
-        "expression_selection_probability": 1,
+        "expression_selection_probability": 1.0,
         **changes,
     })
     async with environment(core, tmp_path, monkeypatch, paid=paid,
