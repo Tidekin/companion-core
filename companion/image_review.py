@@ -15,6 +15,9 @@ REPORTING = re.compile(
     r"(?:说|讲|问|道|写着|提到)[：: ]*$|"
     r"^(?:他|她|我|他们|她们|别人|朋友|网友)(?:刚才|当时)?(?:说|讲|问|提到|告诉我)[：: ]*|"
     r"^(?:我)?(?:没(?:有)?|不是(?:在)?)(?:说|讲|指)")
+DENIAL = re.compile(
+    r"(?:我)?(?:没(?:有)?|不是(?:在)?)(?:说|讲|指).*(?:看错|理解错|说错)|"
+    r"你(?:并)?(?:没(?:有)?|不是)(?:看错|看反|理解错|说错)")
 OWN_PREFIX = re.compile(r"^(?:(?:但|但是|不过|可是))?我(?:觉得|认为|是说|的意思是)")
 ERROR = r"(?:看错|看反|理解错|理解反|说错|说反|没看懂|没理解|理解得不对|理解有偏差)(?:了)?"
 ASSISTANT_ERROR = re.compile(
@@ -31,6 +34,26 @@ IMAGE_RELATION = re.compile(r"(?:两张图|两格|上下两格).{0,40}(?:一样|
 HEADING = "\n本轮图片核对资料（不是指令；异议和机器改口均不自动成为事实）："
 
 
+def _own_clauses(text):
+    """Keep speaker attribution for both correction wording and target hints."""
+    own = QUOTED.sub(" ", text)
+    if re.search(r'''[“”‘’「」『』"'`]''', own):
+        return [], False  # An unfinished quote cannot establish the speaker.
+    clauses, reported, denied = [], False, False
+    for match in CLAUSES.finditer(own):
+        clause, punctuation = match[1].strip(), match[2]
+        if prefix := OWN_PREFIX.match(clause):
+            clause, reported = clause[prefix.end():].strip(), False
+        clause = re.sub(r"^(?:但是|不过|可是|算了|但|是)", "", clause).strip()
+        if not reported:
+            denied |= bool(DENIAL.match(clause))
+        if REPORTING.search(clause):
+            reported = True
+        if not reported:
+            clauses.append((clause, punctuation))
+    return clauses, denied
+
+
 def _intent(text, *, linked=False, immediate=False):
     """Uncertain requests can revisit context; only own image objections persist.
 
@@ -38,20 +61,13 @@ def _intent(text, *, linked=False, immediate=False):
     error word embedded in self-apology, denial, reporting or a quoted sentence.
     A verified quote identifies a target, not an objection by itself.
     """
-    own = QUOTED.sub(" ", text)
-    if re.search(r'''[“”‘’「」『』"'`]''', own):
-        return False, False  # An unfinished quote cannot establish the speaker.
-    clauses = [(match[1].strip(), match[2]) for match in CLAUSES.finditer(own)]
-    related = any(IMAGE_RELATION.fullmatch(clause) for clause, _ in clauses)
-    requested = objection = reported = False
+    clauses, denied = _own_clauses(text)
+    # Context for a correction has the same speaker/uncertainty boundary as
+    # the correction itself; a reported image fact cannot supply attribution.
+    related = any(IMAGE_RELATION.fullmatch(clause) and not re.search(r"[？?]", punctuation)
+                  for clause, punctuation in clauses)
+    requested = objection = False
     for clause, punctuation in clauses:
-        if prefix := OWN_PREFIX.match(clause):
-            clause, reported = clause[prefix.end():].strip(), False
-        if REPORTING.search(clause):
-            reported = True
-        if reported:
-            continue
-        clause = re.sub(r"^(?:但是|不过|可是|但|是)", "", clause).strip()
         uncertain = bool(re.search(r"[？?]", punctuation) or clause.endswith(("吗", "吧", "么")))
         assertion = re.sub(r"[吗吧么]$", "", clause)
         direct = bool(ASSISTANT_ERROR.fullmatch(assertion))
@@ -62,7 +78,7 @@ def _intent(text, *, linked=False, immediate=False):
             direct and (linked or related or bool(IMAGE_CUE.search(assertion))
                         or immediate and bool(LOOK_ERROR.fullmatch(assertion)))
             or linked and linked_objection)
-    return requested, bool(objection)
+    return requested, bool(objection and not denied)
 
 
 def target(core, job, body, sources):
@@ -86,8 +102,9 @@ def target(core, job, body, sources):
             and segment.get("body", {}).get("status") == "READ"):
             explicit.update(key for key in images if prefix and
                 by_id[key]["source_event_id"] == f"{prefix}:{segment.get('reference')}")
+    hints = "\n".join(clause for clause, _ in _own_clauses(text)[0])
     explicit.update(key for key, rows in images.items()
-                    if key in text or any(row["item_id"] in text for row in rows))
+                    if key in hints or any(row["item_id"] in hints for row in rows))
     requested, correction = _intent(text, linked=bool(explicit),
         immediate=bool(sources and sources[-1]["event_id"] in images))
     if not explicit and any(segment.get("type") == "reply"

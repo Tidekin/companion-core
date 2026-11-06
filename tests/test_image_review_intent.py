@@ -28,6 +28,9 @@ from tests.test_onebot_reference_reader import text as text_segment
     ("他说‘你看错了。你理解错了。", True, True, False, False),
     ("他说‘你看错了’，但我认为你对这张图的解读不对", False, True, True, True),
     ("你没有看错", False, True, False, False),
+    ("你看错了，不过我没说你看错了", True, True, True, False),
+    ("你看错了，你没有看错", True, True, True, False),
+    ("‘我没说你看错了’，你这张图理解错了", False, True, True, True),
     ("你没看错", True, True, False, False),
     ("你看错了", False, True, True, True),
     ("你看错了", False, False, True, False),
@@ -37,6 +40,9 @@ from tests.test_onebot_reference_reader import text as text_segment
     ("你理解错了", False, True, True, False),
     ("你理解错了", True, False, True, True),
     ("你理解错了，我不是嫌弃你", False, True, True, False),
+    ("你理解错了，我不是嫌弃你。他说，两张图的动作和台词一样。",
+     False, True, True, False),
+    ("你理解错了，两张图的动作和台词一样？", False, True, True, False),
     ("你理解错了，两张图的动作和台词一样", False, False, True, True),
     ("你把这张图看反了", False, False, True, True),
     ("你这张图看错了", False, False, True, True),
@@ -57,6 +63,7 @@ def test_only_own_image_objections_are_persistent(text, linked, immediate, wante
 
 @pytest.mark.parametrize("text", [
     "错了错了", "我错了，我不养其她鱼", "我没说你看错了", "他说‘你看错了’",
+    "你理解错了，他说‘{source}’",
 ])
 def test_other_meanings_of_wrong_do_not_quarantine_image_evidence(core, tmp_path, text):
     async def scenario():
@@ -70,7 +77,7 @@ def test_other_meanings_of_wrong_do_not_quarantine_image_evidence(core, tmp_path
             reference = next(value for value in memory_references.inputs(core, source)
                              if value["kind"] == "image")
             original = memory_references.read(core.memory, reference["reference_id"], core.clock())
-            await context.entry.admit(2, text)
+            await context.entry.admit(2, text.format(source=source["event_id"]))
             calls = []
             await reply(core, context.entry, "先核对你这句话的意思。", calls)
             assert memory_references.image_reviews(core.store, source["event_id"]) == []
