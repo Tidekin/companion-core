@@ -24,7 +24,7 @@ QUESTION = "结合我以前的需求，这两张图里的哪一个更合适？"
 
 @asynccontextmanager
 async def native_image_memory(core, tmp_path, *, no_candidates=False, limit=None, mutation=None,
-                              core_options=None, reply=None, record_visible=False):
+                              core_options=None, reply=None, record_visible=False, history=False):
     originals, calls, downloads = [], [], []
     for color in ("red", "blue"):
         stream = io.BytesIO()
@@ -61,7 +61,8 @@ async def native_image_memory(core, tmp_path, *, no_candidates=False, limit=None
             body["usage"] = {"prompt_tokens": 200, "completion_tokens": 30}
         return httpx.Response(200, json=body)
 
-    async with environment(core, tmp_path, purposes=("chat", "memory", "image", "content"),
+    async with environment(core, tmp_path,
+        purposes=("chat", "memory", "image", "content", *(("history",) if history else ())),
         core_options={"content_enabled": True, "observation_enabled": True,
                       "lease_seconds": 600 if mutation == "expired" else 120,
                       **(core_options or {})},

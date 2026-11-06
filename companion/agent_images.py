@@ -321,7 +321,7 @@ def waiting(core, job):
     return False
 
 
-def attach(core, job, messages, sources, turns, current, snapshots):
+def attach(core, job, messages, sources, turns, current, snapshots, *, priority_event_id=None):
     """Attach valid originals to their original user turns within the existing limits."""
     groups = [(source["event_id"], next(message for message in reversed(turn)
                                        if message["role"] == "user"))
@@ -330,7 +330,10 @@ def attach(core, job, messages, sources, turns, current, snapshots):
     groups.append((job["event_id"], current))
     selected, count = [], 0
     maximum = core.settings.paid_model.image_input.max_images_per_request
-    for event_id, message in reversed(groups):
+    order = {event_id: index for index, (event_id, _) in enumerate(groups)}
+    preferred = sorted(groups, key=lambda item: (
+        item[0] == job["event_id"], item[0] == priority_event_id, order[item[0]]), reverse=True)
+    for event_id, message in preferred:
         candidates = core.store.rows(
             "SELECT c.item_id FROM content_items c JOIN captured_images p USING(item_id) "
             "WHERE c.owner_event_id=? AND c.redacted=0 AND p.expires_at>? ORDER BY c.slot",
@@ -343,11 +346,12 @@ def attach(core, job, messages, sources, turns, current, snapshots):
         prepared = [_prepared(core.store, core.settings, core.clock, job, row["item_id"])
                     for row in candidates]
         if prepared:
-            selected.insert(0, (event_id, message, prepared))
+            selected.append((event_id, message, prepared))
             count += len(prepared)
+    selected.sort(key=lambda item: order[item[0]])
     ids = [row["item_id"] for _, _, group in selected for row, _, _ in group]
     if not ids:
-        return
+        return []
     with core.store.transaction():
         reply_revision.remember_sources(core.store, job, [event_id for event_id, _, _ in selected])
         previous = core.store.rows("SELECT item_id FROM agent_image_inputs WHERE job_id=? "
@@ -368,6 +372,7 @@ def attach(core, job, messages, sources, turns, current, snapshots):
     snapshot = {"kind": "images", "item_ids": ids}
     if snapshots is not None and snapshot not in snapshots:
         snapshots.append(snapshot)
+    return ids
 
 
 def check_payload(store, settings, clock, job, messages):

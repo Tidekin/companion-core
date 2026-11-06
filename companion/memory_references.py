@@ -15,7 +15,8 @@ from companion.store import encode
 INPUT = "memory_reference_input:"
 MEMORY = "memory_reference:"
 LABELS = {"document": "文件解析", "image": "图像解析", "transcript": "机器转写",
-          "quote": "引用或转发", "assistant": "助手已发送原话"}
+          "quote": "引用或转发", "assistant": "助手已发送原话",
+          "image_review": "图片解释异议（未核实）"}
 
 
 def _load(store, key):
@@ -132,10 +133,31 @@ def read(memory, reference_id, now):
             != reference_id):
             raise ValueError()
         MemoryContext(memory).revalidate(value["proof"], now)
+        if value["kind"] == "image":
+            for review in image_reviews(memory.store, value["owner_event_id"]):
+                try:
+                    read(memory, review["reference_id"], now)
+                except CoreError:
+                    continue
+                # A fact extracted from this older machine analysis must not
+                # silently return without the later dispute. The immutable raw
+                # receipt remains available in source-bound dialogue replay.
+                raise CoreError("MEMORY_REFERENCE_CHANGED", 409)
         if value["kind"] == "assistant":
             row = memory.store.one("SELECT * FROM outbox WHERE message_id=? AND state='SENT'",
                                    (value["receipt"]["message_id"],))
             if not row or row["content_sha256"] != value["receipt"]["content_sha256"]:
+                raise ValueError()
+        if value["kind"] == "image_review":
+            from companion import reply_revision
+
+            if not all(reply_revision.source_active(memory.store, event_id)
+                       for event_id in value["proof"]["source_event_ids"]):
+                raise ValueError()
+            row = memory.store.one("SELECT * FROM outbox WHERE message_id=? AND state='SENT'",
+                                   (value["receipt"]["message_id"],))
+            if (not row or row["origin_event_id"] != value["receipt"]["target_event_id"]
+                or row["content_sha256"] != value["receipt"]["content_sha256"]):
                 raise ValueError()
         if value["kind"] == "quote":
             from companion import qq_quotes
@@ -275,6 +297,15 @@ def candidate(memory, item, now):
         or item.evidence_quote not in value["text"]):
         raise CoreError("UNSUPPORTED_MEMORY_EVIDENCE", 409)
     return value
+
+
+def image_reviews(store, event_id):
+    """IDs and source pins only; callers authorize the selected review before replay."""
+    return [json.loads(row["value"]) for row in store.rows(
+        "SELECT value FROM runtime_meta WHERE key LIKE ? "
+        "AND json_extract(value,'$.kind')='image_review' "
+        "AND json_extract(value,'$.receipt.target_event_id')=? ORDER BY rowid",
+        (INPUT + "%", event_id))]
 
 
 def attributed(item, reference):
