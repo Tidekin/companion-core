@@ -87,6 +87,11 @@ def _plan(settings, manifest):
     try:
         plan, limits = manifest["plan"], _limits(manifest)
         synthetic = manifest.get("kind", "owner_pilot") == "synthetic"
+        # Offline planners retain the original conservative bounds without an
+        # executable paid grant; live admission still requires the real contract.
+        approval = settings.paid_model
+        output_limit = approval.max_output_tokens if approval else 2048
+        attempt_limit = approval.per_attempt_micro_usd if approval else 5000
         if len(encode(manifest).encode()) > limits["bytes"] or redact(
             encode(manifest), settings
         ) != encode(manifest):
@@ -154,9 +159,8 @@ def _plan(settings, manifest):
             if (payload != row["payload"] or paid_budget.sha(payload) != row["payload_sha256"]
                 or row["shared_context_sha256"] != digest
                 or row["planned_max_output_tokens"] != settings.max_output_tokens
-                or not settings.paid_model
                 or not synthetic and settings.max_output_tokens > 2048
-                or settings.max_output_tokens > settings.paid_model.max_output_tokens):
+                or settings.max_output_tokens > output_limit):
                 raise ValueError("fixed payload")
             if version == 2:
                 measured = _request_measurement(settings, payload)
@@ -164,7 +168,7 @@ def _plan(settings, manifest):
                     row.get(key) != value for key, value in measured.items()
                 ) or measured["budget_input_tokens"] > limits["input"] or measured[
                     "estimated_reservation_micro_usd"] > (
-                        settings.paid_model.per_attempt_micro_usd)
+                        attempt_limit)
                     or not synthetic and measured["estimated_reservation_micro_usd"] > 5000):
                     raise ValueError("unsupported, changed or over-limit measurement")
                 measured_costs.append(measured["estimated_reservation_micro_usd"])
