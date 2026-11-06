@@ -14,20 +14,17 @@ import pytest
 from companion import budget, cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelResponse
-from companion.store import Store
+from companion.store import Store, encode
 from tests.owner_model_fixtures import authorized_job
 from tests.test_paid_model_gate import approved_live
 
 
 @pytest.fixture(autouse=True)
 def clear_cache():
-    cache = getattr(paid_budget, "_validated_bytes", None)
-    if cache:
-        cache.cache_clear()
+    paid_budget._clear_codec()
     paid_budget.forget_views()
     yield
-    if cache:
-        cache.cache_clear()
+    paid_budget._clear_codec()
     paid_budget.forget_views()
 
 
@@ -58,9 +55,7 @@ def test_warm_chain_reads_complete_bytes_and_skips_only_chain_hashes(core, tmp_p
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes)
     monkeypatch.setattr(paid_budget, "sha", sha)
-    cache = getattr(paid_budget, "_validated_bytes", None)
-    if cache:
-        cache.cache_clear()
+    paid_budget._clear_codec()
     core.store.db.set_trace_callback(queries.append)
     try:
         with core.store.transaction():
@@ -365,15 +360,15 @@ def test_payload_decode_failure_uses_original_line_decoder(core, tmp_path, monke
     approval, _ = settled(core, tmp_path)
     with core.store.transaction():
         expected = paid_budget.journal(core.store, approval)
-    original, failures = json.loads, []
+    original, failures = marshal.loads, []
 
     def loads(value, *args, **kwargs):
-        if isinstance(value, bytes) and value.startswith(b"["):
+        if not failures:
             failures.append(1)
             raise RecursionError("synthetic aggregate decoder limit")
         return original(value, *args, **kwargs)
 
-    monkeypatch.setattr(json, "loads", loads)
+    monkeypatch.setattr(marshal, "loads", loads)
     paid_budget.forget_views(core.store)  # exercise the cold decode path
     with core.store.transaction():
         assert paid_budget.journal(core.store, approval) == expected
@@ -463,3 +458,157 @@ def test_simultaneous_snapshots_build_one_view_and_keep_results_private(
             other.read_or_write(lambda: paid_budget.journal(other, approval))
     finally:
         other.close()
+
+
+def test_database_change_repeats_full_fold_without_redecoding_unchanged_chain(
+    core, tmp_path, monkeypatch,
+):
+    approval, _ = settled(core, tmp_path)
+    with core.store.transaction():
+        expected = paid_budget.journal(core.store, approval)
+    decodes, folds = [], []
+    original_decode, original_fold = paid_budget._decode_lines, cumulative.fold
+
+    def decode(lines, *args):
+        decodes.extend(lines)
+        return original_decode(lines, *args)
+
+    def fold(*args):
+        folds.append(True)
+        return original_fold(*args)
+
+    monkeypatch.setattr(paid_budget, "_decode_lines", decode)
+    monkeypatch.setattr(cumulative, "fold", fold)
+    with core.store.transaction():
+        core.store.execute("INSERT INTO runtime_meta VALUES ('codec_fixture_change','1')")
+        assert paid_budget.journal(core.store, approval) == expected
+    assert folds and not decodes
+
+
+def codec_chain(count, *, padding=0):
+    rows, previous = [], "0" * 64
+    for index in range(count):
+        row = {"kind": "synthetic", "previous": previous,
+               "data": {"nested": [index, {"text": "x" * padding}]}}
+        previous = row["sha256"] = paid_budget.sha(row)
+        rows.append(row)
+    return ("".join(encode(row) + "\n" for row in rows)).encode(), rows
+
+
+@pytest.mark.parametrize("separator", [b"\n", b"\r\n", b"\r", "\u2028".encode()])
+def test_codec_append_reuses_only_an_exact_lf_terminated_prefix(monkeypatch, separator):
+    complete, expected = codec_chain(3)
+    lines = complete.splitlines()
+    prefix = separator.join(lines[:2]) + separator
+    appended = separator.join(lines) + separator
+    records, checked = paid_budget._journal_records(prefix)
+    assert checked and records == expected[:2]
+    records[0]["data"]["nested"][1]["text"] = "caller-owned mutation"
+    decodes = []
+    original = paid_budget._decode_lines
+
+    def decode(lines, *args):
+        decodes.extend(lines)
+        return original(lines, *args)
+
+    monkeypatch.setattr(paid_budget, "_decode_lines", decode)
+    records, checked = paid_budget._journal_records(appended)
+    assert checked and records == expected
+    assert len(decodes) == (1 if separator.endswith(b"\n") else 3)
+    # A valid truncation is different bytes, never the prior longer projection.
+    records, checked = paid_budget._journal_records(prefix)
+    assert checked and records == expected[:2]
+
+
+def test_small_appends_do_not_reserialize_verified_chain_prefix(monkeypatch):
+    raw, expected = codec_chain(128, padding=512)
+    assert paid_budget._journal_records(raw) == (expected, True)
+    decodes = []
+    original = paid_budget._decode_lines
+
+    def decode(lines, *args):
+        decodes.extend(lines)
+        return original(lines, *args)
+
+    def unexpected(*args):
+        pytest.fail("small append reserialized the full verified prefix")
+
+    monkeypatch.setattr(paid_budget, "_decode_lines", decode)
+    monkeypatch.setattr(marshal, "dumps", unexpected)
+    for index in range(3):
+        row = {"kind": "synthetic", "previous": expected[-1]["sha256"], "part": index}
+        row["sha256"] = paid_budget.sha(row)
+        expected.append(row)
+        raw += (encode(row) + "\n").encode()
+        assert paid_budget._journal_records(raw) == (expected, True)
+    # Every tail is fully rechecked; only the unchanged prefix is reused.
+    assert len(decodes) == 1 + 2 + 3
+
+
+def test_decoded_chain_over_serialized_limit_is_not_retained(monkeypatch):
+    row = {"kind": "synthetic", "previous": "0" * 64, "values": [0] * 1000}
+    row["sha256"] = paid_budget.sha(row)
+    raw = (encode(row) + "\n").encode()
+    assert len(raw) < len(marshal.dumps([row]))
+    monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", len(raw))
+    assert paid_budget._journal_records(raw) == ([row], True)
+    assert paid_budget._validated_bytes.cache_info().currsize == 0
+    assert paid_budget._previous is None
+
+
+@pytest.mark.parametrize("retain_bytes", [True, False])
+def test_frozen_journal_key_reuses_digest_only_for_exact_bytes(
+    core, tmp_path, monkeypatch, retain_bytes,
+):
+    approval, _ = settled(core, tmp_path)
+    path = Path(approval.journal_path)
+    raw = path.read_bytes()
+    monkeypatch.setattr(paid_budget, "KEY_MAX_BYTES", len(raw) if retain_bytes else len(raw) - 1)
+    hashes, original = [], paid_budget.hashlib.sha256
+
+    def sha256(value):
+        if value == raw:
+            hashes.append(True)
+        return original(value)
+
+    monkeypatch.setattr(paid_budget.hashlib, "sha256", sha256)
+    with core.store.transaction():
+        first = paid_budget._view_key(core.store, path, raw)
+        assert paid_budget._view_key(core.store, path, memoryview(raw).tobytes()) == first
+        assert len(hashes) == (1 if retain_bytes else 2)
+        identity = core.store._view_key_memo[0][-1]
+        assert isinstance(identity, bytes) is retain_bytes
+        core.store.execute("INSERT INTO runtime_meta VALUES ('digest_scope_write','1')")
+        changed = paid_budget._view_key(core.store, path, raw)
+        assert changed != first
+        assert len(hashes) == (2 if retain_bytes else 3)
+        tampered = raw.replace(b'"previous":"0', b'"previous":"9', 1)
+        assert len(tampered) == len(raw) and tampered != raw
+        assert paid_budget._view_key(core.store, path, tampered)[1] != changed[1]
+    with core.store.transaction():
+        paid_budget._view_key(core.store, path, raw)
+    assert len(hashes) == (3 if retain_bytes else 4)
+
+
+def test_frozen_journal_digest_reuse_still_reads_and_rejects_current_file(
+    core, tmp_path, monkeypatch,
+):
+    approval, _ = settled(core, tmp_path)
+    path = Path(approval.journal_path)
+    raw, original = path.read_bytes(), Path.read_bytes
+    reads = []
+
+    def read(value):
+        if value == path:
+            reads.append(True)
+        return original(value)
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    with core.store.transaction():
+        paid_budget.journal(core.store, approval)
+        paid_budget.journal(core.store, approval)
+        assert len(reads) == 2
+        path.write_bytes(raw.replace(b'"previous":"0', b'"previous":"9', 1))
+        with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+            paid_budget.journal(core.store, approval)
+    assert len(reads) >= 3

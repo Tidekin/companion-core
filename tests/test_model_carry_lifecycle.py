@@ -34,6 +34,79 @@ def test_same_approval_can_resume_after_second_stop(core, tmp_path):
     assert core.store.rows("SELECT * FROM model_usage") == before
 
 
+def carried_authority_chain(core, tmp_path):
+    case = migrated(core, tmp_path)
+    for index in range(2):
+        stopped = owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+            operation_id=f"chain-batch-stop-{index}", authority=case.successor["authority"],
+        ))
+        active, _ = activate(core, case.policy, revision=stopped["authority"]["revision"],
+                             operation=f"chain-batch-resume-{index}")
+        case.successor = active
+    with core.store.transaction():
+        view = owner_authority.custody(core.store, core.settings)
+    saved = view["model_carries"][case.receipt["carry_sha256"]]
+    revisions = core.store.rows("SELECT * FROM owner_authority_revisions "
+                               "WHERE revision>=3 ORDER BY revision")
+    return saved, revisions
+
+
+def test_authority_chain_batches_rows_and_equal_policy_bodies_per_call(core, tmp_path, monkeypatch):
+    from companion.owner_authority_protocol import OwnerGrantPolicy
+
+    saved, revisions = carried_authority_chain(core, tmp_path)
+    assert len(revisions) == 5
+    before = digest([saved, revisions])
+    parsed, queries = [], []
+    original = OwnerGrantPolicy.model_validate_json
+
+    def parse(value, *args, **kwargs):
+        parsed.append(value)
+        return original(value, *args, **kwargs)
+
+    monkeypatch.setattr(OwnerGrantPolicy, "model_validate_json", parse)
+    core.store.db.set_trace_callback(queries.append)
+    try:
+        for _ in range(2):
+            with core.store.transaction():
+                model_carry.authority_chain(core.store, saved, revisions)
+    finally:
+        core.store.db.set_trace_callback(None)
+    assert len([query for query in queries if query.startswith(
+        "SELECT * FROM owner_authority_revisions")]) == 2
+    assert len(parsed) == 2  # No parsed policy is retained across calls.
+    assert digest([saved, revisions]) == before
+
+
+@pytest.mark.parametrize("change", ["missing", "record", "policy", "redacted_body", "erased"])
+def test_authority_chain_rechecks_current_rows_and_redaction(core, tmp_path, change):
+    saved, revisions = carried_authority_chain(core, tmp_path)
+    with core.store.transaction():
+        model_carry.authority_chain(core.store, saved, revisions)
+    if change == "missing":
+        core.store.execute("DELETE FROM owner_authority_revisions WHERE revision=4")
+    elif change == "record":
+        core.store.execute("UPDATE owner_authority_revisions SET record_sha256=? WHERE revision=4",
+                           ("0" * 64,))
+    elif change == "policy":
+        value = json.loads(revisions[1]["policy_json"])
+        value["unknown_carry_sha256"] = "0" * 64
+        core.store.execute("UPDATE owner_authority_revisions SET policy_json=? WHERE revision=4",
+                           (json.dumps(value),))
+    else:
+        core.store.execute("UPDATE owner_authority_revisions SET policy_redacted=1 "
+                           "WHERE revision=4")
+        if change == "erased":
+            core.store.execute("UPDATE owner_authority_revisions SET policy_json='{}' "
+                               "WHERE revision=4")
+    with core.store.transaction():
+        if change == "erased":
+            model_carry.authority_chain(core.store, saved, revisions)
+        else:
+            with pytest.raises(ValueError):
+                model_carry.authority_chain(core.store, saved, revisions)
+
+
 def current_unknown(core, *, number=2):
     job = authorized_job(core, number=number)
     request_id = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())

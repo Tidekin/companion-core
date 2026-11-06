@@ -48,6 +48,11 @@ def read(path, *, maximum=32 * 1048576):
     return _read(path, maximum=maximum, count_only=False)
 
 
+def read_count(path, *, maximum=32 * 1048576):
+    """Revalidate the complete journal without materializing its decoded prefix."""
+    return _read(path, maximum=maximum, count_only=True)
+
+
 def _read(path, *, maximum, count_only):
     try:
         info = path.lstat()

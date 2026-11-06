@@ -105,6 +105,113 @@ def test_stop_record_and_database_projection_cannot_diverge(core, tmp_path):
         paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
 
 
+def projection_history(core, tmp_path):
+    policy = prepare(core, tmp_path)
+    current, _ = activate(core, policy)
+    for index in range(3):
+        stopped = authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+            operation_id=f"projection-stop-{index}", authority=current["authority"],
+        ))
+        current, _ = activate(core, policy, revision=stopped["authority"]["revision"],
+                              operation=f"projection-activate-{index}")
+    path = Path(core.settings.paid_model.journal_path)
+    records = []
+    for line in path.read_text("utf-8").splitlines():
+        row = json.loads(line)
+        if row["kind"] == authority.RECORD_KIND:
+            authority.fold(records, row, row.pop("sha256"))
+    journal_id = core.store.one("SELECT value FROM runtime_meta "
+                                "WHERE key='model_budget_journal_id'")["value"]
+    return path, journal_id, records
+
+
+def test_projection_resolves_shared_paths_and_hashes_identical_policies_once_per_call(
+    core, tmp_path, monkeypatch,
+):
+    path, journal_id, records = projection_history(core, tmp_path)
+    resolutions, policies = [], []
+    resolve, sha = Path.resolve, authority._sha
+
+    def resolved(value, *args, **kwargs):
+        resolutions.append(str(value))
+        return resolve(value, *args, **kwargs)
+
+    def hashed(value):
+        policies.append(value)
+        return sha(value)
+
+    monkeypatch.setattr(Path, "resolve", resolved)
+    monkeypatch.setattr(authority, "_sha", hashed)
+    for _ in range(2):
+        with core.store.transaction():
+            authority.validate_projection(core.store, records, journal_id, path)
+    assert len(records) == 7
+    # Each call checks the current path again at entry and exit, with no cross-call cache.
+    assert resolutions == [str(path)] * 4
+    assert len(policies) == 2
+
+
+@pytest.mark.parametrize("matching", [True, False])
+def test_projection_preserves_resolved_path_alias_and_mismatch(core, tmp_path, matching):
+    path, journal_id, records = projection_history(core, tmp_path)
+    directory = tmp_path / "alias"
+    directory.mkdir()
+    saved_path = directory / ".." / (path.name if matching else "another-journal.jsonl")
+    core.store.execute("UPDATE owner_authority_revisions SET journal_path=?", (str(saved_path),))
+    with core.store.transaction():
+        if matching:
+            authority.validate_projection(core.store, records, journal_id, path)
+        else:
+            with pytest.raises(ValueError, match="authority projection mismatch"):
+                authority.validate_projection(core.store, records, journal_id, path)
+
+
+def test_projection_rechecks_path_alias_after_policy_validation(core, tmp_path, monkeypatch):
+    path, journal_id, records = projection_history(core, tmp_path)
+    resolve, sha = Path.resolve, authority._sha
+    changed = False
+
+    def resolved(value, *args, **kwargs):
+        return resolve(tmp_path / "changed-journal.jsonl" if changed else value, *args, **kwargs)
+
+    def hashed(value):
+        nonlocal changed
+        result = sha(value)
+        changed = True
+        return result
+
+    monkeypatch.setattr(Path, "resolve", resolved)
+    monkeypatch.setattr(authority, "_sha", hashed)
+    with core.store.transaction(), pytest.raises(ValueError, match="authority projection mismatch"):
+        authority.validate_projection(core.store, records, journal_id, path)
+
+
+@pytest.mark.parametrize("change", ["policy", "redacted_body", "erased"])
+def test_projection_checks_changed_policy_and_each_redaction(core, tmp_path, change):
+    path, journal_id, records = projection_history(core, tmp_path)
+    with core.store.transaction():
+        authority.validate_projection(core.store, records, journal_id, path)
+    if change == "policy":
+        value = json.loads(core.store.one("SELECT policy_json FROM owner_authority_revisions "
+                                         "WHERE revision=2")["policy_json"])
+        value["authorization_sha256"] = "e" * 64
+        core.store.execute("UPDATE owner_authority_revisions SET policy_json=? WHERE revision=2",
+                           (json.dumps(value),))
+    else:
+        core.store.execute("UPDATE owner_authority_revisions SET policy_redacted=1 "
+                           "WHERE revision=2")
+        if change == "erased":
+            core.store.execute("UPDATE owner_authority_revisions SET policy_json='{}' "
+                               "WHERE revision=2")
+    with core.store.transaction():
+        if change == "erased":
+            authority.validate_projection(core.store, records, journal_id, path)
+        else:
+            with pytest.raises(ValueError,
+                               match="authority policy mismatch|invalid erased authority"):
+                authority.validate_projection(core.store, records, journal_id, path)
+
+
 def test_control_api_rejects_bridge_credential_and_activates_exact_preview(core, tmp_path):
     policy = prepare(core, tmp_path)
     core.settings.control_token = SecretStr("synthetic-owner-control-token")

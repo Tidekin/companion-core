@@ -123,11 +123,43 @@ work while SQLite's single writer is held; WAL and durability settings are uncha
 Bridge codec reuse follows `paid_budget.journal`'s immutable process-local `marshal`
 view. Only already parsed and hash-checked JSON is serialized, and each caller receives
 independent objects. The disk journal remains the original JSON hash chain. Cache state
-retains at most 8 MiB of source bytes and 8 MiB of serialized records; a larger serialized
+retains at most 16 MiB of source bytes and 16 MiB of serialized records; a larger serialized
 view is evicted. Journals above that input bound reuse an LF-terminated prefix and fully
 validate the tail against its head and sequence, preserving the existing 32 MiB file
 limit. Rewrites, truncation, permissions, STOP and all runtime projection checks remain
 live. Decoding cached records is not authority to send.
+
+When only the spool DB changes, `OwnerRuntime` can reuse its existing read-only decoded
+records if the complete current journal bytes and owner row still match. A fresh native
+count-only read repeats file permissions, size and hash-chain checks and must match the
+retained record count and current journal head. Every original replay and DB projection
+check still runs, including current results, held input, media, handoff and STOP custody.
+Changed bytes or owner rows retain the original full decode path.
+
+Native delivery-resolution verification builds one local prefix index while walking the
+journal. Each historical proof still sees only its preceding records, including the
+original prior head and latest STOP/confirmation across handoffs. Current result reads,
+binding checks, signatures and final DB comparisons run for every proof. Later ACKs or
+handoffs cannot change an earlier proof's cutoff. This follows the existing synchronous
+handoff table batch; the index is local to that call and caches no authorization decision.
+
+Core's paid-journal codec also retains immutable decoded records, with its existing
+1 MiB source and serialized-record bounds. An exact LF-terminated prefix can survive
+small appends; every remaining line is decoded and checked against the prefix head.
+Every read still reads the complete file. Within the existing frozen-scope key memo,
+up to 4 MiB of exact current bytes can reuse their SHA-256 digest. A different scope,
+own write, path or byte sequence invalidates that memo; larger files use the original
+digest-key path. The separate 1 MiB validated-view bound and all DB/file checks remain.
+
+A rebuilt view still folds all journal records and checks the current DB projection.
+Historical renewal baselines read admission windows in one batch, then select the same
+requests present at that journal cutoff. Carry-chain validation batches its original
+grant/revision range and parses each exact policy JSON once per call, retaining every
+revision, erased-policy and transition check. Authority projections compare every stored
+revision, but resolve each distinct journal path at the start and end of the call and
+hash each distinct policy JSON once within the call. Path drift, missing admissions,
+changed policies and invalid erased rows still reject the view. No policy, permission
+or filesystem result is reused across these validation calls.
 
 These changes leave model generation settings, prompts, output allowances and reply
 segmentation unchanged. Production timing comparisons belong to the verification

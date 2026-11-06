@@ -95,21 +95,33 @@ def validate_projection(store, records, journal_id, journal_path):
     rows = store.rows("SELECT * FROM owner_authority_revisions ORDER BY revision") if exists else []
     if len(rows) != len(records):
         raise ValueError("authority DB behind journal")
+    paths, policies = {}, {}
+
+    def resolved(value):
+        if value not in paths:
+            paths[value] = Path(value).resolve()
+        return paths[value]
+
     for saved, record in zip(rows, records, strict=True):
         if any(saved[key] != record[key] for key in (
             "grant_id", "revision", "operation_id", "request_sha256", "state", "policy_sha256",
             "restore_generation", "predecessor_sha256", "record_sha256",
         )) or saved["created_at"] != record["at"] or (
             saved["journal_id"] != journal_id
-            or Path(saved["journal_path"]).resolve() != Path(journal_path).resolve()
+            or resolved(saved["journal_path"]) != resolved(str(journal_path))
         ):
             raise ValueError("authority projection mismatch")
-        if not saved["policy_redacted"] and _sha(json.loads(saved["policy_json"])) != (
-            saved["policy_sha256"]
-        ):
-            raise ValueError("authority policy mismatch")
+        if not saved["policy_redacted"]:
+            text = saved["policy_json"]
+            if text not in policies:
+                policies[text] = _sha(json.loads(text))
+            if policies[text] != saved["policy_sha256"]:
+                raise ValueError("authority policy mismatch")
         if saved["policy_redacted"] and saved["policy_json"] != "{}":
             raise ValueError("invalid erased authority")
+    # Reuse is confined to this validation; a changed alias invalidates the batch.
+    if any(Path(value).resolve() != path for value, path in paths.items()):
+        raise ValueError("authority projection mismatch")
     expected = records[-1]["record_sha256"] if records else None
     if _meta(store, CURRENT) != expected:
         raise ValueError("authority pointer behind journal")

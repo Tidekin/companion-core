@@ -54,10 +54,30 @@ def rows(runtime):
     return [dict(zip(names, row, strict=True)) for row in cursor]
 
 
-def _source(runtime, records, message_id):
-    entries = [record for record in records
-               if record["kind"] in UNCERTAIN | {"ACK"}
-               and record["data"].get("message_id") == message_id]
+class _Prefix:
+    """Only the original records preceding the proof currently being checked."""
+
+    def __init__(self, records=()):
+        self.attempts = {}
+        self.stop = self.confirmation = self.previous = None
+        for record in records:
+            self.append(record)
+
+    def append(self, record):
+        kind, value = record["kind"], record["data"]
+        if kind in UNCERTAIN | {"ACK"}:
+            message_id = value.get("message_id")
+            if isinstance(message_id, str):
+                self.attempts.setdefault(message_id, []).append(record)
+        elif kind == "OWNER_STOPPED":
+            self.stop = record
+        elif kind == "CORE_STOP_CONFIRMED":
+            self.confirmation = record
+        self.previous = record
+
+
+def _source(runtime, prefix, message_id):
+    entries = prefix.attempts.get(message_id, [])
     reserved = [record for record in entries if record["kind"] == "RESERVED"]
     if len(reserved) != 1 or entries[-1]["kind"] not in UNCERTAIN:
         raise ValueError("DELIVERY_UNCERTAIN_SOURCE_REQUIRED")
@@ -146,21 +166,20 @@ def _confirmation(runtime, value):
         raise ValueError("OWNER_CORE_STOP_RECEIPT_INVALID")
 
 
-def _check_proof(runtime, records, proof):
+def _check_proof(runtime, prefix, proof):
     wire.validate_quiescence(proof)
-    source = _source(runtime, records, proof["message_id"])
-    stops = [record for record in records if record["kind"] == "OWNER_STOPPED"]
-    confirmations = [record for record in records if record["kind"] == "CORE_STOP_CONFIRMED"]
-    if not stops or not confirmations:
+    source = _source(runtime, prefix, proof["message_id"])
+    stop, confirmation = prefix.stop, prefix.confirmation
+    if stop is None or confirmation is None:
         raise ValueError("DELIVERY_QUIESCENT_PROCESS_REQUIRED")
-    confirmation = confirmations[-1]["data"]
+    confirmed = confirmation["data"]
     if (proof["version"] != 2 or any(proof[key] != value for key, value in source.items())
-        or proof["budget_journal_id"] != confirmation["budget_journal_id"]
-        or proof["core_stop_record_sha256"] != confirmation["core_stop_sha256"]
-        or proof["stop_record_sha256"] != wire.digest(stops[-1])
-        or proof["bridge_journal_head_sha256"] != wire.digest(records[-1])
-        or proof["stopped_at"] != stops[-1]["at"]
-        or wire.timestamp(proof["quiesced_at"]) < wire.timestamp(confirmations[-1]["at"])):
+        or proof["budget_journal_id"] != confirmed["budget_journal_id"]
+        or proof["core_stop_record_sha256"] != confirmed["core_stop_sha256"]
+        or proof["stop_record_sha256"] != wire.digest(stop)
+        or proof["bridge_journal_head_sha256"] != wire.digest(prefix.previous)
+        or proof["stopped_at"] != stop["at"]
+        or wire.timestamp(proof["quiesced_at"]) < wire.timestamp(confirmation["at"])):
         raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
     key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(runtime.config.capture_signing_key))
     key.public_key().verify(bytes.fromhex(proof["signature"]), wire.signing_payload(proof))
@@ -176,7 +195,8 @@ def verify(runtime, records):
         raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
     stopped = False
     context = runtime
-    for index, record in enumerate(records):
+    prefix = _Prefix()
+    for record in records:
         kind, value = record["kind"], record["data"]
         if kind in {"OWNER_BOUND", "OWNER_REBOUND"}:
             context = SimpleNamespace(authority=value["authority"], db=runtime.db,
@@ -189,7 +209,7 @@ def verify(runtime, records):
                 raise ValueError("DELIVERY_QUIESCENT_PROCESS_REQUIRED")
             _confirmation(context, value)
         elif kind == "DELIVERY_QUIESCED":
-            _check_proof(context, records[:index], value)
+            _check_proof(context, prefix, value)
             if value["message_id"] in prepared:
                 raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
             prepared[value["message_id"]] = value
@@ -207,6 +227,9 @@ def verify(runtime, records):
                 or wire.timestamp(record["at"]) < wire.timestamp(receipt["at"])):
                 raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
             accepted[message_id] = (receipt, wire.digest(record))
+        # Keep the global prefix across authority handoffs, and advance only after
+        # checking this record: later ACKs, STOPs or proofs cannot alter its source.
+        prefix.append(record)
     projected = {row["message_id"]: row for row in rows(runtime)}
     if set(projected) != set(prepared):
         raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
@@ -324,9 +347,10 @@ async def prepare(runtime, client, message_id):
     if stored:
         proof = json.loads(stored["proof_json"])
     else:
-        stop = next(record for record in reversed(records) if record["kind"] == "OWNER_STOPPED")
+        prefix = _Prefix(records)
+        stop = prefix.stop
         proof = {"kind": "owner_delivery_quiescence_v2", "version": 2,
-            **_source(runtime, records, message_id),
+            **_source(runtime, prefix, message_id),
             "budget_journal_id": confirmation["budget_journal_id"],
             "stop_record_sha256": wire.digest(stop),
             "core_stop_record_sha256": confirmation["core_stop_sha256"],
@@ -335,7 +359,7 @@ async def prepare(runtime, client, message_id):
         key = Ed25519PrivateKey.from_private_bytes(
             bytes.fromhex(runtime.config.capture_signing_key))
         proof["signature"] = key.sign(wire.signing_payload(proof)).hex()
-        _check_proof(runtime, records, proof)
+        _check_proof(runtime, prefix, proof)
         runtime.db.execute(f"CREATE TABLE IF NOT EXISTS {TABLE} (message_id TEXT PRIMARY KEY,"
             "plan_hash TEXT NOT NULL,proof_json TEXT NOT NULL,receipt_json TEXT,"
             "receipt_record_sha256 TEXT)")
