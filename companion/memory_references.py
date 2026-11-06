@@ -382,6 +382,10 @@ def candidate(memory, item, now):
 
 def image_reviews(store, event_id, *, work=None):
     """IDs and source pins only; callers authorize the selected review before replay."""
+    query = ("FROM runtime_meta INDEXED BY idx_memory_image_review_target "
+             "WHERE key GLOB 'memory_reference_input:*' AND json_valid(value) "
+             "AND json_extract(value,'$.kind')='image_review' "
+             "AND json_extract(value,'$.receipt.target_event_id')=? ORDER BY rowid")
     if work is not None:
         from companion.retrieval_work import WorkLimit
 
@@ -389,11 +393,10 @@ def image_reviews(store, event_id, *, work=None):
         if not limit:
             work.mark("attachment_rows")
             raise WorkLimit("attachment_rows")
-        rows = work.rows(store,
-            "SELECT key FROM runtime_meta WHERE key GLOB 'memory_reference_input:*' "
-            "AND json_valid(value) AND json_extract(value,'$.kind')='image_review' "
-            "AND json_extract(value,'$.receipt.target_event_id')=? ORDER BY rowid LIMIT ?",
-            (event_id, limit + 1), limit=limit + 1)
+        # This is a consumed source's validity check, including inside checkpoint
+        # writes. Read indexed adjacency on that same Store so uncommitted disputes
+        # are visible; optional nomination's separate snapshot cannot certify it.
+        rows = store.rows("SELECT key " + query + " LIMIT ?", (event_id, limit + 1))
         if len(rows) > limit:
             work.mark("attachment_rows")
             raise WorkLimit("attachment_rows")
@@ -405,11 +408,7 @@ def image_reviews(store, event_id, *, work=None):
             if value:
                 result.append(value)
         return result
-    return [json.loads(row["value"]) for row in store.rows(
-        "SELECT value FROM runtime_meta WHERE key LIKE ? "
-        "AND json_extract(value,'$.kind')='image_review' "
-        "AND json_extract(value,'$.receipt.target_event_id')=? ORDER BY rowid",
-        (INPUT + "%", event_id))]
+    return [json.loads(row["value"]) for row in store.rows("SELECT value " + query, (event_id,))]
 
 
 def attributed(item, reference):
