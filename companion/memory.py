@@ -31,6 +31,30 @@ class Memory:
         if actor != "owner" or not self.settings.memory_enabled:
             raise CoreError("MEMORY_ACCESS_DENIED", 403)
 
+    def standing_relationship(self, *, memory_ids=None, limit=3, max_chars=300, now=None):
+        """Confirmed long-term relationship facts that apply to every turn.
+
+        Topic retrieval only admits facts resembling the current message, so an ordinary
+        "I'm back" never carries the names and roles both sides already use. Episodes,
+        hypotheses and conflicts stay with topic retrieval; native eligibility applies.
+        """
+        if limit <= 0 or max_chars <= 0:
+            return []
+        rows, used = [], 0
+        for row in self.search("*", subjects=("relationship",), limit=limit * 4,
+                               memory_ids=memory_ids, now=now):
+            if (row["status"] != "CONFIRMED" or row["needs_review"]
+                    or row["kind"] == "episode"):
+                continue
+            size = len(row["content"])
+            if used + size > max_chars:
+                continue
+            rows.append(row)
+            used += size
+            if len(rows) >= limit:
+                break
+        return rows
+
     def project_recall_candidates(self, query, *, memory_ids=None, limit=6, now=None):
         """Nominate a bounded project catalog for an explicit retrospective request.
 
