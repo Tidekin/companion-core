@@ -39,6 +39,14 @@ async def checked_post(guard, path, body):
             remaining = (guard.lease_until - guard.runtime.clock()).total_seconds()
             if remaining > 0:
                 await asyncio.sleep(min(0.1, remaining))
+        except httpx.TransportError:
+            # Core may have committed begin-send even though its ACK was lost.
+            # Never repeat that POST or dispatch OneBot from an unknown response.
+            # The same signed RESERVED witness can close the expired original lease.
+            remaining = (guard.lease_until - guard.runtime.clock()).total_seconds()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            raise Expired(stage) from None
         except httpx.HTTPStatusError as error:
             if (busy and error.response.status_code == 409
                 and guard.runtime.clock() >= guard.lease_until):

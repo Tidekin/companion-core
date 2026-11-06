@@ -52,6 +52,7 @@ def test_delivery_failure_boundary_retains_actual_uncertainty(
                 if request.url.path.endswith("/send-check"):
                     checks.append(request)
                     if boundary == "send_check_timeout":
+                        core.clock.advance(core.settings.lease_seconds + 1)
                         error = httpx.ReadTimeout("synthetic Core check timeout", request=request)
                         failures.append(error)
                         raise error
@@ -105,6 +106,14 @@ def test_delivery_failure_boundary_retains_actual_uncertainty(
                     assert body["result"] == "SENT" and body["provider_message_id"]
                     assert runtime.row()["state"] == "ACTIVE" and not runtime.stop_path.exists()
                     assert not cancels and kinds[-2:] == ["IO_STARTED", "ACK"]
+                elif boundary == "send_check_timeout":
+                    assert not sends and not guard.dispatched and not cancels
+                    assert attempt == "NOT_SENT" and outbox["state"] == "CANCELLED"
+                    assert body["result"] == "NOT_SENT"
+                    assert outbox["last_error_code"] == "REPLY_NOT_DISPATCHED"
+                    assert runtime.row()["state"] == "ACTIVE"
+                    assert not runtime.stop_path.exists() and "IO_STARTED" not in kinds
+                    assert len(failures) == 1
                 else:
                     assert len(sends) == int(boundary == "lost_ack")
                     assert guard.dispatched == (boundary == "lost_ack")
