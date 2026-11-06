@@ -32,27 +32,58 @@ class Memory:
             raise CoreError("MEMORY_ACCESS_DENIED", 403)
 
     def standing_relationship(self, *, memory_ids=None, limit=3, max_chars=300, now=None):
-        """Confirmed long-term relationship facts that apply to every turn.
-
-        Topic retrieval only admits facts resembling the current message, so an ordinary
-        "I'm back" never carries the names and roles both sides already use. Episodes,
-        hypotheses and conflicts stay with topic retrieval; native eligibility applies.
-        """
+        """Nominate confirmed relationship facts under native read/source work limits."""
         if limit <= 0 or max_chars <= 0:
             return []
-        rows, used = [], 0
-        for row in self.search("*", subjects=("relationship",), limit=limit * 4,
-                               memory_ids=memory_ids, now=now):
-            if (row["status"] != "CONFIRMED" or row["needs_review"]
-                    or row["kind"] == "episode"):
-                continue
-            size = len(row["content"])
-            if used + size > max_chars:
-                continue
-            rows.append(row)
-            used += size
-            if len(rows) >= limit:
-                break
+        self.require_owner("owner")
+        if memory_ids is not None and not memory_ids:
+            return []
+        version, rows, used = read_version(self), [], 0
+        # Filter before the bounded head: episodes must not crowd out enduring facts.
+        eligible = ("subject='relationship' AND status='CONFIRMED' AND needs_review=0 "
+                    "AND kind<>'episode' AND origin<>'event_observed' "
+                    "AND privacy_scope='private' AND confidence>0")
+        args = ()
+        if memory_ids is not None:
+            eligible += " AND memory_id IN (SELECT value FROM json_each(?))"
+            args = (encode(memory_ids),)
+        with retrieval_work.scope() as work:
+            sources = MemorySources(self, now, bounded=True, work=work)
+            ceiling = min(retrieval_work.FACT_CANDIDATES, work.remaining("candidates"))
+            if not work.take("searches"):
+                return []
+            if not ceiling:
+                work.mark("candidates")
+                return []
+            try:
+                headers = work.rows(self.store,
+                    "SELECT memory_id,octet_length(content) AS text_bytes FROM memories WHERE "
+                    + eligible + " ORDER BY updated_at DESC,memory_id LIMIT ?",
+                    (*args, ceiling + 1), limit=ceiling + 1)
+                if len(headers) > ceiling:
+                    work.mark("candidate_pool")
+                for header in headers[:ceiling]:
+                    if not work.take("candidates"):
+                        break
+                    if not work.take("text_bytes", header["text_bytes"]):
+                        continue
+                    row = self.store.one("SELECT * FROM memories WHERE " + eligible
+                        + " AND memory_id=? AND octet_length(content)=?",
+                        (*args, header["memory_id"], header["text_bytes"]))
+                    if (not row or used + len(row["content"]) > max_chars
+                        or not sources.current(row)):
+                        continue
+                    evidence = sources.evidence(row["memory_id"])
+                    if not evidence:
+                        continue
+                    row["evidence_ids"] = [source["event_id"] for source in evidence]
+                    rows.append(row)
+                    used += len(row["content"])
+                    if len(rows) >= limit:
+                        break
+            except retrieval_work.WorkLimit as error:
+                work.mark(error.reason)
+        check_version(self, version)
         return rows
 
     def project_recall_candidates(self, query, *, memory_ids=None, limit=6, now=None):

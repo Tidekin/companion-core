@@ -40,6 +40,10 @@ memory_daily_micro_usd = 50000
 # `follow_up_enabled = false`.
 # Long-term memory is on by default; run life-worker for background memory extraction.
 memory_enabled = true
+# Confirmed, current relationship facts also accompany unrelated chat topics.
+# Either value set to 0 disables this block; native memory authority still applies.
+relationship_standing_limit = 3
+relationship_standing_chars = 300
 evaluation_enabled = false # Owner-consented, six-call no-delivery experiments on the same budget.
 embedding_cache_dir = "data/embedding-cache"
 semantic_min_score = 0.5

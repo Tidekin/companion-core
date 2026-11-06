@@ -962,6 +962,7 @@ class Core(Runtime):
             reference_sources.append((learned["message"], learned["source_event_ids"]))
             reference_proofs.append((learned["message"],
                                      {"kind": "growth", "proof": learned["snapshot"]}))
+        standing = []
         if cfg.memory_enabled and permitted("memory"):
             allowed = live_text.memory_ids(s, cfg, self.clock, job) if bounded_text else None
             hits = self.memory_context.recall(
@@ -971,14 +972,15 @@ class Core(Runtime):
             ) else memories
             hits, relations = self.memory.with_relayed_updates(hits, self.clock())
             # A signed bounded window admits only its reviewed facts; leave it unchanged.
-            recalled = {h["memory_id"] for h in hits}
-            standing = [row for row in self.memory.standing_relationship(
+            standing = self.memory.standing_relationship(
                 limit=cfg.relationship_standing_limit,
                 max_chars=cfg.relationship_standing_chars, now=self.clock(),
-            ) if row["memory_id"] not in recalled] if (
+            ) if (
                 job["kind"] == "chat" and not bounded_text
             ) else []
-            memory_proof = self.memory_context.pin(self.clock(), rows=[*standing, *hits])
+            standing_ids = {row["memory_id"] for row in standing}
+            hits = [row for row in hits if row["memory_id"] not in standing_ids]
+            memory_proof = self.memory_context.pin(self.clock(), rows=hits)
             from companion.interest import profile
 
             trait_rows = (
@@ -1035,11 +1037,12 @@ class Core(Runtime):
             if standing:
                 selection.add(RELATIONSHIP_HEADING,
                     {"memories": [{k: row[k] for k in (
-                        "subject", "kind", "content", "status", "evidence_ids")}
+                        "subject", "kind", "content", "status", "origin", "evidence_ids")}
                         for row in standing]},
                     {event for row in standing for event in row["evidence_ids"]},
                     priority=context_selection.TOPIC, required=True,
-                    proofs=[{"kind": "memory", "proof": memory_proof}], module="memory")
+                    proofs=[{"kind": "memory", "proof": self.memory_context.pin(
+                        self.clock(), rows=standing)}], module="memory")
             for rank, h in enumerate(hits):
                 memory = {**{k: h[k] for k in (
                     "subject", "kind", "content", "status", "needs_review", "evidence_ids")},
@@ -1118,7 +1121,7 @@ class Core(Runtime):
                         self.clock(), event_ids=set(recalled["event_ids"]))}])
         mark("context_turn_recall")
         if continuation := self._memory_continuation(
-            job, sources, [row["memory_id"] for row in hits],
+            job, sources, [row["memory_id"] for row in [*standing, *hits]],
             reserved_ids=set(recalled["event_ids"]) if recalled else frozenset(),
             reserved_bytes=recalled["cost_bytes"] if recalled else 0,
         ):

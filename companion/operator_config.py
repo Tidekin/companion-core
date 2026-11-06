@@ -114,6 +114,8 @@ LABELS = {
     "turn_recall_rerank": "历史消息交叉编码重排",
     "memory_rerank": "记忆交叉编码重排",
     "memory_required_hits": "优先保留的记忆条数",
+    "relationship_standing_limit": "每轮保留的已确认长期关系条数",
+    "relationship_standing_chars": "每轮长期关系内容上限（字符）",
     "recent_protected_turns": "优先保留的最近完整对话轮数",
     "turn_recall_history_share": "历史消息召回占用比例",
     "turn_recall_second_hop": "历史消息二次检索条数",
