@@ -62,14 +62,31 @@ async def processes(core, directory, *, count=2, mode="normal", drain=False):
                 await child.wait()
 
 
-def test_real_tcp_control_entry_and_two_independent_workers_share_one_job(core, tmp_path):
-    manifest = prepare(core, tmp_path)
+@pytest.mark.parametrize("visual", [False, True], ids=["text", "image"])
+def test_real_tcp_control_entry_and_two_independent_workers_share_one_job(core, tmp_path, visual):
+    if visual:
+        from tests.test_image_evaluation import prepared
+
+        _, manifests = prepared(core, tmp_path)
+        from scripts.evaluate_image_understanding import manifest as image_manifest
+
+        manifest = evaluation.Manifest.model_validate(image_manifest(
+            core.settings, manifests[0].plan["requests"][:6], False))
+    else:
+        manifest = prepare(core, tmp_path)
     core.settings.control_token = SecretStr("synthetic-control-" * 3)
     async def scenario():
         async with real_core_http(core) as port, httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}", trust_env=False,
             headers={"Authorization": "Bearer " + core.settings.control_token.get_secret_value()},
         ) as client:
+            if visual:
+                oversized = await client.post("/internal/v2/evaluations/preview",
+                    content=b" " * (evaluation.MAX_HTTP_BODY_BYTES + 1))
+                assert oversized.status_code == 413
+                ordinary = await client.post("/internal/v1/inbox/events",
+                                             json=manifest.model_dump())
+                assert ordinary.status_code == 413
             preview = await client.post("/internal/v2/evaluations/preview",
                                         json=manifest.model_dump())
             assert preview.status_code == 200, preview.text
@@ -87,7 +104,8 @@ def test_real_tcp_control_entry_and_two_independent_workers_share_one_job(core, 
             assert observed.json()["state"] == "SUCCEEDED"
             assert all(row["complete_response"] for row in observed.json()["requests"])
     asyncio.run(scenario())
-    assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 6
+    count = core.store.one("SELECT COUNT(*) n FROM model_usage")["n"]
+    assert count == manifest.plan["request_count"]
     assert core.store.rows("SELECT * FROM outbox") == []
     assert core.store.rows("SELECT * FROM memories") == []
 

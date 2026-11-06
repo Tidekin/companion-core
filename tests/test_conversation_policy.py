@@ -124,7 +124,8 @@ def test_v2_is_default_and_receipt_names_the_strategy():
 
 
 def test_v2_wording_avoids_cold_positioning_and_requires_sources():
-    assert len(PARTICIPATION_V2.splitlines()) == 6
+    assert len(PARTICIPATION_V2.splitlines()) == 7
+    assert "不把纠正当成安慰或确认关系的请求" in PARTICIPATION_V2
     assert "AI 朋友" in PRINCIPLES
     assert "没有就不要装作记得" in PARTICIPATION_V2
     assert "小肥鱼" not in PARTICIPATION_V2  # Names come from memory, never the prompt.

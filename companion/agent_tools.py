@@ -242,8 +242,11 @@ Each tool requires its current purpose on the original owner-authorized job.
     ) -> dict:
         """Record visible text and objects from one currently attached original image.
 
-        Call once per image before replying, using its zero-based slot. Include exact
-        visible text and uncertainty; never infer the owner's identity, facts or intent.
+        When a reusable observation is useful, record it once using the zero-based
+        slot. For panels, preserve panel order, exact text, speakers, actions, and
+        repeated or changed elements. Separate visible relations from interpretation;
+        mark unreadable details and uncertainty. Do not put the image's inferred moral,
+        the owner's identity, intent or preferences into this factual observation.
         This is a machine analysis receipt, separate from your conversational reply.
         """
         check("memory")

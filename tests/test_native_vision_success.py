@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from companion import image_spool
+from companion import image_spool, image_understanding
 from companion_onebot_bridge import pending_media
 from tests.conftest import run
 from tests.native_continuous_support import until
@@ -23,9 +23,10 @@ from tests.test_onebot_images import image_segment
 from tests.test_owner_image_recovery import run_worker
 
 
-@pytest.mark.parametrize("count", [1, 3], ids=["single_image", "continuous_images"])
+@pytest.mark.parametrize("count,expire", [(1, False), (3, False), (1, True)],
+                         ids=["single_image", "continuous_images", "expired_followup"])
 def test_new_images_reach_vision_reply_ack_and_following_text(
-    core, tmp_path, monkeypatch, count,
+    core, tmp_path, monkeypatch, count, expire,
 ):
     async def scenario():
         async with native_host(core, tmp_path, monkeypatch, count=count,
@@ -74,14 +75,19 @@ def test_new_images_reach_vision_reply_ack_and_following_text(
                         for row in stored] == originals
                 first = await run_worker(core, tmp_path, 1, "已按顺序看到图片颜色。")
                 assert len(first) == 1 and model_images(first[0]) == originals
+                assert image_understanding.RULES in first[0]["messages"][0]["content"]
                 assert question in json.dumps(first[0]["messages"], ensure_ascii=False)
                 await wait_for_ack(core, active, sends, tasks, 1, retries, responses, rpc)
+                if expire:
+                    core.clock.advance(image_spool.RETENTION_SECONDS + 1)
                 await send(core, inbound, inputs + 1,
                            [{"type": "text", "data": {"text": "现在继续文字聊天"}}])
                 await until(lambda: len(core.store.rows("SELECT * FROM events")) == inputs + 1,
                             tasks=tasks, deadline_seconds=20)
                 second = await run_worker(core, tmp_path, 2, "可以，继续文字聊天。")
                 assert len(second) == 1
+                assert model_images(second[0]) == ([] if expire else originals)
+                assert (image_understanding.RULES in second[0]["messages"][0]["content"]) != expire
                 assert "现在继续文字聊天" in json.dumps(second[0]["messages"], ensure_ascii=False)
                 await wait_for_ack(core, active, sends, tasks, 2, retries, responses, rpc)
                 assert [body["message"][0]["data"]["text"] for body in sends] == [

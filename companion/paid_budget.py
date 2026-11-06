@@ -209,7 +209,7 @@ def estimate_input_tokens(approval, messages, scenario, *, tools=()):
                  for message in messages):
             from companion.image_input import messages_and_estimate
 
-            if scenario != "chat":
+            if scenario not in {"chat", "evaluation"}:
                 raise ValueError("unsupported image scenario")
             messages, image_estimate = messages_and_estimate(approval.image_input, messages)
             estimate += image_estimate
