@@ -358,7 +358,11 @@ independent of the current topic. `relationship_standing_limit` defaults to 3 an
 `relationship_standing_chars` to 300; setting either to zero disables it. Episodes,
 hypotheses, unresolved conflicts and unconfirmed observations stay outside this block.
 The filters run before bounded nomination so temporary episodes cannot crowd out a lasting
-agreement. Selection reuses the reply-local SQL/candidate/source limits and `MemorySources`
+agreement. Eligible records are ordered by existing stored importance, then recency and
+memory ID. A partial SQLite index applies that ordering before the candidate cap, so newer
+low-importance records cannot push an older important agreement out of the candidate pool.
+Importance only ranks candidates; it does not confirm a fact or replace source validation.
+Selection reuses the reply-local SQL/candidate/source limits and `MemorySources`
 validation, without repairing facts or writing a second memory store. Facts that do not fit
 the character allowance are skipped whole.
 
