@@ -282,6 +282,20 @@ async def original_input_state(active):
     return response.json()
 
 
+def test_semantic_reply_without_line_breaks_is_one_complete_native_send(core, tmp_path):
+    text = "哦，已经到了。我刚才以为你还在路上。"
+
+    async def scenario():
+        async with native_fragments(core, tmp_path, parts=[text]) as (active, sends, _, calls):
+            assert await active.pump()
+            assert (await original_input_state(active))["terminal"]
+            assert not await active.pump()
+            assert active.attempts() == {"ACK": 1} and len(calls) == 1
+            assert sends[0]["message"] == [{"type": "text", "data": {"text": text}}]
+
+    run(scenario())
+
+
 def test_controlled_group_waits_restarts_and_acks_input_only_after_last_fragment(core, tmp_path):
     async def scenario():
         async with native_fragments(core, tmp_path) as (active, sends, _, calls):

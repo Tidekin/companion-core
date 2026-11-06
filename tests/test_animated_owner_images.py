@@ -14,7 +14,7 @@ from PIL import Image
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.image_input import ImageInputPolicy, text_and_estimate
-from companion.reply_segments import SegmentedReplyConfig
+from companion.reply_segments import SEMANTIC_RULES, SegmentedReplyConfig
 from companion_onebot_bridge import app, images
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.pending_media import MediaPump
@@ -224,7 +224,7 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
         assert ("抽样" in json.dumps(calls[0], ensure_ascii=False)) == (count > 1)
         assert "synthetic-summary-not-visual-evidence" not in json.dumps(calls)
         assert {"role": "assistant", "content": first_reply} in calls[1]
-        assert "自然语义停顿" in calls[1][0]["content"]
+        assert SEMANTIC_RULES in calls[1][0]["content"]
         content = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
         assert content["state"] == "SUCCEEDED"
         assert content["media_sha256"] == hashlib.sha256(original).hexdigest()

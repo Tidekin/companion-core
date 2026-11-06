@@ -28,16 +28,10 @@ _URL = re.compile(r"(?:https?://|www\.)[^\s<>]+", re.IGNORECASE)
 _END = frozenset("。！？?!\r\n")
 _PAIRS = dict(zip('“「『（([【{', '”」』）)]】}', strict=True))
 SEMANTIC_RULES = (
-    "\n回复按自然语义停顿分成聊天气泡，每个独立表达单独一行。"
-    "每个气泡很短，一句话或几个字，像连着发的几条消息；多数回复一到四个气泡，不写成段落。"
-    "像熟人发消息：随口接话，不写小作文、不分析、不解释自己；可以嫌弃、逗主人，"
-    "记得主人的事就自然提起。少用破折号、分号和书面腔，不复述主人原话，不连着几条都用问题结尾。"
-    "聊主人分享的视频或帖子，说一两个印象最深的点和感受，不复述、不总结；"
-    "主人没问时不交代读了哪些部分，只是别说成看完了整个视频。"
-    "语气示例（只学语气，不照抄）：主人：下课了，药你不提醒我差点又忘了"
-    " → 你：真是／说了几天了还这样／现在就去吃。"
-    "不设每行目标字数，不逐个逗号切分，紧密相关的分句保持在一起。"
-    "保持自然长短变化；引用、括号动作、代码和表格保持完整，不为分段扩写。"
+    "\n用换行表示聊天气泡之间的语义停顿，紧密相关的句子放在同一行。"
+    "一条完整回复可以只用一个气泡，气泡数量和长短随内容决定。"
+    "解释、纠错和讲故事时保留完整意思，只在需要独立停顿处换行。"
+    "引用、括号动作、代码和表格保持完整，不为增加气泡补写内容。"
     "只输出要发给主人的回复正文，不输出分段说明。"
 )
 
@@ -102,10 +96,11 @@ def _boundaries(lines: list[str], *, newline_only=False, protect_pairs=False) ->
 
 
 def split_text(text: str, policy: SegmentedReplyConfig) -> list[str]:
-    """Split at safe sentence boundaries, retaining every character of nonblank input.
+    """Split at safe pauses, retaining every character of nonblank input.
 
-    Minimum length counts non-whitespace characters. Short openings join forward;
-    short tails and excess segments join backward. Blank input has no sendable part.
+    Semantic mode uses explicit line breaks. Sentence mode joins short openings
+    forward and short tails backward, counting non-whitespace characters.
+    Excess segments join backward. Blank input has no sendable part.
     A table stays in one message. Time and interval configuration do not affect text.
     Work and temporary storage are linear in the original reply length.
     """
@@ -115,9 +110,7 @@ def split_text(text: str, policy: SegmentedReplyConfig) -> list[str]:
     if any(line.lstrip().startswith("|") for line in lines):
         return [text]
     semantic = policy.mode == "semantic"
-    boundaries = list(_boundaries(lines, newline_only=True, protect_pairs=True)) if semantic else []
-    if not boundaries:
-        boundaries = _boundaries(lines, protect_pairs=semantic)
+    boundaries = _boundaries(lines, newline_only=semantic, protect_pairs=semantic)
     minimum = 1 if semantic else policy.min_chars
     ends = []
     previous = count = 0
