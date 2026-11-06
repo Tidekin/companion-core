@@ -3,7 +3,7 @@
 import json
 
 from companion.contracts import Candidate
-from companion.model import MEMORY_HEADING
+from companion.model import MEMORY_HEADING, RELATIONSHIP_HEADING
 from tests.conftest import run
 from tests.test_dialogue_context import current_job, sent_history
 
@@ -30,12 +30,19 @@ def test_chat_memory_preserves_episode_kind_and_confirmed_fact(core):
     job = current_job(core, text='雪狐和猫侍卫都是长期称呼吗？')
     messages = core.context(job,
                             memories=memories, snapshots=snapshots)
-    supplied = [memory for message in messages if isinstance(message['content'], str)
-                and message['content'].startswith(MEMORY_HEADING)
-                for memory in json.loads(message['content'].split('\n', 1)[1])['memories']]
+    blocks = {
+        heading: [memory for message in messages if isinstance(message['content'], str)
+                  and message['content'].startswith(heading)
+                  for memory in json.loads(message['content'].split('\n', 1)[1])['memories']]
+        for heading in (RELATIONSHIP_HEADING, MEMORY_HEADING)
+    }
+    assert [m['content'] for m in blocks[RELATIONSHIP_HEADING]] == [statements[0][0]]
+    assert [m['content'] for m in blocks[MEMORY_HEADING]] == [statements[1][0]]
+    supplied = [*blocks[RELATIONSHIP_HEADING], *blocks[MEMORY_HEADING]]
     assert [(memory['kind'], memory['status'], memory['origin']) for memory in supplied] == [
         ('fact', 'CONFIRMED', 'user_confirmed'), ('episode', 'HYPOTHESIS', 'model_inferred')]
     assert all(memory['needs_review'] == 0 for memory in supplied)
+    assert [memory['evidence_ids'] for memory in supplied] == [['evt_test_1'], ['evt_test_2']]
     # The model receives the words with their actual roles, not a synthesized owner claim.
     for owner, reply, _, _ in statements:
         assert {'role': 'user', 'content': owner} in messages

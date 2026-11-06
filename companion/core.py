@@ -45,7 +45,13 @@ from companion.media import MediaService
 from companion.meme_core import MemeCaptionService
 from companion.memory import Memory
 from companion.memory_context import MemoryContext
-from companion.model import MEMORY_HEADING, MEMORY_RULES, PRINCIPLES, RECALL_RULES
+from companion.model import (
+    MEMORY_HEADING,
+    MEMORY_RULES,
+    PRINCIPLES,
+    RECALL_RULES,
+    RELATIONSHIP_HEADING,
+)
 from companion.observation import ObservationService
 from companion.privacy import epoch, redact
 from companion.reading import ReadingService
@@ -956,6 +962,7 @@ class Core(Runtime):
             reference_sources.append((learned["message"], learned["source_event_ids"]))
             reference_proofs.append((learned["message"],
                                      {"kind": "growth", "proof": learned["snapshot"]}))
+        standing = []
         if cfg.memory_enabled and permitted("memory"):
             allowed = live_text.memory_ids(s, cfg, self.clock, job) if bounded_text else None
             hits = self.memory_context.recall(
@@ -964,6 +971,15 @@ class Core(Runtime):
                 memories is None
             ) else memories
             hits, relations = self.memory.with_relayed_updates(hits, self.clock())
+            # A signed bounded window admits only its reviewed facts; leave it unchanged.
+            standing = self.memory.standing_relationship(
+                limit=cfg.relationship_standing_limit,
+                max_chars=cfg.relationship_standing_chars, now=self.clock(),
+            ) if (
+                job["kind"] == "chat" and not bounded_text
+            ) else []
+            standing_ids = {row["memory_id"] for row in standing}
+            hits = [row for row in hits if row["memory_id"] not in standing_ids]
             memory_proof = self.memory_context.pin(self.clock(), rows=hits)
             from companion.interest import profile
 
@@ -1018,6 +1034,16 @@ class Core(Runtime):
                         "心情不改变判断；没有新证据不必重新编造观点）：", data, ids,
                         module="interest", priority=related(item["topic"]), proofs=proofs,
                         fact=("self", judgment["take"]) if judgment else None)
+            if standing:
+                selection.add(RELATIONSHIP_HEADING,
+                    {"memories": [{k: row[k] for k in (
+                        "subject", "kind", "content", "status", "needs_review", "origin",
+                        "evidence_ids")}
+                        for row in standing]},
+                    {event for row in standing for event in row["evidence_ids"]},
+                    priority=context_selection.TOPIC, required=True,
+                    proofs=[{"kind": "memory", "proof": self.memory_context.pin(
+                        self.clock(), rows=standing)}], module="memory")
             for rank, h in enumerate(hits):
                 memory = {**{k: h[k] for k in (
                     "subject", "kind", "content", "status", "needs_review", "evidence_ids")},
@@ -1096,7 +1122,7 @@ class Core(Runtime):
                         self.clock(), event_ids=set(recalled["event_ids"]))}])
         mark("context_turn_recall")
         if continuation := self._memory_continuation(
-            job, sources, [row["memory_id"] for row in hits],
+            job, sources, [row["memory_id"] for row in [*standing, *hits]],
             reserved_ids=set(recalled["event_ids"]) if recalled else frozenset(),
             reserved_bytes=recalled["cost_bytes"] if recalled else 0,
         ):

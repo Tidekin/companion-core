@@ -350,3 +350,20 @@ Additional implementation references: [SQLite FTS5 native rank ordering](https:/
 and [DSH bounded search at 22ddee3](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/fs/tool-fs-search/src/search-core.ts).
 DSH provides the explicit overflow/abort-versus-no-match principle; Core retains its native
 SQLite, proof and delivery contracts. No dependency was added.
+
+### Confirmed relationship context
+
+Ordinary chat also selects a small standing block of current, confirmed relationship facts,
+independent of the current topic. `relationship_standing_limit` defaults to 3 and
+`relationship_standing_chars` to 300; setting either to zero disables it. Episodes,
+hypotheses, unresolved conflicts and unconfirmed observations stay outside this block.
+The filters run before bounded nomination so temporary episodes cannot crowd out a lasting
+agreement. Selection reuses the reply-local SQL/candidate/source limits and `MemorySources`
+validation, without repairing facts or writing a second memory store. Facts that do not fit
+the character allowance are skipped whole.
+
+The block retains native origin and evidence, carries its own source proof, and has required
+context priority even when topic retrieval found the same fact. Topic references omit those
+duplicates. Current input and full paid admission keep their existing budget rules. Memory
+permission is still required, and signed bounded-text windows keep only their reviewed facts.
+Erasure, expiry and source changes invalidate the same native proof before generation/delivery.

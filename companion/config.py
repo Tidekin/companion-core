@@ -630,6 +630,11 @@ class Settings(BaseModel):
     # own recent statement. The newest complete pairs that fit alongside current
     # input are required context; original full-request hard admission still applies.
     memory_required_hits: int = Field(default=3, ge=0, le=20)
+    # Confirmed long-term names, forms of address and relationship agreements ride
+    # along with every chat turn, independent of topic similarity. Bounded by count
+    # and characters; 0 disables the standing block.
+    relationship_standing_limit: int = Field(default=3, ge=0, le=8)
+    relationship_standing_chars: int = Field(default=300, ge=0, le=1200)
     recent_protected_turns: int = Field(default=2, ge=1, le=20)
     # Raw-turn recall may use at most this share of the history allowance left after
     # recent dialogue, so episode continuation keeps room for related earlier turns.
