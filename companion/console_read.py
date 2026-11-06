@@ -6,6 +6,7 @@ from datetime import datetime
 from companion import capabilities, worker_loop
 from companion.memory_context import MemorySources, check_version, read_version
 from companion.privacy import redact
+from companion.store import encode
 
 
 def entry(identifier, kind, title, status, at=None, summary="", **detail):
@@ -29,6 +30,19 @@ def activity(core, before=None, limit=30):
     return collection(core, items, rows[limit - 1]["audit_id"] if len(rows) > limit else None)
 
 
+def _memory_page(core, now, ids):
+    """An explicit catalog page needs complete source checks, independent of reply recall."""
+    core.memory.require_owner("owner")
+    sources = MemorySources(core.memory, now)
+    for row in core.store.rows(
+        "SELECT * FROM memories WHERE memory_id IN (SELECT value FROM json_each(?)) "
+        "AND status IN ('CONFIRMED','HYPOTHESIS') AND privacy_scope='private' AND confidence>0",
+        (encode(ids),),
+    ):
+        if sources.current(row) and (evidence := sources.evidence(row["memory_id"])):
+            yield {**row, "evidence_ids": [event["event_id"] for event in evidence]}
+
+
 def _memory_rows(core, now, review=False):
     """Pending means unconfirmed or conflicted; native source eligibility still applies."""
     offset, batch_size = 0, 200
@@ -46,9 +60,7 @@ def _memory_rows(core, now, review=False):
         if not candidates:
             return
         ids = [row["memory_id"] for row in candidates]
-        eligible = {row["memory_id"]: row for row in core.memory.search(
-            "*", memory_ids=ids, limit=len(ids), now=now,
-        )}
+        eligible = {row["memory_id"]: row for row in _memory_page(core, now, ids)}
         for memory_id in ids:
             if memory_id in eligible:
                 yield eligible[memory_id]
@@ -72,9 +84,7 @@ def memories(core, query="", review=False, limit=30):
             and len(selected) < limit):
             selected.append(row["memory_id"])
     # Recheck early pages after the complete scan, without returning stale evidence.
-    rows = {row["memory_id"]: row for row in core.memory.search(
-        "*", memory_ids=selected, limit=len(selected), now=now,
-    )}
+    rows = {row["memory_id"]: row for row in _memory_page(core, now, selected)}
     check_version(core.memory, version)
     items = []
     for memory_id in selected:

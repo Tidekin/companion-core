@@ -40,7 +40,7 @@ def turn_messages(source, store=None, query=""):
 
 
 def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, event_ids=None,
-                        include_partial=False, cutoff_rowid=None):
+                        include_partial=False, cutoff_rowid=None, _nominate=None):
     """Return source-bound turns; an optional small allowlist is applied before LIMIT."""
     from companion.transport import digest, reply_group, segment_envelopes
 
@@ -62,16 +62,22 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
         "=reply.segment_count AND NOT EXISTS (SELECT 1 FROM outbox part "
         "WHERE part.reply_group_id=reply.reply_group_id AND part.state!='SENT'))) "
     ) if not include_partial else ""
-    rows = store.rows(
+    projection = ("SELECT e.event_id,octet_length(e.body_json)+octet_length(o.content_json) "
+                  "AS text_bytes " if _nominate is not None else
         "SELECT e.*,o.message_id,o.content_json,o.content_sha256,o.delivery_key,o.reply_group_id,"
         "json_extract(e.body_json,'$.text') AS user_text,"
-        "json_extract(o.content_json,'$.text') AS reply_text FROM events e "
-        "JOIN outbox o ON o.origin_event_id=e.event_id AND o.rowid IN "
-        "(SELECT MAX(reply.rowid) FROM outbox reply WHERE reply.conversation_id=? "
+        "json_extract(o.content_json,'$.text') AS reply_text ")
+    read = store.rows if _nominate is None else lambda sql, args: _nominate.rows(
+        store, sql, args, limit=max_turns)
+    rows = read(
+        projection + "FROM events e "
+        "JOIN outbox o ON o.rowid="
+        "(SELECT MAX(reply.rowid) FROM outbox reply WHERE reply.origin_event_id=e.event_id "
+        "AND reply.conversation_id=? "
         "AND reply.action_type='qq.private.reply' AND reply.state='SENT' "
         "AND json_type(reply.content_json,'$.text')='text' "
         + completeness +
-        "AND length(json_extract(reply.content_json,'$.text'))>0 GROUP BY reply.origin_event_id) "
+        "AND length(json_extract(reply.content_json,'$.text'))>0) "
         "WHERE e.conversation_id=? AND e.actor_id='owner' AND e.privacy_scope='private' "
         "AND e.source='qq.onebot' "
         "AND e.event_type IN ('message.received','message.media_received') "
@@ -88,6 +94,8 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
          cutoff_rowid if cutoff_rowid is not None else current_event_id,
          *(event_ids or ()), max_turns),
     )
+    if _nominate is not None:
+        return rows  # Identity/size nominations only; callers must read and validate live sources.
     sources = []
     for row in rows:
         # This operational column is outside historical input and context fingerprints.

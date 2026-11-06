@@ -101,6 +101,10 @@ def test_sync_and_async_share_ranking_and_evidence(core, monkeypatch):
     asynchronous = run(core.memory.search_async("青禾项目", now=core.clock(), clock=core.clock,
                                                trace=async_trace, explain=async_explain))
     assert synchronous == asynchronous
+    sync_work, async_work = sync_trace.pop("work"), async_trace.pop("work")
+    assert sync_work["counts"]["candidates"] == async_work["counts"]["candidates"] == 1
+    assert sync_work["counts"]["cold_vectors"] == 1
+    assert async_work["counts"]["cold_vectors"] == 0
     assert sync_trace == async_trace and sync_explain == async_explain == sync_trace["selected"]
     assert synchronous[0]["memory_id"] == mid
     assert synchronous[0]["evidence_ids"] == ["evt_test_1"]
@@ -131,7 +135,7 @@ def test_context_trace_only_retains_final_sources_and_marks_project_fallback(cor
     assert trace["selected"] == {mid: {"project_fallback": True} for mid in ids}
 
 
-def test_cancelled_inference_keeps_cpu_slot_until_thread_finishes(core, monkeypatch):
+def test_cancelled_inference_keeps_cpu_slot_and_next_reply_does_not_queue(core, monkeypatch):
     fact(core, 1, "青禾项目使用蓝色配色")
     entered, release = threading.Event(), threading.Event()
     queries = []
@@ -156,13 +160,14 @@ def test_cancelled_inference_keeps_cpu_slot_until_thread_finishes(core, monkeypa
             first.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await first
-            second = asyncio.create_task(core.memory.search_async("第二次", now=core.clock()))
-            await asyncio.sleep(.03)
+            trace = {}
+            second = asyncio.create_task(core.memory.search_async("青禾项目", now=core.clock(),
+                                                                  trace=trace))
+            assert await asyncio.wait_for(second, 2)
             assert queries == ["第一次"]
+            assert "encoder_busy" in trace["work"]["reasons"]
             assert not core.store.rows("SELECT * FROM memory_vectors")
             release.set()
-            assert await second
-            assert queries == ["第一次", "第二次"]
         finally:
             release.set()
             await asyncio.gather(first, *([second] if second else []), return_exceptions=True)

@@ -52,8 +52,8 @@ class MemoryProjections:
     Temperature is independent of truth status, importance and retrieval score.
     """
 
-    def __init__(self, memory):
-        self.memory, self.store = memory, memory.store
+    def __init__(self, memory, *, work=None):
+        self.memory, self.store, self.work = memory, memory.store, work
 
     def continuation_candidates(self, conversation_id, now, selected_event_ids):
         """Bound each candidate lane before provenance and native heat validation.
@@ -78,11 +78,21 @@ class MemoryProjections:
         ]
         selected, truncated = {}, False
         for predicate, parameter in lanes:
-            rows = self.store.rows(base + "AND " + predicate +
-                " ORDER BY e.ended_at DESC,e.episode_id LIMIT 21",
-                (conversation_id, now, parameter))
+            sql = base + "AND " + predicate + " ORDER BY e.ended_at DESC,e.episode_id LIMIT 21"
+            args = (conversation_id, now, parameter)
+            rows = (self.work.rows(self.store, sql, args, limit=21) if self.work
+                    else self.store.rows(sql, args))
             truncated |= len(rows) > 20
-            selected.update((row["episode_id"], row) for row in rows[:20])
+            for row in rows[:20]:
+                if row["episode_id"] in selected:
+                    continue
+                if self.work:
+                    if not self.work.take("candidates"):
+                        break
+                    if self.store.one("SELECT * FROM episodes WHERE episode_id=?",
+                                      (row["episode_id"],)) != row:
+                        continue
+                selected[row["episode_id"]] = row
         return sorted(selected.values(), key=lambda row: (
             row["ended_at"], row["episode_id"],
         ), reverse=True), truncated
@@ -169,7 +179,11 @@ class MemoryProjections:
         return "Cold", ["OLDER_EVIDENCE"]
 
     def _goals(self, ids, sources, allowed):
-        rows = self.store.rows(
+        def read(sql, args):
+            return (self.work.rows(self.store, sql, args, limit=21) if self.work
+                    else self.store.rows(sql, args))
+
+        rows = read(
             "SELECT DISTINCT g.* FROM goals g JOIN goal_evidence ge USING(goal_id) "
             "LEFT JOIN goal_steps s USING(goal_id) LEFT JOIN commitments c USING(goal_id) "
             "WHERE g.redacted=0 AND ge.event_id IN (SELECT value FROM json_each(?)) "
@@ -178,6 +192,9 @@ class MemoryProjections:
         )
         result = []
         for goal in rows[:20]:
+            if self.work and self.store.one("SELECT * FROM goals WHERE goal_id=?",
+                                            (goal["goal_id"],)) != goal:
+                continue
             roots = [r["event_id"] for r in self.store.rows(
                 "SELECT event_id FROM goal_evidence WHERE goal_id=? ORDER BY event_id LIMIT 101",
                 (goal["goal_id"],),
@@ -250,7 +267,11 @@ class MemoryProjections:
     def _executions(self, goal, step, sources, allowed):
         if not step:
             return [], False
-        rows = self.store.rows(
+        def read(sql, args):
+            return (self.work.rows(self.store, sql, args, limit=21) if self.work
+                    else self.store.rows(sql, args))
+
+        rows = read(
             "SELECT r.request_id,r.state,a.state AS attempt_state FROM exploration_requests r "
             "LEFT JOIN reading_attempts a USING(request_id) WHERE r.redacted=0 "
             "AND r.operation='read' AND json_extract(r.goal_step_json,'$.goal_id')=? "
@@ -260,6 +281,15 @@ class MemoryProjections:
         )
         executions = []
         for row in rows[:20]:
+            if self.work and self.store.one(
+                "SELECT r.request_id,r.state,a.state AS attempt_state FROM exploration_requests r "
+                "LEFT JOIN reading_attempts a USING(request_id) WHERE r.request_id=? "
+                "AND r.redacted=0 AND r.operation='read' "
+                "AND json_extract(r.goal_step_json,'$.goal_id')=? "
+                "AND json_extract(r.goal_step_json,'$.step_id')=?",
+                (row["request_id"], goal["goal_id"], step["step_id"]),
+            ) != row:
+                continue
             ids = [r["event_id"] for r in self.store.rows(
                 "SELECT event_id FROM exploration_evidence WHERE request_id=? "
                 "ORDER BY event_id LIMIT 101", (row["request_id"],),
@@ -282,8 +312,14 @@ class MemoryProjections:
         if not receipt or receipt["result_status"] not in {"FETCHED", "WATCHED"}:
             return False
         lineage = list(sources._lineage(key))
-        required = set(roots) | {row["event_id"] for row in self.store.rows(
-            "SELECT event_id FROM goal_step_evidence WHERE step_id=?", (step["step_id"],))}
+        evidence = self.store.rows("SELECT event_id FROM goal_step_evidence WHERE step_id=?"
+                                   + (" LIMIT 101" if self.work else ""), (step["step_id"],))
+        if self.work and len(evidence) > 100:
+            from companion.retrieval_work import WorkLimit
+
+            self.work.mark("source_nodes")
+            raise WorkLimit("source_nodes")
+        required = set(roots) | {row["event_id"] for row in evidence}
         if not required <= {event["source_id"] for event in lineage}:
             return False
         return self._live_lineage(lineage, sources)

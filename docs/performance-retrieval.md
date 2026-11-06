@@ -61,8 +61,9 @@ records. Disable full lock capture after measurement and apply the deployment lo
 Regression checks use comparison counts rather than wall-clock thresholds for fusion growth,
 real SQLite writers for contention, actual WS/HTTP ingress plus an independent native worker,
 and checked native segmented delivery. Only the external model and OneBot transport are
-synthetic. Candidate/recall-quality changes, full-history ledger checkpoints and sustained
-1x/10x/24–72h latency acceptance remain separate work; this change reports no production P95.
+synthetic. These maintenance measurements establish no production P95. The bounded retrieval
+section below covers the subsequent candidate changes; full-history ledger checkpoints and
+sustained 24–72h latency acceptance still need separate evidence.
 
 Implementation references: existing Core/Life maintenance and Store rollback scopes;
 [Python scandir lifecycle](https://docs.python.org/3.12/library/os.html#os.scandir);
@@ -252,3 +253,100 @@ Local query timings measure the retrieval pair with one caller and warm document
 not provider latency, overall chat latency or answer accuracy. Round 5 answer-quality
 acceptance must freeze the candidate before authoring fresh questions and running the
 existing anchored judges and closed-book control.
+
+
+## Reply-local retrieval work limits
+
+A reply owns one work allowance through the existing `retrieval.query_scope`. Prefetch,
+raw-turn recall, episode continuation and later memory tools share it, including nested
+scopes and CPU threads. Closing or cancelling the reply closes the allowance. Independent
+replies have independent counters. This bounds optional retrieval work; original owner,
+financial-journal and erasure-ledger custody checks still inspect their complete authorities.
+It does not guarantee a fixed end-to-end response time or bound provider latency.
+
+| Resource | Per reply | Per operation |
+| --- | ---: | --- |
+| Nominated fact/turn/episode/revision records | 256 | 96 facts; 192 raw turns; existing episode/revision heads |
+| Optional text materialization and proof reads | 1 MiB | Size checked before reading memory/event/reference bodies |
+| Cold passage vectors, shared by facts and turns | 16 | Missing vectors receive no fabricated semantic score |
+| Query vectors / fact searches | 8 / 8 | Existing encoder-specific query reuse |
+| Cached vectors scanned / bytes | 4,096 / 8 MiB | At most 2,048 cached vectors per nomination |
+| Optional source-node visits | 2,048 | At most 512 distinct nodes and 64 positive roots per proof |
+| Optional nomination SQLite VM instructions | 3,000,000 | Rounded up in 1,000-instruction units |
+| Cross-encoder document pairs | 48 | Existing tokenizer length and batch limits |
+| Recalled attachment records | 128 | At most eight file/image items and eight transcripts per turn |
+
+Consumed proofs have independent 512-node / 64-root / 1 MiB limits: exhaustion of optional
+nomination cannot authorize a truncated proof or disable final source validation. Full selected
+proofs, row identities, current privacy epochs and caller permissions are rechecked after
+inference and at the existing dispatch boundaries. Legacy QQ correction matching shares the
+same exact command predicate as retention; proof traversal follows indexed adjacency rather
+than running the unbounded descendant-erasure closure. Erasure itself retains the full closure.
+
+Fact nomination combines exact memory IDs/fact keys, native FTS5 rank, a bounded cached-vector
+scan and a bounded native ordered head. Exact and lexical channels have finite heads so a
+broad lexical query leaves room for semantic nominees. Hyphenated identifiers stay intact.
+Every nominee is re-read and source-validated on the original Store before use. Confidence
+repair and importance refresh touch nominated rows only; there is no foreground global sweep.
+An old synonym-only fact outside the cached-vector scan or not yet indexed can be missed.
+This limitation is explicit; this is not an ANN index or a claim of complete semantic recall.
+
+Optional SQL runs on its own read-only, query-only connection with its own progress handler.
+It never replaces a Store callback, interrupts a live writer, or turns I/O/corruption errors
+into empty history. A writable/unrecognized active transaction refuses nomination; a native
+read snapshot may nominate on the separate connection and must re-read identities in its
+original snapshot. The existing full authority fences remain authoritative. Encoder/reranker
+contention returns the available lexical/fused candidates instead of queueing behind an older
+CPU task. Cancellation prevents late source/index commits; an already running CPU thread may
+finish its bounded batch.
+
+When any head, text, SQL, vector or source allowance limits coverage, recall returns
+`retrieval_coverage` with counters, limits and reason codes. An empty result is
+`COVERAGE_LIMITED`, with “本轮检索覆盖有限，未命中不代表主人没有说过或没有这段记忆。”
+The note also enters native prompt assembly and raw-turn tool fallback. `NO_RECORD` remains
+reserved for an exhausted eligible search without a work-limit signal. Counts are local work
+evidence, not source authority, delivery receipts, token usage or answer-quality judgments.
+
+The existing Life RoundRobin adds one derived-index unit: scan 16 headers, compute at most
+eight missing vectors and read at most 64 KiB of fact text. It uses existing source pins,
+conditional cache writes and the `memory_vectors` invalidation trigger. Foreground precedence
+prevents starting another unit; a thread already computing does not hold a DB writer.
+The cursor lives in existing runtime metadata; an empty index does not write a zero cursor or
+report false progress that restarts the idle sweep. There is no second task queue or memory store.
+
+Owner Console catalog pages and complete pending totals use the existing `MemorySources`
+validator directly, with the existing final privacy/source recheck. These explicit administrative
+catalog reads remain complete; they do not inherit the reply relevance-search allowance.
+A 206-record pending total remains 206 when a reply has insufficient nomination allowance.
+
+Migration `0066_chat_retrieval_bounds` adds SQLite indexes for nomination, fact keys, vector
+version, evidence adjacency/order, per-origin sent replies and reference owner/kind. Transcript
+replay looks up nominated owners through the JSON expression index instead of enumerating
+all historical transcripts. Recent dialogue chooses the latest eligible reply per indexed
+origin instead of grouping the whole conversation. The native 120/1,200-turn probe changed
+from 17,100/167,100 VM instructions to approximately 1,100/900 (100-instruction sampling).
+Migration is required before using this code; release coordination treats it as a schema change.
+
+Paid dispatch prepares its measurement before entering the writer and reuses that in-memory
+measurement only while both the exact wire payload hash and counting-contract hash match.
+Reserve and dispatch now count twice in total, both outside the writer; original request,
+reservation, configuration, journal/fsync, final transport and actual settlement checks remain.
+`dispatch_measure` separates this local counting time from `dispatch_journal`.
+
+Verification separates work bounds from recall: native 120/1,200-fact fixtures check exact IDs
+and fact keys, shared scopes, source/SQL/text exhaustion, cancellation, writer survival and
+bounded cache warming. The frozen 50-query offline suite keeps at least 42/43 required facts,
+10/10 correct empty queries, at most 12 extra candidates and zero forbidden-source leaks.
+Fresh 120/1,200-record cases separately cover cold and warm old facts, hyphenated IDs,
+Chinese synonyms, dates, owner corrections, expiry, erasure and private scope. The pinned real
+BGE encoder and existing 0.5 semantic threshold are used, with no provider calls. The more
+abstract phrase “摄影设备的收纳位置” scores 0.4898 against the camera fact in the original
+encoder, below the unchanged threshold; the positive synonym case “摄影器材收在哪里” scores
+0.5257. These are retrieval checks, not generated-answer or live P95 acceptance.
+
+Additional implementation references: [SQLite FTS5 native rank ordering](https://www.sqlite.org/fts5.html#sorting_by_auxiliary_function_results),
+[SQLite indexed query planning](https://www.sqlite.org/optoverview.html),
+[SQLite connection-local progress callbacks](https://www.sqlite.org/c3ref/progress_handler.html),
+and [DSH bounded search at 22ddee3](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/fs/tool-fs-search/src/search-core.ts).
+DSH provides the explicit overflow/abort-versus-no-match principle; Core retains its native
+SQLite, proof and delivery contracts. No dependency was added.

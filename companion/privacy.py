@@ -17,6 +17,14 @@ SECRET_PATTERNS = [
 ]
 
 
+def legacy_correction_matches(memory, body_json):
+    """The exact legacy QQ command relation shared by retention and source proofs."""
+    command, arguments = command_parts(json.loads(body_json).get("text", ""))
+    return command == "纠正这一条" and arguments.split(maxsplit=1) == [
+        memory["supersedes_memory_id"], memory["content"],
+    ]
+
+
 def redact(text, settings):
     for secret in (
         settings.bridge_token.get_secret_value(),
@@ -796,10 +804,7 @@ class ErasureLedger:
                 "AND e.source='qq.onebot' AND e.event_id IN (SELECT value FROM json_each(?))",
                 (encode(sorted(event_ids)),),
             ):
-                command, arguments = command_parts(json.loads(row["body_json"]).get("text", ""))
-                if command == "纠正这一条" and arguments.split(maxsplit=1) == [
-                    row["supersedes_memory_id"], row["content"],
-                ]:
+                if legacy_correction_matches(row, row["body_json"]):
                     event_ids.update(item["event_id"] for item in store.rows(
                         "SELECT e.event_id FROM memory_evidence v JOIN events e USING(event_id) "
                         "WHERE v.memory_id=? AND e.source='owner.decision' "
