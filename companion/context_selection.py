@@ -20,6 +20,12 @@ _SHARE_BACKREF = re.compile(
     r"\b(?:earlier|previous|before|continue|compare)\b", re.IGNORECASE)
 _NEW_TOPIC = re.compile(
     r"换[个下]?话题|(?:和|跟).{0,30}(?:无关|没(?:有)?关系)|\bunrelated\b", re.IGNORECASE)
+_SHARE_FUNCTION_PREFIX = frozenset("我你他她它这那的一们是在有也就都还又和与个很不么一")
+_SHARE_GENERIC = frozenset({
+    "图片", "照片", "画面", "看着", "张图", "一起", "想要", "希望", "可以", "应该",
+    "the", "and", "you", "your", "this", "that", "with", "for", "are", "look", "at", "of",
+    "image", "picture", "photo",
+})
 
 
 def terms(text):
@@ -70,7 +76,16 @@ def share_history(sources, topic):
     """
     return [source for source in sources if source.get("reply_complete") is False
             or not source.get("reply_text")
-            or relevance(topic, source.get("user_text", "")) == RELATED]
+            or _share_related(topic, source.get("user_text", ""))]
+
+
+def _share_related(topic, text):
+    # Soft ranking may use a weak match; selecting old raw dialogue needs more.
+    # Timestamps, pronouns and stock sharing phrases do not name the new topic.
+    common = {term for term in topic & terms(text)
+              if not term.isdecimal() and term not in _SHARE_GENERIC
+              and term[0] not in _SHARE_FUNCTION_PREFIX}
+    return len(common) >= 2
 
 
 def relevance(focus_terms, text):

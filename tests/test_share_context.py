@@ -30,6 +30,17 @@ def test_share_history_matches_owner_words_not_assistant_guesses_and_keeps_pendi
     assert len(sources) == 3
 
 
+@pytest.mark.parametrize(("old", "current"), [
+    ("我们一起研究采购预算", "我们一起看看这张"),
+    ("我想学习钢琴", "我想喝杯咖啡"),
+    ("look at this picture of my keyboard", "look at this picture of a rocket"),
+    ("[10:00] 刚才游戏输了，我有点不服", "[21:00] 看下这张"),
+])
+def test_shared_function_words_do_not_reintroduce_an_unrelated_topic(old, current):
+    source = {"user_text": old, "reply_text": "我猜你会发图续上这件事"}
+    assert selection.share_history([source], selection.terms(current)) == []
+
+
 def test_current_share_focus_cannot_inherit_an_older_observation():
     old = {"owner_event_id": "old", "text": "旧的采购计划"}
     current = {"owner_event_id": "current", "text": "宇航服照片", "trust": "quoted_data"}
@@ -83,7 +94,7 @@ def test_native_new_picture_keeps_relationship_but_not_an_unrelated_sent_guess(
         async with image_fixture.native_image_memory(core, tmp_path, history=True) as context:
             assert await context.worker.run_once()
             await context.entry.send(context.entry.client, context.entry.protocol)
-            owner_text = "你是我女儿，我是爸爸。另一个话题：这次采购预算要控制。"
+            owner_text = "你是我女儿，我是爸爸。另一个话题：我们一起研究采购预算。"
             old = await context.entry.admit(2, owner_text)
             await reply(core, context.entry, "我猜你晚点还会发图提醒采购预算。", [])
             with core.store.transaction():
@@ -91,7 +102,7 @@ def test_native_new_picture_keeps_relationship_but_not_an_unrelated_sent_guess(
                     fact_key="family", content="你是我女儿，我是爸爸。",
                     evidence_event_id=old["event_id"], evidence_quote="你是我女儿，我是爸爸。"),
                     core.clock(), confirmed=True)
-            monkeypatch.setattr(image_fixture, "QUESTION", "看看这张")
+            monkeypatch.setattr(image_fixture, "QUESTION", "我们一起看看这张")
             next_job = await context.admit_image(3)
             start = len(context.calls)
             assert await context.worker.run_once()
