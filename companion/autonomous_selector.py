@@ -319,6 +319,12 @@ def native_selector(core, worker_id) -> RoundRobin:
             return UnitResult(False)
         return await run_native_unit(core.memes.run_once, worker_id)
 
+    async def memory_index():
+        from companion.memory_index_work import warm_once
+
+        return UnitResult(await warm_once(core.memory, core.clock,
+                                          lambda: _allowed(core, ("memory",))))
+
     return RoundRobin((
         maintenance("retention", core.expire_raw_events),
         maintenance("media_cleanup", core.cleanup_media),
@@ -339,6 +345,7 @@ def native_selector(core, worker_id) -> RoundRobin:
         lane("diary", diary, ("diary",)),
         lane("consolidation", consolidation, ("consolidation",)),
         lane("memory", memory, ("memory",)),
+        lane("memory_index", memory_index, ("memory",), interval=1.0),
         lane("rem", rem, ("rem", "memory")),
         lane("social", social, ("social",)),
     ), lambda: foreground_clear(core))

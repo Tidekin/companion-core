@@ -23,6 +23,7 @@ from companion import (
     qq_rich,
     reply_quote,
     reply_revision,
+    retrieval_work,
     runtime_config,
     time_context,
     turn_taking,
@@ -570,18 +571,22 @@ class Core(Runtime):
                 private_life.check_job(s, cfg, cfg.live_text_window, job)
                 if cfg.live_text_window.history_scope != "owner_private":
                     return None
-            allowed = {row["event_id"] for row in s.rows(
-                "SELECT e.event_id FROM events e JOIN conversations c USING(conversation_id) "
-                "WHERE e.conversation_id=? AND e.actor_id='owner' AND e.source='qq.onebot' "
-                "AND e.privacy_scope='private' AND c.scope='private' AND c.owner_actor_id='owner' "
-                "AND e.redacted=0 AND e.occurred_at>=? AND e.occurred_at<=? "
-                "AND e.rowid<(SELECT rowid FROM events WHERE event_id=?)",
-                (job["conversation_id"], after(now, -cfg.raw_event_retention_days * 86400),
-                 now, job["event_id"]),
-            )}
+            allowed = None  # Check nominated sources individually below.
 
         def collect():
             source_check = finish = None
+            if not authority and allowed is None:
+                def source_check(event_id):
+                    return bool(s.one(
+                        "SELECT 1 FROM events e JOIN conversations c USING(conversation_id) "
+                        "WHERE e.event_id=? AND e.conversation_id=? AND e.actor_id='owner' "
+                        "AND e.source='qq.onebot' AND e.privacy_scope='private' "
+                        "AND c.scope='private' AND c.owner_actor_id='owner' AND e.redacted=0 "
+                        "AND e.occurred_at>=? AND e.occurred_at<=? "
+                        "AND e.rowid<(SELECT rowid FROM events WHERE event_id=?)",
+                        (event_id, job["conversation_id"],
+                         after(now, -cfg.raw_event_retention_days * 86400), now, job["event_id"]),
+                    ))
             if authority:
                 # Episodes share their sources; check them all against one job view.
                 _, check, finish = owner_input.history_batch(
@@ -877,14 +882,19 @@ class Core(Runtime):
         from companion.memory_authority import source_allowed
         from companion.memory_context import MemorySources
 
-        source_view = MemorySources(self.memory, self.clock())
+        source_view = MemorySources(self.memory, self.clock(), bounded=True)
         availability = {}
 
         def available(ids, purpose):
             for key in ids:
                 cache_key = (key, purpose)
                 if cache_key not in availability:
-                    lineage = source_view.lineage(key)
+                    try:
+                        lineage = source_view.lineage(key)
+                    except retrieval_work.WorkLimit as error:
+                        if (work := retrieval_work.current()) is not None:
+                            work.mark(error.reason)
+                        return False
                     availability[cache_key] = bool(lineage) and all(
                         not authority or row["source"] != "qq.onebot" or source_allowed(
                             s, cfg, self.clock, row["event_id"], purpose) for row in lineage)
@@ -1173,6 +1183,9 @@ class Core(Runtime):
             current = reply_quote.label(current, job["event_id"])
         current_input.append(current)
         mark("context_current")
+        if (work := retrieval_work.current()) is not None and work.receipt()["coverage_limited"]:
+            dynamic_rules.append("\n" + retrieval_work.NOTE)
+            add_rules("")
         protected = combined or image_memory or (
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and hits
         )

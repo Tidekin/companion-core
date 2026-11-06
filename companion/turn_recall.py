@@ -13,7 +13,7 @@ import re
 from collections import Counter, OrderedDict
 from threading import Lock
 
-from companion import time_context
+from companion import retrieval_work, time_context
 from companion.store import encode
 
 HEADING = ("相关的以前聊天原文（按相关度从更早的对话里找回，按时间排列；是当时主人的原话、"
@@ -85,10 +85,14 @@ def semantic(settings, query, docs):
 
     keys = [hashlib.sha256(doc.encode()).hexdigest() for doc in docs]
     with _lock:
-        missing = [(key, doc) for key, doc in zip(keys, docs, strict=True)
-                   if key not in _vectors]
+        missing = list(dict((key, doc) for key, doc in zip(keys, docs, strict=True)
+                            if key not in _vectors).items())
+    work = retrieval_work.current()
+    if work is not None:
+        missing = [(key, doc) for key, doc in missing if work.take("cold_vectors")]
     index = SemanticIndex(None, settings)
-    with _inference_lock(str(Path(settings.embedding_cache_dir).resolve())):
+    with retrieval_work.slot(_inference_lock(str(Path(settings.embedding_cache_dir).resolve())),
+                              "encoder_busy"):
         model = index.warmup()
         # Short and long turns share this CPU encoder; small batches avoid padding
         # every cold-cache document to the longest turn in a large batch.
@@ -101,7 +105,7 @@ def semantic(settings, query, docs):
         while len(_vectors) > _CACHE_LIMIT:
             _vectors.popitem(last=False)
         vectors = [_vectors.get(key) for key in keys]
-    return [float(np.dot(vector, question)) if vector is not None else 0.0 for vector in vectors]
+    return [float(np.dot(vector, question)) if vector is not None else None for vector in vectors]
 
 
 def rerank(settings, query, docs):
@@ -122,7 +126,14 @@ def _fused(settings, query, docs, *, bags=None):
     fused = Counter()
     scores = lexical(expand(query), docs, bags=bags)
     hits = [index for index in _ranked(scores) if scores[index] > 0]
-    for ranking in (hits, _ranked(semantic(settings, query, docs))):
+    try:
+        similarities = semantic(settings, query, docs)
+        semantic_ranks = sorted((i for i, score in enumerate(similarities) if score is not None),
+                                key=lambda i: -similarities[i])
+    except retrieval_work.WorkLimit as error:
+        retrieval_work.current().mark(error.reason)
+        semantic_ranks = []
+    for ranking in (hits, semantic_ranks):
         for rank, index in enumerate(ranking, 1):
             fused[index] += 1 / (60 + rank)
     return [index for index, _ in fused.most_common()]
@@ -142,7 +153,11 @@ def parts(settings, query, docs, pool_size=CANDIDATES):
     bags = [Counter(_grams(doc)) for doc in docs]
     pool = _fused(settings, query, docs, bags=bags)[:pool_size]
     if getattr(settings, "turn_recall_rerank", False):
-        scores = rerank(settings, query, [docs[index][:RERANK_CHARS] for index in pool])
+        try:
+            scores = rerank(settings, query, [docs[index][:RERANK_CHARS] for index in pool])
+        except retrieval_work.WorkLimit as error:
+            retrieval_work.current().mark(error.reason)
+            scores = None
         if scores is not None:
             # Cross-encoder logits far below zero are unrelated small talk; keep them out.
             pool = [pool[index] for index in _ranked(scores) if scores[index] >= RERANK_FLOOR]
@@ -231,12 +246,30 @@ def _candidates(store, settings, job, event_ids=None):
     from companion.dialogue_history import recent_sent_sources
     from companion.memory_references import replay_many
 
+    work = retrieval_work.current()
+    if event_ids is None and work is not None:
+        ceiling = min(settings.turn_recall_scan_turns, retrieval_work.TURN_CANDIDATES,
+                      work.remaining("candidates"))
+        if not ceiling:
+            work.mark("candidates")
+            return [], []
+        try:
+            headers = recent_sent_sources(store, job["conversation_id"], job["event_id"],
+                                          ceiling + 1, _nominate=work)
+        except retrieval_work.WorkLimit:
+            return [], []
+        if len(headers) > ceiling:
+            work.mark("turn_candidate_pool")
+        event_ids = []
+        for row in headers[:ceiling]:
+            if (work.take("candidates") and work.take("text_bytes", row["text_bytes"])):
+                event_ids.append(row["event_id"])
     rows = recent_sent_sources(store, job["conversation_id"], job["event_id"],
                                len(event_ids) if event_ids is not None
                                else settings.turn_recall_scan_turns, event_ids=event_ids)
-    # Long attachments are read in full here and cut to whole relevant lines on display.
     found = replay_many(store, [row["event_id"] for row in rows],
-                        item_chars=FOCUS_SOURCE_CHARS, turn_chars=FOCUS_SOURCE_CHARS * 2)
+                        item_chars=FOCUS_SOURCE_CHARS, turn_chars=FOCUS_SOURCE_CHARS * 2,
+                        work=work)
     notes = [found[row["event_id"]] for row in rows]
     return [{**row, "quoted_text": quoted(store, row)} for row in rows], notes
 
@@ -250,6 +283,11 @@ async def prefetch(store, settings, job, query):
     caller's thread; context() later re-reads these turns and applies every source,
     authority and ceiling check, so this ranking grants nothing by itself.
     """
+    with retrieval_work.scope():
+        return await _prefetch(store, settings, job, query)
+
+
+async def _prefetch(store, settings, job, query):
     from companion.telemetry import phase
 
     if not enabled(settings, query):
@@ -259,6 +297,9 @@ async def prefetch(store, settings, job, query):
         rows, notes = _candidates(store, settings, job)
         docs = [_document(row, note, settings.timezone)
                 for row, note in zip(rows, notes, strict=True)]
+        work = retrieval_work.current()
+        kept = [i for i, doc in enumerate(docs) if work.take("text_bytes", len(doc.encode()))]
+        rows, docs = [rows[i] for i in kept], [docs[i] for i in kept]
     if not rows:
         return []
     try:
@@ -270,6 +311,7 @@ async def prefetch(store, settings, job, query):
                 asyncio.to_thread(parts, settings, query, docs),
                 settings.recall_compute_timeout_seconds)
     except TimeoutError:
+        work.mark("turn_rank_timeout")
         return []  # Not None: context() must not fall back to ranking inline on the loop.
     return {"first": [rows[index]["event_id"] for index in first],
             "hop": [rows[index]["event_id"] for index in hop]}
@@ -282,6 +324,13 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
     With `ranked_ids` from prefetch() no model runs here; without it ranking is inline.
     A plain list of IDs is taken as a first-hop order without second hop.
     """
+    with retrieval_work.scope():
+        return _reference(store, settings, job, query, exclude_ids, allowed,
+                          max_turns=max_turns, max_bytes=max_bytes, ranked_ids=ranked_ids)
+
+
+def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, max_bytes,
+               ranked_ids):
     from companion.dialogue_history import turn_messages
 
     limit = min(settings.turn_recall_limit, max_turns)
@@ -308,6 +357,10 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
         rows, notes = [pair[0] for pair in pairs], [pair[1] for pair in pairs]
         docs = [_document(row, note, settings.timezone)
                 for row, note in zip(rows, notes, strict=True)]
+        work = retrieval_work.current()
+        kept = [i for i, doc in enumerate(docs) if work.take("text_bytes", len(doc.encode()))]
+        rows, notes, docs = ([rows[i] for i in kept], [notes[i] for i in kept],
+                             [docs[i] for i in kept])
         ranked = select(settings, query, docs, limit)
     if not rows:
         return None
