@@ -60,7 +60,14 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
         "OR (reply.reply_group_id IS NOT NULL AND "
         "(SELECT COUNT(*) FROM outbox part WHERE part.reply_group_id=reply.reply_group_id) "
         "=reply.segment_count AND NOT EXISTS (SELECT 1 FROM outbox part "
-        "WHERE part.reply_group_id=reply.reply_group_id AND part.state!='SENT'))) "
+        "WHERE part.reply_group_id=reply.reply_group_id AND part.state!='SENT')) "
+        "OR EXISTS (SELECT 1 FROM runtime_meta rr JOIN jobs rj "
+        "ON rj.job_id=json_extract(rr.value,'$.job_id') "
+        "WHERE rr.key='owner_reply_recovery_original:'||reply.reply_group_id "
+        "AND rj.kind='reply_recovery' AND rj.state='SUCCEEDED' "
+        "AND EXISTS (SELECT 1 FROM outbox rp WHERE rp.origin_event_id=rj.event_id) "
+        "AND NOT EXISTS (SELECT 1 FROM outbox rp WHERE rp.origin_event_id=rj.event_id "
+        "AND rp.state!='SENT'))) "
     ) if not include_partial else ""
     rows = store.rows(
         "SELECT e.*,o.message_id,o.content_json,o.content_sha256,o.delivery_key,o.reply_group_id,"
@@ -96,7 +103,10 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
             continue
         if row.pop("reply_group_id") is not None:
             try:
-                group = reply_group(store, row["message_id"], require_sent=not include_partial)
+                from companion.reply_recovery import history_group
+
+                group = history_group(store, row["message_id"]) or reply_group(
+                    store, row["message_id"], require_sent=not include_partial)
                 if not group:
                     continue
                 parts = group["rows"]
@@ -116,10 +126,10 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
                     parts = prefix
                 row["reply_text"] = "".join(json.loads(part["content_json"])["text"]
                                            for part in parts)
-                envelopes = segment_envelopes(group)
+                envelopes = group.get("envelopes") or segment_envelopes(group)
                 row["reply_segments"] = [
                     {"message_id": part["message_id"],
-                     **envelopes[part["message_id"]]}
+                     **(envelopes[part["message_id"]] or {})}
                     for part in parts
                 ]
             except CoreError:
