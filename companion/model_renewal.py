@@ -186,13 +186,15 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
                 or not hash_value(item["tool_sha256"])
             ):
                 raise ValueError("model renewal current admission changed")
+    windows = {item["request_id"]: item["window_id"] for item in store.rows(
+        "SELECT request_id,window_id FROM model_admissions"
+    )}
+    if latest.keys() - windows.keys():
+        raise ValueError("model renewal admission missing")
     baseline = {
         key: data
         for key, data in latest.items()
-        if store.one("SELECT window_id FROM model_admissions WHERE request_id=?", (key,))[
-            "window_id"
-        ]
-        in value["budget_scope_window_ids"]
+        if windows[key] in value["budget_scope_window_ids"]
     }
     if (
         digest(baseline) != value["budget_baseline_sha256"]

@@ -835,11 +835,16 @@ def authority_chain(store, saved, revisions):
     from companion.owner_authority_protocol import OwnerGrantPolicy
 
     origin = saved["manifest"]["authority"]
+    first = origin["revision"] + 2
+    current_rows = {row["revision"]: row for row in store.rows(
+        "SELECT * FROM owner_authority_revisions WHERE grant_id=? "
+        "AND revision BETWEEN ? AND ?",
+        (origin["grant_id"], first, first + len(revisions) - 1),
+    )} if revisions else {}
+    policies = {}
     previous, previous_policy = None, None
     for index, row in enumerate(revisions):
-        current = store.one("SELECT * FROM owner_authority_revisions "
-                            "WHERE grant_id=? AND revision=?",
-                            (row["grant_id"], row["revision"]))
+        current = current_rows.get(row["revision"])
         if (not current or row["grant_id"] != origin["grant_id"]
             or row["restore_generation"] != origin["restore_generation"]
             or row["revision"] != origin["revision"] + 2 + index
@@ -855,8 +860,12 @@ def authority_chain(store, saved, revisions):
             if current["policy_json"] != "{}":
                 raise ValueError("invalid erased authority")
         else:
-            policy = OwnerGrantPolicy.model_validate_json(current["policy_json"])
-            if (digest(policy.model_dump(mode="json")) != row["policy_sha256"]
+            text = current["policy_json"]
+            if text not in policies:
+                policy = OwnerGrantPolicy.model_validate_json(text)
+                policies[text] = policy, digest(policy.model_dump(mode="json"))
+            policy, policy_sha256 = policies[text]
+            if (policy_sha256 != row["policy_sha256"]
                 or policy.unknown_carry_sha256 != saved["carry_sha256"]
                 or policy.paid_contract_sha256 != saved["successor_paid_contract_sha256"]):
                 raise ValueError("model carry authority policy changed")

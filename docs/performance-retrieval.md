@@ -129,6 +129,24 @@ validate the tail against its head and sequence, preserving the existing 32 MiB 
 limit. Rewrites, truncation, permissions, STOP and all runtime projection checks remain
 live. Decoding cached records is not authority to send.
 
+Core's paid-journal codec also retains immutable decoded records, with its existing
+1 MiB source and serialized-record bounds. An exact LF-terminated prefix can survive
+small appends; every remaining line is decoded and checked against the prefix head.
+Every read still reads the complete file. Within the existing frozen-scope key memo,
+up to 4 MiB of exact current bytes can reuse their SHA-256 digest. A different scope,
+own write, path or byte sequence invalidates that memo; larger files use the original
+digest-key path. The separate 1 MiB validated-view bound and all DB/file checks remain.
+
+A rebuilt view still folds all journal records and checks the current DB projection.
+Historical renewal baselines read admission windows in one batch, then select the same
+requests present at that journal cutoff. Carry-chain validation batches its original
+grant/revision range and parses each exact policy JSON once per call, retaining every
+revision, erased-policy and transition check. Authority projections compare every stored
+revision, but resolve each distinct journal path at the start and end of the call and
+hash each distinct policy JSON once within the call. Path drift, missing admissions,
+changed policies and invalid erased rows still reject the view. No policy, permission
+or filesystem result is reused across these validation calls.
+
 These changes leave model generation settings, prompts, output allowances and reply
 segmentation unchanged. Production timing comparisons belong to the verification
 receipt, with receipt-to-platform-ACK separated from provider transport and phone display.

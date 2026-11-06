@@ -21,20 +21,50 @@ from companion.store import encode, file_identity, uid
 # The chain codec retains at most this many source bytes. Whole custody views
 # retain only their digest key and at most this many serialized result bytes.
 CACHE_MAX_BYTES = 1048576
+# One Store may retain complete bytes only for its current frozen-scope key.
+# Larger journals retain the original digest key; codec/view bounds stay separate.
+KEY_MAX_BYTES = 4 * 1048576
+
+# Exact validated bytes and their immutable decoded projection, as in the Bridge
+# codec. This is only chain parsing; every changed DB still takes the full fold.
+_previous = None
 
 
-@lru_cache(maxsize=1)
-def _validated_bytes(raw):
-    lines = raw.decode("utf-8").splitlines()
-    previous = "0" * 64
+def _clear_codec():
+    global _previous
+    _previous = None
+    _validated_bytes.cache_clear()
+
+
+def _decode_lines(lines, previous="0" * 64):
+    records = []
     for line in lines:
         row = json.loads(line)
         digest = row.pop("sha256")
         if row.get("previous") != previous or sha(row) != digest:
             raise ValueError("journal chain")
-        previous = digest
-    # Fresh decoding by the caller prevents fold/pop from changing cached objects.
-    return ("[" + ",".join(lines) + "]").encode("utf-8")
+        previous = row["sha256"] = digest
+        records.append(row)
+    return records, previous
+
+
+@lru_cache(maxsize=1)
+def _validated_bytes(raw):
+    global _previous
+    previous, _previous = _previous, None
+    # LF ends the previous line under every accepted splitlines() convention.
+    if (previous is not None and previous[0].endswith(b"\n")
+        and len(raw) > len(previous[0]) and raw.startswith(previous[0])):
+        prior, payload, head = previous
+        tail, head = _decode_lines(raw[len(prior):].decode("utf-8").splitlines(), head)
+        records = marshal.loads(payload)
+        records.extend(tail)
+    else:
+        records, head = _decode_lines(raw.decode("utf-8").splitlines())
+    # Only verified JSON enters process-local marshal; callers get fresh objects.
+    payload = marshal.dumps(records)
+    _previous = (raw, payload, head)
+    return payload, head
 
 
 def _journal_records(raw):
@@ -45,24 +75,28 @@ def _journal_records(raw):
         end = raw.rfind(b"\n", 0, CACHE_MAX_BYTES) + 1
     if end:
         try:
-            payload = _validated_bytes(raw[:end])
-            records = json.loads(payload)
-            previous = records[-1]["sha256"] if records else "0" * 64
-            for line in raw[end:].decode("utf-8").splitlines():
-                row = json.loads(line)
-                digest = row.pop("sha256")
-                if row.get("previous") != previous or sha(row) != digest:
-                    raise ValueError("journal chain")
-                previous = row["sha256"] = digest
-                records.append(row)
-        except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
-            _validated_bytes.cache_clear()
+            prefix = raw[:end]
+            if _previous is not None:
+                last = _previous[0]
+                # Small appends need not reserialize the full verified prefix.
+                if (0 < end - len(last) <= min(8192, len(last) // 64)
+                    and last.endswith(b"\n") and prefix.startswith(last)):
+                    prefix = last
+            end = len(prefix)
+            payload, previous = _validated_bytes(prefix)
+            if len(payload) > CACHE_MAX_BYTES:
+                _clear_codec()
+            records = marshal.loads(payload)
+            tail, _ = _decode_lines(raw[end:].decode("utf-8").splitlines(), previous)
+            records.extend(tail)
+        except (ValueError, TypeError, KeyError, AttributeError, RecursionError, EOFError):
+            _clear_codec()
             # A damaged later line must not skip an earlier fold/error. Replay
             # the original interleaved path over the same freshly read bytes.
         else:
             return records, True
     else:
-        _validated_bytes.cache_clear()
+        _clear_codec()
     return (json.loads(line) for line in raw.decode("utf-8").splitlines()), False
 
 
@@ -301,20 +335,22 @@ def _view_key(store, path, raw):
     writes. The table summary also catches content neither counter sees, such as a page
     level restore into this connection.
     """
-    digest = hashlib.sha256(raw).hexdigest()
     # Inside one write transaction or read snapshot only this connection's own writes,
-    # counted by total_changes, can change the DB; the summary is then fixed.
+    # counted by total_changes, can change the DB; the summary is then fixed. Complete
+    # bytes are still read on every call. Exact equality can reuse their digest too.
     scope = getattr(store, "frozen_scope", None)
     memo = getattr(store, "_view_key_memo", None)
+    identity = raw if len(raw) <= KEY_MAX_BYTES else hashlib.sha256(raw).hexdigest()
     if scope is not None and memo is not None and memo[0] == (
-        scope, store.db.total_changes, str(path), digest,
+        scope, store.db.total_changes, str(path), identity,
     ):
         return memo[1]
+    digest = hashlib.sha256(raw).hexdigest() if isinstance(identity, bytes) else identity
     summary = tuple(store.db.execute(SUMMARY).fetchone())
     version = store.db.execute("PRAGMA data_version").fetchone()[0]
     key = (str(path), digest, store.db.total_changes, version, summary)
     if scope is not None:
-        store._view_key_memo = ((scope, store.db.total_changes, str(path), digest), key)
+        store._view_key_memo = ((scope, store.db.total_changes, str(path), identity), key)
     return key
 
 
@@ -358,7 +394,7 @@ def _permit(view, approval, allow_settlement):
             lifecycle["state"] == "STOPPED"
             or getattr(approval, "window_id", lifecycle["window_id"]) != lifecycle["window_id"])
     ):
-        _validated_bytes.cache_clear()
+        _clear_codec()
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
 
 
@@ -409,7 +445,7 @@ def _read_journal(store, approval, *, allow_settlement, initialize):
                     shared is not None and entry is not None and entry[0] == shared) else None
             identity = store.one(IDENTITY) if saved is not None else None
     except BaseException:
-        _validated_bytes.cache_clear()
+        _clear_codec()
         raise
     if saved is not None and len(saved[1]) <= CACHE_MAX_BYTES and identity == saved[2]:
         if saved[3].get("gateway_clients"):
@@ -470,7 +506,7 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
         path = Path(approval.journal_path)
         identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
     except BaseException:
-        _validated_bytes.cache_clear()
+        _clear_codec()
         raise
     try:
         if not path.exists():
@@ -734,8 +770,8 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
                 "gateway_clients": gateway_clients,
                 "owner_authority": authorities[-1] if authorities else None}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
-        _validated_bytes.cache_clear()
+        _clear_codec()
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from error
     except BaseException:
-        _validated_bytes.cache_clear()
+        _clear_codec()
         raise

@@ -151,6 +151,60 @@ def test_second_renewal_keeps_all_windows_and_immutable_prior_approval(core, tmp
     assert core.store.rows("SELECT * FROM model_usage") == before
 
 
+def test_renewal_replay_batches_windows_at_each_original_cutoff(core, tmp_path):
+    from tests.test_model_carry_lifecycle import current_unknown
+
+    case = migrated(core, tmp_path, expires_at=core.clock.now + timedelta(hours=2),
+                    rates_valid_until=core.clock.now + timedelta(days=4))
+    for number, revision in ((1, 4), (2, 6)):
+        current_unknown(core, number=number + 1)
+        request, policy, witness = renewal(core, case, number=number)
+        model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+        active, _ = activate(core, policy, revision=revision,
+                             operation=f"activate-batched-renewal-{number}")
+        case.successor, case.policy = active, policy
+        core.authorized_model_test_capture = active, case.key
+        core.authorized_model_test_jobs = {}
+    before = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
+    assert len(before) == 3
+    queries = []
+    paid_budget.forget_views(core.store)
+    core.store.db.set_trace_callback(queries.append)
+    try:
+        with core.store.transaction():
+            view = paid_budget.journal(core.store, core.settings.paid_model)
+    finally:
+        core.store.db.set_trace_callback(None)
+    # Each historical cutoff retains its original baseline despite newer admissions.
+    assert len(view["model_carries"]) == 3
+    assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == before
+    baseline_reads = [query for query in queries if query.startswith((
+        "SELECT window_id FROM model_admissions",
+        "SELECT request_id,window_id FROM model_admissions",
+    ))]
+    assert len(baseline_reads) == 2  # One current table read per historical renewal.
+
+
+@pytest.mark.parametrize("change", ["missing", "window"])
+def test_renewal_replay_rejects_changed_baseline_admission(core, tmp_path, change):
+    case = migrated(core, tmp_path)
+    request, policy, witness = renewal(core, case)
+    model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+    activate(core, policy, revision=4, operation="activate-baseline-custody")
+    before = core.store.rows("SELECT * FROM model_usage")
+    if change == "missing":
+        core.store.execute("DELETE FROM model_admissions WHERE request_id=?", (case.request_id,))
+    else:
+        core.store.insert("model_budget_windows", window_id="unrelated-window",
+                          contract_sha256="0" * 64)
+        core.store.execute("UPDATE model_admissions SET window_id=? WHERE request_id=?",
+                           ("unrelated-window", case.request_id))
+    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+        with core.store.transaction():
+            paid_budget.journal(core.store, core.settings.paid_model)
+    assert core.store.rows("SELECT * FROM model_usage") == before
+
+
 @pytest.mark.parametrize("change", ["price", "cap", "start", "purpose", "old_contract", "head"])
 def test_renewal_rejects_scope_or_accounting_changes(core, tmp_path, change):
     case = migrated(core, tmp_path)
