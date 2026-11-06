@@ -37,10 +37,13 @@ LIMITS = {
     "owner_pilot": {"calls": CALLS, "cost": COST, "cases": 1, "bytes": 120000, "input": 2400},
     "synthetic": {"calls": 216, "cost": 1000000, "cases": 36, "bytes": 1500000, "input": 8000},
 }
+MAX_HTTP_BODY_BYTES = max(value["bytes"] for value in LIMITS.values()) + 1024
 # Requests per worker claim; later batches queue behind ordinary chat.
 BATCH = 6
 # Accepted treatments and the arm each is compared against.
 CONTROLS = {"participation_v2": "baseline", "participation_v2_bili_style": "participation_v2"}
+IMAGE_TREATMENTS = {"image_understanding": "baseline", "image_persona": "image_understanding"}
+CONTROLS.update(IMAGE_TREATMENTS)
 
 
 class Manifest(StrictModel):
@@ -108,6 +111,7 @@ def _plan(settings, manifest):
         if control != CONTROLS.get(treatment, "baseline"):
             raise ValueError("treatment control")
         rows = plan["requests"]
+        image_trial = synthetic and version == 2 and treatment in IMAGE_TREATMENTS
         repetitions = plan.get("repetitions", 3) if synthetic else 3
         cases = {row["case"] for row in rows}
         if (type(repetitions) is not int or not 1 <= repetitions <= 3
@@ -133,10 +137,18 @@ def _plan(settings, manifest):
             messages = row["payload"]["messages"]
             if (not 2 <= len(messages) <= 60 or messages[0]["role"] != "system"
                 or messages[-1]["role"] != "user" or any(
-                    set(m) != {"role", "content"} or not isinstance(m["content"], str)
+                    set(m) != {"role", "content"} or not (
+                        isinstance(m["content"], str) or image_trial and m["role"] == "user"
+                        and isinstance(m["content"], list))
                     or m["role"] not in ({"system"} if i == 0 else {"user", "assistant"})
                     for i, m in enumerate(messages))):
                 raise ValueError("text-only messages")
+            if any(isinstance(m["content"], list) for m in messages):
+                from companion.image_input import messages_and_estimate
+
+                # The original paid image contract validates inline bytes, image
+                # count, MIME, decoder dimensions and the separate token estimate.
+                messages_and_estimate(settings.paid_model.image_input, messages)
             payload = model_payload(settings, messages, "evaluation")
             digest = paid_budget.sha(messages[1:])
             if (payload != row["payload"] or paid_budget.sha(payload) != row["payload_sha256"]

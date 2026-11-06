@@ -193,6 +193,17 @@ def reserve(
                 or cloud_task_id not in {None, video_binding["task_id"]}):
                 raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
             cloud_task_kind, cloud_task_id = "video", video_binding["task_id"]
+    elif scenario == "evaluation" and any(
+        isinstance(message, dict) and isinstance(message.get("content"), list)
+        for message in messages
+    ):
+        from companion.image_input import messages_and_estimate
+
+        if not approval or not approval.image_input:
+            raise CoreError("PAID_IMAGE_APPROVAL_REQUIRED", 503)
+        messages_and_estimate(approval.image_input, messages)
+        # The existing evaluation admission below owns the finite job, exact
+        # frozen payload and per-attempt request identity (not a chat job ID).
     elif scenario == "content_vision" or any(
         isinstance(message, dict) and isinstance(message.get("content"), list)
         for message in messages
