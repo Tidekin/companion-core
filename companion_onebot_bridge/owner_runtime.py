@@ -203,7 +203,6 @@ class OwnerRuntime:
         if key is not None and cached is not None and cached[0] == key:
             records, state, references = cached[1], cached[2], cached[3]
         else:
-            self._verified = None
             records, state, references = self._replay(row)
             if key is not None and self._custody_key(row) == key:
                 self._verified = (key, records, state, references)
@@ -216,11 +215,21 @@ class OwnerRuntime:
         if active and (state != "ACTIVE" or self.spool.reconciliation_only
                        or self.stop_path.exists() or self.stop_path.is_symlink()):
             raise ValueError("OWNER_RUNTIME_STOPPED")
-        # A new list; records are shared read-only values between unchanged proofs.
+        # A new list; decoded records are shared read-only values for identical bytes.
         return list(records)
 
     def _replay(self, row):
-        records, head = journal.read(self.path)
+        cached, self._verified = getattr(self, "_verified", None), None
+        key = self._custody_key(row) if cached is not None else None
+        if key is not None and key[:2] == cached[0][:2]:
+            # Only decoding is reused. The original reader still checks permissions,
+            # limits and the complete chain; every database projection runs below.
+            records = cached[1]
+            count, head = journal.read_count(self.path)
+            if count != len(records) or head != row["journal_head"]:
+                raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
+        else:
+            records, head = journal.read(self.path)
         if (not records or head != row["journal_head"]
             or records[0]["kind"] != "OWNER_BOUND"
             or set(records[0]["data"]) not in (

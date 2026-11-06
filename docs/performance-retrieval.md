@@ -123,11 +123,25 @@ work while SQLite's single writer is held; WAL and durability settings are uncha
 Bridge codec reuse follows `paid_budget.journal`'s immutable process-local `marshal`
 view. Only already parsed and hash-checked JSON is serialized, and each caller receives
 independent objects. The disk journal remains the original JSON hash chain. Cache state
-retains at most 8 MiB of source bytes and 8 MiB of serialized records; a larger serialized
+retains at most 16 MiB of source bytes and 16 MiB of serialized records; a larger serialized
 view is evicted. Journals above that input bound reuse an LF-terminated prefix and fully
 validate the tail against its head and sequence, preserving the existing 32 MiB file
 limit. Rewrites, truncation, permissions, STOP and all runtime projection checks remain
 live. Decoding cached records is not authority to send.
+
+When only the spool DB changes, `OwnerRuntime` can reuse its existing read-only decoded
+records if the complete current journal bytes and owner row still match. A fresh native
+count-only read repeats file permissions, size and hash-chain checks and must match the
+retained record count and current journal head. Every original replay and DB projection
+check still runs, including current results, held input, media, handoff and STOP custody.
+Changed bytes or owner rows retain the original full decode path.
+
+Native delivery-resolution verification builds one local prefix index while walking the
+journal. Each historical proof still sees only its preceding records, including the
+original prior head and latest STOP/confirmation across handoffs. Current result reads,
+binding checks, signatures and final DB comparisons run for every proof. Later ACKs or
+handoffs cannot change an earlier proof's cutoff. This follows the existing synchronous
+handoff table batch; the index is local to that call and caches no authorization decision.
 
 Core's paid-journal codec also retains immutable decoded records, with its existing
 1 MiB source and serialized-record bounds. An exact LF-terminated prefix can survive
