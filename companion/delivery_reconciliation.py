@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 import companion_delivery_protocol as wire
 from companion import cumulative, paid_budget
 from companion.contracts import CoreError
+from companion.privacy import reply_content_erased_by_memory
 from companion.store import encode, utcnow
 
 KIND = "quota_send_resolution"
@@ -142,9 +143,10 @@ def _binding(store, proof, *, recorded=None):
             or paid_budget.sha(content if proof["payload_kind"] == "content_sha256"
                                else content["text"]) != proof["payload_sha256"]):
             raise ValueError("original delivery content changed")
-    elif not store.one("SELECT 1 FROM events e JOIN runtime_meta r "
+    elif not (store.one("SELECT 1 FROM events e JOIN runtime_meta r "
                        "ON r.key='erased_event:'||e.event_id WHERE e.event_id=? AND e.redacted=1",
-                       (row["origin_event_id"],)):
+                       (row["origin_event_id"],))
+              or reply_content_erased_by_memory(store, row)):
         raise ValueError("unproved erased delivery")
     _voice_binding(store, proof, history, row, content_hash)
     token = row["lease_token"]
