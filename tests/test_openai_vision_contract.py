@@ -148,7 +148,8 @@ def test_official_cached_tokens_are_preserved_for_native_accounting():
     asyncio.run(execute())
 
 
-def test_official_image_plan_uses_real_api_and_independent_native_worker(core, tmp_path):
+@pytest.mark.parametrize("kind", ["synthetic", "owner_upload"])
+def test_official_image_plan_uses_real_api_and_independent_native_worker(core, tmp_path, kind):
     cfg = official_settings()
     approved = cfg.paid_model.model_dump(exclude={"journal_path"})
     approved.update(live_approved=True, starts_at="2026-10-01T00:00:00+08:00",
@@ -166,11 +167,17 @@ def test_official_image_plan_uses_real_api_and_independent_native_worker(core, t
     activate(core, OwnerGrantPolicy(owner_qq_id=core.settings.owner_qq_id,
         purposes=["evaluation"], authorization_sha256="a" * 64,
         paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings))))
-    case = next(c for c in experiment.load_cases() if c["id"] == "coffee")
+    case = (next(c for c in experiment.load_cases() if "initial_wrong" in c)
+            if kind == "owner_upload" else next(
+                c for c in experiment.load_cases() if c["id"] == "coffee"))
     experiment.prepare(tmp_path / "official-plan", settings=core.settings, subset=[case])
     rows = [row for path in sorted((tmp_path / "official-plan").glob("manifest-*.json"))
-            for row in json.loads(path.read_text(encoding="utf-8"))["plan"]["requests"]][:6]
-    manifest = experiment.manifest(core.settings, rows, False)
+            for row in json.loads(path.read_text(encoding="utf-8"))["plan"]["requests"]]
+    if kind == "owner_upload":
+        rows = [row for row in rows if any(isinstance(message["content"], list)
+                for message in row["payload"]["messages"])]
+    rows = rows[:6]
+    manifest = experiment.manifest(core.settings, rows, False, kind=kind)
     assert all(r["estimated_reservation_micro_usd"] > 5000
                for r in manifest["plan"]["requests"])
 

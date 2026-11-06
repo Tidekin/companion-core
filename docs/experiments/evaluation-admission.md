@@ -134,3 +134,24 @@ DeepSeek 的 evaluation 复用已有 `chat_thinking`，可与部署中的推理�
 依据 [OpenAI Chat Completions 官方参考](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
 和[官方价格](https://developers.openai.com/api/docs/pricing)。本改动不启用付费评测或变更聊天路由；
 实际评测仍要求匹配的主人授权、原生 consent、固定 manifest 和原 budget journal。
+
+## 主人上传图片（`kind: "owner_upload"`）
+
+主人直接提供的评测图片使用独立的来源类型，不能声明为公开／自制 `synthetic`，
+也不伪造 QQ 消息来满足 `owner_pilot` 的历史来源要求。沿用原 Manifest 和原生 image
+trial 配对：`source_event_ids` 必须为空，schema v2、现有 image treatment/control 和每次
+实际内联原图为必需；图片 MIME、字节、解码尺寸、数量与估计仍由原 image contract 验证。
+`source_document_sha256` 指向已审阅的上传文件清单（含原始文件与实际输入的 SHA256），
+`baseline_sha256` 指向固定提问／基线材料。摘要是材料身份，不能自动证明上传者或图意。
+
+该类型复用合成计划的有限请求数、输入、manifest 字节和每 job 累计额度；每次输出和费用
+沿用原 paid 合同。真实传输仍须由主人授权并通过私有 control 入口、OwnerAuthority
+`evaluation` 用途和精确 manifest consent；新增类型本身不授予权限。
+
+原生 `evaluation.requested` 是 system control 事件，由原 job_sources 追踪。删除该事件
+通过原 Ledger 擦除 manifest 中的图片、结果与绑定，旧备份重放也不能恢复它们；使用费用
+和派发不确定性保留。没有新表、迁移、钱包、执行器、投递通道或模型路由。
+
+只取到单帧的 GIF 缩略图按静态图评价；报告须列出实际帧数，不能声称验证了动作时序。
+主人评分时应先固定答案、隐藏模型标签和顺序，再收集评分；重试、截断或缺失结果保留
+在分母中。实际原图和评分材料只留在本次主人授权的私有评测目录，不进入仓库。

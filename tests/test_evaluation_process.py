@@ -62,16 +62,22 @@ async def processes(core, directory, *, count=2, mode="normal", drain=False):
                 await child.wait()
 
 
-@pytest.mark.parametrize("visual", [False, True], ids=["text", "image"])
-def test_real_tcp_control_entry_and_two_independent_workers_share_one_job(core, tmp_path, visual):
+@pytest.mark.parametrize("kind", ["text", "synthetic", "owner_upload"],
+                         ids=["text", "image", "owner_upload"])
+def test_real_tcp_control_entry_and_two_independent_workers_share_one_job(core, tmp_path, kind):
+    visual = kind != "text"
     if visual:
         from tests.test_image_evaluation import prepared
 
         _, manifests = prepared(core, tmp_path)
         from scripts.evaluate_image_understanding import manifest as image_manifest
 
+        rows = manifests[0].plan["requests"]
+        if kind == "owner_upload":
+            rows = [row for row in rows if any(isinstance(message["content"], list)
+                    for message in row["payload"]["messages"])]
         manifest = evaluation.Manifest.model_validate(image_manifest(
-            core.settings, manifests[0].plan["requests"][:6], False))
+            core.settings, rows[:6], False, kind=kind))
     else:
         manifest = prepare(core, tmp_path)
     core.settings.control_token = SecretStr("synthetic-control-" * 3)

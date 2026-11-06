@@ -32,11 +32,12 @@ DEVICE = "core.evaluation"
 CALLS = 6
 COST = 50000
 SHA = r"^[a-f0-9]{64}$"
-# A pilot replays owner turns; a synthetic plan carries only prepared SYNTHETIC cases.
+# A pilot replays owner turns; prepared trials carry public/authored or owner-uploaded cases.
 LIMITS = {
     "owner_pilot": {"calls": CALLS, "cost": COST, "cases": 1, "bytes": 120000, "input": 2400},
     "synthetic": {"calls": 216, "cost": 1000000, "cases": 36, "bytes": 1500000, "input": 8000},
 }
+LIMITS["owner_upload"] = LIMITS["synthetic"]
 MAX_HTTP_BODY_BYTES = max(value["bytes"] for value in LIMITS.values()) + 1024
 # Requests per worker claim; later batches queue behind ordinary chat.
 BATCH = 6
@@ -48,7 +49,7 @@ CONTROLS.update(IMAGE_TREATMENTS)
 
 class Manifest(StrictModel):
     plan: dict
-    kind: Literal["owner_pilot", "synthetic"] = Field(
+    kind: Literal["owner_pilot", "synthetic", "owner_upload"] = Field(
         default="owner_pilot", exclude_if=lambda value: value == "owner_pilot",
     )
     source_event_ids: list[str] = Field(default_factory=list, max_length=12)
@@ -57,8 +58,8 @@ class Manifest(StrictModel):
 
     @model_validator(mode="after")
     def scoped_sources(self):
-        if (self.kind == "synthetic") != (not self.source_event_ids):
-            raise ValueError("owner pilots need sources; synthetic plans carry none")
+        if (self.kind == "owner_pilot") != bool(self.source_event_ids):
+            raise ValueError("owner pilots need Core sources; prepared trials carry none")
         return self
 
 
@@ -86,7 +87,8 @@ def _plan(settings, manifest):
     """Validate the prepared plan without rewriting a single provider field."""
     try:
         plan, limits = manifest["plan"], _limits(manifest)
-        synthetic = manifest.get("kind", "owner_pilot") == "synthetic"
+        kind = manifest.get("kind", "owner_pilot")
+        prepared = kind != "owner_pilot"
         # Offline planners retain the original conservative bounds without an
         # executable paid grant; live admission still requires the real contract.
         approval = settings.paid_model
@@ -105,8 +107,8 @@ def _plan(settings, manifest):
             raise ValueError("plan version")
         if version == 2 and plan.get("measurement_profile") != _measurement_profile(settings):
             raise ValueError("measurement policy, source or route changed")
-        if synthetic and version != 2:
-            raise ValueError("synthetic plans need native measurement")
+        if prepared and version != 2:
+            raise ValueError("prepared trials need native measurement")
         # v1 plans carry no treatment field, so their digests are unchanged.
         treatment = plan.get("treatment", "participation_v1")
         if "treatment" in plan and treatment not in CONTROLS:
@@ -116,13 +118,15 @@ def _plan(settings, manifest):
         if control != CONTROLS.get(treatment, "baseline"):
             raise ValueError("treatment control")
         rows = plan["requests"]
-        image_trial = synthetic and version == 2 and treatment in IMAGE_TREATMENTS
-        repetitions = plan.get("repetitions", 3) if synthetic else 3
+        image_trial = prepared and version == 2 and treatment in IMAGE_TREATMENTS
+        if kind == "owner_upload" and not image_trial:
+            raise ValueError("owner uploads require the existing image trial contract")
+        repetitions = plan.get("repetitions", 3) if prepared else 3
         cases = {row["case"] for row in rows}
         if (type(repetitions) is not int or not 1 <= repetitions <= 3
             or plan["request_count"] != len(rows) or plan["case_count"] != len(cases)
             or not 1 <= len(cases) <= limits["cases"] or len(rows) > limits["calls"]
-            or (not synthetic and len(rows) != CALLS)
+            or (not prepared and len(rows) != CALLS)
             or plan["actual_provider_calls"] != 0 or plan["actual_cost_micro_usd"] != 0
             or plan["status"] != "PREPARED_NO_MODEL_CALLS"
             or (plan["provider"], plan["model"]) != (settings.provider, settings.model_name)):
@@ -140,6 +144,10 @@ def _plan(settings, manifest):
         measured_costs = []
         for row in rows:
             messages = row["payload"]["messages"]
+            if kind == "owner_upload" and not any(
+                isinstance(m.get("content"), list) for m in messages
+            ):
+                raise ValueError("owner-uploaded image bytes required")
             if (not 2 <= len(messages) <= 60 or messages[0]["role"] != "system"
                 or messages[-1]["role"] != "user" or any(
                     set(m) != {"role", "content"} or not (
@@ -159,7 +167,7 @@ def _plan(settings, manifest):
             if (payload != row["payload"] or paid_budget.sha(payload) != row["payload_sha256"]
                 or row["shared_context_sha256"] != digest
                 or row["planned_max_output_tokens"] != settings.max_output_tokens
-                or not synthetic and settings.max_output_tokens > 2048
+                or not prepared and settings.max_output_tokens > 2048
                 or settings.max_output_tokens > output_limit):
                 raise ValueError("fixed payload")
             if version == 2:
@@ -169,7 +177,7 @@ def _plan(settings, manifest):
                 ) or measured["budget_input_tokens"] > limits["input"] or measured[
                     "estimated_reservation_micro_usd"] > (
                         attempt_limit)
-                    or not synthetic and measured["estimated_reservation_micro_usd"] > 5000):
+                    or not prepared and measured["estimated_reservation_micro_usd"] > 5000):
                     raise ValueError("unsupported, changed or over-limit measurement")
                 measured_costs.append(measured["estimated_reservation_micro_usd"])
             shared.setdefault(row["case"], set()).add(digest)
@@ -226,8 +234,8 @@ def _conversation_binding(store, conversation):
 
 
 def _inputs(store, settings, manifest, now):
-    """Owner sources and conversation fences; a synthetic plan has neither."""
-    if manifest.get("kind", "owner_pilot") == "synthetic":
+    """Replayed owner sources have conversation fences; prepared trials carry fixed inputs."""
+    if manifest.get("kind", "owner_pilot") != "owner_pilot":
         row = store.one("SELECT conversation_id FROM conversations WHERE scope='private' "
                         "AND owner_actor_id='owner' ORDER BY rowid LIMIT 1")
         if not row:

@@ -165,7 +165,9 @@ def prepare(output, *, settings=None, subset=None):
     return summary
 
 
-def manifest(settings, rows, persona):
+def manifest(settings, rows, persona, *, kind="synthetic"):
+    if kind not in {"synthetic", "owner_upload"}:
+        raise ValueError("Prepared image source kind required")
     plan = {"schema_version": 2, "status": "PREPARED_NO_MODEL_CALLS", "repetitions": 1,
         "case_count": len({row["case"] for row in rows}), "request_count": len(rows),
         "provider": settings.provider, "model": settings.model_name,
@@ -178,7 +180,7 @@ def manifest(settings, rows, persona):
             row["estimated_reservation_micro_usd"] for row in rows),
         "requests": rows}
     plan["plan_sha256"] = paid_budget.sha(plan)
-    value = evaluation.Manifest(kind="synthetic", plan=plan,
+    value = evaluation.Manifest(kind=kind, plan=plan,
         baseline_sha256=paid_budget.sha(json.loads((DATA / "baseline.json").read_text("utf-8"))),
         source_document_sha256=paid_budget.sha(
             json.loads((DATA / "cases.json").read_text("utf-8"))))

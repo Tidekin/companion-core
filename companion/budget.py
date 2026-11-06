@@ -829,12 +829,13 @@ def _actual_limit_violations(store, admission, snapshot, usage, actual):
             manifest = json.loads(run["manifest_json"])
             verified = paid_budget.sha(manifest) == run["manifest_sha256"]
             cap = _limits(manifest)["cost"] if verified else COST
-            synthetic = verified and manifest.get("kind", "owner_pilot") == "synthetic"
+            prepared = verified and manifest.get("kind", "owner_pilot") in {
+                "synthetic", "owner_upload"}
         except (TypeError, ValueError, KeyError):
-            cap, synthetic = COST, False
+            cap, prepared = COST, False
         total = store.one("SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
                           "WHERE job_id=?", (usage["job_id"],))["n"]
-        if total + delta > cap or not synthetic and actual > 5000:
+        if total + delta > cap or not prepared and actual > 5000:
             limits.append("EVALUATION_AMOUNT")
     if actual > snapshot["per_attempt_micro_usd"]:
         limits.append("ATTEMPT_AMOUNT")
