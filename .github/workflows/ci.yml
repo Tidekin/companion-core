@@ -112,6 +112,10 @@ jobs:
         with:
           path: data/embedding-cache
           key: bge-small-zh-${{ runner.os }}-46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59
+      - name: Initialize native Compose on Windows
+        if: ${{ runner.os == 'Windows' && fromJSON(needs.preflight.outputs.windows).product }}
+        timeout-minutes: 2
+        run: docker compose version --short
       - name: Run a complete, disjoint suite shard
         if: ${{ fromJSON(needs.preflight.outputs.windows).product }}
         run: >-
