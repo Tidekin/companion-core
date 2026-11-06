@@ -202,7 +202,9 @@ def blind(manifests, outcomes, output):
         if result["payload_sha256"] != row["payload_sha256"]:
             raise ValueError("Outcome input changed")
         identifier = f"answer-{index:04d}"
-        mapping[identifier] = {"request_id": key, "strategy": row["strategy"]}
+        mapping[identifier] = {"request_id": key, "strategy": row["strategy"],
+                               "case_metadata_sha256": paid_budget.sha(
+                                   [row["case"], row["metadata"]])}
         packet.append({"id": identifier, "case": row["case"], "metadata": row["metadata"],
             "text": result["text"], "complete_response": result["complete_response"],
             "scores": {axis: None for axis in AXES}, "reason": ""})
