@@ -8,6 +8,7 @@ from companion.backup import backup, restore
 from companion.contracts import Candidate, CoreError
 from companion.core import Core
 from companion.store import encode
+from companion.token_measurement import measure_request
 from companion.transport import enqueue
 from tests.conftest import ingest, run
 
@@ -83,11 +84,13 @@ def test_budget_removes_the_whole_turn_instead_of_leaving_an_assistant(core):
 
 
 def test_budget_keeps_the_newest_complete_turn_and_complete_current_input(core):
+    core.settings.recent_protected_turns = 1
     sent_history(core, 1, "第一轮的旧内容" * 100, "第一轮回复")
     sent_history(core, 2, "第二轮内容", "第二轮回复")
     job = current_job(core)
     full = core.context(job)
-    core.settings.context_soft_tokens = budget.token_upper_bound([full[0], *full[-3:]])
+    core.settings.context_soft_tokens = measure_request(
+        core.settings, [full[0], *full[-3:]]).reserved_input_tokens
     assert core.context(job) == [full[0], *full[-3:]]
     current = "当前完整输入" * 1000
     job = current_job(core, number=100, text=current)
