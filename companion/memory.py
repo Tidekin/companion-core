@@ -70,6 +70,29 @@ class Memory:
             "*", subjects=("project",), limit=limit, memory_ids=memory_ids, now=now,
         ) if row["status"] == "CONFIRMED" and not row["needs_review"]]
 
+    def standing_relationship(self, actor="owner", limit=3, *, memory_ids=None, now=None):
+        """Few CONFIRMED relationship memories that should be available regardless of query.
+
+        Names, mutual terms, and settled relationship agreements. These are NOT ranked by
+        similarity to the current message — they're background context, selected by salience
+        and recency within the relationship subject. Still subject to native evidence checks.
+        """
+        version, sources, rows, _ = self._prepare_search(
+            "*", actor, subjects=("relationship",), limit=limit, memory_ids=memory_ids, now=now,
+        )
+        check_version(self, version)
+        # Take the most salient confirmed items with valid evidence, up to the limit.
+        standing = []
+        for row in sorted(rows, key=lambda r: (r["importance"], r["created_at"]), reverse=True):
+            if row["status"] != "CONFIRMED" or row["needs_review"]:
+                continue
+            if not sources.evidence(row["memory_id"]):
+                continue
+            standing.append(row)
+            if len(standing) >= limit:
+                break
+        return standing
+
     def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None, now=None,
                explain=None):
         """`explain`, when a dict, receives each returned memory's ranking evidence."""

@@ -907,11 +907,23 @@ class Core(Runtime):
                                      {"kind": "growth", "proof": learned["snapshot"]}))
         if cfg.memory_enabled and permitted("memory"):
             allowed = live_text.memory_ids(s, cfg, self.clock, job) if bounded_text else None
+            # Standing relationship context: names, terms, settled agreements.
+            standing = (
+                self.memory_context.memory.standing_relationship(
+                    memory_ids=allowed, now=self.clock(),
+                )
+                if not bounded_text
+                else []
+            )
+            standing_ids = {row["memory_id"] for row in standing}
             hits = self.memory_context.recall(
                 text or "*", self.clock(), memory_ids=allowed, project_query=text,
             )["rows"] if (
                 memories is None
             ) else memories
+            # Merge standing items that weren't already retrieved, preserving retrieval order.
+            seen = {row["memory_id"] for row in hits}
+            hits = hits + [row for row in standing if row["memory_id"] not in seen]
             memory_proof = self.memory_context.pin(self.clock(), rows=hits)
             from companion.interest import profile
 
