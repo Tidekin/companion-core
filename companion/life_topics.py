@@ -962,7 +962,7 @@ class LifeTopics:
         cfg, s, now = self.settings.life_loop, self.store, self.clock()
         if cfg.mode == "OFF":
             return
-        with _transaction(s):
+        def project():
             # A known supersession retires only the old wording attempt. Recheck
             # the same item once under the new conversation revision and daily cap.
             for interrupted in s.rows(
@@ -1020,7 +1020,7 @@ class LifeTopics:
                     valid = False
                 if not valid:
                     invalidate(s, topic["topic_id"], "SOURCE_EXPIRED", terminal="EXPIRED", now=now)
-                elif topic["due_at"] <= now:
+                elif topic["state"] == "WAITING" and topic["due_at"] <= now:
                     s.execute(
                         "UPDATE life_topics SET state='DUE' WHERE topic_id=?", (topic["topic_id"],)
                     )
@@ -1152,6 +1152,10 @@ class LifeTopics:
                     updated_at=now,
                 )
                 s.insert("life_topic_sources", topic_id=topic_id, event_id=row["event_id"])
+
+        # Idle projection is a WAL reader. Actual changes retry on the existing
+        # authoritative write boundary, with all source and permission checks.
+        return s.read_or_write(project)
 
     def schedule(self):
         cfg, s, now = self.settings.life_loop, self.store, self.clock()
