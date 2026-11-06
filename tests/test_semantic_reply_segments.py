@@ -14,10 +14,18 @@ def test_semantic_pauses_keep_short_units_and_do_not_split_each_comma():
     assert split_text("".join(parts), policy(min_chars=100)) == parts
 
 
-def test_semantic_fallback_uses_sentences_without_a_length_threshold():
-    assert split_text("嗯。我在。慢慢说。", policy()) == ["嗯。", "我在。", "慢慢说。"]
+def test_semantic_single_paragraph_keeps_the_model_selected_bubble():
+    assert split_text("嗯。我在。慢慢说。", policy()) == ["嗯。我在。慢慢说。"]
     long = "因为这几件事互相有关，" * 100
     assert split_text(long, policy()) == [long]
+
+
+@pytest.mark.parametrize("ending", ["", "\n", "\r\n"])
+def test_corrected_premise_stays_with_its_explanation_until_an_explicit_pause(ending):
+    text = "哦，已经到了。我刚才以为你还在路上。" + ending
+    assert split_text(text, policy()) == [text]
+    assert split_text(text + "\n那就接着聊刚才那件事。", policy()) == [
+        text + "\n", "那就接着聊刚才那件事。"]
 
 
 @pytest.mark.parametrize("protected", [
