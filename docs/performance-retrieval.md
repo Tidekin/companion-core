@@ -311,7 +311,13 @@ The existing Life RoundRobin adds one derived-index unit: scan 16 headers, compu
 eight missing vectors and read at most 64 KiB of fact text. It uses existing source pins,
 conditional cache writes and the `memory_vectors` invalidation trigger. Foreground precedence
 prevents starting another unit; a thread already computing does not hold a DB writer.
-The cursor lives in existing runtime metadata. There is no second task queue or memory store.
+The cursor lives in existing runtime metadata; an empty index does not write a zero cursor or
+report false progress that restarts the idle sweep. There is no second task queue or memory store.
+
+Owner Console catalog pages and complete pending totals use the existing `MemorySources`
+validator directly, with the existing final privacy/source recheck. These explicit administrative
+catalog reads remain complete; they do not inherit the reply relevance-search allowance.
+A 206-record pending total remains 206 when a reply has insufficient nomination allowance.
 
 Migration `0066_chat_retrieval_bounds` adds SQLite indexes for nomination, fact keys, vector
 version, evidence adjacency/order, per-origin sent replies and reference owner/kind. Transcript

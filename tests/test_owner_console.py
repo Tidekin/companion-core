@@ -333,23 +333,16 @@ def test_memory_projection_pages_native_candidates_and_keeps_literal_unicode_sea
     for number in range(2, 207):
         core.clock.advance(1)
         stored_memory(core, number, source=source, content=f"其他项目记录 {number}")
-    original = client.app_core.memory.search
-    scopes = []
+    from companion import retrieval_work
 
-    def scoped(query, *args, **kwargs):
-        ids = kwargs.get("memory_ids")
-        assert ids is not None and len(ids) <= 200
-        assert query == "*" and kwargs["now"] == core.clock()
-        scopes.append(len(ids))
-        return original(query, *args, **kwargs)
-
-    monkeypatch.setattr(client.app_core.memory, "search", scoped)
+    # Administrative totals and literal catalog pages remain complete when a reply
+    # would have insufficient nomination allowance for this population.
+    monkeypatch.setitem(retrieval_work.LIMITS, "candidates", 1)
     login(client)
     result = client.get("/v1/console/memories", params={"q": "STRASSE 100%_READY", "limit": 1})
     assert result.status_code == 200, result.text
     assert [row["id"] for row in result.json()["items"]] == [target]
     assert result.json()["items"][0]["detail"]["evidence_ids"] == [source["event_id"]]
-    assert scopes == [200, 6, 1]
     result = client.get("/v1/console/memories", params={"review": "true"})
     assert [row["id"] for row in result.json()["items"]] == [target]
     result = client.get("/v1/console/memories", params={"q": "不存在的字面片段"})
@@ -398,18 +391,20 @@ def test_memory_projection_preserves_native_source_and_validity_filters(
 def test_memory_projection_rechecks_erasure_between_candidate_and_final_read(
     client, core, monkeypatch,
 ):
+    from companion import console_read
+
     memory_id, _ = stored_memory(core)
-    original, calls = client.app_core.memory.search, 0
+    original, calls = console_read._memory_page, 0
 
     def erase_after_read(*args, **kwargs):
         nonlocal calls
-        result = original(*args, **kwargs)
+        result = list(original(*args, **kwargs))
         calls += 1
         if calls == 1:
             core.memory.decide(memory_id, "forget", core.clock())
         return result
 
-    monkeypatch.setattr(client.app_core.memory, "search", erase_after_read)
+    monkeypatch.setattr(console_read, "_memory_page", erase_after_read)
     login(client)
     result = client.get("/v1/console/memories")
     assert result.status_code == 409 and result.json() == {"error": "PRIVACY_CHANGED"}

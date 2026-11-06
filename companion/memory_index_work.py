@@ -54,7 +54,7 @@ async def warm_once(memory, clock, guard):
 
         await memory.index.scores_async("local derived index warmup", rows, revalidate=revalidate)
     next_cursor = headers[-1]["cursor"] if headers else 0
-    if next_cursor != cursor or not saved:
+    if next_cursor != cursor:
         with store.transaction():
             store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
                           (KEY, encode({"version": INDEX_VERSION, "cursor": next_cursor})))

@@ -60,9 +60,7 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
                     "(SELECT value FROM json_each(?)) "
                     "ORDER BY m.updated_at DESC,m.memory_id LIMIT ?",
                     (*params, encode(exact), channel + 1), channel)
-            lexical += collect(projection + base.replace("FROM memories m",
-                    "FROM memories m INDEXED BY "
-                    "idx_memories_fact_key") + "AND m.fact_key COLLATE NOCASE IN "
+            lexical += collect(projection + base + "AND m.fact_key COLLATE NOCASE IN "
                     "(SELECT value FROM json_each(?)) "
                     "ORDER BY m.updated_at DESC,m.memory_id LIMIT ?",
                     (*params, encode(exact), channel + 1), channel)
