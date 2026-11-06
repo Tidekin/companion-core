@@ -184,7 +184,37 @@ Ledger/reconcile and the reviewed retirement procedure. B3b cleanup, compaction,
 pin receipt projection and production acceptance are separate work.
 
 
-## 停止态 caption 财务恢复
+## 已确认的旧图隔离与 Core 切换
+
+当主人明确选择隔离旧图而保留账本时，使用独立的 `meme_isolation` 操作。
+它不把 B3a 的诊断报告变成授权，也不把旧 UNKNOWN 改成 SETTLED。
+
+1. 按原生发布流程停止、完成实际进程静止证明与 handoff prepare。所有原 caption 费用须
+   已结算；待回报的 discovery 或未完成 native handoff 继续阻断。
+2. 使用上述 `meme_export` 导出同一停止态目录，并通过 Core `import` 和 `reconcile`
+   核对最新独立 ErasureLedger、原 capture、模型费用及来源。原图保留在 Core 中。
+3. 把导出中的全部物理原图摘要加入 Core 的 `meme_excluded_sha256`，通过已有 meme
+   capability revision 批准精确配置。历史 SENT 的冷却不猜测、不清零；这些图片保持隔离。
+4. 在原 Bridge 实例锁下运行：
+
+   `python -m companion_onebot_bridge.meme_isolation --config <stopped-bridge.toml> --manifest <export.json>`
+
+5. 配置两侧 `meme_catalog_owner=core` 后完成原生激活/handoff。再核对 Core 原始工作、
+   Bridge 原费用/UNKNOWN/发送记录、实际选图与取图链路。删除这次传输文件等已列明的
+   临时内容副本；原备份按既有隐私保留与恢复规则管理。
+
+隔离命令要求同一原生停止态及精确导出。它在原 owner journal 追加一次
+`MEME_CATALOG_RETIRED`，并在同一 SQLite 事务清除 Bridge 的图片、caption、向量、候选和
+上下文投影。旧费用、来源身份、任务状态、下载回执、原 UNKNOWN、pin 和 native 发送回执
+保留。记录绑定原内容摘要、保留责任摘要与隔离图片集合，不包含私聊或图片正文。
+重复命令仅核对同一原记录；后续 Core transport 可以增加其他图片的原 pin/binding。
+
+恢复旧业务内容、修改保留责任或尝试重新启用 Bridge 图库均被拒绝。旧 binary 不认识新的
+原生 journal 记录，也不能恢复业务执行。journal 已 fsync 而 SQLite 未提交时沿用原生
+不一致拒绝规则，保留原 journal，必须在停止态对账；不得删除记录后重试。
+此命令不处理图库外的任意文件，也不自动把私有备份标成已擦除。
+
+### 停止态 caption 财务恢复命令
 
 已停用旧 Bridge 业务执行、完成原 native STOP 并等 daemon 退出释放原实例锁后，可显式运行：
 

@@ -152,6 +152,9 @@ class OwnerRuntime:
 
     @property
     def memes(self):
+        self.verify(active=False)
+        if getattr(self, "_meme_retired", None) and self.config.meme_catalog_owner != "core":
+            raise ValueError("MEME_CATALOG_RETIRED")
         if not hasattr(self, "_memes"):
             if self.config.meme_catalog_owner == "core":
                 from .meme_transport import CoreMemeTransport
@@ -236,6 +239,7 @@ class OwnerRuntime:
         attempts = {}
         bindings = {}
         inputs = {}
+        retirement = None
         for index, record in enumerate(records[1:], start=1):
             if record["kind"] == "OWNER_STOPPED":
                 if record["data"] != {"authority": current}:
@@ -255,6 +259,12 @@ class OwnerRuntime:
                 current = successor
                 references.append(current)
                 state = "ACTIVE"
+            elif record["kind"] == "MEME_CATALOG_RETIRED":
+                from .meme_isolation import validate_record
+
+                if retirement is not None:
+                    raise ValueError("MEME_RETIREMENT_CONFLICT")
+                retirement = validate_record(record["data"], current, state)
             elif record["kind"] == "RESERVED":
                 value = record["data"]
                 if (state != "ACTIVE" or value["message_id"] in attempts
@@ -339,6 +349,11 @@ class OwnerRuntime:
             else:
                 raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
         hashes = [journal.digest(ref) for ref in references]
+        if retirement is not None:
+            from .meme_isolation import verify_projection
+
+            verify_projection(self.db, retirement)
+        self._meme_retired = retirement
         condition = " WHERE plan_hash IN (" + ",".join("?" for _ in hashes) + ")"
         cursor = self.db.execute("SELECT * FROM window_attempts"
             + (condition if self.legacy else "") + " ORDER BY fence", hashes if self.legacy else ())

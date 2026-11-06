@@ -53,6 +53,7 @@ class _ReadonlyRuntime(OwnerRuntime):
         self.path = _file(directory / "owner-journal.jsonl")
         self.stop_path = _file(directory / ("owner-" + digest(self.authority) + ".stop"))
         self.legacy = None
+        self._valid_profiles = set()
 
 
 def export(config, output):

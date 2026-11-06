@@ -40,7 +40,9 @@ def test_acquisition_consumers_keep_application_import_boundaries(module, blocke
     isolated_import(module, blocked)
 
 
-@pytest.mark.parametrize("name", ["__init__.py", "fetch.py", "community.py", "review.py"])
+@pytest.mark.parametrize("name", [
+    "__init__.py", "fetch.py", "community.py", "review.py", "gallery.py",
+])
 def test_each_source_file_invalidates_both_runtime_digests(monkeypatch, name):
     import companion_meme_sources
     from companion.live_text import code_sha256

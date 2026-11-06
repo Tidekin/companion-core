@@ -254,6 +254,27 @@ def test_snapshot_tampering_and_cold_changes_are_fenced(hot):
         hot.context(job)
 
 
+def test_pre_gallery_default_snapshot_survives_restart(hot, monkeypatch):
+    original = operator_config._raw
+
+    def before_gallery(settings, *, reveal=True):
+        value = original(settings, reveal=reveal)
+        if isinstance(settings, Settings):
+            value.pop("meme_gallery_source", None)
+            value.pop("meme_excluded_sha256", None)
+        return value
+
+    with monkeypatch.context() as old:
+        old.setattr(operator_config, "_raw", before_gallery)
+        job = task(hot)
+        baseline = runtime_config.check(hot.store, hot.settings, "job:" + job["job_id"])
+    assert runtime_config.check(hot.store, hot.settings, "job:" + job["job_id"]) == baseline
+    hot.settings.meme_catalog_owner = "core"
+    hot.settings.meme_excluded_sha256 = ["a" * 64]
+    with pytest.raises(CoreError, match="CONFIGURATION_STARTUP_IDENTITY_CHANGED"):
+        hot.context(job)
+
+
 def test_owner_revocation_cannot_activate_a_new_runtime_version(hot, tmp_path):
     capture, _ = captured(hot, tmp_path)
     old_contract = paid_budget.snapshot(hot.settings)

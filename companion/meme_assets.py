@@ -116,11 +116,12 @@ def stage_native(store, settings, clock, *, caption_job_id, metadata_value, data
     item = {"asset_sha256": caption["asset_sha256"], "source_sha256": caption["source_sha256"],
             "active": True, "metadata": meta, "mime": image.mime_type if image else ""}
     acquired = strict_json(meta["acquisition_json"])
-    if (image is None or image.sha256 != item["asset_sha256"]
+    if (image is None or image.sha256 in settings.meme_excluded_sha256
+        or image.sha256 != item["asset_sha256"]
         or source_digest(meta) != item["source_sha256"]
         or original_custody(store, settings, job["event_id"]) != custody
-        or "source_files" not in acquired or acquired.get("archive_member")
-        or not meme_policy.trusted_source(meta, meme_policy.source_rules(settings))):
+        or not ({"source_files", "gallery_selection"} & acquired.keys())
+        or acquired.get("archive_member") or not meme_policy.source_allowed(meta, settings)):
         raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
     sources, withdrawn = provenance(store, settings, custody, item, data,
                                     caption_job_id=caption_job_id)

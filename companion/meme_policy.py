@@ -10,6 +10,34 @@ from companion.contracts import StrictModel
 from companion_meme_protocol import caption_text
 
 
+class GallerySource(StrictModel):
+    version: int = Field(default=1, strict=True, ge=1, le=1)
+    index_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    terms_revision: str = Field(pattern=r"^[a-f0-9]{40}$")
+    terms_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    usage_basis: str = Field(min_length=1, max_length=256)
+    images: list[dict] = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def validate_selection(self):
+        self.selection()
+        return self
+
+    def selection(self):
+        from companion_meme_sources.gallery import Selection
+
+        return Selection(self.model_dump(mode="json"))
+
+
+def source_allowed(metadata, settings):
+    gallery = getattr(settings, "meme_gallery_source", None)
+    if "gallery_selection" in json.loads(metadata["acquisition_json"]):
+        from companion_meme_sources.gallery import allowed
+
+        return gallery is not None and allowed(metadata, gallery.selection())
+    return trusted_source(metadata, source_rules(settings))
+
+
 class TrustedSource(StrictModel):
     repo: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=512)
     revision: str = Field(pattern=r"^[a-f0-9]{40}$")

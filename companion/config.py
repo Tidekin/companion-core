@@ -28,7 +28,7 @@ from companion.input_debounce import InputDebounceConfig
 from companion.jargon_config import JargonConfig
 from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.media_config import ContentConfig, ImageGenerationConfig, MediaConfig
-from companion.meme_policy import TrustedSource
+from companion.meme_policy import GallerySource, TrustedSource
 from companion.meme_wiki_config import MemeWikiConfig
 from companion.operator_config import ConsoleConfig
 from companion.owner_authority_protocol import OwnerRuntimeConfig
@@ -590,8 +590,14 @@ class Settings(BaseModel):
     meme_trusted_sources: list[TrustedSource] = Field(
         default_factory=list, max_length=32, exclude_if=lambda value: not value,
     )
+    meme_gallery_source: GallerySource | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     meme_cooldown_seconds: int = Field(
         default=1800, strict=True, ge=0, le=86400, exclude_if=lambda value: value == 1800,
+    )
+    meme_excluded_sha256: list[Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]] = Field(
+        default_factory=list, max_length=4096, exclude_if=lambda value: not value,
     )
     meme_semantics_enabled: bool = Field(
         default=False, exclude_if=lambda value: value is False,
@@ -685,6 +691,9 @@ class Settings(BaseModel):
     def validate_settings(self):
         ZoneInfo(self.timezone)
         exact_web_hosts(self.web_reading_hosts)
+        if (self.meme_gallery_source is not None or self.meme_excluded_sha256) \
+                and self.meme_catalog_owner != "core":
+            raise ValueError("MEME_CORE_CATALOG_REQUIRED")
         if self.mode not in {"demo", "live"}:
             raise ValueError("mode must be demo or live")
         if len(self.bridge_token.get_secret_value()) < 24:
@@ -813,10 +822,13 @@ class Settings(BaseModel):
                     data[field] = TypeAdapter(dict[str, ObservationAdapterConfig]).validate_json(
                         value
                     )
-                elif field in {"expression_meme_categories", "web_reading_hosts"}:
+                elif field in {"expression_meme_categories", "web_reading_hosts",
+                               "meme_excluded_sha256"}:
                     data[field] = TypeAdapter(list[str]).validate_json(value)
                 elif field == "meme_trusted_sources":
                     data[field] = TypeAdapter(list[TrustedSource]).validate_json(value)
+                elif field == "meme_gallery_source":
+                    data[field] = GallerySource.model_validate_json(value)
                 elif field == "meme_cooldown_seconds":
                     data[field] = TypeAdapter(int).validate_json(value, strict=True)
                 elif field == "executive":

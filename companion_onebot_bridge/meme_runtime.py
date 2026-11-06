@@ -78,6 +78,8 @@ def infer_intent(text):
 
 class MemeRuntime(DeliveryCustody):
     def __init__(self, window, *, reviewer=None, transport=None, resolver=resolve_public):
+        if getattr(window, "_meme_retired", None):
+            raise ValueError("MEME_CATALOG_RETIRED")
         self.window, self.spool, self.db = window, window.spool, window.spool.db
         if self.db.in_transaction:
             raise RuntimeError("MEME_RUNTIME_REQUIRES_TRANSACTION_BOUNDARY")
