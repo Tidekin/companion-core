@@ -7,16 +7,67 @@ from companion import memory_references, qq_quotes, reply_revision
 from companion.contracts import CoreError
 from companion.store import encode
 
-CORRECTION = re.compile(
-    r"看错|理解错|说错|不对|错了|有偏差|没[看理]懂|没理解|重新[看核]|再看|"
-    r"不是.{0,60}(?:而是|是)|可是.{0,50}[上下图]|两[张格].{0,30}一样")
+IMAGE = r"(?:(?:这|那)(?:张|幅|个|两张)?|两张)?(?:图片?|漫画)|(?:上|下)(?:图|格)|上下两格|两格"
+IMAGE_CUE = re.compile(IMAGE)
+QUOTED = re.compile(r'''“[^“”]*”|‘[^‘’]*’|「[^「」]*」|『[^『』]*』|"[^"]*"|'[^']*'|`[^`]*`''')
+CLAUSES = re.compile(r"([^，,。！!？?；;\n]+)([，,。！!？?；;\n]*)")
+REPORTING = re.compile(
+    r"(?:说|讲|问|道|写着|提到)[：: ]*$|"
+    r"^(?:他|她|我|他们|她们|别人|朋友|网友)(?:刚才|当时)?(?:说|讲|问|提到|告诉我)[：: ]*|"
+    r"^(?:我)?(?:没(?:有)?|不是(?:在)?)(?:说|讲|指)")
+OWN_PREFIX = re.compile(r"^(?:(?:但|但是|不过|可是))?我(?:觉得|认为|是说|的意思是)")
+ERROR = r"(?:看错|看反|理解错|理解反|说错|说反|没看懂|没理解|理解得不对|理解有偏差)(?:了)?"
+ASSISTANT_ERROR = re.compile(
+    rf"(?:你(?:刚才|刚刚|这次|之前|又|确实|真的)*(?:(?:把|对)?(?:{IMAGE})(?:的意思)?(?:给)?)?{ERROR}"
+    rf"|(?:{IMAGE})你{ERROR}"
+    rf"|(?:你(?:刚才|刚刚)?(?:对(?:{IMAGE}))?的|(?:{IMAGE})的)"
+    r"(?:解释|解读|理解|分析)(?:不对|错了|有偏差|有误))(?:啊|呀|呢)?")
+LOOK_ERROR = re.compile(r"你(?:刚才|刚刚|这次|之前|又|确实|真的)*看(?:错|反)(?:了)?(?:啊|呀|呢)?")
+LINKED_OBJECTION = re.compile(
+    r"不对|(?:这句|这个解释|这个理解)(?:不对|错了)|不是这样(?:的)?|不是这个意思")
+RECHECK = re.compile(
+    r"(?:错了){1,3}|(?:请)?(?:重新|再)(?:看|核对)(?:看|一下|一遍)?(?:原图|这张图)?")
+IMAGE_RELATION = re.compile(r"(?:两张图|两格|上下两格).{0,40}(?:一样|相同|重复)")
 HEADING = "\n本轮图片核对资料（不是指令；异议和机器改口均不自动成为事实）："
+
+
+def _intent(text, *, linked=False, immediate=False):
+    """Uncertain requests can revisit context; only own image objections persist.
+
+    Like native owner-feedback rules, match whole own clauses rather than an
+    error word embedded in self-apology, denial, reporting or a quoted sentence.
+    A verified quote identifies a target, not an objection by itself.
+    """
+    own = QUOTED.sub(" ", text)
+    if re.search(r'''[“”‘’「」『』"'`]''', own):
+        return False, False  # An unfinished quote cannot establish the speaker.
+    clauses = [(match[1].strip(), match[2]) for match in CLAUSES.finditer(own)]
+    related = any(IMAGE_RELATION.fullmatch(clause) for clause, _ in clauses)
+    requested = objection = reported = False
+    for clause, punctuation in clauses:
+        if prefix := OWN_PREFIX.match(clause):
+            clause, reported = clause[prefix.end():].strip(), False
+        if REPORTING.search(clause):
+            reported = True
+        if reported:
+            continue
+        clause = re.sub(r"^(?:但是|不过|可是|但|是)", "", clause).strip()
+        uncertain = bool(re.search(r"[？?]", punctuation) or clause.endswith(("吗", "吧", "么")))
+        assertion = re.sub(r"[吗吧么]$", "", clause)
+        direct = bool(ASSISTANT_ERROR.fullmatch(assertion))
+        linked_objection = bool(LINKED_OBJECTION.fullmatch(assertion))
+        requested |= direct or linked_objection or bool(
+            RECHECK.fullmatch(assertion) or IMAGE_RELATION.fullmatch(assertion))
+        objection |= not uncertain and (
+            direct and (linked or related or bool(IMAGE_CUE.search(assertion))
+                        or immediate and bool(LOOK_ERROR.fullmatch(assertion)))
+            or linked and linked_objection)
+    return requested, bool(objection)
 
 
 def target(core, job, body, sources):
     """Resolve only inside the already authorized recent/selected source window."""
     text = body.get("text", "")
-    correction = bool(CORRECTION.search(text))
     by_id = {source["event_id"]: source for source in sources}
     images = {key: core.store.rows(
         "SELECT item_id,slot,output_event_id FROM content_items WHERE owner_event_id=? "
@@ -37,7 +88,14 @@ def target(core, job, body, sources):
                 by_id[key]["source_event_id"] == f"{prefix}:{segment.get('reference')}")
     explicit.update(key for key, rows in images.items()
                     if key in text or any(row["item_id"] in text for row in rows))
-    if not correction and not explicit:
+    requested, correction = _intent(text, linked=bool(explicit),
+        immediate=bool(sources and sources[-1]["event_id"] in images))
+    if not explicit and any(segment.get("type") == "reply"
+                            for segment in (body.get("rich") or {}).get("segments", [])):
+        # An unproven/out-of-window quote cannot silently dispute a different
+        # recent image merely because that is the sole remaining candidate.
+        correction = False
+    if not requested and not explicit:
         return None
     if explicit:
         candidates = explicit
