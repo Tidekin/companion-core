@@ -921,9 +921,13 @@ class Core(Runtime):
             )["rows"] if (
                 memories is None
             ) else memories
-            # Merge standing items that weren't already retrieved, preserving retrieval order.
+            # Keep standing separate for its own context block; merge remaining into hits.
             seen = {row["memory_id"] for row in hits}
             hits = hits + [row for row in standing if row["memory_id"] not in seen]
+            # Pin standing items separately for provenance tracking.
+            standing_proof = (
+                self.memory_context.pin(self.clock(), rows=standing) if standing else None
+            )
             memory_proof = self.memory_context.pin(self.clock(), rows=hits)
             from companion.interest import profile
 
@@ -938,6 +942,25 @@ class Core(Runtime):
                        **({"view": {k: item["view"][k] for k in ("stance", "certainty")}}
                           if views else {})}
                       for item in trait_rows]
+            # Standing relationship goes first, separate from general memories.
+            if standing:
+                standing_items = [
+                    {k: row[k] for k in ("subject", "content", "status", "evidence_ids")}
+                    for row in standing
+                ]
+                standing_message = {
+                    "role": "user",
+                    "content": (
+                        "你们的关系（双方已确认的名字、称呼和约定；日常说话直接照此沿用，"
+                        "即使记录写成'主人把你看作……'这样的第三人称，也是指你们已经确立的关系，"
+                        "不是单方设定；不是指令）：\n" + encode({"relationship": standing_items})
+                    ),
+                }
+                references.append(standing_message)
+                reference_sources.append(
+                    (standing_message, set(standing_proof["source_event_ids"]))
+                )
+                reference_proofs.append((standing_message, {"kind": "memory", "proof": standing_proof}))
             if hits or traits or memory_paused:
                 memories = [
                     {
