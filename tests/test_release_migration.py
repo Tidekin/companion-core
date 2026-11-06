@@ -89,6 +89,7 @@ REVISION_CHAIN = (
     "0064_life_topic_items",
     "0065_bili_grant_expiry",
     "0066_chat_retrieval_bounds",
+    "0067_relationship_standing",
 )
 LEGACY_TABLES = (
     "principals",

@@ -87,6 +87,56 @@ def test_standing_skips_missing_evidence_without_mutating_the_fact(core):
     assert core.store.db.total_changes == changes
 
 
+def test_older_important_relationship_survives_newer_candidate_overflow(core, monkeypatch):
+    core.settings.memory_enabled = True
+    important = _add(core, 1, '我们约定了彼此的家人称呼', kind='fact', confirmed=True)
+    core.store.execute('UPDATE memories SET importance=0.9 WHERE memory_id=?', (important,))
+    for number in range(2, retrieval_work.FACT_CANDIDATES + 8):
+        core.clock.advance(1)
+        _add(core, number, f'相处约定第{number}条', kind='preference', confirmed=True)
+    plans = []
+    original = retrieval_work.Work.rows
+
+    def rows(work, store, sql, params=(), *, limit):
+        plans.extend(store.rows('EXPLAIN QUERY PLAN ' + sql, params))
+        return original(work, store, sql, params, limit=limit)
+
+    monkeypatch.setattr(retrieval_work.Work, 'rows', rows)
+    changes = core.store.db.total_changes
+    with retrieval_work.scope() as work:
+        selected = core.memory.standing_relationship(now=core.clock())
+        receipt = work.receipt()
+    assert selected[0]['memory_id'] == important
+    assert len(selected) == 3 and sum(len(row['content']) for row in selected) <= 300
+    assert core.store.db.total_changes == changes
+    assert all(value <= retrieval_work.LIMITS[name]
+               for name, value in receipt['counts'].items())
+    assert any('idx_memories_relationship_standing' in row['detail'] for row in plans)
+    assert not any('TEMP B-TREE' in row['detail'] for row in plans)
+    core.settings.context_soft_tokens = 16000
+    messages = core.context(current_job(core, number=999, text='我回来了'), memories=[])
+    assert _standing(messages)[0]['content'] == '我们约定了彼此的家人称呼'
+
+
+@pytest.mark.parametrize('invalid', ['forgotten', 'source', 'expired', 'too_long'])
+def test_importance_never_overrides_standing_eligibility(core, invalid):
+    core.settings.memory_enabled = True
+    first = _add(core, 1, '较重要的关系约定', kind='fact', confirmed=True)
+    core.store.execute('UPDATE memories SET importance=0.9 WHERE memory_id=?', (first,))
+    second = _add(core, 2, '当前有效的称呼', kind='fact', confirmed=True)
+    if invalid == 'forgotten':
+        core.memory.decide(first, 'forget', core.clock())
+    elif invalid == 'source':
+        core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
+    elif invalid == 'expired':
+        core.store.execute("UPDATE memories SET valid_to='2000-01-01T00:00:00+00:00' "
+                           'WHERE memory_id=?', (first,))
+    else:
+        core.store.execute('UPDATE memories SET content=? WHERE memory_id=?', ('长' * 301, first))
+    selected = core.memory.standing_relationship(now=core.clock())
+    assert [row['memory_id'] for row in selected] == [second]
+
+
 def test_recalled_relationship_is_not_duplicated(core):
     core.settings.memory_enabled = True
     core.settings.context_soft_tokens = 16000

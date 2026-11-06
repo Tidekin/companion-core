@@ -39,7 +39,8 @@ class Memory:
         if memory_ids is not None and not memory_ids:
             return []
         version, rows, used = read_version(self), [], 0
-        # Filter before the bounded head: episodes must not crowd out enduring facts.
+        # Filter and rank before the bounded head; recent low-importance facts must
+        # not evict an older important relationship before its sources are checked.
         eligible = ("subject='relationship' AND status='CONFIRMED' AND needs_review=0 "
                     "AND kind<>'episode' AND origin<>'event_observed' "
                     "AND privacy_scope='private' AND confidence>0")
@@ -57,8 +58,9 @@ class Memory:
                 return []
             try:
                 headers = work.rows(self.store,
-                    "SELECT memory_id,octet_length(content) AS text_bytes FROM memories WHERE "
-                    + eligible + " ORDER BY updated_at DESC,memory_id LIMIT ?",
+                    "SELECT memory_id,octet_length(content) AS text_bytes FROM memories "
+                    "INDEXED BY idx_memories_relationship_standing WHERE "
+                    + eligible + " ORDER BY importance DESC,updated_at DESC,memory_id LIMIT ?",
                     (*args, ceiling + 1), limit=ceiling + 1)
                 if len(headers) > ceiling:
                     work.mark("candidate_pool")
