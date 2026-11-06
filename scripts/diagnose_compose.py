@@ -94,10 +94,10 @@ def powershell(code, data=None, timeout=8):
     return json.loads(result.stdout.decode('utf-8-sig'))
 
 
-def snapshot(pid):
+def snapshot(pid, timeout=8):
     started = time.monotonic()
     try:
-        rows = powershell(SNAPSHOT.replace('ROOT_PID', str(int(pid))))
+        rows = powershell(SNAPSHOT.replace('ROOT_PID', str(int(pid))), timeout=timeout)
         return {'processes': rows, 'query_seconds': round(time.monotonic() - started, 3)}
     except Exception as error:
         return {'processes': [], 'query_seconds': round(time.monotonic() - started, 3),
@@ -114,26 +114,37 @@ def run(label, command, *, timeout, stdin_null=False, monitor=False):
              'timed_out': False, 'snapshots': []}
     deadline = started + timeout
     output = error = None
+    monitor_stop = threading.Event()
+    captures = []
+
+    def observe():
+        next_capture = started + 5
+        while not monitor_stop.wait(max(0, next_capture - time.monotonic())):
+            observed = snapshot(process.pid)
+            observed['elapsed_seconds'] = round(time.monotonic() - started, 3)
+            captures.append(observed)
+            next_capture += 5
+
+    observer = threading.Thread(target=observe, daemon=True) if monitor else None
+    if observer:
+        observer.start()
     while True:
         try:
-            output, error = process.communicate(timeout=max(0.01, min(
-                5 if monitor else timeout, deadline - time.monotonic())))
+            output, error = process.communicate(timeout=max(0.01, deadline - time.monotonic()))
+            value['native_completion_seconds'] = round(time.monotonic() - started, 3)
             break
         except subprocess.TimeoutExpired as failure:
-            if monitor and time.monotonic() < deadline:
-                observed = snapshot(process.pid)
-                docker_rows = [row for row in observed['processes']
-                               if row['name'].lower().startswith('docker')]
-                if docker_rows or observed.get('error_type'):
-                    value['snapshots'].append({**observed, 'processes': docker_rows,
-                        'elapsed_seconds': round(time.monotonic() - started, 3)})
-                continue
+            monitor_stop.set()
             value.update(timed_out=True, returncode_at_timeout=process.poll(),
+                timeout_detected_seconds=round(time.monotonic() - started, 3),
                 output_at_timeout={'stdout': output_evidence(failure.stdout),
                                    'stderr': output_evidence(failure.stderr)})
-            observed = snapshot(process.pid)
+            # Monitoring is independent of communicate's deadline: a slow CIM
+            # query must not give the native command additional execution time.
+            observed = ((captures[-1] if captures else {'processes': [], 'capture_pending': True})
+                        if monitor else snapshot(process.pid))
             value['snapshots'].append({**observed,
-                'elapsed_seconds': round(time.monotonic() - started, 3), 'at_timeout': True})
+                'at_timeout': True, 'observation_source': 'latest_monitor_capture' if monitor else 'timeout_capture'})
             cleanup = value['cleanup'] = {}
             # taskkill /T is the repository's existing Windows cleanup mechanism.
             # The retained Popen handle prevents targeting a recycled parent PID.
@@ -159,6 +170,11 @@ def run(label, command, *, timeout, stdin_null=False, monitor=False):
                 output, error = failure.stdout, failure.stderr
                 cleanup['pipes_drained'] = False
             break
+    monitor_stop.set()
+    if observer:
+        observer.join(timeout=9)
+        value['monitor_finished'] = not observer.is_alive()
+        value['snapshots'] = [*captures, *value['snapshots']]
     value.update(returncode=process.poll(), elapsed_seconds=round(time.monotonic() - started, 3),
                  stdout=output_evidence(output), stderr=output_evidence(error))
     if value.get('cleanup', {}).get('pipes_drained', True):
@@ -168,7 +184,7 @@ def run(label, command, *, timeout, stdin_null=False, monitor=False):
 
 
 def candidates(docker, observations):
-    """Read plugin locations only after the cold render; never execute discovery."""
+    """Read installed plugin locations without executing Docker or Compose."""
     paths = []
     for value in observations:
         for capture in value.get('snapshots', []):
@@ -225,8 +241,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pytest', action='store_true', help='Observe the exact two-worker test pairing')
     parser.add_argument('--concurrent', action='store_true', help='End native mode with two concurrent config renders')
+    first = parser.add_mutually_exclusive_group()
+    first.add_argument('--first-devnull', action='store_true', help='Use DEVNULL on the first native config call')
+    first.add_argument('--direct-first', action='store_true', help='Run installed Compose directly before Docker CLI')
     parser.add_argument('--output', type=Path, default=Path('.local/compose-diagnostic/report.json'))
     args = parser.parse_args()
+    assert not (args.pytest and (args.first_devnull or args.direct_first)), 'NATIVE_FIRST_VARIANTS_ONLY'
     assert os.name == 'nt' and POWERSHELL, 'WINDOWS_POWERSHELL_REQUIRED'
     assert (ROOT / 'source_reader/migrate_astrbot.py').is_file(), 'RUN_FROM_REPOSITORY_REQUIRED'
     output = (ROOT / args.output).resolve()
@@ -239,7 +259,10 @@ def main():
     assert not events.exists(), 'FRESH_EVENT_LOG_REQUIRED'
     report = {'status': 'DIAGNOSTIC_RUNNING', 'mode': 'pytest' if args.pytest else 'native',
         'started_utc': datetime.now(UTC).isoformat(), 'source_root': str(ROOT),
-        'python': executable(sys.executable), 'calls': [], 'no_version_warmup': True,
+        'python': executable(sys.executable), 'calls': [],
+        'no_version_warmup': os.environ.get('COMPOSE_DIAGNOSTIC_PREINITIALIZED') != '1',
+        'initialization_recorded_by_workflow': os.environ.get('COMPOSE_DIAGNOSTIC_PREINITIALIZED') == '1',
+        'first_devnull': args.first_devnull, 'direct_first': args.direct_first,
         'ambient_environment_present': {name: name in os.environ for name in (
             'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CLI_PLUGIN_ORIGINAL_CLI_COMMAND',
             'COMPOSE_FILE', 'COMPOSE_PROFILES', 'COMPOSE_ENV_FILES', 'COMPOSE_PROJECT_NAME')},
@@ -267,6 +290,8 @@ def main():
 
     exit_code = 0
     try:
+        record({'label': 'cim_own_process_baseline_no_docker_warmup', 'pid': os.getpid(),
+                'snapshots': [snapshot(os.getpid(), timeout=15)], 'docker_or_compose_executed': False})
         if args.pytest:
             command = [sys.executable, '-B', '-m', 'pytest', '-q', '-n', '2', '--dist=loadfile',
                 '--no-loadscope-reorder', '--basetemp=' + str(scratch / 'pytest'),
@@ -294,9 +319,21 @@ def main():
             assert value['returncode'] == 0 and not value['timed_out'], 'MIGRATION_CLI_FAILED'
             arguments = ['-f', str(target / 'compose.json'), 'config', '--format', 'json']
             native = [str(docker), 'compose', *arguments]
-            for label, null in (('cold_docker_config_inherited_stdin', False),
-                                ('docker_config_devnull_stdin', True)):
-                value, raw, _ = invoke(label, native, stdin_null=null)
+            if args.direct_first:
+                installed = candidates(docker, [])
+                assert installed, 'DIRECT_COMPOSE_NOT_FOUND_WITHOUT_EXECUTION'
+                report['direct_first_selected'] = executable(installed[0])
+                value, raw, _ = invoke('cold_direct_compose_config_inherited_stdin',
+                    [str(installed[0]), *arguments], monitor=True)
+                config_result(value, raw, token)
+                record(value)
+            probes = ([('cold_docker_config_devnull_stdin', True),
+                       ('docker_config_inherited_stdin', False)] if args.first_devnull else
+                      [('docker_config_inherited_stdin_after_direct' if args.direct_first else
+                        'cold_docker_config_inherited_stdin', False), ('docker_config_devnull_stdin', True)])
+            for index, (label, null) in enumerate(probes):
+                value, raw, _ = invoke(label, native, stdin_null=null,
+                                      monitor=index == 0 and not args.direct_first)
                 config_result(value, raw, token)
                 record(value)
             # The exact cold command above always precedes these metadata/version calls.
