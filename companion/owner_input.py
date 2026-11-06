@@ -281,9 +281,28 @@ def history_batch(store, settings, clock, job, *, purpose):
 
 
 def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
+    view, check, finish = history_batch(store, settings, clock, job, purpose=purpose)
+    return _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid)
+
+
+def history_for_owner(store, settings, clock, job, view):
+    """Current private-history permission for an explicitly selected historical job.
+
+    This is a read of original evidence; it does not grant the old job execution.
+    The caller holds a snapshot while collecting the same ordinary history proof.
+    """
+    def finish():
+        owner_authority.current(store, settings, clock, purpose="history", authority=view.authority)
+
+    finish()
+    return _collect_history(store, settings, clock, job, view,
+        lambda event_id: source(store, settings, view, event_id, clock(), history=True),
+        finish, None)
+
+
+def _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid):
     from companion.dialogue_history import recent_context_sources, turn_messages
 
-    view, check, finish = history_batch(store, settings, clock, job, purpose=purpose)
     if "history" not in view.policy.purposes:
         return []
     scope = view.policy.history
