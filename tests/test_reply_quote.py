@@ -21,6 +21,20 @@ def test_choice_marker_is_parsed_once_and_always_removed():
     assert reply_quote.alias("evt_" + "0" * 64) == reply_quote.alias("evt_" + "0" * 64)
 
 
+@pytest.mark.parametrize("label", [
+    "[编号 m1a2b]", "【编号 m1a2b】", "[编号 m...]", "【编号 m...】",
+    "[编号 m…]", "【编号 m……】",
+])
+def test_internal_labels_and_template_placeholders_are_not_visible_text(label):
+    assert reply_quote.extract(label + " 我记得。\n" + label + "后来呢？") == (
+        None, "我记得。\n后来呢？")
+
+
+@pytest.mark.parametrize("text", ["编号 m 是这款设备的型号", "[编号 1234]", "【编号 m12345】"])
+def test_ordinary_numbered_content_is_preserved(text):
+    assert reply_quote.extract(text) == (None, text)
+
+
 def first_event(core):
     return core.store.one("SELECT event_id FROM events WHERE source='qq.onebot' "
                           "AND actor_id='owner' ORDER BY rowid LIMIT 1")["event_id"]
@@ -190,9 +204,10 @@ def first_reply(core):
     return core.store.one("SELECT message_id FROM outbox ORDER BY rowid LIMIT 1")["message_id"]
 
 
-def test_named_own_earlier_reply_is_quoted_by_its_recorded_provider_id(core, tmp_path):
+@pytest.mark.parametrize("label", ["[编号 m0000]", "【编号 m1a2b】", "[编号 m...]"])
+def test_named_own_earlier_reply_is_quoted_by_its_recorded_provider_id(core, tmp_path, label):
     def own(core):
-        return "【引用 " + reply_quote.alias(first_reply(core)) + "】[编号 m0000] 我是认真的"
+        return "【引用 " + reply_quote.alias(first_reply(core)) + "】" + label + " 我是认真的"
 
     sends, requests = converse(core, tmp_path, own)
     shown = json.dumps(requests[1], ensure_ascii=False)
