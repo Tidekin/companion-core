@@ -1,4 +1,4 @@
-"""Settlement of an owner reply whose guarded SQLite preflight exhausted its lease."""
+"""Settlement of an owner reply whose guarded Core preflight exhausted its lease."""
 
 import json
 from typing import Literal
@@ -49,7 +49,10 @@ def settle(store, settings, clock, body):
             raise CoreError("OWNER_PREFLIGHT_AUTHORITY_CHANGED", 409)
         lease = live_text._meta(store, "owner_preflight_lease:" + body.message_id)
         row = store.one("SELECT * FROM outbox WHERE message_id=?", (body.message_id,))
-        begun = body.stage == "send-check"
+        # A begin-send ACK can be lost after Core commits SENDING. The original
+        # exclusive Bridge still attests RESERVED and no provider dispatch, so
+        # retain the actual begun count rather than treating the ACK as an effect.
+        begun = body.stage == "send-check" or bool(row and row["attempt_count"] == 1)
         states = {"SENDING", "DELIVERY_UNCERTAIN"} if begun else {"LEASED", "PENDING"}
         if (lease != {k: proof[k] for k in ("item_sha256", "lease_sha256", "lease_until")}
             or not row or not row["authority_json"]
