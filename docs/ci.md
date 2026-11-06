@@ -23,6 +23,14 @@ repeat product tests before the parallel jobs. Documentation validation owns a
 fresh `ci-docs-*` directory under `.local/test-temp`, removed on success or failure.
 Unrelated retained diagnostics are preserved.
 
+Windows product shards run `docker compose version --short` once, with a two-minute
+step limit, immediately before parallel pytest. The [Windows diagnostic run](https://github.com/Tidekin/companion-core/actions/runs/42256242406)
+observed a 30-second cold configuration timeout and a prolonged plugin-metadata child
+in a separate two-worker run. Docker's [native metadata discovery](https://github.com/docker/cli/blob/v29.7.2/cli-plugins/manager/candidate.go)
+starts that child when loading the Compose plugin. This initialization gives the
+installed dependency its own bounded startup phase; the configuration tests retain
+their existing deadlines and assertions.
+
 ## Console and Windows path selection
 
 Only pull requests can use the `selected` profile. The complete PR diff selects the checks;
