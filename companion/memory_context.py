@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime
 
+from companion import retrieval_work
 from companion.contracts import CoreError
 from companion.privacy import epoch, redact, sensitive
 from companion.store import after, encode
@@ -29,17 +30,31 @@ def check_version(memory, version):
 class MemorySources:
     """Positive owner evidence requires every upstream source to remain available."""
 
-    def __init__(self, memory, now=None, excluded=()):
+    def __init__(self, memory, now=None, excluded=(), *, bounded=False, work=None):
         self._memory = memory
         self.store, self.settings, self.now = memory.store, memory.settings, now
         self.ledger = memory.ledger
         self.excluded = set(excluded)
+        self.bounded = bounded
+        self.work = work or (retrieval_work.Work() if bounded else None)
+        self._source_ids, self._source_bytes = set(), 0
         self.cutoff = (datetime.fromisoformat(after(
             now, -86400 * self.settings.raw_event_retention_days,
         )) if now else None)
 
     def _lineage(self, event_id):
         """Follow native edges and the exact legacy correction relation used by erasure."""
+        if self.bounded:
+            def read():
+                try:
+                    return self._bounded_lineage(event_id)
+                except retrieval_work.WorkLimit as error:
+                    return error  # A work limit is not a snapshot-write retry.
+
+            rows = self.store.read_or_write(read)
+            if isinstance(rows, retrieval_work.WorkLimit):
+                raise rows
+            return rows
         lineage = "SELECT value FROM json_each(?)"
         if self.store.one("SELECT 1 FROM sqlite_master WHERE name='event_dependencies'"):
             lineage += (" UNION SELECT d.source_event_id FROM event_dependencies d "
@@ -77,6 +92,81 @@ class MemorySources:
                         pending.add(source)
         return found.values()
 
+    def _bounded_lineage(self, event_id):
+        """Read complete indexed adjacency, or refuse the candidate; never cut its proof."""
+        from companion.retrieval_work import EVIDENCE_ROOTS, LIMITS, SOURCE_NODES, WorkLimit
+
+        def refuse(reason):
+            if self.work:
+                self.work.mark(reason)
+            raise WorkLimit(reason)
+
+        dependencies = self.store.one(
+            "SELECT 1 FROM sqlite_master WHERE name='event_dependencies'")
+        pending, found, loaded = [event_id], {}, {}
+
+        def read(key):
+            if key in loaded:
+                return loaded[key]
+            self._source_ids.add(key)
+            if len(self._source_ids) > SOURCE_NODES:
+                refuse("source_nodes")
+            if self.work and not self.work.take("source_nodes"):
+                refuse("source_nodes")
+            size = self.store.one("SELECT octet_length(body_json) AS size FROM events "
+                                  "WHERE event_id=?", (key,))
+            size = size["size"] if size else 0
+            self._source_bytes += size
+            if self._source_bytes > LIMITS["text_bytes"] or (
+                self.work and not self.work.take("text_bytes", size)
+            ):
+                refuse("source_text_bytes")
+            row = self.store.one(
+                "SELECT s.event_id AS source_id,e.*,c.scope,c.owner_actor_id,r.key AS erased "
+                "FROM (SELECT ? AS event_id) s LEFT JOIN events e USING(event_id) "
+                "LEFT JOIN conversations c USING(conversation_id) "
+                "LEFT JOIN runtime_meta r ON r.key='erased_event:'||s.event_id", (key,))
+            loaded[key] = row
+            return row
+
+        while pending:
+            key = pending.pop()
+            if key in found:
+                continue
+            row = read(key)
+            found[key] = row
+            if dependencies:
+                edges = self.store.rows("SELECT source_event_id FROM event_dependencies "
+                    "WHERE event_id=? LIMIT ?", (key, SOURCE_NODES + 1))
+                if len(edges) > SOURCE_NODES:
+                    refuse("source_nodes")
+                pending.extend(edge["source_event_id"] for edge in edges)
+            if row["source"] != "owner.decision" or row["event_type"] != "memory.corrected":
+                continue
+            memories = self.store.rows(
+                "SELECT DISTINCT m.memory_id,m.supersedes_memory_id,m.content "
+                "FROM memory_evidence v JOIN memories m "
+                "USING(memory_id) WHERE v.event_id=? AND m.supersedes_memory_id IS NOT NULL "
+                "LIMIT ?", (key, EVIDENCE_ROOTS + 1))
+            if len(memories) > EVIDENCE_ROOTS:
+                refuse("evidence_roots")
+            for memory in memories:
+                candidates = self.store.rows(
+                    "SELECT DISTINCT e.event_id FROM memory_evidence v JOIN events e "
+                    "ON e.event_id=v.event_id WHERE v.memory_id=? AND e.source='qq.onebot' "
+                    "LIMIT ?", (memory["memory_id"], EVIDENCE_ROOTS + 1))
+                if len(candidates) > EVIDENCE_ROOTS:
+                    refuse("evidence_roots")
+                for candidate in candidates:
+                    source = candidate["event_id"]
+                    from companion.privacy import legacy_correction_matches
+
+                    if source not in found and legacy_correction_matches(
+                        memory, read(source)["body_json"],
+                    ):
+                        pending.append(source)
+        return found.values()
+
     def lineage(self, event_id):
         """Live private provenance for owner facts and non-owner reference sources."""
         rows = list(self._lineage(event_id))
@@ -108,16 +198,25 @@ class MemorySources:
         from companion.memory_references import MEMORY
 
         reference = self.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (MEMORY + memory_id,))
-        return [event for row in self.store.rows(
+        rows = self.store.rows(
             "SELECT event_id FROM memory_evidence WHERE memory_id=? AND polarity=1 "
-            "ORDER BY created_at,event_id", (memory_id,),
-        ) if (event := self.event(row["event_id"], require_text=not reference))]
+            "ORDER BY created_at,event_id" + (" LIMIT ?" if self.bounded else ""),
+            (memory_id, retrieval_work.EVIDENCE_ROOTS + 1) if self.bounded else (memory_id,),
+        )
+        if self.bounded and len(rows) > retrieval_work.EVIDENCE_ROOTS:
+            if self.work:
+                self.work.mark("evidence_roots")
+            raise retrieval_work.WorkLimit("evidence_roots")
+        return [event for row in rows
+                if (event := self.event(row["event_id"], require_text=not reference))]
 
     def current(self, row):
         from companion import memory_references
 
         try:
-            memory_references.for_memory(self._memory, row, self.now)
+            memory_references.for_memory(self._memory, row, self.now, work=self.work)
+        except retrieval_work.WorkLimit:
+            raise
         except CoreError:
             return False
         if not self.now:
@@ -146,7 +245,7 @@ class MemoryContext:
             "event_id", "source", "occurred_at", "ingested_at",
         )} for source in sources[-8:]], "evidence_truncated": len(sources) > 8}
 
-    def pin(self, now, *, rows=(), event_ids=(), historical=False):
+    def pin(self, now, *, rows=(), event_ids=(), historical=False, work=None):
         """Freeze full fact/evidence identity for a local await, never a display projection.
 
         The proof contains all positive roots and actual ancestors, including legacy
@@ -156,7 +255,7 @@ class MemoryContext:
         # Source-only pins are also used by independently authorized expression /
         # exploration consumers. They cannot read facts; Core checks their purpose.
         version = self._begin("owner") if rows else read_version(self.memory)
-        sources = MemorySources(self.memory, now)
+        sources = MemorySources(self.memory, now, bounded=True, work=work)
         roots, memories = set(event_ids), []
         for expected in rows:
             row = self.store.one("SELECT * FROM memories WHERE memory_id=?",
@@ -175,7 +274,7 @@ class MemoryContext:
             roots.update(ids)
             from companion import memory_references
 
-            reference = memory_references.for_memory(self.memory, row, now)
+            reference = memory_references.for_memory(self.memory, row, now, work=sources.work)
             if reference:
                 roots.update(reference["proof"]["source_event_ids"])
         fingerprints = {}
@@ -196,9 +295,9 @@ class MemoryContext:
         return {"rows": memories, "event_ids": sorted(event_ids), "historical": historical,
                 "source_event_ids": sorted(fingerprints), "sources": fingerprints}
 
-    def revalidate(self, proof, now):
+    def revalidate(self, proof, now, *, work=None):
         actual = self.pin(now, rows=proof["rows"], event_ids=proof["event_ids"],
-                          historical=proof["historical"])
+                          historical=proof["historical"], work=work)
         if actual != proof:
             raise CoreError("PRIVACY_CHANGED", 409)
 
@@ -211,6 +310,11 @@ class MemoryContext:
         NO_RECORD means this eligible scope has no hit. Index/custody errors propagate
         rather than misrepresenting unavailable data as an empty personal history.
         """
+        with retrieval_work.scope():
+            return self._recall(query, now, actor=actor, memory_ids=memory_ids,
+                                project_query=project_query, trace=trace)
+
+    def _recall(self, query, now, *, actor, memory_ids, project_query, trace):
         version = self._begin(actor)
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
@@ -221,6 +325,12 @@ class MemoryContext:
 
     async def recall_async(self, query, now, *, actor="owner", memory_ids=None,
                            project_query=None, source_check=None, clock=None, trace=None):
+        with retrieval_work.scope():
+            return await self._recall_async(query, now, actor=actor, memory_ids=memory_ids,
+                project_query=project_query, source_check=source_check, clock=clock, trace=trace)
+
+    async def _recall_async(self, query, now, *, actor, memory_ids, project_query,
+                             source_check, clock, trace):
         version = self._begin(actor)
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
@@ -236,16 +346,25 @@ class MemoryContext:
             rows = self.memory.project_recall_candidates(
                 project_query, memory_ids=memory_ids, limit=6, now=now,
             )
-        sources = MemorySources(self.memory, now)
+        work = retrieval_work.current()
+        sources = MemorySources(self.memory, now, bounded=True, work=work)
         facts, conflicts = [], []
         for row in rows:
-            evidence = sources.evidence(row["memory_id"])
+            try:
+                evidence = sources.evidence(row["memory_id"])
+            except retrieval_work.WorkLimit as error:
+                work.mark(error.reason)
+                break
             if not evidence:
                 continue
             item = self._fact(row, evidence)
             from companion import memory_references
 
-            reference = memory_references.for_memory(self.memory, row, now)
+            try:
+                reference = memory_references.for_memory(self.memory, row, now, work=work)
+            except retrieval_work.WorkLimit as error:
+                work.mark(error.reason)
+                break
             if reference:
                 item["reference"] = {"kind": reference["kind"],
                     "reference_id": reference["reference_id"],
@@ -261,7 +380,12 @@ class MemoryContext:
                 "conflicts_truncated": len(conflicts) > 2,
                 "selected": {mid: ranks.get(mid, {"project_fallback": True})
                              for mid in sorted(selected)}})
-        return {"state": "FOUND" if facts else "NEEDS_REVIEW" if conflicts else "NO_RECORD",
+            trace["work"] = work.receipt()
+        coverage = work.receipt()
+        return {"state": "FOUND" if facts else "NEEDS_REVIEW" if conflicts else (
+                    "COVERAGE_LIMITED" if coverage["coverage_limited"] else "NO_RECORD"),
+                **({"retrieval_coverage": coverage, "note": retrieval_work.NOTE}
+                   if coverage["coverage_limited"] else {}),
                 "privacy_epoch": version[0], "as_of": now, "facts": facts,
                 "conflicts": conflicts[:2], "conflicts_truncated": len(conflicts) > 2,
                 "rows": [row for row in rows if row["memory_id"] in selected],
@@ -269,6 +393,19 @@ class MemoryContext:
 
     def continuation(self, conversation_id, now, *, actor="owner", event_ids=None,
                      current_event_ids=(), used_memory_ids=(), source_check=None):
+        with retrieval_work.scope() as work:
+            try:
+                return self._continuation(conversation_id, now, actor=actor, event_ids=event_ids,
+                    current_event_ids=current_event_ids, used_memory_ids=used_memory_ids,
+                    source_check=source_check)
+            except retrieval_work.WorkLimit as error:
+                work.mark(error.reason)
+                return {"privacy_epoch": epoch(self.store), "as_of": now, "items": [],
+                        "truncated": True, "retrieval_coverage": work.receipt(),
+                        "note": retrieval_work.NOTE}
+
+    def _continuation(self, conversation_id, now, *, actor, event_ids,
+                      current_event_ids, used_memory_ids, source_check):
         """Three Hot/Warm episode excerpts within the caller's authorized source scope.
 
         These are attributed observations, never current facts or proof of a sent reply.
@@ -278,7 +415,8 @@ class MemoryContext:
         from companion.memory_projections import MemoryProjections, identifiers
 
         version = self._begin(actor)
-        sources = MemorySources(self.memory, now)
+        work = retrieval_work.current()
+        sources = MemorySources(self.memory, now, bounded=True, work=work)
         allowed = set(event_ids) if event_ids is not None else None
         current = set(identifiers(current_event_ids))
         used = identifiers(used_memory_ids)
@@ -290,7 +428,7 @@ class MemoryContext:
         ):
             if sources.current(memory):
                 recalled.update(item["event_id"] for item in sources.evidence(memory["memory_id"]))
-        projection = MemoryProjections(self.memory)
+        projection = MemoryProjections(self.memory, work=work)
         rows, truncated = projection.continuation_candidates(
             conversation_id, now, current | recalled,
         )
@@ -349,13 +487,25 @@ class MemoryContext:
         Recorded/corrected timestamps are not guessed real-world validity dates.
         A supplied allowlist bounds every member, not just the initially selected ID.
         """
+        with retrieval_work.scope():
+            return self._history(memory_id, now, actor=actor, memory_ids=memory_ids)
+
+    def _history(self, memory_id, now, *, actor, memory_ids):
         version = self._begin(actor)
         if memory_ids is not None and memory_id not in memory_ids:
             return {"privacy_epoch": version[0], "as_of": now,
                     "revisions": [], "truncated": False}
         # The native replacement edge establishes the attribute relation even if
         # historical inference used different key spellings for that attribute.
-        rows = self.store.rows(
+        work = retrieval_work.current()
+
+        def nominate(sql, params):
+            try:
+                return work.rows(self.store, sql, params, limit=21)
+            except retrieval_work.WorkLimit:
+                return []
+
+        rows = nominate(
             "WITH RECURSIVE edges(older,newer) AS ("
             "SELECT supersedes_memory_id,memory_id FROM memories "
             "WHERE supersedes_memory_id IS NOT NULL UNION "
@@ -370,22 +520,38 @@ class MemoryContext:
             "SELECT e.older FROM edges e JOIN family f ON e.newer=f.memory_id), "
             "descendants(root,node) AS (SELECT memory_id,memory_id FROM family UNION "
             "SELECT d.root,e.newer FROM descendants d JOIN edges e ON e.older=d.node) "
-            "SELECT m.* FROM memories m JOIN family f USING(memory_id) "
+            "SELECT m.memory_id,octet_length(m.content) AS text_bytes "
+            "FROM memories m JOIN family f USING(memory_id) "
             "JOIN (SELECT root,COUNT(*) AS later_count FROM descendants GROUP BY root) rank "
             "ON rank.root=m.memory_id "
             "WHERE m.privacy_scope='private' AND m.confidence>0 "
             "AND m.status IN ('CONFIRMED','HYPOTHESIS','SUPERSEDED') "
             "ORDER BY rank.later_count,m.created_at DESC,m.memory_id LIMIT 21", (now, memory_id),
         )
-        sources, items = MemorySources(self.memory, now), []
-        for row in rows[:20]:
-            if memory_ids is not None and row["memory_id"] not in memory_ids:
+        sources = MemorySources(self.memory, now, bounded=True, work=work)
+        items = []
+        for header in rows[:20]:
+            if memory_ids is not None and header["memory_id"] not in memory_ids:
                 continue
-            if evidence := sources.evidence(row["memory_id"]):
-                items.append(self._fact(row, evidence))
+            if not work.take("candidates") or not work.take("text_bytes", header["text_bytes"]):
+                break
+            row = self.store.one("SELECT * FROM memories WHERE memory_id=? "
+                                 "AND octet_length(content)=? AND privacy_scope='private' "
+                                 "AND confidence>0 AND status IN "
+                                 "('CONFIRMED','HYPOTHESIS','SUPERSEDED')",
+                                 (header["memory_id"], header["text_bytes"]))
+            try:
+                if row and (evidence := sources.evidence(row["memory_id"])):
+                    items.append(self._fact(row, evidence))
+            except retrieval_work.WorkLimit as error:
+                work.mark(error.reason)
+                break
         check_version(self.memory, version)
+        coverage = work.receipt()
         return {"privacy_epoch": version[0], "as_of": now, "revisions": items,
-                "truncated": len(rows) > 20}
+                "truncated": len(rows) > 20 or coverage["coverage_limited"],
+                **({"retrieval_coverage": coverage, "note": retrieval_work.NOTE}
+                   if coverage["coverage_limited"] else {})}
 
     def invalidation_plan(self, event_ids, now, *, actor="owner"):
         """Read-only withdrawal plan; integration owns the Ledger-first mutation/replay.

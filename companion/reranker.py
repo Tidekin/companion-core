@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 
+from companion import retrieval_work
 from companion.contracts import CoreError
 
 MAX_LENGTH = 320
@@ -43,15 +44,18 @@ def _model(directory):
 def scores(directory, query, docs, *, batch_size=8):
     import numpy as np
 
-    try:
-        tokenizer, session = _model(str(directory))
-    except CoreError:
-        raise
-    except Exception as error:
-        raise CoreError("MEMORY_RERANKER_UNAVAILABLE", 503) from error
-    names = {item.name for item in session.get_inputs()}
-    result = []
-    with _lock:
+    work = retrieval_work.current()
+    if work is not None and not work.take("rerank_pairs", len(docs)):
+        raise retrieval_work.WorkLimit("rerank_pairs")
+    with retrieval_work.slot(_lock, "reranker_busy"):
+        try:
+            tokenizer, session = _model(str(directory))
+        except CoreError:
+            raise
+        except Exception as error:
+            raise CoreError("MEMORY_RERANKER_UNAVAILABLE", 503) from error
+        names = {item.name for item in session.get_inputs()}
+        result = []
         for start in range(0, len(docs), batch_size):
             batch = tokenizer.encode_batch([(query, doc) for doc in docs[start:start + batch_size]])
             feed = {"input_ids": np.array([item.ids for item in batch], dtype=np.int64),

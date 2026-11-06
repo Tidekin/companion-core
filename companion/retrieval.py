@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from threading import Lock
 
+from companion import retrieval_work
 from companion.contracts import CoreError
 from companion.store import encode
 
@@ -30,10 +31,15 @@ _queries = ContextVar("retrieval_queries", default=None)
 @asynccontextmanager
 async def query_scope():
     """Bound query reuse to one reply, including its to_thread inference calls."""
+    existing = _queries.get()
+    if existing is not None and not existing["closed"]:
+        yield
+        return
     cache = {"values": OrderedDict(), "lock": Lock(), "closed": False}
     token = _queries.set(cache)
     try:
-        yield
+        with retrieval_work.scope():
+            yield
     finally:
         _queries.reset(token)
         with cache["lock"]:
@@ -52,6 +58,9 @@ def query_vector(model, query):
             if key in cache["values"]:
                 cache["values"].move_to_end(key)
                 return cache["values"][key]
+    work = retrieval_work.current()
+    if work is not None and not work.take("query_vectors"):
+        raise retrieval_work.WorkLimit("query_vectors")
     vector = np.asarray(next(model.query_embed(query)), dtype="<f4")
     if cache is not None:
         with cache["lock"]:
@@ -103,6 +112,58 @@ class SemanticIndex:
         except Exception as error:
             raise CoreError("MEMORY_INDEX_UNAVAILABLE", 503) from error
 
+    def _nomination_rows(self, subjects=(), memory_ids=None):
+        work = retrieval_work.current()
+        ceiling = min(2048, work.remaining("vector_rows"), work.remaining("vector_bytes") // 2048)
+        if not ceiling:
+            work.mark("vector_rows")
+            return []
+        filters, params = "", [INDEX_VERSION]
+        if memory_ids is not None:
+            filters += "AND m.memory_id IN (SELECT value FROM json_each(?)) "
+            params.append(encode(memory_ids))
+        if subjects:
+            filters += "AND m.subject IN (SELECT value FROM json_each(?)) "
+            params.append(encode(subjects))
+        rows = work.rows(self.store,
+            "SELECT v.memory_id,v.vector FROM memory_vectors v JOIN memories m USING(memory_id) "
+            "WHERE v.model_version=? AND length(v.vector)<=2048 "
+            "AND m.status IN ('CONFIRMED','HYPOTHESIS') AND m.privacy_scope='private' "
+            "AND m.confidence>0 " + filters + "ORDER BY v.rowid LIMIT ?",
+            (*params, ceiling), limit=ceiling)
+        if len(rows) == ceiling:
+            work.mark("vector_pool")
+        for row in rows:
+            work.take("vector_rows")
+            work.take("vector_bytes", len(row["vector"]))
+        return rows
+
+    @staticmethod
+    def _nomination_order(rows, question):
+        import numpy as np
+
+        scores = {}
+        for row in rows:
+            try:
+                vector = np.frombuffer(row["vector"], dtype="<f4")
+                if vector.shape != question.shape or not np.isfinite(vector).all():
+                    raise ValueError()
+                scores[row["memory_id"]] = float(np.dot(vector, question))
+            except ValueError:
+                retrieval_work.current().mark("vector_cache")
+        return sorted(scores, key=lambda mid: -scores[mid])[:48]
+
+    def nominate(self, query, *, subjects=(), memory_ids=None):
+        rows = self._nomination_rows(subjects, memory_ids)
+        return self._nomination_order(rows, self._infer(query, ())[1]) if rows else []
+
+    async def nominate_async(self, query, *, subjects=(), memory_ids=None):
+        rows = self._nomination_rows(subjects, memory_ids)
+        if not rows:
+            return []
+        _, question = await asyncio.to_thread(self._infer, query, ())
+        return self._nomination_order(rows, question)
+
     def _prepare(self, rows):
         import numpy as np
 
@@ -121,14 +182,17 @@ class SemanticIndex:
             if old and old["content_hash"] == key:
                 vectors[row["memory_id"]] = np.frombuffer(old["vector"], dtype="<f4")
             else:
-                missing.append((row, key))
+                work = retrieval_work.current()
+                if work is None or work.take("cold_vectors"):
+                    missing.append((row, key))
         return vectors, missing
 
     def _infer(self, query, contents):
         """Pure inference only; fully consume lazy generators before leaving the thread."""
         import numpy as np
 
-        with _inference_lock(str(Path(self.settings.embedding_cache_dir).resolve())):
+        with retrieval_work.slot(_inference_lock(
+            str(Path(self.settings.embedding_cache_dir).resolve())), "encoder_busy"):
             model = self.warmup()
             encoded = tuple(np.asarray(v, dtype="<f4") for v in
                             model.passage_embed(contents, batch_size=32)) if contents else ()
@@ -149,7 +213,7 @@ class SemanticIndex:
                     "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0",
                     (INDEX_VERSION, key, vector.tobytes(), row["memory_id"], row["content"]),
                 )
-        # ponytail: exact scan suits a single owner's memories; use an ANN index at larger scale.
+        # Only the bounded, source-validated candidate set reaches scoring.
         return {key: float(np.dot(value, question)) for key, value in vectors.items()}
 
     def scores(self, query, rows):

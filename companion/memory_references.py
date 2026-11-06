@@ -19,8 +19,20 @@ LABELS = {"document": "文件解析", "image": "图像解析", "transcript": "�
           "image_review": "图片解释异议（未核实）"}
 
 
-def _load(store, key):
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+def _load(store, key, *, work=None):
+    if work is not None:
+        from companion.retrieval_work import WorkLimit
+
+        size = store.one("SELECT octet_length(value) AS size FROM runtime_meta WHERE key=?",
+                         (key,))
+        if not size:
+            return None
+        if not work.take("text_bytes", size["size"]):
+            raise WorkLimit("reference_text_bytes")
+        row = store.one("SELECT value FROM runtime_meta WHERE key=? AND octet_length(value)=?",
+                        (key, size["size"]))
+    else:
+        row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
     try:
         return json.loads(row["value"]) if row else None
     except (ValueError, TypeError):
@@ -60,8 +72,11 @@ def replay(store, event_id, query=""):
     return notes
 
 
-def replay_many(store, event_ids, *, item_chars=HISTORY_ITEM_CHARS, turn_chars=HISTORY_TURN_CHARS):
+def replay_many(store, event_ids, *, item_chars=HISTORY_ITEM_CHARS, turn_chars=HISTORY_TURN_CHARS,
+                work=None):
     """`replay` for many inputs with one pass over each source table."""
+    if work is not None:
+        return _bounded_replay(store, event_ids, item_chars, turn_chars, work)
     found = {key: [] for key in event_ids}
     ids = list(found)
     for start in range(0, len(ids), 500):
@@ -79,12 +94,13 @@ def replay_many(store, event_ids, *, item_chars=HISTORY_ITEM_CHARS, turn_chars=H
                 items.append((LABELS["document" if row["kind"] == "qq_file" else "image"],
                               row["slot"], json.loads(row["body_json"]).get("text", "")))
     transcripts = {}
-    for row in store.rows(
-        "SELECT json_extract(value,'$.owner_event_id') AS owner,"
-        "json_extract(value,'$.text') AS text FROM runtime_meta WHERE key LIKE ? "
-        "AND json_extract(value,'$.kind')='transcript' ORDER BY key", (INPUT + "%",)):
-        if row["owner"] in found:
-            transcripts.setdefault(row["owner"], []).append(row["text"])
+    for owner in found:
+        for row in store.rows(
+            "SELECT json_extract(value,'$.text') AS text FROM runtime_meta "
+            "WHERE key GLOB 'memory_reference_input:*' AND json_valid(value) "
+            "AND json_extract(value,'$.owner_event_id')=? "
+            "AND json_extract(value,'$.kind')='transcript' ORDER BY key", (owner,)):
+            transcripts.setdefault(owner, []).append(row["text"])
     result = {}
     for key, items in found.items():
         items = items + [(LABELS["transcript"], index, text)
@@ -99,6 +115,68 @@ def replay_many(store, event_ids, *, item_chars=HISTORY_ITEM_CHARS, turn_chars=H
                           "excerpt": clipped != text})
         result[key] = notes
     return result
+
+
+def _bounded_replay(store, event_ids, item_chars, turn_chars, work):
+    from companion.retrieval_work import WorkLimit
+
+    found = {key: [] for key in event_ids}
+    for owner, notes in found.items():
+        remaining = turn_chars
+        queries = (
+            ("SELECT e.event_id AS id,c.item_id,c.slot,c.kind,octet_length(e.body_json) AS size "
+             "FROM content_items c JOIN observations o ON o.event_id=c.output_event_id "
+             "JOIN events e ON e.event_id=o.event_id WHERE c.owner_event_id=? "
+             "AND c.kind IN ('qq_file','qq_image') AND c.state='SUCCEEDED' "
+             "AND c.redacted=0 AND o.redacted=0 AND e.redacted=0 "
+             "AND o.result_status='FETCHED' ORDER BY c.slot LIMIT 9", False),
+            ("SELECT key AS id,0 AS slot,'transcript' AS kind,octet_length(value) AS size "
+             "FROM runtime_meta WHERE key GLOB 'memory_reference_input:*' AND json_valid(value) "
+             "AND json_extract(value,'$.owner_event_id')=? "
+             "AND json_extract(value,'$.kind')='transcript' ORDER BY key LIMIT 9", True),
+        )
+        try:
+            for query, transcript in queries:
+                if not work.remaining("attachment_rows"):
+                    work.mark("attachment_rows")
+                    break
+                rows = work.rows(store, query, (owner,), limit=9)
+                if len(rows) > 8:
+                    work.mark("attachment_pool")
+                for index, row in enumerate(rows[:8]):
+                    if not work.take("attachment_rows"):
+                        break
+                    if not work.take("text_bytes", row["size"]):
+                        continue
+                    if transcript:
+                        value = store.one("SELECT value AS body FROM runtime_meta WHERE key=? "
+                            "AND octet_length(value)=? AND json_valid(value) "
+                            "AND json_extract(value,'$.owner_event_id')=? "
+                            "AND json_extract(value,'$.kind')='transcript'",
+                            (row["id"], row["size"], owner))
+                    else:
+                        value = store.one("SELECT e.body_json AS body FROM content_items c "
+                            "JOIN observations o ON o.event_id=c.output_event_id "
+                            "JOIN events e ON e.event_id=o.event_id WHERE c.item_id=? "
+                            "AND c.owner_event_id=? AND e.event_id=? "
+                            "AND octet_length(e.body_json)=? "
+                            "AND c.kind IN ('qq_file','qq_image') AND c.state='SUCCEEDED' "
+                            "AND c.redacted=0 AND o.redacted=0 AND e.redacted=0 "
+                            "AND o.result_status='FETCHED'",
+                            (row["item_id"], owner, row["id"], row["size"]))
+                    text = json.loads(value["body"]).get("text", "") if value else ""
+                    if not isinstance(text, str) or not text.strip() or remaining <= 0:
+                        continue
+                    clipped = text[:min(item_chars, remaining)]
+                    remaining -= len(clipped)
+                    label = ("transcript" if transcript else
+                             "document" if row["kind"] == "qq_file" else "image")
+                    notes.append({"kind": LABELS[label],
+                                  "slot": index if transcript else row["slot"],
+                                  "text": clipped, "excerpt": clipped != text})
+        except WorkLimit:
+            break
+    return found
 
 
 def capture(memory, root, kind, text, receipt, now, *, sources=(), binding=None):
@@ -121,10 +199,11 @@ def capture(memory, root, kind, text, receipt, now, *, sources=(), binding=None)
     return value
 
 
-def read(memory, reference_id, now):
+def read(memory, reference_id, now, *, work=None):
     from companion.memory_context import MemoryContext
+    from companion.retrieval_work import WorkLimit
 
-    value = _load(memory.store, INPUT + reference_id)
+    value = _load(memory.store, INPUT + reference_id, work=work)
     if not isinstance(value, dict):
         raise CoreError("MEMORY_REFERENCE_CHANGED", 409)
     try:
@@ -132,11 +211,13 @@ def read(memory, reference_id, now):
             or sha([value["owner_event_id"], value["kind"], value["receipt"], sha(value["text"])])
             != reference_id):
             raise ValueError()
-        MemoryContext(memory).revalidate(value["proof"], now)
+        MemoryContext(memory).revalidate(value["proof"], now, work=work)
         if value["kind"] == "image":
-            for review in image_reviews(memory.store, value["owner_event_id"]):
+            for review in image_reviews(memory.store, value["owner_event_id"], work=work):
                 try:
-                    read(memory, review["reference_id"], now)
+                    read(memory, review["reference_id"], now, work=work)
+                except WorkLimit:
+                    raise
                 except CoreError:
                     continue
                 # A fact extracted from this older machine analysis must not
@@ -299,8 +380,31 @@ def candidate(memory, item, now):
     return value
 
 
-def image_reviews(store, event_id):
+def image_reviews(store, event_id, *, work=None):
     """IDs and source pins only; callers authorize the selected review before replay."""
+    if work is not None:
+        from companion.retrieval_work import WorkLimit
+
+        limit = work.remaining("attachment_rows")
+        if not limit:
+            work.mark("attachment_rows")
+            raise WorkLimit("attachment_rows")
+        rows = work.rows(store,
+            "SELECT key FROM runtime_meta WHERE key GLOB 'memory_reference_input:*' "
+            "AND json_valid(value) AND json_extract(value,'$.kind')='image_review' "
+            "AND json_extract(value,'$.receipt.target_event_id')=? ORDER BY rowid LIMIT ?",
+            (event_id, limit + 1), limit=limit + 1)
+        if len(rows) > limit:
+            work.mark("attachment_rows")
+            raise WorkLimit("attachment_rows")
+        result = []
+        for row in rows:
+            if not work.take("attachment_rows"):
+                raise WorkLimit("attachment_rows")
+            value = _load(store, row["key"], work=work)
+            if value:
+                result.append(value)
+        return result
     return [json.loads(row["value"]) for row in store.rows(
         "SELECT value FROM runtime_meta WHERE key LIKE ? "
         "AND json_extract(value,'$.kind')='image_review' "
@@ -320,14 +424,14 @@ def record(memory, memory_id, item, now):
         encode({"reference_id": value["reference_id"], "content_sha256": sha(content)})))
 
 
-def for_memory(memory, row, now):
-    saved = _load(memory.store, MEMORY + row["memory_id"])
+def for_memory(memory, row, now, *, work=None):
+    saved = _load(memory.store, MEMORY + row["memory_id"], work=work)
     if row["origin"] != "event_observed" and saved is None:
         return None
     if (not isinstance(saved, dict) or saved.get("content_sha256") != sha(row["content"])
         or not isinstance(saved.get("reference_id"), str)):
         raise CoreError("MEMORY_REFERENCE_CHANGED", 409)
-    return read(memory, saved["reference_id"], now)
+    return read(memory, saved["reference_id"], now, work=work)
 
 
 def erase(store, event_ids):
