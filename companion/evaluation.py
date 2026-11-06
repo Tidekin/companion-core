@@ -154,14 +154,18 @@ def _plan(settings, manifest):
             if (payload != row["payload"] or paid_budget.sha(payload) != row["payload_sha256"]
                 or row["shared_context_sha256"] != digest
                 or row["planned_max_output_tokens"] != settings.max_output_tokens
-                or settings.max_output_tokens > 2048):
+                or not settings.paid_model
+                or not synthetic and settings.max_output_tokens > 2048
+                or settings.max_output_tokens > settings.paid_model.max_output_tokens):
                 raise ValueError("fixed payload")
             if version == 2:
                 measured = _request_measurement(settings, payload)
-                if measured["budget_input_tokens"] is None or any(
+                if (measured["budget_input_tokens"] is None or any(
                     row.get(key) != value for key, value in measured.items()
                 ) or measured["budget_input_tokens"] > limits["input"] or measured[
-                    "estimated_reservation_micro_usd"] > 5000:
+                    "estimated_reservation_micro_usd"] > (
+                        settings.paid_model.per_attempt_micro_usd)
+                    or not synthetic and measured["estimated_reservation_micro_usd"] > 5000):
                     raise ValueError("unsupported, changed or over-limit measurement")
                 measured_costs.append(measured["estimated_reservation_micro_usd"])
             shared.setdefault(row["case"], set()).add(digest)
@@ -312,7 +316,9 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
     if (len(prior) >= min(limits["calls"], len(manifest["plan"]["requests"]))
         or any(row["state"] != "SETTLED" for row in prior)
         or sum(row["billed_micro_usd"] for row in prior) + estimate > limits["cost"]
-        or estimate > 5000 or estimated_input > limits["input"]):
+        or estimate > settings.paid_model.per_attempt_micro_usd
+        or manifest.get("kind", "owner_pilot") == "owner_pilot" and estimate > 5000
+        or estimated_input > limits["input"]):
         raise CoreError("EVALUATION_SUBLIMIT_EXHAUSTED", 429)
     ordinal = len(prior)
     if (rid != request_id(run["manifest_sha256"], ordinal)

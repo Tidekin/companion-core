@@ -25,12 +25,18 @@ async def main():
     args = parser.parse_args()
     raw = await asyncio.to_thread(Path(args.config).read_text, "utf-8")
     settings = Settings.model_validate(json.loads(raw))
-    if settings.model_url != "https://synthetic.invalid/v1" or (
+    if settings.model_url not in {
+        "https://synthetic.invalid/v1", "https://api.openai.com/v1",
+    } or (
         settings.model_key.get_secret_value() != "synthetic-key"
     ):
         raise ValueError("SYNTHETIC_PROCESS_ONLY")
 
     def provider(request):
+        if settings.model_url == "https://api.openai.com/v1":
+            payload = json.loads(request.content)
+            assert "max_tokens" not in payload
+            assert payload["max_completion_tokens"] == settings.max_output_tokens
         with Path(args.log).open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"payload_sha256": sha(json.loads(request.content))}) + "\n")
             stream.flush()

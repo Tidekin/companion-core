@@ -11,9 +11,10 @@ OwnerAuthority preview/activate 单独新增 `evaluation` 用途和新的授权�
 付费合同、窗口、期限、carry 引用及其他用途和来源范围保持不变；Bridge 使用普通
 prepare/handoff 完成交接。具体约束见[独立授权修订](../qq-beta/p0-model-carry-contract.md#independent-evaluation-permission-revision)。
 此步骤与启用 `evaluation_enabled`、下述每份计划的预览和执行同意分别核对。
-授权修订不提高额度：当前原生每次上限为 5000 microUSD，实际结算仍以同 job 累计
-50000 microUSD 触发停止；即使合成计划预览允许更高总额，也须按这个更严的实际门禁
-安排运行，不能把主人授权的最高金额视为已经修改了运行时上限。
+授权修订不提高额度：每次调用沿用现有 paid 合同的 `per_attempt_micro_usd` 和
+`max_output_tokens`；同 job 的累计额度仍按下表限制，并与日/月/窗口限制共同生效。
+提高模型价格或输出长度必须有匹配的原 paid 合同，不能仅修改实验计划绕过准入。
+主人 pilot 额外保留每次 5000 microUSD 和输出 2048 tokens 的更严子上限。
 
 以下接口均使用现有 owner `control_token`，Bridge token 无权调用。服务不提供公共模型
 代理。操作材料与结果只在原私有运行目录或经检查的本地私有目录保留；不进入 Git、
@@ -61,7 +62,7 @@ prepare/handoff 完成交接。具体约束见[独立授权修订](../qq-beta/p0
 合成计划只包含仓库中 SYNTHETIC case，由现有 `prepare` 以 schema v2 生成，manifest 写
 `"kind": "synthetic"`，`source_event_ids` 必须为空；主人 pilot 不写 `kind`，其 manifest
 哈希不变。两类计划共用同一 consent、OwnerAuthority `evaluation` 用途、原 paid 合同与
-日/月/窗口限制，以及每次 5000 microUSD 的子上限。
+日/月/窗口限制，以及 paid 合同的每次费用和输出上限。
 
 | 限制 | 主人 pilot | 合成计划 |
 |---|---|---|
@@ -80,8 +81,10 @@ prepare/handoff 完成交接。具体约束见[独立授权修订](../qq-beta/p0
 ## 预算和不确定性
 
 原 paid 合同、月/日/窗口限制、并发限制和 CNY 全局政策先后在同一权威 Store 的原事务中
-校验；实验另外最多6次、合计50000 microUSD，每次估计最多5000 microUSD、输入估计
-最多2400 tokens、输出上限2048。没有第二个余额、wallet、预算同步服务或独立 executor。
+校验；主人 pilot 另外最多6次、合计50000 microUSD、输入估计最多2400 tokens；
+合成计划沿用上表的次数、总额和输入限制。每次估计和输出长度分别不能超过现有 paid
+合同的 `per_attempt_micro_usd` 和 `max_output_tokens`。没有第二个余额、wallet、预算同步
+服务或独立 executor。
 如果已用费用、其他任务的 RESERVED/UNKNOWN、FX 到期或原窗口限制不允许，实验失败。
 
 次数、顺序和子费用上限与原 reserve 同事务校验。usage 按原计费规则结算；实际超过实验
@@ -119,3 +122,15 @@ Outbox、memories 或对话回复。来源失效禁止取回；源擦除清掉 m
 
 本次复用依据、模块归属与批准范围见
 [准入设计记录](../plans/2026-10-24-evaluation-admission.md)。
+
+## 官方 OpenAI 图像评测
+
+官方 `https://api.openai.com/v1` 路由使用 `max_completion_tokens`，请求测量、
+冻结 payload 与实际 dispatch 保持同一个输出额度；其他兼容服务保持其原字段。
+官方 `prompt_tokens_details.cached_tokens` 进入原 usage 结算；缺失时仍按原不确定性规则处理。
+DeepSeek 的 evaluation 复用已有 `chat_thinking`，可与部署中的推理档位一致；
+后台 JSON 任务保持其原推理设置。对比报告须列明各模型推理档位与输出额度。
+
+依据 [OpenAI Chat Completions 官方参考](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+和[官方价格](https://developers.openai.com/api/docs/pricing)。本改动不启用付费评测或变更聊天路由；
+实际评测仍要求匹配的主人授权、原生 consent、固定 manifest 和原 budget journal。

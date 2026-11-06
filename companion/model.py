@@ -288,6 +288,10 @@ def model_payload(settings, messages, scenario, *, tools=(), generation=None):
         payload["max_tokens"] = generation.max_tokens
         if generation.temperature is not None:
             payload["temperature"] = generation.temperature
+    if (model_route(settings, scenario)[0], model_route(settings, scenario)[2]) == (
+        "openai", "https://api.openai.com/v1",
+    ):
+        payload["max_completion_tokens"] = payload.pop("max_tokens")
     return payload
 
 
@@ -387,6 +391,10 @@ class ModelClient:
             prompt = usage.get("prompt_tokens")
             output = usage.get("completion_tokens")
             cached = usage.get("prompt_cache_hit_tokens", 0)
+            details = usage.get("prompt_tokens_details")
+            if (not cache_usage_present and model_route(self.settings, scenario)[0] == "openai"
+                and isinstance(details, dict) and "cached_tokens" in details):
+                cache_usage_present, cached = True, details["cached_tokens"]
             if not all(type(x) is int and x >= 0 for x in (prompt, output, cached)):
                 prompt, output, cached = None, None, 0
             received = ModelResponse("", prompt, output, cached,

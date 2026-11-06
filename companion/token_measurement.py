@@ -186,7 +186,7 @@ def measure_payload(settings, payload, scenario, *, tools=(), generation=None):
     provider, _, endpoint = model_route(settings, scenario)
     common = {"payload_sha256": paid_budget.sha(payload), "provider": provider,
               "endpoint": endpoint, "model": payload["model"],
-              "output_allowance": payload["max_tokens"]}
+              "output_allowance": payload.get("max_completion_tokens", payload.get("max_tokens"))}
     config = settings.token_measurement
     reason = "local_renderer_not_configured"
     if config is not None:

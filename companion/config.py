@@ -494,7 +494,7 @@ class Settings(BaseModel):
         default_factory=lambda: SegmentedReplyConfig(mode="semantic"),
         exclude_if=lambda value: value == SegmentedReplyConfig(mode="semantic"),
     )
-    # DeepSeek thinking for the chat scenario only; background JSON tasks stay non-thinking.
+    # Evaluation reuses the configured chat reasoning profile; background JSON stays off.
     # Reasoning tokens count against max_tokens, so chat gets this extra output allowance.
     chat_thinking: Literal["disabled", "low", "high", "max"] = Field(
         default="high", exclude_if=lambda value: value == "high",
@@ -788,7 +788,7 @@ class Settings(BaseModel):
 
     def thinking_effort(self, scenario):
         """The DeepSeek reasoning effort for a scenario, or None for non-thinking requests."""
-        if (scenario != "chat" or self.provider != "deepseek"
+        if (scenario not in {"chat", "evaluation"} or self.provider != "deepseek"
             or self.chat_thinking == "disabled"):
             return None
         return self.chat_thinking
