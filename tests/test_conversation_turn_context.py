@@ -8,6 +8,7 @@ import pytest
 
 from companion import owner_input
 from companion.conversation_policy import PARTICIPATION_V2, ConversationPolicyConfig
+from companion.reply_segments import SEMANTIC_RULES, SegmentedReplyConfig
 from scripts.evaluate_r1_conversation import load_cases
 from tests.conftest import run
 from tests.support.native_consumer_entry import environment
@@ -76,7 +77,8 @@ def test_native_entry_and_independent_worker_keep_turn_sources_and_delivery(core
     async def scenario():
         async with environment(core, tmp_path, purposes=("chat", "history"),
             core_options={"conversation_policy": ConversationPolicyConfig(),
-                          "chat_time_labels": True},
+                          "chat_time_labels": True,
+                          "segmented_reply": SegmentedReplyConfig(mode="semantic")},
             paid_options={"provider": core.settings.provider, "model": core.settings.model_name,
                           "endpoint": core.settings.model_url}, expires_in=60) as (entry, sends):
             events = []
@@ -89,6 +91,8 @@ def test_native_entry_and_independent_worker_keep_turn_sources_and_delivery(core
                 assert len(eligible) == number - 1
                 job_id, wire = await sdk_step(core, tmp_path, source["event_id"], number)
                 assert PARTICIPATION_V2 in wire["messages"][0]["content"]
+                assert SEMANTIC_RULES in wire["messages"][0]["content"]
+                assert "不分析、不解释自己" not in wire["messages"][0]["content"]
                 answers = sum(item["role"] == "assistant" for item in wire["messages"])
                 assert answers == number - 1, {
                     "system_bytes": len(wire["messages"][0]["content"].encode()),
