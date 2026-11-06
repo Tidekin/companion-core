@@ -14,7 +14,7 @@ from companion import owner_authority, owner_delivery, owner_input, reply_revisi
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import epoch
 from companion.store import encode, uid
-from companion_delivery_protocol import digest, no_io, preflight
+from companion_delivery_protocol import MAX_INPUT_DELIVERIES, digest, no_io, preflight
 
 KIND = "reply_recovery"
 RECORD = "owner_reply_recovery:"
@@ -258,6 +258,20 @@ def create(store, settings, clock, message_id, expected, operation, fingerprint)
         value, group, current = _selection(store, settings, clock, message_id)
         if digest(value) != expected:
             raise CoreError("REPLY_RECOVERY_CHANGED", 409)
+        related = store.rows("SELECT job_id FROM jobs j WHERE event_id=? OR EXISTS "
+            "(SELECT 1 FROM job_sources s WHERE s.job_id=j.job_id AND s.event_id=?) LIMIT ?",
+            (value["original_event_id"], value["original_event_id"], MAX_INPUT_DELIVERIES + 1))
+        if len(related) >= MAX_INPUT_DELIVERIES:
+            _fail()
+        ids = [r["job_id"] for r in related]
+        deliveries = store.rows("SELECT o.message_id FROM outbox o LEFT JOIN runtime_meta m "
+            "ON m.key='owner_delivery:'||o.message_id WHERE o.origin_event_id=? OR "
+            "CASE WHEN json_valid(m.value) THEN json_extract(m.value,'$.event_id')=? OR "
+            "json_extract(m.value,'$.job_id') IN (" + ",".join("?" for _ in ids) + ") "
+            "ELSE 0 END LIMIT ?", (value["original_event_id"], value["original_event_id"],
+                                  *ids, MAX_INPUT_DELIVERIES + 1))
+        if len(deliveries) + len(group["rows"]) - value["prefix"] > MAX_INPUT_DELIVERIES:
+            _fail()
         now, job_id = clock(), uid("job")
         event_id = "evt_" + digest([KIND, value["original_job_id"]])
         body = {
@@ -418,7 +432,7 @@ def check(store, settings, clock, row, material, body=None):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
 
 
-def history_group(store, message_id):
+def history_group(store, message_id, *, include_partial=False):
     """Join the original ACK prefix and the new ACKs only for conversation history.
 
     Neither physical group nor its delivery identities are rewritten. Each part
@@ -435,7 +449,7 @@ def history_group(store, message_id):
         or digest({k: v for k, v in record.items() if k != "sha256"}) != record["sha256"]):
         _fail()
     old = reply_group(store, message_id)
-    new = reply_group(store, record["message_ids"][0], require_sent=True)
+    new = reply_group(store, record["message_ids"][0], require_sent=not include_partial)
     if new is None:
         return None
     selected = record["selection"]

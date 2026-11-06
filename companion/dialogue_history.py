@@ -105,11 +105,19 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
             try:
                 from companion.reply_recovery import history_group
 
-                group = history_group(store, row["message_id"]) or reply_group(
-                    store, row["message_id"], require_sent=not include_partial)
+                group = history_group(store, row["message_id"], include_partial=include_partial)
+                group = group or reply_group(store, row["message_id"],
+                                             require_sent=not include_partial)
                 if not group:
                     continue
                 parts = group["rows"]
+                if group.get("envelopes"):
+                    delivered = [part for part in parts if part["state"] == "SENT"]
+                    if delivered:
+                        # The physical SQL row belongs to the original ACK prefix;
+                        # the logical history now ends at the copied suffix's ACK.
+                        for key in ("message_id", "content_json", "content_sha256", "delivery_key"):
+                            row[key] = delivered[-1][key]
                 if include_partial:
                     prefix = []
                     for part in parts:

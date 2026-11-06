@@ -23,6 +23,7 @@
 无派发证明。后续尾段只能是顺序门禁下未领取、零尝试的取消记录。未知是否送达、
 已派发、缺失证明、非连续 SENT 前缀、内容变化、语音、图片和阅读工具结果均拒绝。
 本入口只支持 2–100 段的原纯文本组，已有前缀且至少一段待补；单段尾部沿单消息投递。
+新旧责任合计仍须满足原生输入回执的 100 条上限，超限在建组前拒绝。
 
 新任务取得当前主人聊天权限，同时独立核验原签名输入、原模型 admission/结算、
 冻结上下文、历史、记忆与正文摘要。历史授权不会恢复旧任务的执行许可。
@@ -40,6 +41,7 @@
 复用现有 SQLite Outbox，而非引入发送旁路；原子提交、顺序和重复处理原则见
 [AWS transactional outbox](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)。
 供应商已接收而 ACK 丢失仍按现有不确定性对账，不能从超时推断未发送。
+Core 预发送 RPC 超时或连接中断均复用原签名的过期预留证明；不重复不明确的 POST。
 
 `tests/test_reply_recovery.py` 经真实认证 WebSocket、Core HTTP、独立 worker 与独立对账
 进程覆盖：部分送达后的三段原文续发、原 ACK 不变、重复请求、提交后响应丢失、
