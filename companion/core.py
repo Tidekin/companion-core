@@ -1037,7 +1037,8 @@ class Core(Runtime):
             if standing:
                 selection.add(RELATIONSHIP_HEADING,
                     {"memories": [{k: row[k] for k in (
-                        "subject", "kind", "content", "status", "origin", "evidence_ids")}
+                        "subject", "kind", "content", "status", "needs_review", "origin",
+                        "evidence_ids")}
                         for row in standing]},
                     {event for row in standing for event in row["evidence_ids"]},
                     priority=context_selection.TOPIC, required=True,
