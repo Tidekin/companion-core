@@ -878,7 +878,24 @@ class Core(Runtime):
                 s, job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2)
             if private_life.enabled(cfg):
                 sources = private_life.recent_history(s, cfg, job)
-        focus = context_selection.focus(text, sources)
+        image_review_requested = False
+        if authority and job["kind"] == "chat" and permitted("image"):
+            from companion import image_review
+
+            image_review_requested = image_review.requests_context(text)
+        # A fresh share is not an empty continuation of the preceding text turn.
+        # Explicit references and image objections keep their bounded source context.
+        scoped_share = bool(job["kind"] == "chat" and (has_images or body.get(
+            "shared_content")) and not image_review_requested
+            and not context_selection.share_continuation(text) and not any(
+                item.get("type") == "reply" for item in (body.get("rich") or {}).get(
+                    "segments", [])))
+        focus = context_selection.focus(text, sources, shared=scoped_share)
+        if scoped_share:
+            content_reference, content_focus = context_selection.current_share(
+                content_reference, job["event_id"])
+            focus |= content_focus
+            sources = context_selection.share_history(sources, focus)
 
         from companion.memory_authority import source_allowed
         from companion.memory_context import MemorySources
@@ -1097,7 +1114,7 @@ class Core(Runtime):
         mark("context_memory")
         turns = [dialogue_history.turn_messages(source, s, text) for source in sources]
         recalled = None
-        if (job["kind"] == "chat" and authority and not bounded_text and text
+        if (job["kind"] == "chat" and authority and not bounded_text and text and not scoped_share
                 and cfg.memory_enabled and permitted("memory")
                 and "history" in authority.policy.purposes):
             from companion import turn_recall
@@ -1121,11 +1138,12 @@ class Core(Runtime):
                     proofs=[{"kind": "memory", "proof": self.memory_context.pin(
                         self.clock(), event_ids=set(recalled["event_ids"]))}])
         mark("context_turn_recall")
-        if continuation := self._memory_continuation(
+        continuation = None
+        if not scoped_share and (continuation := self._memory_continuation(
             job, sources, [row["memory_id"] for row in [*standing, *hits]],
             reserved_ids=set(recalled["event_ids"]) if recalled else frozenset(),
             reserved_bytes=recalled["cost_bytes"] if recalled else 0,
-        ):
+        )):
             sources = continuation["history"]
             turns = [dialogue_history.turn_messages(source, s, text) for source in sources]
             references.append(continuation["message"])

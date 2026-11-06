@@ -697,6 +697,7 @@ class ContentService(ContentIntake):
         def add_metadata(row):
             item = {
                 "event_id": row.get("event_id", row["owner_event_id"]),
+                "owner_event_id": row["owner_event_id"],
                 "url": row["url"],
                 "status": row.get("result_status", row["state"]),
                 "trust": row["trust"],
