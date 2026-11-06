@@ -11,11 +11,12 @@ import pytest
 
 from companion import image_spool, memory_references, retrieval_work
 from companion.config import ObservationAdapterConfig
-from companion.contracts import CoreError
+from companion.contracts import Candidate, CoreError
 from companion.memory_context import MemoryContext
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, worker_for
 from tests.support.native_image_memory import native_image_memory
+from tests.test_native_history_delivery import sdk_step
 from tests.test_native_image_bursts import model_images
 
 OBSERVATION = {"observation_adapters": {"content_image": ObservationAdapterConfig(
@@ -31,6 +32,39 @@ async def reply(core, entry, text, calls):
         assert await worker.run_once()
     delivered = await entry.send(entry.client, entry.protocol)
     assert delivered["attempt_states"].get("ACK")
+
+
+def test_image_derived_fact_survives_native_checkpoint_and_delivery(core, tmp_path):
+    async def scenario():
+        async with native_image_memory(core, tmp_path, record_visible=True,
+                                       core_options=OBSERVATION) as context:
+            assert await context.worker.run_once()
+            await context.entry.send(context.entry.client, context.entry.protocol)
+            source = core.store.one("SELECT * FROM events WHERE event_id=?",
+                                    (context.job["event_id"],))
+            reference = next(value for value in memory_references.inputs(core, source)
+                             if value["kind"] == "image")
+            memory_id = core.memory.add(Candidate(subject="project", kind="fact",
+                fact_key="ticket", content="青栎资料卡：十二月九日入场，座位B17。",
+                evidence_event_id=source["event_id"], evidence_quote="十二月九日入场，座位B17",
+                evidence_reference_id=reference["reference_id"]), core.clock())
+            current = await context.entry.admit(2, "青栎资料卡的入场日期和座位是什么？")
+            _, request = await sdk_step(core, tmp_path, current["event_id"], 2)
+            delivered = await context.entry.send(context.entry.client, context.entry.protocol)
+            assert delivered["attempt_states"].get("ACK")
+            job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (current["event_id"],))
+            assert job["state"] == "SUCCEEDED", job["last_error_code"]
+            assert "青栎资料卡" in json.dumps(request, ensure_ascii=False)
+            saved = core.store.one("SELECT phase,snapshots_json FROM agent_conversations "
+                                   "WHERE job_id=?", (job["job_id"],))
+            assert saved["phase"] == "COMPLETE"
+            assert any(memory_id == row["memory_id"]
+                       for snapshot in json.loads(saved["snapshots_json"])
+                       if snapshot["kind"] == "memory"
+                       for row in snapshot["proof"]["rows"])
+            assert core.store.one("SELECT state FROM model_usage WHERE job_id=?",
+                                  (job["job_id"],))["state"] == "SETTLED"
+    run(scenario())
 
 
 @pytest.mark.parametrize("expired", [False, True])
