@@ -19,6 +19,7 @@ from companion.diary import DiaryCorrection, DiaryService
 from companion.goals import GoalEngine
 from companion.memory import Memory
 from companion.privacy import ErasureLedger
+from companion.reply_recovery import RecoveryRequest
 from companion.source_grants import SourceGrantService
 from companion.store import after, encode
 from companion.transport import cancel_proactive_work, reconcile_delivery
@@ -466,6 +467,46 @@ def register_console_routes(app, settings):
 
             return _operation(context, captured, idempotency_key, material, apply,
                               recover=recovered, owner_check=owner_check)
+
+        return await app.state.api_store.run(execute)
+
+    @app.get(prefix + "/deliveries/{message_id}/recovery", dependencies=auth)
+    async def recovery_preview(message_id: str, request: Request):
+        from companion import reply_recovery
+
+        captured, clock = _request_fields(request), app.state.core.clock
+
+        def execute(store):
+            context = SimpleNamespace(store=store, settings=settings, clock=clock)
+            _check_owner(context, captured)
+            return reply_recovery.preview(store, settings, clock, message_id)
+
+        return await app.state.api_store.run(execute)
+
+    @app.post(prefix + "/deliveries/{message_id}/recovery", dependencies=auth)
+    async def recover_reply(message_id: str, body: RecoveryRequest, request: Request,
+                            idempotency_key: str = Header(default="")):
+        from companion import reply_recovery
+
+        captured, clock = _request_fields(request), app.state.core.clock
+        material = body.model_dump()
+        fingerprint = digest(encode([captured.method, captured.url.path, material]))
+
+        def execute(store):
+            context = SimpleNamespace(store=store, settings=settings, clock=clock)
+
+            def owner_check():
+                _check_owner(context, captured)
+
+            def apply():
+                with store.transaction():
+                    owner_check()
+                    return reply_recovery.create(store, settings, clock, message_id,
+                        body.expected_sha256, idempotency_key, fingerprint)
+
+            return _operation(context, captured, idempotency_key, material, apply,
+                recover=lambda key, sha: reply_recovery.create(store, settings, clock, message_id,
+                    body.expected_sha256, key, sha), owner_check=owner_check)
 
         return await app.state.api_store.run(execute)
 

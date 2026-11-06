@@ -135,9 +135,9 @@ def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, 
             "SELECT j.job_id,j.kind,e.event_id,e.conversation_id,e.redacted "
             "FROM jobs j JOIN events e USING(event_id) WHERE j.job_id=?", (job["job_id"],),
         )
-        if (not source or source["kind"] not in {"chat", "activity"}
+        if (not source or source["kind"] not in {"chat", "activity", "reply_recovery"}
             or action not in {"qq.private.reply", "qq.private.proactive"}
-            or (source["kind"] == "chat" and action != "qq.private.reply")
+            or (source["kind"] in {"chat", "reply_recovery"} and action != "qq.private.reply")
             or source["redacted"] or any(
             source[key] != job[key] for key in ("event_id", "conversation_id")
         )):
@@ -202,10 +202,12 @@ def reply_group(store, message_id, *, require_sent=False):
             "JOIN events e USING(event_id) WHERE j.job_id=?", (row["reply_group_id"],),
         )
         if (
-            not source or source["redacted"] or source["kind"] not in {"chat", "activity"}
+            not source or source["redacted"]
+            or source["kind"] not in {"chat", "activity", "reply_recovery"}
             or not 1 <= len(rows) <= 2**31 - 1 or row["segment_count"] != len(rows)
             or row["action_type"] not in {"qq.private.reply", "qq.private.proactive"}
-            or (source["kind"] == "chat" and row["action_type"] != "qq.private.reply")
+            or (source["kind"] in {"chat", "reply_recovery"}
+                and row["action_type"] != "qq.private.reply")
             or (source["event_id"], source["conversation_id"]) != (
                 row["origin_event_id"], row["conversation_id"])
             or type(row["segment_interval_ms"]) is not int
@@ -379,7 +381,14 @@ def _empty_delivery_poll(store, settings, request, now):
 
 
 def lease_deliveries(store, settings, request, now):
-    from companion import account_actions, owner_authority, owner_delivery, poke, private_life
+    from companion import (
+        account_actions,
+        owner_authority,
+        owner_delivery,
+        poke,
+        private_life,
+        reply_recovery,
+    )
     from companion.social import proactive_allowed, share_delivery_problem
 
     if store.read_or_write(lambda: _empty_delivery_poll(store, settings, request, now)):
@@ -453,6 +462,7 @@ def lease_deliveries(store, settings, request, now):
                     raise
             voice_flow = None
             if (not account and settings.voice.enabled
+                and not reply_recovery.is_delivery(store, row["message_id"])
                 and (not owner or "voice" in owner_authority.current(
                     store, settings, lambda: now).policy.purposes)
                 and row["action_type"] in {"qq.private.reply", "qq.private.proactive"}
@@ -525,7 +535,8 @@ def lease_deliveries(store, settings, request, now):
                 items[-1].update(authority=json.loads(row["authority_json"]),
                                  origin_event_id=row["origin_event_id"],
                                  content_sha256=row["content_sha256"])
-                if reply_revision.owner_input(store, row["origin_event_id"]):
+                if (reply_revision.owner_input(store, row["origin_event_id"])
+                    or reply_recovery.is_delivery(store, row["message_id"])):
                     items[-1]["reply_revision"] = store.one(
                         "SELECT reply_revision FROM events WHERE event_id=?",
                         (row["origin_event_id"],),

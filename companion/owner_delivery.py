@@ -359,7 +359,11 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
     material = json.loads(saved["value"])
     job = _job(store, material["job_id"])
     group = None
-    if material.get("kind") == FAILURE_NOTICE:
+    if material.get("kind") == "reply_recovery":
+        from companion import reply_recovery
+
+        view = reply_recovery.check(store, settings, clock, row, material, check)
+    elif material.get("kind") == FAILURE_NOTICE:
         view = _failure_view(store, settings, clock, job)
         if (json.loads(row["authority_json"]) != view.authority.as_dict()
                 or material != _failure_material(store, row, job, view)):
