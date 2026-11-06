@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from pydantic import Field
 from pydantic_ai.toolsets import FunctionToolset
 
-from companion import capabilities, meme_wiki, reply_revision
+from companion import capabilities, meme_wiki, reply_revision, retrieval_work
 from companion.agent_runtime import check_conversation
 from companion.contracts import CoreError
 from companion.paid_budget import sha
@@ -128,9 +128,14 @@ Each tool requires its current purpose on the original owner-authorized job.
         from companion.memory_authority import source_allowed
         from companion.memory_context import MemorySources
 
-        sources = MemorySources(core.memory, core.clock())
+        sources = MemorySources(core.memory, core.clock(), bounded=True)
         for key in ids:
-            lineage = sources.lineage(key)
+            try:
+                lineage = sources.lineage(key)
+            except retrieval_work.WorkLimit as error:
+                if (work := retrieval_work.current()) is not None:
+                    work.mark(error.reason)
+                return False
             if not lineage or not all(row["source"] != "qq.onebot" or source_allowed(
                     core.store, core.settings, core.clock, row["event_id"], "memory")
                     for row in lineage):
@@ -210,9 +215,14 @@ Each tool requires its current purpose on the original owner-authorized job.
                 value["raw_turns"] = turns
                 value["raw_turns_note"] = RAW_NOTE
                 recall_state["idle"] = 0
+                work = retrieval_work.current()
+                if work is not None and work.receipt()["coverage_limited"]:
+                    value.update(retrieval_coverage=work.receipt(), note=retrieval_work.NOTE)
                 return value
         if recall_state["idle"] >= RECALL_IDLE_LIMIT:
             value["note"] = STOP_NOTE
+        if (work := retrieval_work.current()) is not None and work.receipt()["coverage_limited"]:
+            value.update(retrieval_coverage=work.receipt(), note=retrieval_work.NOTE)
         return value
 
     async def memory_history(memory_id: str) -> dict:

@@ -45,4 +45,6 @@ def test_frozen_entity_time_and_scope_probes(core, record_property):
         "correct_empty_queries": negative_correct, "forbidden_source_leaks": 0,
         "provider_calls": 0, "cases": cases}
     record_property("memory_recall_probe_metrics", encode(metrics))
+    assert recalled >= 42 and negative_correct == negatives == 10
+    assert extra <= 12
     assert not core.store.rows("SELECT * FROM model_usage")

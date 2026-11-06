@@ -20,6 +20,39 @@ from tests.support.native_consumer_entry import environment
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_shared_limit_note_reaches_real_worker_model_request(core, tmp_path, monkeypatch):
+    from companion import retrieval_work
+
+    monkeypatch.setitem(retrieval_work.LIMITS, "candidates", 1)
+
+    async def scenario():
+        async with environment(core, tmp_path, purposes=("chat", "memory", "history")) as (
+            entry, _,
+        ):
+            source = await entry.admit(1, "葭岸项目的样机编号是GL-84。")
+            async with worker_for(core, lambda request: httpx.Response(
+                200, json=answer("收到资料。"))) as worker:
+                assert await worker.run_once("limit-source")
+            assert (await entry.send(entry.client, entry.protocol))["worked"]
+            with core.store.transaction():
+                core.memory.add(Candidate(subject="project", kind="fact", fact_key="prototype",
+                    content=source["payload"]["text"], evidence_event_id=source["event_id"],
+                    evidence_quote=source["payload"]["text"]), core.clock())
+            await entry.admit(2, "葭岸项目的样机编号是多少？")
+            requests = []
+
+            def provider(request):
+                requests.append(json.loads(request.content)["messages"])
+                return httpx.Response(200, json=answer("样机编号是GL-84。"))
+
+            async with worker_for(core, provider) as worker:
+                assert await worker.run_once("limit-question")
+            assert requests and retrieval_work.NOTE in encode(requests[-1])
+            assert "GL-84" in encode(requests[-1])
+
+    run(scenario())
+
+
 def test_prefetch_enters_first_request_without_tool_and_erases_with_source(core, tmp_path):
     async def scenario():
         async with environment(core, tmp_path, purposes=("chat", "memory", "history")) as (

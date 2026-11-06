@@ -3,6 +3,7 @@
 import hashlib
 import json
 
+from companion import retrieval_work
 from companion.contracts import CoreError
 from companion.memory_context import MemoryContext
 from companion.privacy import redact, sensitive
@@ -17,8 +18,18 @@ def _hash(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
-def _load(store, key):
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+def _load(store, key, *, work=None):
+    if work is not None:
+        size = store.one("SELECT octet_length(value) AS size FROM runtime_meta WHERE key=?",
+                         (key,))
+        if not size:
+            return None
+        if not work.take("text_bytes", size["size"]):
+            raise retrieval_work.WorkLimit("enrichment_text_bytes")
+        row = store.one("SELECT value FROM runtime_meta WHERE key=? AND octet_length(value)=?",
+                        (key, size["size"]))
+    else:
+        row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
     if row:
         try:
             return json.loads(row["value"])
@@ -36,14 +47,16 @@ def _settled(store, request_id):
                      "AND scenario='memory_extract' AND state='SETTLED'", (request_id,))
 
 
-def _valid(memory, record, now, content_hash):
+def _valid(memory, record, now, content_hash, *, work=None):
     try:
         if (record["content_sha256"] != content_hash
             or not _settled(memory.store, record["request_id"])
             or record["source_event_ids"] != record["proof"]["source_event_ids"]):
             return False
-        MemoryContext(memory).revalidate(record["proof"], now)
+        MemoryContext(memory).revalidate(record["proof"], now, work=work)
         return True
+    except retrieval_work.WorkLimit:
+        raise
     except (CoreError, KeyError, TypeError, ValueError):
         return False
 
@@ -97,7 +110,7 @@ def _importance(store, memory_id, records):
 
 def refresh_importance(memory, row, now):
     """Drop stale estimates before ranking; the original fact status is untouched."""
-    saved = _load(memory.store, IMPORTANCE + row["memory_id"])
+    saved = _load(memory.store, IMPORTANCE + row["memory_id"], work=retrieval_work.current())
     if saved is None:
         if row["importance"] != 0.5:
             return _importance(memory.store, row["memory_id"], [])
@@ -109,7 +122,8 @@ def refresh_importance(memory, row, now):
                and memory.store.one("SELECT 1 FROM memory_evidence WHERE memory_id=? "
                                     "AND event_id=? AND polarity=1",
                                     (row["memory_id"], record.get("event_id")))
-               and _valid(memory, record, now, _hash(row["content"]))] \
+               and _valid(memory, record, now, _hash(row["content"]),
+                          work=retrieval_work.current())] \
         if isinstance(saved, list) and len(saved) <= 20 else []
     value = sum(record["salience"] for record in records) / (10 * len(records)) if records else 0.5
     if records != saved or value != row["importance"]:
@@ -178,7 +192,8 @@ def record(memory, candidates, memory_ids, events, summaries, request_id, now, *
 
 
 def summary(memory, episode_id, source_event_ids, now):
-    value = _load(memory.store, SUMMARY + episode_id)
+    work = retrieval_work.current()
+    value = _load(memory.store, SUMMARY + episode_id, work=work)
     row = memory.store.one("SELECT title,summary,extractor_version,status FROM episodes "
                             "WHERE episode_id=?", (episode_id,))
     actual_ids = [item["event_id"] for item in memory.store.rows(
@@ -189,7 +204,7 @@ def summary(memory, episode_id, source_event_ids, now):
         or value.get("event_ids") != sorted(source_event_ids)
         or actual_ids != sorted(source_event_ids)
         or not _valid(memory, value, now, _hash({
-            "title": row["title"], "summary": row["summary"]}))):
+            "title": row["title"], "summary": row["summary"]}), work=work)):
         return None
     return {"kind": "model_summary", "title": row["title"], "text": row["summary"],
             "request_id": value["request_id"]}

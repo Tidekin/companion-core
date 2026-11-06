@@ -9,9 +9,10 @@ import json
 import httpx
 import pytest
 
-from companion import image_spool, memory_references
+from companion import image_spool, memory_references, retrieval_work
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
+from companion.memory_context import MemoryContext
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, worker_for
 from tests.support.native_image_memory import native_image_memory
@@ -51,6 +52,8 @@ def test_review_replays_objection_and_actual_reply_without_overwriting_receipts(
                                     (context.job["event_id"],))
             references = memory_references.inputs(core, source)
             image_reference = next(value for value in references if value["kind"] == "image")
+            image_proof = memory_references.read(core.memory, image_reference["reference_id"],
+                                                 core.clock())["proof"]
             if expired:
                 core.clock.advance(image_spool.RETENTION_SECONDS + 1)
             objection = "你理解错了，两张图的动作和台词都一样，下面不是在推翻上面。"
@@ -72,6 +75,27 @@ def test_review_replays_objection_and_actual_reply_without_overwriting_receipts(
             assert data["evidence"]["evidence_verified_correction"] is False
             with pytest.raises(CoreError, match="MEMORY_REFERENCE_CHANGED"):
                 memory_references.read(core.memory, image_reference["reference_id"], core.clock())
+            with retrieval_work.scope() as work:
+                with pytest.raises(CoreError, match="MEMORY_REFERENCE_CHANGED"):
+                    memory_references.read(core.memory, image_reference["reference_id"],
+                                           core.clock(), work=work)
+                assert work.receipt()["counts"]["attachment_rows"] == 1
+            with retrieval_work.scope() as work:
+                assert work.take("attachment_rows", retrieval_work.LIMITS["attachment_rows"])
+                with pytest.raises(retrieval_work.WorkLimit):
+                    memory_references.read(core.memory, image_reference["reference_id"],
+                                           core.clock(), work=work)
+            # Enough source work for the original proof, but not its later review:
+            # a nested work limit must not be mistaken for an invalid objection.
+            probe = retrieval_work.Work()
+            MemoryContext(core.memory).revalidate(image_proof, core.clock(), work=probe)
+            with retrieval_work.scope() as work:
+                assert work.take("source_nodes", retrieval_work.LIMITS["source_nodes"]
+                                 - probe.receipt()["counts"]["source_nodes"])
+                with pytest.raises(retrieval_work.WorkLimit):
+                    memory_references.read(core.memory, image_reference["reference_id"],
+                                           core.clock(), work=work)
+                assert work.receipt()["counts"]["attachment_rows"] == 1
             assert core.store.one("SELECT * FROM events WHERE event_id=?",
                                   (receipt["event_id"],)) == receipt
             assert core.store.one("SELECT output_event_id FROM content_items WHERE item_id=?",

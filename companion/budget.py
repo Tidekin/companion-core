@@ -965,8 +965,17 @@ def _persist_accounting(
 
 
 def _check_measurement(settings, admission, messages, scenario, *, tools=(), generation=None,
-                       video_profile=None):
-    measured = measure_request(settings, messages, scenario, tools=tools, generation=generation)
+                       video_profile=None, prepared=None):
+    if prepared is None:
+        measured = measure_request(settings, messages, scenario, tools=tools, generation=generation)
+    else:
+        from companion.model import model_payload
+
+        measured, contract = prepared
+        if (contract != paid_budget.sha(paid_budget.snapshot(settings))
+            or measured.payload_sha256 != paid_budget.sha(model_payload(
+                settings, messages, scenario, tools=tools, generation=generation))):
+            raise CoreError("MODEL_TOKEN_MEASUREMENT_CHANGED", 503)
     check_request_limits(settings.paid_model, measured, scenario)
     if measured.reserved_input_tokens != admission["input_bound"]:
         raise CoreError("MODEL_INPUT_ESTIMATE_CHANGED", 503)
@@ -1085,6 +1094,12 @@ async def _dispatch(
     if isinstance(model, ModelClient) and model.settings is not settings:
         raise CoreError("MODEL_ADMISSION_CONFIGURATION_MISMATCH", 503)
     approval = paid_budget.contract(settings, now)
+    # Pure counting can load/tokenize the full request. Keep it outside the writer;
+    # reuse only inside this invocation while its exact wire/counting contract matches.
+    counting_contract = paid_budget.sha(paid_budget.snapshot(wire))
+    with phase("dispatch_measure", trace_id):
+        prepared = (measure_request(wire, messages, scenario, tools=tools,
+                                    generation=generation), counting_contract)
     with phase("dispatch_journal", trace_id), store.transaction():
         cumulative.preflight(store, settings, clock)
         paid_budget.contract(settings, clock())
@@ -1127,7 +1142,7 @@ async def _dispatch(
             wire, messages, scenario, tools=tools, generation=generation)):
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
         _check_measurement(wire, row, messages, scenario, tools=tools, generation=generation,
-                           video_profile=profile)
+                           video_profile=profile, prepared=prepared)
         if store.one(
             "SELECT 1 FROM runtime_meta WHERE key IN "
             "('model_budget_blocked','model_budget_restore_required')"
@@ -1227,7 +1242,7 @@ async def _dispatch(
                 ):
                     raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
                 _check_measurement(wire, current, messages, scenario, tools=tools,
-                                   generation=generation, video_profile=profile)
+                                   generation=generation, video_profile=profile, prepared=prepared)
             if source_check is not None:
                 # Caller-owned evidence may expire while an HTTP hook awaits.
                 # Keep this synchronous proof inside the existing transport fence.
