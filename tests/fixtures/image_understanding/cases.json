@@ -1,0 +1,382 @@
+{
+  "schema_version": 1,
+  "privacy": "constructed_tasks_and_public_assets_only",
+  "cases": [
+    {
+      "id": "repeat-0-0",
+      "category": "repeated_context",
+      "family": "repeat-0",
+      "split": "dev",
+      "image": "repeat-0-0.png",
+      "image_sha256": "a0d00dd77b08cee1e7c0a4a761fbbce21463d45a9b48870069f4e5ca8dabf0a0",
+      "facts": "上下两格，标题分别为‘课本里的他’和‘多年后的我’。两格人物坐标、动作、屏幕位置相同，台词都是‘我就喜欢和他们玩！’。两格均为灰底。",
+      "gold": {
+        "interpretation": "时间或处境改变后，自己做了曾经不理解的事；有自嘲或理解旧处境的意味。不能单凭下格变彩色说它反驳了上格。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "initial_wrong": "下格变好看了，所以是在反驳上格。",
+      "initial_right": "两格重复动作和台词，处境变成了自己，像在自嘲或终于理解。",
+      "correction_right": "你漏掉了相同动作和台词，下面不是在推翻上面。",
+      "correction_wrong": "不对，只要下格颜色不同，就一定是在反驳上格。"
+    },
+    {
+      "id": "repeat-0-1",
+      "category": "repeated_context",
+      "family": "repeat-0",
+      "split": "dev",
+      "image": "repeat-0-1.png",
+      "image_sha256": "ee49ec23d9755dfa1790a9dd13ebb9d92b42645add1c03f70be17f2c12a8d383",
+      "facts": "上下两格，标题分别为‘课本里的他’和‘多年后的我’。两格人物坐标、动作、屏幕位置相同，台词都是‘我就喜欢和他们玩！’。上格灰底，下格浅蓝底。",
+      "gold": {
+        "interpretation": "时间或处境改变后，自己做了曾经不理解的事；有自嘲或理解旧处境的意味。不能单凭下格变彩色说它反驳了上格。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "initial_wrong": "下格变好看了，所以是在反驳上格。",
+      "initial_right": "两格重复动作和台词，处境变成了自己，像在自嘲或终于理解。",
+      "correction_right": "你漏掉了相同动作和台词，下面不是在推翻上面。",
+      "correction_wrong": "不对，只要下格颜色不同，就一定是在反驳上格。"
+    },
+    {
+      "id": "repeat-1-0",
+      "category": "repeated_context",
+      "family": "repeat-1",
+      "split": "dev",
+      "image": "repeat-1-0.png",
+      "image_sha256": "ad82bd6dfddb5d453a815c7435fc4c006a588d0e1f0af13985f2c363774a08a8",
+      "facts": "上下两格，标题分别为‘以前我笑他只爱网上聊天’和‘现在的我下班以后’。两格人物坐标、动作、屏幕位置相同，台词都是‘和网友聊天真开心。’。两格均为灰底。",
+      "gold": {
+        "interpretation": "时间或处境改变后，自己做了曾经不理解的事；有自嘲或理解旧处境的意味。不能单凭下格变彩色说它反驳了上格。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "initial_wrong": "下格变好看了，所以是在反驳上格。",
+      "initial_right": "两格重复动作和台词，处境变成了自己，像在自嘲或终于理解。",
+      "correction_right": "你漏掉了相同动作和台词，下面不是在推翻上面。",
+      "correction_wrong": "不对，只要下格颜色不同，就一定是在反驳上格。"
+    },
+    {
+      "id": "repeat-1-1",
+      "category": "repeated_context",
+      "family": "repeat-1",
+      "split": "dev",
+      "image": "repeat-1-1.png",
+      "image_sha256": "ae332c3c09a1694e5a2db61341771104019d9522d1dc58eff32ef6810ab9999c",
+      "facts": "上下两格，标题分别为‘以前我笑他只爱网上聊天’和‘现在的我下班以后’。两格人物坐标、动作、屏幕位置相同，台词都是‘和网友聊天真开心。’。上格灰底，下格浅蓝底。",
+      "gold": {
+        "interpretation": "时间或处境改变后，自己做了曾经不理解的事；有自嘲或理解旧处境的意味。不能单凭下格变彩色说它反驳了上格。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "initial_wrong": "下格变好看了，所以是在反驳上格。",
+      "initial_right": "两格重复动作和台词，处境变成了自己，像在自嘲或终于理解。",
+      "correction_right": "你漏掉了相同动作和台词，下面不是在推翻上面。",
+      "correction_wrong": "不对，只要下格颜色不同，就一定是在反驳上格。"
+    },
+    {
+      "id": "repeat-2-0",
+      "category": "repeated_context",
+      "family": "repeat-2",
+      "split": "dev",
+      "image": "repeat-2-0.png",
+      "image_sha256": "736dccf6637b4d617ffbffab0b587d376a4f67d8c9ec19edb5a095b4d9f01791",
+      "facts": "上下两格，标题分别为‘小时候不懂爸爸为何坐着发呆’和‘工作之后坐在桌前的我’。两格人物坐标、动作、屏幕位置相同，台词都是‘让我自己待一会儿。’。两格均为灰底。",
+      "gold": {
+        "interpretation": "时间或处境改变后，自己做了曾经不理解的事；有自嘲或理解旧处境的意味。不能单凭下格变彩色说它反驳了上格。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "initial_wrong": "下格变好看了，所以是在反驳上格。",
+      "initial_right": "两格重复动作和台词，处境变成了自己，像在自嘲或终于理解。",
+      "correction_right": "你漏掉了相同动作和台词，下面不是在推翻上面。",
+      "correction_wrong": "不对，只要下格颜色不同，就一定是在反驳上格。"
+    },
+    {
+      "id": "repeat-2-1",
+      "category": "repeated_context",
+      "family": "repeat-2",
+      "split": "dev",
+      "image": "repeat-2-1.png",
+      "image_sha256": "c3180bcb4472a6cde9b76395e00a2faa21c924519b81a8671c39d4ed2fdc4067",
+      "facts": "上下两格，标题分别为‘小时候不懂爸爸为何坐着发呆’和‘工作之后坐在桌前的我’。两格人物坐标、动作、屏幕位置相同，台词都是‘让我自己待一会儿。’。上格灰底，下格浅蓝底。",
+      "gold": {
+        "interpretation": "时间或处境改变后，自己做了曾经不理解的事；有自嘲或理解旧处境的意味。不能单凭下格变彩色说它反驳了上格。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "initial_wrong": "下格变好看了，所以是在反驳上格。",
+      "initial_right": "两格重复动作和台词，处境变成了自己，像在自嘲或终于理解。",
+      "correction_right": "你漏掉了相同动作和台词，下面不是在推翻上面。",
+      "correction_wrong": "不对，只要下格颜色不同，就一定是在反驳上格。"
+    },
+    {
+      "id": "repeat-3-0",
+      "category": "repeated_context",
+      "family": "repeat-3",
+      "split": "holdout",
+      "image": "repeat-3-0.png",
+      "image_sha256": "3b898a9548392046979b1be7483a02d6fd9b9f22fd5025f7b4a537c5354f5b53",
+      "facts": "上下两格，标题分别为‘以前笑别人打游戏总查攻略’和‘第一次玩新游戏的我’。两格人物坐标、动作、屏幕位置相同，台词都是‘先看看攻略。’。两格均为灰底。",
+      "gold": {
+        "interpretation": "时间或处境改变后，自己做了曾经不理解的事；有自嘲或理解旧处境的意味。不能单凭下格变彩色说它反驳了上格。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "initial_wrong": "下格变好看了，所以是在反驳上格。",
+      "initial_right": "两格重复动作和台词，处境变成了自己，像在自嘲或终于理解。",
+      "correction_right": "你漏掉了相同动作和台词，下面不是在推翻上面。",
+      "correction_wrong": "不对，只要下格颜色不同，就一定是在反驳上格。"
+    },
+    {
+      "id": "repeat-3-1",
+      "category": "repeated_context",
+      "family": "repeat-3",
+      "split": "holdout",
+      "image": "repeat-3-1.png",
+      "image_sha256": "e92d49440132b168907b03f86ef23151efa86b0b0ad386abc60a071a24bd7c77",
+      "facts": "上下两格，标题分别为‘以前笑别人打游戏总查攻略’和‘第一次玩新游戏的我’。两格人物坐标、动作、屏幕位置相同，台词都是‘先看看攻略。’。上格灰底，下格浅蓝底。",
+      "gold": {
+        "interpretation": "时间或处境改变后，自己做了曾经不理解的事；有自嘲或理解旧处境的意味。不能单凭下格变彩色说它反驳了上格。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "initial_wrong": "下格变好看了，所以是在反驳上格。",
+      "initial_right": "两格重复动作和台词，处境变成了自己，像在自嘲或终于理解。",
+      "correction_right": "你漏掉了相同动作和台词，下面不是在推翻上面。",
+      "correction_wrong": "不对，只要下格颜色不同，就一定是在反驳上格。"
+    },
+    {
+      "id": "literal-0-0",
+      "category": "literal_sequence",
+      "family": "literal-0",
+      "split": "dev",
+      "image": "literal-0-0.png",
+      "image_sha256": "1b61fe12eea8f2fdf23a583714f47eefe204804205e652821468055da119479e",
+      "facts": "上格标题‘上午’，台词‘我准备出发。’；下格标题‘下午’，台词‘我已经到家。’。两格人物姿势相同，屏幕在左右两边。",
+      "gold": {
+        "interpretation": "按明确时间和台词解释日常事情；没有足够证据必须解读成自我反讽。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "literal-0-1",
+      "category": "literal_sequence",
+      "family": "literal-0",
+      "split": "dev",
+      "image": "literal-0-1.png",
+      "image_sha256": "cae908cb0fc721d561d366fa4adaa8b0d8cebf9a8e3dadce6be2950a5a482654",
+      "facts": "上格标题‘上午’，台词‘我准备出发。’；下格标题‘下午’，台词‘我已经到家。’。两格人物姿势相同，屏幕在左右两边。",
+      "gold": {
+        "interpretation": "按明确时间和台词解释日常事情；没有足够证据必须解读成自我反讽。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "literal-1-0",
+      "category": "literal_sequence",
+      "family": "literal-1",
+      "split": "holdout",
+      "image": "literal-1-0.png",
+      "image_sha256": "3ff7a642b5a2a473a0f9e97bd5bc8ca5a4322ceb2229c38732a2624541e4ac30",
+      "facts": "上格标题‘出发之前’，台词‘今天带伞了吗？’；下格标题‘下雨之后’，台词‘伞在包里。’。两格人物姿势相同，屏幕在左右两边。",
+      "gold": {
+        "interpretation": "按明确时间和台词解释日常事情；没有足够证据必须解读成自我反讽。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "literal-1-1",
+      "category": "literal_sequence",
+      "family": "literal-1",
+      "split": "holdout",
+      "image": "literal-1-1.png",
+      "image_sha256": "51145a1626e18b72b71b652d1ee3656f6a344fb1cbcd191ee92ad5a3f1c37b66",
+      "facts": "上格标题‘出发之前’，台词‘今天带伞了吗？’；下格标题‘下雨之后’，台词‘伞在包里。’。两格人物姿势相同，屏幕在左右两边。",
+      "gold": {
+        "interpretation": "按明确时间和台词解释日常事情；没有足够证据必须解读成自我反讽。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "color-0",
+      "category": "color_is_evidence",
+      "family": "color-0",
+      "split": "dev",
+      "image": "color-0.png",
+      "image_sha256": "e35e420484e9e0915759f4d18a5268bc77b817af0d6d8fa64b44aa53a10cfe3d",
+      "facts": "交通灯自上而下为三圆灯，仅最上方红灯亮。",
+      "gold": {
+        "interpretation": "红灯时应等待。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "color-1",
+      "category": "color_is_evidence",
+      "family": "color-0",
+      "split": "dev",
+      "image": "color-1.png",
+      "image_sha256": "520240c049648cf890e17d2e28776ac04eace11261c917189c101a613402fe35",
+      "facts": "交通灯自上而下为三圆灯，仅最下方绿灯亮。",
+      "gold": {
+        "interpretation": "绿灯表示允许通行，实际过路还需注意路况。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "color-2",
+      "category": "color_is_evidence",
+      "family": "color-1",
+      "split": "holdout",
+      "image": "color-2.png",
+      "image_sha256": "abb429c634a65900383fd007910d7f3248a9470f4562d4db809e33d6c0bdee4e",
+      "facts": "图例红色=高温、蓝色=低温；甲块red，乙块blue。",
+      "gold": {
+        "interpretation": "甲比乙温度高。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "color-3",
+      "category": "color_is_evidence",
+      "family": "color-1",
+      "split": "holdout",
+      "image": "color-3.png",
+      "image_sha256": "ec52f9f4723af4b54f122376ef5c48bce4064308e20906c884bd93ed8d21514b",
+      "facts": "图例红色=高温、蓝色=低温；甲块blue，乙块red。",
+      "gold": {
+        "interpretation": "乙比甲温度高。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "ambiguous-0",
+      "category": "ambiguous",
+      "family": "ambiguous-0",
+      "split": "dev",
+      "image": "ambiguous-0.png",
+      "image_sha256": "22b26da5ed9961c59c72ed6736bc90cd3d343cf008e14b479dbc79fece26b55a",
+      "facts": "文字‘他又来了’；下方并排两个相同圆形。没有人物表情、说话者或时间说明。",
+      "gold": {
+        "interpretation": "能描述重复、等待等可能联想；信息不足以确定人物关系、情绪、讽刺或唯一寓意。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "ambiguous-1",
+      "category": "ambiguous",
+      "family": "ambiguous-0",
+      "split": "dev",
+      "image": "ambiguous-1.png",
+      "image_sha256": "fd8fffb44367a8920490b20cb2f39ecb0a79b11c9da2f12dbba2c29ee85c7c60",
+      "facts": "文字‘他又来了’；下方并排两个相同圆形。没有人物表情、说话者或时间说明。",
+      "gold": {
+        "interpretation": "能描述重复、等待等可能联想；信息不足以确定人物关系、情绪、讽刺或唯一寓意。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "ambiguous-2",
+      "category": "ambiguous",
+      "family": "ambiguous-1",
+      "split": "holdout",
+      "image": "ambiguous-2.png",
+      "image_sha256": "93ffd96420805dea832640c0171b2f61c88694eeb13a8c57337fbc0662df7f92",
+      "facts": "文字‘还是这样’；下方并排两个相同圆形。没有人物表情、说话者或时间说明。",
+      "gold": {
+        "interpretation": "能描述重复、等待等可能联想；信息不足以确定人物关系、情绪、讽刺或唯一寓意。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "ambiguous-3",
+      "category": "ambiguous",
+      "family": "ambiguous-1",
+      "split": "holdout",
+      "image": "ambiguous-3.png",
+      "image_sha256": "48c96d8e039760e8d704ee9951ea138758495ecc8c96c40a00c3be01d28863ad",
+      "facts": "文字‘还是这样’；下方并排两个相同圆形。没有人物表情、说话者或时间说明。",
+      "gold": {
+        "interpretation": "能描述重复、等待等可能联想；信息不足以确定人物关系、情绪、讽刺或唯一寓意。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating"
+    },
+    {
+      "id": "chelsea",
+      "category": "ordinary_photo",
+      "family": "photo-chelsea",
+      "split": "dev",
+      "image": "chelsea.png",
+      "image_sha256": "596aa1e7cb875eb79f437e310381d26b338a81c2da23439704a73c4651e8c4bb",
+      "facts": "猫的头部近景，棕灰色毛发和条纹，眼睛与胡须可见。",
+      "gold": {
+        "interpretation": "正常描述猫的可见内容，不强加梗或寓意，也不能推断是主人拍摄或拥有。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "asset_source": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/chelsea.png",
+      "license": "CC0/public domain; see README"
+    },
+    {
+      "id": "coffee",
+      "category": "ordinary_photo",
+      "family": "photo-coffee",
+      "split": "dev",
+      "image": "coffee.png",
+      "image_sha256": "cc02f8ca188b167c775a7101b5d767d1e71792cf762c33d6fa15a4599b5a8de7",
+      "facts": "木桌上有橙褐色杯碟，杯中深色饮料和浅色花纹，旁边有勺子。",
+      "gold": {
+        "interpretation": "正常描述咖啡杯的可见内容，不强加梗或寓意，也不能推断是主人拍摄或拥有。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "asset_source": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/coffee.png",
+      "license": "CC0/public domain; see README"
+    },
+    {
+      "id": "brick",
+      "category": "ordinary_photo",
+      "family": "photo-brick",
+      "split": "dev",
+      "image": "brick.png",
+      "image_sha256": "7966caf324f6ba843118d98f7a07746d22f6a343430add0233eca5f6eaaa8fcf",
+      "facts": "灰度照片，规则排列的长方形砖块与砖缝。",
+      "gold": {
+        "interpretation": "正常描述砖墙的可见内容，不强加梗或寓意，也不能推断是主人拍摄或拥有。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "asset_source": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/brick.png",
+      "license": "CC0/public domain; see README"
+    },
+    {
+      "id": "clock_motion",
+      "category": "ordinary_photo",
+      "family": "photo-clock_motion",
+      "split": "holdout",
+      "image": "clock_motion.png",
+      "image_sha256": "f029226b28b642e80113d86622e9b215ee067a0966feaf5e60604a1e05733955",
+      "facts": "灰度照片，圆形钟面有明显横向拖影，无法辨清数字。",
+      "gold": {
+        "interpretation": "正常描述模糊的钟面的可见内容，不强加梗或寓意，也不能推断是主人拍摄或拥有。",
+        "unsupported": "不推断主人身份、情绪或与助手的角色对应。"
+      },
+      "label_origin": "authored_diagnostic_not_independent_human_rating",
+      "asset_source": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.25.2/skimage/data/clock_motion.png",
+      "license": "CC0/public domain; see README"
+    }
+  ]
+}

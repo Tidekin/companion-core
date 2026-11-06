@@ -50,6 +50,7 @@ from companion.contracts import (
 )
 from companion.core import Core
 from companion.diary import DiaryCorrection, DiaryMode
+from companion.evaluation import MAX_HTTP_BODY_BYTES
 from companion.exploration import METERED_READS_SQL
 from companion.life_protocol import LifeConsumeRequest, TopicClosure
 from companion.media_api import register_media_routes
@@ -102,7 +103,7 @@ class _MemoryControlExclusive:
 class BodyLimit:
     def __init__(self, app, image_limit=131072, meme_limit=131072, file_limit=131072,
                  voice_limit=131072, voice_input_limit=131072, video_limit=131072,
-                 singing_voice_tokens=()):
+                 singing_voice_tokens=(), evaluation_limit=131072):
         self.app = app
         self.image_limit = image_limit
         self.meme_limit = meme_limit
@@ -111,6 +112,7 @@ class BodyLimit:
         self.voice_input_limit = voice_input_limit
         self.video_limit = video_limit
         self.singing_voice_tokens = singing_voice_tokens
+        self.evaluation_limit = evaluation_limit
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
@@ -130,6 +132,8 @@ class BodyLimit:
             if re.fullmatch(r"/internal/v1/voice-inputs/[^/]+", scope["path"])
             else self.video_limit
             if re.fullmatch(r"/internal/v3/readers/[^/]+/[^/]+/media", scope["path"])
+            else self.evaluation_limit
+            if scope["path"] in {"/internal/v2/evaluations", "/internal/v2/evaluations/preview"}
             else 131072
         )
         if re.fullmatch(r"/internal/v2/voice-node/jobs/voice_[a-f0-9]{32}/result", scope["path"]):
@@ -217,6 +221,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         voice_input_limit=8_000_000 if settings.voice.enabled else 131072,
         video_limit=(4 * ((settings.bili_video.media.max_total_output_bytes + 2) // 3)
                      + 131072 if settings.bili_video.enabled else 131072),
+        evaluation_limit=MAX_HTTP_BODY_BYTES if settings.evaluation_enabled else 131072,
     )
 
     async def authenticate(authorization: str = Header(default="")):
