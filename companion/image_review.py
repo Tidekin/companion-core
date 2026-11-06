@@ -81,6 +81,11 @@ def _intent(text, *, linked=False, immediate=False):
     return requested, bool(objection and not denied)
 
 
+def requests_context(text):
+    """Conservative presentation guard; it grants no target or correction proof."""
+    return _intent(text, immediate=True)[0]
+
+
 def target(core, job, body, sources):
     """Resolve only inside the already authorized recent/selected source window."""
     text = body.get("text", "")

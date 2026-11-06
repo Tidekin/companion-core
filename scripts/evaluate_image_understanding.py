@@ -69,7 +69,7 @@ def system(arm):
         return frozen["principles"] + "\n" + frozen["participation_v2"]
     principles = PRINCIPLES
     if arm == "image_persona":
-        start, end = principles.index("你在乎主人"), principles.index("说话像熟人")
+        start, end = principles.index("你在乎主人"), principles.index("闲聊像熟人")
         principles = principles[:start] + principles[end:]
         principles = principles.replace("是主人很亲近的人", "和主人熟悉相处")
     return principles + "\n" + PARTICIPATION_V2 + RULES
