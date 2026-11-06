@@ -14,8 +14,9 @@ from tests.test_evaluation_process import process_config
 
 
 @pytest.mark.parametrize("stage", ["begin-send", "send-check"])
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
 def test_lost_preflight_response_closes_without_provider_io_and_next_input_works(
-    core, tmp_path, stage,
+    core, tmp_path, stage, error_type,
 ):
     number = 0
 
@@ -53,7 +54,7 @@ def test_lost_preflight_response_closes_without_provider_io_and_next_input_works
                     core.clock.advance(core.settings.lease_seconds + 1)
                     with core.store.transaction():
                         recover_deliveries(core.store, core.clock())
-                    raise httpx.ReadTimeout("synthetic lost Core ACK", request=response.request)
+                    raise error_type("synthetic lost Core ACK", request=response.request)
                 if response.request.url.path.endswith("/expired-preflight"):
                     assert response.status_code == 200
                     proofs.append(json.loads(response.request.content))

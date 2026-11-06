@@ -23,12 +23,13 @@ PARTS = ["synthetic first\n\n", "synthetic second\n\n", "synthetic third\n\n", "
 ORIGIN = "https://console.example.test"
 
 
-@pytest.mark.parametrize("interrupt", [False, True])
+@pytest.mark.parametrize("interrupt", ["none", "erase", "new_input", "capacity"])
 def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
     core,
     tmp_path,
     interrupt,
 ):
+    parts = PARTS if interrupt != "capacity" else [f"synthetic {i}\n\n" for i in range(60)]
     core.settings.control_token = SecretStr("synthetic-owner-control-token")
     core.settings.console.enabled = True
     core.settings.console.public_origin = ORIGIN
@@ -58,11 +59,11 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
                 "--now",
                 core.clock(),
                 "--reply",
-                "".join(PARTS),
+                "".join(parts),
             ) == {"worked": True, "calls": 1}
             assert await active.pump()
             originals = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
-            assert len(originals) == 4 and originals[0]["state"] == "SENT"
+            assert len(originals) == len(parts) and originals[0]["state"] == "SENT"
             prefix = originals[0]
             ack = active.db.execute(
                 "SELECT * FROM window_attempts WHERE message_id=?", (prefix["message_id"],)
@@ -146,16 +147,18 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
             assert (await active.client.get(path, headers=headers)).status_code == 409
             with core.store.transaction():
                 core.store.insert("runtime_meta", key=receipt_key, value=retained["value"])
-                core.store.execute("UPDATE outbox SET attempt_count=1 WHERE message_id=?",
-                                   (item["message_id"],))
+                core.store.execute(
+                    "UPDATE outbox SET attempt_count=1 WHERE message_id=?", (item["message_id"],)
+                )
             assert (await active.client.get(path, headers=headers)).status_code == 409
             with core.store.transaction():
-                core.store.execute("UPDATE outbox SET attempt_count=0 WHERE message_id=?",
-                                   (item["message_id"],))
+                core.store.execute(
+                    "UPDATE outbox SET attempt_count=0 WHERE message_id=?", (item["message_id"],)
+                )
             preview = await active.client.get(path, headers=headers)
             assert preview.status_code == 200, preview.text
             selected = preview.json()
-            assert selected["texts"] == PARTS[1:]
+            assert selected["texts"] == parts[1:]
             assert selected["skip_message_ids"] == [prefix["message_id"]]
             body = {"expected_sha256": selected["expected_sha256"]}
             rejected = await active.client.post(
@@ -166,11 +169,19 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
             assert rejected.status_code == 409
             assert not core.store.rows("SELECT * FROM jobs WHERE kind='reply_recovery'")
             created = await active.client.post(path, json=body, headers=headers)
+            if interrupt == "capacity":
+                assert created.status_code == 409, created.text
+                assert not core.store.rows("SELECT * FROM jobs WHERE kind='reply_recovery'")
+                assert len(sends) == 1
+                return
             assert created.status_code == 200, created.text
             assert created.json() == {"state": "QUEUED"}
             with core.store.transaction():
-                core.store.execute("UPDATE console_operations SET state='STARTED',result_json=NULL "
-                                   "WHERE request_id=?", (headers["Idempotency-Key"],))
+                core.store.execute(
+                    "UPDATE console_operations SET state='STARTED',result_json=NULL "
+                    "WHERE request_id=?",
+                    (headers["Idempotency-Key"],),
+                )
             assert (
                 await active.client.post(path, json=body, headers=headers)
             ).json() == created.json()
@@ -188,16 +199,49 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
                 == before
             )
             assert await active.pump()
-            if interrupt:
-                from companion.privacy import advance_epoch
+            if interrupt != "none":
+                from companion.privacy import ErasureLedger
 
-                with core.store.transaction():
-                    advance_epoch(core.store)
+                if interrupt == "erase":
+                    with core.store.transaction():
+                        ErasureLedger(core.settings.erasure_ledger).expire_events(
+                            core.store, [originals[0]["origin_event_id"]], core.clock()
+                        )
+                else:
+                    from companion_onebot_bridge.event_normalizer import normalize
+                    from companion_onebot_bridge.spool import encode
+                    from tests.support.onebot_events import raw_event
+
+                    # OneBot timestamps have second precision; the input follows activation.
+                    core.clock.advance(1)
+                    raw = encode(
+                        raw_event(
+                            2, time=int(core.clock.now.timestamp()), text="synthetic newer input"
+                        )
+                    )
+                    event = normalize(raw, active.config, now=core.clock.now.timestamp())
+                    active.runtime.persist_capture(
+                        event, raw, received_at=core.clock.now, peer=("127.0.0.1", 1)
+                    )
+                    await active.flush()
                 assert not await active.pump()
                 assert len(sends) == 2
                 assert not core.store.one(
                     "SELECT 1 FROM outbox WHERE state IN ('PENDING','LEASED')"
                 )
+                if interrupt == "new_input":
+                    from companion.dialogue_history import recent_sent_sources
+
+                    history = recent_sent_sources(
+                        core.store,
+                        originals[0]["conversation_id"],
+                        "",
+                        10,
+                        include_partial=True,
+                        cutoff_rowid=100000,
+                    )
+                    assert len(history) == 1 and not history[0]["reply_complete"]
+                    assert history[0]["reply_text"] == "".join(parts[:2])
             else:
                 assert await active.pump()
                 active.restart()
@@ -205,16 +249,39 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
                 assert not await active.pump()
                 assert len(sends) == 4
                 texts = [r["message"][0]["data"]["text"] for r in sends]
-                assert texts == [p.strip() for p in PARTS]
+                assert texts == [p.strip() for p in parts]
                 from companion.dialogue_history import recent_sent_sources
 
-                history = recent_sent_sources(core.store, originals[0]["conversation_id"], "", 10,
-                                              cutoff_rowid=100000)
-                assert len(history) == 1 and history[0]["reply_text"] == "".join(PARTS)
-            assert (
-                core.store.one("SELECT * FROM outbox WHERE message_id=?", (prefix["message_id"],))
-                == prefix
+                history = recent_sent_sources(
+                    core.store, originals[0]["conversation_id"], "", 10, cutoff_rowid=100000
+                )
+                assert len(history) == 1 and history[0]["reply_text"] == "".join(parts)
+            retained_prefix = core.store.one(
+                "SELECT * FROM outbox WHERE message_id=?", (prefix["message_id"],)
             )
+            if interrupt == "erase":
+                assert {
+                    k: retained_prefix[k]
+                    for k in (
+                        "state",
+                        "attempt_count",
+                        "sent_at",
+                        "provider_message_id",
+                        "native_ack_json",
+                    )
+                } == {
+                    k: prefix[k]
+                    for k in (
+                        "state",
+                        "attempt_count",
+                        "sent_at",
+                        "provider_message_id",
+                        "native_ack_json",
+                    )
+                }
+                assert retained_prefix["content_json"] == "{}"
+            else:
+                assert retained_prefix == prefix
             assert (
                 active.db.execute(
                     "SELECT * FROM window_attempts WHERE message_id=?", (prefix["message_id"],)
@@ -239,4 +306,3 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
             ]
 
     run(scenario())
-
