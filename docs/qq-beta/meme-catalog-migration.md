@@ -199,7 +199,10 @@ pin receipt projection and production acceptance are separate work.
 
    `python -m companion_onebot_bridge.meme_isolation --config <stopped-bridge.toml> --manifest <export.json>`
 
-5. 配置两侧 `meme_catalog_owner=core` 后完成原生激活/handoff。再核对 Core 原始工作、
+5. 退休记录会推进 Bridge 日志头。启动保持 STOP 的新 Core API 后，先使用新 Bridge binary
+   和原停止态配置重新执行 `owner-handoff-prepare`，让原生回执绑定退休后的最终日志头。
+   旧回执不能直接用于激活后的交接；不得复制回执或放宽 `OWNER_HANDOFF_PREPARATION_REQUIRED`。
+6. 配置两侧 `meme_catalog_owner=core` 后完成原生激活/handoff。再核对 Core 原始工作、
    Bridge 原费用/UNKNOWN/发送记录、实际选图与取图链路。删除这次传输文件等已列明的
    临时内容副本；原备份按既有隐私保留与恢复规则管理。
 
