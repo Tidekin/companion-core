@@ -15,7 +15,8 @@ from companion.store import encode
 INPUT = "memory_reference_input:"
 MEMORY = "memory_reference:"
 LABELS = {"document": "文件解析", "image": "图像解析", "transcript": "机器转写",
-          "quote": "引用或转发", "assistant": "助手已发送原话"}
+          "quote": "引用或转发", "assistant": "助手已发送原话",
+          "image_review": "图片解释异议（未核实）"}
 
 
 def _load(store, key, *, work=None):
@@ -200,6 +201,7 @@ def capture(memory, root, kind, text, receipt, now, *, sources=(), binding=None)
 
 def read(memory, reference_id, now, *, work=None):
     from companion.memory_context import MemoryContext
+    from companion.retrieval_work import WorkLimit
 
     value = _load(memory.store, INPUT + reference_id, work=work)
     if not isinstance(value, dict):
@@ -210,10 +212,33 @@ def read(memory, reference_id, now, *, work=None):
             != reference_id):
             raise ValueError()
         MemoryContext(memory).revalidate(value["proof"], now, work=work)
+        if value["kind"] == "image":
+            for review in image_reviews(memory.store, value["owner_event_id"], work=work):
+                try:
+                    read(memory, review["reference_id"], now, work=work)
+                except WorkLimit:
+                    raise
+                except CoreError:
+                    continue
+                # A fact extracted from this older machine analysis must not
+                # silently return without the later dispute. The immutable raw
+                # receipt remains available in source-bound dialogue replay.
+                raise CoreError("MEMORY_REFERENCE_CHANGED", 409)
         if value["kind"] == "assistant":
             row = memory.store.one("SELECT * FROM outbox WHERE message_id=? AND state='SENT'",
                                    (value["receipt"]["message_id"],))
             if not row or row["content_sha256"] != value["receipt"]["content_sha256"]:
+                raise ValueError()
+        if value["kind"] == "image_review":
+            from companion import reply_revision
+
+            if not all(reply_revision.source_active(memory.store, event_id)
+                       for event_id in value["proof"]["source_event_ids"]):
+                raise ValueError()
+            row = memory.store.one("SELECT * FROM outbox WHERE message_id=? AND state='SENT'",
+                                   (value["receipt"]["message_id"],))
+            if (not row or row["origin_event_id"] != value["receipt"]["target_event_id"]
+                or row["content_sha256"] != value["receipt"]["content_sha256"]):
                 raise ValueError()
         if value["kind"] == "quote":
             from companion import qq_quotes
@@ -353,6 +378,38 @@ def candidate(memory, item, now):
         or item.evidence_quote not in value["text"]):
         raise CoreError("UNSUPPORTED_MEMORY_EVIDENCE", 409)
     return value
+
+
+def image_reviews(store, event_id, *, work=None):
+    """IDs and source pins only; callers authorize the selected review before replay."""
+    if work is not None:
+        from companion.retrieval_work import WorkLimit
+
+        limit = work.remaining("attachment_rows")
+        if not limit:
+            work.mark("attachment_rows")
+            raise WorkLimit("attachment_rows")
+        rows = work.rows(store,
+            "SELECT key FROM runtime_meta WHERE key GLOB 'memory_reference_input:*' "
+            "AND json_valid(value) AND json_extract(value,'$.kind')='image_review' "
+            "AND json_extract(value,'$.receipt.target_event_id')=? ORDER BY rowid LIMIT ?",
+            (event_id, limit + 1), limit=limit + 1)
+        if len(rows) > limit:
+            work.mark("attachment_rows")
+            raise WorkLimit("attachment_rows")
+        result = []
+        for row in rows:
+            if not work.take("attachment_rows"):
+                raise WorkLimit("attachment_rows")
+            value = _load(store, row["key"], work=work)
+            if value:
+                result.append(value)
+        return result
+    return [json.loads(row["value"]) for row in store.rows(
+        "SELECT value FROM runtime_meta WHERE key LIKE ? "
+        "AND json_extract(value,'$.kind')='image_review' "
+        "AND json_extract(value,'$.receipt.target_event_id')=? ORDER BY rowid",
+        (INPUT + "%", event_id))]
 
 
 def attributed(item, reference):
