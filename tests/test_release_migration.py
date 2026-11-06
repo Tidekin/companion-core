@@ -90,6 +90,7 @@ REVISION_CHAIN = (
     "0065_bili_grant_expiry",
     "0066_chat_retrieval_bounds",
     "0067_relationship_standing",
+    "0068_image_review_target",
 )
 LEGACY_TABLES = (
     "principals",

@@ -327,6 +327,12 @@ origin instead of grouping the whole conversation. The native 120/1,200-turn pro
 from 17,100/167,100 VM instructions to approximately 1,100/900 (100-instruction sampling).
 Migration is required before using this code; release coordination treats it as a schema change.
 
+Image-derived facts recheck later image disputes on the same Store used by the checkpoint,
+paid admission or delivery transaction. Migration `0068_image_review_target` indexes the
+existing review receipts by their target event. This source-adjacency lookup retains the
+attachment-row and text-byte limits and sees disputes written in the current transaction;
+it does not run optional nomination on a separate snapshot. The migration adds only an index.
+
 Paid dispatch prepares its measurement before entering the writer and reuses that in-memory
 measurement only while both the exact wire payload hash and counting-contract hash match.
 Reserve and dispatch now count twice in total, both outside the writer; original request,
