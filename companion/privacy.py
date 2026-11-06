@@ -17,6 +17,17 @@ SECRET_PATTERNS = [
 ]
 
 
+def reply_content_erased_by_memory(store, row):
+    """A completed memory erasure clears every reply already present, not its receipt."""
+    if row["content_json"] != "{}" or row["content_sha256"] != "":
+        return False
+    return bool(store.one(
+        "SELECT 1 FROM privacy_erasure_ledger WHERE target_type='memory' "
+        "AND state='COMPLETE' AND julianday(erased_at)>=julianday(?) LIMIT 1",
+        (row["created_at"],),
+    ))
+
+
 def legacy_correction_matches(memory, body_json):
     """The exact legacy QQ command relation shared by retention and source proofs."""
     command, arguments = command_parts(json.loads(body_json).get("text", ""))

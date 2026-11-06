@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 import companion_delivery_protocol as wire
 from companion import owner_authority
 from companion.owner_authority_protocol import OwnerGrantPolicy
+from companion.privacy import reply_content_erased_by_memory
 from companion_delivery_protocol.authority import AuthorityRef
 
 
@@ -68,10 +69,11 @@ def binding(store, proof, row, authority, recorded, *, not_sent=False):
             or wire.digest(content if proof["payload_kind"] == "content_sha256"
                            else content["text"]) != proof["payload_sha256"]):
             raise ValueError("original native content changed")
-    elif not store.one("SELECT 1 FROM job_sources s JOIN events e USING(event_id) "
+    elif not (store.one("SELECT 1 FROM job_sources s JOIN events e USING(event_id) "
                        "WHERE s.job_id=? AND e.redacted=1 AND EXISTS "
                        "(SELECT 1 FROM runtime_meta WHERE key='erased_event:'||e.event_id)",
-                       (authority.get("job_id"),)):
+                       (authority.get("job_id"),))
+              or reply_content_erased_by_memory(store, row)):
         raise ValueError("unproved erased native delivery")
     from companion.voice_original_proof import validate_original_voice_binding
 
