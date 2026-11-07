@@ -624,12 +624,15 @@ class MoodService:
                 prior["reason"], prior["kind"] = "REVIEWED_GOAL_COMPLETION", "experience"
             else:
                 merged[key] = item
-        if view and transactional:
+        if view:
             # Independent journals, STOP and time remain live at the batch boundary.
             owner_authority.current(
                 s, cfg, self.clock, purpose="expression", authority=view.authority
             )
-            if not frozen() or s.change_token() != changes:
+            if transactional:
+                if not frozen() or s.change_token() != changes:
+                    raise CoreError("PRIVACY_CHANGED", 409)
+            elif not s.in_transaction or s.change_token()["writes"] != changes["writes"]:
                 raise CoreError("PRIVACY_CHANGED", 409)
         ordered = sorted(
             merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])

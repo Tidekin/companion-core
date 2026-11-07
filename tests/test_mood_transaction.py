@@ -1,11 +1,11 @@
-"""Native mood sources share custody only inside one synchronous write transaction."""
+"""Native mood sources reuse authority only inside a Core-owned read snapshot."""
 
 import json
-import sqlite3
 from contextlib import nullcontext
 from pathlib import Path
 
 import httpx
+import psycopg
 import pytest
 
 from companion import owner_authority, owner_input, paid_budget
@@ -56,19 +56,22 @@ def test_mood_batches_authority_but_validates_every_source(core, tmp_path, monke
         monkeypatch.setattr(paid_budget, "journal", journal)
         monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
         if transactional == "read_transaction":
-            core.store.db.execute("BEGIN")
+            core.store.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             try:
                 actual = core.mood.snapshot()
             finally:
-                core.store.db.rollback()
-            assert len(calls) > 10
+                core.store.execute("ROLLBACK")
         else:
             with core.store.transaction() if transactional else nullcontext():
                 actual = core.mood.snapshot()
+        if transactional:
+            # Two independent authority checks per source outside a Core read snapshot.
+            assert len(calls) == 3 + 2 * len(recalls)
+        else:
             assert len(calls) <= 4
         assert len(recalls) == 6
         assert actual == expected
-        assert not core.store.db.in_transaction
+        assert not core.store.in_transaction
 
     run(native_mood(core, tmp_path, check))
 
@@ -84,7 +87,8 @@ def test_mood_batch_rejects_changes_before_publishing(core, tmp_path, monkeypatc
         # A caller's write transaction sees its own DB change; an unowned batch reads one
         # snapshot, so the DB change comes from another connection's commit.
         external = not transactional and boundary in {"marker", "redaction", "signature"}
-        other = sqlite3.connect(core.settings.database, isolation_level=None) if external else None
+        other = (psycopg.connect(core.settings.database.get_secret_value(), autocommit=True)
+                 if external else None)
         execute = other.execute if external else core.store.execute
 
         def recall(*args, **kwargs):
@@ -95,7 +99,7 @@ def test_mood_batch_rejects_changes_before_publishing(core, tmp_path, monkeypatc
             if boundary == "stop":
                 core.settings.owner_runtime.mode = "OFF"
             elif boundary == "marker":
-                execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                execute("UPDATE runtime_meta SET value=%s WHERE key=%s",
                         (encode("OFF"), owner_authority.MODE))
             elif boundary == "expiry":
                 core.clock.advance(121)
@@ -105,14 +109,14 @@ def test_mood_batch_rejects_changes_before_publishing(core, tmp_path, monkeypatc
                 saved[path] = path.read_bytes()
                 path.write_bytes(saved[path] + b"\n")
             elif boundary == "redaction":
-                execute("UPDATE events SET redacted=1 WHERE event_id=?",
+                execute("UPDATE events SET redacted=1 WHERE event_id=%s",
                         (expected["signals"][0]["event_id"],))
             else:
                 key = owner_input.INPUT + expected["signals"][0]["event_id"]
                 value = json.loads(core.store.one(
                     'SELECT value FROM runtime_meta WHERE key=%s', (key,))["value"])
                 value["capture"]["signature"] = "0" * 128
-                execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), key))
+                execute("UPDATE runtime_meta SET value=%s WHERE key=%s", (encode(value), key))
 
         monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
         try:
@@ -129,5 +133,33 @@ def test_mood_batch_rejects_changes_before_publishing(core, tmp_path, monkeypatc
                 path.write_bytes(content)
             if other is not None:
                 other.close()
+
+    run(native_mood(core, tmp_path, check))
+
+
+@pytest.mark.parametrize("change", ["journal", "redaction"])
+def test_mood_rechecks_mutable_batch_at_publication(core, tmp_path, monkeypatch, change):
+    def check(expected):
+        appraisals = core.mood._appraisals
+        journal = Path(core.settings.paid_model.journal_path)
+        original = journal.read_bytes()
+
+        def collect(*args, **kwargs):
+            signals = appraisals(*args, **kwargs)
+            if change == "journal":
+                journal.write_bytes(original + b"\n")
+            else:
+                core.store.execute(
+                    "UPDATE events SET redacted=1 WHERE event_id=%s",
+                    (expected["signals"][0]["event_id"],),
+                )
+            return signals
+
+        monkeypatch.setattr(core.mood, "_appraisals", collect)
+        try:
+            with pytest.raises(CoreError), core.store.transaction():
+                core.mood.snapshot()
+        finally:
+            journal.write_bytes(original)
 
     run(native_mood(core, tmp_path, check))
