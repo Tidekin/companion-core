@@ -49,16 +49,20 @@ def test_console_reset_wait_keeps_health_responsive_and_retry_idempotent(
         def __init__(self, path):
             super().__init__(path)
             opened.append((self, threading.get_ident()))
-            entered.set()
+            self.db.set_trace_callback(
+                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
+            )
 
         def close(self):
             closed.append((self, threading.get_ident()))
             super().close()
 
     async def scenario():
-        async with real_core_http(core) as port, httpx.AsyncClient(
-            base_url=f"http://127.0.0.1:{port}", trust_env=False,
-        ) as client:
+        async with (
+            real_core_http(core) as port,
+            httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False) as client,
+            httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe,
+        ):
             headers = await login(client)
             monkeypatch.setattr(api_store, "Store", ObservedStore)
             process = await asyncio.create_subprocess_exec(
@@ -75,11 +79,13 @@ def test_console_reset_wait_keeps_health_responsive_and_retry_idempotent(
                     denied = await client.post(PATH, json={"confirm": True}, headers=rejected)
                     assert denied.status_code == status
                 assert not opened
+                # Measure API responsiveness on an established connection while BEGIN is blocked.
+                assert (await probe.get("/internal/v1/health/live")).status_code == 200
                 pending = asyncio.create_task(client.post(PATH, json={"confirm": True},
                                                           headers=headers))
                 assert await asyncio.to_thread(entered.wait, 3)
                 before = perf_counter()
-                health = await asyncio.wait_for(client.get("/internal/v1/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 0.75)
                 elapsed = perf_counter() - before
                 record_property("health_during_console_reset_wait_ms", round(elapsed * 1000, 3))
                 assert health.status_code == 200 and elapsed < 0.75 and not pending.done()
