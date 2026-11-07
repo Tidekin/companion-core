@@ -3,7 +3,7 @@
 import json
 import re
 
-from companion import memory_references, qq_quotes, reply_revision
+from companion import memory_references, qq_quotes, reply_quote, reply_revision
 from companion.contracts import CoreError
 from companion.store import encode
 
@@ -96,8 +96,8 @@ def target(core, job, body, sources):
     images = {key: value for key, value in images.items() if value}
     if not images:
         return None
-    explicit = {item["event_id"] for item in core._self_quote_indices(job, body)
-                if item["event_id"] in images}
+    quotes = reply_quote.self_quote_indices(core.store, core.settings, job, body)
+    explicit = {item["event_id"] for item in quotes if item["event_id"] in images}
     current = core.store.one("SELECT source_event_id FROM events WHERE event_id=?",
                              (job["event_id"],))
     prefix = qq_quotes.namespace(current["source_event_id"])
@@ -223,3 +223,26 @@ def annotate(core, job, sources, turns):
             if used:
                 proofs.append((turn, used, core.memory_context.pin(core.clock(), event_ids=used)))
     return proofs
+
+
+def attach_reply(core, job, messages, history, current, snapshots, *, capture_memory):
+    from companion import agent_images
+
+    review_target = history.review_target
+    attached = agent_images.attach(
+        core, job, messages, history.sources, history.turns, current, snapshots,
+        priority_event_id=review_target and review_target.get("event_id"))
+    if not review_target:
+        return
+    if review_target["ambiguous"]:
+        data = {"target_ambiguous": True,
+                "note": "先简短确认在纠正哪张图或哪句解释，不自行指定目标。"}
+    else:
+        data = evidence(core, review_target, attached)
+        if capture_memory:
+            capture(core, job, review_target, attached)
+    content = current["content"]
+    if isinstance(content, list):
+        content[0]["text"] += HEADING + encode(data)
+    else:
+        current["content"] += HEADING + encode(data)

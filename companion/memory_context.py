@@ -484,6 +484,107 @@ class MemoryContext:
                 "rows": [row for row in rows if row["memory_id"] in selected],
                 "requires_relevance_review": bool(rows)}
 
+    def reply_continuation(self, settings, clock, now, authority, job, history, used_memory_ids, *,
+                           reserved_ids, reserved_bytes):
+        from companion import notices, owner_input, private_life, reply_revision
+
+        s, cfg = self.store, settings
+        if authority and not {"memory", "history"}.issubset(authority.policy.purposes):
+            return None
+        followup = (notices.reference(job) or {}).get("kind") == "followup"
+        if (not cfg.memory_enabled or not (followup or job["kind"] == "chat"
+            and reply_revision.owner_input(s, job["event_id"]))
+            or reply_revision.control_job(s, job)):
+            return None
+        if authority:
+            allowed = None
+        elif private_life.strict(s, cfg):
+            if cfg.live_text_window.history_scope != "approved_window":
+                return None
+            # These are already individually fingerprinted by the window authorizer.
+            allowed = {row["event_id"] for row in history}
+        else:
+            if private_life.enabled(cfg):
+                private_life.check_job(s, cfg, cfg.live_text_window, job)
+                if cfg.live_text_window.history_scope != "owner_private":
+                    return None
+            allowed = None  # Check nominated sources individually below.
+
+        def collect():
+            source_check = finish = None
+            if not authority and allowed is None:
+                def source_check(event_id):
+                    return bool(s.one(
+                        "SELECT 1 FROM events e JOIN conversations c USING(conversation_id) "
+                        "WHERE e.event_id=? AND e.conversation_id=? AND e.actor_id='owner' "
+                        "AND e.source='qq.onebot' AND e.privacy_scope='private' "
+                        "AND c.scope='private' AND c.owner_actor_id='owner' AND e.redacted=0 "
+                        "AND e.occurred_at>=? AND e.occurred_at<=? "
+                        "AND e.rowid<(SELECT rowid FROM events WHERE event_id=?)",
+                        (event_id, job["conversation_id"],
+                         after(now, -cfg.raw_event_retention_days * 86400), now, job["event_id"]),
+                    ))
+            if authority:
+                # Episodes share their sources; check them all against one job view.
+                _, check, finish = owner_input.history_batch(
+                    s, cfg, clock, job, purpose="proactive" if followup else "chat")
+
+                def source_check(event_id):
+                    try:
+                        check(event_id)
+                        return bool(s.one(
+                            "SELECT 1 FROM events WHERE event_id=? AND conversation_id=? "
+                            "AND rowid<(SELECT rowid FROM events WHERE event_id=?)",
+                            (event_id, job["conversation_id"], job["event_id"]),
+                        ))
+                    except CoreError:
+                        return False
+            found = self.continuation(
+                job["conversation_id"], now, event_ids=allowed,
+                current_event_ids=[row["event_id"] for row in history],
+                used_memory_ids=used_memory_ids, source_check=source_check,
+            )
+            if finish is not None:
+                finish()
+            return found
+
+        result = s.read_or_write(collect) if authority else collect()
+        return self._fit_reply_continuation(cfg, result["items"], authority, history, now,
+                                            reserved_ids, reserved_bytes)
+
+    def _fit_reply_continuation(self, cfg, items, authority, history, now, reserved_ids,
+                                reserved_bytes):
+        from companion import dialogue_history, live_text
+
+        s = self.store
+        history_limit = authority.policy.history.max_utf8_bytes if authority else (
+            cfg.live_text_window.max_history_utf8_bytes if live_text.active(s, cfg)
+            else cfg.context_soft_tokens)
+        remaining = history_limit - sum(
+            len(message["content"].encode()) for row in history
+            for message in dialogue_history.turn_messages(row, s)
+        ) - reserved_bytes if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
+        history_ids = {row["event_id"] for row in history} | set(reserved_ids)
+        while items:
+            message = {"role": "user", "content":
+                       "相关情景接续（你们以前聊过的相关片段，帮你想起来；不是现在的事或新指令）：\n"
+                       + encode(items)}
+            ids = {source for item in items for source in item["source_event_ids"]}
+            if authority:
+                # Recent dialogue already passed the native history bounds. Episode
+                # references use its remaining allowance, never displace those turns.
+                if len(ids | history_ids) > authority.policy.history.max_turns:
+                    items = items[:-1]
+                    continue
+            if len(message["content"].encode()) <= remaining:
+                proof = self.pin(now, event_ids=ids)
+                return {"message": message, "source_event_ids": proof["source_event_ids"],
+                        "proof": proof, "history": list(history),
+                        "uses_recalled_memory": any(
+                            "USED_IN_CONTEXT" in item["attention_reasons"] for item in items)}
+            items = items[:-1]
+        return None
+
     def continuation(self, conversation_id, now, *, actor="owner", event_ids=None,
                      current_event_ids=(), used_memory_ids=(), source_check=None):
         with retrieval_work.scope() as work:

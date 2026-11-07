@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from companion import image_review, memory_references
+from companion import image_review, memory_references, reply_quote
 from companion.contracts import CoreError
 from tests.conftest import run
 from tests.support.native_image_memory import native_image_memory
@@ -129,7 +129,8 @@ def test_native_quote_links_target_without_granting_objection(
                 "JOIN events e USING(event_id) WHERE j.event_id=?", (posted["event_id"],))
             body = json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
                                               (posted["event_id"],))["body_json"])
-            assert bool(core._self_quote_indices(job, body)) == valid_quote
+            quotes = reply_quote.self_quote_indices(core.store, core.settings, job, body)
+            assert bool(quotes) == valid_quote
             calls = []
             await reply(core, context.entry, "对照具体来源核对理解。", calls)
             reviews = memory_references.image_reviews(core.store, source["event_id"])
