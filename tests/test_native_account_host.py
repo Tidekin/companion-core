@@ -20,8 +20,8 @@ from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
 from tests.support.onebot_events import config
 from tests.support.owner_authority import activate
-from tests.test_social_autonomy import background, queue
-from tests.test_social_owner_authority import authorize, close_provider_clients, stop  # noqa: F401
+from tests.support.social_autonomy import background, queue
+from tests.support.social_owner_authority import authorize, close_provider_clients, stop  # noqa: F401
 
 
 def configure_host(core, tmp_path, policy):

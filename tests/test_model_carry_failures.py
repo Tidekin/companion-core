@@ -157,7 +157,7 @@ def test_fsync_before_projection_failure_requires_exact_controlled_recovery(
 
 
 def test_enrolled_cumulative_or_projection_is_an_explicit_blocker(core, tmp_path):
-    from tests.test_cumulative_budget import enable
+    from tests.support.cumulative_budget import enable
 
     enable(core, tmp_path)
     original = core.settings.paid_model
@@ -205,7 +205,7 @@ def test_carry_journal_preserves_hashes_instead_of_private_policy(core, tmp_path
 
 
 def test_legacy_defaults_do_not_change_frozen_approval_bytes(core, tmp_path):
-    from tests.test_owner_authority import prepare
+    from tests.support.owner_authority_setup import prepare
 
     policy = prepare(core, tmp_path)
     assert "concurrency_basis" not in paid_budget.snapshot(core.settings)

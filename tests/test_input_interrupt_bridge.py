@@ -10,11 +10,7 @@ from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, until, worker
-
-
-def model_response(text):
-    return httpx.Response(200, json={"choices": [{"message": {"content": text}}],
-                                    "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+from tests.support.input_interrupt_bridge import model_response
 
 
 def test_slow_reply_does_not_block_accepting_new_input_with_independent_api_worker(

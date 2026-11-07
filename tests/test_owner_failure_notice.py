@@ -9,8 +9,8 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.transport import enqueue
 from tests.owner_model_fixtures import authorized_job
+from tests.support.carried_capabilities import reader_carry
 from tests.support.failure_notice import assert_failure_notice
-from tests.test_carried_capabilities import reader_carry
 
 
 def failed(core, tmp_path, code):

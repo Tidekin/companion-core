@@ -16,10 +16,10 @@ from companion.social_autonomy import SocialAutonomy
 from companion.store import Store, after
 from companion.transport import begin_send, lease_deliveries
 from tests.conftest import run
+from tests.support.owner_console import ORIGIN, login
+from tests.support.owner_console import client as client
+from tests.support.social_owner_authority import close_provider_clients, stop  # noqa: F401
 from tests.test_life_expression_consumption import prepared
-from tests.test_owner_console import ORIGIN, login
-from tests.test_owner_console import client as client
-from tests.test_social_owner_authority import close_provider_clients, stop  # noqa: F401
 
 
 def setup(core, tmp_path, *, private=False):

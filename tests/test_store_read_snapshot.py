@@ -11,9 +11,9 @@ import pytest
 from companion import paid_budget, runtime_config
 from companion.autonomous_selector import native_selector
 from companion.store import Store
+from tests.support.api_store import PREFIX, headers
 from tests.support.core_http import real_core_http
-from tests.test_api_store import PREFIX, headers
-from tests.test_owner_input import captured
+from tests.support.owner_input import captured
 
 
 @pytest.fixture

@@ -8,8 +8,8 @@ from source_reader.bili_audio import download_song, representation
 from source_reader.bili_media import media_locator
 from source_reader.network import PublicHTTP, ReadFailure
 from tests.conftest import run
-from tests.test_bili_media import BVID, NAV, NOW, VIEW, allowed, pool
-from tests.test_source_reader import response
+from tests.support.bili_media import BVID, NAV, NOW, VIEW, allowed, pool
+from tests.support.source_reader import response
 
 CDN = "https://song.mcdn.bilivideo.cn/audio.m4s?token=transient"
 PLAY = {"code": 0, "data": {"timelength": 3000, "dash": {"audio": [{

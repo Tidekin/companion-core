@@ -4,8 +4,8 @@ import json
 from datetime import datetime
 
 from tests.conftest import run
+from tests.support.reply_revision import accept
 from tests.test_diary import DAY
-from tests.test_reply_revision import accept
 
 
 def test_consolidation_drains_more_than_twenty_superseded_owner_inputs(core):

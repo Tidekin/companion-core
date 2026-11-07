@@ -13,8 +13,8 @@ from companion.core import Core
 from companion.reply_segments import SegmentedReplyConfig
 from tests.conftest import run
 from tests.native_continuous_support import answer, frame, host
+from tests.support.cumulative_budget import policy
 from tests.support.paid_model import approved_live
-from tests.test_cumulative_budget import policy
 
 
 @asynccontextmanager

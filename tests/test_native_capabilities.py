@@ -9,8 +9,8 @@ from companion.file_evidence import PrivateFilesConfig
 from companion.image_input import ImageInputPolicy
 from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy
 from tests.support.owner_authority import activate
+from tests.support.owner_authority_setup import prepare
 from tests.support.voice_jobs import voice_config
-from tests.test_owner_authority import prepare
 from tests.test_runtime_capabilities import rows
 
 

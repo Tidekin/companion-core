@@ -18,15 +18,7 @@ from companion.owner_authority_protocol import (
     OwnerRuntimeConfig,
 )
 from tests.support.owner_authority import activate
-from tests.support.paid_model import approved_live
-
-
-def prepare(core, tmp_path, *, enabled=True):
-    approved_live(core, tmp_path)
-    core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED" if enabled else "OFF")
-    return OwnerGrantPolicy(owner_qq_id=core.settings.owner_qq_id, purposes=["evaluation"],
-                            authorization_sha256="d" * 64,
-                            paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)))
+from tests.support.owner_authority_setup import prepare
 
 
 def test_default_off_and_no_implicit_grant(core, tmp_path):

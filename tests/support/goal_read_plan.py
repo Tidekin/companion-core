@@ -18,10 +18,10 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
 from tests.support.core_http import real_core_http
 from tests.support.owner_memory import environment
+from tests.support.source_reader import META, PLAYER, SUBTITLE, RecordingStream, Responses
+from tests.support.source_reader import response as network_response
 from tests.test_heybox_reader import mock_pool
 from tests.test_rem_native import response
-from tests.test_source_reader import META, PLAYER, SUBTITLE, RecordingStream, Responses
-from tests.test_source_reader import response as network_response
 
 TOKEN = "synthetic-goal-reader-token-" * 3
 URLS = ["https://www.bilibili.com/video/BV1xx411c7m" + suffix for suffix in "DEF"]

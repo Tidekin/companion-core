@@ -3,9 +3,6 @@
 import asyncio
 import hashlib
 import json
-import pickle
-import sys
-from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -19,10 +16,10 @@ from companion_onebot_bridge.rich_input import input_digest
 from companion_onebot_bridge.spool import encode
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, until
-from tests.sdk_reader_fixture import answer
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_images import image_segment
-from tests.test_prepare_owner_input import native_spool, window
+from tests.support.onebot_images import image_segment
+from tests.support.owner_image_recovery import run_worker
+from tests.support.prepare_owner_input import native_spool, window
 
 UNAVAILABLE = "这张图片目前读不到，请重新发图或用文字描述一下。"
 BAD_IMAGES = [
@@ -92,24 +89,6 @@ def test_native_prepare_preserves_text_and_supported_sibling_sources(core, tmp_p
             finally:
                 spool.close()
     run(scenario())
-
-
-async def run_worker(core, tmp_path, number, response):
-    job = core.store.one("SELECT * FROM jobs ORDER BY rowid DESC LIMIT 1")
-    config_path, output = tmp_path / f"recovery-{number}.pickle", tmp_path / f"wire-{number}.json"
-    config_path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
-                                         [answer(response)], "SUCCEEDED", str(output))))
-    child = await asyncio.create_subprocess_exec(sys.executable, "-B",
-        str(Path(__file__).with_name("reader_sdk_worker.py")), str(config_path),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    try:
-        logs, _ = await asyncio.wait_for(child.communicate(), 45)
-        assert child.returncode == 0, logs.decode(errors="replace")
-    finally:
-        if child.returncode is None:
-            child.kill()
-            await child.wait()
-    return json.loads(output.read_text(encoding="utf-8"))
 
 
 def test_owner_ws_survives_unknown_images_and_replay_with_independent_worker(core, tmp_path):

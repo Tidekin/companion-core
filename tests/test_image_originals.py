@@ -21,7 +21,7 @@ from companion.image_input import ImageInputPolicy, messages_and_estimate, text_
 from companion.privacy import advance_epoch
 from companion.store import Store, after, encode, uid
 from tests.conftest import ingest
-from tests.test_live_image_input import png
+from tests.support.live_image_input import png
 from tests.test_paid_image_budget import image_messages
 
 

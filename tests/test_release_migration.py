@@ -21,7 +21,7 @@ from companion.privacy import ErasureLedger
 from companion.store import Store, encode, migrate
 from companion.transport import digest
 from tests.conftest import Clock
-from tests.test_test_fixtures import historical_database
+from tests.support.historical_schema import historical_database
 
 REVISION_CHAIN = (
     "0001_m0",

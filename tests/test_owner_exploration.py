@@ -15,8 +15,8 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+from tests.support.source_reader import META, Responses, response
 from tests.test_reading_followup import READER_AUTH, admit, window
-from tests.test_source_reader import META, Responses, response
 
 
 @pytest.mark.parametrize("text", [

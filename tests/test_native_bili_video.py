@@ -12,12 +12,12 @@ from companion import owner_authority
 from companion.model import ModelClient
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
-from tests import test_bili_video_entrypoint as reader_fixture
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call
-from tests.test_bili_video_entrypoint import URL, reader_files, reader_once, upstream
+from tests.support import bili_video_entrypoint as reader_fixture
+from tests.support.bili_video_entrypoint import URL, reader_files, reader_once, upstream
+from tests.support.prepare_owner_input import window
 from tests.test_native_image_pipeline import admit_image
-from tests.test_prepare_owner_input import window
 
 
 async def sdk_step(core, tmp_path, job_id, replies, expected, name):

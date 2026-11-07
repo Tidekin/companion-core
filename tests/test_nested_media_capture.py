@@ -13,8 +13,8 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.reference_reader import captured_media, enrich, restore
 from tests.conftest import run
 from tests.support.onebot_events import config, raw_event
-from tests.test_onebot_images import image_segment
-from tests.test_onebot_reference_reader import Protocol, forward, node, reply, text
+from tests.support.onebot_images import image_segment
+from tests.support.onebot_reference_reader import Protocol, forward, node, reply, text
 
 
 def captured():

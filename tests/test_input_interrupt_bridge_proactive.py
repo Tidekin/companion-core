@@ -15,9 +15,9 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
+from tests.support.input_interrupt_bridge import model_response
 from tests.support.owner_authority import activate
-from tests.test_input_interrupt_bridge import model_response
-from tests.test_private_companion import companion_options
+from tests.support.private_companion import companion_options
 
 
 def test_queued_owner_input_cancels_proactive_before_dispatch_without_unknown(core, tmp_path):

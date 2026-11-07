@@ -12,9 +12,9 @@ from companion.voice_protocol import VoiceProtocolError
 from companion_voice_node.worker import VoiceNodeWorker
 from source_reader.network import PublicHTTP
 from tests.conftest import run
+from tests.support.bili_media import pool
+from tests.support.source_reader import RecordingStream, response
 from tests.test_bili_audio import BVID, NAV, PLAY, VIEW
-from tests.test_bili_media import pool
-from tests.test_source_reader import RecordingStream, response
 from tests.test_voice_node_worker import node as node  # noqa: F401
 
 

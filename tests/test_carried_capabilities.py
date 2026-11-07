@@ -8,34 +8,21 @@ import pytest
 
 from companion import budget, owner_authority
 from companion.capabilities import open_unknown, public_source_readiness, snapshot
-from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.retrieval import SemanticIndex
 from companion.store import encode
 from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
-from tests.model_carry_support import MESSAGES, migrated
+from tests.model_carry_support import MESSAGES
 from tests.owner_model_fixtures import authorized_job
 from tests.sdk_reader_fixture import answer, call
+from tests.support.bili_video_entrypoint import URL, reader_files, reader_once, upstream
+from tests.support.carried_capabilities import reader_carry
 from tests.support.core_http import real_core_http
-from tests.support.exploration import configure
-from tests.support.paid_model import approved_live
-from tests.test_bili_video_entrypoint import TOKEN, URL, reader_files, reader_once, upstream
 from tests.test_model_carry_lifecycle import current_unknown
 from tests.test_native_bili_video import sdk_step
 from tests.test_reading_followup import admit
-
-
-def reader_carry(core, tmp_path, **limits):
-    configure(core)
-    core.settings.content_enabled = True
-    core.settings.rich_input_scope = "references_v1"
-    core.settings.observation_adapters["bili"] = ObservationAdapterConfig(
-        source="bilibili", token=TOKEN, reader_max_requests=6)
-    approved_live(core, tmp_path, concurrency=1, **limits)
-    authorized_job(core, purposes=("chat", "content", "exploration"))
-    return migrated(core, tmp_path, **limits)
 
 
 @pytest.mark.parametrize("later_unknown", [False, True])

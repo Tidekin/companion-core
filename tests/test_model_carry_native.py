@@ -26,9 +26,9 @@ from tests.conftest import run
 from tests.model_carry_support import executors
 from tests.support.onebot import provider
 from tests.support.onebot_events import raw_event
+from tests.support.prepare_owner_input import window
+from tests.support.video_understanding import video_policy
 from tests.test_native_video import animation
-from tests.test_prepare_owner_input import window
-from tests.test_video_understanding import video_policy
 
 
 async def child(tmp_path, name, core, **options):
@@ -81,7 +81,7 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
     meme_enabled,
     evaluation_revision,
 ):
-    import tests.test_prepare_owner_input as preparation
+    import tests.support.prepare_owner_input as preparation
 
     original_prepare = preparation.prepare
 

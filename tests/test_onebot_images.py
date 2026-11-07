@@ -9,8 +9,7 @@ import pytest
 from companion_onebot_bridge import images
 from companion_onebot_bridge.window import digest
 from tests.conftest import run
-
-URL = "https://multimedia.nt.qq.com.cn/download?appid=1407&rkey=synthetic-private-reference"
+from tests.support.onebot_images import URL, image_segment
 
 
 def test_qq_cdn_rejects_one_byte_over_32_mib():
@@ -102,13 +101,6 @@ def test_real_httpcore_trace_does_not_log_signed_redirect_header(caplog):
         run(scenario())
     assert "public-trace-still-visible" in caplog.text
     assert URL not in caplog.text and "synthetic-private-reference" not in caplog.text
-
-
-def image_segment(url=URL, *, subtype=0):
-    return {
-        "type": "image",
-        "data": {"url": url, "file": "synthetic-file", "summary": "", "sub_type": subtype},
-    }
 
 
 @pytest.mark.parametrize("subtype", [0, 1, 7, 11])

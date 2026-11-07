@@ -57,8 +57,8 @@ def grant_native(core, purposes, *, capabilities=()):
 
 
 def private_images(core, tmp_path):
-    from tests.test_onebot_capture import pinned_plan
-    from tests.test_video_understanding import scope_options
+    from tests.support.onebot_capture import pinned_plan
+    from tests.support.video_understanding import scope_options
 
     pinned_plan(core, tmp_path, 3001, live=True, approved=True,
                 rich_input_scope="references_v1",
@@ -294,8 +294,8 @@ def test_native_bili_tool_requires_content_even_when_given_as_exposed(core, tmp_
 
 
 def test_retired_fact_window_does_not_claim_native_memory_admission(core, tmp_path):
+    from tests.support.onebot_capture import pinned_plan
     from tests.test_live_memory_recall import scope_facts
-    from tests.test_onebot_capture import pinned_plan
 
     _, _, pins = scope_facts(core)
     pinned_plan(core, tmp_path, 3001, live=True, approved=True, scope_options={
@@ -640,10 +640,10 @@ def native_capabilities(core, tmp_path):
     from companion.poke_protocol import PokePolicy
     from companion.social_autonomy import SocialAutonomy
     from companion.social_autonomy_protocol import ProfileBaseline, SocialAutonomyConfig
+    from tests.support.onebot_capture import pinned_plan
+    from tests.support.social_autonomy import avatar
     from tests.support.voice_jobs import voice_config
     from tests.test_bili_video import paid_options
-    from tests.test_onebot_capture import pinned_plan
-    from tests.test_social_autonomy import avatar
 
     options = paid_options(core)
     files = PrivateFilesConfig(enabled=True, parser_image="sha256:" + "d" * 64,
@@ -843,7 +843,7 @@ def test_unknown_model_liability_pauses_native_capabilities_without_settling_it(
 
 @pytest.mark.usefixtures("budget_projection")
 def test_cumulative_pause_is_read_from_original_journal_without_repair(core, tmp_path):
-    from tests.test_delivery_reconciliation import native
+    from tests.support.delivery_reconciliation import native
 
     native(core, tmp_path)
     before = list(core.store.db.iterdump())

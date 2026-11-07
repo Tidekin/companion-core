@@ -24,7 +24,7 @@ from tests.test_model_renewal_native import life_case, source_and_renewal
 
 def test_discovered_link_and_revision_share_native_terminal_contract(core, tmp_path):
     from companion import reply_revision
-    from tests.test_carried_capabilities import reader_carry
+    from tests.support.carried_capabilities import reader_carry
     from tests.test_reading_followup import URL, admit
 
     case = reader_carry(core, tmp_path)

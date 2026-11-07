@@ -16,8 +16,8 @@ from companion.turn_taking import SILENCE_RULES, TurnTakingConfig
 from tests.conftest import event, ingest, run
 from tests.notice_owner_fixtures import run_notice
 from tests.support.core_http import real_core_http
+from tests.support.social_owner_authority import authorize
 from tests.test_life_worker_integration import process_worker
-from tests.test_social_owner_authority import authorize
 
 
 class Model:

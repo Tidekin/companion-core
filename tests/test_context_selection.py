@@ -12,10 +12,10 @@ from companion.goals import GoalProposal, GoalScope
 from companion.store import encode
 from companion.token_measurement import measure_request
 from tests.conftest import ingest
+from tests.support.owner_runtime import chat
 from tests.test_context_planner import initial, request_context
 from tests.test_dialogue_context import current_job, sent_history
 from tests.test_mood import feedback
-from tests.test_owner_runtime import chat
 from tests.test_subjective_cognition import ASTRONOMY, BAKING, judge, prepare, read
 
 

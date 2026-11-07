@@ -16,29 +16,10 @@ from pydantic import SecretStr
 from companion import api, api_store, owner_authority, owner_input
 from companion.privacy import epoch
 from companion.store import Store
+from tests.support.api_store import PREFIX, child_done, event_wait, headers
 from tests.support.core_http import real_core_http
 from tests.support.owner_authority import activate
-from tests.test_owner_input import captured, inbound
-
-PREFIX = "/internal/v1"
-
-
-def headers(core):
-    return {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
-
-
-async def event_wait(event):
-    assert await asyncio.to_thread(event.wait, 3), "worker did not reach bounded test gate"
-
-
-async def child_done(process):
-    try:
-        output, error = await asyncio.wait_for(process.communicate(), 40)
-        assert process.returncode == 0, (output + error).decode(errors="replace")
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
+from tests.support.owner_input import captured, inbound
 
 
 @pytest.mark.parametrize("action", ["inputs/approve", "stop"])

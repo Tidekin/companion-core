@@ -14,8 +14,8 @@ from companion import owner_authority
 from tests.conftest import run
 from tests.support.core_http import real_core_http
 from tests.support.goal_read_plan import TOKEN, URLS
+from tests.support.social_owner_authority import close_provider_clients as close_provider_clients
 from tests.test_life_decision_context import prepared
-from tests.test_social_owner_authority import close_provider_clients as close_provider_clients
 
 
 async def life_child(core, tmp_path, phase, number):

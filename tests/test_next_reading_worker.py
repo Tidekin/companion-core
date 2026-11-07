@@ -16,10 +16,18 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import ReadFailure
 from source_reader.web import WebHTTP
 from tests.conftest import run
+from tests.support.source_reader import (
+    ITEM,
+    META,
+    NOW,
+    PLAYER,
+    RecordingStream,
+    Responses,
+    response,
+)
 from tests.test_heybox_reader import mock_pool
 from tests.test_next_reading import HTML, WEB, web_response
 from tests.test_plugin_readonly import SECRET, grant
-from tests.test_source_reader import ITEM, META, NOW, PLAYER, RecordingStream, Responses, response
 
 NOW_DT = datetime.fromisoformat(NOW)
 TOKEN = "isolated-reader-core-token-only"

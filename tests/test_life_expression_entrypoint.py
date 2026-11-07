@@ -13,8 +13,8 @@ from pydantic import SecretStr
 from companion.reply_segments import SegmentedReplyConfig
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.social_owner_authority import stop
 from tests.test_life_expression_consumption import prepared, request
-from tests.test_social_owner_authority import stop
 
 
 @pytest.fixture(autouse=True)

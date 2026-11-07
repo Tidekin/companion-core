@@ -23,10 +23,10 @@ from companion_onebot_bridge import app, metrics, pending_media
 from companion_onebot_bridge.onebot_client import bounded_post
 from tests.conftest import run
 from tests.native_continuous_support import host, until
+from tests.support.live_image_input import options
 from tests.support.onebot_events import raw_event
-from tests.test_live_image_input import options
-from tests.test_onebot_images import image_segment
-from tests.test_owner_image_recovery import run_worker
+from tests.support.onebot_images import image_segment
+from tests.support.owner_image_recovery import run_worker
 
 
 def picture(color):

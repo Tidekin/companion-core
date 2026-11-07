@@ -10,8 +10,8 @@ from companion import owner_authority
 from companion.account_original_proof import validate_original_account_send_check
 from companion.api import create_app
 from companion.social_autonomy import erase_social_autonomy
-from tests.test_account_owner_transport import prepared
-from tests.test_social_owner_authority import (
+from tests.support.account_owner_transport import prepared
+from tests.support.social_owner_authority import (
     close_provider_clients,  # noqa: F401 - shared native planner fixture
     stop,
 )

@@ -360,7 +360,7 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
     freeze(c, monkeypatch)
     before = c.core.store.rows("SELECT * FROM model_usage")
     legacy = tmp_path / "pre0048.sqlite3"
-    from tests.test_test_fixtures import historical_database
+    from tests.support.historical_schema import historical_database
 
     historical_database(c.core.store, legacy, "0047_meme_assets")
     archive, restored, key = (
@@ -519,7 +519,7 @@ def test_normal_downgrade_discards_only_projection_and_upgrade_rebuilds_empty(
     from companion.meme_core import MemeCaptionService
     from companion.meme_retrieval import MemeRetrieval
     from companion.store import migrate
-    from tests.test_test_fixtures import historical_database
+    from tests.support.historical_schema import historical_database
 
     c = runtime_case
     saved, _ = freeze(c, monkeypatch)

@@ -18,14 +18,14 @@ from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.native_continuous_support import host
 from tests.native_owner_recovery_support import CONTROL_TOKEN, stop_host
-from tests.test_onebot_account_actions import catalog, fixture, model_response, plan_action
-from tests.test_onebot_owner_resolution import (
+from tests.support.onebot_account_actions import catalog, fixture, model_response, plan_action
+from tests.support.onebot_owner_resolution import (
     assert_custody_counts,
     original_rows,
     reopen,
     successor,
 )
-from tests.test_onebot_pokes import silent
+from tests.support.onebot_pokes import silent
 
 
 @pytest.mark.parametrize("kind,path", [

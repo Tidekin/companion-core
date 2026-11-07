@@ -11,9 +11,9 @@ from companion.owner_authority_protocol import AuthorityStop
 from companion.store import after
 from tests.conftest import run
 from tests.support.owner_authority import activate
+from tests.support.owner_authority_setup import prepare
+from tests.support.owner_input import captured, inbound
 from tests.test_autonomous_selector import drain
-from tests.test_owner_authority import prepare
-from tests.test_owner_input import captured, inbound
 
 
 def test_selector_stays_silent_without_owner_grant_in_live_mode(core):

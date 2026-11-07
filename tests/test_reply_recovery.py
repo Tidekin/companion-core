@@ -16,7 +16,7 @@ from companion_onebot_bridge.owner_send import OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
-from tests.test_bridge_owner_resolution import child
+from tests.support.bridge_owner_resolution import child
 from tests.test_evaluation_process import process_config
 
 PARTS = ["synthetic first\n\n", "synthetic second\n\n", "synthetic third\n\n", "synthetic last"]

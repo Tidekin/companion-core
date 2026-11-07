@@ -28,8 +28,8 @@ from companion_onebot_bridge.meme_library import MemeLibrary
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.historical_schema import historical_database
 from tests.test_meme_core import body, caption_environment, worker
-from tests.test_test_fixtures import historical_database
 
 ROOT = Path(__file__).resolve().parents[1]
 

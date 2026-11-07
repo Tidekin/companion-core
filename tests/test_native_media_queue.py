@@ -17,8 +17,8 @@ from companion_onebot_bridge.capture import prepare_owner_input
 from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
 from tests.support.onebot_events import raw_event
+from tests.support.prepare_owner_input import native_spool, window
 from tests.test_native_image_pipeline import pixels
-from tests.test_prepare_owner_input import native_spool, window
 
 
 async def captured(core, client, runtime, *, number=42, message=None):

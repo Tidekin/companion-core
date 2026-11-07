@@ -8,7 +8,7 @@ import pytest
 from companion import evaluation, paid_budget
 from companion.contracts import CoreError
 from scripts import evaluate_image_understanding as experiment
-from tests.test_evaluation import authorize, prepare, response, result, work
+from tests.support.evaluation import authorize, prepare, response, result, work
 
 
 def prepared(core, tmp_path):

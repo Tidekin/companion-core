@@ -44,12 +44,12 @@ from companion.source_grants import SourceGrantSnapshot
 from companion.store import Store, encode
 from companion.video_media_contract import AssetManifest, MediaAsset
 from tests.conftest import run
+from tests.support.historical_schema import historical_database
 from tests.support.native_consumer import admit, select_tools, source_window
 from tests.support.onebot_events import raw_event
-from tests.test_reading_protocol import envelope
-from tests.test_reading_service import queued
-from tests.test_test_fixtures import historical_database
-from tests.test_video_understanding import scope_options
+from tests.support.reading_protocol import envelope
+from tests.support.reading_service import queued
+from tests.support.video_understanding import scope_options
 
 
 def metadata(core, *, deadline=None, duration=60, enabled=True, grant=None):

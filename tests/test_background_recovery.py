@@ -14,8 +14,8 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
 from source_reader.worker import tick
 from tests.conftest import ingest, run
+from tests.support.source_reader import ITEM, META, Responses, read, response
 from tests.test_consolidation import enable_nightly
-from tests.test_source_reader import ITEM, META, Responses, read, response
 
 
 def test_bilibili_discovery_reads_the_bounded_public_feed_once():

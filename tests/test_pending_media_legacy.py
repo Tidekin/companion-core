@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from companion_onebot_bridge import images, pending_media, voice_runtime
 from companion_onebot_bridge.spool import encode
 from companion_onebot_bridge.window import digest
-from tests.test_onebot_images import image_segment
+from tests.support.onebot_images import image_segment
 from tests.test_qq_face_images import face
 
 

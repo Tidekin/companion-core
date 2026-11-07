@@ -22,9 +22,9 @@ from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
 from tests.support.native_consumer_entry import environment
 from tests.support.paid_model import approved_live
+from tests.support.video_understanding import video_policy
 from tests.test_paid_image_budget import image_approval, image_messages
 from tests.test_token_measurement import MESSAGES, configure
-from tests.test_video_understanding import video_policy
 
 
 class LegacyVideo(VideoInputPolicy):

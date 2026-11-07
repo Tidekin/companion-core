@@ -8,9 +8,8 @@ from cryptography.fernet import Fernet
 import companion.affect as affect
 from companion import budget
 from companion.backup import backup, restore
-from companion.contracts import Candidate, CoreError, InboundEvent
+from companion.contracts import Candidate, CoreError
 from companion.input_recall import (
-    canonical_source,
     is_recalled,
     marker_key,
     recall_input,
@@ -20,28 +19,8 @@ from companion.memory import Memory
 from companion.privacy import epoch
 from companion.store import Store, after, encode
 from companion.transport import enqueue
-from tests.support.onebot_events import config, normalized, raw_event
-
-
-def source(number=42, **changes):
-    return canonical_source(
-        **{
-            "owner_qq_id": "10001",
-            "bot_qq_id": "10002",
-            "protocol_epoch": config().protocol_epoch,
-            "provider_message_id": str(number),
-            **changes,
-        }
-    )
-
-
-def incoming(core, number=42, text="我喜欢绿茶", *, event_id=None):
-    value = normalized(raw_event(number, text))
-    if event_id is not None:
-        value["event_id"] = event_id
-    event = InboundEvent.model_validate(value)
-    core.ingest(event, event.event_id)
-    return event.event_id
+from tests.support.input_recall import incoming, recall, source
+from tests.support.onebot_events import normalized
 
 
 def remember(core, event_id, text="我喜欢绿茶"):
@@ -59,19 +38,6 @@ def remember(core, event_id, text="我喜欢绿茶"):
             core.clock(),
             confirmed=True,
         )
-
-
-def recall(core, number=42, *, verified=True):
-    return recall_input(
-        core.store,
-        core.ledger,
-        source(number),
-        core.clock(),
-        retention_cutoff=after(core.clock(), -86400 * 30),
-        verified=verified,
-        occurred_at=core.clock(),
-        event_id=normalized(raw_event(number))["event_id"] if verified else None,
-    )
 
 
 def test_before_input_marker_is_idempotent_scoped_and_replayed_from_pre_notice_backup(

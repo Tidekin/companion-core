@@ -1,8 +1,6 @@
 """Offline timing contracts through the original bounded HTTP request boundary."""
 
 import asyncio
-import json
-import math
 
 import httpx
 import pytest
@@ -10,8 +8,8 @@ import pytest
 from companion_onebot_bridge import metrics
 from companion_onebot_bridge.onebot_client import bounded_post
 from tests.conftest import run
+from tests.support.onebot_rpc_metrics import CANARY, records
 
-CANARY = "private-canary-token-and-message"
 RPCS = [
     ("/internal/v1/owner-authority/check", "t_core_owner_check"),
     ("/internal/v1/owner-authority/inputs/approve", "t_core_input_approve"),
@@ -21,21 +19,6 @@ RPCS = [
     ("/internal/v1/owner-authority/send-check", "t_core_send_check"),
     ("/internal/v1/deliveries/msg_" + "b" * 32 + "/result", "t_core_delivery_result"),
 ]
-
-
-def records(capsys):
-    output = capsys.readouterr().out
-    assert not any(value in output for value in (
-        CANARY, "private.invalid", "Authorization", "msg_", "/internal/",
-    ))
-    result = [json.loads(line) for line in output.splitlines()]
-    for row in result:
-        assert set(row) == {"schema_version", "evidence_type", "stage", "monotonic_ns",
-                            "elapsed_ms", "error_class"}
-        assert row["schema_version"] == 1 and row["evidence_type"] == "OFFLINE_FIXTURE"
-        assert type(row["monotonic_ns"]) is int and row["monotonic_ns"] > 0
-        assert math.isfinite(row["elapsed_ms"]) and row["elapsed_ms"] >= 0
-    return result
 
 
 def test_opt_in_rpc_spans_preserve_request_order_payloads_and_results(monkeypatch, capsys):

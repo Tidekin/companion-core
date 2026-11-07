@@ -108,7 +108,7 @@ def test_control_reset_preserves_unknown_and_owner_authority_custody(core, tmp_p
 
     from companion import evaluation, paid_budget
     from companion.api import create_app
-    from tests.test_evaluation import authorize, prepare, work
+    from tests.support.evaluation import authorize, prepare, work
 
     manifest = prepare(core, tmp_path)
     evaluation.submit(core, authorize(core, manifest))

@@ -12,9 +12,9 @@ from companion.social_autonomy_protocol import ProfileBaseline
 from companion.store import Store, after, encode
 from tests.conftest import run
 from tests.social_profile_support import confirmed_profile_material
-from tests.test_owner_console import ORIGIN, PASSWORD, login
-from tests.test_owner_console import client as client  # noqa: F401 -- pytest fixture
-from tests.test_social_autonomy import background, dispatch, queue
+from tests.support.owner_console import ORIGIN, PASSWORD, login
+from tests.support.owner_console import client as client  # noqa: F401 -- pytest fixture
+from tests.support.social_autonomy import background, dispatch, queue
 
 
 @pytest.mark.parametrize("decision", ["confirm", "correct"])

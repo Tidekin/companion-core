@@ -11,10 +11,10 @@ from companion.reading_protocol import ReadObservation
 from companion.store import after, encode
 from tests.conftest import ingest, run
 from tests.support.exploration import URL
-from tests.test_reading_protocol import envelope
-from tests.test_reading_service import configure
-from tests.test_social_owner_authority import authorize
-from tests.test_social_owner_authority import close_provider_clients as close_provider_clients
+from tests.support.reading_protocol import envelope
+from tests.support.reading_service import configure
+from tests.support.social_owner_authority import authorize
+from tests.support.social_owner_authority import close_provider_clients as close_provider_clients
 
 
 def prepared(core, tmp_path, *, affect=True, text="明天可以看看这篇天文介绍",

@@ -280,7 +280,7 @@ def test_foreign_conversation_sources_never_supply_activity_or_attention(core):
 
 
 def test_expired_reader_lease_is_only_a_record_never_presence_or_a_retry(core):
-    from tests.test_reading_service import queued
+    from tests.support.reading_service import queued
 
     _, leased, _ = queued(core)
     core.clock.advance(core.settings.lease_seconds + 1)
@@ -364,7 +364,7 @@ def test_future_read_permission_and_historical_processing_stay_separate(core, bo
 
 @pytest.mark.parametrize("body", ["broken", "{}", '["forged"]', "[[]]"])
 def test_malformed_or_unavailable_reader_result_cannot_leak_an_id(core, body):
-    from tests.test_reading_service import queued
+    from tests.support.reading_service import queued
 
     _, leased, _ = queued(core)
     core.store.execute("UPDATE reading_attempts SET result_event_ids_json=?", (body,))

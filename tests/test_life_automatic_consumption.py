@@ -5,11 +5,11 @@ from pydantic import ValidationError
 
 from companion.life_protocol import LifeShadowApproval
 from tests.support.owner_authority import activate
+from tests.support.social_owner_authority import stop
 from tests.test_life_expression_consumption import (
     close_provider_clients as close_provider_clients,
 )
 from tests.test_life_expression_consumption import prepared
-from tests.test_social_owner_authority import stop
 
 CHANNELS = [
     ("qq.private.proactive", "PRIVATE_MESSAGE_DRAFT", ["proactive"]),

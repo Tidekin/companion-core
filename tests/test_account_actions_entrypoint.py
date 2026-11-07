@@ -15,8 +15,8 @@ from companion.store import encode
 from tests.conftest import ingest, run
 from tests.social_model_transport import next_social_turn
 from tests.support.core_http import real_core_http
-from tests.test_social_autonomy import read_public
-from tests.test_social_owner_authority import authorize
+from tests.support.social_autonomy import read_public
+from tests.support.social_owner_authority import authorize
 
 
 @pytest.mark.parametrize("outcome", ["SUCCEEDED", "REJECTED", "UNKNOWN", "CANCELLED", "ERASED"])

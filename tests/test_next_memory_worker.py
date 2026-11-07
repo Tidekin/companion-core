@@ -21,9 +21,9 @@ from companion.store import encode
 from companion_onebot_bridge import pending_media
 from tests.conftest import run
 from tests.sdk_reader_fixture import worker_for
+from tests.support.live_image_input import png
 from tests.support.native_consumer_entry import environment
-from tests.test_live_image_input import png
-from tests.test_onebot_images import image_segment
+from tests.support.onebot_images import image_segment
 
 
 def provider_response(text):

@@ -26,15 +26,15 @@ from companion_onebot_bridge.window import TestWindow, WindowPlan
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.live_text_window import live_fixture
 from tests.support.native_recall_entry import native_recall, returned
 from tests.support.onebot import provider
+from tests.support.onebot_capture import bootstrap_frames, capture_approval
+from tests.support.onebot_delivery import core_client
 from tests.support.onebot_events import raw_event
-from tests.test_live_text_window import live_fixture
+from tests.support.onebot_window import reply_approval
 from tests.test_memory_commands import fact
 from tests.test_memory_review_output import assert_settled_calls
-from tests.test_onebot_capture import bootstrap_frames, capture_approval
-from tests.test_onebot_delivery import core_client
-from tests.test_onebot_window import reply_approval
 
 
 def scope_facts(core):

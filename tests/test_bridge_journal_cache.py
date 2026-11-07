@@ -11,8 +11,9 @@ from companion_onebot_bridge import journal
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool, encode
+from tests.support.bridge_journal_cache import chain, write
+from tests.support.bridge_owner_runtime import config as config
 from tests.support.onebot_events import raw_event
-from tests.test_bridge_owner_runtime import config as config
 
 
 @pytest.fixture(autouse=True)
@@ -20,21 +21,6 @@ def empty_cache():
     journal._validated_bytes.cache_clear()
     yield
     journal._validated_bytes.cache_clear()
-
-
-def chain(*data):
-    rows, head = [], "0" * 64
-    for value in data:
-        row = {"seq": len(rows) + 1, "previous": head, "at": "2026-10-26T12:00:00+00:00",
-               "kind": "SYNTHETIC", "data": value}
-        rows.append(row)
-        head = journal.digest(row)
-    return ("".join(encode(row) + "\n" for row in rows)).encode("utf-8"), rows, head
-
-
-def write(path, raw):
-    path.write_bytes(raw)
-    path.chmod(0o600)
 
 
 def test_every_read_loads_current_bytes_but_reuses_only_successful_codec_work(

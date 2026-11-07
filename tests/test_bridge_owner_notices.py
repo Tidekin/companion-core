@@ -7,15 +7,10 @@ from companion_onebot_bridge import owner_notices
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool, encode
+from tests.support.bridge_owner_notices import frame
+from tests.support.bridge_owner_runtime import config as config
 from tests.support.onebot_events import raw_event
-from tests.test_bridge_owner_runtime import config as config
 from tests.test_reading_followup import window
-
-
-def frame(config, now):
-    return encode({"post_type": "notice", "notice_type": "friend_recall",
-        "time": int(now.timestamp()), "self_id": int(config.bot_qq_id),
-        "user_id": int(config.owner_qq_id), "message_id": 1})
 
 
 def test_notice_journal_detects_projection_change(config):

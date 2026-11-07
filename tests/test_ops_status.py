@@ -19,7 +19,7 @@ from companion.privacy import ErasureLedger
 from companion.runtime import Runtime
 from companion.store import Store, migrate
 from tests.conftest import ingest, run
-from tests.test_test_fixtures import assert_schema_metadata
+from tests.support.historical_schema import assert_schema_metadata
 
 
 def settings(tmp_path):

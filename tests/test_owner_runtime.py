@@ -13,15 +13,9 @@ from companion.owner_authority_protocol import AuthorityStop, OwnerSendCheck
 from companion.store import after, encode, uid
 from companion.transport import begin_send, enqueue, lease_deliveries
 from tests.conftest import ingest
-from tests.test_evaluation import response, work
-from tests.test_owner_input import captured, inbound
-
-
-def chat(core, tmp_path):
-    capture, _ = captured(core, tmp_path)
-    owner_input.approve(core.store, core.settings, core.clock, capture)
-    result = core.ingest(inbound(core, capture), "runtime-source")
-    return capture, core.claim_job("owner-runtime-test", job_id=result["job_id"])
+from tests.support.evaluation import response, work
+from tests.support.owner_input import captured, inbound
+from tests.support.owner_runtime import chat
 
 
 def test_chat_only_context_never_reads_other_purposes(core, tmp_path, monkeypatch):

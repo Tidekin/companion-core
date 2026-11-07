@@ -9,7 +9,7 @@ from alembic.config import Config
 
 from companion.store import Store, migrate
 from tests.conftest import ingest
-from tests.test_test_fixtures import historical_database
+from tests.support.historical_schema import historical_database
 from tests.test_token_measurement_migration import historical_admission, snapshot
 
 

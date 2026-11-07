@@ -29,10 +29,10 @@ from tests.life_shadow_process import run_native
 from tests.support.core_http import real_core_http
 from tests.support.exploration import URL, configure
 from tests.support.owner_authority import activate
-from tests.test_owner_authority import prepare
+from tests.support.owner_authority_setup import prepare
+from tests.support.reading_protocol import envelope
 from tests.test_reading_followup import admit as admit_owner
 from tests.test_reading_followup import select_read
-from tests.test_reading_protocol import envelope
 
 
 async def native_worker(core, provider, monkeypatch):

@@ -8,8 +8,8 @@ import pytest
 
 from tests.conftest import run
 from tests.historical_input_retirement import historical_input
-from tests.test_onebot_images import image_segment
-from tests.test_video_understanding import scope_options
+from tests.support.onebot_images import image_segment
+from tests.support.video_understanding import scope_options
 
 
 @pytest.mark.parametrize("mutation", [

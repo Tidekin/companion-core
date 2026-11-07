@@ -424,7 +424,7 @@ def test_gateway_custody_blocks_schema_downgrade(harness, tmp_path):
     from alembic.config import Config
 
     from companion.store import Store
-    from tests.test_test_fixtures import historical_database
+    from tests.support.historical_schema import historical_database
 
     path = historical_database(harness.core.store, tmp_path / "gateway.db", "0059_gateway")
     config = Config()
@@ -452,7 +452,7 @@ def test_gateway_unknown_never_uses_private_owner_attempt_closures(harness):
 
 
 def test_gateway_obeys_original_cumulative_account_without_owner_message(harness):
-    from tests.test_cumulative_budget import policy
+    from tests.support.cumulative_budget import policy
 
     core = harness.core
     policy(core, account={"model_attempts": 1})

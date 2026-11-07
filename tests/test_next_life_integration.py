@@ -21,10 +21,10 @@ from tests.conftest import run
 from tests.native_continuous_support import host
 from tests.support.native_context import Capture
 from tests.support.onebot_events import raw_event
+from tests.support.owner_recall_bridge import recall_frame
+from tests.support.private_companion import companion_options
 from tests.test_diary import DAY
 from tests.test_next_life_diary import seed, withdraw
-from tests.test_owner_recall_bridge import recall_frame
-from tests.test_private_companion import companion_options
 
 ADMIN_TOKEN = "synthetic-diary-owner-token-32-characters"
 

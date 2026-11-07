@@ -9,8 +9,8 @@ import pytest
 from companion_onebot_bridge import images
 from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
+from tests.support.prepare_owner_input import native_spool, window
 from tests.test_native_image_pipeline import admit_image, claim, pixels
-from tests.test_prepare_owner_input import native_spool, window
 
 
 def test_native_image_check_contains_the_same_complete_authority_receipt(core, tmp_path):

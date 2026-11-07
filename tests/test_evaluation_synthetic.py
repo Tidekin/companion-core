@@ -9,7 +9,7 @@ from companion import evaluation, paid_budget
 from companion.contracts import CoreError
 from companion.model import model_payload
 from scripts import evaluate_r1_conversation as experiment
-from tests.test_evaluation import authorize, prepare, response, result, work
+from tests.support.evaluation import authorize, prepare, response, result, work
 from tests.test_evaluation_measurement_v2 import rehash
 
 

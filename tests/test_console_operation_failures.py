@@ -11,7 +11,7 @@ from companion.diary import DiaryService
 from companion.goals import GoalEngine
 from companion.memory import Memory
 from companion.store import encode
-from tests import test_owner_console
+from tests.support import owner_console as test_owner_console
 
 
 @pytest.fixture

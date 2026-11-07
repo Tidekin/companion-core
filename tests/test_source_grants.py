@@ -21,6 +21,8 @@ from source_reader.network import ReadFailure
 from source_reader.worker import read_result, tick
 from tests.conftest import run
 from tests.support.exploration import configure
+from tests.support.historical_schema import historical_database
+from tests.support.input_reply_migration import config_for
 from tests.support.source_grants import (
     GRANT_ID,
     URL,
@@ -32,10 +34,8 @@ from tests.support.source_grants import (
     receipt,
 )
 from tests.test_heybox_reader import mock_pool
-from tests.test_input_reply_migration import config_for
 from tests.test_observations import observation
 from tests.test_plugin_readonly import NOW_DT, grant
-from tests.test_test_fixtures import historical_database
 
 
 @pytest.mark.parametrize("stop", ["expiry", "read_revoke"])

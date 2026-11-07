@@ -9,9 +9,9 @@ from companion.owner_authority_protocol import OwnerCapture
 from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.owner_recall import receipt
+from tests.support.prepare_owner_input import window
 from tests.test_native_image_pipeline import admit_image, claim, pixels, upload_headers
-from tests.test_owner_recall import receipt
-from tests.test_prepare_owner_input import window
 
 
 @pytest.mark.parametrize("kind", ["image", "file"])

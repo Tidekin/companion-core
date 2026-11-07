@@ -26,7 +26,7 @@ from companion.store import Store, encode
 from companion.token_measurement import measure_request
 from tests.owner_model_fixtures import authorized_job
 from tests.sdk_reader_fixture import Provider, answer, call
-from tests.test_owner_runtime import chat
+from tests.support.owner_runtime import chat
 from tests.test_paid_image_budget import image_approval, image_messages
 
 

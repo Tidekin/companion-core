@@ -37,10 +37,10 @@ from tests.support.core_http import real_core_http
 from tests.support.exploration import URL
 from tests.support.onebot_events import raw_event
 from tests.support.owner_authority import activate
-from tests.test_owner_authority import prepare
-from tests.test_reading_protocol import envelope
-from tests.test_reading_service import TOKEN
-from tests.test_source_reader import META, PLAYER, SUBTITLE, Responses, response
+from tests.support.owner_authority_setup import prepare
+from tests.support.reading_protocol import envelope
+from tests.support.reading_service import TOKEN
+from tests.support.source_reader import META, PLAYER, SUBTITLE, Responses, response
 
 SHORT = "https://b23.tv/abc123"
 READER_AUTH = {"Authorization": "Bearer " + TOKEN}

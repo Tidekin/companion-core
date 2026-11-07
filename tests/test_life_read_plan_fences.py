@@ -9,9 +9,9 @@ from companion.reading_protocol import ReadObservation
 from companion.store import after, encode
 from tests.conftest import run
 from tests.life_plan_process import choice
+from tests.support.reading_protocol import envelope
+from tests.support.social_owner_authority import close_provider_clients as close_provider_clients
 from tests.test_life_read_plan import prepare
-from tests.test_reading_protocol import envelope
-from tests.test_social_owner_authority import close_provider_clients as close_provider_clients
 
 
 def turn(core, phase, mutate=None):

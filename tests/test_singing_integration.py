@@ -59,8 +59,8 @@ async def queue_song(core, client, config, plan, *, short_link=False):
         from source_reader.bilibili import BilibiliReader
         from source_reader.network import PublicHTTP
         from source_reader.worker_v1 import tick
+        from tests.support.source_reader import META, PLAYER, SUBTITLE, response
         from tests.test_heybox_reader import mock_pool
-        from tests.test_source_reader import META, PLAYER, SUBTITLE, response
 
         reader = Provider(answer(calls=[call("read-song", "read_content", {"url": SHORT})]))
         async with worker_for(core, reader) as worker:

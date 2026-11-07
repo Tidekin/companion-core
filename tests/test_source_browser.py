@@ -6,7 +6,7 @@ import pytest
 from source_reader.browser import BrowserRenderer
 from source_reader.network import ReadFailure
 from tests.conftest import run
-from tests.test_source_reader import URL
+from tests.support.exploration import URL
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("COMPANION_TEST_BROWSER") != "1", reason="Explicit sandboxed Chromium test run"

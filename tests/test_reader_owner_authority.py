@@ -17,8 +17,8 @@ from source_reader.network import PublicHTTP
 from tests.conftest import run
 from tests.support.exploration import URL
 from tests.support.owner_authority import activate
+from tests.support.source_reader import META, PLAYER, SUBTITLE, Responses, response
 from tests.test_reading_followup import READER_AUTH, admit, window
-from tests.test_source_reader import META, PLAYER, SUBTITLE, Responses, response
 
 
 async def goal_read(core, client, config, plan):

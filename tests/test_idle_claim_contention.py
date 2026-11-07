@@ -69,7 +69,7 @@ def test_chat_worker_survives_busy_before_claim_without_repeating_a_job(
     from companion import __main__, shutdown
     from companion import core as core_module
     from tests.conftest import run
-    from tests.test_worker_shutdown import NoNetworkClient
+    from tests.support.worker_shutdown import NoNetworkClient
 
     admitted = core.ingest(event(core), "busy-claim") if boundary != "poke" else None
     original = (core.recover if boundary == "recovery" else core._claim_job

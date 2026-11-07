@@ -18,7 +18,7 @@ from companion.file_evidence import PrivateFilesConfig
 from companion.privacy import advance_epoch
 from companion.store import Store, migrate
 from tests.conftest import run
-from tests.test_input_reply_migration import config_for
+from tests.support.input_reply_migration import config_for
 from tests.test_qq_files import IMAGE, prepared, signed_upload
 from tests.test_release_migration import (
     TIMES,

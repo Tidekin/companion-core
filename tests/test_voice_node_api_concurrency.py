@@ -12,9 +12,9 @@ import pytest
 
 from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import ROUTE_PREFIX
+from tests.support.api_store import child_done, event_wait
 from tests.support.core_http import real_core_http
 from tests.support.voice_jobs import TOKEN, prepared
-from tests.test_api_store import child_done, event_wait
 from tests.test_voice_node_api import claim_body
 
 

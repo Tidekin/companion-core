@@ -14,7 +14,7 @@ from companion.core import Core
 from companion.model import ModelResponse
 from scripts import evaluate_r1_conversation as experiment
 from tests.support.core_http import real_core_http
-from tests.test_evaluation import authorize, prepare, response, result, work
+from tests.support.evaluation import authorize, prepare, response, result, work
 from tests.test_evaluation_process import processes
 
 

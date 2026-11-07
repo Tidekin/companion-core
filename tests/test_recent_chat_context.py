@@ -8,11 +8,11 @@ import pytest
 
 from companion.store import encode
 from tests.conftest import run
+from tests.support.live_image_input import image_parts, options, png, resolve
 from tests.support.native_images import image_host, upload
 from tests.support.onebot_events import raw_event
-from tests.test_live_image_input import image_parts, options, png, resolve
-from tests.test_onebot_images import image_segment
-from tests.test_owner_image_recovery import run_worker
+from tests.support.onebot_images import image_segment
+from tests.support.owner_image_recovery import run_worker
 
 
 @pytest.mark.parametrize("image_count,image_limit", [(3, 3), (5, 5), (8, "unlimited"), (5, 3)])

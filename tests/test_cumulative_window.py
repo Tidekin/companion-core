@@ -18,9 +18,10 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
+from tests.support.cumulative_budget import policy, view
+from tests.support.cumulative_window import bind_policy
+from tests.support.live_text_window import live_clients, live_fixture
 from tests.support.paid_model import approved_live
-from tests.test_cumulative_budget import policy, view
-from tests.test_live_text_window import live_clients, live_fixture
 
 
 @asynccontextmanager
@@ -48,7 +49,7 @@ async def native_stage(core, bridge, *, count=None):
 def archived_account(core, tmp_path):
     """Original v1 rows and signed timestamp inventory; no legacy live writer."""
     from companion_onebot_bridge import journal
-    from tests.test_legacy_owner_input import archived
+    from tests.support.legacy_owner_input import archived
 
     old, _, job, mids, key = archived(core, tmp_path)
     # Frozen v1 send custody includes the single original reservation/ACK.
@@ -124,28 +125,6 @@ async def renew_native(core, bridge, number, **limits):
     earliest_frame = ceil(datetime.fromisoformat(admitted_at).timestamp())
     await asyncio.sleep(max(0, earliest_frame - datetime.now(UTC).timestamp()) + 0.1)
     assert datetime.now(UTC).timestamp() >= earliest_frame
-
-
-def bind_policy(core, plan, **changes):
-    scope = policy(core, **changes)
-    live = core.settings.live_text_window.model_copy(update={
-        "cumulative": scope,
-        "core_config_sha256": live_text.config_sha256(core.settings),
-        "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings)),
-    })
-    value = deepcopy(plan.value)
-    value["live_text"] = live.model_dump(mode="json", exclude={"plan_sha256"})
-    inventory = {key: value[key] for key in (
-        "identity_sha256", "protocol_epoch", "config_sha256", "config_version", "image_ids",
-    )}
-    authorization = None
-    if value["execution"] == "approved_live":
-        authorization = {"kind": "owner_qq_window", "approved": True,
-            "scope_sha256": digest({k: v for k, v in value.items() if k != "authorization_sha256"}),
-            "evidence_sha256": "a" * 64}
-        value["authorization_sha256"] = digest(authorization)
-    core.settings.live_text_window = live.model_copy(update={"plan_sha256": digest(value)})
-    return WindowPlan(value, plan.config, inventory, authorization)
 
 
 def fixture(core, tmp_path, **changes):
@@ -325,7 +304,7 @@ def test_missing_spool_projection_cannot_reset_cumulative_inputs(core, tmp_path)
 
 
 def test_stop_requires_new_policy_for_successor(core, tmp_path):
-    from tests.test_live_text_handoff import (
+    from tests.support.live_text_handoff import (
         configure,
         open_successor,
         reference,

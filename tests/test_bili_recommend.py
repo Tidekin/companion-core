@@ -23,13 +23,13 @@ from source_reader.network import PublicHTTP, ReadBudget, ReadFailure
 from source_reader.protocol import decode_lease
 from source_reader.reading import ReadingContext, read_observation
 from tests.conftest import run
+from tests.support.bili_media import NAV as MEDIA_NAV
 from tests.support.core_http import real_core_http
 from tests.support.exploration import configure
-from tests.test_bili_media import NAV as MEDIA_NAV
+from tests.support.source_reader import NOW, response
 from tests.test_heybox_reader import mock_pool
 from tests.test_next_reading_worker import lease
 from tests.test_plugin_readonly import SECRET, grant, registered_grant
-from tests.test_source_reader import NOW, response
 
 NOW_DT = datetime.fromisoformat(NOW)
 NAV = {"code": 0, "data": {**MEDIA_NAV["data"], "isLogin": True}}
