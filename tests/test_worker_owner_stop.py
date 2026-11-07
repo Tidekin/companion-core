@@ -12,6 +12,7 @@ from companion.owner_authority_protocol import AuthorityStop, OwnerCapture
 from companion.store import utcnow
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.meme_core import body, caption_environment, worker
 from tests.support.owner_authority import activate
 from tests.support.owner_authority_setup import prepare
 from tests.support.owner_input import captured
@@ -23,7 +24,6 @@ from tests.support.worker_wakeup_process import (
     start,
     state,
 )
-from tests.test_meme_core import body, caption_environment, worker
 
 
 @pytest.mark.parametrize("fence", ["stop", "restore", "disabled"])

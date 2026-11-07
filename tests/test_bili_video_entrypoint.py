@@ -13,12 +13,7 @@ from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
-from tests.support.bili_video_entrypoint import TOKEN, URL, reader_files, reader_once, upstream
-from tests.support.cloud_budget import native
-from tests.support.core_http import real_core_http
-from tests.support.native_consumer import source_window
-from tests.support.onebot_events import raw_event
-from tests.test_bili_video import (
+from tests.support.bili_video import (
     model_response,
     paid_media,
     paid_options,
@@ -27,6 +22,11 @@ from tests.test_bili_video import (
     receipt,
     upload_body,
 )
+from tests.support.bili_video_entrypoint import TOKEN, URL, reader_files, reader_once, upstream
+from tests.support.cloud_budget import native
+from tests.support.core_http import real_core_http
+from tests.support.native_consumer import source_window
+from tests.support.onebot_events import raw_event
 
 
 @pytest.mark.parametrize("erase_during_model", [False, True])

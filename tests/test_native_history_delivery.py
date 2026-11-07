@@ -2,8 +2,6 @@
 
 import asyncio
 import json
-import pickle
-import sys
 from pathlib import Path
 
 import httpx
@@ -14,28 +12,9 @@ from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, worker_for
 from tests.support.native_context import source_window
+from tests.support.native_history_delivery import sdk_step
 from tests.support.onebot_events import raw_event
-from tests.test_qq_rich_input import card
-
-
-async def sdk_step(core, tmp_path, event_id, index):
-    job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?", (event_id,))
-    config, output = tmp_path / f"history-{index}.pickle", tmp_path / f"history-{index}.json"
-    config.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
-        [answer("原始历史答复")], "SUCCEEDED", str(output))))
-    process = await asyncio.create_subprocess_exec(sys.executable,
-        str(Path(__file__).with_name("reader_sdk_worker.py")), str(config),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    try:
-        logs, _ = await asyncio.wait_for(process.communicate(), 45)
-    except BaseException:
-        process.kill()
-        await process.wait()
-        raise
-    assert process.returncode == 0, logs.decode(errors="replace")
-    requests = json.loads(output.read_text(encoding="utf-8"))
-    assert len(requests) == 1
-    return job["job_id"], requests[0]
+from tests.support.qq_rich_input import card
 
 
 def change_input(core, event_id):

@@ -22,9 +22,9 @@ from tests.support.onebot_voice_media import URL, wav
 from tests.support.onebot_voice_pipeline import capture, media_row, pump, tick
 from tests.support.prepare_owner_input import native_spool, window
 from tests.support.voice_jobs import TEXT, voice_config
-from tests.test_voice_node_api import independent_node, tls_core
-from tests.test_voice_node_worker import child_receipts
-from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
+from tests.support.voice_node_api import independent_node, tls_core
+from tests.support.voice_node_worker import child_receipts
+from tests.support.voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 
 
 @pytest.mark.parametrize("reply_mode", ["auto", "model", "mixed"])

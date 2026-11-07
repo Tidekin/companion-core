@@ -12,7 +12,7 @@ from companion.capabilities import snapshot
 from companion.contracts import CoreError
 from companion.core import Core
 from tests.conftest import FakeModel, event, run
-from tests.test_content import enable, owner_share, png
+from tests.support.content import enable, owner_share, png
 
 
 def test_http_image_and_independent_reply_worker_share_the_cny_ledger(core):

@@ -13,7 +13,7 @@ from companion.transport import lease_deliveries
 from tests.conftest import ingest, run
 from tests.meme_authority_fixture import stop
 from tests.support.api_store import PREFIX, child_done
-from tests.test_meme_service import claim, discovery_environment, reservation, submit
+from tests.support.meme_service import claim, discovery_environment, reservation, submit
 
 
 def test_empty_polls_and_input_state_finish_while_independent_writer_is_held(

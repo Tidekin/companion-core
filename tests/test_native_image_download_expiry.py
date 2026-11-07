@@ -8,8 +8,8 @@ from companion import agent_images, image_spool, owner_authority
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from tests.conftest import run
+from tests.support.native_image_pipeline import admit_image, claim, pixels, upload_headers
 from tests.support.prepare_owner_input import window
-from tests.test_native_image_pipeline import admit_image, claim, pixels, upload_headers
 
 
 @pytest.mark.parametrize("state", ["FETCHING", "UNKNOWN"])

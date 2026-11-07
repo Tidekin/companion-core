@@ -19,16 +19,16 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.owner_memes import MemePump
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
+from tests.support.meme_core import CAPTION
+from tests.support.meme_runtime import RULE, public_transport
 from tests.support.native_meme_entry import native_entry
+from tests.support.next_memes_catalog import png
+from tests.support.next_memes_discovery import resolver
 from tests.support.onebot import provider as onebot_provider
 from tests.support.onebot_events import raw_event
 from tests.support.private_companion import companion_options
+from tests.support.voice_flow import finish_node
 from tests.support.voice_jobs import voice_config
-from tests.test_meme_core import CAPTION
-from tests.test_meme_runtime import RULE, public_transport
-from tests.test_next_memes_catalog import png
-from tests.test_next_memes_discovery import resolver
-from tests.test_voice_flow import finish_node
 
 
 def test_current_catalog_meme_is_sent_between_voice_and_text(core, tmp_path, monkeypatch):

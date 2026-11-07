@@ -8,8 +8,8 @@ from companion.conversation_policy import ConversationPolicyConfig
 from companion.life_protocol import LifeLoopConfig
 from companion.social import feedback_paused, proactive_counts
 from tests.conftest import ingest, run
+from tests.support.notices import ready_share
 from tests.support.turn_taking import Model, turn
-from tests.test_notices import ready_share
 
 POINT = "昨天那个导出问题，我想到可以看看文件名里的空格。"
 ROOT = "导出文件的问题明天再聊，可能和文件名有关"

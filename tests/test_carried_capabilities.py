@@ -21,8 +21,8 @@ from tests.support.bili_video_entrypoint import URL, reader_files, reader_once, 
 from tests.support.carried_capabilities import reader_carry
 from tests.support.core_http import real_core_http
 from tests.support.model_carry_lifecycle import current_unknown
+from tests.support.native_bili_video import sdk_step
 from tests.support.reading_followup import admit
-from tests.test_native_bili_video import sdk_step
 
 
 @pytest.mark.parametrize("later_unknown", [False, True])

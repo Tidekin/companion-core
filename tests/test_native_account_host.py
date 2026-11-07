@@ -9,33 +9,17 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from companion import paid_budget
 from companion.api import create_app
 from companion.model import ModelClient
-from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
-from tests.support.onebot_events import config
+from tests.support.native_account_host import configure_host
 from tests.support.owner_authority import activate
 from tests.support.social_autonomy import background, queue
 from tests.support.social_owner_authority import authorize, close_provider_clients, stop  # noqa: F401
-
-
-def configure_host(core, tmp_path, policy):
-    cfg = replace(config(), data_dir=str(tmp_path / "bridge"), capture_signing_key="c" * 64,
-                  protocol_epoch="synthetic-epoch", core_url="http://127.0.0.1:8765",
-                  onebot_http_url="http://127.0.0.1:3000",
-                  onebot_ws_url="ws://127.0.0.1:3001",
-                  bridge_token=core.settings.bridge_token.get_secret_value())
-    policy = OwnerGrantPolicy.model_validate({**policy.model_dump(),
-        "purposes": ["chat", *policy.purposes], "capture": {
-            "public_key": cfg.capture_public_key, "protocol_epoch": cfg.protocol_epoch,
-            "identity_sha256": paid_budget.sha([cfg.owner_qq_id, cfg.bot_qq_id])}})
-    result, _ = activate(core, policy, revision=1, operation="account-host-capture")
-    return replace(cfg, owner_authority=result["authority"])
 
 
 def prepared_host(core, tmp_path):

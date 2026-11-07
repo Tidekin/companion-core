@@ -183,9 +183,9 @@ def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(
 
 
 def test_console_shows_cache_three_states_from_the_backend_projection(core, tmp_path):
+    from tests.support.cache_usage_presence import ABSENT
+    from tests.support.cache_usage_presence import attempt as cache_attempt
     from tests.support.paid_model import approved_live
-    from tests.test_cache_usage_presence import ABSENT
-    from tests.test_cache_usage_presence import attempt as cache_attempt
 
     approved_live(core, tmp_path)
     core.clock.now = datetime.now(UTC)

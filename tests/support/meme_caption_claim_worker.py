@@ -17,7 +17,7 @@ from companion.config import Settings
 from companion.core import Core
 from companion.meme_core import MemeCaptionService
 from companion.worker_schedule import ClaimBusy
-from tests.test_meme_core import CAPTION
+from tests.support.meme_core import CAPTION
 
 
 def main():

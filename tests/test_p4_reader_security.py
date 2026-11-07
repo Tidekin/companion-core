@@ -14,8 +14,8 @@ from source_reader.worker import read_result
 from tests.conftest import run
 from tests.support.heybox_reader import ITEM as HEYBOX_ITEM
 from tests.support.heybox_reader import POST, mock_pool
+from tests.support.plugin_readonly import NOW_DT, grant
 from tests.support.source_reader import ITEM, META, SUBTITLE, read, response
-from tests.test_plugin_readonly import NOW_DT, grant
 
 
 @pytest.mark.parametrize("changed", ["none", "bvid", "aid", "cid"])

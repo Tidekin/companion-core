@@ -636,10 +636,10 @@ def native_capabilities(core, tmp_path):
     from companion.poke_protocol import PokePolicy
     from companion.social_autonomy import SocialAutonomy
     from companion.social_autonomy_protocol import ProfileBaseline, SocialAutonomyConfig
+    from tests.support.bili_video import paid_options
     from tests.support.onebot_capture import pinned_plan
     from tests.support.social_autonomy import avatar
     from tests.support.voice_jobs import voice_config
-    from tests.test_bili_video import paid_options
 
     options = paid_options(core)
     files = PrivateFilesConfig(enabled=True, parser_image="sha256:" + "d" * 64,

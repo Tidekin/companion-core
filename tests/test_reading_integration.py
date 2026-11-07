@@ -23,10 +23,10 @@ from tests.sdk_reader_fixture import Provider, answer, call, worker_for
 from tests.support.core_http import real_core_http
 from tests.support.native_consumer_entry import environment
 from tests.support.native_http import owned_http_protocol
+from tests.support.next_reading import HTML, WEB
 from tests.support.reading_protocol import envelope
 from tests.support.reading_service import TOKEN, configure
 from tests.support.source_reader import ITEM, META, PLAYER, SUBTITLE
-from tests.test_next_reading import HTML, WEB
 
 
 @pytest.mark.parametrize("hosts", [("articles.example",), ("*",)])

@@ -11,8 +11,8 @@ from companion.owner_authority_protocol import AuthorityStop
 from companion_onebot_bridge.meme_runtime import MemeRuntime
 from companion_onebot_bridge.meme_semantic_http import BASE, CaptionHTTP, SemanticHTTP
 from tests.conftest import run
-from tests.test_meme_semantic_runtime import SemanticCore
-from tests.test_meme_semantic_runtime import make_runtime as make_runtime
+from tests.support.meme_semantic_runtime import SemanticCore
+from tests.support.meme_semantic_runtime import make_runtime as make_runtime
 
 
 async def submitted(runtime, core, client):

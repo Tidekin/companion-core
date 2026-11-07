@@ -180,8 +180,8 @@ def test_optional_reference_is_removed_as_a_block_before_recent_turns(core, monk
 
 
 def test_current_shared_content_survives_complete_history_trimming(core):
-    from tests.test_content import enable
-    from tests.test_content_integration import finish_read, share
+    from tests.support.content import enable
+    from tests.support.content_integration import finish_read, share
 
     sent_history(core, 1, "很长的历史输入" * 300, "很长的历史回复" * 300)
     enable(core)

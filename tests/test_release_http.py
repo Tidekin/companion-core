@@ -20,8 +20,8 @@ from companion_onebot_bridge.images import fetch_image, original_images
 from source_reader.heybox import HeyboxReader, SourceAPI
 from source_reader.network import PublicHTTP, ReadBudget, ReadFailure
 from tests.conftest import ingest, run
+from tests.support.content import POST, enable
 from tests.support.executive import TOKEN, envelope
-from tests.test_content import POST, enable
 
 PATHS = ("public_reader", "source_reader", "qq_image", "link_image")
 BODY = json.dumps(

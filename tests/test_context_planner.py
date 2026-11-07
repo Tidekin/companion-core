@@ -3,15 +3,12 @@
 import asyncio
 from contextlib import closing
 from copy import deepcopy
-from types import SimpleNamespace
 
 import httpx
 import pytest
 from cryptography.fernet import Fernet
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import Hooks
-from pydantic_ai.messages import repair_messages
-from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.toolsets import FunctionToolset
 
 from companion import agent_runtime, beta_observation
@@ -26,41 +23,9 @@ from companion.store import Store, encode
 from companion.token_measurement import measure_request
 from tests.owner_model_fixtures import authorized_job
 from tests.sdk_reader_fixture import Provider, answer, call
+from tests.support.context_planner import initial, request_context
 from tests.support.owner_runtime import chat
 from tests.support.paid_image_budget import image_approval, image_messages
-
-
-def initial(core, job, *, references=1, turns=1, snapshots=None):
-    snapshots = [] if snapshots is None else snapshots
-    rules = [{"role": "system", "content": "trusted rules"}]
-    refs = [
-        [{"role": "user", "content": "optional-reference-" + str(i) + " R" * 700}]
-        for i in range(references)
-    ]
-    history = [
-        [
-            {"role": "user", "content": "old question" + " H" * 200},
-            {"role": "assistant", "content": "old answer" + " A" * 200},
-        ]
-        for _ in range(turns)
-    ]
-    current = [{"role": "user", "content": "complete current input"}]
-    blocks = [
-        ("rules", rules, True, 4),
-        *(("reference", ref, False, 1) for ref in refs),
-        *(("history", turn, False, 2) for turn in history),
-        ("current", current, True, 4),
-    ]
-    messages = [message for _, block, _, _ in blocks for message in block]
-    planner.initialize(core, job, messages, blocks, snapshots)
-    return messages, snapshots
-
-
-def request_context(messages, *, parameters=None):
-    return SimpleNamespace(
-        messages=repair_messages(from_wire_messages(messages), repair_last_response=False),
-        model_request_parameters=parameters or ModelRequestParameters(),
-    )
 
 
 def test_merged_sdk_parts_trim_references_then_whole_old_turns(core, tmp_path):

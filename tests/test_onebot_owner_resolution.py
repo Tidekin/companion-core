@@ -32,7 +32,7 @@ from tests.support.onebot_owner_resolution import (
     reopen,
     successor,
 )
-from tests.test_poke import native_frame
+from tests.support.poke import native_frame
 
 
 @asynccontextmanager

@@ -12,7 +12,7 @@ from companion.autonomous_selector import native_selector
 from companion.config import Settings
 from companion.core import Core
 from companion.model import ModelClient
-from tests.test_meme_core import CAPTION
+from tests.support.meme_core import CAPTION
 
 
 async def main():

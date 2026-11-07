@@ -16,8 +16,8 @@ from companion.model import ModelAdmission, ModelClient, model_payload
 from companion.paid_budget import sha
 from companion.privacy import advance_epoch
 from companion.rem_protocol import RemConfig
+from tests.support.humanlike_defaults import plain
 from tests.support.model_reasoning import reasoning_chat
-from tests.test_humanlike_defaults import plain
 
 
 def test_rem_defaults_enable_bounded_private_dreams():

@@ -8,13 +8,9 @@ from source_reader.bili_audio import download_song, representation
 from source_reader.bili_media import media_locator
 from source_reader.network import PublicHTTP, ReadFailure
 from tests.conftest import run
+from tests.support.bili_audio import CDN, PLAY
 from tests.support.bili_media import BVID, NAV, NOW, VIEW, allowed, pool
 from tests.support.source_reader import response
-
-CDN = "https://song.mcdn.bilivideo.cn/audio.m4s?token=transient"
-PLAY = {"code": 0, "data": {"timelength": 3000, "dash": {"audio": [{
-    "base_url": CDN, "mime_type": "audio/mp4", "codecs": "mp4a.40.2", "bandwidth": 64000,
-}]}}}
 
 
 async def download(tmp_path, *, view=None, nav=None, play=None, guard=allowed, status=200):

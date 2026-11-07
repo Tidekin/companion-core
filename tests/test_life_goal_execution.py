@@ -27,10 +27,10 @@ from tests.support.exploration import URL, configure
 from tests.support.heybox_reader import mock_pool
 from tests.support.life_topics import assert_no_delivery, bug, due, proposal
 from tests.support.life_worker_integration import native_worker
+from tests.support.next_reading import WEB, web_response
 from tests.support.owner_authority import activate
 from tests.support.owner_memory import environment
 from tests.support.source_reader import META, PLAYER, SUBTITLE, response
-from tests.test_next_reading import WEB, web_response
 
 
 @pytest.mark.parametrize("action", ["CONTINUE", "EXPLORE"])

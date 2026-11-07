@@ -5,8 +5,8 @@ import pytest
 from companion import image_input, live_text
 from companion.video_input import call_limit_matches
 from tests.conftest import run
+from tests.support.bili_video import paid_options
 from tests.support.onebot_capture import source_window
-from tests.test_bili_video import paid_options
 
 
 @pytest.mark.parametrize("calls", [4, 6, 10])

@@ -116,7 +116,7 @@ def recall(runtime, number=42):
 
 
 def native_item(runtime, event, candidate, *, key=None):
-    from tests.test_meme_runtime import item
+    from tests.support.meme_runtime import item
 
     value = item(event, candidate, key=key)
     value["origin_event_id"] = value.pop("window_origin_event_id")

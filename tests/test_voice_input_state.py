@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from companion.contracts import CoreError
-from tests.test_voice_flow import flow_fixture, upload
+from tests.support.voice_flow import flow_fixture, upload
 
 
 @pytest.mark.parametrize("closed", ["expired", "running", "consumed"])

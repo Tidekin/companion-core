@@ -13,13 +13,13 @@ from companion_onebot_bridge import pending_media
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.sdk_reader_fixture import answer, call
+from tests.support.live_card_content import TOKEN, URL, result
+from tests.support.live_card_content import options as card_options
 from tests.support.live_image_input import options as image_options
 from tests.support.live_image_input import png
+from tests.support.native_bili_video import sdk_step
 from tests.support.onebot_images import image_segment
-from tests.test_live_card_content import TOKEN, URL, result
-from tests.test_live_card_content import options as card_options
-from tests.test_native_bili_video import sdk_step
-from tests.test_qq_rich_input import card
+from tests.support.qq_rich_input import card
 
 
 @pytest.mark.parametrize("layout", ["same_message", "card_image_text", "image_card_text"])

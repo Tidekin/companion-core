@@ -22,13 +22,13 @@ from source_reader.worker_v1 import tick
 from tests.conftest import run
 from tests.support.exploration import URL
 from tests.support.heybox_reader import mock_pool
+from tests.support.live_card_content import options
 from tests.support.native_consumer import source_window
 from tests.support.onebot_events import raw_event
+from tests.support.plugin_readonly import NOW_DT, SECRET, grant
+from tests.support.qq_rich_input import rich_event
 from tests.support.reading_followup import select_read
 from tests.support.source_reader import ITEM, META, PLAYER, SUBTITLE, read, response
-from tests.test_live_card_content import options
-from tests.test_plugin_readonly import NOW_DT, SECRET, grant
-from tests.test_qq_rich_input import rich_event
 
 SHORT = "https://b23.tv/Synthetic7"
 LOCATION = URL + "?share_source=qq&tracking=private-tracking-value"

@@ -16,7 +16,7 @@ from tests.conftest import run
 from tests.support.native_context import source_window
 from tests.support.onebot_capture import bootstrap_frames
 from tests.support.onebot_events import raw_event
-from tests.test_qq_rich_input import card
+from tests.support.qq_rich_input import card
 
 
 @pytest.mark.parametrize("change", [None, "spool", "job", "delivery", "erase", "replay"])

@@ -8,7 +8,7 @@ import pytest
 from companion.contracts import CoreError
 from companion.store import encode
 from companion.voice_jobs import erase_voice_jobs, fence_conversation, restore_voice_jobs
-from tests.test_voice_flow import finish_node, flow_fixture, prepare
+from tests.support.voice_flow import finish_node, flow_fixture, prepare
 
 
 @pytest.mark.parametrize("action", ["erase", "restore", "revision"])

@@ -10,9 +10,9 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.outbound import deliver_item
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.conftest import run
+from tests.support.meme_core_transport import handler
+from tests.support.meme_core_transport import transport_case as transport_case
 from tests.support.onebot import provider
-from tests.test_meme_core_transport import handler
-from tests.test_meme_core_transport import transport_case as transport_case
 
 
 @pytest.mark.parametrize("phase", ["reserve_stop", "probe_stop", "cancelled", "begin_stop",

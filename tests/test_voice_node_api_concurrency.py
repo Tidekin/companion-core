@@ -15,7 +15,7 @@ from companion.voice_protocol import ROUTE_PREFIX
 from tests.support.api_store import child_done, event_wait
 from tests.support.core_http import real_core_http
 from tests.support.voice_jobs import TOKEN, prepared
-from tests.test_voice_node_api import claim_body
+from tests.support.voice_node_api import claim_body
 
 
 def test_node_claim_write_wait_keeps_http_responsive(core, monkeypatch, record_property):

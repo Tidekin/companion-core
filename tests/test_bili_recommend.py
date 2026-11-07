@@ -27,9 +27,9 @@ from tests.support.bili_media import NAV as MEDIA_NAV
 from tests.support.core_http import real_core_http
 from tests.support.exploration import configure
 from tests.support.heybox_reader import mock_pool
+from tests.support.next_reading_worker import lease
+from tests.support.plugin_readonly import SECRET, grant, registered_grant
 from tests.support.source_reader import NOW, response
-from tests.test_next_reading_worker import lease
-from tests.test_plugin_readonly import SECRET, grant, registered_grant
 
 NOW_DT = datetime.fromisoformat(NOW)
 NAV = {"code": 0, "data": {**MEDIA_NAV["data"], "isLogin": True}}

@@ -4,8 +4,8 @@ import json
 
 from companion import qq_rich
 from companion.store import encode
-from tests.test_content import POST, enable, owner_share
-from tests.test_qq_rich_input import rich_event
+from tests.support.content import POST, enable, owner_share
+from tests.support.qq_rich_input import rich_event
 
 
 def test_card_urls_schedule_reader_once_with_limit_and_ignore_quoted_urls(core):

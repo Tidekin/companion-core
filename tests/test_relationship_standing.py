@@ -18,7 +18,7 @@ from companion.token_measurement import measure_request
 from tests.conftest import run
 from tests.support.dialogue_context import current_job, sent_history
 from tests.support.native_consumer_entry import environment
-from tests.test_native_history_delivery import sdk_step
+from tests.support.native_history_delivery import sdk_step
 
 
 def _add(core, number, owner, *, kind, confirmed):

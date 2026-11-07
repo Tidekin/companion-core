@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import httpx
 
-from tests.test_voice_node_api import tls_core
+from tests.support.voice_node_api import tls_core
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "companion/console_static"

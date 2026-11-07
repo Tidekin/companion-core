@@ -14,7 +14,7 @@ from companion.model import ModelClient
 from companion.owner_authority_protocol import OwnerSendCheck
 from companion.transport import begin_send, lease_deliveries
 from tests.poke_authority_fixture import environment, settle, signed
-from tests.test_poke import claim, receive
+from tests.support.poke import claim, receive
 
 
 @pytest.mark.parametrize("kind", ["text", "poke", "none"])

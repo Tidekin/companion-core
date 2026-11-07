@@ -7,10 +7,10 @@ import pytest
 from companion import context_planner as planner
 from companion.paid_budget import sha
 from companion.token_measurement import measure_payload
-from tests.test_meme_core_process import (
-    test_signed_core_worker_and_bridge_process_use_one_original_image as signed_meme,
+from tests.support.meme_core_process import (
+    check_signed_core_worker_and_bridge_delivery as signed_meme,
 )
-from tests.test_meme_core_runtime import runtime_case as runtime_case
+from tests.support.meme_core_runtime import runtime_case as runtime_case
 
 
 @pytest.mark.parametrize("runtime_case", ["no_current"], indirect=True)

@@ -23,14 +23,14 @@ from companion_onebot_bridge.onebot_client import OneBotClient
 from tests.conftest import run
 from tests.native_continuous_support import until
 from tests.sdk_reader_fixture import answer
+from tests.support.native_file_pipeline import configure
+from tests.support.native_image_pipeline import admit_image
 from tests.support.onebot import provider
 from tests.support.onebot_events import raw_event
 from tests.support.onebot_voice_media import URL as VOICE_URL
 from tests.support.onebot_voice_media import segment as voice_segment
 from tests.support.onebot_voice_pipeline import fixture as voice_fixture
 from tests.support.prepare_owner_input import native_spool, window
-from tests.test_native_file_pipeline import configure
-from tests.test_native_image_pipeline import admit_image
 
 
 async def claim_file(core, client, config, plan, tmp_path):

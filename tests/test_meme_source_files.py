@@ -9,7 +9,7 @@ import pytest
 
 from companion_meme_protocol import CaptionOutcome, digest
 from tests.conftest import run
-from tests.test_meme_core import body, caption_environment, worker
+from tests.support.meme_core import body, caption_environment, worker
 
 REVISION = "a" * 40
 RAW_ROOT = f"https://raw.githubusercontent.com/owner/repo/{REVISION}"

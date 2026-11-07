@@ -7,10 +7,10 @@ import pytest
 from companion import image_review, memory_references, reply_quote
 from companion.contracts import CoreError
 from tests.conftest import run
+from tests.support.image_review import OBSERVATION, reply
 from tests.support.native_image_memory import native_image_memory
 from tests.support.onebot_reference_reader import reply as quote_segment
 from tests.support.onebot_reference_reader import text as text_segment
-from tests.test_image_review import OBSERVATION, reply
 
 
 @pytest.mark.parametrize("text,linked,immediate,wanted,objection", [

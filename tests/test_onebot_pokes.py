@@ -29,9 +29,9 @@ from tests.support.onebot_capture import source_window
 from tests.support.onebot_events import raw_event
 from tests.support.onebot_pokes import silent
 from tests.support.owner_authority import activate
+from tests.support.poke import native_frame
 from tests.support.private_companion import companion_options
 from tests.support.social_owner_authority import stop
-from tests.test_poke import native_frame
 
 
 @asynccontextmanager

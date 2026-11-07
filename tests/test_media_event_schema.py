@@ -12,7 +12,7 @@ from companion_onebot_bridge.event_normalizer import normalize
 from tests.support.onebot_events import config, raw_event
 from tests.support.onebot_files import segment
 from tests.support.onebot_images import image_segment
-from tests.test_qq_face_images import face
+from tests.support.qq_face_images import face
 
 
 def validator():

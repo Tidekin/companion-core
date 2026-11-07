@@ -12,9 +12,9 @@ from companion.voice_config import VoiceNode
 from companion.voice_jobs import INPUT_RECEIPT
 from companion.voice_protocol import canonical_bytes
 from tests.conftest import run
+from tests.support.voice_flow import signed_input
 from tests.support.voice_jobs import TOKEN, voice_config
-from tests.test_voice_flow import signed_input
-from tests.test_voice_node_api import tls_core
+from tests.support.voice_node_api import tls_core
 from tests.voice_owner_fixtures import native_voice
 
 

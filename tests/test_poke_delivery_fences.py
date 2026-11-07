@@ -7,7 +7,7 @@ from companion.contracts import CoreError
 from companion.store import after, uid
 from tests.poke_authority_fixture import environment as native_environment
 from tests.poke_authority_fixture import owner_turn, settle
-from tests.test_poke import claim, receive
+from tests.support.poke import claim, receive
 
 
 @pytest.fixture

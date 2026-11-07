@@ -12,11 +12,11 @@ from companion.goals import GoalProposal, GoalScope
 from companion.store import encode
 from companion.token_measurement import measure_request
 from tests.conftest import ingest
+from tests.support.context_planner import initial, request_context
 from tests.support.dialogue_context import current_job, sent_history
 from tests.support.mood import feedback
 from tests.support.owner_runtime import chat
 from tests.support.subjective_cognition import ASTRONOMY, BAKING, judge, prepare, read
-from tests.test_context_planner import initial, request_context
 
 
 def test_exact_fact_coalescing_keeps_subject_status_and_all_evidence():

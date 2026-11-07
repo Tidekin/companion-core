@@ -11,10 +11,10 @@ from companion.core import Core
 from companion_onebot_bridge import pending_media
 from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
+from tests.support.native_image_pipeline import admit_image, claim, pixels, upload_headers
+from tests.support.native_media_queue import captured, row
 from tests.support.owner_image_recovery import run_worker
 from tests.support.prepare_owner_input import native_spool, window
-from tests.test_native_image_pipeline import admit_image, claim, pixels, upload_headers
-from tests.test_native_media_queue import captured, row
 
 
 @pytest.mark.parametrize("claim_delay", [0, 65])

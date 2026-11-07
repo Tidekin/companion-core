@@ -15,9 +15,9 @@ from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.native_image_pipeline import admit_image, claim, pixels, upload_headers
 from tests.support.onebot import provider
 from tests.support.prepare_owner_input import native_spool, window
-from tests.test_native_image_pipeline import admit_image, claim, pixels, upload_headers
 
 
 @pytest.mark.parametrize("boundary", [

@@ -9,7 +9,7 @@ from companion import budget, meme_asset_migration, meme_assets
 from companion.contracts import CoreError
 from companion.store import Store, encode
 from tests.conftest import run
-from tests.test_meme_core import body, caption_environment, worker
+from tests.support.meme_core import body, caption_environment, worker
 
 
 @asynccontextmanager

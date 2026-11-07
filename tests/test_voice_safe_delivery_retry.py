@@ -18,11 +18,11 @@ from companion.voice_jobs import VoiceJobs, erase_voice_jobs
 from companion.voice_protocol import digest
 from companion_voice_node.worker import local_manifest
 from tests.conftest import run
+from tests.support.voice_flow import finish_node, flow_fixture, leased, prepare
 from tests.support.voice_jobs import TEXT, claim, voice_config
-from tests.test_voice_flow import finish_node, flow_fixture, leased, prepare
-from tests.test_voice_node_api import independent_node, tls_core
-from tests.test_voice_node_worker import child_receipts
-from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
+from tests.support.voice_node_api import independent_node, tls_core
+from tests.support.voice_node_worker import child_receipts
+from tests.support.voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 
 
 def safe_retry(core, monkeypatch, stage="retry_wait"):

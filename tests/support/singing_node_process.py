@@ -16,10 +16,10 @@ from companion.voice_protocol import SingingResult
 from companion_voice_node.supervisor import ProcessSupervisor, child_entry
 from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker
 from source_reader.network import PublicHTTP
-from tests.support.bili_media import pool
+from tests.support.bili_audio import PLAY
+from tests.support.bili_media import NAV, VIEW, pool
+from tests.support.singing_protocol import result
 from tests.support.source_reader import RecordingStream, response
-from tests.test_bili_audio import NAV, PLAY, VIEW
-from tests.test_singing_protocol import result
 
 AUDIO = b"native audio" * 256
 

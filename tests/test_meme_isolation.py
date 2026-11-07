@@ -17,10 +17,10 @@ from companion_onebot_bridge.meme_runtime import MemeRuntime
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.meme_asset_migration import cli, config_file
+from tests.support.meme_semantic_runtime import SemanticCore
+from tests.support.meme_semantic_runtime import make_runtime as make_runtime
 from tests.support.native_meme import case
-from tests.test_meme_asset_migration import cli, config_file
-from tests.test_meme_semantic_runtime import SemanticCore
-from tests.test_meme_semantic_runtime import make_runtime as make_runtime
 
 
 @pytest.fixture

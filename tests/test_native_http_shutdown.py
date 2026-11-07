@@ -10,7 +10,7 @@ from uvicorn.protocols.http.auto import AutoHTTPProtocol
 
 from tests.native_continuous_support import core_http
 from tests.support.native_http import native_http_proactor_scope
-from tests.test_voice_node_api import tls_core
+from tests.support.voice_node_api import tls_core
 
 
 @pytest.mark.skipif(not native_http_proactor_scope(),

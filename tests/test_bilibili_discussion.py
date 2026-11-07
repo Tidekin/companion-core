@@ -70,7 +70,7 @@ def test_subtitles_comments_and_compressed_danmaku_keep_distinct_raw_evidence():
 
 
 def test_account_reader_accepts_danmaku_binary_without_treating_it_as_json(tmp_path):
-    from tests.test_plugin_readonly import grant
+    from tests.support.plugin_readonly import grant
 
     async def scenario():
         pool, backend = mock_pool(*replies())

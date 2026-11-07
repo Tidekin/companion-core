@@ -24,10 +24,7 @@ from tests.support.live_image_input import options
 from tests.support.native_images import image_host, upload
 from tests.support.onebot_events import config, raw_event
 from tests.support.onebot_images import image_segment
-
-
-def face(identifier="277"):
-    return {"type": "face", "data": {"id": identifier}}
+from tests.support.qq_face_images import face
 
 
 def test_known_face_gets_an_ordered_image_slot_without_changing_owner_text():

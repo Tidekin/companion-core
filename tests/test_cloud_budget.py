@@ -20,11 +20,11 @@ from tests.sdk_reader_fixture import Provider, answer, worker_for
 from tests.support.cloud_budget import MESSAGES, change, charge, native, options
 from tests.support.cumulative_budget import policy as cumulative_policy
 from tests.support.executive import FakeExecutor, configured, proposal
+from tests.support.media import chunk, process, service, start
 from tests.support.native_consumer_entry import environment
 from tests.support.paid_model import approved_live
-from tests.test_media import chunk, process, service, start
-from tests.test_video_accounting import core as historical_video_core
-from tests.test_video_accounting import correct, failed_video
+from tests.support.video_accounting import core as historical_video_core
+from tests.support.video_accounting import correct, failed_video
 
 __all__ = ["failed_video", "historical_video_core"]
 

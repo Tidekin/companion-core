@@ -9,9 +9,7 @@ from companion import image_spool, image_understanding
 from companion_onebot_bridge import pending_media
 from tests.conftest import run
 from tests.native_continuous_support import until
-from tests.support.onebot_images import image_segment
-from tests.support.owner_image_recovery import run_worker
-from tests.test_native_image_bursts import (
+from tests.support.native_image_bursts import (
     bridge_tasks,
     model_images,
     native_host,
@@ -21,6 +19,8 @@ from tests.test_native_image_bursts import (
     send,
     wait_for_ack,
 )
+from tests.support.onebot_images import image_segment
+from tests.support.owner_image_recovery import run_worker
 
 
 @pytest.mark.parametrize("count,expire", [(1, False), (3, False), (1, True)],
