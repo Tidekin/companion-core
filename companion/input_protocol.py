@@ -460,11 +460,9 @@ def cancel_before_send(store, settings, clock, body):
             if row["action_type"] == "qq.private.reply":
                 # The queued replacement may itself be recalled before ingestion.
                 # Once interrupted, no unsent tail of this reply may resume.
-                store.execute("UPDATE outbox SET state='CANCELLED',updated_at=?,"
-                              "last_error_code='REPLY_SUPERSEDED' WHERE origin_event_id=? "
-                              "AND action_type='qq.private.reply' "
-                              "AND state IN ('PENDING','LEASED','RETRY_WAIT')",
-                              (clock(), row["origin_event_id"]))
+                from companion.transport import cancel_origin_replies
+
+                cancel_origin_replies(store, row["origin_event_id"], clock())
             live_text._put(store, key, material)
         return {"cancelled": True, "message_id": body.message_id,
                 "state": "CANCELLED", "send_attempt_retained": True}

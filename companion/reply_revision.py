@@ -99,6 +99,7 @@ def advance(store, conversation_id, event_id, now):
     """Accept one new owner turn inside the caller's ingestion transaction."""
     if not store.db.in_transaction:
         raise RuntimeError("REPLY_REVISION_TRANSACTION_REQUIRED")
+    from companion.transport import cancel_superseded_replies
     from companion.voice_jobs import fence_conversation
 
     fence_conversation(store, conversation_id)
@@ -122,13 +123,7 @@ def advance(store, conversation_id, event_id, now):
         "AND COALESCE(json_extract(body_json,'$.diary_command'),0)!=1)",
         (SUPERSEDED, now, conversation_id, event_id),
     )
-    store.execute(
-        "UPDATE outbox SET state='CANCELLED',last_error_code=?,updated_at=? "
-        "WHERE conversation_id=? AND action_type='qq.private.reply' AND origin_event_id!=? "
-        "AND state IN ('PENDING','LEASED','RETRY_WAIT') AND origin_event_id IN "
-        "(SELECT event_id FROM events WHERE " + OWNER_INPUT + ")",
-        (SUPERSEDED, now, conversation_id, event_id),
-    )
+    cancel_superseded_replies(store, conversation_id, event_id, now)
     store.audit("reply.superseded", event_id, source["trace_id"], now, reply_revision=revision)
     return revision
 

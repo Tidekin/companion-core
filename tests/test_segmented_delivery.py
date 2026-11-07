@@ -188,6 +188,37 @@ def test_partial_failure_cancels_remaining_parts_and_late_ack_cannot_resume(core
         )
 
 
+def test_uncertain_result_cancels_its_own_suffix_and_recovery_repairs_other_groups(core):
+    job, ids = freeze(core)
+    item, = lease(core)
+    begin_send(core.store, ids[0], item["lease_token"], core.clock(), core.settings)
+    other = ingest(core, 2, origin=f"other:FriendMessage:{core.settings.owner_qq_id}")
+    other_job = core.store.one(
+        "SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) WHERE job_id=?",
+        (other["job_id"],),
+    )
+    other_ids = enqueue_reply_parts(core.store, other_job, PARTS, 1500, core.clock())
+    # An older group already needs recovery. Reporting this message must only change its group.
+    core.store.execute("UPDATE outbox SET state='FAILED' WHERE message_id=?", (other_ids[0],))
+    delivery_result(core.store, core.settings, ids[0], DeliveryResult(
+        lease_token=item["lease_token"], result="DELIVERY_UNCERTAIN",
+    ), core.clock())
+
+    def rows(job_id):
+        return core.store.rows("SELECT state,last_error_code,updated_at FROM outbox "
+                               "WHERE reply_group_id=? ORDER BY segment_index", (job_id,))
+
+    original = rows(job["job_id"])
+    assert [row["state"] for row in original] == ["DELIVERY_UNCERTAIN", "CANCELLED", "CANCELLED"]
+    assert [row["state"] for row in rows(other_job["job_id"])] == ["FAILED", "PENDING", "PENDING"]
+    core.clock.advance(1)
+    with core.store.transaction():
+        recover_deliveries(core.store, core.clock())
+    assert rows(job["job_id"]) == original
+    assert [row["state"] for row in rows(other_job["job_id"])] == [
+        "FAILED", "CANCELLED", "CANCELLED"]
+
+
 def test_new_accepted_owner_input_cancels_the_unsent_tail_but_duplicate_does_not(core):
     _, ids = freeze(core)
     first = lease(core)[0]
