@@ -4,6 +4,7 @@ import pytest
 
 from companion.store import after
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.console_cognition import client as client
 from tests.support.console_cognition import login
 from tests.support.consolidation import enable_nightly
@@ -23,18 +24,19 @@ def test_decisions_list_wake_and_reflection_records_without_reasoning(core, clie
     headers = login(client)
     calls = list(model.calls)
     reader = client.app.state.core
-    changes = reader.store.db.total_changes
+    before_state = logical_state(core.store)
     pages = []
     # These are the same kind-specific reads used by the current thinking page.
-    for path in paths:
-        response = client.get(path)
-        assert response.status_code == 200, response.text
-        assert response.headers["cache-control"] == "no-store"
-        page = response.json()
-        assert page["reasoning"] == "NOT_EXPOSED"
-        assert page["candidate_set"] == "NOT_RECORDED"
-        assert "下次可以再了解" not in str(page)
-        pages.append(page)
+    with reader.store.read_snapshot():
+        for path in paths:
+            response = client.get(path)
+            assert response.status_code == 200, response.text
+            assert response.headers["cache-control"] == "no-store"
+            page = response.json()
+            assert page["reasoning"] == "NOT_EXPOSED"
+            assert page["candidate_set"] == "NOT_RECORDED"
+            assert "下次可以再了解" not in str(page)
+            pages.append(page)
     wake = pages[0]["items"][0]
     assert wake["choice"] == "SKIP" and wake["source_evidence"] == "NOT_RECORDED"
     original_wake = core.store.one("SELECT decision_id,created_at FROM wake_decisions")
@@ -48,7 +50,8 @@ def test_decisions_list_wake_and_reflection_records_without_reasoning(core, clie
         (reflection["run_id"],))
     assert item["model_request_id"] == original["model_request_id"]
     assert item["occurred_at"] == original["created_at"] != pages[1]["as_of"]
-    assert reader.store.db.total_changes == changes and model.calls == calls
+    assert logical_state(core.store) == before_state
+    assert model.calls == calls
     # Suggestion content belongs to the separate Life read, not cognition metadata.
     suggestions = client.get("/v1/console/reflections").json()["items"]
     assert len(suggestions) == 1 and suggestions[0]["run_id"] == item["id"]
@@ -78,10 +81,12 @@ def test_console_decisions_hide_reflection_when_original_source_is_unavailable(
         core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s', (
             after(core.clock(), -86400 * (core.settings.raw_event_retention_days + 1)), source))
     calls = list(model.calls)
-    changes = client.app.state.core.store.db.total_changes
-    hidden = client.get(path, params=query)
+    before_state = logical_state(core.store)
+    with client.app.state.core.store.read_snapshot():
+        hidden = client.get(path, params=query)
     assert hidden.status_code == 200 and hidden.headers["cache-control"] == "no-store"
     assert hidden.json()["items"] == []
     assert hidden.json()["record_status"] == "NOT_RECORDED"
     assert hidden.json()["reasoning"] == "NOT_EXPOSED"
-    assert client.app.state.core.store.db.total_changes == changes and model.calls == calls
+    assert logical_state(core.store) == before_state
+    assert model.calls == calls

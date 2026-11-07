@@ -23,6 +23,7 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.sdk_reader_fixture import answer
 from tests.support.core_http import real_core_http
 from tests.support.native_account_host import configure_host
@@ -107,14 +108,13 @@ def test_chat_receives_actual_profile_result_even_while_background_work_yields(
 ):
     async def scenario():
         async with action_then_chat(core, tmp_path, monkeypatch) as (_, job, _, _):
-            before = (core.store.db.total_changes,
-                      len(core.store.rows("SELECT * FROM model_usage")))
-            reference = account_action_context.reference(core, job)
+            before = logical_state(core.store)
+            with core.store.read_snapshot():
+                reference = account_action_context.reference(core, job)
             assert reference is not None
             assert reference["data"]["records"][0]["result"] == "SUCCEEDED"
             assert reference["data"]["records"][0]["value"] == "星语"
-            assert (core.store.db.total_changes, len(core.store.rows("SELECT * FROM model_usage"))
-                    ) == before
+            assert logical_state(core.store) == before
             snapshots = []
             messages = core.context(job, memories=[], snapshots=snapshots)
             text = json.dumps(messages, ensure_ascii=False)
@@ -176,7 +176,7 @@ def test_invalidated_receipt_or_source_cannot_survive_model_await(
                 core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_800'",
                                    (json.dumps({"text": "changed evidence"}),))
             else:
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, ["evt_test_800"], core.clock())
             with pytest.raises(CoreError):
                 core._check_context_snapshots(job, snapshots)

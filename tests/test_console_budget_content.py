@@ -12,6 +12,7 @@ from companion.capabilities import snapshot
 from companion.contracts import CoreError
 from companion.core import Core
 from tests.conftest import FakeModel, event, run
+from tests.postgres_fixture import logical_state
 from tests.support.content import enable, owner_share, png
 
 
@@ -79,8 +80,9 @@ def test_unknown_image_keeps_original_fx_and_blocks_replay_after_reconfiguration
 
 def test_runtime_capability_snapshot_reports_cloud_exhaustion_without_binding(core):
     core.settings.cloud_budget.daily_micro_cny = 0
-    before = core.store.db.total_changes
-    value = snapshot(core.store, core.settings, core.clock)
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        value = snapshot(core.store, core.settings, core.clock)
     assert "CLOUD_DAILY_BUDGET_EXHAUSTED" in json.dumps(value)
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     assert not core.store.rows("SELECT * FROM cloud_budget_policies")

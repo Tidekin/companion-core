@@ -6,6 +6,7 @@ from companion import console_media_views, paid_budget
 from companion.social_autonomy_protocol import ProfileBaseline
 from companion.store import after, encode
 from companion.voice_protocol import VoiceLeaseRef
+from tests.postgres_fixture import logical_state
 from tests.support.owner_console import client as client  # noqa: F401 -- pytest fixture
 from tests.support.owner_console import login
 from tests.support.social_autonomy import (
@@ -40,13 +41,14 @@ def test_media_views_require_owner_session_and_read_only_empty_state(client, cor
             == 401
         )
     login(client)
-    before = client.app_core.store.db.total_changes
-    assert view(client, "voice")["items"] == []
-    accounts = view(client, "account-actions")
+    before = logical_state(core.store)
+    with client.app_core.store.read_snapshot():
+        assert view(client, "voice")["items"] == []
+        accounts = view(client, "account-actions")
     assert accounts["meta"]["enabled"] is False
     assert len(accounts["items"]) == 3
     assert all(item["status"] == "UNOBSERVED" for item in accounts["items"])
-    assert client.app_core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     assert not core.model.calls
 
 
@@ -63,9 +65,10 @@ def test_voice_projection_separates_node_contact_task_and_original_delivery(
     create_asr(core, jobs, event_id, key, partial=True)
     core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN',attempt_count=1")
     login(client)
-    before = client.app_core.store.db.total_changes
-    projected = view(client, "voice")
-    assert client.app_core.store.db.total_changes == before
+    before = logical_state(core.store)
+    with client.app_core.store.read_snapshot():
+        projected = view(client, "voice")
+    assert logical_state(core.store) == before
     nodes = [item for item in projected["items"] if item["kind"] == "voice_node"]
     assert nodes[0]["status"] == "BUSY"
     assert nodes[0]["detail"]["verified_manifest_sha256"] == "b" * 64
@@ -118,11 +121,13 @@ def test_account_view_uses_native_receipt_and_public_provenance(client, core, na
     token = dispatch(module, frozen)
     outcome(module, frozen, token, native)
     login(client)
-    before = client.app_core.store.db.total_changes
+    before = logical_state(core.store)
     ledger = core.store.rows("SELECT * FROM model_usage")
-    item = next(
-        item for item in view(client, "account-actions")["items"] if item["id"] == plan["plan_id"]
-    )
+    with client.app_core.store.read_snapshot():
+        item = next(
+            item for item in view(client, "account-actions")["items"]
+            if item["id"] == plan["plan_id"]
+        )
     assert item["status"] == expected
     assert item["detail"]["receipt_state"] == native
     assert item["detail"]["sources"][0]["status"] == "FETCHED"
@@ -131,7 +136,7 @@ def test_account_view_uses_native_receipt_and_public_provenance(client, core, na
         assert item["detail"]["resource_id"] == "synthetic-real-tid"
     else:
         assert item["detail"]["resource_id"] is None
-    assert client.app_core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     assert core.store.rows("SELECT * FROM model_usage") == ledger
 
 
