@@ -4,6 +4,7 @@ The event owns its revision. Jobs and deliveries inherit it rather than keeping
 independent version counters. Callers still own admission, accounting and I/O.
 """
 
+from companion import job_queue
 from companion.contracts import CoreError
 
 SUPERSEDED = "REPLY_SUPERSEDED"
@@ -115,13 +116,12 @@ def advance(store, conversation_id, event_id, now):
     revision = store.one("SELECT reply_revision FROM conversations WHERE conversation_id=?",
                          (conversation_id,))["reply_revision"]
     store.execute("UPDATE events SET reply_revision=? WHERE event_id=?", (revision, event_id))
-    store.execute(
-        "UPDATE jobs SET state='CANCELLED',lease_token=NULL,last_error_code=?,updated_at=? "
-        "WHERE kind='chat' AND state IN ('QUEUED','RUNNING','RETRY_WAIT') AND event_id IN "
-        "(SELECT event_id FROM events WHERE conversation_id=? AND event_id!=? AND "
-        + OWNER_INPUT + " AND COALESCE(json_extract(body_json,'$.control_command'),0)!=1 "
-        "AND COALESCE(json_extract(body_json,'$.diary_command'),0)!=1)",
-        (SUPERSEDED, now, conversation_id, event_id),
+    job_queue.cancel_active(
+        store, "kind='chat' AND event_id IN (SELECT event_id FROM events WHERE conversation_id=? "
+        "AND event_id!=? AND " + OWNER_INPUT + " AND "
+        "COALESCE(json_extract(body_json,'$.control_command'),0)!=1 AND "
+        "COALESCE(json_extract(body_json,'$.diary_command'),0)!=1)",
+        (conversation_id, event_id), SUPERSEDED, now,
     )
     cancel_superseded_replies(store, conversation_id, event_id, now)
     store.audit("reply.superseded", event_id, source["trace_id"], now, reply_revision=revision)

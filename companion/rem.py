@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from companion import budget, owner_authority, paid_budget, reply_revision
+from companion import budget, job_queue, owner_authority, paid_budget, reply_revision
 from companion.contracts import CoreError
 from companion.diary import day_bounds
 from companion.memory import Memory
@@ -102,9 +102,7 @@ def _enqueue(store, settings, clock, day, conversation, expires, snapshot, sourc
                  event_type="rem.requested", occurred_at=now, ingested_at=now,
                  privacy_scope="private", body_json=encode({"rem_id": rem_id}),
                  trace_id=rem_id, memory_processed=1)
-    store.insert("jobs", job_id=job_id, event_id=event_id, kind="rem", state="QUEUED",
-                 idempotency_key=idempotency_key or rem_id, max_attempts=1,
-                 created_at=now, updated_at=now, context_tracked=1)
+    job_queue.create(store, job_id, event_id, "rem", idempotency_key or rem_id, now)
     store.insert("job_sources", job_id=job_id, event_id=event_id)
     owner_authority.bind_job(store, settings, clock, job_id, purpose="rem")
     for key in sorted(set(sources)):
@@ -287,9 +285,9 @@ async def run(core, job):
                           "text": data["result"]["text"], "questions": []}
                 store.execute("UPDATE rem_records SET output_json=? WHERE rem_id=?",
                                (encode(output), row["rem_id"]))
-                store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
-                               "WHERE job_id=? AND lease_token=?",
-                               (clock(), job["job_id"], job["lease_token"]))
+                job_queue.release(
+                    store, job["job_id"], "SUCCEEDED", clock(), token=job["lease_token"]
+                )
                 store.audit("rem.completed", row["rem_id"], job["trace_id"], clock(),
                             kind="FICTION", decision="DREAM", life_job_id=data["job"]["job_id"])
             return True
@@ -318,9 +316,7 @@ async def run(core, job):
             source_check()
             store.execute("UPDATE rem_records SET output_json=? WHERE rem_id=?",
                            (encode(output), row["rem_id"]))
-            store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
-                           "WHERE job_id=? AND lease_token=?", (clock(), job["job_id"],
-                                                                job["lease_token"]))
+            job_queue.release(store, job["job_id"], "SUCCEEDED", clock(), token=job["lease_token"])
             store.audit("rem.completed", row["rem_id"], job["trace_id"], clock(),
                         kind="FICTION", decision=draft.decision)
     except Exception as error:
@@ -329,24 +325,26 @@ async def run(core, job):
             if code in budget.CAPACITY_WAIT_CODES and not store.one(
                 "SELECT 1 FROM model_usage WHERE job_id=?", (job["job_id"],),
             ):
-                store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL,updated_at=?,"
-                               "attempts=MAX(0,attempts-1),"
-                               "next_attempt_at=?,last_error_code=? WHERE job_id=? "
-                               "AND state='RUNNING' AND lease_token=?",
-                               (clock(), after(clock(), 60), code, job["job_id"],
-                                job["lease_token"]))
+                job_queue.retry_outcome(
+                    store,
+                    job["job_id"],
+                    "RETRY_WAIT",
+                    clock(),
+                    after(clock(), 60),
+                    reason=code,
+                    token=job["lease_token"],
+                    refund=True,
+                )
                 return True
-            store.execute("UPDATE jobs SET state='FAILED',lease_token=NULL,last_error_code=?,"
-                           "updated_at=? WHERE job_id=? AND state='RUNNING' AND lease_token=?",
-                           (code, clock(), job["job_id"], job["lease_token"]))
+            job_queue.release(store, job["job_id"], "FAILED", clock(), reason=code,
+                              token=job["lease_token"])
             store.audit("rem.failed", job["job_id"], job["trace_id"], clock(), code=code)
     return True
 
 
 def recover_interrupted(store, now):
-    store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                   "last_error_code='REM_INTERRUPTED' WHERE kind='rem' "
-                   "AND state='RUNNING' AND lease_until<=?", (now, now))
+    job_queue.cancel_active(store, "kind='rem' AND state='RUNNING' AND lease_until<=?",
+                            (now,), "REM_INTERRUPTED", now)
 
 
 def erase(store, event_ids):
@@ -364,9 +362,7 @@ def _scrub(store, row, code):
     store.execute("UPDATE rem_records SET redacted=1,source_snapshot_json='{}',output_json='{}',"
                    "source_memory_ids_json='[]',source_event_ids_json='[]' WHERE rem_id=?",
                    (row["rem_id"],))
-    store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,last_error_code=? "
-                   "WHERE job_id=? AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-                   (code, row["job_id"]))
+    job_queue.cancel_active(store, "job_id=?", (row["job_id"],), code)
 
 
 def expire(store, ledger, now):

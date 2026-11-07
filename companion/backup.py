@@ -5,7 +5,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-from companion import transport
+from companion import job_queue, transport
 from companion.contracts import CoreError
 from companion.executive import restore_executive
 from companion.privacy import ErasureLedger, advance_epoch
@@ -72,27 +72,27 @@ def restore(source, destination, key, ledger_path):
                 restore_gateway(store)
                 transport.restore_deliveries(store)
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
-                store.execute(
-                    "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
-                    "updated_at=?,last_error_code='RESTORED_EVALUATION_REQUIRES_REVIEW' "
-                    "WHERE kind='evaluation' AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-                    (utcnow(),),
+                job_queue.cancel_active(
+                    store,
+                    "kind='evaluation'",
+                    (),
+                    "RESTORED_EVALUATION_REQUIRES_REVIEW",
+                    utcnow(),
+                    clear_deadline=True,
                 )
-                store.execute(
-                    "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
-                    "updated_at=?,last_error_code='RESTORED_POKE_REQUIRES_RECONCILIATION' "
-                    "WHERE kind='poke' AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-                    (utcnow(),),
+                job_queue.cancel_active(
+                    store,
+                    "kind='poke'",
+                    (),
+                    "RESTORED_POKE_REQUIRES_RECONCILIATION",
+                    utcnow(),
+                    clear_deadline=True,
                 )
                 store.execute("UPDATE meme_discovery_reservations SET state='UNKNOWN',"
                               "updated_at=? WHERE state='RESERVED'", (utcnow(),))
-                store.execute(
-                    "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
-                    "updated_at=?,last_error_code='RESTORED_DISCOVERY_REQUIRES_RECONCILIATION' "
-                    "WHERE kind IN ('meme_discovery','meme_caption') "
-                    "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-                    (utcnow(),),
-                )
+                job_queue.cancel_active(store, "kind IN ('meme_discovery','meme_caption')", (),
+                                        "RESTORED_DISCOVERY_REQUIRES_RECONCILIATION", utcnow(),
+                                        clear_deadline=True)
                 # A backup cannot re-authorize a consumed stopped memory-control grant.
                 # This marker is deliberately independent of model/window counters.
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",

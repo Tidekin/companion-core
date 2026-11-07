@@ -5,7 +5,7 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from companion import transport
+from companion import job_queue, transport
 from companion.commands import command_parts
 from companion.contracts import CoreError
 from companion.store import encode, uid
@@ -787,12 +787,8 @@ class ErasureLedger:
         job_ids = encode([row["job_id"] for row in jobs])
         origins = encode(sorted(set(event_ids) | {row["event_id"] for row in jobs
                                                   if row["event_id"]}))
-        store.execute(
-            "UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-            "last_error_code='REPLY_SOURCE_RECALLED' WHERE job_id IN "
-            "(SELECT value FROM json_each(?)) AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-            (at, job_ids),
-        )
+        job_queue.cancel_active(store, "job_id IN (SELECT value FROM json_each(?))", (job_ids,),
+                                "REPLY_SOURCE_RECALLED", at)
         transport.revoke_deliveries(
             store, "origin_event_id IN (SELECT value FROM json_each(?)) OR (? AND NOT EXISTS "
             "(SELECT 1 FROM jobs j WHERE j.event_id=outbox.origin_event_id))",
@@ -879,12 +875,7 @@ class ErasureLedger:
                 "UPDATE events SET body_json='{}',redacted=1,memory_processed=1 WHERE event_id=?",
                 (event_id,),
             )
-            store.execute(
-                "UPDATE jobs SET state='CANCELLED',lease_token=NULL,"
-                "last_error_code='PRIVACY_CHANGED' "
-                "WHERE event_id=? AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-                (event_id,),
-            )
+            job_queue.cancel_active(store, "event_id=?", (event_id,), "PRIVACY_CHANGED")
     def clear_event_replies(self, store, event_ids):
         for event_id in event_ids:
             transport.revoke_deliveries(store, "origin_event_id=?", (event_id,), erase_content=True)

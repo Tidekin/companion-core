@@ -4,7 +4,7 @@ import re
 from contextlib import nullcontext
 from datetime import datetime
 
-from companion import reply_revision
+from companion import job_queue, reply_revision
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
 from companion_delivery_protocol import preflight
@@ -413,13 +413,14 @@ def recover_deliveries(store, now):
 def cancel_proactive_work(store, now):
     # Caller holds the write transaction. A dispatched model still owns settlement;
     # logical cancellation must not turn its eventual observed usage into UNKNOWN.
-    store.execute(
-        "UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-        "last_error_code='AUTONOMY_PAUSED' WHERE kind='activity' "
-        "AND event_id NOT IN (SELECT event_id FROM events WHERE "
-        "json_extract(body_json,'$.notice.kind') IN ('commitment','life')) "
-        "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-        (now,),
+    job_queue.cancel_active(
+        store,
+        "kind='activity' AND event_id NOT IN "
+        "(SELECT event_id FROM events WHERE json_extract(body_json,'$.notice.kind') "
+        "IN ('commitment','life'))",
+        (),
+        "AUTONOMY_PAUSED",
+        now,
     )
     _cancel_unsent(store, now, "AUTONOMY_PAUSED", "action_type='qq.private.proactive'", ())
 

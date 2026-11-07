@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import UTC
 
-from companion import owner_authority, owner_input, reply_revision
+from companion import job_queue, owner_authority, owner_input, reply_revision
 from companion.contracts import CoreError
 from companion.exploration import ReadItem, ReadResult
 from companion.observation import ArticleEvidence, ReadingEvidence
@@ -374,11 +374,7 @@ class ReadingService:
                  result.observed_requests, result.observed_bytes, self.clock(), request_id),
             )
             # Wake the original Core worker after committing the correlated Reader result.
-            s.execute("UPDATE jobs SET next_attempt_at=?,updated_at=? WHERE state='RETRY_WAIT' "
-                      "AND job_id IN (SELECT a.job_id FROM agent_tool_calls a "
-                      "JOIN agent_conversations c USING(job_id) WHERE a.request_id=? "
-                      "AND a.state='DEFERRED' AND c.phase='WAITING')",
-                      (self.clock(), self.clock(), request_id))
+            job_queue.reader_ready(s, request_id, self.clock())
             video = self.video
             if (not owner_authority.required(s, self.settings)
                 and video is not None and self.settings.bili_video.enabled) and (

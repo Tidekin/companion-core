@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+from companion import job_queue
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode, uid
@@ -196,8 +197,7 @@ def bind_job(store, settings, clock, job_id, *, purpose):
     saved = json.loads(row["authority_json"])
     if saved and saved != view.authority.as_dict():
         raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
-    store.execute("UPDATE jobs SET authority_json=? WHERE job_id=?",
-                  (encode(view.authority.as_dict()), job_id))
+    job_queue.bind_authority(store, job_id, view.authority.as_dict())
     return view
 
 
