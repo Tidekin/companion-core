@@ -89,18 +89,19 @@ def _original(store, settings, clock, message_id):
         p["kind"] in {"reader", "images", "singing", "video_preview_reply"} for p in snapshots
     ) or store.one("SELECT 1 FROM agent_image_inputs WHERE job_id=?", (job["job_id"],)):
         _fail()
-    proof = owner_delivery._history_proof(store, job)
+    proof = owner_delivery._history_proof(store, job, snapshots)
     if proof != owner_input.history_proof(
         owner_input.history_for_owner(store, settings, clock, job, current)
     ):
         raise CoreError(reply_revision.CANCELLED, 409)
-    owner_delivery._memories(store, settings, clock, job, current)
+    owner_delivery._memories(store, settings, clock, current, snapshots)
     if len(group["text"]) > current.policy.max_reply_chars:
         _fail()
     requests = owner_delivery._usage(store, job, original, snapshots, message_id, group=group)
+    context_hashes = owner_delivery._context_hashes(proof, snapshots)
     for row in group["rows"]:
         saved = _meta(store, owner_delivery.DELIVERY + row["message_id"])
-        if saved != owner_delivery._material(store, row, job, original, requests, snapshots):
+        if saved != owner_delivery._material(store, row, job, original, requests, context_hashes):
             _fail()
     return group, job, current
 

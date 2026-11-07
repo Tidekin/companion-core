@@ -258,7 +258,8 @@ def test_voice_choice_preserves_existing_picture_expression(core, monkeypatch):
                        (encode(owner_delivery._material(core.store, updated,
                             job,
                             voice_authority.current(core.store, core.settings, core.clock),
-                            original["request_ids"], owner_delivery._snapshots(core.store, job))),
+                            original["request_ids"], {key: original[key] for key in (
+                                "history_sha256", "context_sha256")})),
                         owner_delivery.DELIVERY + message_id))
     assert prepare(core, flow, message_id).state == "TEXT"
     assert not core.store.rows("SELECT * FROM voice_jobs")
