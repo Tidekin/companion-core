@@ -13,6 +13,7 @@ from companion import (
     dialogue_history,
     image_spool,
     inbox,
+    job_queue,
     live_text,
     notices,
     owner_authority,
@@ -71,6 +72,7 @@ from companion.transport import (
     enqueue_reply_parts,
     reconcile_delivery,
     recover_deliveries,
+    set_proactive_paused,
 )
 from companion.voice_flow import VoiceFlow
 from companion.wake import WakePlanner
@@ -158,8 +160,10 @@ class Core(Runtime):
             content=self.content, diary=self.diary.repo, affect=self.affect,
         )
 
-    def new_job(self, event_id, kind, key, now):
-        return inbox.new_job(self.store, self.settings, event_id, kind, key, now)
+    def new_job(self, event_id, kind, key, now, *, max_attempts=None):
+        return job_queue.enqueue(self.store, event_id, kind, key, now,
+                                 max_attempts=(self.settings.max_attempts if max_attempts is None
+                                               else max_attempts))
 
     def recover(self, now):
         from companion.evaluation import recover as recover_evaluation
@@ -180,8 +184,7 @@ class Core(Runtime):
             "AND NOT EXISTS (SELECT 1 FROM model_usage m WHERE m.job_id=j.job_id) "
             "AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.origin_event_id=j.event_id)",
         ):
-            s.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                      "last_error_code='LEGACY_TIMER_RETIRED' WHERE job_id=?", (now, job["job_id"]))
+            job_queue.release(s, job["job_id"], "CANCELLED", now, reason="LEGACY_TIMER_RETIRED")
             s.audit("activity.legacy_timer_retired", job["job_id"], job["trace_id"], now)
         expired = s.rows("SELECT * FROM jobs WHERE state='RUNNING' "
                          "AND kind IN ('chat','activity') AND lease_until<=?", (now,))
@@ -195,11 +198,7 @@ class Core(Runtime):
 
             if not recoverable(s, job["job_id"]):
                 state = "FAILED"
-            s.execute(
-                "UPDATE jobs SET state=?,lease_token=NULL,last_error_code='WORKER_LEASE_EXPIRED',"
-                "updated_at=? WHERE job_id=?",
-                (state, now, job["job_id"]),
-            )
+            job_queue.release(s, job["job_id"], state, now, reason="WORKER_LEASE_EXPIRED")
         budget.expire_cancelled_reservations(s, self.settings, now)
         from companion.voice_jobs import expire_voice_jobs
         expire_voice_jobs(s, now)
@@ -294,8 +293,7 @@ class Core(Runtime):
                 owner_authority.check_job(s, self.settings, self.clock, row,
                     purpose=owner_authority.model_purpose(s, row["kind"], row["job_id"]))
             except CoreError as error:
-                s.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                          "last_error_code=? WHERE job_id=?", (now, error.code, row["job_id"]))
+                job_queue.release(s, row["job_id"], "CANCELLED", now, reason=error.code)
                 return None
         if self.memes.waiting_offer(row, now):
             return None
@@ -331,14 +329,10 @@ class Core(Runtime):
         try:
             runtime_config.bind(s, self.settings, self.clock, "job:" + row["job_id"])
         except CoreError as error:
-            s.execute("UPDATE jobs SET state='FAILED',last_error_code=?,updated_at=? "
-                      "WHERE job_id=?", (error.code, now, row["job_id"]))
+            job_queue.finish_unclaimed(s, row["job_id"], "FAILED", now, reason=error.code)
             return None
-        s.execute(
-            "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
-            "attempts=attempts+1,updated_at=? WHERE job_id=?",
-            (worker_id, token, after(now, self.settings.lease_seconds), now, row["job_id"]),
-        )
+        job_queue.claim(s, row["job_id"], worker_id, token, after(now, self.settings.lease_seconds),
+                        now)
         return {**row, "lease_token": token, "attempts": row["attempts"] + 1}
 
     def _check_context_snapshots(self, job, snapshots, *, current_request=None):
@@ -1132,7 +1126,7 @@ class Core(Runtime):
                        "当前交互状态", "为什么形成偏好", "你记得什么"}:
             # These service responses do not yet expose complete source receipts.
             # Recall treats them conservatively instead of claiming exact lineage.
-            s.execute("UPDATE jobs SET context_tracked=0 WHERE job_id=?", (job["job_id"],))
+            job_queue.mark_context_untracked(s, job["job_id"])
         diary_reply = self.diary.command(text, self.settings.owner_qq_id)
         if diary_reply is not None:
             return diary_reply
@@ -1156,12 +1150,7 @@ class Core(Runtime):
             return "已记录核对结果，不会重发该条消息。"
         if text in {"暂停主动分享", "恢复主动分享"}:
             with s.transaction():
-                s.execute(
-                    "INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
-                    ("1" if text.startswith("暂停") else "0",),
-                )
-                if text.startswith("暂停"):
-                    cancel_proactive_work(s, now)
+                set_proactive_paused(s, text.startswith("暂停"), now)
             return "已" + text + "。"
         if not self.settings.memory_enabled:
             return None
@@ -1309,11 +1298,8 @@ class Core(Runtime):
             # blocks the ordinary paid admission path and never creates a retry.
             code = error.code if isinstance(error, CoreError) else "PRIVATE_POKE_FAILED"
             with self.store.transaction():
-                self.store.execute(
-                    "UPDATE jobs SET state='FAILED',lease_token=NULL,last_error_code=?,"
-                    "updated_at=? WHERE job_id=? AND state='RUNNING' AND lease_token=?",
-                    (code, self.clock(), job["job_id"], job["lease_token"]),
-                )
+                job_queue.release(self.store, job["job_id"], "FAILED", self.clock(), reason=code,
+                                  token=job["lease_token"])
                 self.store.audit("poke.failed", job["job_id"], job["trace_id"], self.clock(),
                                  error_code=code)
         return True
@@ -1603,11 +1589,7 @@ class Core(Runtime):
                         )
                 if conversation_store is not None:
                     conversation_store.complete()
-                self.store.execute(
-                    "UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
-                    "WHERE job_id=?",
-                    (now, job["job_id"]),
-                )
+                job_queue.release(self.store, job["job_id"], "SUCCEEDED", now)
                 self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now,
                                  **({"reply_suppressed": True} if not reply_is_current else {}),
                                  **({"reply_skipped": True} if silent else {}))
@@ -1646,10 +1628,7 @@ class Core(Runtime):
             if code in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED,
                         reply_revision.CANCELLED, "INPUT_RECALLED", "OWNER_SOURCE_CHANGED",
                         "OWNER_CAPTURE_INVALID", "OWNER_SOURCE_JOB_BINDING_REQUIRED"}:
-                self.store.execute(
-                    "UPDATE jobs SET state='CANCELLED',lease_token=NULL,last_error_code=?,"
-                    "updated_at=? WHERE job_id=?", (code, now, job["job_id"]),
-                )
+                job_queue.release(self.store, job["job_id"], "CANCELLED", now, reason=code)
                 return
             if notices.retry_required_wording(self.store, self.settings, job, code, now):
                 return
@@ -1658,11 +1637,15 @@ class Core(Runtime):
                 "DAILY_BUDGET_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",
             } and not self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
                                      (job["job_id"],)):
-                self.store.execute(
-                    "UPDATE jobs SET state='RETRY_WAIT',attempts=MAX(0,attempts-1),"
-                    "last_error_code=?,next_attempt_at=?,lease_token=NULL,updated_at=? "
-                    "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
-                    (code, after(now, 60), now, job["job_id"], job["lease_token"]),
+                job_queue.retry_outcome(
+                    self.store,
+                    job["job_id"],
+                    "RETRY_WAIT",
+                    now,
+                    after(now, 60),
+                    reason=code,
+                    token=job["lease_token"],
+                    refund=True,
                 )
                 return
             checkpoint = self.store.one(
@@ -1680,11 +1663,8 @@ class Core(Runtime):
                 # Admission contention is a wait, including between SDK model turns.
                 # A READY checkpoint retains paid responses and observed tool results;
                 # an uncertain original attempt never authorizes this continuation.
-                self.store.execute(
-                    "UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL,last_error_code=?,"
-                    "next_attempt_at=?,attempts=MAX(0,attempts-1),updated_at=? WHERE job_id=?",
-                    (code, after(now, 1), now, job["job_id"]),
-                )
+                job_queue.retry_outcome(self.store, job["job_id"], "RETRY_WAIT", now, after(now, 1),
+                                        reason=code, token=job["lease_token"], refund=True)
                 return
             bounded_text = live_text.active(self.store, self.settings)
             if bounded_text:
@@ -1698,19 +1678,9 @@ class Core(Runtime):
             }
             state = ("RETRY_WAIT" if retryable and not bounded_text
                      and job["attempts"] < job["max_attempts"] else "FAILED")
-            changed = self.store.execute(
-                "UPDATE jobs SET state=?,last_error_code=?,next_attempt_at=?,"
-                "lease_token=NULL,updated_at=? WHERE job_id=? "
-                "AND state='RUNNING' AND lease_token=?",
-                (
-                    state,
-                    code,
-                    after(now, 5 * 2 ** (job["attempts"] - 1)),
-                    now,
-                    job["job_id"],
-                    job["lease_token"],
-                ),
-            ).rowcount
+            changed = job_queue.retry_outcome(self.store, job["job_id"], state, now,
+                                    after(now, 5 * 2 ** (job["attempts"] - 1)), reason=code,
+                                    token=job["lease_token"])
             if changed:
                 self.store.audit(
                     "job.failed", job["job_id"], job["trace_id"], now, code=code, state=state

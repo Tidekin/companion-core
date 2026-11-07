@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from companion import budget, owner_authority, social_profile_sources, transport
+from companion import budget, job_queue, owner_authority, social_profile_sources, transport
 from companion.contracts import CoreError
 from companion.observation import ArticleEvidence, ReadingEvidence, expired_sources
 from companion.privacy import redact
@@ -759,9 +759,8 @@ class SocialAutonomy:
                 s.audit("social.plan_decided", plan_id, plan_id, self.clock(),
                         outcome="skip" if isinstance(frozen, Skip) else frozen.action_type)
                 if job:
-                    s.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
-                              "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
-                              (self.clock(), job["job_id"], job["lease_token"]))
+                    job_queue.release(s, job["job_id"], "SUCCEEDED", self.clock(),
+                                      token=job["lease_token"])
         except BaseException as error:
             code = (error.code if isinstance(error, CoreError) else "SOCIAL_PLAN_INVALID"
                     if isinstance(error, ValidationError) else "SOCIAL_PLANNING_INTERRUPTED")

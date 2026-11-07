@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
-from companion import meme_assets, meme_service, private_life
+from companion import job_queue, meme_assets, meme_service, private_life
 from companion.contracts import CoreError
 from companion.store import encode
 from companion_meme_protocol import CaptionContext, source_evidence
@@ -195,11 +195,16 @@ class MemeDiscovery:
                     limits=meme_service.DiscoveryLimits()))
         except CoreError as error:
             with self.store.transaction():
-                self.store.execute("UPDATE jobs SET state='FAILED',last_error_code=?,"
-                    "lease_token=NULL,updated_at=? WHERE job_id=? AND state='RUNNING' "
-                    "AND lease_token=? AND NOT EXISTS (SELECT 1 FROM meme_discovery_reservations "
-                    "WHERE job_id=jobs.job_id)",
-                    (error.code, self.clock(), claim["job_id"], claim["lease_token"]))
+                job_queue.release(
+                    self.store,
+                    claim["job_id"],
+                    "FAILED",
+                    self.clock(),
+                    reason=error.code,
+                    token=claim["lease_token"],
+                    condition="NOT EXISTS (SELECT 1 FROM "
+                    "meme_discovery_reservations WHERE job_id=jobs.job_id)",
+                )
             return True
         usage, complete, committed = Usage(), False, False
 

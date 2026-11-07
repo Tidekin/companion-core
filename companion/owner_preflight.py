@@ -8,10 +8,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import Field
 
 import companion_delivery_protocol as wire
-from companion import cumulative, live_text, owner_authority
+from companion import cumulative, input_protocol, live_text, owner_authority
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityReference
-from companion.transport import cancel_segment_tail, mark_not_dispatched
+from companion.transport import cancel_segment_tail, mark_not_dispatched, retire_preflight_lease
 from companion_delivery_protocol import preflight
 
 
@@ -29,7 +29,6 @@ class ExpiredPreflight(AuthorityReference):
 def settle(store, settings, clock, body):
     """Consume only the exclusive Bridge's signed RESERVED witness for our last lease."""
     proof = body.model_dump(mode="json")
-    key = "input_cancel_before_send:" + body.message_id
     with store.transaction(delivery_preflight=True):
         view = owner_authority.evidence(store, settings, body.authority)
         try:
@@ -39,10 +38,7 @@ def settle(store, settings, clock, body):
             raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 403) from None
         receipt = {"cancelled": True, "message_id": body.message_id,
                    "state": "CANCELLED", "send_attempt_retained": True}
-        prior = live_text._meta(store, key)
-        if prior is not None:
-            if prior != proof:
-                raise CoreError("INPUT_CANCEL_RECEIPT_CONFLICT", 409)
+        if input_protocol.prior_cancellation(store, body.message_id, proof):
             return receipt
         latest = owner_authority._latest(store)
         if (not latest or latest["state"] != "ACTIVE"
@@ -74,9 +70,8 @@ def settle(store, settings, clock, body):
         if row["state"] != "CANCELLED":
             mark_not_dispatched(store, body.message_id, now, attempt_count=row["attempt_count"])
         cancel_segment_tail(store, row, now)
-        store.execute("DELETE FROM runtime_meta WHERE key=?",
-                      ("owner_preflight_lease:" + body.message_id,))
-        live_text._put(store, key, proof)
+        retire_preflight_lease(store, body.message_id)
+        input_protocol.record_cancellation(store, body.message_id, proof)
         store.audit("delivery.preflight_expired", body.message_id, "bridge", now,
                     proof_sha256=wire.digest(proof), stage=body.stage)
         return receipt

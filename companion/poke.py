@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from companion import (
     cumulative,
     dialogue_history,
+    job_queue,
     owner_authority,
     owner_input,
     paid_budget,
@@ -253,10 +254,15 @@ def receive(store, settings, clock, capture):
                 result.update(job_id=batch["job_id"], state="QUEUED", coalesced=True)
         elif configured.mode != "none" and configured.daily_limit:
             job_id = uid("job")
-            store.insert("jobs", job_id=job_id, event_id=capture.event_id, kind="poke",
-                         state="QUEUED", idempotency_key="poke-response:" + capture.event_id,
-                         max_attempts=1, created_at=now, updated_at=now, context_tracked=1,
-                         next_attempt_at=after(now, configured.coalesce_seconds))
+            job_queue.create(
+                store,
+                job_id,
+                capture.event_id,
+                "poke",
+                "poke-response:" + capture.event_id,
+                now,
+                next_attempt_at=after(now, configured.coalesce_seconds),
+            )
             owner_authority.bind_job(store, settings, clock, job_id, purpose="poke")
             store.insert("job_sources", job_id=job_id, event_id=capture.event_id)
             store.insert("poke_batches", job_id=job_id, conversation_id=conversation_id,
@@ -295,9 +301,7 @@ def _snapshot(sources):
 
 
 def _cancel(store, job_id, reason, now):
-    store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,last_error_code=?,"
-                  "updated_at=? WHERE job_id=? AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-                  (reason, now, job_id))
+    job_queue.cancel_active(store, "job_id=?", (job_id,), reason, now)
 
 
 def claim_ready(store, settings, clock, worker_id):
@@ -355,10 +359,9 @@ def claim_ready(store, settings, clock, worker_id):
                                  (job["conversation_id"],))["reply_revision"]
             sources = _sources(store, settings, job, cutoff, clock)
             token = uid("lease")
-            store.execute("UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,"
-                          "lease_until=?,attempts=attempts+1,updated_at=? WHERE job_id=?",
-                          (worker_id, token, after(now, settings.lease_seconds), now,
-                           job["job_id"]))
+            job_queue.claim(
+                store, job["job_id"], worker_id, token, after(now, settings.lease_seconds), now
+            )
             store.execute("UPDATE poke_batches SET claimed_at=?,context_cutoff=?,reply_revision=?,"
                           "context_json=? WHERE job_id=?",
                           (now, cutoff, revision, encode(_snapshot(sources)), job["job_id"]))
@@ -467,9 +470,7 @@ def finish(store, settings, approval, job, decision, now):
             from companion.owner_delivery import record_poke_reply
 
             record_poke_reply(store, settings, lambda: now, job, [message_id])
-        store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
-                      "WHERE job_id=?",
-                      (now, job["job_id"]))
+        job_queue.release(store, job["job_id"], "SUCCEEDED", now)
         return [message_id] if message_id else []
 
 
@@ -505,9 +506,8 @@ def erase(store, event_ids):
     for event_id in event_ids:
         jobs = "SELECT job_id FROM poke_batches WHERE job_id IN " \
                "(SELECT job_id FROM job_sources WHERE event_id=?)"
-        store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,"
-                      "last_error_code='REPLY_SOURCE_RECALLED' WHERE job_id IN (" + jobs + ") "
-                      "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')", (event_id,))
+        job_queue.cancel_active(store, "job_id IN (" + jobs + ")", (event_id,),
+                                "REPLY_SOURCE_RECALLED")
         transport.revoke_deliveries(store, "message_id IN (SELECT response_message_id "
                                     "FROM poke_batches WHERE job_id IN (" + jobs + "))",
                                     (event_id,), erase_content=True)

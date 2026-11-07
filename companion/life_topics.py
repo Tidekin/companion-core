@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from companion import budget, owner_authority, private_life, reply_revision
+from companion import budget, job_queue, owner_authority, private_life, reply_revision
 from companion.contracts import CoreError
 from companion.diary import DiaryDraft, is_management_command, render_draft
 from companion.life_protocol import (
@@ -454,12 +454,8 @@ def invalidate(store, topic_id, reason, *, terminal=None, now=None):
         "proposal_json='{}',source_sha256='',source_fingerprints_json='{}' WHERE topic_id=?",
         (topic_id,),
     )
-    store.execute(
-        "UPDATE jobs SET state='CANCELLED',lease_token=NULL,last_error_code=? "
-        "WHERE job_id IN (SELECT job_id FROM life_activity_results WHERE topic_id=?) "
-        "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-        (reason, topic_id),
-    )
+    job_queue.cancel_active(store, "job_id IN (SELECT job_id FROM life_activity_results "
+                            "WHERE topic_id=?)", (topic_id,), reason)
     if terminal:
         store.execute(
             "UPDATE life_topics SET state=?,reason_code=?,revision=revision+1,"

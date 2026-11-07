@@ -4,7 +4,7 @@ import re
 from contextlib import nullcontext
 from datetime import datetime
 
-from companion import reply_revision
+from companion import job_queue, reply_revision
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
 from companion_delivery_protocol import preflight
@@ -410,16 +410,29 @@ def recover_deliveries(store, now):
                    "('FAILED','CANCELLED','DELIVERY_UNCERTAIN'))", ())
 
 
+def set_proactive_paused(store, paused, now):
+    """Change the owner's pause setting and revoke eligible work in the same transaction."""
+    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
+                  ("1" if paused else "0",))
+    if paused:
+        cancel_proactive_work(store, now)
+
+
+def retire_preflight_lease(store, message_id):
+    store.execute("DELETE FROM runtime_meta WHERE key=?", ("owner_preflight_lease:" + message_id,))
+
+
 def cancel_proactive_work(store, now):
     # Caller holds the write transaction. A dispatched model still owns settlement;
     # logical cancellation must not turn its eventual observed usage into UNKNOWN.
-    store.execute(
-        "UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-        "last_error_code='AUTONOMY_PAUSED' WHERE kind='activity' "
-        "AND event_id NOT IN (SELECT event_id FROM events WHERE "
-        "json_extract(body_json,'$.notice.kind') IN ('commitment','life')) "
-        "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-        (now,),
+    job_queue.cancel_active(
+        store,
+        "kind='activity' AND event_id NOT IN "
+        "(SELECT event_id FROM events WHERE json_extract(body_json,'$.notice.kind') "
+        "IN ('commitment','life'))",
+        (),
+        "AUTONOMY_PAUSED",
+        now,
     )
     _cancel_unsent(store, now, "AUTONOMY_PAUSED", "action_type='qq.private.proactive'", ())
 
@@ -769,8 +782,7 @@ def delivery_result(store, settings, message_id, result, now):
                 message_id,
             ),
         )
-        store.execute("DELETE FROM runtime_meta WHERE key=?",
-                      ("owner_preflight_lease:" + message_id,))
+        retire_preflight_lease(store, message_id)
         store.audit("delivery.result", message_id, "delivery", now, state=state)
         if account:
             from companion.social_autonomy import SocialAutonomy

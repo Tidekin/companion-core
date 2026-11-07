@@ -5,7 +5,7 @@ import json
 import re
 from contextlib import nullcontext
 
-from companion import owner_authority
+from companion import job_queue, owner_authority
 from companion.contracts import CoreError
 from companion.observation import expired_sources
 from companion.paid_budget import sha
@@ -173,8 +173,7 @@ def schedule(store, settings, kind, ref, conversation_id, now):
             store.execute("INSERT INTO event_dependencies(event_id,source_event_id) VALUES (?,?)",
                           (event_id, source_id))
         job_id = uid("job")
-        store.insert("jobs", job_id=job_id, event_id=event_id, kind="activity", state="QUEUED",
-            idempotency_key=key, max_attempts=1, context_tracked=1, created_at=now, updated_at=now)
+        job_queue.create(store, job_id, event_id, "activity", key, now)
         if owner_authority.required(store, settings):
             owner_authority.bind_job(
                 store, settings, lambda: now, job_id,
@@ -436,12 +435,9 @@ def retry_required_wording(store, settings, job, code, now):
         return False
     state = "RETRY_WAIT" if current["attempts"] == 1 else "FAILED"
     # Keep the original attempt count and charges; next claim/admission owns a fresh request.
-    store.execute(
-        "UPDATE jobs SET state=?,max_attempts=2,last_error_code=?,next_attempt_at=?,"
-        "lease_token=NULL,updated_at=? WHERE job_id=? AND state='RUNNING' AND lease_token=?",
-        (state, code, after(now, 5 * 2 ** (current["attempts"] - 1)), now,
-         job["job_id"], job["lease_token"]),
-    )
+    job_queue.retry_outcome(store, job["job_id"], state, now,
+                                  after(now, 5 * 2 ** (current["attempts"] - 1)), reason=code,
+                                  token=job["lease_token"], max_attempts=2)
     store.audit("job.failed", job["job_id"], job["trace_id"], now, code=code, state=state)
     return True
 

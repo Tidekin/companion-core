@@ -16,6 +16,7 @@ from pydantic import Field
 
 from companion import (
     budget,
+    job_queue,
     meme_service,
     owner_authority,
     owner_input,
@@ -52,6 +53,11 @@ from companion_meme_protocol import (
 
 QUERY = "meme_query:"
 OFFER = "meme_offer:"
+
+
+def freeze_offer(store, event_id, material):
+    """Insert the checked offer once, under the source event's current revision."""
+    store.insert("runtime_meta", key=OFFER + event_id, value=encode(material))
 
 
 def offer_possible(text):
@@ -366,12 +372,8 @@ def erase_captions(store, event_ids):
             "source_json='{}',request_json='{}' WHERE job_id=?",
             (row["job_id"],),
         )
-        store.execute(
-            "UPDATE jobs SET state='CANCELLED',lease_token=NULL,"
-            "last_error_code='MEME_CAPTION_SOURCE_ERASED' WHERE job_id=? "
-            "AND kind='meme_caption'",
-            (row["job_id"],),
-        )
+        job_queue.release(store, row["job_id"], "CANCELLED", reason="MEME_CAPTION_SOURCE_ERASED",
+                          condition="kind='meme_caption'")
     for event_id in event_ids:
         store.execute(
             "DELETE FROM runtime_meta WHERE key IN (?,?)", (QUERY + event_id, OFFER + event_id)
@@ -501,18 +503,8 @@ class MemeCaptionService:
             prior = candidate
             break
         job_id = uid("job")
-        s.insert(
-            "jobs",
-            job_id=job_id,
-            event_id=body.context.event_id,
-            kind="meme_caption",
-            state="QUEUED",
-            idempotency_key="meme_caption:" + request.sha256,
-            max_attempts=1,
-            context_tracked=1,
-            created_at=now,
-            updated_at=now,
-        )
+        job_queue.create(s, job_id, body.context.event_id, "meme_caption",
+                         "meme_caption:" + request.sha256, now)
         owner_authority.bind_job(s, self.settings, self.clock, job_id, purpose="meme")
         s.insert("job_sources", job_id=job_id, event_id=body.context.event_id)
         s.insert(
@@ -538,7 +530,7 @@ class MemeCaptionService:
             updated_at=now,
         )
         if prior and prior["result_json"]:
-            s.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job_id,))
+            job_queue.finish_unclaimed(s, job_id, "SUCCEEDED")
         return self.outcome(job_id)
 
     def _reuse_compatible(self, job_id, custody):
@@ -775,11 +767,7 @@ class MemeCaptionService:
             if row["usage_request_id"]:
                 budget.settle(s, self.settings, row["usage_request_id"], None)
             with s.transaction():
-                s.execute(
-                    "UPDATE jobs SET state='FAILED',lease_token=NULL,"
-                    "last_error_code='MEME_CAPTION_UNKNOWN',updated_at=? WHERE job_id=?",
-                    (now, row["job_id"]),
-                )
+                job_queue.release(s, row["job_id"], "FAILED", now, reason="MEME_CAPTION_UNKNOWN")
         job = None
         try:
             with claim_scope(s), s.transaction():
@@ -802,10 +790,8 @@ class MemeCaptionService:
                     approval = scope(s, self.settings, self.clock)
                     check_caption_job(s, self.settings, approval, job, clock=self.clock)
                 except CoreError as error:
-                    s.execute(
-                        "UPDATE jobs SET state='CANCELLED',last_error_code=?,updated_at=? "
-                        "WHERE job_id=?",
-                        (error.code, now, job["job_id"]),
+                    job_queue.finish_unclaimed(
+                        s, job["job_id"], "CANCELLED", now, reason=error.code
                     )
                     return True
                 if private_life.owner_waiting(s, self.settings, now):
@@ -833,38 +819,25 @@ class MemeCaptionService:
                             "WHERE job_id=?",
                             (prior["result_json"], prior["usage_request_id"], now, job["job_id"]),
                         )
-                        s.execute(
-                            "UPDATE jobs SET state=?,updated_at=? WHERE job_id=?",
-                            ("SUCCEEDED" if prior["result_json"] else "FAILED", now, job["job_id"]),
+                        job_queue.finish_unclaimed(
+                            s, job["job_id"], "SUCCEEDED" if prior["result_json"] else "FAILED", now
                         )
                         return True
                     # Full current ancestry changes atomically with every affected asset's
                     # attribution. Original paid responsibility cannot authorize takeover.
                     self._repoint(job, prior)
                 job["lease_token"] = uid("lease")
-                s.execute(
-                    "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
-                    "attempts=1,updated_at=? WHERE job_id=?",
-                    (
-                        worker_id,
-                        job["lease_token"],
-                        after(now, self.settings.lease_seconds),
-                        now,
-                        job["job_id"],
-                    ),
-                )
+                job_queue.claim(s, job["job_id"], worker_id, job["lease_token"],
+                                after(now, self.settings.lease_seconds), now, single_attempt=True)
         except CoreError as error:
             if job is None:
                 raise
             # The failed transaction restored both graph and attribution. Cancel only
             # this still-unconsumed request; retain all original bodies and obligations.
             with s.transaction():
-                s.execute(
-                    "UPDATE jobs SET state='CANCELLED',last_error_code=?,updated_at=? "
-                    "WHERE job_id=? AND state='QUEUED' AND NOT EXISTS "
-                    "(SELECT 1 FROM model_usage WHERE job_id=jobs.job_id)",
-                    (error.code, now, job["job_id"]),
-                )
+                job_queue.finish_unclaimed(s, job["job_id"], "CANCELLED", now, reason=error.code,
+                                           condition="state='QUEUED' AND NOT EXISTS (SELECT 1 FROM "
+                                                     "model_usage WHERE job_id=jobs.job_id)")
             return True
         request_id = None
         try:
@@ -923,28 +896,16 @@ class MemeCaptionService:
                     "UPDATE meme_captions SET result_json=?,updated_at=? WHERE job_id=?",
                     (result.model_dump_json(), self.clock(), job["job_id"]),
                 )
-                s.execute(
-                    "UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
-                    "WHERE job_id=?",
-                    (self.clock(), job["job_id"]),
-                )
+                job_queue.release(s, job["job_id"], "SUCCEEDED", self.clock())
         except Exception as error:
             if request_id:
                 budget.settle(s, self.settings, request_id, None)
             code = error.code if isinstance(error, CoreError) else "MEME_CAPTION_INVALID"
             if budget.capacity_wait(s, code, request_id=request_id):
-                s.execute(
-                    "UPDATE jobs SET state='QUEUED',lease_token=NULL,attempts=0,"
-                    "next_attempt_at=?,last_error_code=?,updated_at=? "
-                    "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
-                    (after(self.clock(), 1), code, self.clock(), job["job_id"], job["lease_token"]),
-                )
+                job_queue.retry_unadmitted(s, job, self.clock(), after(self.clock(), 1), code)
                 return True
-            s.execute(
-                "UPDATE jobs SET state='FAILED',lease_token=NULL,last_error_code=?,updated_at=? "
-                "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
-                (code, self.clock(), job["job_id"], job["lease_token"]),
-            )
+            job_queue.release(s, job["job_id"], "FAILED", self.clock(), reason=code,
+                              token=job["lease_token"])
         return True
 
     def _embedding(self, text, *, query=False):
@@ -1080,7 +1041,7 @@ class MemeCaptionService:
                             (job["job_id"], source["event_id"]),
                         )
             if not prior:
-                s.insert("runtime_meta", key=OFFER + body.event_id, value=encode(value))
+                freeze_offer(s, body.event_id, value)
             return {
                 "job_id": job["job_id"],
                 "event_id": body.event_id,

@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from companion import (
     budget,
+    job_queue,
     live_text,
     owner_authority,
     owner_input,
@@ -1338,11 +1339,7 @@ class BiliVideoService:
                 observed_bytes=body["observed_bytes"],
                 observed_requests=body["observed_requests"],
             )
-            s.execute("UPDATE jobs SET next_attempt_at=?,updated_at=? WHERE state='RETRY_WAIT' "
-                      "AND job_id IN (SELECT a.job_id FROM agent_tool_calls a "
-                      "JOIN agent_conversations c USING(job_id) WHERE a.request_id=? "
-                      "AND a.state='DEFERRED' AND c.phase='WAITING')",
-                      (self.clock(), self.clock(), request_id))
+            job_queue.reader_ready(s, request_id, self.clock())
             return {"accepted": True}
 
     def check_result(self, request_id, event_ids):

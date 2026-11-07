@@ -22,7 +22,7 @@ from companion.privacy import ErasureLedger
 from companion.reply_recovery import RecoveryRequest
 from companion.source_grants import SourceGrantService
 from companion.store import after, encode
-from companion.transport import cancel_proactive_work, reconcile_delivery
+from companion.transport import reconcile_delivery, set_proactive_paused
 
 COOKIE = "companion_owner_session"
 # These native Memory failures leave no committed change after its transaction rolls back.
@@ -557,12 +557,7 @@ def register_console_routes(app, settings):
                 raise CoreError("PROACTIVE_DISABLED_IN_CONFIG", 409)
             with core.store.transaction():
                 owner_check()
-                core.store.execute(
-                    "INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
-                    ("0" if body.enabled else "1",),
-                )
-                if not body.enabled:
-                    cancel_proactive_work(core.store, core.clock())
+                set_proactive_paused(core.store, not body.enabled, core.clock())
             return {"target": body.target, "enabled": body.enabled}
 
         # Both failures occur before their setters start a native transaction.

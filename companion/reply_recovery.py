@@ -10,7 +10,13 @@ from contextlib import nullcontext
 from cryptography.exceptions import InvalidSignature
 from pydantic import Field
 
-from companion import owner_authority, owner_delivery, owner_input, reply_revision, transport
+from companion import (
+    job_queue,
+    owner_authority,
+    owner_delivery,
+    owner_input,
+    reply_revision,
+)
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import epoch
 from companion.store import encode, uid
@@ -301,19 +307,8 @@ def create(store, settings, clock, message_id, expected, operation, fingerprint)
             memory_processed=1,
             reply_revision=value["reply_revision"],
         )
-        store.insert(
-            "jobs",
-            job_id=job_id,
-            event_id=event_id,
-            kind=KIND,
-            state="SUCCEEDED",
-            idempotency_key=key,
-            max_attempts=1,
-            context_tracked=1,
-            created_at=now,
-            updated_at=now,
-            authority_json=encode(current.authority.as_dict()),
-        )
+        job_queue.create(store, job_id, event_id, KIND, key, now, state="SUCCEEDED",
+                         authority=current.authority.as_dict())
         dependencies = {
             value["original_event_id"],
             *(
@@ -351,10 +346,7 @@ def create(store, settings, clock, message_id, expected, operation, fingerprint)
         for index, new_id in enumerate(ids):
             row = store.one("SELECT * FROM outbox WHERE message_id=?", (new_id,))
             material = _material(store, row, record, index)
-            transport.bind_authority(store, new_id, current.authority.as_dict())
-            store.insert(
-                "runtime_meta", key=owner_delivery.DELIVERY + new_id, value=encode(material)
-            )
+            owner_delivery.bind_material(store, new_id, current.authority.as_dict(), material)
         store.audit(
             "delivery.recovery_created",
             job_id,

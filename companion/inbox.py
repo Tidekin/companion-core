@@ -6,6 +6,7 @@ from datetime import UTC
 from companion import (
     input_debounce,
     input_protocol,
+    job_queue,
     live_text,
     owner_authority,
     owner_input,
@@ -22,7 +23,12 @@ from companion.life import is_life_command
 from companion.privacy import redact
 from companion.reading import service_for_store
 from companion.store import encode, uid
-from companion.transport import cancel_interrupted_replies, cancel_proactive_work, digest
+from companion.transport import (
+    cancel_interrupted_replies,
+    cancel_proactive_work,
+    digest,
+    set_proactive_paused,
+)
 
 
 def receive(store, settings, clock, ledger, event, key, *, content_options):
@@ -130,11 +136,9 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 body["diary_correction"] = command == "修改日记"
                 body["diary_timezone"] = cfg.timezone
             if native_controls and command == "暂停写日记" and not arguments:
-                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
-                diary.cancel_pending("DIARY_PAUSED")
+                diary.set_paused(True)
             if native_controls and command == "暂停主动分享" and not arguments:
-                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused','1')")
-                cancel_proactive_work(s, now)
+                set_proactive_paused(s, True, now)
             # M0/M1 never fetch attachments; discard URL/ref content that may carry credentials.
             body["media"] = [{"kind": m["kind"], "sha256": m["sha256"]} for m in body["media"]]
             s.insert(
@@ -168,10 +172,15 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 cancel_interrupted_replies(s, conversation_id, now)
             if authority or private_life.enabled(cfg):
                 cancel_proactive_work(s, now)
-            job_id = new_job(s, cfg, event.event_id, "chat", "reply:" + event.event_id, now)
-            if debounce:
-                s.execute("UPDATE jobs SET next_attempt_at=? WHERE job_id=?",
-                          (debounce, job_id))
+            job_id = job_queue.enqueue(
+                s,
+                event.event_id,
+                "chat",
+                "reply:" + event.event_id,
+                now,
+                max_attempts=cfg.max_attempts,
+                next_attempt_at=debounce or None,
+            )
             if authority:
                 owner_authority.bind_job(s, cfg, clock, job_id, purpose="chat")
             if (not diary_command and not control_command
@@ -192,22 +201,3 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
             }
     except sqlite3.IntegrityError as error:
         raise CoreError("IDEMPOTENCY_CONFLICT") from error
-
-
-def new_job(store, settings, event_id, kind, key, now):
-    job_id = uid("job")
-    store.insert(
-        "jobs",
-        job_id=job_id,
-        event_id=event_id,
-        kind=kind,
-        state="QUEUED",
-        idempotency_key=key,
-        max_attempts=settings.max_attempts,
-        created_at=now,
-        updated_at=now,
-        context_tracked=1,
-    )
-    if event_id is not None:
-        store.insert("job_sources", job_id=job_id, event_id=event_id)
-    return job_id

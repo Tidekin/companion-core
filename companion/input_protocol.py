@@ -324,6 +324,19 @@ def input_state(store, settings, event_id):
     }
 
 
+def prior_cancellation(store, message_id, material):
+    """Accept an exact replay; a different witness cannot replace a recorded cancellation."""
+    prior = live_text._meta(store, "input_cancel_before_send:" + message_id)
+    if prior is not None and prior != material:
+        raise CoreError("INPUT_CANCEL_RECEIPT_CONFLICT", 409)
+    return prior is not None
+
+
+def record_cancellation(store, message_id, material):
+    store.insert("runtime_meta", key="input_cancel_before_send:" + message_id,
+                 value=encode(material))
+
+
 def cancel_before_send(store, settings, clock, body):
     """Consume the Bridge's narrow pre-delegate non-dispatch attestation."""
     with store.transaction():
@@ -334,13 +347,8 @@ def cancel_before_send(store, settings, clock, body):
             approval = owner_authority.evidence(store, settings, body.authority)
         else:
             approval = approval_for_receipt(store, settings, body.window_sha256)
-        key = "input_cancel_before_send:" + body.message_id
-        prior = live_text._meta(store, key)
         material = body.model_dump(mode="json")
-        if prior:
-            if prior != material:
-                raise CoreError("INPUT_CANCEL_RECEIPT_CONFLICT", 409)
-        else:
+        if not prior_cancellation(store, body.message_id, material):
             row = store.one("SELECT o.*,e.reply_revision FROM outbox o JOIN events e "
                             "ON e.event_id=o.origin_event_id WHERE o.message_id=?",
                             (body.message_id,))
@@ -461,6 +469,6 @@ def cancel_before_send(store, settings, clock, body):
                 # The queued replacement may itself be recalled before ingestion.
                 # Once interrupted, no unsent tail of this reply may resume.
                 cancel_origin_replies(store, row["origin_event_id"], clock())
-            live_text._put(store, key, material)
+            record_cancellation(store, body.message_id, material)
         return {"cancelled": True, "message_id": body.message_id,
                 "state": "CANCELLED", "send_attempt_retained": True}
