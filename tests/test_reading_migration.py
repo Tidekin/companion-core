@@ -21,13 +21,13 @@ from tests.support.exploration import configure
 from tests.support.input_recall import incoming, recall
 from tests.support.input_reply_migration import config_for
 from tests.support.reading_protocol import envelope
-from tests.support.source_grants import prepare
-from tests.test_release_migration import (
+from tests.support.release_migration import (
     TIMES,
     assert_old_columns_unchanged,
     seed_legacy,
     table_snapshot,
 )
+from tests.support.source_grants import prepare
 
 READING_REVISION = "0024_reading_attempts"
 PREVIOUS = "0023_meme_discovery_reservations"

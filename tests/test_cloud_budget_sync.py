@@ -5,8 +5,8 @@ import pytest
 from companion import cloud_budget
 from companion.executive import erase_executive
 from companion.executor_gateway import receipt
-from tests.test_cloud_budget import charge, options
-from tests.test_executive import configured, proposal
+from tests.support.cloud_budget import charge, options
+from tests.support.executive import configured, proposal
 
 
 def tool(core, status=None):

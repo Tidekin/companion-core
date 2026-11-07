@@ -14,7 +14,7 @@ from companion.model import ModelClient
 from companion.owner_authority_protocol import AuthorityStop
 from tests.conftest import run
 from tests.meme_authority_fixture import admit, environment
-from tests.test_evaluation_process import process_config
+from tests.support.evaluation_process import process_config
 from tests.test_meme_core import CAPTION, body
 from tests.test_meme_service import claim, reservation, result, submit
 

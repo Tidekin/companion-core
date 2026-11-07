@@ -22,7 +22,7 @@ from companion.privacy import advance_epoch
 from companion.store import Store, after, encode, uid
 from tests.conftest import ingest
 from tests.support.live_image_input import png
-from tests.test_paid_image_budget import image_messages
+from tests.support.paid_image_budget import image_messages
 
 
 @pytest.mark.parametrize("count", [1, 2, 4])

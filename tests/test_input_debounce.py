@@ -7,8 +7,8 @@ from companion.config import Settings
 from companion.input_debounce import InputDebounceConfig
 from companion.store import after
 from tests.support.input_debounce import accept
-from tests.test_runtime_configuration import hot as hot
-from tests.test_runtime_configuration import save
+from tests.support.runtime_configuration import hot as hot
+from tests.support.runtime_configuration import save
 
 
 def enable(core, **values):

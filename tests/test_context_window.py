@@ -21,10 +21,10 @@ from companion.video_input import VideoInputPolicy
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
 from tests.support.native_consumer_entry import environment
+from tests.support.paid_image_budget import image_approval, image_messages
 from tests.support.paid_model import approved_live
+from tests.support.token_measurement import MESSAGES, configure
 from tests.support.video_understanding import video_policy
-from tests.test_paid_image_budget import image_approval, image_messages
-from tests.test_token_measurement import MESSAGES, configure
 
 
 class LegacyVideo(VideoInputPolicy):
@@ -113,7 +113,7 @@ def test_joint_boundary_uses_the_actual_scenario_route(core, tmp_path, scenario)
 
 
 def test_joint_refusal_precedes_paid_reservation_and_preserves_tools(core, tmp_path):
-    from tests.test_token_tools import CONTINUATION, TOOLS
+    from tests.support.token_tools import CONTINUATION, TOOLS
 
     configure(core, tmp_path)
     measured = tm.measure_request(core.settings, CONTINUATION, tools=TOOLS)

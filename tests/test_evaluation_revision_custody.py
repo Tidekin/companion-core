@@ -14,18 +14,19 @@ from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
 from tests.model_carry_support import migrated
 from tests.support.core_http import real_core_http
+from tests.support.evaluation_authority_revision import revise, revised_policy, stop
+from tests.support.model_accounting import prepared
+from tests.support.model_carry_lifecycle import current_unknown
+from tests.support.model_renewal import renewal
+from tests.support.model_renewal_native import life_case, source_and_renewal
 from tests.support.owner_authority import activate
-from tests.test_evaluation_authority_revision import revise, revised_policy, stop
-from tests.test_model_accounting import prepared
-from tests.test_model_carry_lifecycle import current_unknown
-from tests.test_model_renewal import renewal
-from tests.test_model_renewal_native import life_case, source_and_renewal
 
 
 def test_discovered_link_and_revision_share_native_terminal_contract(core, tmp_path):
     from companion import reply_revision
     from tests.support.carried_capabilities import reader_carry
-    from tests.test_reading_followup import URL, admit
+    from tests.support.exploration import URL
+    from tests.support.reading_followup import admit
 
     case = reader_carry(core, tmp_path)
     core.settings.control_token = SecretStr("synthetic-discovery-revision-control")

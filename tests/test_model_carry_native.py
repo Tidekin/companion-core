@@ -3,8 +3,6 @@
 import asyncio
 import hashlib
 import json
-import pickle
-import sys
 from dataclasses import replace
 
 import httpx
@@ -24,25 +22,12 @@ from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.model_carry_support import executors
+from tests.support.model_carry_native import child, finished
 from tests.support.onebot import provider
 from tests.support.onebot_events import raw_event
 from tests.support.prepare_owner_input import window
 from tests.support.video_understanding import video_policy
 from tests.test_native_video import animation
-
-
-async def child(tmp_path, name, core, **options):
-    path = tmp_path / (name + ".pickle")
-    bundle = {"settings": core.settings, "now": core.clock.now, **options}
-    path.write_bytes(pickle.dumps(bundle))
-    return await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "tests.model_carry_native_host",
-        str(path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
 
 
 async def marker(process, expected):
@@ -53,12 +38,6 @@ async def marker(process, expected):
         lines.append(line)
         if expected.encode() in line:
             return line
-
-
-async def finished(process):
-    output, _ = await asyncio.wait_for(process.communicate(), 40)
-    assert process.returncode == 0, output.decode(errors="replace")
-    return output.decode().strip()
 
 
 async def stopped(process):

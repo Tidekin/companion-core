@@ -14,9 +14,9 @@ from companion_onebot_bridge.spool import encode
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.support.bridge_owner_resolution import child
+from tests.support.evaluation_process import process_config
 from tests.support.onebot_events import raw_event
 from tests.support.owner_preflight_fences import ready
-from tests.test_evaluation_process import process_config
 
 
 @pytest.mark.parametrize("stage", ["begin-send", "send-check"])

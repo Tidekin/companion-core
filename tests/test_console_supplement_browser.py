@@ -11,12 +11,12 @@ from companion.console_cognition import tool_scope
 from companion.executive_protocol import ExecutorEndpoint, ToolArguments, ToolRequest
 from companion.source_grants import grant_tombstone
 from tests.conftest import run
+from tests.support.console_browser import console_page, navigate, submit_dialog
+from tests.support.executive import FakeExecutor
+from tests.support.executive import configured as configure_executive
+from tests.support.executive import proposal as tool_proposal
 from tests.support.source_grants import accepted, derived_records
 from tests.support.source_grants import prepare as prepare_grant
-from tests.test_console_browser import console_page, navigate, submit_dialog
-from tests.test_executive import FakeExecutor
-from tests.test_executive import configured as configure_executive
-from tests.test_executive import proposal as tool_proposal
 from tests.test_growth_foundations import complete_read, view
 from tests.test_life_topics import bug, due
 from tests.test_life_topics import proposal as life_proposal
@@ -123,7 +123,7 @@ def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
 def test_console_shows_saved_provider_reasoning_as_plain_text(core, tmp_path):
     from pathlib import Path
 
-    from tests.test_model_reasoning import reasoning_chat
+    from tests.support.model_reasoning import reasoning_chat
 
     core.clock.now = datetime.now(UTC)
     text = "<script>window.reasoningInjected=true</script>\n合成私人推理"
@@ -153,7 +153,7 @@ def test_console_shows_saved_provider_reasoning_as_plain_text(core, tmp_path):
 def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(core, tmp_path):
     from pathlib import Path
 
-    from tests.test_context_meter_inspector import recorded_attempts
+    from tests.support.context_meter_inspector import recorded_attempts
 
     core.clock.now = datetime.now(UTC)
     run(recorded_attempts(core, tmp_path, unknown=True))

@@ -20,17 +20,7 @@ from companion.model import ModelClient, model_payload
 from companion.store import encode
 from tests.owner_model_fixtures import authorized_job
 from tests.support.paid_model import approved_live
-
-MESSAGES = [{"role": "user", "content": "hello"}]
-
-
-def configure(core, tmp_path, policy="prefer_exact"):
-    approved_live(core, tmp_path, provider="deepseek", model="deepseek-flash",
-                  endpoint="https://api.deepseek.com")
-    core.settings.token_measurement = tm.TokenMeasurementConfig(
-        policy=policy, provider="deepseek", endpoint="https://api.deepseek.com",
-        model="deepseek-flash", renderer="deepseek-v4.1-flash-1017", revision=tm.REVISION,
-    )
+from tests.support.token_measurement import MESSAGES, configure
 
 
 @pytest.mark.parametrize("number", range(1, 6))
@@ -221,7 +211,7 @@ def test_journal_detects_measurement_loss_after_settlement(core, tmp_path):
 
 
 def test_images_never_claim_text_exactness(core, tmp_path):
-    from tests.test_paid_image_budget import image_approval, image_messages
+    from tests.support.paid_image_budget import image_approval, image_messages
 
     configure(core, tmp_path)
     image_approval(core, tmp_path, provider="deepseek", model="deepseek-flash",

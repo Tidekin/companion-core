@@ -13,9 +13,9 @@ import yaml
 
 from scripts import ci_container_artifacts as images
 from scripts import ci_policy, ci_reuse
-from tests import test_ci_policy as policy_tests
-from tests.test_ci_container_artifacts import runtime_evidence
-from tests.test_ci_policy import commit
+from tests.support import ci_policy as policy_tests
+from tests.support.ci_container_artifacts import runtime_evidence
+from tests.support.ci_policy import commit
 
 ROOT = Path(__file__).resolve().parents[1]
 

@@ -304,7 +304,7 @@ def test_concurrent_requests_cannot_overspend_remaining_session_budget(core):
 
 @pytest.mark.parametrize("tool_state", ["RUNNING", "UNKNOWN"])
 def test_tool_reservations_and_unknown_cost_block_media_monthly_overspend(core, tool_state):
-    from tests.test_executive import FakeExecutor, configured, proposal
+    from tests.support.executive import FakeExecutor, configured, proposal
 
     executor = FakeExecutor()
     executive = configured(core, executor)

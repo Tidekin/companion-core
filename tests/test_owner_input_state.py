@@ -17,7 +17,8 @@ def test_discovered_link_can_finish_handoff_through_native_http(core, tmp_path, 
 
     from companion import reply_revision
     from tests.conftest import run
-    from tests.test_reading_followup import URL, admit, window
+    from tests.support.exploration import URL
+    from tests.support.reading_followup import admit, window
 
     core.settings.control_token = SecretStr("synthetic-discovered-link-control")
 

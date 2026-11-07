@@ -13,19 +13,13 @@ from fastapi.testclient import TestClient
 
 from companion import __main__, ops_status
 from companion.api import create_app
-from companion.config import Settings
 from companion.core import Core
 from companion.privacy import ErasureLedger
 from companion.runtime import Runtime
 from companion.store import Store, migrate
 from tests.conftest import ingest, run
 from tests.support.historical_schema import assert_schema_metadata
-
-
-def settings(tmp_path):
-    return Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="synthetic-token-" * 3,
-                    database=str(tmp_path / "core.db"),
-                    erasure_ledger=str(tmp_path / "erasures.jsonl"), proactive_enabled=False)
+from tests.support.ops_status import settings
 
 
 def test_missing_database_diagnostic_never_creates_or_initializes_state(tmp_path, monkeypatch):

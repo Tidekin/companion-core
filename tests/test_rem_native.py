@@ -19,8 +19,8 @@ from companion.model import ModelClient
 from companion.rem_protocol import RemConfig
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.evaluation_process import process_config
 from tests.support.owner_memory import environment
-from tests.test_evaluation_process import process_config
 
 FACT = "青禾项目下一步检查配色"
 DREAM = {"decision": "DREAM", "title": "纸上的花园", "text": "虚构：配色化成了纸上的花园。",

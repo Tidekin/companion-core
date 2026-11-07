@@ -10,7 +10,7 @@ import pytest
 
 from companion import paid_budget
 from tests.support.native_consumer_entry import environment
-from tests.test_token_measurement import configure
+from tests.support.token_measurement import configure
 
 WORKER = r'''
 import asyncio, json, sys

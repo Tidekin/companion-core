@@ -3,9 +3,9 @@
 import pytest
 
 from tests.conftest import run
-from tests.test_reading_followup import (
+from tests.support.exploration import URL
+from tests.support.reading_followup import (
     READER_AUTH,
-    URL,
     admit,
     finish,
     lease,

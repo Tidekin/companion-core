@@ -7,8 +7,8 @@ import pytest
 
 from tests.conftest import run
 from tests.console_proxy import ROOT
+from tests.support.console_browser import console_page, navigate
 from tests.support.social_owner_authority import close_provider_clients  # noqa: F401
-from tests.test_console_browser import console_page, navigate
 from tests.test_qzone_publication import setup
 
 pytestmark = pytest.mark.skipif(os.environ.get("COMPANION_TEST_BROWSER") != "1",

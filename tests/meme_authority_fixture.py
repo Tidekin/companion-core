@@ -23,7 +23,7 @@ from tests.support.core_http import real_core_http
 from tests.support.onebot_events import raw_event
 from tests.support.owner_authority import activate
 from tests.support.paid_model import approved_live
-from tests.test_reading_followup import notice as reader_notice
+from tests.support.reading_followup import notice as reader_notice
 
 
 @asynccontextmanager

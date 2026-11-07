@@ -21,10 +21,10 @@ from companion_voice_node.worker import local_manifest
 from tests import owner_model_fixtures
 from tests.conftest import event, run
 from tests.model_carry_support import migrated
+from tests.support.model_carry_lifecycle import current_unknown, stop_current
+from tests.support.model_renewal import renewal
 from tests.support.owner_authority import activate
 from tests.support.voice_jobs import voice_config
-from tests.test_model_carry_lifecycle import current_unknown, stop_current
-from tests.test_model_renewal import renewal
 from tests.test_voice_node_api import independent_node, tls_core
 from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 from tests.test_voice_quiescence import stopped_unknown

@@ -23,9 +23,10 @@ from companion.voice_protocol import (
 from companion_onebot_bridge.voice_media import prepare_delivery
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+from tests.support.exploration import URL
 from tests.support.owner_authority import activate
+from tests.support.reading_followup import admit, window
 from tests.support.voice_jobs import TOKEN, voice_config
-from tests.test_reading_followup import URL, admit, window
 from tests.test_singing_protocol import result as song_result
 
 
@@ -50,7 +51,7 @@ async def singing_window(core, tmp_path, monkeypatch, *, manifest_sha256="b" * 6
 
 
 async def queue_song(core, client, config, plan, *, short_link=False):
-    from tests.test_reading_followup import READER_AUTH, SHORT
+    from tests.support.reading_followup import READER_AUTH, SHORT
 
     event, admitted = await admit(client, core, config, plan, 1, "想听你唱首歌",
                                   card=SHORT if short_link else URL)

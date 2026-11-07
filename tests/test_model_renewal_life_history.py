@@ -16,11 +16,11 @@ from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.model_carry_native import child, finished
+from tests.support.model_renewal import renewal
+from tests.support.model_renewal_native import life_case, source_and_renewal
 from tests.support.owner_authority import activate
 from tests.test_life_worker_integration import process_worker
-from tests.test_model_carry_native import child, finished
-from tests.test_model_renewal import renewal
-from tests.test_model_renewal_native import life_case, source_and_renewal
 
 
 async def selected_then_history(core, tmp_path, case, http):

@@ -6,7 +6,7 @@ from pydantic import SecretStr
 
 from companion import operator_config
 from companion.config import Settings
-from tests.test_console_cognition import PASSWORD, client, login  # noqa: F401
+from tests.support.console_cognition import PASSWORD, client, login  # noqa: F401
 from tests.test_style_distill import PATTERN, candidates, comment, thread
 from tests.test_style_distill import ready as style_ready
 from tests.test_style_distill import step as style_step

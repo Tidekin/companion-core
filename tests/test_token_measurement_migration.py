@@ -9,28 +9,9 @@ from alembic import command
 from alembic.config import Config
 
 from companion.store import Store, migrate
+from tests.support.token_measurement_migration import PRIOR, historical_admission, snapshot
 
-PRIOR = "0034_voice_retention_v2"
 REVISION = "0035_token_measurement"
-
-
-def historical_admission(tmp_path):
-    path = tmp_path / "historical.db"
-    migrate(str(path), PRIOR)
-    with closing(Store(str(path))) as store:
-        store.insert("model_usage", rowid=17, usage_id="usage", request_id="request",
-                     scenario="chat", provider="synthetic", model="synthetic",
-                     billed_micro_usd=23, occurred_at="2026-10-24T00:00:00+00:00",
-                     state="UNKNOWN")
-        store.insert("model_budget_windows", window_id="window", contract_sha256="a" * 64)
-        store.insert("model_admissions", rowid=41, request_id="request",
-                     logical_request_id="logical", attempt_id="attempt", attempt_number=1,
-                     window_id="window", contract_sha256="a" * 64, payload_sha256="b" * 64,
-                     snapshot_json='{"preserve": "exact historical bytes"}',
-                     reserved_micro_usd=23, input_bound=100, output_bound=20,
-                     lease_token="lease", lease_until="2026-10-24T00:01:00+00:00",
-                     journal_path=str(tmp_path / "budget.jsonl"), journal_id="journal")
-    return path
 
 
 def downgrade(path):
@@ -39,11 +20,6 @@ def downgrade(path):
                                                  / "migrations"))
     config.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
     command.downgrade(config, PRIOR)
-
-
-def snapshot(store):
-    return {table: store.rows(f"SELECT rowid AS original_rowid,* FROM {table} ORDER BY rowid")
-            for table in ("model_usage", "model_admissions", "model_budget_windows")}
 
 
 def test_upgrade_and_legacy_downgrade_preserve_accounting_and_snapshot_bytes(tmp_path):

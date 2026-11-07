@@ -7,11 +7,11 @@ import pytest
 from companion import beta_observation, paid_budget
 from companion.privacy import advance_epoch, epoch
 from companion.store import encode
-from scripts.summarize_beta_feedback import snapshot
+from scripts.summarize_beta_feedback import snapshot, summarize
 from scripts.validate_beta_feedback import validate_record
 from tests.conftest import ingest, run
-from tests.test_beta_observation import feedback_template, paid_fixture
-from tests.test_p12_beta_operations import bundle, feedback, inspector, summarize
+from tests.support.beta_observation import feedback_template, paid_fixture
+from tests.support.p12_beta_operations import bundle, feedback, inspector
 
 
 def selection_fixture(core):

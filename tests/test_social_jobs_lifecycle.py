@@ -15,8 +15,8 @@ from companion.social_autonomy import restore_social_autonomy
 from companion.social_autonomy_runtime import _expire, run_once
 from companion.store import Store, migrate
 from tests.conftest import run
+from tests.support.release_migration import TIMES, seed_legacy
 from tests.support.social_autonomy import background, planned
-from tests.test_release_migration import TIMES, seed_legacy
 
 
 def deferred(core):

@@ -19,10 +19,10 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool, encode
 from tests.support.bridge_owner_resolution import child
+from tests.support.evaluation_process import process_config
 from tests.support.onebot import provider
 from tests.support.onebot_events import raw_event
-from tests.test_evaluation_process import process_config
-from tests.test_reading_followup import window
+from tests.support.reading_followup import window
 
 
 @pytest.mark.parametrize("lost_ack", [False, True])

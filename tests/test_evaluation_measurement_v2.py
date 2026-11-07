@@ -15,7 +15,8 @@ from companion.model import ModelResponse
 from scripts import evaluate_r1_conversation as experiment
 from tests.support.core_http import real_core_http
 from tests.support.evaluation import authorize, prepare, response, result, work
-from tests.test_evaluation_process import processes
+from tests.support.evaluation_measurement_v2 import rehash
+from tests.support.evaluation_process import processes
 
 
 def v2(core, tmp_path):
@@ -29,10 +30,6 @@ def v2(core, tmp_path):
         r["estimated_reservation_micro_usd"] for r in plan["requests"])
     rehash(plan)
     return manifest
-
-
-def rehash(plan):
-    plan["plan_sha256"] = paid_budget.sha({k: v for k, v in plan.items() if k != "plan_sha256"})
 
 
 def test_v2_receipts_equal_native_reservations_and_restart_does_not_repay(core, tmp_path):

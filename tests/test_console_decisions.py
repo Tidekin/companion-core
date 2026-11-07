@@ -4,8 +4,8 @@ import pytest
 
 from companion.store import after
 from tests.conftest import run
-from tests.test_console_cognition import client as client
-from tests.test_console_cognition import login
+from tests.support.console_cognition import client as client
+from tests.support.console_cognition import login
 from tests.test_consolidation import enable_nightly
 from tests.test_diary import DAY
 

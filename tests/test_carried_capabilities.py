@@ -20,9 +20,9 @@ from tests.sdk_reader_fixture import answer, call
 from tests.support.bili_video_entrypoint import URL, reader_files, reader_once, upstream
 from tests.support.carried_capabilities import reader_carry
 from tests.support.core_http import real_core_http
-from tests.test_model_carry_lifecycle import current_unknown
+from tests.support.model_carry_lifecycle import current_unknown
+from tests.support.reading_followup import admit
 from tests.test_native_bili_video import sdk_step
-from tests.test_reading_followup import admit
 
 
 @pytest.mark.parametrize("later_unknown", [False, True])
@@ -83,7 +83,7 @@ def test_signed_link_after_carry_reaches_independent_reader_and_sdk_context(
     case = reader_carry(core, tmp_path)
     if accounted:
         from companion import model_accounting
-        from tests.test_model_accounting import prepared
+        from tests.support.model_accounting import prepared
 
         request, private = prepared(core, tmp_path, case.request_id)
         result = model_accounting.record(core.store, core.settings, request, private, core.clock)

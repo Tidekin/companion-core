@@ -9,7 +9,7 @@ from pydantic import SecretStr
 from companion.console_api import COOKIE
 from tests.conftest import run
 from tests.console_proxy import STATIC, console_proxy
-from tests.test_console_browser import PASSWORD
+from tests.support.console_browser import PASSWORD
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("COMPANION_TEST_BROWSER") != "1"

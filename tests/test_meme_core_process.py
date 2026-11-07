@@ -18,9 +18,9 @@ from companion.core import Core
 from tests.conftest import run
 from tests.native_continuous_support import until as wait_for_evidence
 from tests.support.core_http import real_core_http
+from tests.support.evaluation_process import process_config
 from tests.support.onebot import onebot_http
 from tests.support.onebot_events import raw_event
-from tests.test_evaluation_process import process_config
 from tests.test_meme_core_runtime import runtime_case as runtime_case
 from tests.test_native_meme_host import worker
 

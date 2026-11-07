@@ -16,29 +16,11 @@ from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from tests.model_carry_support import MESSAGES, migrated, stranded
 from tests.owner_model_fixtures import authorized_job
+from tests.support.model_accounting import prepared, proposal
+from tests.support.model_carry_lifecycle import current_unknown
+from tests.support.model_renewal import renewal
 from tests.support.owner_authority import activate
 from tests.support.paid_model import approved_live
-from tests.test_model_carry_lifecycle import current_unknown
-from tests.test_model_renewal import renewal
-
-
-def proposal(tmp_path, request_id, *, operation="estimate-first", basis=None):
-    private = tmp_path / (operation + ".evidence")
-    private.write_bytes(("private-synthetic-billing-evidence:" + operation).encode())
-    return {
-        "version": 1, "operation_id": operation, "request_id": request_id,
-        "authorization_sha256": "a" * 64,
-        "evidence_sha256": hashlib.sha256(private.read_bytes()).hexdigest(),
-        "basis": basis or {"kind": "owner_estimate", "reference_provider": "reference",
-            "reference_model": "reference-text", "currency": "USD",
-            "input_rate": 2_000_000, "output_rate": 4_000_000},
-    }, private
-
-
-def prepared(core, tmp_path, request_id, **options):
-    value, private = proposal(tmp_path, request_id, **options)
-    return model_accounting.preview(core.store, core.settings, value, private, core.clock)[
-        "prepared_request"], private
 
 
 def journal(core):

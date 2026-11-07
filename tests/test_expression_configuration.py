@@ -15,8 +15,8 @@ from companion.core import Core
 from companion.model import ModelResponse
 from companion.store import encode
 from tests.conftest import ingest
-from tests.test_runtime_configuration import hot as hot
-from tests.test_runtime_configuration import save, task
+from tests.support.runtime_configuration import hot as hot
+from tests.support.runtime_configuration import save, task
 
 TEXT = "请接住一个具体细节，用自己的话回应；需要解决问题时认真帮助。"
 

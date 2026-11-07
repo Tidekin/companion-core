@@ -18,9 +18,9 @@ from companion_onebot_bridge.owner_send import OwnerSendGuard
 from companion_onebot_bridge.spool import Spool, encode
 from tests.support.bridge_owner_resolution import child, reserve_uncertain
 from tests.support.bridge_owner_runtime import config as config
+from tests.support.evaluation_process import process_config
 from tests.support.onebot_events import raw_event
-from tests.test_evaluation_process import process_config
-from tests.test_reading_followup import window
+from tests.support.reading_followup import window
 
 
 def test_native_unknown_requires_dedicated_stop_proof_and_original_owner_receipt(

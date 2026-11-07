@@ -8,7 +8,7 @@ import pytest
 
 from companion.executor_budget_proxy import create_budget_proxy
 from tests.conftest import run
-from tests.test_executive import envelope
+from tests.support.executive import envelope
 
 ADMIN = "synthetic-proxy-admin-" * 3
 HEADERS = {"Authorization": "Bearer " + ADMIN}

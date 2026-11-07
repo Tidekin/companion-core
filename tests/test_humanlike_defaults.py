@@ -9,7 +9,7 @@ from companion import conversation_policy
 from companion import token_measurement as tm
 from companion.config import Settings
 from companion.model import MEMORY_RULES, PRINCIPLES, model_payload
-from tests.test_token_measurement import MESSAGES, configure
+from tests.support.token_measurement import MESSAGES, configure
 
 
 def plain(**values):

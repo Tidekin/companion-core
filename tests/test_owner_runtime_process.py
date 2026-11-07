@@ -9,8 +9,8 @@ import pytest
 from pydantic import SecretStr
 
 from tests.support.core_http import real_core_http
+from tests.support.evaluation_process import process_config
 from tests.support.owner_input import captured, inbound
-from tests.test_evaluation_process import process_config
 
 
 @pytest.mark.parametrize("stop", [False, True])

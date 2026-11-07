@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from scripts import ci_policy, ci_reuse
-from tests.test_ci_policy import ROOT, commit, git, needs
+from tests.support.ci_policy import ROOT, commit, git, needs
 
 
 def selection(files, event="pull_request", ref="refs/pull/1/merge", profile="full"):

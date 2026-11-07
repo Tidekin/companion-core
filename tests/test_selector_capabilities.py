@@ -19,8 +19,8 @@ from tests.meme_authority_fixture import stop as stop_meme
 from tests.poke_authority_fixture import environment as poke_environment
 from tests.poke_authority_fixture import owner_turn, signed
 from tests.support.core_http import real_core_http
+from tests.support.evaluation_process import process_config
 from tests.support.owner_authority import activate
-from tests.test_evaluation_process import process_config
 from tests.test_meme_core import body
 from tests.test_meme_owner_authority import configure, discovery
 from tests.test_meme_service import result

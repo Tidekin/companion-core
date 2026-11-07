@@ -3,40 +3,15 @@
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from companion.api import create_app
-from companion.retrieval import SemanticIndex
 from companion.store import after
 from tests.conftest import run
+from tests.support.console_cognition import ORIGIN, PASSWORD, login
+from tests.support.console_cognition import client as client
 from tests.test_cognition_goal_steps import finish_record, retained_plan
 from tests.test_consolidation import enable_nightly
 from tests.test_diary import DAY
-
-ORIGIN = "https://console.example.test"
-PASSWORD = "owner-console-cognition-password-" * 2
-
-
-@pytest.fixture
-def client(core, monkeypatch):
-    core.settings.console.enabled = True
-    core.settings.console.public_origin = ORIGIN
-    core.settings.control_token = SecretStr(PASSWORD)
-    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
-    app = create_app(core.settings)
-    with TestClient(app, base_url=ORIGIN) as http:
-        app.state.core.clock = core.clock
-        app.state.core.mood.clock = core.clock
-        app.state.core.goals.clock = core.clock
-        app.state.core.executive.clock = core.clock
-        yield http
-
-
-def login(client):
-    csrf = client.post("/v1/console/session", json={"password": PASSWORD},
-                       headers={"Origin": ORIGIN}).json()["csrf_token"]
-    return {"Origin": ORIGIN, "X-CSRF-Token": csrf}
 
 
 @pytest.mark.parametrize("path", ["/cognition?kind=goal", "/affect", "/goals", "/reflections",
@@ -140,7 +115,7 @@ def test_goal_console_keeps_history_without_continuation_authority(client, core,
 
 
 def test_tool_list_shows_the_exact_scope_an_approval_releases(client, core):
-    from tests.test_executive import configured, proposal
+    from tests.support.executive import configured, proposal
 
     executive = configured(core, allow_changes=True)
     task = executive.submit(proposal(2, "windows.write_text", text="明天的购物清单"))
@@ -163,7 +138,7 @@ def test_tool_list_shows_the_exact_scope_an_approval_releases(client, core):
 
 
 def test_tool_scope_that_no_longer_matches_its_digest_is_not_shown(client, core):
-    from tests.test_executive import configured, proposal
+    from tests.support.executive import configured, proposal
 
     executive = configured(core, allow_changes=True)
     task = executive.submit(proposal(3, "windows.write_text", text="原始内容"))
@@ -179,7 +154,7 @@ def test_tool_scope_that_no_longer_matches_its_digest_is_not_shown(client, core)
 
 @pytest.mark.parametrize("source_state", ["expired", "missing_evidence", "redacted"])
 def test_tool_scope_hides_arguments_when_owner_sources_are_unavailable(client, core, source_state):
-    from tests.test_executive import configured, proposal
+    from tests.support.executive import configured, proposal
 
     executive = configured(core, allow_changes=True)
     text = "synthetic-private-tool-content"
@@ -207,7 +182,7 @@ def test_tool_scope_hides_arguments_when_owner_sources_are_unavailable(client, c
 def test_tool_scope_privacy_change_during_http_read_fails_closed(client, core, monkeypatch, change):
     from companion import console_cognition
     from companion.privacy import advance_epoch
-    from tests.test_executive import configured, proposal
+    from tests.support.executive import configured, proposal
 
     executive = configured(core, allow_changes=True)
     text = "synthetic-private-tool-content"

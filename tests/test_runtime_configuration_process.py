@@ -16,9 +16,9 @@ from companion.store import after, encode
 from companion.turn_taking import SILENCE_RULES
 from companion_delivery_protocol.authority import CAPTURE_DOMAIN
 from tests.support.core_http import real_core_http
+from tests.support.evaluation_process import process_config
 from tests.support.owner_console import ORIGIN, PASSWORD
 from tests.support.owner_input import captured, inbound
-from tests.test_evaluation_process import process_config
 
 
 @pytest.mark.parametrize("change", ["safe", "expression", "mixed", "stop", "privacy",

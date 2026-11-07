@@ -11,7 +11,8 @@ from companion.privacy import advance_epoch, epoch
 from companion.store import encode
 from scripts.validate_beta_feedback import validate_record
 from tests.conftest import ingest, run
-from tests.test_ops_status import settings
+from tests.support.beta_observation import feedback_template, paid_fixture
+from tests.support.ops_status import settings
 
 
 def test_missing_database_and_wrong_owner_never_bootstrap_or_disclose(core, tmp_path):
@@ -57,20 +58,6 @@ def test_committed_wal_snapshot_does_not_write_or_emit_plaintext(core, monkeypat
     assert list(core.store.db.iterdump()) == before
     assert Path(core.settings.erasure_ledger).read_bytes() == ledger
     assert len(core.model.calls) == calls
-
-
-def paid_fixture(core):
-    """Synthetic accounting rows only, never a real admission or provider receipt."""
-    usage = core.store.one("SELECT request_id FROM model_usage")
-    core.store.insert("model_budget_windows", window_id="synthetic", contract_sha256="a" * 64)
-    core.store.insert(
-        "model_admissions", request_id=usage["request_id"], logical_request_id="synthetic",
-        attempt_id="synthetic-attempt", attempt_number=1, window_id="synthetic",
-        contract_sha256="a" * 64, payload_sha256="b" * 64, snapshot_json="{}",
-        reserved_micro_usd=100, input_bound=100, output_bound=100, lease_token="synthetic",
-        lease_until=core.clock(), io_started_at=core.clock(), journal_path="PRIVATE_PATH",
-        journal_id="synthetic-journal",
-    )
 
 
 def test_unknown_usage_never_promoted_to_observed_tokens_or_invoice(core):
@@ -192,11 +179,6 @@ def test_cli_is_local_read_only_and_does_not_construct_core(core, monkeypatch, c
     result = json.loads(capsys.readouterr().out)
     assert result["trace"] == {"state": "NOT_FOUND"}
     assert result["read_only"] and result["diagnostic_only"]
-
-
-def feedback_template():
-    return json.loads((Path(__file__).resolve().parents[1]
-                       / "docs/qq-beta/p11-beta-feedback.template.json").read_text("utf-8"))
 
 
 def test_feedback_unknown_values_do_not_become_real_ratings_or_receipts():

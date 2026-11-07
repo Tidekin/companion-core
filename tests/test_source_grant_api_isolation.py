@@ -15,11 +15,11 @@ from companion import api_store, console_api
 from companion.backup import backup, restore
 from companion.source_grants import grant_tombstone
 from companion.store import Store
+from tests.support.console_reset_isolation import configure as console_configure
+from tests.support.console_reset_isolation import login
 from tests.support.core_http import real_core_http
 from tests.support.exploration import configure
 from tests.support.source_grants import accepted, authorization, derived_records, lease, prepare
-from tests.test_console_reset_isolation import configure as console_configure
-from tests.test_console_reset_isolation import login
 
 
 @pytest.mark.parametrize("channel,action", [

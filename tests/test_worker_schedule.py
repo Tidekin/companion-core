@@ -11,7 +11,7 @@ from companion.store import after
 from companion.worker_schedule import UnitResult, run_native_unit
 from companion.worker_wakeup import Wakeup
 from tests.conftest import run
-from tests.test_executive import FakeExecutor, configured, proposal
+from tests.support.executive import FakeExecutor, configured, proposal
 
 
 def test_scan_context_is_immutable_and_cannot_be_reused_after_another_scan(core):

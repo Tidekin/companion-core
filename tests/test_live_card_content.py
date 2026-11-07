@@ -22,8 +22,8 @@ from tests.support.live_image_input import png
 from tests.support.native_consumer import source_window
 from tests.support.onebot_events import raw_event
 from tests.support.onebot_images import image_segment
+from tests.support.reading_followup import select_read
 from tests.test_qq_rich_input import card
-from tests.test_reading_followup import select_read
 
 URL = "https://www.xiaoheihe.cn/app/bbs/link/123456"
 TOKEN = "synthetic-card-reader-token-12345"

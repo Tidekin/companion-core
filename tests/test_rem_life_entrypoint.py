@@ -6,7 +6,7 @@ import sys
 
 from companion import rem
 from tests.conftest import run
-from tests.test_evaluation_process import process_config
+from tests.support.evaluation_process import process_config
 from tests.test_rem_native import prepared, usage
 
 
