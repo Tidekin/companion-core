@@ -11,9 +11,10 @@ from pathlib import Path
 
 from companion.cognition_read import cache_usage, measurement, observed_usage
 from companion.contracts import CoreError
-from companion.ops_status import _ReadView, schema_head
+from companion.ops_status import schema_head
 from companion.paid_budget import sha
 from companion.privacy import epoch
+from companion.store import ReadView
 from companion.transport import reply_group
 
 
@@ -418,7 +419,7 @@ def inspect_context(settings, trace_id):
 
             db.set_progress_handler(progress, 10000)
             db.execute("BEGIN")
-            view = _ReadView(db)
+            view = ReadView(db)
             version = view.one("SELECT version_num FROM alembic_version")
             if not version or version["version_num"] != schema_head():
                 result["blockers"].append("MIGRATION_REQUIRED")

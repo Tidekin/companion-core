@@ -407,6 +407,28 @@ def test_a_new_connection_reuses_the_shared_view_until_any_commit(core, tmp_path
         other.close()
 
 
+def test_commit_during_validation_does_not_cache_under_new_database(core, tmp_path, monkeypatch):
+    approval, request = settled(core, tmp_path)
+    paid_budget.forget_views(core.store)
+    other = Store(core.settings.database)
+    original = paid_budget._journal
+
+    def change_after_validation(*args, **kwargs):
+        view = original(*args, **kwargs)
+        other.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=?", (request,))
+        return view
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(paid_budget, "_journal", change_after_validation)
+            paid_budget.journal(core.store, approval)
+        for reader in (core.store, other):
+            with reader.transaction(), pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
+                paid_budget.journal(reader, approval)
+    finally:
+        other.close()
+
+
 def test_uncommitted_writes_never_fill_or_use_the_shared_view(core, tmp_path):
     approval, _ = settled(core, tmp_path)
     paid_budget.forget_views()

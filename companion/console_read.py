@@ -232,12 +232,12 @@ def overview(core):
         "review_memories": _review_count(core),
         "companion_proposals": s.one(
             "SELECT COUNT(*) n FROM capability_overrides WHERE state='PROPOSED'")["n"]
-        if s.one("SELECT 1 FROM sqlite_master WHERE name='capability_overrides'") else 0,
+        if s.has_table("capability_overrides") else 0,
         "pending_goals": s.one("SELECT COUNT(*) n FROM goals WHERE state='PENDING'")["n"]
-        if s.one("SELECT 1 FROM sqlite_master WHERE name='goals'") else 0,
+        if s.has_table("goals") else 0,
         "pending_reflections": s.one(
             "SELECT COUNT(*) n FROM reflection_suggestions WHERE state='PENDING'")["n"]
-        if s.one("SELECT 1 FROM sqlite_master WHERE name='reflection_suggestions'") else 0,
+        if s.has_table("reflection_suggestions") else 0,
     }
     worker = worker_loop.snapshot(s, datetime.fromisoformat(now))
     budget = budget_view(core)
@@ -312,10 +312,6 @@ def diagnostics(core):
     return collection(core, items)
 
 
-def _table_exists(store, name):
-    return bool(store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)))
-
-
 def decisions(core, limit=40):
     """Recorded decisions with their trigger, options, outcome and the bounded facts they used.
 
@@ -343,7 +339,7 @@ def decisions(core, limit=40):
         items.append(entry(row["candidate_id"], "share", "主动分享候选", row["state"],
                            row["created_at"], row["reason_code"] or "",
                            options=["SHARE", "SKIP"], delivery_state=row["sent"]))
-    if _table_exists(s, "social_autonomy_plans"):
+    if s.has_table("social_autonomy_plans"):
         for row in s.rows(
             "SELECT plan_id,state,last_error_code,created_at FROM social_autonomy_plans "
             "WHERE redacted=0 ORDER BY created_at DESC LIMIT ?", (limit,),
@@ -361,7 +357,7 @@ def decisions(core, limit=40):
         adjustments = s.one(
             "SELECT COUNT(*) n FROM capability_overrides c JOIN reflection_suggestions x "
             "USING(suggestion_id) WHERE x.run_id=?", (row["run_id"],),
-        )["n"] if _table_exists(s, "capability_overrides") else 0
+        )["n"] if s.has_table("capability_overrides") else 0
         items.append(entry(row["run_id"], "reflection", "每日反思", row["state"],
                            row["created_at"], row["last_error_code"] or "",
                            options=["SUGGEST", "SKIP"], local_date=row["local_date"],

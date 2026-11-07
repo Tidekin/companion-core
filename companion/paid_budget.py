@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from companion.contracts import CoreError
-from companion.store import encode, file_identity, uid
+from companion.store import encode, uid
 
 # The chain codec retains at most this many source bytes. Whole custody views
 # retain only their digest key and at most this many serialized result bytes.
@@ -318,11 +318,13 @@ def _live_record(row, digest, current, seen):
 
 
 IDENTITY = "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
-SUMMARY = ("SELECT (SELECT count(*) FROM runtime_meta),"
-           "(SELECT total(length(key)+length(value)) FROM runtime_meta),"
-           "(SELECT count(*) FROM model_admissions),"
-           "(SELECT count(*) FROM model_usage),"
-           "(SELECT total(length(state)+billed_micro_usd) FROM model_usage)")
+SUMMARY = ("SELECT (SELECT count(*) FROM runtime_meta) AS metadata_count,"
+           "(SELECT COALESCE(sum(CAST(length(key)+length(value) AS double precision)),0) "
+           "FROM runtime_meta) AS metadata_size,"
+           "(SELECT count(*) FROM model_admissions) AS admissions_count,"
+           "(SELECT count(*) FROM model_usage) AS usage_count,"
+           "(SELECT COALESCE(sum(CAST(length(state)+billed_micro_usd AS double precision)),0) "
+           "FROM model_usage) AS usage_size")
 # Views shared by every connection of this process, for callers such as the API that open
 # one connection per request. Keyed by the journal path.
 _SHARED, _SHARED_LOCK = {}, threading.RLock()
@@ -338,42 +340,25 @@ def _view_key(store, path, raw):
     # Inside one write transaction or read snapshot only this connection's own writes,
     # counted by total_changes, can change the DB; the summary is then fixed. Complete
     # bytes are still read on every call. Exact equality can reuse their digest too.
-    scope = getattr(store, "frozen_scope", None)
+    scope = store.frozen_revision
     memo = getattr(store, "_view_key_memo", None)
     identity = raw if len(raw) <= KEY_MAX_BYTES else hashlib.sha256(raw).hexdigest()
     if scope is not None and memo is not None and memo[0] == (
-        scope, store.db.total_changes, str(path), identity,
+        scope, str(path), identity,
     ):
         return memo[1]
     digest = hashlib.sha256(raw).hexdigest() if isinstance(identity, bytes) else identity
-    summary = tuple(store.db.execute(SUMMARY).fetchone())
-    version = store.db.execute("PRAGMA data_version").fetchone()[0]
-    key = (str(path), digest, store.db.total_changes, version, summary)
+    summary = tuple(store.one(SUMMARY).values())
+    key = (str(path), digest, store.change_token(), summary)
     if scope is not None:
-        store._view_key_memo = ((scope, store.db.total_changes, str(path), identity), key)
+        store._view_key_memo = ((scope, str(path), identity), key)
     return key
 
 
 def _shared_key(store, key):
-    """The same view for any connection: journal bytes, table summary and the DB files.
-
-    Every commit, from any process, writes the WAL (or the DB file after a checkpoint), so
-    their inode, size and modification time change with it. A connection with its own
-    uncommitted writes never uses or fills the shared entry.
-    """
-    if store.db.in_transaction and store.db.total_changes != getattr(store, "_txn_changes", None):
-        return None
-    path = getattr(store, "path", None)
-    if not isinstance(path, (str, os.PathLike)) or str(path).startswith((":memory:", "file:")):
-        return None
-    files = file_identity(path)
-    if files[0] is None:
-        return None
-    # A read snapshot is older than the files once anyone commits; such a view must
-    # neither be filled under the newer files nor answer for the older snapshot.
-    if getattr(store, "in_read_snapshot", False) and files != store._snapshot_files:
-        return None
-    return (key[0], key[1], key[4], files)
+    identity = store.shared_snapshot_identity()
+    path, digest, _, summary = key
+    return (path, digest, summary, identity) if identity is not None else None
 
 
 def forget_views(store=None):
@@ -476,13 +461,16 @@ def _read_journal(store, approval, *, allow_settlement, initialize):
         if len(blob) > CACHE_MAX_BYTES:
             forget_views(store)
             return view
+        # A concurrent commit can land between the fold and publication. Bind the
+        # result only to the database and snapshot identity it actually checked.
         after = _view_key(store, path, raw)
-        entry = (after, blob, store.one(IDENTITY), marshal.loads(blob))
+        if after != key or _shared_key(store, after) != shared:
+            return view
+        entry = (key, blob, store.one(IDENTITY), marshal.loads(blob))
         store._journal_view = entry
-        shared = _shared_key(store, after)
         if shared is not None:
             with _SHARED_LOCK:
-                _SHARED[after[0]] = (shared, *entry[1:])
+                _SHARED[key[0]] = (shared, *entry[1:])
     return view
 
 
