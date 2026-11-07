@@ -11,7 +11,7 @@ import companion_delivery_protocol as wire
 from companion import cumulative, live_text, owner_authority
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityReference
-from companion.transport import cancel_segment_tail
+from companion.transport import cancel_segment_tail, mark_not_dispatched
 from companion_delivery_protocol import preflight
 
 
@@ -72,9 +72,7 @@ def settle(store, settings, clock, body):
         # New owner input can already have cancelled an unstarted lease. Its exact
         # signed reservation still closes Bridge custody; retain Core's terminal reason.
         if row["state"] != "CANCELLED":
-            store.execute("UPDATE outbox SET state='CANCELLED',"
-                          "last_error_code='REPLY_NOT_DISPATCHED',updated_at=? WHERE message_id=?",
-                          (now, body.message_id))
+            mark_not_dispatched(store, body.message_id, now, attempt_count=row["attempt_count"])
         cancel_segment_tail(store, row, now)
         store.execute("DELETE FROM runtime_meta WHERE key=?",
                       ("owner_preflight_lease:" + body.message_id,))

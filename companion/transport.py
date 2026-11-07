@@ -328,6 +328,15 @@ def cancel_origin_replies(store, event_id, now):
                    retain_lease=True)
 
 
+def mark_not_dispatched(store, message_id, now, *, attempt_count):
+    """Apply a verified Bridge non-dispatch receipt inside its settlement transaction."""
+    store.execute(
+        "UPDATE outbox SET state='CANCELLED',updated_at=?,attempt_count=?,"
+        "last_error_code='REPLY_NOT_DISPATCHED' WHERE message_id=?",
+        (now, attempt_count, message_id),
+    )
+
+
 def cancel_segment_tail(store, row, now, *, reason="REPLY_SEGMENT_CHAIN_STOPPED"):
     if row["reply_group_id"] is not None:
         _cancel_unsent(store, now, reason, "reply_group_id=? AND segment_index>?",
