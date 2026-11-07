@@ -1,4 +1,4 @@
-"""Settlement of an owner reply whose guarded Core preflight exhausted its lease."""
+"""Settlement of an owner text delivery whose guarded Core preflight exhausted its lease."""
 
 import json
 from typing import Literal
@@ -53,7 +53,7 @@ def settle(store, settings, clock, body):
         # exclusive Bridge still attests RESERVED and no provider dispatch, so
         # retain the actual begun count rather than treating the ACK as an effect.
         begun = body.stage == "send-check" or bool(row and row["attempt_count"] == 1)
-        states = {"SENDING", "DELIVERY_UNCERTAIN"} if begun else {"LEASED", "PENDING"}
+        states = {"SENDING", "DELIVERY_UNCERTAIN"} if begun else {"LEASED", "PENDING", "CANCELLED"}
         if (lease != {k: proof[k] for k in ("item_sha256", "lease_sha256", "lease_until")}
             or not row or not row["authority_json"]
             or json.loads(row["authority_json"]) != body.authority
@@ -68,8 +68,12 @@ def settle(store, settings, clock, body):
             raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
         now = clock()
         cumulative.send_result(store, body.message_id, "FAILED", now)
-        store.execute("UPDATE outbox SET state='CANCELLED',last_error_code='REPLY_NOT_DISPATCHED',"
-                      "updated_at=? WHERE message_id=?", (now, body.message_id))
+        # New owner input can already have cancelled an unstarted lease. Its exact
+        # signed reservation still closes Bridge custody; retain Core's terminal reason.
+        if row["state"] != "CANCELLED":
+            store.execute("UPDATE outbox SET state='CANCELLED',"
+                          "last_error_code='REPLY_NOT_DISPATCHED',updated_at=? WHERE message_id=?",
+                          (now, body.message_id))
         store.execute("UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
                       "last_error_code='REPLY_SEGMENT_CHAIN_STOPPED' WHERE reply_group_id=? "
                       "AND segment_index>? AND state IN ('PENDING','RETRY_WAIT','LEASED')",

@@ -236,3 +236,49 @@ def test_proactive_provider_response_loss_still_stops_without_resending(core, tm
             assert provider_calls == 2
 
     run(scenario())
+
+
+def test_new_owner_input_during_proactive_response_loss_keeps_original_cancellation(core, tmp_path):
+    core.settings.lease_seconds = 25
+    core.settings.timeout_seconds = 5
+
+    async def scenario():
+        async with ready(core, tmp_path) as (active, sends):
+            assert await active.pump() and len(sends) == 1
+            interrupted = False
+
+            async def new_input(request):
+                nonlocal interrupted
+                if request.url.path.endswith("/begin-send") and not interrupted:
+                    interrupted = True
+                    raw = encode(raw_event(2, text="合成的新问题",
+                                           time=int(core.clock.now.timestamp())))
+                    event = normalize(raw, active.config, now=core.clock.now.timestamp())
+                    assert active.runtime.persist_capture(event, raw, received_at=core.clock.now,
+                                                          peer=("127.0.0.1", 3001))
+                    await active.flush()
+                    current = core.store.one("SELECT state,last_error_code,lease_token "
+                                             "FROM outbox WHERE segment_index=1")
+                    assert current == {"state": "CANCELLED", "last_error_code": "AUTONOMY_PAUSED",
+                                       "lease_token": None}
+                    core.clock.advance(core.settings.lease_seconds + 1)
+                    raise httpx.RemoteProtocolError("synthetic proactive connection lost",
+                                                    request=request)
+
+            active.client.event_hooks["request"].append(new_input)
+            assert await active.pump()
+            assert active.attempts() == {"ACK": 1, "NOT_SENT": 1} and len(sends) == 1
+            assert core.store.rows("SELECT state,last_error_code FROM outbox "
+                                   "WHERE segment_index>0 ORDER BY segment_index") == [
+                {"state": "CANCELLED", "last_error_code": "AUTONOMY_PAUSED"}] * 2
+            active.restart()
+            cfg = tmp_path / "interrupted-owner.json"
+            cfg.write_text(json.dumps(core.settings.model_dump(mode="python"),
+                default=lambda value: value.get_secret_value()
+                if isinstance(value, SecretStr) else str(value)), encoding="utf8")
+            assert await child("tests.owner_runtime_process", "--config", str(cfg),
+                "--now", core.clock(), "--reply", "合成的正常回答") == {"worked": True, "calls": 1}
+            assert await active.pump() and len(sends) == 2
+            assert active.runtime.row()["state"] == "ACTIVE"
+
+    run(scenario())
