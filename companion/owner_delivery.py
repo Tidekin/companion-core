@@ -57,8 +57,7 @@ def _images(store, settings, clock, job, snapshots, *, executing):
     try:
         saved = [item["item_ids"] for item in snapshots if item["kind"] == "images"]
         # A frozen text reply consumes the signed evidence, not original pixels.
-        actual = [row["item_id"] for row, _ in agent_images.input_sources(
-            store, settings, clock, job, executing=executing)]
+        actual = agent_images.context_item_ids(store, settings, clock, job, executing=executing)
         if saved != ([actual] if actual else []):
             raise ValueError("original image snapshots changed")
     except (ValueError, KeyError, TypeError, CoreError) as error:
