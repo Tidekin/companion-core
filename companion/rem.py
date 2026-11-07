@@ -558,7 +558,7 @@ def expire(store, ledger, now):
         "relnamespace=current_schema()::regnamespace AND relname='rem_records' AND relkind IN "
         "('r','p')"
     ):
-        return
+        return 0
     rows = store.rows(
         "SELECT j.event_id FROM rem_records AS r JOIN jobs AS j USING (job_id) WHERE "
         "r.redacted = 0 AND r.expires_at <= %s ORDER BY r.expires_at NULLS FIRST LIMIT 1000",
@@ -568,6 +568,7 @@ def expire(store, ledger, now):
         # Expire only the derived REM event. Original memory sources and their
         # facts remain intact; the original external Ledger makes restore replay safe.
         ledger.expire_events(store, [row["event_id"] for row in rows], now, retention_cutoff=now)
+    return len(rows)
 
 
 def records(core, *, limit=20):

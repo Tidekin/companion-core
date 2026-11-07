@@ -203,6 +203,9 @@ def native_selector(core, worker_id) -> RoundRobin:
 
         return lane(name, run, purposes, interval=MAINTENANCE_SECONDS, maintenance=True)
 
+    async def retention():
+        return UnitResult(bool(core.expire_raw_events(include_rem=True)))
+
     async def wake_goal():
         with core.store.transaction():
             decisions = core.wake.evaluate()
@@ -382,7 +385,7 @@ def native_selector(core, worker_id) -> RoundRobin:
 
     return RoundRobin(
         (
-            maintenance("retention", core.expire_raw_events),
+            lane("retention", retention, interval=MAINTENANCE_SECONDS, maintenance=True),
             maintenance("media_cleanup", core.cleanup_media),
             maintenance("diary_schedule", core.diary.schedule_due, ("diary",)),
             maintenance(

@@ -36,13 +36,14 @@ class Runtime:
         finally:
             self.database.close()
 
-    def expire_raw_events(self):
+    def expire_raw_events(self, *, include_rem=False):
+        """Return expired raw events, optionally counting expired REM records as well."""
         from companion.rem import expire as expire_rem
 
         now = self.clock()
         cutoff = after(now, -86400 * self.settings.raw_event_retention_days)
         with self.store.transaction(control_write=True):
-            expire_rem(self.store, self.ledger, now)
+            rem_count = expire_rem(self.store, self.ledger, now)
             rows = self.store.rows(
                 'SELECT event_id FROM events WHERE redacted = 0 AND ingested_at < %s ORDER BY '
                 'record_sequence NULLS FIRST LIMIT 1000',
@@ -51,4 +52,4 @@ class Runtime:
             if rows:
                 self.ledger.expire_events(self.store, [e["event_id"] for e in rows], now,
                                           retention_cutoff=cutoff)
-            return len(rows)
+            return len(rows) + (rem_count if include_rem else 0)
