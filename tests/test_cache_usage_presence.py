@@ -58,6 +58,20 @@ def attempt(core, *, cache=ABSENT, usage=ABSENT, status=200, number=1, marker=AB
     return response, row, record
 
 
+def test_overview_counts_only_current_sources_and_original_usage(core, tmp_path):
+    from companion.console_read import overview
+
+    approved_live(core, tmp_path)
+    _, row, _ = attempt(core, cache=40)
+    summary = overview(core)["model"]
+    assert summary == dict(calls=1, observed_calls=1, cache_calls=1, uncertain_calls=0,
+                           cached=40, fresh=40, unknown_input=0, output=3,
+                           billed_micro_usd=row["billed_micro_usd"], complete=True)
+    core.store.execute("UPDATE events SET redacted=1 WHERE event_id IN "
+                       "(SELECT event_id FROM job_sources WHERE job_id=?)", (row["job_id"],))
+    assert overview(core)["model"]["calls"] == 0
+
+
 def projections(core, row):
     item = cognition_read.CognitionRead(core).page("model", record_id=row["request_id"])["items"][0]
     trace = core.store.one("SELECT e.trace_id FROM jobs j JOIN events e USING(event_id) "

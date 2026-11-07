@@ -4,6 +4,8 @@ import json
 from datetime import datetime
 
 from companion import capabilities, worker_loop
+from companion.cognition_read import CognitionRead
+from companion.contracts import CoreError
 from companion.memory_context import MemorySources, check_version, read_version
 from companion.privacy import redact
 from companion.store import encode
@@ -239,6 +241,11 @@ def overview(core):
     }
     worker = worker_loop.snapshot(s, datetime.fromisoformat(now))
     budget = budget_view(core)
+    try:
+        model = core.store.read_or_write(lambda: CognitionRead(core).daily_model_usage(
+            budget["local_day"], budget["timezone"], now))
+    except CoreError:
+        model = None
     blocked = s.one("SELECT 1 FROM runtime_meta WHERE key IN "
                     "('model_budget_blocked','model_budget_restore_required')")
     paused = {row["key"]: row["value"] == "1" for row in s.rows(
@@ -257,7 +264,7 @@ def overview(core):
                         "state": "ATTENTION" if blocked or counts["unknown_calls"]
                         or budget["admission_blocked"] or worker["state"] != "RECORDED"
                         else "READY"},
-            "counts": counts, "budget": budget,
+            "counts": counts, "budget": budget, "model": model,
             "capabilities": capabilities.snapshot(s, core.settings, core.clock)}
 
 

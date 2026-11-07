@@ -173,6 +173,19 @@ def test_native_model_measurement_and_unknown(core, tmp_path, response_usage):
         assert item["usage"]["input_tokens"] == 20
 
 
+def test_daily_model_summary_covers_more_than_500_visible_calls(core):
+    from companion.console_read import overview
+
+    with core.store.transaction():
+        for n in range(513):
+            core.store.insert("model_usage", usage_id=f"usage_{n}", request_id=f"request_{n}",
+                              occurred_at=core.clock(), provider="demo", model="demo",
+                              scenario="chat", state="UNKNOWN")
+    result = overview(core)["model"]
+    assert result["calls"] == result["uncertain_calls"] == 513
+    assert result["complete"] and result["observed_calls"] == 0
+
+
 def test_explicit_route_contract(core):
     # Module contract only. Application composition is owned by the integration lane.
     app = FastAPI()
