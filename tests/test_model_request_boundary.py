@@ -78,7 +78,7 @@ def test_only_admitted_content_reaches_actual_receive(core, tmp_path, mutation):
 
 @pytest.mark.parametrize("mutation", [
     "url", "host", "authorization", "method", "transfer_encoding", "credential", "lease",
-    "expired", "approval_removed", "mode", "output_config",
+    "expired", "approval_removed", "mode", "output_config", "logical_request",
 ])
 def test_every_paid_request_rechecks_after_all_user_hooks(core, tmp_path, mutation):
     approved_live(core, tmp_path)
@@ -108,6 +108,11 @@ def test_every_paid_request_rechecks_after_all_user_hooks(core, tmp_path, mutati
             core.settings.mode = "demo"
         elif mutation == "output_config":
             core.settings.max_output_tokens -= 1
+        elif mutation == "logical_request":
+            core.store.execute(
+                "UPDATE model_admissions SET logical_request_id=? WHERE request_id=?",
+                ("other", request_id),
+            )
         else:
             core.settings.paid_model = None
 

@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 
+import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import AwareDatetime, Field, field_validator, model_validator
@@ -1633,6 +1634,12 @@ def check_model(store, settings, clock, request_id):
             current["lease_until"], qq_images.original_deadline(store, job),
         )
     return current
+
+
+def check_synthetic_transport(settings, model, url):
+    if (settings.live_text_window.execution == "local_synthetic"
+        and not isinstance(model.client._transport_for_url(url), httpx.MockTransport)):
+        raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
 
 
 def dispatch_fence(

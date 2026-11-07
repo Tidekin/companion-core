@@ -31,6 +31,7 @@ CAPABILITY = "model.evaluate"
 DEVICE = "core.evaluation"
 CALLS = 6
 COST = 50000
+ATTEMPT_MICRO_USD = 5000
 SHA = r"^[a-f0-9]{64}$"
 # A pilot replays owner turns; a synthetic plan carries only prepared SYNTHETIC cases.
 LIMITS = {
@@ -161,7 +162,7 @@ def _plan(settings, manifest):
                 if measured["budget_input_tokens"] is None or any(
                     row.get(key) != value for key, value in measured.items()
                 ) or measured["budget_input_tokens"] > limits["input"] or measured[
-                    "estimated_reservation_micro_usd"] > 5000:
+                    "estimated_reservation_micro_usd"] > ATTEMPT_MICRO_USD:
                     raise ValueError("unsupported, changed or over-limit measurement")
                 measured_costs.append(measured["estimated_reservation_micro_usd"])
             shared.setdefault(row["case"], set()).add(digest)
@@ -312,7 +313,7 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
     if (len(prior) >= min(limits["calls"], len(manifest["plan"]["requests"]))
         or any(row["state"] != "SETTLED" for row in prior)
         or sum(row["billed_micro_usd"] for row in prior) + estimate > limits["cost"]
-        or estimate > 5000 or estimated_input > limits["input"]):
+        or estimate > ATTEMPT_MICRO_USD or estimated_input > limits["input"]):
         raise CoreError("EVALUATION_SUBLIMIT_EXHAUSTED", 429)
     ordinal = len(prior)
     if (rid != request_id(run["manifest_sha256"], ordinal)
@@ -323,6 +324,14 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
         or paid_budget.sha(model_payload(settings, messages, "evaluation")) != (
             manifest["plan"]["requests"][ordinal]["payload_sha256"])):
         raise CoreError("EVALUATION_SEQUENCE_OR_PAYLOAD_CHANGED", 409)
+
+
+def actual_limits(store, usage, actual):
+    total = store.one("SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
+                      "WHERE job_id=?", (usage["job_id"],))["n"]
+    if actual > ATTEMPT_MICRO_USD or total + actual - usage["billed_micro_usd"] > COST:
+        return ["EVALUATION_AMOUNT"]
+    return []
 
 
 def check_request(store, settings, clock, rid):

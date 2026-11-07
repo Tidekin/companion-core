@@ -10,7 +10,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from companion import budget, capabilities, life_topics, owner_authority, paid_budget
+from companion import budget, capabilities, life_topics, model_scope, owner_authority, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelClient
 from companion.store import Store
@@ -49,7 +49,10 @@ def test_background_capacity_waits_do_not_spend_domain_retries(core, tmp_path, m
                         else "BACKGROUND_YIELD_TO_CHAT", 429)
 
     with monkeypatch.context() as patch:
-        patch.setattr(budget, "reserve" if boundary == "admission" else "_model_scope", full)
+        if boundary == "admission":
+            patch.setattr(budget, "reserve", full)
+        else:
+            patch.setattr(model_scope, "check", full)
         for _ in range(5 if boundary == "admission" else 1):
             assert step(core)
             row = core.store.one(f"SELECT state,attempts FROM {table}")

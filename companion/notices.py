@@ -238,6 +238,18 @@ def validate(store, settings, job, now):
     return data
 
 
+def admit_activity(store, settings, job_id, now):
+    from companion.social import proactive_allowed
+
+    job = store.one("SELECT j.*,e.body_json FROM jobs j JOIN events e USING(event_id) "
+                    "WHERE job_id=?", (job_id,))
+    if reference(job) is not None:
+        validate(store, settings, job, now)
+    if (not shadow(job) and not required(store, job_id)
+        and not proactive_allowed(store, settings, now)):
+        raise CoreError("AUTONOMY_PAUSED", 409)
+
+
 def check_request(store, settings, request_id, now):
     job = store.one(
         "SELECT j.*,e.body_json FROM model_usage m JOIN jobs j USING(job_id) "

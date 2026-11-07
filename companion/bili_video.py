@@ -296,15 +296,26 @@ def _model_room(store, settings, job_id, request_id=None):
         raise CoreError(CHAT_HEADROOM, 429)
 
 
+def _input_binding(store, settings, clock, request_id, job_id, scenario, logical_id):
+    binding = model_binding(store, settings, clock, request_id, job_id=job_id,
+                            scenario=scenario, logical_request_id=logical_id)
+    if scenario == "content_video_preview" and binding is None:
+        raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
+    return binding
+
+
+def recheck_input_binding(store, settings, clock, request_id, job_id, scenario, logical_id, saved):
+    if model_binding(store, settings, clock, request_id, job_id=job_id,
+                     scenario=scenario, logical_request_id=logical_id) != saved:
+        raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
+
+
 def reserve_model_input(store, settings, clock, request_id, job_id, scenario, logical_id,
                         wire, messages, tools, cloud_kind, cloud_id):
     from companion import paid_budget, video_input
     from companion.model import model_payload
 
-    binding = model_binding(store, settings, clock, request_id, job_id=job_id,
-                            scenario=scenario, logical_request_id=logical_id)
-    if scenario == "content_video_preview" and binding is None:
-        raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
+    binding = _input_binding(store, settings, clock, request_id, job_id, scenario, logical_id)
     video_input.contract(settings, job_id, logical_id)
     if binding is not None and (
         binding["payload_sha256"] != paid_budget.sha(
@@ -318,10 +329,7 @@ def reserve_model_input(store, settings, clock, request_id, job_id, scenario, lo
 def validate_model_input(store, settings, clock, request_id, scenario, job_id, logical_id):
     from companion import image_input, video_input
 
-    binding = model_binding(store, settings, clock, request_id, job_id=job_id,
-                            scenario=scenario, logical_request_id=logical_id)
-    if scenario == "content_video_preview" and binding is None:
-        raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
+    binding = _input_binding(store, settings, clock, request_id, job_id, scenario, logical_id)
     if binding is None:
         image_input.contract(settings, job_id, logical_id)
     if scenario in video_input.SCENARIOS:

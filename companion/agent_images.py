@@ -382,6 +382,13 @@ def attach(core, job, messages, sources, turns, current, snapshots, *, priority_
     return ids
 
 
+def check_chat_admission(store, settings, clock, job, messages):
+    if not job or job["kind"] != "chat":
+        raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
+    owner_authority.check_job(store, settings, clock, job, purpose="image", executing=True)
+    check_payload(store, settings, clock, job, messages)
+
+
 def check_payload(store, settings, clock, job, messages):
     if not enabled(settings):
         return

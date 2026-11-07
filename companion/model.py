@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from companion.contracts import CoreError
+from companion.video_input import approved_route as video_route
 
 MAX_REASONING_CHARS = 64000
 
@@ -245,9 +246,7 @@ class _AdmissionTransport(httpx.AsyncBaseTransport):
 
 def model_route(settings, scenario):
     """The effective generation route shared by payload measurement and transport."""
-    video = (settings.paid_model.video_input
-             if scenario in {"content_video", "content_video_preview"}
-             and settings.paid_model else None)
+    video = video_route(settings, scenario)
     return (video.provider, video.model, video.endpoint.rstrip("/")) if video else (
         settings.provider, settings.model_name, settings.model_url.rstrip("/"))
 
@@ -261,9 +260,7 @@ def model_payload(settings, messages, scenario, *, tools=(), generation=None):
         generation, GenerationOptions,
     ) or type(generation.max_tokens) is not int or generation.max_tokens < 1):
         raise CoreError("MODEL_GENERATION_SCOPE_REQUIRED", 503)
-    video = (settings.paid_model.video_input
-             if scenario in {"content_video", "content_video_preview"}
-             and settings.paid_model else None)
+    video = video_route(settings, scenario)
     payload = {
         "model": model_route(settings, scenario)[1],
         "messages": messages,
@@ -328,9 +325,7 @@ class ModelClient:
         ):
             raise CoreError("MODEL_ADMISSION_REQUIRED", 503)
         admission.consumed = True
-        video = (self.settings.paid_model.video_input
-                 if scenario in {"content_video", "content_video_preview"}
-                 and self.settings.paid_model else None)
+        video = video_route(self.settings, scenario)
         endpoint = model_route(self.settings, scenario)[2]
         endpoint += "/chat/completions"
         key = self.settings.video_model_key if video else self.settings.model_key
