@@ -18,8 +18,8 @@ from companion_onebot_bridge import owner_notices
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.owner_recall_bridge import recall_frame
 from tests.test_bili_video import final_result, model_response, paid_media, phase_usage, upload_body
-from tests.test_owner_recall_bridge import recall_frame
 
 
 @pytest.mark.parametrize(

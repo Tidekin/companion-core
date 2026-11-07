@@ -19,7 +19,7 @@ from companion_onebot_bridge.event_normalizer import normalize, normalize_recall
 from companion_onebot_bridge.rich_input import input_digest
 from tests.support.core_http import real_core_http
 from tests.support.onebot_events import raw_event
-from tests.test_owner_input import captured
+from tests.support.owner_input import captured
 
 BASE = "/internal/v1/owner-authority"
 

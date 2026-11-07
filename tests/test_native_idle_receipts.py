@@ -9,7 +9,7 @@ from companion_onebot_bridge.owner_resolution import TABLE
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
-from tests.test_bridge_owner_runtime import config as config
+from tests.support.bridge_owner_runtime import config as config
 
 
 def test_idle_receipts_skip_history_but_keep_identity_and_pending_guard(config, monkeypatch):

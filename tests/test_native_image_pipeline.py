@@ -23,7 +23,7 @@ from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.onebot_events import raw_event
-from tests.test_prepare_owner_input import native_spool, window
+from tests.support.prepare_owner_input import native_spool, window
 
 
 def pixels(mime="image/png"):
@@ -243,7 +243,7 @@ def test_native_upload_rechecks_original_source_and_lease(core, tmp_path, bounda
                                    (encode(changed), event["event_id"]))
             elif boundary == "recall":
                 from companion.owner_authority_protocol import OwnerCapture
-                from tests.test_owner_recall import receipt
+                from tests.support.owner_recall import receipt
 
                 saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
                     ("owner_input:" + event["event_id"],))["value"])
@@ -342,7 +342,7 @@ def test_unknown_image_model_call_is_not_replayed_after_restart(core, tmp_path):
 
 def test_native_recall_erases_uploaded_original_and_rejects_replay(core, tmp_path):
     from companion.owner_authority_protocol import OwnerCapture
-    from tests.test_owner_recall import receipt
+    from tests.support.owner_recall import receipt
 
     async def scenario():
         async with window(core, tmp_path, media=True, content=True) as (client, config, plan):

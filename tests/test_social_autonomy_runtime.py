@@ -10,8 +10,8 @@ from companion.social_autonomy_runtime import run_once
 from companion.store import after
 from tests.conftest import ingest, run
 from tests.social_profile_support import confirmed_profile_material
-from tests.test_reading_protocol import envelope
-from tests.test_social_autonomy import (
+from tests.support.reading_protocol import envelope
+from tests.support.social_autonomy import (
     MockPlanner,
     avatar,
     background,

@@ -13,26 +13,15 @@ from companion import budget, owner_authority, paid_budget
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
-from companion.video_input import VideoInputPolicy, encode_animation, preview, text_and_estimate
+from companion.video_input import encode_animation, preview, text_and_estimate
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call, worker_for
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.live_image_input import png
+from tests.support.onebot_images import image_segment
+from tests.support.prepare_owner_input import native_spool, window
+from tests.support.video_understanding import video_policy
 from tests.test_animated_owner_images import animation, policy
-from tests.test_live_image_input import options as image_options
-from tests.test_live_image_input import png
-from tests.test_onebot_images import image_segment
-from tests.test_prepare_owner_input import native_spool, window
-from tests.test_private_companion import companion_options
-
-
-def video_policy(**changes):
-    return VideoInputPolicy(**{
-        "approval_sha256": "d" * 64, "provider": "synthetic-video",
-        "endpoint": "https://video.example.test/v1", "model": "configurable-video-one",
-        "input_rate": 1000000, "cached_input_rate": 100000, "output_rate": 2000000,
-        "estimated_tokens_per_second": 200, "max_output_tokens": 128,
-        **changes,
-    })
 
 
 @pytest.mark.parametrize("format,mime", [
@@ -88,22 +77,6 @@ def test_fractional_apng_frame_durations_do_not_accumulate_rounding_drift():
             duration += animation.info["duration"]
     encoded = encode_animation(original, "image/apng", policy(), video_policy())
     assert abs(encoded.seconds - duration / 1000) <= 0.040001
-
-
-def scope_options(core, *, model, different_rates=False):
-    options, image = companion_options(core), image_options()
-    options.update(image_scope=image["image_scope"],
-                   image_approval_sha256=image["image_approval_sha256"])
-    options["core_options"].update(image["core_options"], video_model_key=SecretStr(
-        "synthetic-video-provider-key-12345",
-    ))
-    prices = ({"input_rate": 8990, "cached_input_rate": 899, "output_rate": 44949,
-               "max_output_tokens": 1000} if different_rates else {})
-    options["paid_options"].update(
-        image_input=image["paid_options"]["image_input"],
-        video_input=video_policy(model=model, **prices), per_request_calls=4,
-    )
-    return options
 
 
 async def native_media(core, tmp_path, client, config, plan, *, extra_static=False):

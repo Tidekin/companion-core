@@ -12,9 +12,9 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.profile_probe import ProfilePump
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
-from tests.test_bridge_owner_runtime import config as config
+from tests.support.bridge_owner_runtime import config as config
+from tests.support.onebot_images import image_segment
 from tests.test_native_image_bursts import native_host, send
-from tests.test_onebot_images import image_segment
 
 
 def test_idle_background_waits_skip_history_and_stop_wakes_profile_cooldown(config, monkeypatch):

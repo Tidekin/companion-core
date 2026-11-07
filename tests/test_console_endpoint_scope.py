@@ -4,7 +4,7 @@ import pytest
 from pydantic import SecretStr
 
 from companion import operator_config
-from tests import test_owner_console
+from tests.support import owner_console as test_owner_console
 
 
 @pytest.fixture

@@ -8,8 +8,8 @@ import httpx
 from pydantic import SecretStr
 
 from tests.support.core_http import real_core_http
+from tests.support.owner_input import captured, inbound
 from tests.test_evaluation_process import process_config
-from tests.test_owner_input import captured, inbound
 
 PATH = "/internal/v2/cognition/activity"
 
@@ -77,7 +77,7 @@ def test_signed_tcp_entry_independent_core_and_stop_leave_inspection_read_only(c
 def test_signed_read_and_isolated_reader_receipts_are_observed_without_more_io(
     core, tmp_path, monkeypatch,
 ):
-    from tests import test_bili_video_entrypoint as reader_fixture
+    from tests.support import bili_video_entrypoint as reader_fixture
     from tests.test_reading_followup import TOKEN, URL, admit, select_read, window
 
     # The existing isolated Reader accepts only mocked upstream bytes and cannot

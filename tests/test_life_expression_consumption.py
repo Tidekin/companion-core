@@ -21,11 +21,11 @@ from companion.social_autonomy import SocialAutonomy
 from companion.store import after, encode, uid
 from tests.conftest import run
 from tests.support.owner_authority import activate
-from tests.test_reading_protocol import envelope
-from tests.test_reading_service import configure
-from tests.test_reply_revision import accept
-from tests.test_social_autonomy import service
-from tests.test_social_owner_authority import authorize, stop
+from tests.support.reading_protocol import envelope
+from tests.support.reading_service import configure
+from tests.support.reply_revision import accept
+from tests.support.social_autonomy import service
+from tests.support.social_owner_authority import authorize, stop
 
 
 @pytest.fixture(autouse=True)

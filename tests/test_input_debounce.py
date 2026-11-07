@@ -1,34 +1,18 @@
 """Owner bursts wait briefly, are answered once, and commands are never delayed."""
 
-import json
 from datetime import datetime
 
-from companion import dialogue_history, input_debounce, reply_revision
+from companion import dialogue_history, input_debounce
 from companion.config import Settings
 from companion.input_debounce import InputDebounceConfig
 from companion.store import after
-from tests.conftest import ingest
+from tests.support.input_debounce import accept
 from tests.test_runtime_configuration import hot as hot
 from tests.test_runtime_configuration import save
 
 
 def enable(core, **values):
     core.settings.input_debounce = InputDebounceConfig(**values)
-
-
-def accept(core, number, text="在吗"):
-    """The production order: read the waiting batch, supersede, then delay the new job."""
-    result = ingest(core, number, text)
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (result["event_id"],))
-    with core.store.transaction():
-        due = input_debounce.due(core.store, core.settings, event["conversation_id"],
-                                 event["event_id"], json.loads(event["body_json"]), core.clock())
-        reply_revision.advance(core.store, event["conversation_id"], event["event_id"],
-                               core.clock())
-        if due:
-            core.store.execute("UPDATE jobs SET next_attempt_at=? WHERE job_id=?",
-                               (due, result["job_id"]))
-    return result, due
 
 
 def seconds(core, value):

@@ -5,7 +5,7 @@ import pytest
 from companion.contracts import CoreError
 from companion.reading_protocol import ReadObservation
 from tests.conftest import run
-from tests.test_reading_service import queued
+from tests.support.reading_service import queued
 
 
 @pytest.mark.parametrize("entry", ["recover", "lease", "worker"])

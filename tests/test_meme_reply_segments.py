@@ -8,7 +8,7 @@ from companion.contracts import CoreError
 from companion.transport import digest, enqueue_reply_parts, reply_group, segment_envelopes
 from companion_onebot_bridge import reply_segments
 from tests.conftest import event
-from tests.test_segmented_delivery import acknowledge, lease
+from tests.support.segmented_delivery import acknowledge, lease
 
 IMAGE = {"source": "companion.meme_catalog", "category": "happy",
          "candidate_id": "a" * 64}

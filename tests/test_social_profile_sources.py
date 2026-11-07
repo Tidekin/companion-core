@@ -13,7 +13,7 @@ from companion.social_autonomy_runtime import run_once
 from companion.store import encode
 from tests.conftest import ingest, run
 from tests.social_profile_support import confirmed_profile_material
-from tests.test_social_autonomy import background, dispatch, queue
+from tests.support.social_autonomy import background, dispatch, queue
 
 
 def setup(core, **kwargs):

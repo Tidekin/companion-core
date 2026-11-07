@@ -19,8 +19,8 @@ from companion_onebot_bridge.generated_image_http import read_image
 from companion_onebot_bridge.outbound import validate_item
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+from tests.support.prepare_owner_input import native_spool, window
 from tests.test_native_image_pipeline import admit_image
-from tests.test_prepare_owner_input import native_spool, window
 
 URL = "https://images.example.test/v1/images/generations"
 

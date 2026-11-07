@@ -13,12 +13,12 @@ from companion_onebot_bridge import pending_media
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.sdk_reader_fixture import answer, call
+from tests.support.live_image_input import options as image_options
+from tests.support.live_image_input import png
+from tests.support.onebot_images import image_segment
 from tests.test_live_card_content import TOKEN, URL, result
 from tests.test_live_card_content import options as card_options
-from tests.test_live_image_input import options as image_options
-from tests.test_live_image_input import png
 from tests.test_native_bili_video import sdk_step
-from tests.test_onebot_images import image_segment
 from tests.test_qq_rich_input import card
 
 

@@ -8,10 +8,10 @@ from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import after, encode
 from tests.conftest import run
 from tests.support.owner_authority import activate
+from tests.support.owner_authority_setup import prepare
+from tests.support.owner_input import captured, inbound
 from tests.test_consolidation import enable_nightly
 from tests.test_diary import DAY
-from tests.test_owner_authority import prepare
-from tests.test_owner_input import captured, inbound
 
 
 def grant(core, tmp_path, purposes):
@@ -90,7 +90,7 @@ def test_prior_v2_raw_revision_requires_explicit_history_for_domain(core, tmp_pa
 
 
 def test_legacy_memory_read_uses_original_archive_without_rebinding(core, tmp_path):
-    from tests.test_legacy_owner_input import archived
+    from tests.support.legacy_owner_input import archived
 
     _, view, job, _, _ = archived(core, tmp_path)
     policy = OwnerGrantPolicy.model_validate({**view.policy.model_dump(),

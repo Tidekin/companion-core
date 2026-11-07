@@ -7,15 +7,15 @@ import pytest
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow
 from tests.conftest import run
-from tests.support.onebot_events import raw_event
-from tests.test_live_text_window import (
+from tests.support.live_text_window import (
     live_clients,
     live_fixture,
     native_admit,
     native_clients,
     native_send,
 )
-from tests.test_onebot_window import input_approval
+from tests.support.onebot_events import raw_event
+from tests.support.onebot_window import input_approval
 
 
 @pytest.mark.parametrize("text", ["暂停写日记", "暂停主动分享", "记住这个：我喜欢绿茶"])

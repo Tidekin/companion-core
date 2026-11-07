@@ -13,21 +13,12 @@ import pytest
 from companion_onebot_bridge import app, pending_media
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, recall_frame, until
+from tests.support.input_interrupt_bridge import model_response
+from tests.support.live_image_input import options as image_options
+from tests.support.live_image_input import png
 from tests.support.onebot_events import raw_event
-from tests.test_input_interrupt_bridge import model_response
-from tests.test_live_image_input import options as image_options
-from tests.test_live_image_input import png
-from tests.test_onebot_images import image_segment
-from tests.test_private_companion import companion_options
-
-
-def scope(core):
-    options, images = companion_options(core), image_options()
-    options.update(image_scope=images["image_scope"],
-                   image_approval_sha256=images["image_approval_sha256"])
-    options["core_options"].update(images["core_options"])
-    options["paid_options"]["image_input"] = images["paid_options"]["image_input"]
-    return options
+from tests.support.onebot_images import image_segment
+from tests.support.owner_recall_bridge_media import scope
 
 
 def original():
@@ -67,7 +58,7 @@ async def media_host(core, tmp_path, source, *, model_reply=None, independent_ap
 def test_media_wait_does_not_block_new_input_or_recall(core, tmp_path, monkeypatch, phase, control):
     from companion import api
     from companion.core import Core
-    from tests.test_owner_image_recovery import run_worker
+    from tests.support.owner_image_recovery import run_worker
 
     monkeypatch.setattr(api, "Core", lambda *args, **kwargs: Core(
         *args, clock=core.clock, **kwargs))

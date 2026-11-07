@@ -10,9 +10,9 @@ import pytest
 from companion_onebot_bridge import journal, owner_handoff, owner_notices, pending_media
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
-from tests.test_bridge_owner_handoff import core_handler
-from tests.test_bridge_owner_notices import frame
-from tests.test_bridge_owner_runtime import config as config
+from tests.support.bridge_owner_handoff import core_handler
+from tests.support.bridge_owner_notices import frame
+from tests.support.bridge_owner_runtime import config as config
 
 
 @pytest.mark.parametrize("old_queues", [(), ("automatic_recalls",), ("automatic_media",),

@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import companion_delivery_protocol as wire
 from companion_onebot_bridge import owner_native_resolution as resolution
 from companion_onebot_bridge.spool import encode
-from tests.test_bridge_owner_runtime import config as config
+from tests.support.bridge_owner_runtime import config as config
 
 
 @pytest.fixture

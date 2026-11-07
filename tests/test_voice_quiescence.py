@@ -6,8 +6,8 @@ from companion import owner_input, owner_input_state, transport
 from companion.contracts import CoreError, DeliveryResult
 from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import VoiceCleanup, VoiceStopRef, VoiceStopRequest
+from tests.support.owner_input import captured, inbound
 from tests.support.voice_jobs import TEXT, start
-from tests.test_owner_input import captured, inbound
 from tests.test_voice_flow import leased
 from tests.voice_owner_fixtures import native_reply
 

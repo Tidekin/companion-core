@@ -12,8 +12,8 @@ from source_reader.heybox import HeyboxReader
 from source_reader.network import PublicHTTP, PublicNetwork
 from source_reader.worker_v1 import tick
 from tests.conftest import run
+from tests.support.source_reader import RecordingStream, Responses, response
 from tests.test_live_card_content import TOKEN, captured
-from tests.test_source_reader import RecordingStream, Responses, response
 
 
 @pytest.mark.parametrize("stop_at", [None, "after_lease", "dns", "tls"])

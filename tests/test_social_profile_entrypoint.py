@@ -13,9 +13,9 @@ from companion.console_api import COOKIE
 from tests.conftest import run
 from tests.social_profile_support import confirmed_profile_material
 from tests.support.core_http import real_core_http
-from tests.test_owner_console import ORIGIN, PASSWORD
-from tests.test_social_autonomy import background
-from tests.test_social_owner_authority import authorize
+from tests.support.owner_console import ORIGIN, PASSWORD
+from tests.support.social_autonomy import background
+from tests.support.social_owner_authority import authorize
 
 
 def test_real_api_independent_profile_worker_excludes_public_and_rechecks_forget(core, tmp_path):

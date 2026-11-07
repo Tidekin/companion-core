@@ -14,8 +14,8 @@ from companion.model import ModelResponse
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import Store
 from tests.conftest import ingest
-from tests.test_owner_console import PASSWORD, client, login  # noqa: F401
-from tests.test_owner_input import captured
+from tests.support.owner_console import PASSWORD, client, login  # noqa: F401
+from tests.support.owner_input import captured
 
 
 @pytest.fixture

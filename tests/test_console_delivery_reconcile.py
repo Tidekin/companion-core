@@ -4,8 +4,8 @@ import pytest
 
 from companion.store import encode, uid
 from companion.transport import digest
-from tests import test_owner_console
 from tests.conftest import ingest
+from tests.support import owner_console as test_owner_console
 
 
 @pytest.fixture

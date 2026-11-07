@@ -11,9 +11,9 @@ from source_reader.network import PublicHTTP, PublicNetwork, ReadFailure
 from source_reader.reading import ReadingContext, read_observation
 from source_reader.web import WebHTTP, WebReader, extract_html, web_url
 from tests.conftest import run
+from tests.support.source_reader import ITEM, META, NOW, PLAYER, SUBTITLE, response
 from tests.test_heybox_reader import IMAGE, POST, SOURCE_TOKEN, mock_pool
 from tests.test_heybox_reader import ITEM as HEYBOX_ITEM
-from tests.test_source_reader import ITEM, META, NOW, PLAYER, SUBTITLE, response
 
 CONTEXT = ReadingContext("root_read_1", "bilibili", ("evt_owner_1",), 3)
 WEB = "https://articles.example/story"

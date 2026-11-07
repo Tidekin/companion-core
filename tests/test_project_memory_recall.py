@@ -10,8 +10,8 @@ from companion.store import encode
 from tests.conftest import ingest, run
 from tests.sdk_reader_fixture import answer, call
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.live_image_input import options as image_options
 from tests.support.native_recall_entry import native_recall, returned
-from tests.test_live_image_input import options as image_options
 from tests.test_memory_commands import fact
 from tests.test_memory_review_output import assert_settled_calls
 

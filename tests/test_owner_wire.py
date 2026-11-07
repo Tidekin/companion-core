@@ -7,7 +7,7 @@ import pytest
 from companion.owner_authority_protocol import OwnerSendCheck
 from companion_delivery_protocol.authority import capture_signing_payload, validate_send_check
 from companion_onebot_bridge.outbound import deliver_item
-from tests.test_owner_input import captured
+from tests.support.owner_input import captured
 
 
 def test_capture_canonical_timestamp_and_v1_field_rejection(core, tmp_path):

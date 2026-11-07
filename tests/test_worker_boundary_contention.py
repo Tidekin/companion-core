@@ -11,7 +11,7 @@ from companion import runtime_config, shutdown
 from companion.autonomous_selector import Selection
 from companion.worker_schedule import UnitResult
 from tests.conftest import run
-from tests.test_worker_shutdown import NoNetworkClient
+from tests.support.worker_shutdown import NoNetworkClient
 
 
 @pytest.fixture(autouse=True)

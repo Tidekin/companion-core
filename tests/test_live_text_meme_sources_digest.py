@@ -8,7 +8,7 @@ import pytest
 import companion_meme_sources
 from companion import live_text
 from companion.contracts import CoreError
-from tests.test_live_text_handoff import initial, journal_bytes
+from tests.support.live_text_handoff import initial, journal_bytes
 
 
 @pytest.mark.parametrize("changed", [

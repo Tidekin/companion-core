@@ -61,10 +61,10 @@ def test_recall_waiting_for_writer_keeps_http_live_and_commits_once(
 ):
     from time import perf_counter
 
-    from tests.test_handoff_recall_recovery import approve_only
-    from tests.test_input_protocol import environment, notice
-    from tests.test_owner_input import captured, inbound
-    from tests.test_owner_recall import receipt
+    from tests.support.handoff_recall_recovery import approve_only
+    from tests.support.input_protocol import environment, notice
+    from tests.support.owner_input import captured, inbound
+    from tests.support.owner_recall import receipt
 
     entered = threading.Event()
 

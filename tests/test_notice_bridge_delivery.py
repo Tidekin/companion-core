@@ -17,7 +17,7 @@ from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.support.exploration import URL
 from tests.support.onebot_events import config
-from tests.test_private_companion import companion_options
+from tests.support.private_companion import companion_options
 
 
 @pytest.mark.parametrize("outcome", ["FULFILLED", "EXPLAINED_FAILURE"])

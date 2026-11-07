@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from companion import owner_authority
 from companion.api import create_app
 from companion.owner_authority_protocol import AuthorityStop
-from tests.test_owner_input import captured
+from tests.support.owner_input import captured
 
 
 @pytest.mark.parametrize("boundary", ["active", "stop", "restore", "purpose", "revision"])

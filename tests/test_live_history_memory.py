@@ -20,9 +20,9 @@ from companion_onebot_bridge.window import WindowPlan, digest, stored_plan
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.live_continuity import history_snapshot, native_continuity
+from tests.support.live_text_window import live_fixture
 from tests.support.owner_authority import activate
-from tests.test_live_continuity import history_snapshot, native_continuity
-from tests.test_live_text_window import live_fixture
 from tests.test_memory_commands import fact
 
 

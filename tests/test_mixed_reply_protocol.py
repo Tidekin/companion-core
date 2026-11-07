@@ -73,7 +73,7 @@ def test_content_or_type_substitution_is_rejected_by_core_and_independent_bridge
                                      "interrupted", "erased"])
 def test_mixed_group_tail_cannot_escape_failure_interruption_or_erasure(core, outcome):
     from companion.transport import cancel_interrupted_replies
-    from tests.test_segmented_delivery import acknowledge, lease
+    from tests.support.segmented_delivery import acknowledge, lease
 
     items = freeze(core, ("text", "voice", "meme"))
     first = lease(core)[0]

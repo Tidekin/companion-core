@@ -23,6 +23,7 @@ from companion.worker_lock import single_worker
 from companion.worker_schedule import UnitResult
 from companion.worker_wakeup import Wakeup
 from tests.conftest import run
+from tests.support.worker_shutdown import NoNetworkClient
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,14 +33,6 @@ def stop_flag():
     shutdown.reset()
     yield
     shutdown.reset()
-
-
-class NoNetworkClient:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_):
-        pass
 
 
 @pytest.fixture

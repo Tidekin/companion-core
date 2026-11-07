@@ -1,27 +1,18 @@
 """Historical data survives upgrades; irreversible state blocks lossy downgrades."""
 
 from contextlib import closing
-from pathlib import Path
 
 import pytest
 from alembic import command
-from alembic.config import Config
 
 from companion.store import Store, migrate
+from tests.support.input_reply_migration import config_for
 from tests.test_release_migration import (
     TIMES,
     assert_old_columns_unchanged,
     seed_legacy,
     table_snapshot,
 )
-
-
-def config_for(database):
-    config = Config()
-    config.set_main_option(
-        "script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
-    config.set_main_option("sqlalchemy.url", "sqlite:///" + database.resolve().as_posix())
-    return config
 
 
 @pytest.mark.parametrize("protected", ["revision", "lineage"])

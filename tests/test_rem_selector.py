@@ -13,8 +13,8 @@ from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.rem_protocol import RemConfig
 from tests.conftest import run
 from tests.support.owner_authority import activate
+from tests.support.owner_input import captured, inbound
 from tests.test_autonomous_selector import drain
-from tests.test_owner_input import captured, inbound
 
 
 def prepare(core, tmp_path, *, cap=50000, purposes=("memory", "rem")):

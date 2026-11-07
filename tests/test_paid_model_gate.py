@@ -1025,7 +1025,7 @@ def test_finite_approval_needs_rate_validity_and_open_rates_follow_start(core, t
 
 def test_open_ended_approval_cannot_escape_a_cumulative_scope(core, tmp_path):
     from companion.config import PaidModelApproval
-    from tests.test_cumulative_budget import policy
+    from tests.support.cumulative_budget import policy
 
     approved_live(core, tmp_path)
     scope = policy(core)

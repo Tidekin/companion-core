@@ -6,10 +6,9 @@ from companion import console_media_views, paid_budget
 from companion.social_autonomy_protocol import ProfileBaseline
 from companion.store import after, encode
 from companion.voice_protocol import VoiceLeaseRef
-from tests.support.voice_jobs import TEXT, TOKEN, claim, create_asr, create_tts, prepared, result
-from tests.test_owner_console import client as client  # noqa: F401 -- pytest fixture
-from tests.test_owner_console import login
-from tests.test_social_autonomy import (
+from tests.support.owner_console import client as client  # noqa: F401 -- pytest fixture
+from tests.support.owner_console import login
+from tests.support.social_autonomy import (
     avatar,
     background,
     dispatch,
@@ -18,6 +17,7 @@ from tests.test_social_autonomy import (
     queue,
     service,
 )
+from tests.support.voice_jobs import TEXT, TOKEN, claim, create_asr, create_tts, prepared, result
 
 
 def view(client, route):

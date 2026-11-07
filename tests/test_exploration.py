@@ -257,7 +257,7 @@ def public_fixture(*responses):
 
 
 def test_public_reader_real_http_contract_only_get_and_no_core_auth():
-    from tests.test_source_reader import META, response
+    from tests.support.source_reader import META, response
 
     async def scenario():
         public, backend = public_fixture(response(META))
@@ -275,7 +275,7 @@ def test_public_reader_real_http_contract_only_get_and_no_core_auth():
 
 
 def test_public_html_discovers_titles_but_spa_shell_is_not_read_body():
-    from tests.test_source_reader import response
+    from tests.support.source_reader import response
 
     html = b'<title>title</title><a href="/app/bbs/link/123">article</a>'
 
@@ -295,7 +295,7 @@ def test_public_html_discovers_titles_but_spa_shell_is_not_read_body():
 
 
 def test_reader_size_and_redirects_fail_without_followup():
-    from tests.test_source_reader import response
+    from tests.support.source_reader import response
 
     async def scenario():
         for row in (response(status=302, headers={"Location": "https://127.0.0.1/"}),
@@ -311,7 +311,7 @@ def test_reader_size_and_redirects_fail_without_followup():
 
 
 def test_bridge_result_report_failure_does_not_repeat_public_io():
-    from tests.test_source_reader import META, response
+    from tests.support.source_reader import META, response
 
     reports = []
 
@@ -336,8 +336,8 @@ def test_bridge_result_report_failure_does_not_repeat_public_io():
 
 
 def test_optional_heybox_http_contract_keeps_get_scope_and_business_status():
+    from tests.support.source_reader import response
     from tests.test_heybox_reader import ITEM, POST, SOURCE_TOKEN, URL, mock_pool
-    from tests.test_source_reader import response
 
     async def scenario():
         pool, backend = mock_pool(response({"status": "ok", "result": {"links": [{
@@ -463,7 +463,7 @@ def test_unknown_zero_usage_cannot_release_reserved_traffic(core):
 
 
 def test_html_void_elements_do_not_truncate_read_content():
-    from tests.test_source_reader import response
+    from tests.support.source_reader import response
 
     html = b"<title>post</title><article><p>first</p><img/><p>second<br/>last</p></article>"
 

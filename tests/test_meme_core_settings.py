@@ -205,7 +205,7 @@ def test_invalid_environment_is_not_silently_coerced(core, tmp_path, monkeypatch
 
 
 def queued_native_chat(core, tmp_path):
-    from tests.test_owner_runtime import chat
+    from tests.support.owner_runtime import chat
 
     _, job = chat(core, tmp_path)
     core.store.execute(
@@ -220,7 +220,7 @@ def test_prepare_failure_fences_fresh_and_persisted_native_chat(core, tmp_path, 
 
     from companion.agent_messages import from_wire_messages
     from companion.agent_persistence import ConversationStore
-    from tests.test_owner_runtime import chat
+    from tests.support.owner_runtime import chat
 
     _, job = chat(core, tmp_path)
     if saved:

@@ -15,8 +15,8 @@ from companion_onebot_bridge import continuous
 from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
 from tests.historical_input_retirement import historical_input
-from tests.test_onebot_capture import source_window
-from tests.test_private_companion import companion_options
+from tests.support.onebot_capture import source_window
+from tests.support.private_companion import companion_options
 
 
 def damage(window, fault):

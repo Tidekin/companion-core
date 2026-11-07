@@ -13,7 +13,7 @@ from companion_onebot_bridge import network
 from companion_onebot_bridge.spool import Spool, encode
 from companion_onebot_bridge.window import TestWindow, WindowPlan, command, digest, stored_plan
 from tests.conftest import run
-from tests.test_onebot_window_handoff import CoreContract, plan_for, source
+from tests.support.onebot_window_handoff import CoreContract, plan_for, source
 
 ABORT = "/internal/v1/live-text/handoff/abort"
 
@@ -312,9 +312,9 @@ def test_real_bridge_abort_reaches_real_core_api_and_preserves_independent_stop_
 ):
     from companion import api, live_text, paid_budget
     from companion.config import LiveTextWindowApproval
-    from tests.test_live_text_handoff import configure, journal_bytes
-    from tests.test_onebot_capture import pinned_plan
-    from tests.test_onebot_delivery import core_client
+    from tests.support.live_text_handoff import configure, journal_bytes
+    from tests.support.onebot_capture import pinned_plan
+    from tests.support.onebot_delivery import core_client
 
     cfg, plan = pinned_plan(core, tmp_path, 3001, live=True,
                             bridge_options={"capture_signing_key": "12" * 32})

@@ -22,7 +22,7 @@ from companion.store import Store
 from companion.transport import begin_send, delivery_result, digest
 from tests.conftest import ingest, run
 from tests.support.astrbot_delivery import deliver_expression, journal
-from tests.test_m0 import lease
+from tests.support.basic_chat import lease
 
 
 def engine(core, enabled=True):

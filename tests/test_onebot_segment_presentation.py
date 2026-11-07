@@ -12,7 +12,7 @@ from companion_onebot_bridge import reply_segments
 from tests.conftest import run
 from tests.support.native_context import source_window
 from tests.support.onebot_events import raw_event
-from tests.test_private_companion import companion_options
+from tests.support.private_companion import companion_options
 
 
 def item_for(text):

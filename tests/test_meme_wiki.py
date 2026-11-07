@@ -166,7 +166,7 @@ def test_chat_context_carries_the_entry_without_memory_evidence(core):
 
 def test_search_tool_is_bound_for_owner_chat(core, tmp_path):
     from companion.agent_tools import core_query_tools
-    from tests.test_owner_runtime import chat
+    from tests.support.owner_runtime import chat
 
     _, job = chat(core, tmp_path)
     tools = core_query_tools(core, job, [])

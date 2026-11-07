@@ -12,7 +12,7 @@ from companion.contracts import LeaseRequest
 from companion.transport import lease_deliveries
 from tests.conftest import ingest, run
 from tests.meme_authority_fixture import stop
-from tests.test_api_store import PREFIX, child_done
+from tests.support.api_store import PREFIX, child_done
 from tests.test_meme_service import claim, discovery_environment, reservation, submit
 
 

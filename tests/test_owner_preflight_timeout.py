@@ -9,7 +9,7 @@ from pydantic import SecretStr
 from companion.transport import recover_deliveries
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
-from tests.test_bridge_owner_resolution import child
+from tests.support.bridge_owner_resolution import child
 from tests.test_evaluation_process import process_config
 
 

@@ -13,9 +13,9 @@ from companion.expression import ExpressionEngine, MemeOffer
 from companion.owner_authority_protocol import AuthorityStop, OwnerCapture, OwnerSendCheck
 from companion.transport import begin_send, lease_deliveries
 from companion_delivery_protocol.authority import capture_signing_payload
+from tests.support.evaluation import work
 from tests.support.owner_authority import activate
-from tests.test_evaluation import work
-from tests.test_owner_input import captured, inbound
+from tests.support.owner_input import captured, inbound
 
 
 def source(core, tmp_path, *, purposes=("chat", "meme", "expression")):

@@ -11,8 +11,8 @@ from pydantic import SecretStr
 
 from tests.conftest import run
 from tests.support.core_http import real_core_http
-from tests.test_social_autonomy import background
-from tests.test_social_owner_authority import authorize
+from tests.support.social_autonomy import background
+from tests.support.social_owner_authority import authorize
 
 
 def test_http_authority_independent_worker_resumes_same_unadmitted_social_job(core, tmp_path):

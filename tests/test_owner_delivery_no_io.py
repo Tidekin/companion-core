@@ -12,9 +12,9 @@ from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy, 
 from companion.privacy import ErasureLedger
 from companion.transport import lease_deliveries, recover_deliveries
 from companion_delivery_protocol import no_io
-from tests.test_evaluation import work
-from tests.test_owner_delivery_reconciliation import delivery_proof
-from tests.test_owner_input import captured, inbound
+from tests.support.evaluation import work
+from tests.support.owner_delivery_reconciliation import delivery_proof
+from tests.support.owner_input import captured, inbound
 
 
 def reserved(core, tmp_path, *, reserve_send=False, retained_lease=False):
@@ -149,8 +149,8 @@ def test_zero_send_requires_every_original_no_io_fact(core, tmp_path, change):
 
 
 def test_retained_independent_send_liability_blocks_zero_counter(core, tmp_path, monkeypatch):
-    from tests import test_owner_input
-    from tests.test_cumulative_budget import policy
+    from tests.support import owner_input as test_owner_input
+    from tests.support.cumulative_budget import policy
 
     original_prepare = test_owner_input.prepare
 

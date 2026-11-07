@@ -8,7 +8,7 @@ from companion import owner_input, paid_budget
 from companion.owner_authority_protocol import OwnerCapture
 from companion.qq_rich import input_digest
 from companion_delivery_protocol.authority import capture_signing_payload
-from tests.test_cumulative_budget import enable, view
+from tests.support.cumulative_budget import enable, view
 
 
 class Crash(BaseException):

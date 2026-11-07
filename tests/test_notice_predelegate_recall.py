@@ -12,8 +12,8 @@ from companion.transport import digest
 from companion_onebot_bridge import owner_notices
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, recall_frame
-from tests.test_input_interrupt_bridge import model_response
-from tests.test_private_companion import companion_options
+from tests.support.input_interrupt_bridge import model_response
+from tests.support.private_companion import companion_options
 
 
 @pytest.mark.parametrize("boundary", ["before_begin", "before_delegate", "after_dispatch"])

@@ -12,8 +12,8 @@ from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from companion_delivery_protocol.authority import file_upload_signing_payload
 from tests.conftest import run
+from tests.support.prepare_owner_input import window
 from tests.test_native_image_pipeline import admit_image
-from tests.test_prepare_owner_input import window
 
 
 async def upload(core, client, config, plan, tmp_path):
@@ -100,8 +100,8 @@ def test_native_file_bridge_queue_recovery(core, tmp_path, recovery):
     from companion_onebot_bridge.network import private_http_client
     from companion_onebot_bridge.onebot_client import OneBotClient
     from tests.support.onebot_events import raw_event
+    from tests.support.prepare_owner_input import native_spool
     from tests.test_native_media_queue import row
-    from tests.test_prepare_owner_input import native_spool
 
     async def scenario():
         configure(core)
@@ -263,7 +263,7 @@ def test_native_file_guards_final_download_and_upload(core, tmp_path, boundary):
     from companion_onebot_bridge.files import OriginalFile, upload_original
     from companion_onebot_bridge.network import private_http_client
     from companion_onebot_bridge.onebot_client import OneBotClient
-    from tests.test_prepare_owner_input import native_spool
+    from tests.support.prepare_owner_input import native_spool
 
     async def scenario():
         configure(core)
@@ -322,7 +322,7 @@ def test_native_file_guards_final_download_and_upload(core, tmp_path, boundary):
 def test_native_file_retirement_never_dispatches_parser(core, tmp_path, retire):
     from companion import image_spool, qq_files
     from companion.owner_authority_protocol import OwnerCapture
-    from tests.test_owner_recall import receipt
+    from tests.support.owner_recall import receipt
 
     async def scenario():
         configure(core)

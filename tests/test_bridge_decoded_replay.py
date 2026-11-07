@@ -13,8 +13,8 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.owner_send import OwnerSendGuard
 from companion_onebot_bridge.spool import Spool, encode
+from tests.support.bridge_owner_runtime import config as config
 from tests.support.onebot_events import raw_event
-from tests.test_bridge_owner_runtime import config as config
 
 
 @pytest.fixture

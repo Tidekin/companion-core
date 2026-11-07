@@ -17,11 +17,11 @@ from companion.source_grants import ReaderReadValidation
 from companion.store import encode
 from source_reader.reading import ReadingContext, observation
 from tests.conftest import run
+from tests.support.live_image_input import options as image_options
+from tests.support.live_image_input import png
 from tests.support.native_consumer import source_window
 from tests.support.onebot_events import raw_event
-from tests.test_live_image_input import options as image_options
-from tests.test_live_image_input import png
-from tests.test_onebot_images import image_segment
+from tests.support.onebot_images import image_segment
 from tests.test_qq_rich_input import card
 from tests.test_reading_followup import select_read
 

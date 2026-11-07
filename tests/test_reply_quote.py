@@ -10,8 +10,8 @@ from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
 from tests.conftest import run
 from tests.support.native_context import source_window
+from tests.support.onebot_capture import bootstrap_frames
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_capture import bootstrap_frames
 
 
 def test_choice_marker_is_parsed_once_and_always_removed():

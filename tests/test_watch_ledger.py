@@ -15,8 +15,8 @@ from tests.conftest import run
 from tests.support.exploration import configure
 from tests.support.onebot_events import normalized, raw_event
 from tests.support.owner_authority import activate
+from tests.support.owner_authority_setup import prepare
 from tests.support.paid_model import approved_live
-from tests.test_owner_authority import prepare
 
 JUDGEMENT = {"rating": 1, "take": "猫卡在纸箱里那段特别好笑", "topic_tags": ["猫", "日常"]}
 

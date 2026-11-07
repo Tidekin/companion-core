@@ -7,7 +7,7 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from companion_onebot_bridge.owner_handoff import terminal
-from tests.test_owner_input import captured, inbound
+from tests.support.owner_input import captured, inbound
 
 
 def test_discovered_link_can_finish_handoff_through_native_http(core, tmp_path, monkeypatch):
@@ -120,7 +120,7 @@ def test_unadmitted_stopped_input_has_zero_revision_without_making_work(core, tm
 
 
 def test_native_input_state_never_treats_unknown_delivery_as_complete(core, tmp_path):
-    from tests.test_owner_delivery_reconciliation import pending
+    from tests.support.owner_delivery_reconciliation import pending
 
     proof, _ = pending(core, tmp_path)
     import json
@@ -219,7 +219,7 @@ def test_a_reply_cleared_by_a_later_erasure_keeps_the_input_state_readable(core,
 
     from companion.owner_authority_protocol import OwnerCapture
     from companion.privacy import ErasureLedger
-    from tests.test_owner_delivery_reconciliation import pending
+    from tests.support.owner_delivery_reconciliation import pending
 
     proof, _ = pending(core, tmp_path)
     saved = core.store.one("SELECT value FROM runtime_meta WHERE key=?",

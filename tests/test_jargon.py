@@ -10,7 +10,7 @@ from companion.model import ModelClient
 from tests.conftest import ingest, run
 from tests.support.exploration import configure
 from tests.support.owner_authority import activate
-from tests.test_owner_authority import prepare
+from tests.support.owner_authority_setup import prepare
 from tests.test_watch_ledger import Provider
 
 EXTRACT = {"terms": [{"term": "摸鱼王", "event_ids": ["evt_test_2"]},

@@ -11,9 +11,9 @@ from companion.autonomous_selector import Lane, RoundRobin, native_selector
 from companion.contracts import CoreError
 from companion.worker_schedule import UnitResult
 from tests.conftest import ingest, run
+from tests.support.social_autonomy import background
 from tests.test_diary import seed_day
 from tests.test_life_topics import bug, proposal
-from tests.test_social_autonomy import background
 
 
 async def drain(selector, limit=100):

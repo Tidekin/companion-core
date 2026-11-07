@@ -17,19 +17,14 @@ from companion import owner_input
 from companion.api import create_app
 from companion.backup import backup, restore
 from companion.config import Settings
-from companion.contracts import CoreError, DeliveryResult, LeaseRequest
+from companion.contracts import CoreError, DeliveryResult
 from companion.core import Core
 from companion.model import ModelClient
 from companion.store import Store, migrate
-from companion.transport import begin_send, delivery_result, enqueue, lease_deliveries
+from companion.transport import begin_send, delivery_result, enqueue
 from tests.conftest import event, ingest, run
 from tests.support.astrbot_delivery import StreamingAPI, deliver_one
-
-
-def lease(core):
-    return lease_deliveries(
-        core.store, core.settings, LeaseRequest(worker_id="test"), core.clock()
-    )["items"]
+from tests.support.basic_chat import lease
 
 
 def test_m0_01_duplicate_event_and_content_conflict(core):
@@ -116,7 +111,7 @@ def test_m0_03_bridge_normalizes_without_llm_and_sends_once(core, tmp_path):
 
 @pytest.mark.parametrize("failure", [429, 503, "timeout"])
 def test_m0_04_uncertain_provider_usage_blocks_paid_retry(core, failure, tmp_path):
-    from tests.test_owner_input import captured, inbound
+    from tests.support.owner_input import captured, inbound
 
     capture, _ = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)

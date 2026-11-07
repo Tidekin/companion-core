@@ -17,10 +17,10 @@ from companion_onebot_bridge.owner_memes import MemePump
 from companion_onebot_bridge.profile_probe import ProfilePump
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, recall_frame, until
-from tests.test_input_interrupt_bridge import model_response
+from tests.support.input_interrupt_bridge import model_response
+from tests.support.private_companion import companion_options
 from tests.test_meme_runtime import RULE
 from tests.test_next_memes_catalog import metadata, png
-from tests.test_private_companion import companion_options
 
 
 def options(core, *, discovery=False):

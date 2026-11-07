@@ -9,7 +9,7 @@ from companion.store import encode
 from companion.transport import digest, enqueue
 from tests.conftest import run
 from tests.support.onebot_events import normalized, raw_event
-from tests.test_onebot_reference_reader import enriched, reply, text
+from tests.support.onebot_reference_reader import enriched, reply, text
 
 QUOTE = "这张图用了一个反差梗。"
 QUESTION = "你刚才说的梗是什么意思？"

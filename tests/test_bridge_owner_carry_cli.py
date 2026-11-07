@@ -13,8 +13,8 @@ import httpx
 from companion_onebot_bridge import journal
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
-from tests.test_bridge_owner_carry_handoff import capture, handler, proof, stopped
-from tests.test_bridge_owner_runtime import config as config
+from tests.support.bridge_owner_carry_handoff import capture, handler, proof, stopped
+from tests.support.bridge_owner_runtime import config as config
 
 
 def write_config(path, config):

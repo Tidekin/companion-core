@@ -130,8 +130,8 @@ def test_cancelled_input_proof_survives_handoff_and_cannot_be_forged_in_spool(tm
     from companion_onebot_bridge.spool import Spool
     from companion_onebot_bridge.window import TestWindow, digest
     from tests.support.onebot_events import normalized
-    from tests.test_onebot_window import input_approval
-    from tests.test_onebot_window_handoff import CoreContract, plan_for
+    from tests.support.onebot_window import input_approval
+    from tests.support.onebot_window_handoff import CoreContract, plan_for
 
     cfg, plan, now = plan_for(tmp_path)
 

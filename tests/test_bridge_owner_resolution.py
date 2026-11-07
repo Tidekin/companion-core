@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import sys
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 
@@ -17,24 +16,11 @@ from companion_onebot_bridge.network import CheckedTransport, PrivateDestination
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.owner_send import OwnerSendGuard
 from companion_onebot_bridge.spool import Spool, encode
+from tests.support.bridge_owner_resolution import child, reserve_uncertain
+from tests.support.bridge_owner_runtime import config as config
 from tests.support.onebot_events import raw_event
-from tests.test_bridge_owner_runtime import config as config
 from tests.test_evaluation_process import process_config
 from tests.test_reading_followup import window
-
-
-async def child(module, *args):
-    process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m", module, *args,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    try:
-        async with asyncio.timeout(30):
-            output, error = await process.communicate()
-            assert process.returncode == 0, error.decode()
-            return json.loads(output)
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
 
 
 def test_native_unknown_requires_dedicated_stop_proof_and_original_owner_receipt(
@@ -143,21 +129,6 @@ def test_native_unknown_requires_dedicated_stop_proof_and_original_owner_receipt
                 assert "测试未知发送" not in runtime.path.read_text("utf-8")
                 assert journal.read(runtime.path)[1] == runtime.row()["journal_head"]
     asyncio.run(scenario())
-
-
-def reserve_uncertain(config):
-    now = datetime.now(UTC)
-    item = {"authority": config.owner_authority, "message_id": "msg_" + "a" * 32,
-        "lease_token": "lease_" + "b" * 32, "lease_until": (now + timedelta(minutes=2)).isoformat(),
-        "origin_event_id": "evt_" + "c" * 64, "action_type": "qq.private.reply",
-        "content": {"text": "synthetic unknown"}, "reply_revision": 1}
-    with Spool(config) as spool:
-        runtime = OwnerRuntime(spool)
-        guard = OwnerSendGuard(runtime, None)
-        guard.reserve(item)
-        spool.start_delivery(item)
-        guard.complete(item, None)
-    return item
 
 
 @pytest.mark.parametrize("mutation", [None, "lease", "missing_ack", "native_ack", "queue",

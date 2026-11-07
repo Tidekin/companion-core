@@ -20,10 +20,10 @@ from companion_onebot_bridge import images
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
 from tests.native_continuous_support import frame
+from tests.support.live_image_input import options
 from tests.support.native_images import image_host, upload
 from tests.support.onebot_events import config, raw_event
-from tests.test_live_image_input import options
-from tests.test_onebot_images import image_segment
+from tests.support.onebot_images import image_segment
 
 
 def face(identifier="277"):
