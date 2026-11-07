@@ -16,6 +16,7 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.store import encode
 from tests.conftest import ingest, run
+from tests.postgres_fixture import isolated_database, logical_state
 from tests.support.observations import records, status_server
 
 BASE = datetime(2026, 10, 21, tzinfo=UTC)
@@ -206,12 +207,12 @@ def test_native_failed_business_is_not_success_even_when_loop_completes(core, mo
 
 def test_status_reads_only_a_bounded_safe_record_without_initializing_or_writing(core, monkeypatch):
     worker_loop.Recorder(core.store).completed()
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     ledger = Path(core.settings.erasure_ledger).read_bytes()
     monkeypatch.setattr(core_module.Core, "__init__", lambda *_: pytest.fail("no Core startup"))
     snapshot = ops_status.snapshot(core.settings)
     assert snapshot["worker_loop"]["state"] == "RECORDED"
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert Path(core.settings.erasure_ledger).read_bytes() == ledger
     assert core.model.calls == []
 
@@ -322,25 +323,28 @@ def test_native_restored_fresh_loop_record_never_proves_a_running_worker(
 ):
     worker_loop.Recorder(core.store).completed()
     original = stored(core)
-    source_before = list(core.store.db.iterdump())
+    source_before = logical_state(core.store)
     key = Fernet.generate_key()
-    archive, restored = tmp_path / "backup.enc", tmp_path / "restored.db"
+    archive = tmp_path / "backup.enc"
     backup(core.settings.database, archive, key)
-    restore(archive, restored, key, core.settings.erasure_ledger)
-    settings = core.settings.model_copy(update={"database": str(restored)})
-    first = ops_status.snapshot(settings)
-    assert first["worker_loop"]["state"] == "RECORDED"
-    assert first["worker_loop"]["session"] == original["session"]
-    assert first["worker_loop"]["sequence"] == original["sequence"]
-    output = tmp_path / "restored-loop.jsonl"
-    result = observe.observe(lambda: (ops_status.snapshot(settings), None), output,
-                             samples=2, interval_seconds=5)
-    assert result["worker_loop_activity"]["advancing_intervals"] == 0
-    assert result["worker_health_proven"] is False
-    assert [row["worker_loop_activity"]["reasons"] for row in records(output)[1:-1]] == [
-        ["LOOP_BASELINE_REQUIRED"], ["LOOP_SEQUENCE_UNCHANGED"],
-    ]
-    assert list(core.store.db.iterdump()) == source_before
+    with isolated_database() as restored:
+        state = tmp_path / "restored-state"
+        restore(archive, restored, key, core.settings.erasure_ledger, state_directory=state)
+        settings = core.settings.model_copy(update={"database": restored,
+                                                    "state_directory": str(state)})
+        first = ops_status.snapshot(settings)
+        assert first["worker_loop"]["state"] == "RECORDED"
+        assert first["worker_loop"]["session"] == original["session"]
+        assert first["worker_loop"]["sequence"] == original["sequence"]
+        output = tmp_path / "restored-loop.jsonl"
+        result = observe.observe(lambda: (ops_status.snapshot(settings), None), output,
+                                 samples=2, interval_seconds=5)
+        assert result["worker_loop_activity"]["advancing_intervals"] == 0
+        assert result["worker_health_proven"] is False
+        assert [row["worker_loop_activity"]["reasons"] for row in records(output)[1:-1]] == [
+            ["LOOP_BASELINE_REQUIRED"], ["LOOP_SEQUENCE_UNCHANGED"],
+        ]
+    assert logical_state(core.store) == source_before
 
 
 @pytest.mark.parametrize("change", ["sequence", "age", "state", "state_type", "stage",

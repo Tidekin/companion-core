@@ -16,6 +16,7 @@ from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
 from tests.model_carry_support import MESSAGES
 from tests.owner_model_fixtures import authorized_job
+from tests.postgres_fixture import logical_state
 from tests.sdk_reader_fixture import answer, call
 from tests.support.bili_video_entrypoint import URL, reader_files, reader_once, upstream
 from tests.support.carried_capabilities import reader_carry
@@ -33,18 +34,18 @@ def test_carried_unknown_does_not_block_reader_or_model_readiness(
     if later_unknown:
         current_unknown(core)
     journal = Path(core.settings.paid_model.journal_path)
-    before = list(core.store.db.iterdump()), journal.read_bytes()
+    before = logical_state(core.store), journal.read_bytes()
     ready = public_source_readiness(core.store, core.settings, core.clock, "bili")
     assert ready["state"] == "READY", ready
     rows = snapshot(core.store, core.settings, core.clock)["capabilities"]
     assert next(row for row in rows if row["id"] == "reading.bili")["state"] == "READY"
     assert not any("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" in row["reason_codes"] for row in rows)
-    assert (list(core.store.db.iterdump()), journal.read_bytes()) == before
+    assert (logical_state(core.store), journal.read_bytes()) == before
     assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                           (case.request_id,))["state"] == "UNKNOWN"
     with pytest.raises(CoreError, match="REPLY_CANCELLED"):
         budget.reserve(core.store, core.settings, case.job_id, "chat", MESSAGES, core.clock())
-    assert (list(core.store.db.iterdump()), journal.read_bytes()) == before
+    assert (logical_state(core.store), journal.read_bytes()) == before
 
 
 @pytest.mark.parametrize("boundary", ["unclosed", "stop", "journal"])

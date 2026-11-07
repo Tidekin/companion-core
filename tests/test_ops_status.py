@@ -2,6 +2,7 @@ import json
 import shutil
 import sqlite3
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,11 +14,13 @@ from fastapi.testclient import TestClient
 
 from companion import __main__, ops_status
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.core import Core
 from companion.privacy import ErasureLedger
 from companion.runtime import Runtime
 from companion.store import Store, migrate
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.historical_schema import assert_schema_metadata
 from tests.support.ops_status import settings
 
@@ -59,19 +62,19 @@ def test_snapshot_sees_committed_wal_and_preserves_unknown_and_private_content(c
     core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN'")
     core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
     core.store.execute("INSERT INTO runtime_meta VALUES ('model_budget_blocked','private detail')")
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     ledger = Path(core.settings.erasure_ledger).read_bytes()
     calls = len(core.model.calls)
-    traces = []
-    connect = sqlite3.connect
+    original = ops_status.read_view
+    observed = []
 
-    def readonly(*args, **kwargs):
-        assert "mode=ro" in args[0] and "immutable" not in args[0]
-        connection = connect(*args, **kwargs)
-        connection.set_trace_callback(traces.append)
-        return connection
+    @contextmanager
+    def readonly(settings):
+        with original(settings) as view:
+            observed.append(view.one("SHOW transaction_read_only")["transaction_read_only"])
+            yield view
 
-    monkeypatch.setattr(ops_status.sqlite3, "connect", readonly)
+    monkeypatch.setattr(ops_status, "read_view", readonly)
     # Resource counts and fractional wall time can coincidentally contain the
     # synthetic owner ID. Keep this privacy check's ambient inputs deterministic.
     monkeypatch.setattr(ops_status, "datetime", SimpleNamespace(
@@ -81,7 +84,7 @@ def test_snapshot_sees_committed_wal_and_preserves_unknown_and_private_content(c
     result = ops_status.snapshot(core.settings)
     assert result["observed_at"] == core.clock.now.isoformat()
     assert result["resources"]["disk_free_bytes"] == 2 ** 30
-    assert result["database"]["wal_bytes"] > 0
+    assert result["database"]["bytes"] > 0
     assert result["deliveries"]["states"] == {"DELIVERY_UNCERTAIN": 1}
     assert result["budget"]["unknown_calls"] == 1
     assert result["budget"]["calibration"]["calibrated_calls"] == 0
@@ -92,13 +95,14 @@ def test_snapshot_sees_committed_wal_and_preserves_unknown_and_private_content(c
     )
     assert result["worker_progress"]["state"] == "UNOBSERVED"
     assert result["database"]["integrity"] == "NOT_CHECKED"
-    assert not any("quick_check" in sql.lower() or "BEGIN IMMEDIATE" in sql for sql in traces)
-    assert list(core.store.db.iterdump()) == before
+    assert observed == ["on"]
+    assert logical_state(core.store) == before
     assert Path(core.settings.erasure_ledger).read_bytes() == ledger
     assert len(core.model.calls) == calls
     encoded = json.dumps(result)
     for private in ("SYNTHETIC_PRIVATE", "private detail", core.settings.owner_qq_id,
-                    core.settings.bridge_token.get_secret_value(), core.settings.database):
+                    core.settings.bridge_token.get_secret_value(),
+                    core.settings.database.get_secret_value()):
         assert private not in encoded
 
 
@@ -164,10 +168,10 @@ def test_missing_budget_journal_identity_is_never_reinitialized(core):
     core.store.execute(
         "INSERT INTO runtime_meta VALUES ('model_budget_journal_id','budget_unknown')"
     )
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = ops_status.snapshot(core.settings, integrity=True)
     assert "BUDGET_JOURNAL_RECONCILIATION_REQUIRED" in result["blockers"]
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 def test_schema_capabilities_reuse_existing_readiness_contract(core):
@@ -229,7 +233,7 @@ def test_unavailable_migration_head_blocks_snapshot_and_ready_without_writes(
             raise CommandError("synthetic broken migration tree")
         return ScriptDirectory(str(scripts))
 
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     ledger = Path(core.settings.erasure_ledger).read_bytes()
     ops_status.schema_head.cache_clear()
     monkeypatch.setattr(ops_status, "ScriptDirectory", directory)
@@ -239,12 +243,13 @@ def test_unavailable_migration_head_blocks_snapshot_and_ready_without_writes(
         assert result["blockers"] == ["SCHEMA_HEAD_UNAVAILABLE"]
         app = create_app(core.settings)
         app.state.core = core
+        app.state.api_store = ApiStore(core.database, core.settings.state_directory)
         response = TestClient(app).get("/internal/v1/health/ready", headers={
             "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value(),
         })
         assert response.status_code == 503
         assert response.json() == {"error": "SCHEMA_HEAD_UNAVAILABLE"}
-        assert list(core.store.db.iterdump()) == before
+        assert logical_state(core.store) == before
         assert Path(core.settings.erasure_ledger).read_bytes() == ledger
     finally:
         ops_status.schema_head.cache_clear()

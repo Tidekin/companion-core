@@ -11,6 +11,7 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityChange, AuthorityPreview, AuthorityStop
 from companion_delivery_protocol import digest
 from tests.model_carry_support import migrated
+from tests.postgres_fixture import logical_state
 from tests.support.evaluation_authority_revision import revise, revised_policy, stop
 from tests.support.model_carry_lifecycle import current_unknown
 from tests.support.model_renewal import renewal
@@ -61,11 +62,11 @@ def test_revision_rejects_other_changes_without_writes(core, tmp_path, change):
         "remove": {"purposes": ["evaluation"]},
     }
     policy = policy.model_copy(update=updates[change])
-    before = (list(core.store.db.iterdump()),
+    before = (logical_state(core.store),
               Path(core.settings.paid_model.journal_path).read_bytes())
     with pytest.raises((CoreError, ValueError)):
         activate(core, policy, revision=4, operation="invalid-evaluation-revision")
-    assert (list(core.store.db.iterdump()),
+    assert (logical_state(core.store),
             Path(core.settings.paid_model.journal_path).read_bytes()) == before
 
 
@@ -88,12 +89,12 @@ def test_revision_requires_current_stopped_verified_custody(core, tmp_path, boun
     elif boundary == "missing_revision":
         core.store.execute("DELETE FROM owner_authority_revisions WHERE revision=2")
     revision = owner_authority._latest(core.store)["revision"]
-    before = (list(core.store.db.iterdump()),
+    before = (logical_state(core.store),
               Path(core.settings.paid_model.journal_path).read_bytes())
     with pytest.raises(CoreError):
         owner_authority.preview(core.store, core.settings, core.clock,
             AuthorityPreview(expected_revision=revision, policy=policy))
-    assert (list(core.store.db.iterdump()),
+    assert (logical_state(core.store),
             Path(core.settings.paid_model.journal_path).read_bytes()) == before
 
 

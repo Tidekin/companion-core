@@ -16,6 +16,7 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.rich_input import input_digest
 from tests import native_input_protocol_fixture as native
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support import onebot_window as window_fixtures
 from tests.support.input_protocol import sign
 from tests.support.onebot_capture import pinned_plan
@@ -181,20 +182,20 @@ def test_old_capture_uses_verified_same_epoch_handoff_chain_and_original_signing
     source = input_recall.canonical_source(bot_qq_id=config.bot_qq_id,
         owner_qq_id=config.owner_qq_id, protocol_epoch=config.protocol_epoch,
         provider_message_id="1")
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     assert input_protocol._capture_matches(core.store, core.settings, successor,
                                             source, event["event_id"], now.isoformat())
     stale_epoch = successor.model_copy(update={"handoff": handoff.model_copy(
         update={"protocol_epoch": "previous-epoch"})})
     assert not input_protocol._capture_matches(core.store, core.settings, stale_epoch,
                                                 source, event["event_id"], now.isoformat())
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     original["successor_plan_sha256"] = "3" * 64
     live_text._put(core.store, live_text.HISTORY + plan.sha256, original)
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     assert not input_protocol._capture_matches(core.store, core.settings, successor,
                                                 source, event["event_id"], now.isoformat())
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert core.store.rows("SELECT * FROM events") == []
     assert core.store.rows("SELECT * FROM jobs") == []
 

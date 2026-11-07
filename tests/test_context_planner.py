@@ -18,10 +18,12 @@ from companion.agent_persistence import ConversationStore, recoverable
 from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.model import ModelClient, ModelResponse
+from companion.postgres import Database
 from companion.privacy import advance_epoch, epoch
 from companion.store import Store, encode
 from companion.token_measurement import measure_request
 from tests.owner_model_fixtures import authorized_job
+from tests.postgres_fixture import isolated_database, logical_state
 from tests.sdk_reader_fixture import Provider, answer, call
 from tests.support.context_planner import initial, request_context
 from tests.support.owner_runtime import chat
@@ -281,7 +283,8 @@ def test_unrelated_epoch_preserves_capture_binding_without_rewriting_proofs(core
     _, snapshots = initial(core, job, snapshots=[{"kind": "history", "proof": []}])
     original = deepcopy(snapshots)
     captured = epoch(core.store)
-    advance_epoch(core.store)
+    with core.store.transaction(control_write=True):
+        advance_epoch(core.store)
     plan = planner.check(core, job, snapshots)
     assert plan["privacy_epoch"] == captured and snapshots == original
     # Source/admission bindings remain strict even when the capture is older.
@@ -404,11 +407,11 @@ def test_native_plan_is_content_free_bound_inspection_and_erased_from_old_backup
     assert not any(
         text in encode(plan) for text in ("synthetic owner input", "private saved answer")
     )
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     view = beta_observation._native_context(core.store, job["job_id"], epoch(core.store))
     assert view["state"] == "RECORDED" and view["source_validity"] == "NOT_REVALIDATED"
     assert view["requests"][0]["measurement_sha256"] == plan["requests"][0]["measurement_sha256"]
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     core.store.execute("UPDATE model_admissions SET measurement_json='{}'")
     assert (
         beta_observation._native_context(core.store, job["job_id"], epoch(core.store))["state"]
@@ -419,23 +422,25 @@ def test_native_plan_is_content_free_bound_inspection_and_erased_from_old_backup
         (encode(measure_request(core.settings, provider.requests[0]["messages"]).receipt()),),
     )
     key = Fernet.generate_key()
-    archive, target = tmp_path / "before-erasure.enc", tmp_path / "restored.db"
+    archive = tmp_path / "before-erasure.enc"
     usage = core.store.rows("SELECT * FROM model_usage")
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
     assert (
         persistence.row()["snapshots_json"] == "[]"
         and persistence.row()["conversation_json"] is None
     )
     assert core.store.rows("SELECT * FROM model_usage") == usage
-    restore(archive, target, key, core.settings.erasure_ledger)
-    with closing(Store(str(target))) as restored:
-        assert restored.one("SELECT snapshots_json,conversation_json FROM agent_conversations") == {
-            "snapshots_json": "[]",
-            "conversation_json": None,
-        }
-        assert restored.rows("SELECT * FROM model_usage") == usage
+    with isolated_database() as target:
+        state = tmp_path / "restored-state"
+        restore(archive, target, key, core.settings.erasure_ledger, state_directory=state)
+        with Database(target) as database, closing(Store(database, state)) as restored:
+            row = restored.one("SELECT snapshots_json,conversation_json FROM agent_conversations")
+            assert row == {
+                "snapshots_json": "[]", "conversation_json": None,
+            }
+            assert restored.rows("SELECT * FROM model_usage") == usage
     assert (
         beta_observation._native_context(core.store, job["job_id"], epoch(core.store))["state"]
         == "NOT_RECORDED"

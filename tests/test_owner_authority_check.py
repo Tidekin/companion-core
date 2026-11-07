@@ -5,7 +5,9 @@ from fastapi.testclient import TestClient
 
 from companion import owner_authority
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.owner_authority_protocol import AuthorityStop
+from tests.postgres_fixture import logical_state
 from tests.support.owner_input import captured
 
 
@@ -24,6 +26,7 @@ def test_bridge_current_check_is_exact_and_does_not_mint_an_execution_lease(
         authority["revision"] += 1
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     client = TestClient(app)
     body = {"authority": authority, "purpose": "memory" if boundary == "purpose" else "chat"}
     path = "/internal/v1/owner-authority/check"
@@ -56,7 +59,8 @@ def test_capability_metadata_keeps_independent_purpose_and_policy_fences(core, t
             "max_pending_jobs": core.settings.voice.max_pending_jobs + 1})
     app = create_app(core.settings)
     app.state.core = core
-    before = list(core.store.db.iterdump())
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
+    before = logical_state(core.store)
     response = TestClient(app).post("/internal/v1/owner-authority/check", json={
         "authority": capture.authority,
         "purpose": "account_actions" if boundary == "purpose" else "voice"}, headers={
@@ -66,4 +70,4 @@ def test_capability_metadata_keeps_independent_purpose_and_policy_fences(core, t
         assert response.json()["capability_policies"] == {"voice": expected_hash}
     else:
         assert response.status_code in {403, 409}, response.text
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before

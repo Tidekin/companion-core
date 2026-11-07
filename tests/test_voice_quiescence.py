@@ -3,6 +3,7 @@
 import pytest
 
 from companion import owner_input, owner_input_state
+from tests.postgres_fixture import logical_state
 from tests.support.owner_input import captured, inbound
 
 
@@ -40,19 +41,19 @@ def test_only_proven_stopped_unknown_is_quiescent_without_rewriting_it(core, tmp
         "quarantine": ("resource_state", "QUARANTINED"), "node_error": ("last_error_code", "LOST")}
     if missing in job_changes:
         field, value = job_changes[missing]
-        core.store.execute(f"UPDATE voice_jobs SET {field}=?", (value,))
+        core.store.execute(f"UPDATE voice_jobs SET {field}=%s", (value,))
     elif missing in node_changes:
         field, value = node_changes[missing]
-        core.store.execute(f"UPDATE voice_node_state SET {field}=?", (value,))
+        core.store.execute(f"UPDATE voice_node_state SET {field}=%s", (value,))
     elif missing == "node":
         core.store.execute("DELETE FROM voice_node_state")
     elif missing in {"QUEUED", "LEASED", "RUNNING"}:
         core.store.execute('UPDATE voice_jobs SET state=%s', (missing,))
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = owner_input_state.read(core.store, core.settings, capture)
     assert result["unsettled_work"] is bool(missing)
     assert result["terminal"] is (missing is None)
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 def test_pending_restore_requires_existing_native_node_recovery_evidence(core, tmp_path):
@@ -66,6 +67,6 @@ def test_pending_restore_requires_existing_native_node_recovery_evidence(core, t
     # Same proof as VoiceJobs.session: the current incarnation must be recovered.
     core.store.execute("UPDATE voice_node_state SET recovered_incarnation=(SELECT value "
                        "FROM runtime_meta WHERE key='voice_incarnation')")
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     assert owner_input_state.read(core.store, core.settings, capture)["terminal"]
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before

@@ -16,6 +16,7 @@ from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from tests.model_carry_support import MESSAGES, migrated, stranded
 from tests.owner_model_fixtures import authorized_job
+from tests.postgres_fixture import logical_state
 from tests.support.model_accounting import prepared, proposal
 from tests.support.model_carry_lifecycle import current_unknown
 from tests.support.model_renewal import renewal
@@ -28,7 +29,7 @@ def journal(core):
 
 
 def snapshot(core):
-    return list(core.store.db.iterdump()), journal(core).read_bytes()
+    return logical_state(core.store), journal(core).read_bytes()
 
 
 def custody(core):
@@ -123,6 +124,14 @@ def test_confirmed_limit_violation_blocks_future_io_and_allows_larger_bill(core,
     assert model_accounting.record(core.store, core.settings, request, private, core.clock) == (
         result)
     assert snapshot(core) == before
+    # An exact replay also repairs the STOP projection when it was lost or changed.
+    for damage in ("UPDATE runtime_meta SET value='stale'", "DELETE FROM runtime_meta"):
+        core.store.execute(damage + " WHERE key='model_budget_blocked'")
+        assert model_accounting.record(core.store, core.settings, request, private, core.clock) == (
+            result)
+        marker = core.store.one("SELECT value FROM runtime_meta WHERE key='model_budget_blocked'")
+        assert marker == {"value": "1"}
+        assert journal(core).read_bytes() == before[1]
     bill.update(actual_micro_usd=actual + 100, provider_record_sha256="c" * 64)
     request, private = prepared(core, tmp_path, case.request_id,
                                 operation="higher-confirmed-bill", basis=bill)
@@ -317,7 +326,7 @@ def test_only_identical_operation_repairs_fsync_before_projection_crash(
     native = core.store.execute
 
     def crash(sql, params=()):
-        if sql.startswith("UPDATE model_usage SET billed_micro_usd=MAX"):
+        if isinstance(sql, str) and sql.startswith("UPDATE model_usage SET billed_micro_usd = "):
             raise OSError("synthetic DB write failure after journal fsync")
         return native(sql, params)
 
@@ -370,7 +379,7 @@ def test_accounting_retains_erasure_and_owner_stop_semantics(core, tmp_path):
     request, private = prepared(core, tmp_path, case.request_id)
     model_accounting.record(core.store, core.settings, request, private, core.clock)
     original = core.store.one('SELECT event_id FROM jobs WHERE job_id=%s', (case.job_id,))
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [original["event_id"]], core.clock())
     assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                           (original["event_id"],))["redacted"] == 1

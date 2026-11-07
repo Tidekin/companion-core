@@ -16,6 +16,7 @@ from companion.contracts import CoreError
 from companion.dialogue_history import fit_context
 from companion.model import ModelClient
 from companion.store import encode
+from tests.postgres_fixture import logical_state
 from tests.support.context_meter_inspector import native_job, recorded_attempts
 from tests.support.token_measurement import configure
 
@@ -30,7 +31,7 @@ def test_native_inspector_projects_each_complete_request_without_recounting(
     assert {m["tool_call_id"] for m in tool_results} == {"first-call", "second-call"}
     assert len(requests[0]["tools"]) == len(requests[1]["tools"]) == 2
     admissions = core.store.rows('SELECT * FROM model_admissions ORDER BY record_sequence')
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     ledger = Path(core.settings.paid_model.journal_path).read_bytes()
 
     def forbidden(*args, **kwargs):
@@ -58,7 +59,7 @@ def test_native_inspector_projects_each_complete_request_without_recounting(
         assert calls[-1]["accounted_or_reserved_micro_usd"] > 0
     assert "SYNTHETIC_PRIVATE_TOOL_RESULT" not in encode(result)
     assert core.settings.model_url not in encode(result)
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert Path(core.settings.paid_model.journal_path).read_bytes() == ledger
 
 

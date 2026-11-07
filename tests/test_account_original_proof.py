@@ -9,7 +9,9 @@ import companion_delivery_protocol as wire
 from companion import owner_authority
 from companion.account_original_proof import validate_original_account_send_check
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.social_autonomy import erase_social_autonomy
+from tests.postgres_fixture import logical_state
 from tests.support.account_owner_transport import prepared
 from tests.support.social_owner_authority import (
     close_provider_clients,  # noqa: F401 - shared native planner fixture
@@ -21,6 +23,7 @@ def records(core, tmp_path):
     authority, frozen = prepared(core, tmp_path)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     client = TestClient(app, headers={"Authorization": "Bearer " +
                                      core.settings.bridge_token.get_secret_value()})
     try:
@@ -55,12 +58,12 @@ def records(core, tmp_path):
 
 def test_original_account_check_survives_stop_expiry_and_current_config_change(core, tmp_path):
     values, expected = records(core, tmp_path)
-    before = "\n".join(core.store.db.iterdump())
+    before = logical_state(core.store)
     core.clock.advance(86400)
     core.settings.social_autonomy = core.settings.social_autonomy.model_copy(
         update={"enabled": False})
     assert validate_original_account_send_check(**values) == expected
-    assert "\n".join(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 @pytest.mark.parametrize("change", ["lease", "hash", "authority", "plan", "private_shape"])
@@ -93,6 +96,6 @@ def test_original_account_check_uses_retained_hashes_after_source_erasure(core, 
     values["plan"] = core.store.one('SELECT * FROM social_autonomy_plans WHERE plan_id=%s',
                                      (values["plan"]["plan_id"],))
     assert values["plan"]["redacted"] == 1
-    before = "\n".join(core.store.db.iterdump())
+    before = logical_state(core.store)
     assert validate_original_account_send_check(**values) == expected
-    assert "\n".join(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before

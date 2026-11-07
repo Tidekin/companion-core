@@ -28,6 +28,7 @@ from companion.media_config import MediaConfig, MediaEndpoint
 from companion.media_provider import HTTPMediaProvider, MediaResult
 from companion.store import Store
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.media import AUDIO, IMAGE, XML, FakeMedia, chunk, process, service, start
 
 
@@ -81,7 +82,7 @@ def test_media_creates_actual_observation_without_raw_retention_or_delivery(
     raw = {"audio": AUDIO, "camera": IMAGE, "android": XML}[operation]
     assert evidence["media_sha256"] == hashlib.sha256(raw).hexdigest()
     assert evidence["processor_id"]
-    dump = "\n".join(core.store.db.iterdump())
+    dump = json.dumps(logical_state(core.store), ensure_ascii=False)
     assert base64.b64encode(raw).decode() not in dump
     assert "hidden-password" not in dump
     assert core.store.rows("SELECT * FROM jobs") == core.store.rows("SELECT * FROM outbox") == []
@@ -97,7 +98,7 @@ def test_tts_uses_budget_returns_audio_and_does_not_cache_or_resend(core):
     with pytest.raises(CoreError, match="ALREADY_SUCCEEDED"):
         process(media, session, chunk("speech"))
     assert len(media.provider.calls) == 1
-    assert "valid-audio-fixture" not in "\n".join(core.store.db.iterdump())
+    assert "valid-audio-fixture" not in json.dumps(logical_state(core.store), ensure_ascii=False)
     usage = core.store.one("SELECT * FROM model_usage")
     assert usage["billed_micro_usd"] == 100 and usage["state"] == "SETTLED"
     assert usage["is_estimate"] == 1

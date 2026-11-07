@@ -8,6 +8,7 @@ import pytest
 from companion.capabilities import prompt, public_source_readiness, snapshot
 from companion.config import ObservationAdapterConfig
 from companion.source_grants import SourceGrantRegistration
+from tests.postgres_fixture import logical_state
 from tests.support.exploration import configure
 from tests.support.paid_model import approved_live
 from tests.support.runtime_capabilities import rows
@@ -181,11 +182,11 @@ def test_existing_budget_block_is_reported_without_reconciliation(core, tmp_path
     grant_native(core, ["memory"])
     before_journal = (tmp_path / "budget.jsonl").read_bytes()
     core.store.execute("INSERT INTO runtime_meta VALUES (%s, '1')", (key,))
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     current = rows(core)
     assert current["memory.recall"]["state"] == "PAUSED"
     assert "BUDGET_RECONCILIATION_REQUIRED" in current["memory.recall"]["reason_codes"]
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert (tmp_path / "budget.jsonl").read_bytes() == before_journal
 
 
@@ -233,14 +234,14 @@ def test_projection_does_not_echo_configuration_grant_or_integration_secrets(cor
     data = {"secret": "do-not-echo", "model_key": "private-model-key",
             "endpoint": "https://secret.invalid/private", "owner_qq_id": "secret-owner"}
     evidence = observed(core, catalog_ready=True, community_import=True, **data)
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = snapshot(core.store, core.settings, core.clock,
                       integrations={"bridge_memes": evidence, **data})
     rendered = json.dumps(result, ensure_ascii=False) + prompt(result)
     for secret in (*data.values(), "synthetic-key", GRANT_ID, "a" * 64,
                    core.settings.bridge_token.get_secret_value(), str(tmp_path)):
         assert secret not in rendered
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 def test_tools_argument_never_bypasses_native_video_approval(core):
@@ -383,12 +384,12 @@ def test_reflection_capability_counts_every_attempt_even_with_unlimited_spend(
     reflection_settings(core, tmp_path, unlimited=unlimited)
     assert rows(core)["reflection"]["state"] == "READY"
     usage(core, state=state)
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     current = rows(core)["reflection"]
     assert current["state"] == "PAUSED"
     assert "SCENARIO_CALL_LIMIT" in current["reason_codes"]
     assert current["limits"]["max_daily_calls"] == 1
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert not (tmp_path / "budget.jsonl").exists()
 
 
@@ -516,12 +517,12 @@ def test_paid_capacity_daily_amount_counts_preexisting_other_window_usage(core, 
     admission(core, request, window_id="previous-paid-window")
     assert not core.store.one('SELECT 1 FROM model_admissions WHERE window_id=%s',
                               (approval.window_id,))
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     current = rows(core)["memory.recall"]
     assert current["state"] == "PAUSED"
     assert "MODEL_DAILY_BUDGET_EXHAUSTED" in current["reason_codes"]
     assert "MODEL_WINDOW_BUDGET_EXHAUSTED" not in current["reason_codes"]
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert not (tmp_path / "budget.jsonl").exists()
 
 
@@ -703,7 +704,7 @@ def test_native_capabilities_are_local_facts_without_guard_or_external_io(
     monkeypatch.setattr(live_text, "guard", forbidden)
     monkeypatch.setattr(budget, "reserve", forbidden)
     monkeypatch.setattr(SocialAutonomy, "_authorized", forbidden)
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     current = rows(core)
     assert all(current[name]["state"] == "READY" for name in NATIVE_CAPABILITIES)
     assert all(current[name]["runtime_observation"] == "UNOBSERVED"
@@ -711,7 +712,7 @@ def test_native_capabilities_are_local_facts_without_guard_or_external_io(
     assert current["media.voice"]["state"] == "UNAVAILABLE"
     assert current["model.understand_video"]["state"] == "UNAVAILABLE"
     assert all("model_callable" not in current[name]["invocation"] for name in NATIVE_CAPABILITIES)
-    assert list(core.store.db.iterdump()) == before and core.model.calls == []
+    assert logical_state(core.store) == before and core.model.calls == []
     for compact in (False, True):
         text = prompt(snapshot(core.store, core.settings, core.clock), compact=compact)
         assert "视频画面分析未接入" not in text and "画面分析尚未接入" not in text
@@ -762,10 +763,10 @@ def test_files_require_pinned_parser_transport_adapter_and_original_traffic_budg
     else:
         core.settings.private_files = cfg.model_copy(
             update={"max_daily_bytes": cfg.max_file_bytes - 1})
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     fact = rows(core)["qq.files"]
     assert reason in fact["reason_codes"] and fact["state"] != "READY"
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 @pytest.mark.parametrize("change,reason", [
@@ -803,10 +804,10 @@ def test_bili_sampling_follows_media_scope_provider_reader_and_full_reservation(
 def test_native_readiness_preserves_restore_and_independent_budget_blocks(core, tmp_path, key):
     native_capabilities(core, tmp_path)
     core.store.execute("INSERT INTO runtime_meta VALUES (%s, '1')", (key,))
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     current = rows(core)
     assert all(current[name]["state"] == "PAUSED" for name in NATIVE_CAPABILITIES)
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 def test_voice_observation_is_separate_from_lease_and_resource_admission(core, tmp_path):
@@ -841,11 +842,11 @@ def test_account_state_uses_real_profile_evidence_native_cooldown_and_cached_obs
 def test_unknown_model_liability_pauses_native_capabilities_without_settling_it(core, tmp_path):
     native_capabilities(core, tmp_path)
     usage(core, state="UNKNOWN", scenario="chat")
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     current = rows(core)
     assert all(current[name]["state"] == "PAUSED" for name in NATIVE_CAPABILITIES)
     assert "MODEL_USAGE_UNKNOWN" in current["qq.voice.asr"]["reason_codes"]
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 @pytest.mark.usefixtures("budget_projection")
@@ -853,10 +854,10 @@ def test_cumulative_pause_is_read_from_original_journal_without_repair(core, tmp
     from tests.support.delivery_reconciliation import native
 
     native(core, tmp_path)
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = rows(core)["memory.recall"]
     assert result["state"] == "PAUSED" and "CUMULATIVE_PAUSED" in result["reason_codes"]
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 def test_oversized_capability_inventory_keeps_full_and_compact_utf8_limits(core):
@@ -903,8 +904,8 @@ def test_unknown_voice_resource_is_not_released_by_capability_projection(core, t
                            (core.clock(), created["job_id"]))
         core.store.insert("voice_node_state", node_id="local", active_job_id=created["job_id"],
                           resource_state="READY", last_seen_at=core.clock())
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     fact = rows(core)["qq.voice.tts"]
     assert fact["state"] == "PAUSED"
     assert "VOICE_RESOURCE_RECONCILIATION_REQUIRED" in fact["reason_codes"]
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before

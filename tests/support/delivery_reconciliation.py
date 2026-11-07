@@ -18,7 +18,8 @@ from tests.support.private_companion import companion_options
 
 
 def put(store, key, value):
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(value)))
+    store.execute("INSERT INTO runtime_meta (key,value) VALUES (%s,%s) "
+                  "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", (key, encode(value)))
 
 
 def signed(env, **changes):

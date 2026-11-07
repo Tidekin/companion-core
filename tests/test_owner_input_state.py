@@ -7,6 +7,7 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from companion_onebot_bridge.owner_handoff import terminal
+from tests.postgres_fixture import logical_state
 from tests.support.owner_input import captured, inbound
 
 
@@ -41,13 +42,13 @@ def test_discovered_link_can_finish_handoff_through_native_http(core, tmp_path, 
             saved = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                     (owner_input.INPUT + original["event_id"],))
             capture = json.loads(saved["value"])["capture"]
-            before = list(core.store.db.iterdump())
+            before = logical_state(core.store)
             response = await client.post("/internal/v1/owner-authority/inputs/state", json=capture)
             assert response.status_code == 200, response.text
             receipt = response.json()
             assert receipt["terminal"] and not receipt["unsettled_work"], receipt
             terminal(receipt, capture)
-            assert list(core.store.db.iterdump()) == before
+            assert logical_state(core.store) == before
             assert not core.store.one("SELECT 1 FROM exploration_requests")
 
     run(scenario())
@@ -74,11 +75,11 @@ def test_only_unstarted_native_link_discovery_is_not_pending(core, tmp_path, cha
         "kind": "link", "slot": 0, "target_url": "https://example.com/source",
         "state": "WAITING", "captured_privacy_epoch": 0,
         "deadline": now, "created_at": now, "updated_at": now, **change})
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = owner_input_state.read(core.store, core.settings, capture)
     assert result["terminal"] is (not change)
     assert result["unsettled_work"] is bool(change)
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 def test_native_input_state_requires_original_capture_and_terminal_work(core, tmp_path):
@@ -113,11 +114,11 @@ def test_unadmitted_stopped_input_has_zero_revision_without_making_work(core, tm
     capture, _ = captured(core, tmp_path)
     owner_authority.stop(core.store, core.settings, core.clock,
         AuthorityStop(operation_id="stop-unadmitted-input", authority=capture.authority))
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = owner_input_state.read(core.store, core.settings, capture)
     assert result["reply_revision"] == 0 and result["state"] == "CANCELLED"
     terminal(result, capture.model_dump(mode="json"))
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 def test_native_input_state_never_treats_unknown_delivery_as_complete(core, tmp_path):

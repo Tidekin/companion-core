@@ -1,14 +1,17 @@
 import asyncio
 import json
+import os
 import sys
 
 
 def process_config(core, path):
     values = core.settings.model_dump(mode="json")
     assert core.settings.model_key.get_secret_value() == "synthetic-key"
-    for name in ("model_key", "bridge_token", "control_token"):
+    for name in ("model_key", "bridge_token", "control_token", "database"):
         values[name] = getattr(core.settings, name).get_secret_value()
-    path.write_text(json.dumps(values), encoding="utf-8")
+    with open(path, "w", encoding="utf-8",
+              opener=lambda filename, flags: os.open(filename, flags, 0o600)) as stream:
+        json.dump(values, stream)
 
 
 async def processes(core, directory, *, count=2, mode="normal", drain=False):

@@ -13,6 +13,7 @@ from companion.owner_authority_protocol import AuthorityPreview
 from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
 from tests.model_carry_support import migrated
+from tests.postgres_fixture import logical_state
 from tests.support.core_http import real_core_http
 from tests.support.evaluation_authority_revision import revise, revised_policy, stop
 from tests.support.model_accounting import prepared
@@ -89,11 +90,11 @@ def test_pending_known_bill_blocks_permission_preview(core, tmp_path, monkeypatc
         patch.setattr(paid_budget, "journal", unavailable)
         assert model_accounting.record(core.store, core.settings, request, evidence, core.clock)[
             "state"] == "PENDING_JOURNAL"
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     with pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
         owner_authority.preview(core.store, core.settings, core.clock,
             AuthorityPreview(expected_revision=4, policy=revised_policy(case)))
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert core.store.one("SELECT billed_micro_usd FROM model_usage")["billed_micro_usd"] == 5000
 
 

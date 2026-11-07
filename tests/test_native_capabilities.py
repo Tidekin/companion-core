@@ -8,6 +8,7 @@ from companion import owner_authority, paid_budget
 from companion.file_evidence import PrivateFilesConfig
 from companion.image_input import ImageInputPolicy
 from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy
+from tests.postgres_fixture import logical_state
 from tests.support.owner_authority import activate
 from tests.support.owner_authority_setup import prepare
 from tests.support.runtime_capabilities import rows
@@ -39,11 +40,11 @@ def test_native_media_readiness_needs_no_execution_window_and_is_read_only(core,
     native(core, tmp_path)
     assert core.settings.live_text_window is None
     journal = Path(core.settings.paid_model.journal_path)
-    before = (list(core.store.db.iterdump()), journal.read_bytes())
+    before = (logical_state(core.store), journal.read_bytes())
     current = rows(core)
     for name in ("qq.images", "qq.files", "qq.voice.asr", "qq.voice.tts"):
         assert current[name]["state"] == "READY", current[name]
-    assert (list(core.store.db.iterdump()), journal.read_bytes()) == before
+    assert (logical_state(core.store), journal.read_bytes()) == before
     for name in ("memory.manage", "memory.recall", "diary"):
         assert current[name]["state"] == "UNAVAILABLE"
         assert "OWNER_AUTHORITY_PURPOSE_REQUIRED" in current[name]["reason_codes"]
@@ -65,9 +66,9 @@ def test_native_status_fences_media_when_original_admission_changes(core, tmp_pa
         core.settings.private_files = core.settings.private_files.model_copy(
             update={"max_daily_files": core.settings.private_files.max_daily_files + 1})
     journal = Path(core.settings.paid_model.journal_path)
-    before = (list(core.store.db.iterdump()), journal.read_bytes())
+    before = (logical_state(core.store), journal.read_bytes())
     current = rows(core)
-    assert (list(core.store.db.iterdump()), journal.read_bytes()) == before
+    assert (logical_state(core.store), journal.read_bytes()) == before
     for name in ("qq.images", "qq.files", "qq.voice.asr", "qq.voice.tts"):
         assert current[name]["state"] == "UNAVAILABLE"
         assert reason in current[name]["reason_codes"]

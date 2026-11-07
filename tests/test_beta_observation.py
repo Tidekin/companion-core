@@ -1,6 +1,6 @@
 import json
-import sqlite3
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -11,6 +11,7 @@ from companion.privacy import advance_epoch, epoch
 from companion.store import encode
 from scripts.validate_beta_feedback import validate_record
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.beta_observation import feedback_template, paid_fixture
 from tests.support.ops_status import settings
 
@@ -31,17 +32,21 @@ def test_committed_wal_snapshot_does_not_write_or_emit_plaintext(core, monkeypat
     run(core.run_once("worker"))
     core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN'")
     core.store.execute("UPDATE jobs SET last_error_code='PRIVATE_FAILURE_DO_NOT_EMIT'")
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     ledger = Path(core.settings.erasure_ledger).read_bytes()
     calls = len(core.model.calls)
-    connect = sqlite3.connect
+    original = beta_observation.read_view
+    observed = []
 
-    def readonly(*args, **kwargs):
-        assert "mode=ro" in args[0] and "immutable" not in args[0]
-        return connect(*args, **kwargs)
+    @contextmanager
+    def readonly(settings):
+        with original(settings) as view:
+            observed.append(view.one("SHOW transaction_read_only")["transaction_read_only"])
+            yield view
 
-    monkeypatch.setattr(beta_observation.sqlite3, "connect", readonly)
+    monkeypatch.setattr(beta_observation, "read_view", readonly)
     result = beta_observation.inspect_context(core.settings, "trace_test_1")
+    assert observed == ["on"]
     assert not result["blockers"]
     trace = result["trace"]
     assert trace["outbox"] == {"DELIVERY_UNCERTAIN": 1}
@@ -53,9 +58,10 @@ def test_committed_wal_snapshot_does_not_write_or_emit_plaintext(core, monkeypat
     assert job["failure_recorded"]
     output = encode(result)
     for value in ("PRIVATE_BODY", "PRIVATE_FAILURE", "trace_test_1", core.settings.owner_qq_id,
-                  core.settings.database, core.settings.bridge_token.get_secret_value()):
+                  core.settings.database.get_secret_value(),
+                  core.settings.bridge_token.get_secret_value()):
         assert value not in output
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert Path(core.settings.erasure_ledger).read_bytes() == ledger
     assert len(core.model.calls) == calls
 
@@ -102,7 +108,8 @@ def test_context_projects_only_pins_and_marks_erasure_epoch_stale(core):
     assert context["source_validity"] == "NOT_REVALIDATED"
     assert len(context["history"]) == len(context["memory"]) == 1
     assert "PRIVATE_" not in encode(result)
-    advance_epoch(core.store)
+    with core.store.transaction(control_write=True):
+        advance_epoch(core.store)
     result = beta_observation.inspect_context(core.settings, "trace_test_1")
     assert result["trace"]["jobs"][0]["context"]["state"] == "STALE_EPOCH"
     core.store.execute("UPDATE events SET redacted=1")
@@ -129,7 +136,7 @@ def test_image_inspection_preserves_unknown_cost_and_projects_only_frozen_hashes
                                  "observation_sha256": "a" * 64, "admission_sha256": "b" * 64}]}
     core.store.insert("runtime_meta", key="live_text_context:" + job["job_id"],
                       value=encode(record))
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = beta_observation.inspect_context(core.settings, "trace_test_1")
     assert result["configured_scopes"]["image"] == "none"
     inspected = result["trace"]["jobs"][0]
@@ -139,9 +146,10 @@ def test_image_inspection_preserves_unknown_cost_and_projects_only_frozen_hashes
     assert source["source_validity"] == "NOT_REVALIDATED"
     assert source["media_sha256"] == "d" * 64 and source["observation_sha256"] == "a" * 64
     assert "PRIVATE_" not in encode(result)
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
-    advance_epoch(core.store)
+    with core.store.transaction(control_write=True):
+        advance_epoch(core.store)
     result = beta_observation.inspect_context(core.settings, "trace_test_1")
     inspected = result["trace"]["jobs"][0]
     assert inspected["context"]["state"] == "STALE_EPOCH"
