@@ -156,7 +156,7 @@ def test_console_confirmation_erasure_cancels_profile_plan_and_preserves_fee(cli
                 "event_type='memory.console_decided' ORDER BY record_sequence"
                 ' DESC LIMIT 1'
             )["event_id"]
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [event_id], core.clock())
     with pytest.raises(CoreError):
         dispatch(module, frozen)
@@ -173,7 +173,7 @@ def test_console_receipt_and_native_confirmation_share_one_transaction(client, c
 
     def fail(store, action, *args, **kwargs):
         if action == "memory.owner_decision":
-            assert store is not client.app_core.store and store.db.in_transaction
+            assert store is not client.app_core.store and store.in_transaction
             raise RuntimeError("synthetic receipt failure")
         return original(store, action, *args, **kwargs)
 
@@ -193,7 +193,7 @@ def test_console_owner_is_rechecked_at_native_commit(client, core, monkeypatch):
     original = Memory.decide_from_console
 
     def rotate(memory, *args, **kwargs):
-        assert memory.store is not client.app_core.store and memory.store.db.in_transaction
+        assert memory.store is not client.app_core.store and memory.store.in_transaction
         core.settings.control_token = SecretStr("rotated-between-auth-and-memory")
         return original(memory, *args, **kwargs)
 

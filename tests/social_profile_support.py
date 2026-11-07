@@ -9,7 +9,7 @@ def confirmed_profile_material(core, *, number=800, text="我偏爱星空与简�
     core.settings.memory_enabled = True
     origin = "onebot-direct:FriendMessage:" + core.settings.owner_qq_id
     source = ingest(core, number, text, origin=origin)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         memory_id = core.memory.add(Candidate(
             subject=subject, kind=kind, fact_key="profile-preference-" + str(number), content=text,
             evidence_event_id=source["event_id"], evidence_quote=text,

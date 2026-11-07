@@ -459,7 +459,7 @@ def register_console_routes(app, settings):
         origin = request.headers.get("origin", "")
 
         def apply(context, owner_check):
-            with context.store.transaction():
+            with context.store.transaction(control_write=True):
                 owner_check()
                 return Memory(context.store, settings, context.ledger).decide_from_console(
                     memory_id,
