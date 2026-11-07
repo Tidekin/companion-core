@@ -15,7 +15,7 @@ TOOLS = Path(__file__).resolve().parents[1] / "benchmarks/memory_campaign"
 
 
 @pytest.fixture
-def campaign(tmp_path, monkeypatch):
+def campaign(tmp_path, monkeypatch, request):
     monkeypatch.syspath_prepend(str(TOOLS))
     for name in ("roundcfg", "rubrics", "integrity", "grade", "report"):
         monkeypatch.delitem(sys.modules, name, raising=False)
@@ -25,7 +25,8 @@ def campaign(tmp_path, monkeypatch):
     monkeypatch.setenv("MEMORY_ROUND", str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["grade.py"])
     rc = importlib.import_module("roundcfg")
-    rc.save(tmp_path / "round.json", {"name": "offline", "arms": {"old": {}}})
+    controls = getattr(request, "param", [])
+    rc.save(tmp_path / "round.json", {"name": "offline", "arms": {"old": {}}, "controls": controls})
     suite = tmp_path / "bank/suite-v1"
     (suite / "review-only").mkdir(parents=True)
     (suite / "inputs").mkdir()
@@ -50,14 +51,14 @@ def campaign(tmp_path, monkeypatch):
         "questions_sha256": rc.sha(suite / "questions.jsonl"),
         "criteria_sha256": rc.sha(suite / "review-only/criteria.jsonl")})
     files = []
-    for arm in rc.ARMS:
-        path = (tmp_path / "rag/answers.jsonl" if arm == "rag" else
+    for arm in (*rc.ARMS, *controls):
+        path = (tmp_path / arm / "answers.jsonl" if arm == "rag" or arm in controls else
                 tmp_path / "arms" / arm / "results/P1/answers.jsonl")
         rows(path, [dict(id=q["id"], answer="绿茶", status="SUCCEEDED", elapsed_seconds=1)
                     for q in questions])
         files.append(path)
     rc.save(tmp_path / "all-answers-frozen.json", {
-        "status": "ALL_ANSWERS_CLOSED_BEFORE_GOLD_READ", "answers": 9,
+        "status": "ALL_ANSWERS_CLOSED_BEFORE_GOLD_READ", "answers": len(questions) * len(files),
         "corpus_freeze_sha256": rc.sha(tmp_path / "corpus-freeze.json"),
         "files_sha256": {p.relative_to(tmp_path).as_posix(): rc.sha(p) for p in files}})
     grade = importlib.import_module("grade")
@@ -213,6 +214,28 @@ def test_unresolved_judgments_require_an_explicit_review_verdict(campaign, flag)
         key=data[0]["key"], original_grade=data[0], reason="offline reviewed failure",
         **{"pass": False})])
     assert len(report.load()[0]) == 3
+
+
+@pytest.mark.parametrize("campaign", [["closed"]], indirect=True)
+@pytest.mark.parametrize("arm", ["old", "closed"])
+def test_unresolved_verdicts_are_selected_for_review_including_controls(campaign, monkeypatch, arm):
+    root, _, report, rc, rows, _ = campaign
+    monkeypatch.setitem(report.R.cfg, "review", dict(persona="unused", delay_days=99,
+                                                    changed_per_family=0))
+    mapping = json.loads((root / "grading/blind-mapping.json").read_text("utf-8"))
+    key = next(m["key"] for m in mapping if m["arm"] == arm)
+    path = root / "grading/grades.jsonl"
+    data = rc.read_rows(path)
+    next(g for g in data if g["key"] == key).update(
+        {"anchor_failed": True, "pass": arm == "old", "missing": [] if arm == "old" else [0]})
+    rows(path, data)
+    manifest_path = root / "grading/manifest.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    manifest["raw_grades_sha256"] = rc.sha(path)
+    rc.save(manifest_path, manifest)
+    loaded, grades = report.load(allow_failed_gate=True)
+    selection = report.prepare_review(loaded, grades)
+    assert any(r["key"] == key and r["reason"] == "unresolved_judgment" for r in selection)
 
 
 def test_no_answered_instances_have_no_semantic_rate(campaign):

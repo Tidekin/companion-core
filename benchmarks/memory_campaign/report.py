@@ -254,8 +254,10 @@ def prepare_review(rows, grades):
         for a in ARMS:
             if r["arms"][a]["exact_pass"] not in (None, r["arms"][a]["auto_grade"]["pass"]):
                 selected.append((r, a, "exact_check_disagrees"))
-        for a in ARMS:
+        for a in R.graded_arms:
             g = r["arms"][a]["auto_grade"]
+            if g.get("judge_unresolved") or g.get("anchor_failed"):
+                selected.append((r, a, "unresolved_judgment"))
             if g.get("agreement", 1) < 1:
                 selected.append((r, a, "split_judge_vote"))
             if g.get("index_annotation_errors") or (not g["pass"] and not g.get("missing")
