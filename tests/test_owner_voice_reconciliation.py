@@ -9,9 +9,9 @@ from companion.owner_authority_protocol import AuthorityStop, OwnerSendCheck
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import VoiceDeliveryEnvelope
-from tests.test_evaluation import work
-from tests.test_owner_delivery_reconciliation import delivery_proof
-from tests.test_voice_flow import delivery_check, finish_node
+from tests.support.evaluation import work
+from tests.support.owner_delivery_reconciliation import delivery_proof
+from tests.support.voice_flow import delivery_check, finish_node
 from tests.voice_owner_fixtures import native_voice
 
 

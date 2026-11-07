@@ -1,72 +1,37 @@
 """Frozen account plans use native owner custody, Spool and original Core Outbox."""
 
-import hashlib
-import io
 import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import httpx
 import pytest
-from PIL import Image
 
 from companion import cumulative, paid_budget
 from companion.model import ModelClient
 from companion.owner_authority_protocol import OwnerGrantPolicy
-from companion.social_autonomy import SocialAutonomy
-from companion.social_autonomy_protocol import ProfileBaseline, SocialAutonomyConfig
 from companion.store import encode
 from companion_onebot_bridge import account_actions, account_assets
 from companion_onebot_bridge.native_actions import content_hash
 from companion_onebot_bridge.network import private_http_client
-from companion_onebot_bridge.outbound import deliver_tick, validate_item
-from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
-from tests.conftest import ingest, run
+from companion_onebot_bridge.outbound import validate_item
+from tests.conftest import run
 from tests.native_continuous_support import Host
-from tests.social_profile_support import confirmed_profile_material
 from tests.support.core_http import real_core_http
+from tests.support.cumulative_budget import policy as quota_policy
+from tests.support.cumulative_budget import view
+from tests.support.native_account_host import configure_host
 from tests.support.onebot import provider
+from tests.support.onebot_account_actions import (
+    catalog,
+    model_response,
+    native_fixture,
+    plan_action,
+    pump_account,
+)
 from tests.support.onebot_events import config
-from tests.test_cumulative_budget import policy as quota_policy
-from tests.test_cumulative_budget import view
-from tests.test_native_account_host import configure_host
-from tests.test_private_companion import companion_options
-from tests.test_social_autonomy import avatar, read_public
-from tests.test_social_owner_authority import authorize
-
-
-def fixture(core, kind="qzone_publish"):
-    ref = read_public(core, "bilibili")
-    owner = ingest(core, 99, "合成绑定输入", origin="onebot-direct:FriendMessage:10001")
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
-                                  (owner["event_id"],))["conversation_id"]
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    if kind in {"nickname", "signature"}:
-        confirmed_profile_material(core)
-    policy = SocialAutonomyConfig(enabled=True, scope="qq_social_v1",
-        authorization_sha256="a" * 64, qzone_enabled=True, nickname_enabled=True,
-        signature_enabled=True, avatar_enabled=True, asset_policy_sha256="e" * 64,
-        max_output_tokens=128)
-    options = companion_options(core)
-    options.update(account_actions_scope="qq_social_v1",
-                   account_actions_authorization_sha256=policy.authorization_sha256)
-    options["core_options"].update(social_autonomy=policy, content_enabled=False,
-                                   observation_adapters={})
-    proposal = ({"kind": kind, "text": "公开阅读中的恒星知识。", "source_refs": [ref]}
-                if kind == "qzone_publish" else {"kind": kind, "asset_id": "avatar_reviewed_one"}
-                if kind == "avatar" else {"kind": kind, "value": "观星" if kind == "nickname"
-                                         else "保持好奇"})
-    return ref, conversation, options, proposal
-
-
-def native_fixture(core, kind="qzone_publish"):
-    core.clock.now = datetime.now(UTC).replace(microsecond=0)
-    ref, conversation, options, proposal = fixture(core, kind)
-    options["core_options"]["social_autonomy"] = options["core_options"][
-        "social_autonomy"].model_copy(update={"max_output_tokens": 512})
-    return ref, conversation, options, proposal
-
+from tests.support.social_owner_authority import authorize
 
 
 @asynccontextmanager
@@ -102,50 +67,6 @@ async def account_host(core, tmp_path, *, social_policy, bridge_options=None,
                 yield active, client, protocol, sends
             finally:
                 active.spool.close()
-
-
-async def pump_account(active):
-    guard = OwnerSendGuard(active.runtime, active.client)
-    return await deliver_tick(active.client, OwnerOneBot(guard, active.protocol),
-                              active.spool, guard=guard, delivery_lane="qq_account")
-
-
-def model_response(proposal):
-    return httpx.Response(200, json={"choices": [{"message": {"content": encode(proposal)}}],
-                                   "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
-
-
-def catalog(core, directory):
-    directory.mkdir()
-    image = io.BytesIO()
-    Image.new("RGB", (16, 16), "navy").save(image, format="PNG")
-    data = image.getvalue()
-    review = avatar(core, asset_sha256=hashlib.sha256(data).hexdigest(), width=16, height=16,
-                    size_bytes=len(data))
-    (directory / (review.asset_sha256 + ".bin")).write_bytes(data)
-    manifest = directory / (hashlib.sha256(review.asset_id.encode()).hexdigest() + ".json")
-    manifest.write_text(review.model_dump_json(), encoding="utf-8")
-    return review, data, manifest
-
-
-async def plan_action(core, ref, conversation, proposal, *, review=None):
-    module = SocialAutonomy(core.store, core.settings, core.model, core.clock)
-    kind = proposal["kind"]
-    if kind != "qzone_publish":
-        module.record_profile(ProfileBaseline(bot_qq_id=core.settings.bot_qq_id, field=kind,
-            value="0" * 64 if kind == "avatar" else "原资料", observed_at=core.clock(),
-            receipt_sha256="f" * 64))
-    if review:
-        module.register_asset(review)
-    memory_ids = ([core.store.one(
-        "SELECT memory_id FROM memories WHERE fact_key='profile-preference-800'"
-    )["memory_id"]] if kind in {"nickname", "signature"} else [])
-    planned = await module.plan("bridge-account-plan", profile_memory_ids=memory_ids,
-        source_ids=[ref] if kind == "qzone_publish" else [],
-        profile_fields=[] if kind == "qzone_publish" else [kind],
-        asset_ids=[review.asset_id] if review else [])
-    with core.store.transaction():
-        return module.reserve(planned["plan_id"], conversation)
 
 
 @pytest.mark.parametrize("kind,path,data", [

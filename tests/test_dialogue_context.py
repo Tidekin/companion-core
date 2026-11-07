@@ -10,27 +10,8 @@ from companion.core import Core
 from companion.store import encode
 from companion.token_measurement import measure_request
 from companion.transport import enqueue
-from tests.conftest import ingest, run
-
-
-def sent_history(core, number, text, reply="已收到这一轮。", state="SENT", **kwargs):
-    ingest(core, number, text, **kwargs)
-    event_id = f"evt_test_{number}"
-    row = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=?", (event_id,))
-    if state is not None:
-        message_id = enqueue(core.store, event_id, row["conversation_id"], reply, core.clock())
-        core.store.execute("UPDATE outbox SET state=? WHERE message_id=?", (state, message_id))
-        return message_id
-
-
-def current_job(core, number=99, text="刚才聊到哪了？", **kwargs):
-    ingest(core, number, text, **kwargs)
-    return core.store.one(
-        "SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events e "
-        "ON e.event_id=j.event_id WHERE j.event_id=?",
-        (f"evt_test_{number}",),
-    )
+from tests.conftest import run
+from tests.support.dialogue_context import current_job, sent_history
 
 
 @pytest.mark.parametrize(
@@ -115,7 +96,7 @@ def test_recent_message_cap_counts_complete_turns(core, max_messages, first_kept
 @pytest.mark.parametrize("action", ["qq.private.proactive", "qzone.publish", "qzone.comment"])
 def test_only_a_private_reply_can_complete_a_history_turn(core, action):
     sent_history(core, 1, "不是普通回复的输入")
-    core.store.execute("UPDATE outbox SET action_type=?", (action,))
+    core.store.execute('UPDATE outbox SET action_type=%s', (action,))
     assert len(core.context(current_job(core))) == 2
     assert core.model.calls == []
 
@@ -158,7 +139,7 @@ def test_history_stays_within_session_and_eligible_owner_events(core, excluded):
         )
     else:
         core.store.execute(
-            "UPDATE events SET body_json=json_set(body_json,?,1) WHERE event_id='evt_test_1'",
+            "UPDATE events SET body_json=json_set(body_json,%s,1) WHERE event_id='evt_test_1'",
             (f"$.{excluded}_command",),
         )
     assert len(core.context(current_job(core))) == 2
@@ -175,7 +156,7 @@ def test_current_and_future_inputs_are_not_history_even_if_they_have_a_sent_repl
         "当前的回复",
         core.clock(),
     )
-    core.store.execute("UPDATE outbox SET state='SENT' WHERE message_id=?", (message_id,))
+    core.store.execute("UPDATE outbox SET state='SENT' WHERE message_id=%s", (message_id,))
     sent_history(core, 100, "后来的输入", "后来的回复")
     assert core.context(job)[1:-1] == [
         {"role": "user", "content": "之前的输入"},
@@ -199,8 +180,8 @@ def test_optional_reference_is_removed_as_a_block_before_recent_turns(core, monk
 
 
 def test_current_shared_content_survives_complete_history_trimming(core):
-    from tests.test_content import enable
-    from tests.test_content_integration import finish_read, share
+    from tests.support.content import enable
+    from tests.support.content_integration import finish_read, share
 
     sent_history(core, 1, "很长的历史输入" * 300, "很长的历史回复" * 300)
     enable(core)
@@ -227,7 +208,7 @@ def test_one_input_with_multiple_sent_rows_is_only_one_turn(core):
         core.clock(),
         key="synthetic-second-reply",
     )
-    core.store.execute("UPDATE outbox SET state='SENT' WHERE message_id=?", (message_id,))
+    core.store.execute("UPDATE outbox SET state='SENT' WHERE message_id=%s", (message_id,))
     messages = core.context(current_job(core))
     assert messages[1:-1] == [
         {"role": "user", "content": "唯一旧输入"},

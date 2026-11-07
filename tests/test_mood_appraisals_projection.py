@@ -7,8 +7,8 @@ import pytest
 from companion import mood, mood_appraisals
 from companion.contracts import InteractionSignal
 from tests.conftest import ingest
-from tests.test_mood import erase, feedback
-from tests.test_mood_appraisals import appraise
+from tests.support.mood import erase, feedback
+from tests.support.mood_appraisals import appraise
 
 
 def test_mood_appraisals_integrate_with_existing_signals(core):
@@ -57,7 +57,7 @@ def test_still_valid_filters_invalid_appraisals_from_projection(core, damage):
     if damage == "erase":
         erase(core, [key])
     elif damage == "quote":
-        core.store.execute("UPDATE events SET body_json='{}' WHERE event_id=?", (key,))
+        core.store.execute("UPDATE events SET body_json='{}' WHERE event_id=%s", (key,))
     elif damage == "usage":
         core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
     else:
@@ -99,8 +99,11 @@ def test_appraisals_contribute_to_immediate_and_undertone(core):
 def test_deterministic_signal_wins_for_the_same_owner_event(core):
     key = feedback(core, text="这个想法很有意思")
     core.store.execute(
-        "INSERT INTO model_usage(request_id,scenario,provider,model,state,occurred_at) "
-        "VALUES ('duplicate','memory_extract','synthetic','synthetic','SETTLED',?)",
+        (
+            'INSERT INTO model_usage(request_id,scenario,provider,model,state'
+            ",occurred_at) VALUES ('duplicate','memory_extract','synthetic','"
+            "synthetic','SETTLED',%s)"
+        ),
         (core.clock(),),
     )
     signals = mood_appraisals.validate(core.store, [InteractionSignal(

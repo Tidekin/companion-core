@@ -19,10 +19,9 @@ from companion.contracts import CoreError
 from companion.core import Core
 from companion.image_input import ImageInputPolicy, messages_and_estimate, text_and_estimate
 from companion.privacy import advance_epoch
-from companion.store import Store, after, encode, uid
-from tests.conftest import ingest
-from tests.test_live_image_input import png
-from tests.test_paid_image_budget import image_messages
+from companion.store import Store, after, encode
+from tests.support.image_originals import staged_original
+from tests.support.paid_image_budget import image_messages
 
 
 @pytest.mark.parametrize("count", [1, 2, 4])
@@ -50,22 +49,6 @@ def test_image_estimates_count_each_original_in_both_stages(count):
         messages_and_estimate(policy, [*messages, *messages])
 
 
-def staged_original(core):
-    event_id = ingest(core)["event_id"]
-    data, item_id = png(), uid("content")
-    now = core.clock()
-    core.store.insert(
-        "content_items", item_id=item_id, owner_event_id=event_id, kind="qq_image", slot=0,
-        state="QUEUED", captured_privacy_epoch=0, reserved_bytes=len(data),
-        media_sha256=hashlib.sha256(data).hexdigest(),
-        fingerprint=hashlib.sha256(b"image/png\0" + data).hexdigest(),
-        deadline=after(now, 30), created_at=now, updated_at=now,
-    )
-    row = core.store.one("SELECT * FROM content_items WHERE item_id=?", (item_id,))
-    image_spool.put(core.store, row, data, "image/png", after(now, image_spool.RETENTION_SECONDS))
-    return row, data
-
-
 def test_originals_are_shared_by_new_store_without_entering_db_or_history(core):
     row, data = staged_original(core)
     reopened = Store(core.store.path)
@@ -74,7 +57,11 @@ def test_originals_are_shared_by_new_store_without_entering_db_or_history(core):
         assert image_spool.deadline(reopened, row) == after(core.clock(), 300)
         for table in ("events", "runtime_meta", "audit_log"):
             if core.store.one(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
+                (
+                    'SELECT 1 FROM pg_catalog.pg_class WHERE '
+                    'relnamespace=current_schema()::regnamespace AND relkind '
+                    "IN ('r','p') AND relname=%s"
+                ), (table,),
             ):
                 assert base64.b64encode(data).decode() not in encode(
                     core.store.rows("SELECT * FROM " + table),
@@ -205,7 +192,7 @@ def test_stop_discards_only_images_from_the_matching_window(core):
     image_spool.discard_window(core.store, "a" * 64)
     assert list(image_spool.directory(core.store).glob("*.raw")) == []
     assert not core.store.one(
-        "SELECT 1 FROM runtime_meta WHERE key LIKE 'live_text_image_upload:%'",
+        "SELECT 1 FROM runtime_meta WHERE key LIKE 'live_text_image_upload:%%'",
     )
 
 

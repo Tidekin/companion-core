@@ -7,36 +7,26 @@ import sqlite3
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import httpx
 import pytest
 
 from companion.voice_protocol import (
-    SignedVoiceLease,
     VoiceProtocolError,
     VoiceSession,
     VoiceStopResponse,
-    digest,
 )
 from companion_voice_node.state import NodeState
 from companion_voice_node.supervisor import process_has_exited, process_identity
-from companion_voice_node.worker import VoiceNodeWorker, local_manifest, main
-from tests.test_voice_node_worker import (
-    FakeCore,
+from companion_voice_node.worker import VoiceNodeWorker, main
+from tests.support.voice_node_retention_v2 import scope
+from tests.support.voice_node_worker import (
     FixtureSupervisor,
     child_receipts,
     factory,
     write_config,
 )
-from tests.test_voice_node_worker import node as node  # noqa: F401 -- shared fixture
-
-
-def scope(node):
-    config, key, _ = node
-    remote = FakeCore(config, key)
-    lease = SignedVoiceLease.model_validate(remote.lease(digest(local_manifest(config))))
-    return config, remote, lease
+from tests.support.voice_node_worker import node as node  # noqa: F401 -- shared fixture
 
 
 def session(incarnation="b" * 32, sequence=0, recovery=False):
@@ -431,8 +421,8 @@ def test_real_core_restore_owner_recovery_missing_or_existing_unknown(core, node
     from companion.core import Core
     from companion.voice_jobs import VoiceJobs
     from companion.voice_protocol import VoiceLeaseRef
-    from tests.test_voice_jobs import TOKEN, claim, create_tts, prepared
-    from tests.test_voice_node_api import app_for
+    from tests.support.voice_jobs import TOKEN, claim, create_tts, prepared
+    from tests.support.voice_node_api import app_for
 
     jobs, message, _, _ = prepared(core, monkeypatch)
     archive, restored_path = tmp_path / "early.enc", tmp_path / "restored.db"
@@ -470,7 +460,7 @@ def test_real_core_restore_owner_recovery_missing_or_existing_unknown(core, node
             if missing:
                 assert not record["missing_jobs"][0]["core_cleanup_confirmed"]
             else:
-                retained = restored.store.one("SELECT * FROM voice_jobs WHERE job_id=?",
+                retained = restored.store.one('SELECT * FROM voice_jobs WHERE job_id=%s',
                                               (created["job_id"],))
                 assert retained["state"] == "UNKNOWN"
                 assert retained["cleanup_state"] == "CONFIRMED"
@@ -625,35 +615,6 @@ def test_absent_ordinary_state_files_still_initialize_and_reopen(node):
         assert state.resource()["state"] == "READY"
 
 
-async def temp_crash_fixture(config_path, lease_path, counter, stage):
-    from companion_voice_node.worker import VoiceNodeConfig
-
-    config = VoiceNodeConfig.model_validate_json(
-        await asyncio.to_thread(Path(config_path).read_bytes),
-    )
-    lease = SignedVoiceLease.model_validate_json(
-        await asyncio.to_thread(Path(lease_path).read_bytes),
-    )
-    with NodeState(config.state_directory) as state:
-        state.accept_claim(lease)
-        temporary = state.prepare_temp(lease)
-        temporary.mkdir(parents=True)
-        (temporary / "private.txt").write_text("synthetic crash residue")
-        child = None
-        if stage != "prepared":
-            child = FixtureSupervisor(config.workspace, temporary, counter=Path(counter))
-            await child.start(5)
-            if stage != "spawned":
-                state.bind_process(lease, child.process.pid, child.identity)
-            if stage == "stopped":
-                assert await child.stop()
-                state.process_stopped(lease, child.process.pid, child.identity)
-        print(json.dumps({"stage": stage, "name": temporary.name,
-                          "pid": child.process.pid if child else None,
-                          "identity": child.identity if child else None}), flush=True)
-        await asyncio.Event().wait()
-
-
 @pytest.mark.parametrize("stage", ["prepared", "spawned", "bound", "stopped"])
 def test_real_parent_crash_before_dispatch_never_overwrites_temp_ownership(node, tmp_path, stage):
     config, remote, lease = scope(node)
@@ -663,7 +624,7 @@ def test_real_parent_crash_before_dispatch_never_overwrites_temp_ownership(node,
 
     async def scenario():
         process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
-            "tests.test_voice_node_retention_v2", "--temp-crash", str(config_path),
+            "tests.support.voice_node_retention_v2", "--temp-crash", str(config_path),
             str(lease_path), str(node[2]), stage, cwd=config.workspace,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -704,7 +665,3 @@ def test_real_parent_crash_before_dispatch_never_overwrites_temp_ownership(node,
         assert child_receipts(node[2]) == [] and remote.claim_bodies == []
 
     asyncio.run(scenario())
-
-
-if __name__ == "__main__" and sys.argv[1:2] == ["--temp-crash"]:
-    asyncio.run(temp_crash_fixture(*sys.argv[2:]))

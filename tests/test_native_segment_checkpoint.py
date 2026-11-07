@@ -21,7 +21,7 @@ def test_result_checkpoint_does_not_wait_for_an_observer(core, tmp_path, record_
             await active.capture()
             await active.flush()
             assert await core.run_once()
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             active.db.execute("PRAGMA busy_timeout=2000")
             database = active.spool.directory / "spool.sqlite3"
             uri = database.resolve().as_uri() + "?mode=ro"
@@ -50,7 +50,7 @@ def test_result_checkpoint_does_not_wait_for_an_observer(core, tmp_path, record_
             assert not await active.pump() and len(sends) == 2
             assert core.store.rows("SELECT state FROM outbox ORDER BY segment_index") == [
                 {"state": "SENT"}, {"state": "SENT"}]
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usage
             assert active.db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
     run(scenario())

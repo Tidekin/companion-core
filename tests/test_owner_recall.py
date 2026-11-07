@@ -1,29 +1,13 @@
 """V2 withdrawal preserves native ledger semantics across execution boundaries."""
 
-import hashlib
-from datetime import UTC, datetime
 
 import pytest
 
 from companion import owner_authority, owner_input, owner_recall
 from companion.contracts import CoreError
-from companion.owner_authority_protocol import AuthorityStop, OwnerRecall
-from companion_delivery_protocol.authority import recall_signing_payload
-from tests.test_owner_input import captured, inbound
-
-
-def receipt(core, capture, key, **changes):
-    occurred = datetime.fromisoformat(core.clock()).astimezone(UTC).isoformat()
-    value = dict(authority=capture.authority, kind="authenticated_onebot_friend_recall",
-        recall_id="recall_" + hashlib.sha256(
-            (capture.source_event_id + occurred).encode()).hexdigest(),
-        target_source_event_id=capture.source_event_id, target_event_id=capture.event_id,
-        protocol_epoch=capture.protocol_epoch, identity_sha256=capture.identity_sha256,
-        occurred_at=occurred, received_at=occurred, frame_sha256="f" * 64,
-        evidence_sha256="a" * 64)
-    value.update(changes)
-    value["signature"] = key.sign(recall_signing_payload(value)).hex()
-    return OwnerRecall.model_validate(value)
+from companion.owner_authority_protocol import AuthorityStop
+from tests.support.owner_input import captured, inbound
+from tests.support.owner_recall import receipt
 
 
 @pytest.mark.parametrize("boundary", ["active", "stop", "restore"])
@@ -39,9 +23,9 @@ def test_recall_uses_original_evidence_after_execution_is_disabled(core, tmp_pat
         owner_authority.restore(core.store)
     result = owner_recall.receive(core.store, core.settings, core.ledger, core.clock, body)
     assert result["state"] == "RECALLED"
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                               (owner_input.INPUT + capture.event_id,))
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                            (capture.event_id,))["redacted"]
     repeated = owner_recall.receive(core.store, core.settings, core.ledger, core.clock, body)
     assert repeated["duplicate"]
@@ -57,9 +41,9 @@ def test_recall_before_capture_closes_source_before_inbox_ingestion(core, tmp_pa
     owner_input.approve(core.store, core.settings, core.clock, capture)
     with pytest.raises(CoreError, match="EVENT_ERASED"):
         core.ingest(inbound(core, capture), "pending-recall-input")
-    assert not core.store.one("SELECT 1 FROM events WHERE event_id=?", (capture.event_id,))
-    assert not core.store.one("SELECT 1 FROM jobs WHERE event_id=?", (capture.event_id,))
-    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s', (capture.event_id,))
+    assert not core.store.one('SELECT 1 FROM jobs WHERE event_id=%s', (capture.event_id,))
+    assert core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                           ("erased_event:" + capture.event_id,))
 
 
@@ -80,7 +64,7 @@ def test_recall_rejects_invalid_evidence_without_erasing(core, tmp_path, change)
         body = body.model_copy(update={"signature": "0" * 128})
     with pytest.raises(CoreError, match="OWNER_RECALL_INVALID"):
         owner_recall.receive(core.store, core.settings, core.ledger, core.clock, body)
-    assert not core.store.one("SELECT redacted FROM events WHERE event_id=?",
+    assert not core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                (capture.event_id,))["redacted"]
 
 
@@ -115,13 +99,15 @@ def test_outgoing_provider_id_conflict_cannot_establish_inbound_direction(core, 
     capture, key = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
     result = core.ingest(inbound(core, capture), "recall-conflicting-direction")
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (capture.event_id,))
     with core.store.transaction():
         message_id = enqueue(core.store, capture.event_id, event["conversation_id"],
                              "earlier outgoing", core.clock(), key="conflicting-provider-id")
-        core.store.execute("UPDATE outbox SET state='SENT',provider_message_id='123' "
-                           "WHERE message_id=?", (message_id,))
+        core.store.execute((
+            "UPDATE outbox SET state='SENT',provider_message_id='123' WHERE "
+            'message_id=%s'
+        ), (message_id,))
     assert owner_recall.receive(core.store, core.settings, core.ledger, core.clock,
                                receipt(core, capture, key))["state"] == "PENDING_TARGET"
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (result["job_id"],))[
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (result["job_id"],))[
         "state"] == "QUEUED"

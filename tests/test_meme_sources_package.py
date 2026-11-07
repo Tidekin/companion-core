@@ -7,9 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.verify_package import verify_meme_sources
-from tests.test_meme_asset_migration import (
-    test_offline_entrypoints_do_not_import_the_opposite_application as isolated_import,
-)
+from tests.support.meme_asset_migration import check_entrypoint_import_isolation as isolated_import
 
 ROOT = Path(__file__).resolve().parents[1]
 

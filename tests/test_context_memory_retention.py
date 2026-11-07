@@ -18,9 +18,9 @@ from companion.token_measurement import measure_request
 from companion.transport import enqueue
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call
+from tests.support.context_planner import request_context
 from tests.support.owner_memory import environment
-from tests.test_context_planner import request_context
-from tests.test_owner_runtime import chat
+from tests.support.owner_runtime import chat
 
 
 def result():
@@ -88,12 +88,12 @@ def test_recalled_source_survives_tool_pressure_and_saved_continuation(core, tmp
         async with environment(core, tmp_path) as (admit, recall, _):
             core.settings.max_recent_messages = 0  # Use ranked old turns, not recent history.
             seed, _ = await admit(1, "朋友宁芜转来：市集改从河岸口进。我尚未向组织方核实。")
-            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=?",
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=%s",
                                (seed.event_id,))
-            source = core.store.one("SELECT * FROM events WHERE event_id=?", (seed.event_id,))
+            source = core.store.one('SELECT * FROM events WHERE event_id=%s', (seed.event_id,))
             mid = enqueue(core.store, seed.event_id, source["conversation_id"],
                           "收到。", core.clock())
-            core.store.execute("UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+            core.store.execute("UPDATE outbox SET state='SENT',sent_at=%s WHERE message_id=%s",
                                (core.clock(), mid))
             await admit(2, "市集入口后来有什么新消息？谁说的，我核实了吗？")
             job = core.claim_job("recalled-source-continuation")

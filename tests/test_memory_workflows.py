@@ -3,7 +3,6 @@
 Only DeepSeek responses are substituted here. scripts/verify_memory_live.py repeats
 the workflows using the real provider and records replies, states, and usage.
 """
-
 import json
 
 import pytest
@@ -14,22 +13,9 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import MEMORY_HEADING
-from tests.conftest import ingest, run
+from tests.conftest import run
 from tests.postgres_fixture import isolated_database
-
-
-def message(core, number, text, origin="qq:FriendMessage:10001"):
-    core.settings.memory_enabled = True
-    ingest(core, number, text, origin=origin)
-    assert run(core.run_once())
-    return core.store.one('SELECT * FROM jobs WHERE event_id=%s', (f"evt_test_{number}",))
-
-
-def reply(core, number):
-    row = core.store.one(
-        'SELECT content_json FROM outbox WHERE origin_event_id=%s', (f"evt_test_{number}",)
-    )
-    return json.loads(row["content_json"])["text"]
+from tests.support.memory_workflows import message, reply
 
 
 def relation(payload, *, same=False, conflict=False):
@@ -289,7 +275,7 @@ def test_irrelevant_candidates_are_removed_before_the_chat_call(core):
 
 @pytest.mark.parametrize("count", [10, 11])
 def test_recall_selection_accepts_the_prompt_limit_and_rejects_overflow(core, monkeypatch, count):
-    from tests.test_m1 import remember
+    from tests.support.confirmed_memory import remember
 
     for number in range(count):
         remember(core, number, f"项目编号{number:02}偏好是蓝色", confirmed=True)

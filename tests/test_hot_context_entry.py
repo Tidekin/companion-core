@@ -16,9 +16,9 @@ from companion.qq_rich import input_digest
 from companion.store import after
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.support.core_http import real_core_http
+from tests.support.evaluation_process import process_config
 from tests.support.owner_authority import activate
-from tests.test_evaluation_process import process_config
-from tests.test_owner_input import captured, inbound
+from tests.support.owner_input import captured, inbound
 
 
 @pytest.mark.parametrize("recent_turns", [6, 9])
@@ -59,7 +59,7 @@ def test_hot_episode_uses_spare_history_capacity_and_cools_after_closure(core, t
                 return event.event_id, response.json()["job_id"]
 
             old, old_job = await ingest(1, marker, original.authority)
-            core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?", (old_job,))
+            core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=%s", (old_job,))
             core.clock.advance(8 * 86400)
             view = owner_authority.current(core.store, core.settings, core.clock)
             policy = OwnerGrantPolicy.model_validate({**view.policy.model_dump(),
@@ -68,7 +68,7 @@ def test_hot_episode_uses_spare_history_capacity_and_cools_after_closure(core, t
                 "not_before": after(first_time, -1), "max_turns": 8, "max_utf8_bytes": 8192}})
             authority = activate(core, policy, revision=1, operation="hot-context-history")[0][
                 "authority"]
-            event = core.store.one("SELECT * FROM events WHERE event_id=?", (old,))
+            event = core.store.one('SELECT * FROM events WHERE event_id=%s', (old,))
             core.memory.episodes([event], core.clock())
             goal = core.goals.propose(GoalProposal(topic=marker, source_event_ids=[old]))
             core.goals.accept(goal)

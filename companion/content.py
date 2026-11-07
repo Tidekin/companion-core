@@ -274,8 +274,9 @@ def register_link_images(
 class ContentIntake:
     """Schedule incoming shares on the owner's connection without opening media providers."""
 
-    def __init__(self, store, settings, clock, create_read=None, *, options=None):
+    def __init__(self, store, settings, clock, create_read=None, *, options=None, video=None):
         self.store, self.settings, self.clock = store, settings, clock
+        self.video = video
         self.create_read = create_read
         self.options = options or settings.content
 
@@ -556,11 +557,12 @@ class ContentService(ContentIntake):
         clock=utcnow,
         *,
         options=None,
+        video=None,
         provider=None,
         image_transport=None,
         model=None,
     ):
-        super().__init__(store, settings, clock, create_read, options=options)
+        super().__init__(store, settings, clock, create_read, options=options, video=video)
         self.observations = observations
         if self.options.use_chat_model_for_vision:
             endpoint = MediaEndpoint(
@@ -807,6 +809,29 @@ class ContentService(ContentIntake):
                 wanted[owner] -= cap
             kept.append(item)
         return kept
+
+    def reply_context(self, settings, event_id, messages, *, rich):
+        from companion import private_life
+        from companion.token_measurement import measure_request
+
+        available = settings.context_soft_tokens - measure_request(
+            settings, messages, "chat",
+        ).reserved_input_tokens
+        if private_life.enabled(settings) and self._consumer_rows(event_id):
+            # Required reading evidence shares the prompt with the capability inventory.
+            available = max(min(settings.context_soft_tokens, settings.content.max_context_chars),
+                            available)
+        elif rich:
+            available = max(2048, available)
+        return self.context_message(event_id, available - 24)
+
+    @staticmethod
+    def context_source_ids(reference):
+        """Use the final, possibly trimmed excerpt for the reply's original source list."""
+        for item in json.loads(reference)["shared_content"]:
+            yield item["event_id"]
+            if item.get("article_event_id"):
+                yield item["article_event_id"]
 
     def context_message(self, event_id, max_bytes):
         """Fit real excerpts in a UTF-8 budget, preserving their source labels."""

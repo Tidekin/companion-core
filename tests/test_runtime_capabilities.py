@@ -8,9 +8,10 @@ import pytest
 from companion.capabilities import prompt, public_source_readiness, snapshot
 from companion.config import ObservationAdapterConfig
 from companion.source_grants import SourceGrantRegistration
-from tests.test_exploration import configure
-from tests.test_paid_model_gate import approved_live
-from tests.test_source_grants import GRANT_ID, authorization, prepare
+from tests.support.exploration import configure
+from tests.support.paid_model import approved_live
+from tests.support.runtime_capabilities import rows
+from tests.support.source_grants import GRANT_ID, authorization, prepare
 
 
 @pytest.fixture
@@ -23,11 +24,6 @@ def budget_projection(monkeypatch):
     from companion import capabilities
 
     monkeypatch.setattr(capabilities, "_owner_blocks", lambda *args, **kwargs: [])
-
-
-def rows(core, **kwargs):
-    return {row["id"]: row for row in snapshot(core.store, core.settings, core.clock, **kwargs)
-            ["capabilities"]}
 
 
 def observed(core, **facts):
@@ -57,8 +53,8 @@ def grant_native(core, purposes, *, capabilities=()):
 
 
 def private_images(core, tmp_path):
-    from tests.test_onebot_capture import pinned_plan
-    from tests.test_video_understanding import scope_options
+    from tests.support.onebot_capture import pinned_plan
+    from tests.support.video_understanding import scope_options
 
     pinned_plan(core, tmp_path, 3001, live=True, approved=True,
                 rich_input_scope="references_v1",
@@ -101,7 +97,7 @@ def test_reader_uses_native_latest_grant_rules(core, change, reason):
         elif change == "revoked":
             core.observations.grants.revoke(grant.grant_id)
         else:
-            core.store.execute("INSERT INTO runtime_meta VALUES (?, '1')",
+            core.store.execute("INSERT INTO runtime_meta VALUES (%s, '1')",
                                ("erased_source_grant:" + grant.grant_id,))
     current = public_source_readiness(core.store, core.settings, core.clock, adapter)
     assert current["state"] == "UNAVAILABLE"
@@ -157,8 +153,16 @@ def test_life_pause_does_not_disable_explicit_source_reads(core, tmp_path):
     core.settings.memory_enabled = True
     core.settings.consolidation_enabled = True
     grant_native(core, ["memory", "diary", "consolidation", "content", "exploration"])
-    core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused','1')")
-    core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
+    core.store.execute(
+        "INSERT INTO runtime_meta (key,value) VALUES ('life_paused','1') ON "
+        'CONFLICT(key) DO UPDATE SET '
+        'value=excluded.value,record_sequence=DEFAULT'
+    )
+    core.store.execute(
+        "INSERT INTO runtime_meta (key,value) VALUES ('diary_paused','1') ON "
+        'CONFLICT(key) DO UPDATE SET '
+        'value=excluded.value,record_sequence=DEFAULT'
+    )
     current = rows(core)
     assert current["reading.heybox"]["state"] == "READY"
     assert current["memory.manage"]["state"] == "READY"
@@ -176,7 +180,7 @@ def test_existing_budget_block_is_reported_without_reconciliation(core, tmp_path
     core.settings.memory_enabled = True
     grant_native(core, ["memory"])
     before_journal = (tmp_path / "budget.jsonl").read_bytes()
-    core.store.execute("INSERT INTO runtime_meta VALUES (?, '1')", (key,))
+    core.store.execute("INSERT INTO runtime_meta VALUES (%s, '1')", (key,))
     before = list(core.store.db.iterdump())
     current = rows(core)
     assert current["memory.recall"]["state"] == "PAUSED"
@@ -294,8 +298,8 @@ def test_native_bili_tool_requires_content_even_when_given_as_exposed(core, tmp_
 
 
 def test_retired_fact_window_does_not_claim_native_memory_admission(core, tmp_path):
-    from tests.test_live_memory_recall import scope_facts
-    from tests.test_onebot_capture import pinned_plan
+    from tests.support.live_memory_recall import scope_facts
+    from tests.support.onebot_capture import pinned_plan
 
     _, _, pins = scope_facts(core)
     pinned_plan(core, tmp_path, 3001, live=True, approved=True, scope_options={
@@ -478,7 +482,10 @@ def paid_capacity_settings(core, tmp_path, **changes):
 def admission(core, request_id, *, window_id=None):
     approval = core.settings.paid_model
     window_id = window_id or approval.window_id
-    core.store.execute("INSERT OR IGNORE INTO model_budget_windows VALUES (?,?)",
+    core.store.execute((
+        'INSERT INTO model_budget_windows (window_id,contract_sha256) VALUES '
+        '(%s,%s) ON CONFLICT DO NOTHING'
+    ),
                        (window_id, "a" * 64))
     core.store.insert(
         "model_admissions", request_id=request_id, logical_request_id=request_id,
@@ -507,7 +514,7 @@ def test_paid_capacity_daily_amount_counts_preexisting_other_window_usage(core, 
     approval = paid_capacity_settings(core, tmp_path, daily_micro_usd=100)
     request = usage(core, state=state, amount=100, scenario="chat")
     admission(core, request, window_id="previous-paid-window")
-    assert not core.store.one("SELECT 1 FROM model_admissions WHERE window_id=?",
+    assert not core.store.one('SELECT 1 FROM model_admissions WHERE window_id=%s',
                               (approval.window_id,))
     before = list(core.store.db.iterdump())
     current = rows(core)["memory.recall"]
@@ -640,10 +647,10 @@ def native_capabilities(core, tmp_path):
     from companion.poke_protocol import PokePolicy
     from companion.social_autonomy import SocialAutonomy
     from companion.social_autonomy_protocol import ProfileBaseline, SocialAutonomyConfig
-    from tests.test_bili_video import paid_options
-    from tests.test_onebot_capture import pinned_plan
-    from tests.test_social_autonomy import avatar
-    from tests.test_voice_jobs import voice_config
+    from tests.support.bili_video import paid_options
+    from tests.support.onebot_capture import pinned_plan
+    from tests.support.social_autonomy import avatar
+    from tests.support.voice_jobs import voice_config
 
     options = paid_options(core)
     files = PrivateFilesConfig(enabled=True, parser_image="sha256:" + "d" * 64,
@@ -795,7 +802,7 @@ def test_bili_sampling_follows_media_scope_provider_reader_and_full_reservation(
 @pytest.mark.parametrize("key", ["model_budget_restore_required", "model_budget_blocked"])
 def test_native_readiness_preserves_restore_and_independent_budget_blocks(core, tmp_path, key):
     native_capabilities(core, tmp_path)
-    core.store.execute("INSERT INTO runtime_meta VALUES (?, '1')", (key,))
+    core.store.execute("INSERT INTO runtime_meta VALUES (%s, '1')", (key,))
     before = list(core.store.db.iterdump())
     current = rows(core)
     assert all(current[name]["state"] == "PAUSED" for name in NATIVE_CAPABILITIES)
@@ -843,7 +850,7 @@ def test_unknown_model_liability_pauses_native_capabilities_without_settling_it(
 
 @pytest.mark.usefixtures("budget_projection")
 def test_cumulative_pause_is_read_from_original_journal_without_repair(core, tmp_path):
-    from tests.test_delivery_reconciliation import native
+    from tests.support.delivery_reconciliation import native
 
     native(core, tmp_path)
     before = list(core.store.db.iterdump())
@@ -878,7 +885,7 @@ def test_unknown_voice_resource_is_not_released_by_capability_projection(core, t
     from companion.voice_jobs import VoiceJobs
     from tests.conftest import run
     from tests.sdk_reader_fixture import Provider, answer, worker_for
-    from tests.test_voice_jobs import TEXT
+    from tests.support.voice_jobs import TEXT
     from tests.voice_owner_fixtures import native_voice
 
     native_voice(core, tmp_path, record=False)
@@ -892,7 +899,7 @@ def test_unknown_voice_resource_is_not_released_by_capability_projection(core, t
     jobs = VoiceJobs(core.store, core.settings, core.clock)
     with core.store.transaction():
         created = jobs.create_tts(message_id, TEXT)
-        core.store.execute("UPDATE voice_jobs SET state='UNKNOWN',started_at=? WHERE job_id=?",
+        core.store.execute("UPDATE voice_jobs SET state='UNKNOWN',started_at=%s WHERE job_id=%s",
                            (core.clock(), created["job_id"]))
         core.store.insert("voice_node_state", node_id="local", active_job_id=created["job_id"],
                           resource_state="READY", last_seen_at=core.clock())

@@ -16,9 +16,9 @@ from companion.store import after, encode
 from companion.turn_taking import SILENCE_RULES
 from companion_delivery_protocol.authority import CAPTURE_DOMAIN
 from tests.support.core_http import real_core_http
-from tests.test_evaluation_process import process_config
-from tests.test_owner_console import ORIGIN, PASSWORD
-from tests.test_owner_input import captured, inbound
+from tests.support.evaluation_process import process_config
+from tests.support.owner_console import ORIGIN, PASSWORD
+from tests.support.owner_input import captured, inbound
 
 
 @pytest.mark.parametrize("change", ["safe", "expression", "mixed", "stop", "privacy",
@@ -121,13 +121,18 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                     if tasks == 2:
                         if change == "closing":
                             # Simulated transport delivered the first reply before the owner closed.
-                            assert core.store.execute("UPDATE outbox SET state='SENT',sent_at=? "
-                                "WHERE origin_event_id=? AND state='PENDING'",
+                            assert core.store.execute((
+                                "UPDATE outbox SET state='SENT',sent_at=%s "
+                                "WHERE origin_event_id=%s AND state='PENDING'"
+                            ),
                                 (core.clock(), capture.event_id)).rowcount == 1
                         proof = successor()
                         second = await accept(proof, second_text)
                         if change == "closing":
-                            assert core.store.one("SELECT next_attempt_at FROM jobs WHERE job_id=?",
+                            assert core.store.one((
+                                'SELECT next_attempt_at FROM jobs WHERE '
+                                'job_id=%s'
+                            ),
                                                   (second,))["next_attempt_at"] == next_now
                             core.clock.advance(6)
                         child.stdin.write(b"next-task\n")
@@ -156,12 +161,14 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                         assert "synthetic owner guidance" in result["systems"][1]
                     if change == "closing":
                         assert SILENCE_RULES in result["systems"][1]
-                        assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                        assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                               (second,)) == {"state": "SUCCEEDED"}
-                        assert not core.store.rows("SELECT 1 FROM outbox WHERE origin_event_id=?",
+                        assert not core.store.rows('SELECT 1 FROM outbox WHERE origin_event_id=%s',
                                                    (proof.event_id,))
-                        audit = core.store.one("SELECT safe_detail_json FROM audit_log "
-                            "WHERE action='job.succeeded' AND entity_id=?", (second,))
+                        audit = core.store.one((
+                            'SELECT safe_detail_json FROM audit_log WHERE '
+                            "action='job.succeeded' AND entity_id=%s"
+                        ), (second,))
                         assert json.loads(audit["safe_detail_json"])["reply_skipped"] is True
                     assert result["calls"] == (2 if tasks == 2 else 0)
                     assert runtime_config.get(core.store, core.settings, "job:" + first) == (

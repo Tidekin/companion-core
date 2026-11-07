@@ -12,10 +12,10 @@ from companion.expression import ExpressionEngine
 from companion.meme_retrieval import OFFER, _candidate, query_for
 from tests.conftest import run
 from tests.meme_authority_fixture import admit
-from tests.test_meme_core import worker
-from tests.test_meme_core_runtime import runtime_case as runtime_case
-from tests.test_meme_native_discovery import native_case, release_foreground
-from tests.test_meme_pack_files import Upstream
+from tests.support.meme_core import worker
+from tests.support.meme_core_runtime import runtime_case as runtime_case
+from tests.support.meme_native_discovery import native_case, release_foreground
+from tests.support.meme_pack_files import Upstream
 
 
 @pytest.mark.parametrize("text,intent,target,request_kind", [
@@ -119,7 +119,7 @@ def test_frozen_candidate_withdrawn_later_still_stops_its_use(runtime_case):
     # A later prepare of the same turn keeps its frozen contract instead of re-ranking.
     with pytest.raises(CoreError):
         run(c.service.prepare_offer(c.job))
-    assert c.core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert c.core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                             (OFFER + c.job["event_id"],))
 
 
@@ -147,13 +147,17 @@ def test_second_discovery_reaches_new_files_without_downloading_held_ones(
                                           text="太棒了，又成功了")
             assert response.status_code == 202, response.text
             job = core.claim_job("second-offer", job_id=response.json()["job_id"])
-            second = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+            second = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],))
             # Held captions do not fit this intent: the library lacks relevant material.
             await c.retrieval.prepare(second)
-            assert core.store.one("SELECT 1 FROM jobs WHERE kind='meme_discovery' "
-                                  "AND event_id=?", (event["event_id"],))
-            core.store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL "
-                               "WHERE job_id=?", (second["job_id"],))
+            assert core.store.one((
+                "SELECT 1 FROM jobs WHERE kind='meme_discovery' AND "
+                'event_id=%s'
+            ), (event["event_id"],))
+            core.store.execute((
+                "UPDATE jobs SET state='SUCCEEDED',lease_token=NULL WHERE "
+                'job_id=%s'
+            ), (second["job_id"],))
             assert await c.service.run_once("second-discovery")
             held = set(c.service.discovery._held(event["event_id"]))
             assert len(held) == 5 and first < held
@@ -172,7 +176,7 @@ def test_one_queued_discovery_at_a_time(core, tmp_path, monkeypatch):
             assert response.status_code == 202, response.text
             release_foreground(c)
             job = core.claim_job("second-offer", job_id=response.json()["job_id"])
-            second = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+            second = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],))
             await c.retrieval.prepare(second)
             jobs = core.store.rows("SELECT event_id FROM jobs WHERE kind='meme_discovery'")
             assert [row["event_id"] for row in jobs] == [c.event["event_id"]]
@@ -233,7 +237,7 @@ def test_ambient_miss_is_routine_and_lost_draw_stays_text_only(runtime_case, mon
     # The only asset is comfort-first, which a plain light turn does not get.
     assert saved["offer"]["intent"] == "ambient" and saved["offer"]["candidates"] == []
     assert not c.core.store.one("SELECT 1 FROM audit_log WHERE action='meme.offer_empty'")
-    assert not c.core.store.one("SELECT 1 FROM jobs WHERE kind='meme_discovery' AND event_id=?",
+    assert not c.core.store.one("SELECT 1 FROM jobs WHERE kind='meme_discovery' AND event_id=%s",
                                 (c.job["event_id"],))
     from companion import expression
 

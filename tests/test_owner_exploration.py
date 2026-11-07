@@ -15,8 +15,8 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
-from tests.test_reading_followup import READER_AUTH, admit, window
-from tests.test_source_reader import META, Responses, response
+from tests.support.reading_followup import READER_AUTH, admit, window
+from tests.support.source_reader import META, Responses, response
 
 
 @pytest.mark.parametrize("text", [
@@ -96,9 +96,9 @@ def test_signed_owner_request_runs_one_discovery_and_reports_its_real_coverage(
             assert "发现的恒星故事" in prompt and "DISCOVERED" in prompt
             assert "不是视频内容" in prompt and "系统未启用外部执行工具" not in prompt
             assert core.store.one("SELECT state FROM exploration_requests")["state"] == "DONE"
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (accepted["job_id"],))[
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (accepted["job_id"],))[
                 "state"] == "SUCCEEDED"
-            sources = core.store.rows("SELECT event_id FROM job_sources WHERE job_id=?",
+            sources = core.store.rows('SELECT event_id FROM job_sources WHERE job_id=%s',
                                       (accepted["job_id"],))
             assert {row["event_id"] for row in sources} >= {
                 event["event_id"], core.store.one("SELECT event_id FROM observations")["event_id"],
@@ -109,7 +109,11 @@ def test_signed_owner_request_runs_one_discovery_and_reports_its_real_coverage(
 def test_paused_life_does_not_schedule_natural_browsing(core, tmp_path, monkeypatch):
     async def scenario():
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
-            core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused','1')")
+            core.store.execute(
+                'INSERT INTO runtime_meta (key,value) VALUES '
+                "('life_paused','1') ON CONFLICT(key) DO UPDATE SET "
+                'value=excluded.value,record_sequence=DEFAULT'
+            )
             await admit(client, core, config, plan, 1, "刷B站")
             await select_discovery(core)
             assert not core.store.rows("SELECT * FROM exploration_requests")
@@ -141,8 +145,10 @@ def test_capability_question_uses_current_system_facts_without_requesting_anothe
                     first, _ = await admit(client, core, config, plan, 1, "之前有读取通道吗")
                     assert await first_worker.run_once("legacy-reply-fixture")
                 # Retain an already delivered historical refusal, as in the reported turn.
-                core.store.execute("UPDATE outbox SET state='SENT',sent_at=? "
-                                   "WHERE origin_event_id=?", (core.clock(), first["event_id"]))
+                core.store.execute((
+                    "UPDATE outbox SET state='SENT',sent_at=%s WHERE "
+                    'origin_event_id=%s'
+                ), (core.clock(), first["event_id"]))
                 latest, accepted = await admit(client, core, config, plan, 2, "你还是不能刷b站吗")
                 assert not core.store.rows("SELECT * FROM exploration_requests")
                 assert not core.store.rows("SELECT * FROM content_items")
@@ -166,7 +172,7 @@ def test_capability_question_uses_current_system_facts_without_requesting_anothe
             else:
                 assert "reading.bili" in rules.split("可用：", 1)[1].split("。", 1)[0]
             assert messages[-1] == {"role": "user", "content": "你还是不能刷b站吗"}
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                   (accepted["job_id"],))["state"] == "SUCCEEDED"
             assert not core.store.rows("SELECT * FROM exploration_requests")
             assert not core.store.rows("SELECT * FROM reading_attempts")
@@ -174,7 +180,7 @@ def test_capability_question_uses_current_system_facts_without_requesting_anothe
                 {"scenario": "chat", "state": "SETTLED"},
                 {"scenario": "chat", "state": "SETTLED"},
             ]
-            assert core.store.one("SELECT content_json FROM outbox WHERE origin_event_id=?",
+            assert core.store.one('SELECT content_json FROM outbox WHERE origin_event_id=%s',
                                   (latest["event_id"],))
     run(scenario())
 
@@ -185,8 +191,11 @@ def test_uncertain_browsing_keeps_the_original_attempt_and_expense(core, tmp_pat
             event, accepted = await admit(client, core, config, plan, 1, "刷B站")
             await select_discovery(core)
             row = core.store.one("SELECT * FROM exploration_requests")
-            core.store.execute("UPDATE exploration_requests SET state='UNKNOWN',"
-                               "last_error_code='READER_NETWORK_UNKNOWN' WHERE request_id=?",
+            core.store.execute((
+                'UPDATE exploration_requests SET '
+                "state='UNKNOWN',last_error_code='READER_NETWORK_UNKNOWN' "
+                'WHERE request_id=%s'
+            ),
                                (row["request_id"],))
             await admit(client, core, config, plan, 1, "刷B站")
             assert len(core.store.rows("SELECT * FROM exploration_requests")) == 1

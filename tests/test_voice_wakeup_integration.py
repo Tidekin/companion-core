@@ -10,7 +10,7 @@ from pydantic import SecretStr
 
 from companion.store import after, uid
 from companion.voice_protocol import VoiceLeaseRef
-from tests.test_voice_jobs import claim, control, create_asr, create_tts, prepared, result
+from tests.support.voice_jobs import claim, control, create_asr, create_tts, prepared, result
 
 
 def seeds(core, monkeypatch):
@@ -26,7 +26,7 @@ def seeds(core, monkeypatch):
     _, active = claim(jobs)
     jobs.input("local", VoiceLeaseRef.from_lease(active.lease))
     # There is no runnable chat and no delivery sender in this synthetic worker process.
-    core.store.execute("UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=?",
+    core.store.execute("UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=%s",
                        (after(core.clock(), 3600),))
     return completed, running
 
@@ -84,8 +84,8 @@ def test_more_than_two_thousand_expired_voice_rows_drain_across_real_maintenance
     core, tmp_path, monkeypatch,
 ):
     completed, running = seeds(core, monkeypatch)
-    original = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (completed["job_id"],))
-    outbox = core.store.one("SELECT * FROM outbox WHERE message_id=?", (original["message_id"],))
+    original = core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s', (completed["job_id"],))
+    outbox = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (original["message_id"],))
     # Bulk maintenance fixture copies a natively accepted/completed seed. Unique native
     # message and delivery keys preserve FK/uniqueness; no cloned work is ever dispatched.
     with core.store.transaction():
@@ -95,7 +95,10 @@ def test_more_than_two_thousand_expired_voice_rows_drain_across_real_maintenance
             core.store.insert("outbox", **item)
             core.store.insert("voice_jobs", **(original | {"job_id": uid("voice"),
                 "message_id": message, "outbox_delivery_key": item["delivery_key"]}))
-        core.store.execute("UPDATE voice_jobs SET deadline_at=?,result_expires_at=?,lease_until=?",
+        core.store.execute((
+            'UPDATE voice_jobs SET '
+            'deadline_at=%s,result_expires_at=%s,lease_until=%s'
+        ),
                            (after(core.clock(), -1),) * 3)
     assert core.store.rows("PRAGMA foreign_key_check") == []
     before = invariants(core)
@@ -113,7 +116,7 @@ def test_future_voice_deadline_is_bounded_by_next_real_maintenance_without_write
 ):
     _, running = seeds(core, monkeypatch)
     deadline, maintenance = 0.3, 0.8
-    core.store.execute("UPDATE voice_jobs SET deadline_at=?,result_expires_at=?,lease_until=?",
+    core.store.execute('UPDATE voice_jobs SET deadline_at=%s,result_expires_at=%s,lease_until=%s',
                        (after(core.clock(), deadline),) * 3)
     before = invariants(core)
     evidence = launch(core, tmp_path, maintenance, "future")

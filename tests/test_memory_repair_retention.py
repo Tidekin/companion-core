@@ -7,7 +7,7 @@ from companion.memory_recovery import failures, retry
 from companion.memory_work import checkpoint_state
 from companion.store import encode
 from tests.conftest import run
-from tests.test_memory_write_consistency import (
+from tests.support.memory_write_consistency import (
     CORRECTION,
     candidate,
     extraction,
@@ -81,9 +81,9 @@ def test_mixed_review_drops_rejected_claim_and_commits_corrected_fact(core, repe
     core.clock.advance(61)
     assert run(core.extract_step()).progressed and run(core.extract_step()).progressed
     assert checkpoint_state(core.store)["batch"]["phase"] == "COMPLETE"
-    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=?", (old,))["valid_to"]
-    assert core.store.one("SELECT 1 FROM memories WHERE content=?", (CORRECTION,))
-    assert not core.store.one("SELECT 1 FROM memories WHERE content=?", (rejected.content,))
+    assert core.store.one('SELECT valid_to FROM memories WHERE memory_id=%s', (old,))["valid_to"]
+    assert core.store.one('SELECT 1 FROM memories WHERE content=%s', (CORRECTION,))
+    assert not core.store.one('SELECT 1 FROM memories WHERE content=%s', (rejected.content,))
     rejections = core.store.rows("SELECT safe_detail_json FROM audit_log WHERE "
                                  "action='memory.candidate_rejected' AND entity_id='evt_test_2'")
     assert rejections == [{"safe_detail_json": encode({"reason": "UNSUPPORTED_MEMORY_CLAIM"})}] * (
@@ -103,7 +103,7 @@ def test_guarded_failure_erasure_clears_feedback_but_preserves_accounting(core):
 
 def test_guarded_failure_cannot_replay_unknown_extraction(core):
     record = failed_semantic_batch(core)
-    core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=?",
+    core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=%s",
                        (record["batch"]["extraction_request_id"],))
     calls = len(core.model.calls)
     with pytest.raises(CoreError, match="MEMORY_RECOVERY_UNSETTLED"):

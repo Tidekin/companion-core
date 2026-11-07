@@ -1,7 +1,6 @@
 import copy
 import hashlib
 import json
-import ssl
 from datetime import datetime
 
 import httpcore
@@ -21,43 +20,9 @@ from source_reader.heybox import HeyboxReader, SourceAPI
 from source_reader.network import PublicHTTP, post_url
 from source_reader.worker import read_result, tick
 from tests.conftest import ingest, run
-from tests.test_exploration import configure
-from tests.test_source_reader import NOW, Responses, response
-
-URL = "https://www.xiaoheihe.cn/app/bbs/link/168860244"
-IMAGE = "https://imgheybox.max-c.com/bbs/example.jpg"
-SOURCE_TOKEN = "separate-read-only-service-token"
-ITEM = {
-    "operation": "read",
-    "url": URL,
-    "max_bytes": 524288,
-    "max_requests": 1,
-    "max_items": 4,
-    "lease_token": "fixture_lease",
-}
-POST = {
-    "status": "ok",
-    "result": {
-        "link": {
-            "linkid": 168860244,
-            "title": "测试帖子",
-            "text": [
-                {"type": "text", "text": "<p>第一段介绍了手绘地图。</p>"},
-                {"type": "img", "url": IMAGE + "?imageMogr2/resize/500"},
-                {"type": "html", "content": "<script>secret()</script><p>第二段介绍独立游戏。</p>"},
-            ],
-        }
-    },
-}
-
-
-def mock_pool(*rows):
-    backend = Responses(*rows)
-    return httpcore.AsyncConnectionPool(
-        ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
-        network_backend=backend,
-        max_keepalive_connections=0,
-    ), backend
+from tests.support.exploration import configure
+from tests.support.heybox_reader import IMAGE, ITEM, POST, SOURCE_TOKEN, URL, mock_pool
+from tests.support.source_reader import NOW, response
 
 
 async def read(*rows, api=True, item=None):
@@ -232,7 +197,7 @@ def test_numeric_target_mismatch_cannot_be_overridden_by_share_url():
 
 def test_native_short_share_http_worker_keeps_ordered_media_and_provenance(core, tmp_path):
     from source_reader.heybox_source import NativeHeyboxSource
-    from tests.test_plugin_readonly import registered_grant
+    from tests.support.plugin_readonly import registered_grant
 
     configure(core)
     core.settings.content_enabled = True

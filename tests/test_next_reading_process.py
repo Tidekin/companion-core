@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_next_reading import HTML
+from tests.support.next_reading import HTML
 
 
 @pytest.mark.parametrize("hosts", [["articles.example"], ["*"]])

@@ -6,11 +6,11 @@ import pytest
 
 from companion import owner_delivery
 from tests.conftest import run
+from tests.support.cumulative_budget import view
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.native_consumer_entry import environment
-from tests.test_cumulative_budget import view
-from tests.test_trial_limits import limits, native_trial
-from tests.test_worker_wakeup_process import close_child, finish, ready, start, state
+from tests.support.trial_limits import limits, native_trial
+from tests.support.worker_wakeup_process import close_child, finish, ready, start, state
 
 
 @pytest.mark.parametrize("boundary", ["send", "stop", "recall", "supersede"])
@@ -54,7 +54,7 @@ def test_failed_chat_notice_crosses_native_worker_and_send_checks(core, tmp_path
             if boundary == "send":
                 assert result["worked"] and result["attempt_states"] == {"ACK": 1}
                 assert owner_delivery.FAILURE_TEXT in json.dumps(sends, ensure_ascii=False)
-                assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+                assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                     (notice["message_id"],))["state"] == "SENT"
                 assert not (await entry.send(entry.client, entry.protocol))["worked"]
                 assert len(sends) == 1

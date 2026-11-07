@@ -13,12 +13,12 @@ from pydantic import SecretStr
 from companion.api import create_app
 from companion.core import Core
 from tests.conftest import ingest
-from tests.test_next_memory_context import context, episode
-from tests.test_p12_diary_life import source_with_older_parent
+from tests.support.next_memory_context import context, episode
+from tests.support.p12_diary_life import source_with_older_parent
 
 
 def local_day(core, event_id):
-    row = core.store.one("SELECT occurred_at FROM events WHERE event_id=?", (event_id,))
+    row = core.store.one('SELECT occurred_at FROM events WHERE event_id=%s', (event_id,))
     return datetime.fromisoformat(row["occurred_at"]).astimezone(
         ZoneInfo(core.settings.timezone),
     ).date()

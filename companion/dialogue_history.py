@@ -5,11 +5,55 @@ without settings use the historical byte estimate. Neither grants source authori
 """
 
 import json
+from dataclasses import dataclass
 
 from companion import qq_quotes, reply_revision
 from companion.budget import token_upper_bound
 from companion.contracts import CoreError
 from companion.qq_rich import context
+
+
+@dataclass
+class ReplyHistory:
+    sources: list
+    turns: list
+    continuation: dict | None
+    review_target: dict | None
+    review_proofs: list
+
+    def retained(self, messages):
+        visible = {id(message) for message in messages}
+        return [source for source, turn in zip(self.sources, self.turns, strict=True)
+                if id(turn[0]) in visible]
+
+    def include_review_sources(self, retained, messages):
+        """A retained excerpt may depend on a trimmed turn's original input and delivered reply."""
+        visible = {id(message) for message in messages}
+        reviews = [(used, proof) for turn, used, proof in self.review_proofs
+                   if id(turn[0]) in visible]
+        review_ids = {source_id for used, _ in reviews for source_id in used}
+        if self.review_target and not self.review_target["ambiguous"]:
+            review_ids.add(self.review_target["event_id"])
+        extra = review_ids - {source["event_id"] for source in retained}
+        retained.extend(source for source in self.sources if source["event_id"] in extra)
+        return review_ids, [{"kind": "memory", "proof": proof} for _, proof in reviews]
+
+
+def reply_sources(store, settings, clock, job, *, authority, bounded_text, followup):
+    from companion import live_text, owner_input, private_life
+
+    if authority:
+        sources = owner_input.history_sources(store, settings, clock, job,
+            purpose="proactive" if followup else "chat") if (
+            job["kind"] == "chat" or followup) else []
+    elif bounded_text:
+        sources = live_text.history_sources(store, settings, clock, job)
+    else:
+        sources = recent_sent_sources(
+            store, job["conversation_id"], job["event_id"], settings.max_recent_messages // 2)
+        if private_life.enabled(settings):
+            sources = private_life.recent_history(store, settings, job)
+    return sources
 
 
 def recent_sent_turns(store, conversation_id, current_event_id, max_turns):

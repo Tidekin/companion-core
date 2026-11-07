@@ -6,44 +6,13 @@ import json
 import pytest
 
 from companion.contracts import CoreError
-from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.reading_protocol import ReadObservation
-from companion.store import after, encode
-from tests.conftest import ingest, run
-from tests.test_exploration import URL
-from tests.test_reading_protocol import envelope
-from tests.test_reading_service import configure
-from tests.test_social_owner_authority import authorize
-from tests.test_social_owner_authority import close_provider_clients as close_provider_clients
-
-
-def prepared(core, tmp_path, *, affect=True, text="明天可以看看这篇天文介绍",
-             additional_purposes=(), automatic_actions=()):
-    configure(core)
-    core.settings.affect_enabled = True
-    core.settings.life_loop = LifeLoopConfig(mode="SHADOW", read_goals_enabled=True)
-    core.settings.wake_enabled = True
-    core.settings.quiet_start = core.settings.quiet_end = 0
-    core.settings.content_enabled = False
-    ingest(core, 1, text)
-    ingest(core, 2, "简短一点")
-    core.store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL")
-    core.settings.content_enabled = True
-    core.life_topics.synchronize()
-    topic = core.store.one("SELECT * FROM life_topics")
-    scope = LifeShadowApproval(
-        scope="owner_private_life_shadow_v1", authorization_sha256="c" * 64,
-        conversation_id=topic["conversation_id"], source_event_ids=["evt_test_1", "evt_test_2"],
-        purposes=["PRIVATE_MESSAGE_DRAFT", "PRIVATE_DIARY"], max_items=5,
-        expires_at=after(core.clock(), 3 * 86400),
-        automatic_actions=list(automatic_actions),
-    )
-    authorize(core, tmp_path, life=scope,
-              additional_purposes=["goals", "content", "exploration", "memory",
-                                   *additional_purposes,
-                                   *(["affect"] if affect else [])])
-    core.clock.advance(86400)
-    return topic["topic_id"]
+from companion.store import encode
+from tests.conftest import run
+from tests.support.exploration import URL
+from tests.support.life_decision_context import prepared
+from tests.support.reading_protocol import envelope
+from tests.support.social_owner_authority import close_provider_clients as close_provider_clients
 
 
 def choose(core, action="SHARE", **extra):
@@ -71,7 +40,7 @@ def test_explicit_feedback_changes_actual_model_input_and_choice(core, tmp_path,
     core.model.callback = provider
     job = core.life_topics.schedule()
     assert job and run(core.run_once(job_id=job))
-    row = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (job,))
+    row = core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (job,))
     assert row["action"] == ("SHARE" if affect else "SKIP")
     assert len(core.model.calls) == 1
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
@@ -98,7 +67,7 @@ def test_actual_goal_failure_informs_one_bounded_later_choice(core, tmp_path):
     })
     first = core.life_topics.schedule()
     assert first and run(core.run_once(job_id=first))
-    result = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (first,))
+    result = core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (first,))
     assert result["goal_id"]
     step = core.goals.claim()
     assert step and core.goals.fail(step, "SOURCE_NOT_AVAILABLE")
@@ -174,9 +143,9 @@ def test_native_read_receipt_supplies_interest_or_blocks_continuation(
 
     core.model.callback = provider
     assert run(core.run_once(job_id=second))
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (second,))["state"] == (
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (second,))["state"] == (
         "SUCCEEDED"
-    ), core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (second,))
+    ), core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s', (second,))
     assert {item["event_id"] for item in seen[0]["sources"]} == {
         "evt_test_1", "evt_test_2", *result["event_ids"],
     }
@@ -197,17 +166,17 @@ def test_native_read_receipt_supplies_interest_or_blocks_continuation(
         retained["related_trait_ids"], ["unrelated-trait"], "unrelated-trait", None, [],
     ):
         changed = {**proposal, "related_trait_ids": invalid}
-        core.store.execute("UPDATE life_activity_results SET proposal_json=? WHERE job_id=?",
+        core.store.execute('UPDATE life_activity_results SET proposal_json=%s WHERE job_id=%s',
                            (encode(changed), second))
         with pytest.raises(CoreError, match="LIFE_DRAFT_CHANGED"):
             core.life_topics.retained_result(second)
-    core.store.execute("UPDATE life_activity_results SET proposal_json=? WHERE job_id=?",
+    core.store.execute('UPDATE life_activity_results SET proposal_json=%s WHERE job_id=%s',
                        (retained["result"]["proposal_json"], second))
     assert core.life_topics.retained_result(second)["result"]["text"]
     if autonomy:
         assert context["autonomy_guidance"]["depth_control"][0]["independent_sessions"] == 1
     with core.store.transaction():
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    saved = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (second,))
+    saved = core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (second,))
     assert saved["state"] == "INVALIDATED" and saved["text"] == ""
     assert len(core.model.calls) == 2

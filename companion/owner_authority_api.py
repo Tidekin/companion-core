@@ -7,23 +7,30 @@ from companion.owner_authority_protocol import AuthorityChange, AuthorityPreview
 def register_owner_authority_routes(app, control_auth):
     prefix = "/internal/v1/owner-authority"
 
+    async def run(operation, *args):
+        core = app.state.core
+        return await app.state.api_store.run(
+            lambda store: operation(store, core.settings, core.clock, *args))
+
     @app.post(prefix + "/preview", dependencies=control_auth)
     async def preview(body: AuthorityPreview):
         core = app.state.core
-        return owner_authority.preview(core.store, core.settings, core.clock, body)
+
+        def execute(store):
+            return store.read_or_write(
+                lambda: owner_authority.preview(store, core.settings, core.clock, body))
+
+        return await app.state.api_store.run(execute)
 
     @app.post(prefix + "/activate", dependencies=control_auth)
     @app.post(prefix + "/revisions", dependencies=control_auth)
     async def activate(body: AuthorityChange):
-        core = app.state.core
-        return owner_authority.activate(core.store, core.settings, core.clock, body)
+        return await run(owner_authority.activate, body)
 
     @app.post(prefix + "/stop", dependencies=control_auth)
     async def stop(body: AuthorityStop):
-        core = app.state.core
-        return owner_authority.stop(core.store, core.settings, core.clock, body)
+        return await run(owner_authority.stop, body)
 
     @app.get(prefix + "/status", dependencies=control_auth)
     async def status():
-        core = app.state.core
-        return owner_authority.status(core.store, core.settings, core.clock)
+        return await run(owner_authority.status)

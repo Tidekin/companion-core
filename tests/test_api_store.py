@@ -14,38 +14,25 @@ import pytest
 from pydantic import SecretStr
 
 from companion import api, api_store, owner_authority, owner_input
-from companion.owner_authority_protocol import AuthorityStop
 from companion.privacy import epoch
 from companion.store import Store
+from tests.support.api_store import PREFIX, child_done, event_wait, headers
 from tests.support.core_http import real_core_http
 from tests.support.owner_authority import activate
-from tests.test_owner_input import captured, inbound
-
-PREFIX = "/internal/v1"
+from tests.support.owner_input import captured, inbound
 
 
-def headers(core):
-    return {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
-
-
-async def event_wait(event):
-    assert await asyncio.to_thread(event.wait, 3), "worker did not reach bounded test gate"
-
-
-async def child_done(process):
-    try:
-        output, error = await asyncio.wait_for(process.communicate(), 40)
-        assert process.returncode == 0, (output + error).decode(errors="replace")
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-
-
+@pytest.mark.parametrize("action", ["inputs/approve", "stop"])
 def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
-    core, tmp_path, monkeypatch, record_property,
+    core, tmp_path, monkeypatch, record_property, action,
 ):
     capture, _ = captured(core, tmp_path)
+    auth = headers(core)
+    body = capture.model_dump(mode="json")
+    if action == "stop":
+        core.settings.control_token = SecretStr("synthetic-owner-control-token")
+        auth = {"Authorization": "Bearer " + core.settings.control_token.get_secret_value()}
+        body = {"operation_id": "test-contended-stop", "authority": capture.authority}
     opened, closed, entered = [], [], threading.Event()
     owner_thread = threading.get_ident()
 
@@ -74,15 +61,15 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
             assert ready.rstrip(b"\r\n") == b"LOCKED"
             async with real_core_http(core) as port, httpx.AsyncClient(
                 base_url=f"http://127.0.0.1:{port}", trust_env=False, headers=headers(core),
-            ) as client:
+            ) as client, httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe:
+                assert (await probe.get(PREFIX + "/health/live")).status_code == 200
                 requests = [asyncio.create_task(client.post(
-                    PREFIX + "/owner-authority/inputs/approve",
-                    json=capture.model_dump(mode="json"),
+                    PREFIX + "/owner-authority/" + action, json=body, headers=auth,
                 )) for _ in range(2)]
                 await event_wait(entered)
                 assert not any(request.done() for request in requests)
                 before = perf_counter()
-                response = await asyncio.wait_for(client.get(PREFIX + "/health/live"), 0.75)
+                response = await asyncio.wait_for(probe.get(PREFIX + "/health/live"), 0.75)
                 elapsed = perf_counter() - before
                 record_property("health_during_write_wait_ms", round(elapsed * 1000, 3))
                 assert response.status_code == 200
@@ -92,8 +79,12 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
                 await process.stdin.drain()
                 responses = await asyncio.wait_for(asyncio.gather(*requests), 8)
                 assert all(response.status_code == 200 for response in responses)
-                duplicates = sorted(response.json()["duplicate"] for response in responses)
-                assert duplicates == [False, True]
+                if action == "stop":
+                    assert responses[0].json() == responses[1].json()
+                    assert responses[0].json()["state"] == "STOPPED"
+                else:
+                    assert sorted(response.json()["duplicate"] for response in responses) == [
+                        False, True]
             await child_done(process)
         finally:
             if process.returncode is None:
@@ -109,8 +100,12 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
     for _, connection, _ in opened:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             connection.execute("SELECT 1")
-    assert core.store.one("SELECT COUNT(*) n FROM runtime_meta WHERE key=?",
-                          (owner_input.INPUT + capture.event_id,))["n"] == 1
+    if action == "inputs/approve":
+        assert core.store.one('SELECT COUNT(*) n FROM runtime_meta WHERE key=%s',
+                              (owner_input.INPUT + capture.event_id,))["n"] == 1
+    else:
+        assert core.store.one("SELECT COUNT(*) n FROM owner_authority_revisions "
+                              "WHERE state='STOPPED'")["n"] == 1
 
 
 def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
@@ -144,7 +139,8 @@ def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
             assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
             async with real_core_http(core) as port, httpx.AsyncClient(
                 base_url=f"http://127.0.0.1:{port}", trust_env=False,
-            ) as client:
+            ) as client, httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe:
+                assert (await probe.get(PREFIX + "/health/live")).status_code == 200
                 path = "/internal/v2/affect/reset"
                 body = {"request_id": "concurrent-affect-reset"}
                 denied = await client.post(path, json=body, headers=headers(core))
@@ -157,7 +153,7 @@ def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
                             for _ in range(2)]
                 await event_wait(entered)
                 before = perf_counter()
-                health = await asyncio.wait_for(client.get(PREFIX + "/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get(PREFIX + "/health/live"), 0.75)
                 elapsed = perf_counter() - before
                 record_property("health_during_affect_write_wait_ms", round(elapsed * 1000, 3))
                 assert health.status_code == 200 and elapsed < 0.75
@@ -319,7 +315,7 @@ def test_cancel_joins_native_operation_and_closes_in_own_thread(
         # committed native receipt rather than admitting a second input.
         assert owner_input.approve(core.store, core.settings, core.clock, capture)["duplicate"]
     else:
-        assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+        assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                               (owner_input.INPUT + capture.event_id,)) is None
 
 
@@ -373,7 +369,8 @@ def test_owner_check_waits_for_fsynced_uncommitted_authority(
     async def scenario():
         async with real_core_http(core) as port, httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}", trust_env=False, headers=headers(core),
-        ) as client:
+        ) as client, httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe:
+            assert (await probe.get(PREFIX + "/health/live")).status_code == 200
             writing = asyncio.create_task(asyncio.to_thread(writer))
             checking = None
             try:
@@ -382,7 +379,7 @@ def test_owner_check_waits_for_fsynced_uncommitted_authority(
                     json={"authority": capture.authority, "purpose": "chat"}))
                 await asyncio.sleep(0.05)
                 before = perf_counter()
-                health = await asyncio.wait_for(client.get(PREFIX + "/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get(PREFIX + "/health/live"), 0.75)
                 elapsed = perf_counter() - before
                 record_property("health_during_journal_commit_gap_ms", round(elapsed * 1000, 3))
                 assert health.status_code == 200 and elapsed < 0.75
@@ -401,11 +398,12 @@ def test_owner_check_waits_for_fsynced_uncommitted_authority(
                                      return_exceptions=True)
     asyncio.run(scenario())
     for key in ("model_budget_blocked", "model_budget_restore_required"):
-        assert core.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (key,)) is None
+        assert core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s', (key,)) is None
 
 
 def test_real_http_and_independent_sdk_worker_keep_unknown_and_stop_receipts(core, tmp_path):
     capture, _ = captured(core, tmp_path)
+    core.settings.control_token = SecretStr("synthetic-owner-control-token")
 
     async def scenario():
         async with real_core_http(core) as port, httpx.AsyncClient(
@@ -449,8 +447,10 @@ def test_real_http_and_independent_sdk_worker_keep_unknown_and_stop_receipts(cor
             repeated = await client.post(PREFIX + "/deliveries/lease", json={
                 "worker_id": "thread-http-retry", "authority": capture.authority})
             assert repeated.json()["items"] == []
-            owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
-                operation_id="thread-http-stop", authority=capture.authority))
+            stop = await client.post(PREFIX + "/owner-authority/stop", headers={
+                "Authorization": "Bearer " + core.settings.control_token.get_secret_value(),
+            }, json={"operation_id": "thread-http-stop", "authority": capture.authority})
+            assert stop.status_code == 200 and stop.json()["state"] == "STOPPED"
             for suffix, body in [
                 ("/owner-authority/check", {"authority": capture.authority, "purpose": "chat"}),
                 ("/owner-authority/inputs/approve", capture.model_dump(mode="json")),
@@ -458,10 +458,10 @@ def test_real_http_and_independent_sdk_worker_keep_unknown_and_stop_receipts(cor
             ]:
                 stopped = await client.post(PREFIX + suffix, json=body)
                 assert stopped.status_code in {403, 409}, stopped.text
-            assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+            assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                                   (item["message_id"],))["state"] == "DELIVERY_UNCERTAIN"
             assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE state='SETTLED'")[
                 "n"] == 1
-            assert core.store.one("SELECT attempt_count FROM outbox WHERE message_id=?",
+            assert core.store.one('SELECT attempt_count FROM outbox WHERE message_id=%s',
                                   (item["message_id"],))["attempt_count"] == 1
     asyncio.run(scenario())

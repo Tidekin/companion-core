@@ -6,16 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from companion import meme_asset_migration, meme_policy, meme_service, owner_authority
+from companion import meme_policy, meme_service, owner_authority
 from companion.config import Settings
 from companion.contracts import CoreError
-from companion.core import Core
 from companion.expression import ExpressionEngine
-from companion.meme_core import CaptionBody, MemeCaptionService
-from companion.meme_retrieval import MemeRetrieval, blocked
+from companion.meme_retrieval import blocked
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import after, encode
-from companion_meme_protocol import CaptionResult, digest, parse
+from companion_meme_protocol import CaptionResult, parse
 from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.meme_semantic import caption_eligible as bridge_eligible
 from companion_onebot_bridge.meme_semantic_search import SemanticQuery
@@ -23,234 +21,9 @@ from companion_onebot_bridge.meme_semantic_search import context_allows as bridg
 from companion_onebot_bridge.window import config_matches
 from companion_onebot_bridge.window import digest as bridge_digest
 from tests.conftest import run
-from tests.meme_authority_fixture import admit
-from tests.support.owner_authority import activate
-from tests.test_meme_core import CAPTION, body, caption_environment, worker
-
-RULE = dict(
-    repo="synthetic/pack",
-    revision="a" * 40,
-    license="CC0",
-    license_path="LICENSE",
-    license_sha256="b" * 64,
-    asset_prefix="memes",
-    usage_basis="Synthetic public domain",
-)
-
-
-def licensed_payload(core, event, attempt, now):
-    payload = body(core, event, attempt, now)
-    proof = payload["source_evidence"]
-    page = f"https://github.com/{RULE['repo']}/tree/{RULE['revision']}"
-    archive = f"https://codeload.github.com/{RULE['repo']}/zip/{RULE['revision']}"
-    proof.update(
-        source_page=page,
-        asset_url=archive,
-        revision=RULE["revision"],
-        usage_basis=meme_policy.TrustedSource(**RULE).basis,
-    )
-    acquired = proof["acquisition"]
-    acquired.update(
-        source_page=page,
-        revision=RULE["revision"],
-        discovered_asset_url=f"https://raw.githubusercontent.com/{RULE['repo']}/{RULE['revision']}"
-        "/memes/like/hug.png",
-        archive_member="pack-" + RULE["revision"] + "/memes/like/hug.png",
-    )
-    acquired["fetch"].update(
-        requested_url=archive,
-        final_url=archive,
-        body_sha256="c" * 64,
-        hops=[{"url": archive, "address": "8.8.8.8", "status": 200}],
-    )
-    payload["asset"]["source_evidence_sha256"] = digest(proof)
-    return payload
-
-
-@pytest.fixture
-def runtime_case(core, tmp_path, monkeypatch, request):
-    async def setup():
-        async with caption_environment(core, tmp_path, monkeypatch) as values:
-            event, _, client, config, grant, now, attempt = values
-            payload = licensed_payload(core, event, attempt, now)
-            old = MemeCaptionService(core.store, core.settings, None, core.clock)
-            caption = old.submit(CaptionBody.model_validate(payload))
-            calls = []
-            assert await worker(core, calls) and len(calls) == 1
-            proof = payload["source_evidence"]
-            meta = {
-                "category": "like",
-                "description": "untrusted catalog text",
-                "tags": ["x"],
-                "suitable": ["comfort"],
-                "avoid": [],
-                **{
-                    k: proof[k]
-                    for k in (
-                        "source_page",
-                        "asset_url",
-                        "license",
-                        "usage_basis",
-                        "fetched_at",
-                        "revision",
-                    )
-                },
-                "acquisition_json": encode(proof["acquisition"]),
-            }
-            custody = {
-                "identity": [
-                    config.owner_qq_id,
-                    config.bot_qq_id,
-                    config.origin,
-                    config.protocol_epoch,
-                ],
-                "capture_public_key": config.capture_public_key
-                or grant.key.public_key().public_bytes_raw().hex(),
-                "authority": grant.authority,
-            }
-            item = {
-                "asset_sha256": payload["asset"]["asset_sha256"],
-                "source_sha256": payload["asset"]["source_evidence_sha256"],
-                "active": True,
-                "metadata": meta,
-                "mime": "image/png",
-            }
-            data = old.store.one(
-                "SELECT asset_data FROM meme_captions WHERE job_id=?", (caption["job_id"],)
-            )["asset_data"]
-            with core.store.transaction():
-                imported = meme_asset_migration._apply(
-                    core.store, core.settings, {"custody": custody}, [(item, data)]
-                )
-            assert imported[0]["state"] == "STAGED"
-            if getattr(request, "param", None) == "two_sources":
-                other = json.loads(json.dumps(payload))
-                acquired = other["source_evidence"]["acquisition"]
-                acquired["discovered_asset_url"] = acquired["discovered_asset_url"].replace(
-                    "hug.png", "another-hug.png"
-                )
-                acquired["archive_member"] = acquired["archive_member"].replace(
-                    "hug.png", "another-hug.png"
-                )
-                other["asset"]["source_evidence_sha256"] = digest(other["source_evidence"])
-                second = old.submit(CaptionBody.model_validate(other))
-                assert second["state"] == "SUCCEEDED" and second["cache_hit"]
-                second_item = {
-                    **item,
-                    "source_sha256": other["asset"]["source_evidence_sha256"],
-                    "metadata": {**meta, "acquisition_json": encode(acquired)},
-                }
-                with core.store.transaction():
-                    assert (
-                        meme_asset_migration._apply(
-                            core.store, core.settings, {"custody": custody}, [(second_item, data)]
-                        )[0]["state"]
-                        == "STAGED"
-                    )
-            owner_authority.stop(
-                core.store,
-                core.settings,
-                core.clock,
-                AuthorityStop(operation_id="stop-bridge-catalog", authority=grant.authority),
-            )
-            core.settings = core.settings.model_copy(
-                update={
-                    "meme_catalog_owner": "core",
-                    "meme_trusted_sources": [meme_policy.TrustedSource(**RULE)],
-                    "meme_cooldown_seconds": 1800,
-                    "meme_discovery_enabled": False,
-                }
-            )
-            variant = getattr(request, "param", None)
-            if variant == "semantics_off":
-                core.settings.meme_semantics_enabled = False
-            if variant == "expression_off":
-                core.settings.expression_enabled = False
-            # The older discovery fixture uses model_copy(probability=1), which
-            # bypasses Settings' float validation. A real process loads validated
-            # settings (1.0); issue the new grant against that exact roundtrip.
-            core.settings = type(core.settings).model_validate(core.settings.model_dump())
-            purposes = {
-                "chat_only": ["chat"],
-                "no_meme": ["chat", "expression"],
-                "no_expression": ["chat", "meme"],
-            }.get(variant, grant.policy.purposes)
-            policy = type(grant.policy).model_validate(
-                {
-                    **grant.policy.model_dump(),
-                    "purposes": purposes,
-                    "capability_policies": {"meme": meme_service.policy_hash(core.settings)}
-                    if "meme" in purposes
-                    else {},
-                }
-            )
-            active, _ = activate(core, policy, revision=2, operation="activate-core-catalog")
-            new_grant = SimpleNamespace(authority=active["authority"], key=grant.key, policy=policy)
-            # This live HTTP server shares the original Settings reference. Reopen
-            # it later for Core-mode endpoint checks; ingress itself is unchanged.
-            import httpx
-
-            from tests.support.core_http import real_core_http
-
-            current = job = None
-            if getattr(request, "param", None) == "no_current":
-                service = MemeCaptionService(core.store, core.settings, None, core.clock)
-                return SimpleNamespace(
-                    core=core,
-                    service=service,
-                    retrieval=MemeRetrieval(service),
-                    job=None,
-                    source=event,
-                    caption_id=caption["job_id"],
-                    current=None,
-                    asset_id=imported[0]["asset_id"],
-                    data=data,
-                    config=config,
-                    grant=new_grant,
-                    item=item,
-                    custody=custody,
-                )
-            with Core(core.settings, clock=core.clock) as api_core:
-                async with (
-                    real_core_http(api_core) as port,
-                    httpx.AsyncClient(
-                        base_url=f"http://127.0.0.1:{port}",
-                        trust_env=False,
-                        headers={"Authorization": "Bearer " + config.bridge_token},
-                    ) as current_client,
-                ):
-                    current, accepted = await admit(
-                        current_client,
-                        config,
-                        new_grant,
-                        now,
-                        2,
-                        # A one-character reply is neither cued nor an ambient light turn.
-                        text={"no_match": "嗯", "ambient": "周末去公园走走",
-                              "ambient_low": "今天好累"}.get(variant, "想要温暖的抱抱"),
-                    )
-                    assert accepted.status_code == 202, accepted.text
-            with Core(core.settings, clock=core.clock) as claimant:
-                job = claimant.claim_job("runtime-case")
-            assert job is not None and job["event_id"] == current["event_id"]
-            service = MemeCaptionService(core.store, core.settings, None, core.clock)
-            return SimpleNamespace(
-                core=core,
-                service=service,
-                retrieval=MemeRetrieval(service),
-                job=job,
-                source=event,
-                caption_id=caption["job_id"],
-                current=current,
-                asset_id=imported[0]["asset_id"],
-                data=data,
-                config=config,
-                grant=new_grant,
-                item=item,
-                custody=custody,
-            )
-
-    return run(setup())
+from tests.support.meme_core import CAPTION
+from tests.support.meme_core_runtime import RULE
+from tests.support.meme_core_runtime import runtime_case as runtime_case
 
 
 def test_native_evidence_freezes_exact_source_and_registers_prompt_roots(runtime_case):
@@ -264,7 +37,7 @@ def test_native_evidence_freezes_exact_source_and_registers_prompt_roots(runtime
     binding = frozen["catalog_bindings"][candidate["candidate_id"]]
     assert binding["asset_id"] == c.asset_id and binding["caption_job_id"] == c.caption_id
     assert c.core.store.one(
-        "SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
+        'SELECT 1 FROM job_sources WHERE job_id=%s AND event_id=%s',
         (c.job["job_id"], c.source["event_id"]),
     )
     run(c.service.prepare_offer(c.job))
@@ -318,16 +91,16 @@ def test_catalog_mode_refuses_new_bridge_work_and_does_not_wait(runtime_case):
 
 def test_server_classified_controls_never_require_a_model_offer(runtime_case):
     c = runtime_case
-    row = c.core.store.one("SELECT body_json FROM events WHERE event_id=?", (c.job["event_id"],))
+    row = c.core.store.one('SELECT body_json FROM events WHERE event_id=%s', (c.job["event_id"],))
     value = json.loads(row["body_json"])
     c.core.store.execute(
-        "UPDATE events SET body_json=? WHERE event_id=?",
+        'UPDATE events SET body_json=%s WHERE event_id=%s',
         (encode({**value, "control_command": True}), c.job["event_id"]),
     )
     run(c.service.prepare_offer(c.job))
     c.service.check_offer(c.job)
     assert not c.core.store.one(
-        "SELECT 1 FROM runtime_meta WHERE key=?", ("meme_offer:" + c.job["event_id"],)
+        'SELECT 1 FROM runtime_meta WHERE key=%s', ("meme_offer:" + c.job["event_id"],)
     )
     assert ExpressionEngine(c.core.store, c.core.settings, c.core.clock)._offer(
         c.job["event_id"]
@@ -365,8 +138,11 @@ def test_same_bytes_choose_one_exact_origin_and_never_substitute(runtime_case):
     selected = next(iter(saved["catalog_bindings"].values()))
     assert selected["asset_id"] == assets[0]["asset_id"]
     c.core.store.execute(
-        "UPDATE meme_assets SET state='REMOVED',data=NULL,mime=NULL,"
-        "metadata_json=NULL WHERE asset_id=?",
+        (
+            'UPDATE meme_assets SET '
+            "state='REMOVED',data=NULL,mime=NULL,metadata_json=NULL WHERE "
+            'asset_id=%s'
+        ),
         (selected["asset_id"],),
     )
     assert c.core.store.one("SELECT COUNT(*) AS n FROM meme_assets WHERE state='STAGED'")["n"] == 1
@@ -383,7 +159,7 @@ def test_erasure_of_original_root_invalidates_derived_offer_without_refunding(ru
     with c.core.store.transaction():
         c.core.ledger.expire_events(c.core.store, [c.source["event_id"]], c.core.clock())
     assert not c.core.store.one(
-        "SELECT 1 FROM runtime_meta WHERE key=?", ("meme_offer:" + c.job["event_id"],)
+        'SELECT 1 FROM runtime_meta WHERE key=%s', ("meme_offer:" + c.job["event_id"],)
     )
     asset = c.core.store.one("SELECT * FROM meme_assets")
     assert asset["state"] == "ERASED" and asset["data"] is asset["metadata_json"] is None
@@ -440,8 +216,8 @@ def test_independent_connections_to_same_authoritative_store_reserve_one_image(r
 )
 def test_exact_lexical_gates_match_original_bridge(updates):
     from companion_meme_protocol import sample_frames, validate_bytes
-    from tests.test_next_memes_animation import canvas_gif
-    from tests.test_next_memes_catalog import png
+    from tests.support.next_memes_animation import canvas_gif
+    from tests.support.next_memes_catalog import png
 
     data = canvas_gif([(24, 24), (24, 24)]) if updates.get("temporal_status") else png()
     sampling, _ = sample_frames(data, SimpleNamespace(validate_bytes=validate_bytes))
@@ -542,7 +318,7 @@ def test_frozen_prompt_and_binding_reject_tampering_before_new_model_work(runtim
         )
     before = c.core.store.rows("SELECT * FROM model_usage")
     c.core.store.execute(
-        "UPDATE runtime_meta SET value=? WHERE key=?",
+        'UPDATE runtime_meta SET value=%s WHERE key=%s',
         (encode(saved), "meme_offer:" + c.job["event_id"]),
     )
     with pytest.raises(CoreError):

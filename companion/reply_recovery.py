@@ -10,7 +10,13 @@ from contextlib import nullcontext
 from cryptography.exceptions import InvalidSignature
 from pydantic import Field
 
-from companion import owner_authority, owner_delivery, owner_input, reply_revision
+from companion import (
+    job_queue,
+    owner_authority,
+    owner_delivery,
+    owner_input,
+    reply_revision,
+)
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import epoch
 from companion.store import encode, uid
@@ -89,18 +95,19 @@ def _original(store, settings, clock, message_id):
         p["kind"] in {"reader", "images", "singing", "video_preview_reply"} for p in snapshots
     ) or store.one("SELECT 1 FROM agent_image_inputs WHERE job_id = %s", (job["job_id"],)):
         _fail()
-    proof = owner_delivery._history_proof(store, job)
+    proof = owner_delivery._history_proof(store, job, snapshots)
     if proof != owner_input.history_proof(
         owner_input.history_for_owner(store, settings, clock, job, current)
     ):
         raise CoreError(reply_revision.CANCELLED, 409)
-    owner_delivery._memories(store, settings, clock, job, current)
+    owner_delivery._memories(store, settings, clock, current, snapshots)
     if len(group["text"]) > current.policy.max_reply_chars:
         _fail()
     requests = owner_delivery._usage(store, job, original, snapshots, message_id, group=group)
+    context_hashes = owner_delivery._context_hashes(proof, snapshots)
     for row in group["rows"]:
         saved = _meta(store, owner_delivery.DELIVERY + row["message_id"])
-        if saved != owner_delivery._material(store, row, job, original, requests, snapshots):
+        if saved != owner_delivery._material(store, row, job, original, requests, context_hashes):
             _fail()
     return group, job, current
 
@@ -320,19 +327,8 @@ def create(store, settings, clock, message_id, expected, operation, fingerprint)
             memory_processed=1,
             reply_revision=value["reply_revision"],
         )
-        store.insert(
-            "jobs",
-            job_id=job_id,
-            event_id=event_id,
-            kind=KIND,
-            state="SUCCEEDED",
-            idempotency_key=key,
-            max_attempts=1,
-            context_tracked=1,
-            created_at=now,
-            updated_at=now,
-            authority_json=encode(current.authority.as_dict()),
-        )
+        job_queue.create(store, job_id, event_id, KIND, key, now, state="SUCCEEDED",
+                         authority=current.authority.as_dict())
         dependencies = {
             value["original_event_id"],
             *(
@@ -388,13 +384,7 @@ def create(store, settings, clock, message_id, expected, operation, fingerprint)
                 (new_id,),
             )
             material = _material(store, row, record, index)
-            store.execute(
-                "UPDATE outbox SET authority_json = %s WHERE message_id = %s",
-                (encode(current.authority.as_dict()), new_id),
-            )
-            store.insert(
-                "runtime_meta", key=owner_delivery.DELIVERY + new_id, value=encode(material)
-            )
+            owner_delivery.bind_material(store, new_id, current.authority.as_dict(), material)
         store.audit(
             "delivery.recovery_created",
             job_id,

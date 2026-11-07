@@ -3,7 +3,7 @@
 import asyncio
 import copy
 import json
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 import httpcore
 import httpx
@@ -16,25 +16,19 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import ReadFailure
 from source_reader.web import WebHTTP
 from tests.conftest import run
-from tests.test_heybox_reader import mock_pool
-from tests.test_next_reading import HTML, WEB, web_response
-from tests.test_plugin_readonly import SECRET, grant
-from tests.test_source_reader import ITEM, META, NOW, PLAYER, RecordingStream, Responses, response
-
-NOW_DT = datetime.fromisoformat(NOW)
-TOKEN = "isolated-reader-core-token-only"
-
-
-def lease(source="web", **changes):
-    return {
-        **ITEM, "schema_version": 1, "request_id": "read_fixture_v1",
-        "lease_until": (NOW_DT + timedelta(seconds=30)).isoformat(),
-        "url": WEB if source == "web" else ITEM["url"],
-        "context": {"root_task_id": "root_fixture_v1", "source": source,
-                    "source_event_ids": ["evt_owner_1"], "privacy_epoch": 3},
-        "allowed_hosts": ["articles.example"] if source == "web" else [],
-        **changes,
-    }
+from tests.support.heybox_reader import mock_pool
+from tests.support.next_reading import HTML, web_response
+from tests.support.next_reading_worker import NOW_DT, TOKEN, lease
+from tests.support.plugin_readonly import SECRET, grant
+from tests.support.source_reader import (
+    ITEM,
+    META,
+    NOW,
+    PLAYER,
+    RecordingStream,
+    Responses,
+    response,
+)
 
 
 class MockCore:

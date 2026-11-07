@@ -14,9 +14,9 @@ from companion.qq_faces import FACE_NAMES
 from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import run
 from tests.support.native_context import source_window
+from tests.support.onebot_capture import bootstrap_frames
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_capture import bootstrap_frames
-from tests.test_qq_rich_input import rich_event
+from tests.support.qq_rich_input import rich_event
 
 
 @pytest.mark.parametrize("identifier,name", [("14", "微笑"), ("264", "捂脸"), ("277", "汪汪"),

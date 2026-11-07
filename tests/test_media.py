@@ -16,13 +16,10 @@ from pydantic import ValidationError
 
 from companion.android_observer import AndroidObserver
 from companion.backup import backup, restore
-from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.media import (
-    MediaChunk,
     MediaService,
-    MediaSessionRequest,
     android_text,
     erase_media_links,
 )
@@ -31,88 +28,7 @@ from companion.media_config import MediaConfig, MediaEndpoint
 from companion.media_provider import HTTPMediaProvider, MediaResult
 from companion.store import Store
 from tests.conftest import ingest, run
-
-AUDIO = b"\x1aE\xdf\xa3test-audio-fixture"
-IMAGE = b"\xff\xd8\xfftest-image-fixture"
-XML = (
-    b'<?xml version="1.0"?><hierarchy><node text="Visible title" />'
-    b'<node text="hidden-password" password="true" /></hierarchy>'
-)
-
-
-class FakeMedia:
-    def __init__(self):
-        self.calls = []
-        self.callback = None
-        self.fail = False
-
-    async def process(self, operation, data, mime_type, endpoint):
-        self.calls.append((operation, data, mime_type, endpoint.model))
-        if self.callback:
-            await self.callback()
-        if self.fail:
-            raise CoreError("MEDIA_PROVIDER_UNCERTAIN", 502)
-        return (
-            MediaResult(audio=b"ID3valid-audio-fixture", mime_type="audio/mpeg")
-            if operation == "speech"
-            else MediaResult(text="可见的测试内容")
-        )
-
-
-def service(core, **changes):
-    core.settings.observation_enabled = True
-    core.settings.voice_enabled = core.settings.camera_enabled = core.settings.android_enabled = (
-        True
-    )
-    core.settings.observation_adapters = {
-        "media_" + source: ObservationAdapterConfig(
-            token=source + "-adapter-token-" * 3,
-            source=source,
-            media_analysis=source != "android",
-        )
-        for source in ("voice", "camera", "android")
-    }
-    endpoint = MediaEndpoint(
-        url="https://media.example.test/process",
-        model="fixture-media",
-        key="private-media-provider-key",
-        max_request_micro_usd=100,
-    )
-    options = MediaConfig(
-        enabled=True, daily_micro_usd=1000, stt=endpoint, tts=endpoint, vision=endpoint, **changes
-    )
-    fake = FakeMedia()
-    return MediaService(core.store, core.settings, core.clock, core.observations, options, fake)
-
-
-def start(media, modalities=None, **fields):
-    modalities = modalities or ["voice"]
-    return media.start(
-        MediaSessionRequest(
-            device_id=fields.pop(
-                "device_id", "adb:device-1" if "android" in modalities else "browser-owner"
-            ),
-            modalities=modalities,
-            **fields,
-        )
-    )
-
-
-def chunk(operation="audio", key="chunk-one", data=None):
-    if operation == "speech":
-        return MediaChunk(request_key=key, operation=operation, mime_type="text/plain", text="你好")
-    content = {"audio": AUDIO, "camera": IMAGE, "android": XML}[operation] if data is None else data
-    mime = {"audio": "audio/webm", "camera": "image/jpeg", "android": "application/xml"}[operation]
-    return MediaChunk(
-        request_key=key,
-        operation=operation,
-        mime_type=mime,
-        data_base64=base64.b64encode(content).decode(),
-    )
-
-
-def process(media, session, item):
-    return run(media.process(session["session_id"], session["session_token"], item))
+from tests.support.media import AUDIO, IMAGE, XML, FakeMedia, chunk, process, service, start
 
 
 def test_media_defaults_disabled_and_explicit_device_grants(core):
@@ -158,7 +74,7 @@ def test_media_creates_actual_observation_without_raw_retention_or_delivery(
     media = service(core)
     session = start(media, [source])
     result = process(media, session, chunk(operation))
-    row = core.store.one("SELECT * FROM observations WHERE event_id=?", (result["event_id"],))
+    row = core.store.one('SELECT * FROM observations WHERE event_id=%s', (result["event_id"],))
     assert row["source_kind"] == kind and row["result_status"] == "FETCHED"
     assert row["device_id"] == ("adb:device-1" if source == "android" else "browser-owner")
     evidence = json.loads(row["evidence_json"])
@@ -217,7 +133,7 @@ def test_consent_privacy_and_feature_rechecked_after_provider(core, change, erro
 
     async def callback():
         if change == "revoke":
-            core.store.execute("UPDATE consents SET revoked_at=?", (core.clock(),))
+            core.store.execute('UPDATE consents SET revoked_at=%s', (core.clock(),))
         elif change == "privacy":
             core.observations.consents.revoke(session["consent_id"])
         elif change == "disabled":
@@ -304,7 +220,7 @@ def test_concurrent_requests_cannot_overspend_remaining_session_budget(core):
 
 @pytest.mark.parametrize("tool_state", ["RUNNING", "UNKNOWN"])
 def test_tool_reservations_and_unknown_cost_block_media_monthly_overspend(core, tool_state):
-    from tests.test_executive import FakeExecutor, configured, proposal
+    from tests.support.executive import FakeExecutor, configured, proposal
 
     executor = FakeExecutor()
     executive = configured(core, executor)
@@ -396,7 +312,7 @@ def test_media_commit_is_atomic_with_actual_erasure_on_another_connection(core):
         futures[0].result(timeout=5)
     assert committed == [{"state": "SUCCEEDED", "event_id": result["event_id"]}]
     assert core.store.one(
-        "SELECT redacted FROM events WHERE event_id=?", (result["event_id"],)
+        'SELECT redacted FROM events WHERE event_id=%s', (result["event_id"],)
     ) == {"redacted": 1}
     request = core.store.one("SELECT * FROM media_requests")
     assert request["fingerprint"] == "" and request["event_id"] is None

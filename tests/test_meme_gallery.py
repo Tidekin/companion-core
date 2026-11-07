@@ -12,38 +12,12 @@ from companion import meme_policy, meme_service, owner_authority
 from companion.contracts import CoreError
 from companion.meme_core import _proof
 from companion_meme_protocol import digest
-from companion_meme_sources.gallery import IMAGE_BASE, TERMS_BASE, Selection
+from companion_meme_sources.gallery import IMAGE_BASE, Selection
 from tests.conftest import run
-from tests.test_meme_core import worker
-from tests.test_meme_native_discovery import native_case, release_foreground
-from tests.test_next_memes_catalog import png
-
-TERMS = b"Test-authored gallery fixture. Personal noncommercial chat use.\n"
-SELECTION = {
-    "version": 1, "index_sha256": "a" * 64, "terms_revision": "b" * 40,
-    "terms_sha256": hashlib.sha256(TERMS).hexdigest(), "usage_basis": "Synthetic personal chat",
-    "images": [{"path": "001.png", "intents": ["comfort", "celebrate"]}],
-}
-
-
-class GalleryUpstream:
-    def __init__(self):
-        self.calls = []
-        self.terms = TERMS
-        self.image = png()
-        self.redirect = False
-
-    def handle(self, request):
-        assert request.url.host == "93.184.216.34"
-        assert request.headers["Host"] == request.extensions["sni_hostname"]
-        original = str(request.url.copy_with(host=request.headers["Host"]))
-        self.calls.append(original)
-        if original == TERMS_BASE + SELECTION["terms_revision"] + "/README.md":
-            return httpx.Response(200, content=self.terms, headers={"Content-Type": "text/plain"})
-        assert original == IMAGE_BASE + "001.png"
-        if self.redirect:
-            return httpx.Response(302, headers={"Location": "https://different.invalid/001.png"})
-        return httpx.Response(200, content=self.image, headers={"Content-Type": "image/png"})
+from tests.support.meme_core import worker
+from tests.support.meme_gallery import SELECTION, TERMS, GalleryUpstream
+from tests.support.meme_native_discovery import native_case, release_foreground
+from tests.support.next_memes_catalog import png
 
 
 def setup(c, upstream):
@@ -167,7 +141,7 @@ def test_retained_failed_gallery_caption_does_not_restart_import(core, tmp_path,
             calls = []
             assert await worker(core, calls, content="not valid caption JSON")
             caption = core.store.one("SELECT job_id FROM meme_captions")
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                   (caption["job_id"],))["state"] == "FAILED"
             assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
             assert c.service.discovery._held(c.event["event_id"]) == {IMAGE_BASE + "001.png"}

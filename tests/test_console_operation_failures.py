@@ -11,7 +11,7 @@ from companion.diary import DiaryService
 from companion.goals import GoalEngine
 from companion.memory import Memory
 from companion.store import encode
-from tests import test_owner_console
+from tests.support import owner_console as test_owner_console
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def test_native_pre_effect_rejections_replay_without_reexecuting(
     if case in {"inactive", "blank", "credential"}:
         memory, _ = test_owner_console.stored_memory(core)
     if case == "inactive":
-        core.store.execute("UPDATE memories SET status='SUPERSEDED' WHERE memory_id=?", (memory,))
+        core.store.execute("UPDATE memories SET status='SUPERSEDED' WHERE memory_id=%s", (memory,))
     route = f"/v1/console/memories/{memory}/decision"
     body = {"decision": "confirm"}
     if case in {"blank", "credential"}:

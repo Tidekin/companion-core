@@ -13,8 +13,8 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.owner_send import OwnerSendGuard
 from companion_onebot_bridge.spool import Spool, encode
+from tests.support.bridge_owner_runtime import config as config
 from tests.support.onebot_events import raw_event
-from tests.test_bridge_owner_runtime import config as config
 
 
 @pytest.fixture
@@ -79,7 +79,8 @@ def test_db_only_changes_recheck_projections_without_materializing_or_mutating_r
         invalidate(runtime, foreign=foreign)
         found = runtime.verify()
         assert found == before and original == before
-        assert found is not original and found[0] is original[0]
+        found[0]["data"]["authority"]["revision"] = -1
+        assert original == before and runtime.verify() == before
     assert len(calls) == 2
     with runtime.db:
         runtime.db.execute("UPDATE window_inputs SET input_hash=?", ("f" * 64,))
@@ -88,8 +89,10 @@ def test_db_only_changes_recheck_projections_without_materializing_or_mutating_r
     assert runtime._verified is None and original == before
 
 
-def test_db_only_replay_still_checks_current_journal_permissions(runtime, monkeypatch):
-    invalidate(runtime)
+@pytest.mark.parametrize("db_changed", [False, True])
+def test_cached_verification_checks_current_journal_permissions(runtime, monkeypatch, db_changed):
+    if db_changed:
+        invalidate(runtime)
     original = type(runtime.path).lstat
 
     def lstat(path):

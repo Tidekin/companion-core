@@ -7,15 +7,10 @@ from companion_onebot_bridge import owner_notices
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool, encode
+from tests.support.bridge_owner_notices import frame
+from tests.support.bridge_owner_runtime import config as config
 from tests.support.onebot_events import raw_event
-from tests.test_bridge_owner_runtime import config as config
-from tests.test_reading_followup import window
-
-
-def frame(config, now):
-    return encode({"post_type": "notice", "notice_type": "friend_recall",
-        "time": int(now.timestamp()), "self_id": int(config.bot_qq_id),
-        "user_id": int(config.owner_qq_id), "message_id": 1})
+from tests.support.reading_followup import window
 
 
 def test_notice_journal_detects_projection_change(config):
@@ -55,7 +50,7 @@ def test_native_recall_queue_reaches_real_api_and_erases_original_input(
                     runtime.stop()
                     assert await owner_notices.flush_one(runtime, client)
                 runtime.verify(active=False)
-                stored = core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                stored = core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                         (event["event_id"],))
                 if early:
                     assert stored is None

@@ -11,19 +11,10 @@ from companion.autonomous_selector import Lane, RoundRobin, native_selector
 from companion.contracts import CoreError
 from companion.worker_schedule import UnitResult
 from tests.conftest import ingest, run
-from tests.test_diary import seed_day
-from tests.test_life_topics import bug, proposal
-from tests.test_social_autonomy import background
-
-
-async def drain(selector, limit=100):
-    turns = []
-    for _ in range(limit):
-        selected = await selector.step()
-        turns.append(selected)
-        if not selected.more:
-            return turns
-    pytest.fail("native selector did not finish its bounded idle sweep")
+from tests.support.autonomous_selector import drain
+from tests.support.diary import seed_day
+from tests.support.life_topics import bug, proposal
+from tests.support.social_autonomy import background
 
 
 def test_fenced_units_consume_turns_and_idle_sweep_is_finite():
@@ -233,7 +224,7 @@ def test_social_budget_deferral_reuses_original_native_job_after_deadline(core, 
     selector.resume()
     run(drain(selector))
     assert len(module.model.calls) == 1
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],))[
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],))[
         "state"] == "SUCCEEDED"
     assert core.store.one("SELECT COUNT(*) n FROM jobs WHERE kind='social_plan'")["n"] == 1
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
@@ -272,8 +263,8 @@ def test_owner_pending_blocks_all_autonomous_lanes_but_not_native_chat(core):
 
 def test_chat_bound_content_dependency_keeps_running_while_selector_yields(core, monkeypatch):
     from companion import content
-    from tests.test_article_vision import article
-    from tests.test_content import enable, png
+    from tests.support.article_vision import article
+    from tests.support.content import enable, png
 
     service, provider = enable(core)
     owner_id, article_id = article(core, 1)
@@ -290,7 +281,7 @@ def test_chat_bound_content_dependency_keeps_running_while_selector_yields(core,
     assert (image["owner_event_id"], image["source_event_id"]) == (owner_id, article_id)
     assert image["state"] == "SUCCEEDED" and len(provider.calls) == 1
     assert run(core.run_once("foreground"))
-    finished = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+    finished = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],))
     assert finished["event_id"] == owner_id and finished["state"] == "SUCCEEDED"
 
 

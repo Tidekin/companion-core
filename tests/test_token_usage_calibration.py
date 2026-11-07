@@ -10,7 +10,7 @@ from companion import budget, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelResponse
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 MESSAGES = [{"role": "user", "content": "hello"}]
 
@@ -19,13 +19,18 @@ def reserve(core):
     request = budget.reserve(
         core.store, core.settings, authorized_job(core), "chat", MESSAGES, core.clock(),
     )
-    return request, core.store.one("SELECT * FROM model_admissions WHERE request_id=?", (request,))
+    return request, core.store.one('SELECT * FROM model_admissions WHERE request_id=%s', (request,))
 
 
 def diagnostic(core, request):
     row = core.store.one(
-        "SELECT safe_detail_json FROM audit_log WHERE action='model.usage_diagnostic' "
-        "AND entity_id=? ORDER BY rowid DESC", (request,),
+        (
+            (
+                'SELECT safe_detail_json FROM audit_log WHERE '
+                "action='model.usage_diagnostic' AND entity_id=%s ORDER BY "
+                'record_sequence DESC'
+            )
+        ), (request,),
     )
     return json.loads(row["safe_detail_json"])
 
@@ -49,7 +54,7 @@ def test_small_underestimate_settles_actual_usage_and_does_not_stop_the_next_cal
     budget.settle(core.store, core.settings, request, ModelResponse(
         "ok", actual_input, admission["output_bound"],
     ))
-    usage = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request,))
+    usage = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,))
     assert usage["state"] == "SETTLED"
     assert usage["billed_micro_usd"] > admission["reserved_micro_usd"]
     assert diagnostic(core, request)["input_error_tokens"] == 10
@@ -87,7 +92,7 @@ def test_actual_cost_over_a_local_limit_keeps_usage_and_stops_new_io(core, tmp_p
     budget.settle(core.store, core.settings, request, ModelResponse(
         "ok", estimated + 10, admission["output_bound"],
     ))
-    usage = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request,))
+    usage = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,))
     assert usage["state"] == "UNKNOWN"
     assert usage["input_tokens"] == estimated + 10
     assert usage["billed_micro_usd"] == estimate_cost + 10
@@ -126,7 +131,7 @@ def test_transport_unknown_keeps_liability_and_limits_new_native_work(core, tmp_
     request, _ = reserve(core)
     budget.settle(core.store, core.settings, request)
     assert diagnostic(core, request)["code"] == "TRANSPORT_USAGE_UNKNOWN"
-    original = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request,))
+    original = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,))
     with pytest.raises(CoreError, match="CLOUD_TASK_USAGE_UNCERTAIN"):
         reserve(core)
     job = authorized_job(core, number=2)
@@ -134,7 +139,7 @@ def test_transport_unknown_keeps_liability_and_limits_new_native_work(core, tmp_
     assert second != request
     with pytest.raises(CoreError, match="CONCURRENCY"):
         budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
-    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request,)) == original
+    assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,)) == original
     summary = budget.usage_diagnostics(core.store.db)
     assert summary["calibrated_calls"] == summary["input_actual_tokens"] == 0
     assert summary["currency"] is None

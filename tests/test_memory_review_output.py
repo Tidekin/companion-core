@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from companion import budget, owner_authority
+from companion import owner_authority
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import REVIEW_RULES, ModelClient
@@ -13,6 +13,7 @@ from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.memory_review_output import assert_settled_calls
 from tests.support.owner_memory import environment
 
 FACT = "我用🤔表示在考虑青禾项目的蓝色配色"
@@ -29,15 +30,6 @@ def tool_response(arguments='{"query":"*"}', *, usage=True):
 
 def tool_result(messages):
     return next(message["content"] for message in messages if message["role"] == "tool")
-
-
-def assert_settled_calls(core, count, *, scenario="chat"):
-    charged = budget.cost(core.settings, 100, 20, scenario=scenario)
-    assert charged > 0
-    assert core.store.rows(
-        "SELECT scenario,state,input_tokens,output_tokens,billed_micro_usd FROM model_usage"
-    ) == [{"scenario": scenario, "state": "SETTLED", "input_tokens": 100,
-           "output_tokens": 20, "billed_micro_usd": charged}] * count
 
 
 @pytest.mark.parametrize("arguments", [

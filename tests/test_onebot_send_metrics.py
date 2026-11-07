@@ -16,7 +16,7 @@ from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.support.astrbot_delivery import deliver_expression, journal
 from tests.support.onebot_events import config
-from tests.test_onebot_rpc_metrics import CANARY, records
+from tests.support.onebot_rpc_metrics import CANARY, records
 
 
 async def attempt(tmp_path, fault, clock=None):

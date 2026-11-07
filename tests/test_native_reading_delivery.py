@@ -8,7 +8,8 @@ from companion.store import encode
 from companion_delivery_protocol import digest
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
-from tests.test_reading_followup import URL, admit, finish, lease, select_read, window
+from tests.support.exploration import URL
+from tests.support.reading_followup import admit, finish, lease, select_read, window
 
 
 @pytest.mark.parametrize("drift,boundary", [
@@ -39,17 +40,21 @@ def test_native_reader_reply_revalidates_observation_after_generation(
 
             def change():
                 if drift == "body":
-                    row = core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                    row = core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                          (observed,))
                     value = json.loads(row["body_json"]) | {"text": "正文已经变化"}
-                    core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                    core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                        (encode(value), observed))
                 elif drift == "evidence":
-                    core.store.execute("UPDATE observations SET evidence_json='{}' "
-                                       "WHERE event_id=?", (observed,))
+                    core.store.execute((
+                        "UPDATE observations SET evidence_json='{}' WHERE "
+                        'event_id=%s'
+                    ), (observed,))
                 elif drift == "binding":
-                    core.store.execute("DELETE FROM exploration_evidence WHERE request_id=? "
-                        "AND event_id=?", (item["request_id"], observed))
+                    core.store.execute((
+                        'DELETE FROM exploration_evidence WHERE request_id=%s'
+                        ' AND event_id=%s'
+                    ), (item["request_id"], observed))
 
             if boundary == "before_lease":
                 change()

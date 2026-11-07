@@ -14,17 +14,21 @@ from tests.support.native_segments import session
 def receipt_rows(core):
     # Model reply receipts only; a final failure adds Core's fixed failure notice.
     return core.store.rows(
-        "SELECT key,value FROM runtime_meta WHERE key LIKE 'owner_delivery:%' "
-        "AND json_extract(value,'$.kind') IS NOT 'failure_notice' ORDER BY key",
+        (
+            'SELECT key,value FROM runtime_meta WHERE key LIKE '
+            "'owner_delivery:%%' AND (CASE WHEN value IS JSON THEN "
+            "value::json #>> '{kind}' END) IS DISTINCT FROM 'failure_notice' "
+            'ORDER BY key'
+        ),
     )
 
 
 def model_replies(core):
-    return core.store.rows("SELECT * FROM outbox WHERE delivery_key NOT LIKE 'failure:%'")
+    return core.store.rows("SELECT * FROM outbox WHERE delivery_key NOT LIKE 'failure:%%'")
 
 
 def one_failure_notice(core):
-    rows = core.store.rows("SELECT content_json FROM outbox WHERE delivery_key LIKE 'failure:%'")
+    rows = core.store.rows("SELECT content_json FROM outbox WHERE delivery_key LIKE 'failure:%%'")
     assert [json.loads(row["content_json"]) for row in rows] == [
         {"text": owner_delivery.FAILURE_TEXT}]
 
@@ -161,17 +165,17 @@ def test_each_send_boundary_rechecks_current_state(core, tmp_path, monkeypatch, 
                 owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                     operation_id="stop-native-validation-reuse", authority=ref))
             elif change == "receipt":
-                saved = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                saved = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                     (owner_delivery.DELIVERY + item["message_id"],))
                 value = json.loads(saved["value"]) | {"content_sha256": "0" * 64}
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                     (json.dumps(value), owner_delivery.DELIVERY + item["message_id"]))
             else:
                 core.clock.advance(core.settings.lease_seconds + 1)
             with pytest.raises(CoreError, match=error):
                 owner_delivery.send_check(core.store, core.settings, core.clock, check)
             assert len(sources) == 3
-            assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+            assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                                   (item["message_id"],))["state"] == "SENDING"
             assert core.store.rows("SELECT * FROM model_usage") == usage
             assert host.sends == []

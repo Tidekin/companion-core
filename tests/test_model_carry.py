@@ -25,7 +25,7 @@ from tests.support.owner_authority import activate
 
 def test_explicit_carry_preserves_unknown_nonterminal_and_original_caps(core, tmp_path):
     case = stranded(core, tmp_path)
-    financial = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (case.request_id,))
+    financial = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (case.request_id,))
     state = owner_input_state.read(core.store, core.settings, case.capture)
     assert state["unsettled_model"] and not state["terminal"] and not state["unsettled_work"]
     receipt = model_carry.prepare(
@@ -55,7 +55,7 @@ def test_explicit_carry_preserves_unknown_nonterminal_and_original_caps(core, tm
     )
     assert successor["authority"]["revision"] == 3
     assert (
-        core.store.one("SELECT * FROM model_usage WHERE request_id=?", (case.request_id,))
+        core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (case.request_id,))
         == financial
     )
     assert owner_input_state.read(core.store, core.settings, case.capture)["unsettled_model"]
@@ -123,7 +123,7 @@ def test_duplicate_request_finally_cannot_release_original_active_transport(core
     job = authorized_job(core, number=2)
     request_id = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
     original = core.store.one(
-        "SELECT billed_micro_usd FROM model_usage WHERE request_id=?", (case.request_id,)
+        'SELECT billed_micro_usd FROM model_usage WHERE request_id=%s', (case.request_id,)
     )["billed_micro_usd"]
 
     async def exercise():
@@ -177,7 +177,7 @@ def test_duplicate_request_finally_cannot_release_original_active_transport(core
 
     asyncio.run(exercise())
     assert core.store.one(
-        "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?", (case.request_id,)
+        'SELECT billed_micro_usd,state FROM model_usage WHERE request_id=%s', (case.request_id,)
     ) == {"billed_micro_usd": original, "state": "UNKNOWN"}
 
 

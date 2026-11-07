@@ -16,12 +16,12 @@ from source_reader.network import PublicHTTP
 from source_reader.worker_v1 import tick
 from tests.conftest import ingest, run
 from tests.support.core_http import real_core_http
+from tests.support.exploration import configure
+from tests.support.heybox_reader import mock_pool
 from tests.support.owner_authority import activate
-from tests.test_exploration import configure
-from tests.test_heybox_reader import mock_pool
-from tests.test_owner_authority import prepare
-from tests.test_source_reader import META, PLAYER, SUBTITLE, response
-from tests.test_topic_selection import judged
+from tests.support.owner_authority_setup import prepare
+from tests.support.source_reader import META, PLAYER, SUBTITLE, response
+from tests.support.topic_selection import judged
 
 
 def enable(core):
@@ -141,18 +141,25 @@ def test_idle_wake_yields_to_recent_owner_input_and_quiet_hours(core):
 
 
 def test_open_topic_has_priority_and_pause_and_daily_limit_still_apply(core):
-    from tests.test_life_topics import bug
+    from tests.support.life_topics import bug
 
     topic = bug(core)
     enable(core)
     core.clock.advance(core.settings.proactive_idle_seconds + 1)
     assert topic and not core.wake.evaluate()
     core.store.execute("UPDATE life_topics SET state='CLOSED'")
-    core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused','1')")
+    core.store.execute(
+        "INSERT INTO runtime_meta (key,value) VALUES ('life_paused','1') ON "
+        'CONFLICT(key) DO UPDATE SET '
+        'value=excluded.value,record_sequence=DEFAULT'
+    )
     assert not core.wake.evaluate()
     core.store.execute("DELETE FROM runtime_meta WHERE key='life_paused'")
     core.clock.advance(core.settings.wake_min_interval_minutes * 60 + 1)
     core.settings.wake_max_daily_runs = 0
     assert not core.wake.evaluate()
-    assert core.store.one("SELECT reason_code FROM wake_decisions ORDER BY rowid DESC LIMIT 1") == {
+    assert core.store.one(
+        'SELECT reason_code FROM wake_decisions ORDER BY record_sequence DESC'
+        ' LIMIT 1'
+    ) == {
         "reason_code": "DAILY_LIMIT"}

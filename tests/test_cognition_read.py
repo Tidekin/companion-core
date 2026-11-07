@@ -9,7 +9,7 @@ from companion.cognition_read import KINDS, CognitionRead, measurement
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.privacy import advance_epoch
-from tests.test_goals import setup_goal
+from tests.support.goals import setup_goal
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -134,7 +134,7 @@ def test_native_model_measurement_and_unknown(core, tmp_path, response_usage):
     from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
     from tests.conftest import run
     from tests.support.owner_authority import activate
-    from tests.test_token_measurement import MESSAGES, configure
+    from tests.support.token_measurement import MESSAGES, configure
 
     configure(core, tmp_path)
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
@@ -168,6 +168,19 @@ def test_native_model_measurement_and_unknown(core, tmp_path, response_usage):
     assert "synthetic result" not in json.dumps(item)
     if response_usage:
         assert item["usage"]["input_tokens"] == 20
+
+
+def test_daily_model_summary_covers_more_than_500_visible_calls(core):
+    from companion.console_read import overview
+
+    with core.store.transaction():
+        for n in range(513):
+            core.store.insert("model_usage", usage_id=f"usage_{n}", request_id=f"request_{n}",
+                              occurred_at=core.clock(), provider="demo", model="demo",
+                              scenario="chat", state="UNKNOWN")
+    result = overview(core)["model"]
+    assert result["calls"] == result["uncertain_calls"] == 513
+    assert result["complete"] and result["observed_calls"] == 0
 
 
 def test_explicit_route_contract(core):

@@ -10,8 +10,8 @@ from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
 from tests.conftest import run
 from tests.support.native_context import source_window
+from tests.support.onebot_capture import bootstrap_frames
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_capture import bootstrap_frames
 
 
 def test_choice_marker_is_parsed_once_and_always_removed():
@@ -36,8 +36,10 @@ def test_ordinary_numbered_content_is_preserved(text):
 
 
 def first_event(core):
-    return core.store.one("SELECT event_id FROM events WHERE source='qq.onebot' "
-                          "AND actor_id='owner' ORDER BY rowid LIMIT 1")["event_id"]
+    return core.store.one(
+        "SELECT event_id FROM events WHERE source='qq.onebot' AND "
+        "actor_id='owner' ORDER BY record_sequence LIMIT 1"
+    )["event_id"]
 
 
 def converse(core, tmp_path, second_reply, *, policy="occasionally"):
@@ -78,7 +80,7 @@ def converse(core, tmp_path, second_reply, *, policy="occasionally"):
 
 def reply_parts(core):
     return [json.loads(row["content_json"]) for row in core.store.rows(
-        "SELECT content_json FROM outbox ORDER BY rowid")]
+        'SELECT content_json FROM outbox ORDER BY record_sequence')]
 
 
 def test_named_older_owner_message_is_sent_as_native_quote(core, tmp_path):
@@ -98,8 +100,10 @@ def test_named_older_owner_message_is_sent_as_native_quote(core, tmp_path):
 @pytest.mark.parametrize("choice,policy", [
     (lambda core: "【引用 m0000】那座山高吗", "occasionally"),
     (lambda core: "【引用 " + reply_quote.alias(core.store.one(
-        "SELECT event_id FROM events WHERE source='qq.onebot' AND actor_id='owner' "
-        "ORDER BY rowid DESC LIMIT 1")["event_id"]) + "】那座山高吗", "occasionally"),
+
+            "SELECT event_id FROM events WHERE source='qq.onebot' AND "
+            "actor_id='owner' ORDER BY record_sequence DESC LIMIT 1"
+        )["event_id"]) + "】那座山高吗", "occasionally"),
 ])
 def test_unknown_or_latest_choice_sends_plain_text_without_marker(core, tmp_path, choice,
                                                                    policy):
@@ -120,10 +124,12 @@ def test_erased_or_recalled_target_is_never_resolved(core, tmp_path, removal):
     from companion import input_recall
 
     converse(core, tmp_path, lambda core: "那座山高吗")
-    first = core.store.one("SELECT * FROM events WHERE event_id=?", (first_event(core),))
-    job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
-                         "WHERE "
-                         "e.source='qq.onebot' AND e.actor_id='owner' ORDER BY e.rowid DESC")
+    first = core.store.one('SELECT * FROM events WHERE event_id=%s', (first_event(core),))
+    job = core.store.one(
+        'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+        "USING(event_id) WHERE e.source='qq.onebot' AND e.actor_id='owner' "
+        'ORDER BY e.record_sequence DESC'
+    )
     choice = reply_quote.alias(first["event_id"])
 
     def resolve():
@@ -134,7 +140,7 @@ def test_erased_or_recalled_target_is_never_resolved(core, tmp_path, removal):
     key, value = (("erased_event:" + first["event_id"], "{}") if removal == "erased" else
                   (input_recall.marker_key(first["source_event_id"]),
                    json.dumps({"state": "RECALLED"})))
-    core.store.execute("INSERT INTO runtime_meta(key,value) VALUES(?,?)", (key, value))
+    core.store.execute('INSERT INTO runtime_meta(key,value) VALUES(%s,%s)', (key, value))
     assert resolve() is None
 
 
@@ -201,7 +207,9 @@ def test_bridge_refuses_quotes_outside_a_first_native_reply(change):
 
 
 def first_reply(core):
-    return core.store.one("SELECT message_id FROM outbox ORDER BY rowid LIMIT 1")["message_id"]
+    return core.store.one(
+        'SELECT message_id FROM outbox ORDER BY record_sequence LIMIT 1'
+    )["message_id"]
 
 
 @pytest.mark.parametrize("label", ["[编号 m0000]", "【编号 m1a2b】", "[编号 m...]"])
@@ -219,8 +227,11 @@ def test_named_own_earlier_reply_is_quoted_by_its_recorded_provider_id(core, tmp
 
 def test_erased_own_reply_is_never_resolved(core, tmp_path):
     converse(core, tmp_path, lambda core: "那座山高吗")
-    job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
-                         "WHERE e.source='qq.onebot' AND e.actor_id='owner' ORDER BY e.rowid DESC")
+    job = core.store.one(
+        'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+        "USING(event_id) WHERE e.source='qq.onebot' AND e.actor_id='owner' "
+        'ORDER BY e.record_sequence DESC'
+    )
     choice = reply_quote.alias(first_reply(core))
 
     def resolve():
@@ -228,6 +239,6 @@ def test_erased_own_reply_is_never_resolved(core, tmp_path):
             return reply_quote.target(core.store, core.settings, core.clock, job, choice)
 
     assert resolve() == "123456"
-    core.store.execute("UPDATE outbox SET content_json='{}',content_sha256='' WHERE message_id=?",
+    core.store.execute("UPDATE outbox SET content_json='{}',content_sha256='' WHERE message_id=%s",
                        (first_reply(core),))
     assert resolve() is None

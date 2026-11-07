@@ -2,9 +2,9 @@
 
 import pytest
 
-from companion import budget, owner_authority
+from companion import budget, model_scope, owner_authority
 from companion.contracts import CoreError
-from tests.test_watch_ledger import ready
+from tests.support.watch_ledger import ready
 
 
 def test_the_pre_http_recheck_does_not_yield_but_the_boundary_check_still_can(
@@ -15,7 +15,7 @@ def test_the_pre_http_recheck_does_not_yield_but_the_boundary_check_still_can(
     # Production 2026-10-29: an owner message arrived after I/O custody began; the
     # intermediate recheck raised BACKGROUND_YIELD_TO_CHAT and left the call UNKNOWN.
     monkeypatch.setattr(owner_authority, "owner_waiting", lambda *a, **k: True)
-    assert budget._model_scope(core.store, core.settings, core.clock, request, "watch_review",
+    assert model_scope.check(core.store, core.settings, core.clock, request, "watch_review",
                                yield_to_chat=False)
     with pytest.raises(CoreError, match="BACKGROUND_YIELD_TO_CHAT"):
-        budget._model_scope(core.store, core.settings, core.clock, request, "watch_review")
+        model_scope.check(core.store, core.settings, core.clock, request, "watch_review")

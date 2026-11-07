@@ -71,7 +71,7 @@ def test_due_retry_wakes_without_a_writer_and_native_claim_succeeds(core, before
             core.clock = wake.clock = controlled_clock
             due = after(controlled_clock(), 0.15)
             core.store.execute(
-                "UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=? WHERE job_id=?",
+                "UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=%s WHERE job_id=%s",
                 (due, job["job_id"]),
             )
             await asyncio.sleep(before_scan_delay)
@@ -286,7 +286,7 @@ def test_waiting_chat_job_bounds_chat_rescan_to_former_polling_cadence(core, mon
     assert deadline == start + timedelta(seconds=worker_deadlines.CHAT_WAIT_RESCAN_SECONDS)
     assert core.store.db.total_changes == before
     future = start + timedelta(hours=1)
-    core.store.execute("UPDATE jobs SET next_attempt_at=? WHERE kind='chat'",
+    core.store.execute("UPDATE jobs SET next_attempt_at=%s WHERE kind='chat'",
                        (future.isoformat(),))
     # _next adds 2 ms so a crossed boundary rescans after, not before, it.
     assert worker_deadlines.chat(core.store, core.settings, start) <= future + timedelta(

@@ -12,8 +12,8 @@ from companion.transport import digest
 from companion_onebot_bridge import owner_notices
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, recall_frame
-from tests.test_input_interrupt_bridge import model_response
-from tests.test_private_companion import companion_options
+from tests.support.input_interrupt_bridge import model_response
+from tests.support.private_companion import companion_options
 
 
 @pytest.mark.parametrize("boundary", ["before_begin", "before_delegate", "after_dispatch"])
@@ -52,7 +52,7 @@ def test_notice_source_recall_preserves_actual_dispatch_state(core, tmp_path, bo
                     "SELECT job_id FROM jobs WHERE kind='activity'")["job_id"])
             notice = core.store.one("SELECT o.* FROM outbox o JOIN jobs j "
                                     "ON o.origin_event_id=j.event_id WHERE j.kind='activity'")
-            usage_before = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage_before = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             receipts = []
             leases = []
             cancel_requests = []
@@ -124,7 +124,7 @@ def test_notice_source_recall_preserves_actual_dispatch_state(core, tmp_path, bo
             assert leases[0]["authority"] == window.runtime.authority
             assert leases[0]["origin_event_id"] == notice["origin_event_id"]
             assert "reply_revision" not in leases[0]
-            current = core.store.one("SELECT * FROM outbox WHERE message_id=?",
+            current = core.store.one('SELECT * FROM outbox WHERE message_id=%s',
                                      (notice["message_id"],))
             assert current["attempt_count"] == 1
             assert receipts[0][0].endswith("/begin-send")
@@ -145,9 +145,11 @@ def test_notice_source_recall_preserves_actual_dispatch_state(core, tmp_path, bo
                     [409] if boundary == "before_begin" else [200, 409])
                 # Retry acknowledges the same durable receipt without releasing an attempt.
                 assert (await cancel(cancel_requests[-1])).status_code == 200
-                assert core.store.one("SELECT attempt_count FROM outbox WHERE message_id=?",
+                assert core.store.one('SELECT attempt_count FROM outbox WHERE message_id=%s',
                                       (notice["message_id"],))["attempt_count"] == 1
                 window.runtime.verify(active=False)
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage_before
+            assert core.store.rows(
+                'SELECT * FROM model_usage ORDER BY record_sequence'
+            ) == usage_before
 
     run(scenario())

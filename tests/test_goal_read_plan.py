@@ -76,7 +76,7 @@ def test_plan_serial_receipts_reorder_cas_and_original_evidence(core, tmp_path):
             assert all(step["state"] == "DONE" for step in final["steps"])
             assert len(core.store.rows("SELECT * FROM reading_attempts")) == 3
             assert len({step["outcome_event_id"] for step in final["steps"]}) == 3
-            eid = core.memory.episodes(core.store.rows("SELECT * FROM events WHERE event_id=?",
+            eid = core.memory.episodes(core.store.rows('SELECT * FROM events WHERE event_id=%s',
                                                        (source,)), core.clock())
             projected = MemoryProjections(core.memory).snapshot(core.clock(), episode_ids=[eid])
             assert projected["episodes"][0]["goals"][0]["state"] == "done"
@@ -150,7 +150,7 @@ def test_prior_result_erasure_cancels_tail_and_replays_into_old_backup(core, tmp
             with Core(core.settings.model_copy(update={"database": str(target)}),
                       core.model, core.clock) as restored:
                 for instance in (core, restored):
-                    assert instance.store.one("SELECT redacted FROM goals WHERE goal_id=?",
+                    assert instance.store.one('SELECT redacted FROM goals WHERE goal_id=%s',
                         (goal_id,))["redacted"]
                     assert not instance.store.rows("SELECT * FROM goal_step_evidence")
                     assert not instance.store.rows(
@@ -305,10 +305,10 @@ def test_completed_plan_projection_requires_final_result_and_committed_positions
                 assert await read(client, core.clock(), url) == (True, 3)
                 if index < 2:
                     core.goals.continue_plan(goal_id, decision(core, goal_id))
-            steps = core.store.rows("SELECT * FROM goal_steps WHERE goal_id=? ORDER BY position",
+            steps = core.store.rows('SELECT * FROM goal_steps WHERE goal_id=%s ORDER BY position',
                                    (goal_id,))
             assert len(steps) == 3 and all(step["state"] == "DONE" for step in steps)
-            eid = core.memory.episodes(core.store.rows("SELECT * FROM events WHERE event_id=?",
+            eid = core.memory.episodes(core.store.rows('SELECT * FROM events WHERE event_id=%s',
                                                        (source,)), core.clock())
             view = MemoryProjections(core.memory)
             assert view.snapshot(core.clock(), episode_ids=[eid])["episodes"][0]["goals"][0][
@@ -317,10 +317,10 @@ def test_completed_plan_projection_requires_final_result_and_committed_positions
                 "memories", "model_usage", "model_admissions", "exploration_requests",
                 "reading_attempts", "observations")}
             for damage in ("first_result", "parking_position"):
-                core.store.execute("UPDATE goals SET result_event_id=? WHERE goal_id=?",
+                core.store.execute('UPDATE goals SET result_event_id=%s WHERE goal_id=%s',
                     (steps[0 if damage == "first_result" else -1]["outcome_event_id"], goal_id))
                 if damage == "parking_position":
-                    core.store.execute("UPDATE goal_steps SET position=4 WHERE step_id=?",
+                    core.store.execute('UPDATE goal_steps SET position=4 WHERE step_id=%s',
                                        (steps[-1]["step_id"],))
                 before = core.store.db.total_changes
                 snapshot = view.snapshot(core.clock(), episode_ids=[eid])

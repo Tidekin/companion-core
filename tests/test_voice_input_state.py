@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from companion.contracts import CoreError
-from tests.test_voice_flow import flow_fixture, upload
+from tests.support.voice_flow import flow_fixture, upload
 
 
 @pytest.mark.parametrize("closed", ["expired", "running", "consumed"])
@@ -16,7 +16,7 @@ def test_input_state_never_reopens_expired_or_consumed_upload(core, monkeypatch,
     if closed == "expired":
         core.clock.now += timedelta(seconds=core.settings.voice.asr.wait_seconds + 1)
     else:
-        core.store.execute("UPDATE jobs SET state=? WHERE event_id=?",
+        core.store.execute('UPDATE jobs SET state=%s WHERE event_id=%s',
                            ("RUNNING" if closed == "running" else "SUCCEEDED", event_id))
     before = core.store.db.total_changes
     result = flow.input_receipt(event_id)
@@ -29,7 +29,7 @@ def test_input_state_never_reopens_expired_or_consumed_upload(core, monkeypatch,
 def test_input_state_rejects_different_source_upload_hash(core, monkeypatch):
     flow, _, _, event_id, key = flow_fixture(core, monkeypatch, make_reply=False)
     upload(core, flow, event_id, key)
-    core.store.execute("UPDATE voice_jobs SET source_input_sha256=?", ("0" * 64,))
+    core.store.execute('UPDATE voice_jobs SET source_input_sha256=%s', ("0" * 64,))
     with pytest.raises(CoreError, match="VOICE_INPUT_AUTHORITY_CHANGED"):
         flow.input_receipt(event_id)
 
@@ -37,7 +37,7 @@ def test_input_state_rejects_different_source_upload_hash(core, monkeypatch):
 def test_input_state_rejects_cancelled_source_without_recovery_mutation(core, monkeypatch):
     flow, _, _, event_id, key = flow_fixture(core, monkeypatch, make_reply=False)
     upload(core, flow, event_id, key)
-    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE event_id=?", (event_id,))
+    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE event_id=%s", (event_id,))
     before = core.store.db.total_changes
     with pytest.raises(CoreError):
         flow.input_receipt(event_id)

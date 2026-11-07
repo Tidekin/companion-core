@@ -1,6 +1,8 @@
 """Bounded metadata over native decisions and receipts; never replay cognition."""
 
 import json
+from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from companion.contracts import CoreError
 from companion.memory_context import MemorySources, check_version, read_version
@@ -309,17 +311,77 @@ class CognitionRead:
             )
         ]
 
+    def _sources_visible(self, row, roots, sources):
+        return (not row.get("redacted") and len(roots) <= 100 and all(
+            key and self.projections._goal_source(key, sources) for key in roots
+        ))
+
+    def _model_usage_rows(self, lower, upper):
+        query = (
+            'SELECT m.request_id,m.job_id,m.state,m.input_tokens,m.cached_input_tok'
+            'ens,m.output_tokens,m.billed_micro_usd,m.occurred_at,a.io_started_at '
+            'FROM model_usage m LEFT JOIN model_admissions a ON '
+            'a.request_id=m.request_id WHERE m.occurred_at>=%s AND m.occurred_at<%s'
+        )
+        after, params = "", (lower, upper)
+        while True:
+            rows = self.store.rows(query + after + " ORDER BY m.request_id LIMIT 256", params)
+            yield from rows
+            if len(rows) < 256:
+                return
+            after, params = ' AND m.request_id>%s', (lower, upper, rows[-1]["request_id"])
+
+    def daily_model_usage(self, local_day, timezone, now):
+        """Count visible calls without loading prompts, reasoning or context measurements."""
+        day, zone = date.fromisoformat(local_day), ZoneInfo(timezone)
+        start = datetime.combine(day, time.min, zone).astimezone(UTC)
+        end = datetime.combine(day + timedelta(days=1), time.min, zone).astimezone(UTC)
+        # Stored ISO timestamps can carry different offsets. Narrow by calendar date
+        # before testing exact instants, including both sides of a local DST boundary.
+        lower = (start.date() - timedelta(days=1)).isoformat()
+        upper = (end.date() + timedelta(days=2)).isoformat()
+        result = dict(calls=0, observed_calls=0, cache_calls=0, uncertain_calls=0,
+                      cached=0, fresh=0, unknown_input=0, output=0, billed_micro_usd=0,
+                      complete=True)
+        version = read_version(self.core.memory)
+        sources = MemorySources(self.core.memory, now)
+        for row in self._model_usage_rows(lower, upper):
+            try:
+                occurred = datetime.fromisoformat(row["occurred_at"])
+                in_day = start <= occurred < end
+            except (TypeError, ValueError):
+                in_day = None
+            if in_day is False:
+                continue
+            if not self._sources_visible(row, self._roots("model", row), sources):
+                continue
+            if in_day is None:
+                result["complete"] = False
+                continue
+            result["calls"] += 1
+            result["uncertain_calls"] += row["state"] in {"RESERVED", "UNKNOWN"}
+            result["billed_micro_usd"] += max(0, row["billed_micro_usd"] or 0)
+            if not observed_usage(row, row):
+                continue
+            result["observed_calls"] += 1
+            result["output"] += row["output_tokens"]
+            cache = cache_usage(self.store, row, row)
+            if cache["state"] == "RECORDED":
+                result["cache_calls"] += 1
+                result["cached"] += cache["cached_input_tokens"]
+                result["fresh"] += row["input_tokens"] - cache["cached_input_tokens"]
+            else:
+                result["unknown_input"] += row["input_tokens"]
+        check_version(self.core.memory, version)
+        return result
+
     def _record(self, kind, row, sources):
         if kind == "rem":
             from companion.cognition_rem import record
 
             return record(self.core, row, sources.now)
         roots = self._roots(kind, row)
-        if (
-            row.get("redacted")
-            or len(roots) > 100
-            or any(not key or not self.projections._goal_source(key, sources) for key in roots)
-        ):
+        if not self._sources_visible(row, roots, sources):
             return None
         # Execution leases require an equal captured epoch; historical observation
         # requires current source custody instead. Ordinary memory writes also bump

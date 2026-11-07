@@ -74,7 +74,7 @@ def test_derived_annotations_are_revalidated_even_when_the_old_input_is_retained
     memory, (a, _, _), annotations = setup(core)
     source = annotations[0]["source_event_id"]
     if mutation == "source_changed":
-        core.store.execute("UPDATE events SET body_json='{}' WHERE event_id=?", (source,))
+        core.store.execute("UPDATE events SET body_json='{}' WHERE event_id=%s", (source,))
     elif mutation == "source_forgotten":
         with core.store.transaction():
             core.ledger.expire_events(core.store, [source], core.clock())

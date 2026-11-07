@@ -11,11 +11,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from companion import (
     cumulative,
     dialogue_history,
+    job_queue,
     owner_authority,
     owner_input,
     paid_budget,
     private_life,
     reply_revision,
+    transport,
 )
 from companion.contracts import CoreError
 from companion.poke_protocol import (
@@ -385,17 +387,13 @@ def receive(store, settings, clock, capture):
                 result.update(job_id=batch["job_id"], state="QUEUED", coalesced=True)
         elif configured.mode != "none" and configured.daily_limit:
             job_id = uid("job")
-            store.insert(
-                "jobs",
-                job_id=job_id,
-                event_id=capture.event_id,
-                kind="poke",
-                state="QUEUED",
-                idempotency_key="poke-response:" + capture.event_id,
-                max_attempts=1,
-                created_at=now,
-                updated_at=now,
-                context_tracked=1,
+            job_queue.create(
+                store,
+                job_id,
+                capture.event_id,
+                "poke",
+                "poke-response:" + capture.event_id,
+                now,
                 next_attempt_at=after(now, configured.coalesce_seconds),
             )
             owner_authority.bind_job(store, settings, clock, job_id, purpose="poke")
@@ -465,11 +463,7 @@ def _snapshot(sources):
 
 
 def _cancel(store, job_id, reason, now):
-    store.execute(
-        "UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, last_error_code = %s, "
-        "updated_at = %s WHERE job_id = %s AND state IN ('QUEUED', 'RUNNING', 'RETRY_WAIT')",
-        (reason, now, job_id),
-    )
+    job_queue.cancel_active(store, 'job_id=%s', (job_id,), reason, now)
 
 
 def claim_ready(store, settings, clock, worker_id):
@@ -566,16 +560,15 @@ def claim_ready(store, settings, clock, worker_id):
             )["reply_revision"]
             sources = _sources(store, settings, job, cutoff, clock)
             token = uid("lease")
-            store.execute(
-                "UPDATE jobs SET state = 'RUNNING', lease_owner = %s, lease_token = %s, "
-                "lease_until = %s, attempts = attempts + 1, updated_at = %s WHERE job_id = %s",
-                (worker_id, token, after(now, settings.lease_seconds), now, job["job_id"]),
+            job_queue.claim(
+                store, job["job_id"], worker_id, token, after(now, settings.lease_seconds), now
             )
-            store.execute(
-                "UPDATE poke_batches SET claimed_at = %s, context_cutoff = %s, "
-                "reply_revision = %s, context_json = %s WHERE job_id = %s",
-                (now, cutoff, revision, encode(_snapshot(sources)), job["job_id"]),
-            )
+            store.execute((
+                'UPDATE poke_batches SET '
+                'claimed_at=%s,context_cutoff=%s,reply_revision=%s,context_json=%s '
+                'WHERE job_id=%s'
+            ),
+                          (now, cutoff, revision, encode(_snapshot(sources)), job["job_id"]))
             claimed = {**job, "lease_token": token, "attempts": job["attempts"] + 1}
             reply_revision.remember_sources(store, claimed, [row["event_id"] for row in sources])
             check_job(store, settings, view, claimed, clock=clock)
@@ -738,33 +731,19 @@ def finish(store, settings, approval, job, decision, now):
         elif decision.kind == "poke":
             message_id = uid("msg")
             content = {"kind": "poke", "target_user_id": settings.owner_qq_id}
-            store.insert(
-                "outbox",
-                message_id=message_id,
-                origin_event_id=job["event_id"],
-                conversation_id=batch["conversation_id"],
-                action_type=ACTION,
-                content_json=encode(content),
-                content_sha256=paid_budget.sha(content),
-                state="PENDING",
-                delivery_key="poke-response:" + job["job_id"],
-                created_at=now,
-                updated_at=now,
-            )
-        store.execute(
-            "UPDATE poke_batches SET decision_kind = %s, decision_sha256 = %s, "
-            "response_message_id = %s WHERE job_id = %s",
-            (decision.kind, digest, message_id, job["job_id"]),
-        )
+            transport.queue_delivery(store, message_id, job["event_id"], batch["conversation_id"],
+                                     ACTION, content, "poke-response:" + job["job_id"], now)
+        store.execute((
+            'UPDATE poke_batches SET '
+            'decision_kind=%s,decision_sha256=%s,response_message_id=%s WHERE '
+            'job_id=%s'
+        ),
+                      (decision.kind, digest, message_id, job["job_id"]))
         if message_id:
             from companion.owner_delivery import record_poke_reply
 
             record_poke_reply(store, settings, lambda: now, job, [message_id])
-        store.execute(
-            "UPDATE jobs SET state = 'SUCCEEDED', lease_token = NULL, updated_at = %s "
-            "WHERE job_id = %s",
-            (now, job["job_id"]),
-        )
+        job_queue.release(store, job["job_id"], "SUCCEEDED", now)
         return [message_id] if message_id else []
 
 
@@ -831,32 +810,24 @@ def check_delivery(store, settings, approval, message_id, *, clock=utcnow):
 
 def erase(store, event_ids):
     """Retain identity/rate liabilities while removing derived source fingerprints."""
-    from companion.privacy import ErasureLedger
-
     if not store.one(
-        "SELECT 1 FROM pg_catalog.pg_class WHERE "
-        "relnamespace=current_schema()::regnamespace AND relname='poke_batches' AND relkind IN "
-        "('r','p')"
+        'SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='poke_batches' AND"
+        " relkind IN ('r','p')"
     ):
         return
     for event_id in event_ids:
         jobs = (
-            "SELECT job_id FROM poke_batches WHERE job_id IN (SELECT"
-            " job_id FROM job_sources WHERE event_id=%s)"
+            'SELECT job_id FROM poke_batches WHERE job_id IN (SELECT job_id FROM '
+            'job_sources WHERE event_id=%s)'
         )
-        store.execute(
-            "UPDATE jobs SET state='CANCELLED',lease_token=NULL,"
-            "last_error_code='REPLY_SOURCE_RECALLED' WHERE job_id IN (" + jobs + ") "
-            "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
-            (event_id,),
-        )
-        store.execute(
-            ErasureLedger.clear_reply_sql() + " WHERE message_id IN "
-            "(SELECT response_message_id FROM poke_batches WHERE job_id IN (" + jobs + "))",
-            (event_id,),
-        )
-        store.execute(
-            "UPDATE poke_batches SET context_json = '[]', decision_sha256 = NULL WHERE "
-            "job_id IN (SELECT job_id FROM job_sources WHERE event_id = %s)",
-            (event_id,),
-        )
+        job_queue.cancel_active(store, "job_id IN (" + jobs + ")", (event_id,),
+                                "REPLY_SOURCE_RECALLED")
+        transport.revoke_deliveries(store, "message_id IN (SELECT response_message_id "
+                                    "FROM poke_batches WHERE job_id IN (" + jobs + "))",
+                                    (event_id,), erase_content=True)
+        store.execute((
+            "UPDATE poke_batches SET context_json='[]',decision_sha256=NULL WHERE "
+            'job_id IN (SELECT job_id FROM job_sources WHERE event_id=%s)'
+        ),
+                      (event_id,))

@@ -12,9 +12,9 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from tests.conftest import run
 from tests.meme_authority_fixture import admit
+from tests.support.meme_core import worker
+from tests.support.meme_native_discovery import native_case, release_foreground
 from tests.support.owner_authority import activate
-from tests.test_meme_core import worker
-from tests.test_meme_native_discovery import native_case, release_foreground
 
 
 @pytest.mark.parametrize("changed", ["key", "epoch"])
@@ -112,9 +112,9 @@ async def rotation_case(core, tmp_path, monkeypatch, *, changed, responsibility,
         assert response.status_code == 202, response.text
         claimed = core.claim_job("rotated-offer", job_id=response.json()["job_id"])
         assert claimed is not None
-        job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (claimed["job_id"],))
+        job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (claimed["job_id"],))
         await c.retrieval.prepare(job)
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL WHERE job_id=?",
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL WHERE job_id=%s",
                            (job["job_id"],))
         if erase:
             with core.store.transaction():
@@ -135,10 +135,12 @@ async def rotation_case(core, tmp_path, monkeypatch, *, changed, responsibility,
         monkeypatch.setattr(c.service, "_reuse_compatible", measured_compatible)
         assert await c.service.run_once("refuse-incompatible-custody")
         assert reached == [original_captions[0]["job_id"]]
-        parent = core.store.one("SELECT job_id FROM jobs WHERE kind='meme_discovery' "
-                                "AND event_id=?",
+        parent = core.store.one((
+            "SELECT job_id FROM jobs WHERE kind='meme_discovery' AND "
+            'event_id=%s'
+        ),
                                 (event["event_id"],))
-        settled = core.store.one("SELECT * FROM meme_discovery_reservations WHERE job_id=?",
+        settled = core.store.one('SELECT * FROM meme_discovery_reservations WHERE job_id=%s',
                                  (parent["job_id"],))
         assert settled["state"] == "SETTLED" and settled["storage_bytes"] == 0
         assert settled["requests"] == len(c.upstream.calls) - before_calls == 5

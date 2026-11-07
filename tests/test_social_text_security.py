@@ -11,8 +11,8 @@ from companion.social_autonomy_protocol import ProfileBaseline, proposal_adapter
 from companion_onebot_bridge.account_actions import native_body
 from tests.conftest import ingest, run
 from tests.social_profile_support import confirmed_profile_material
-from tests.test_reading_service import queued
-from tests.test_social_autonomy import MockPlanner, background, dispatch, planned, queue, service
+from tests.support.reading_service import queued
+from tests.support.social_autonomy import MockPlanner, background, dispatch, planned, queue, service
 
 
 @pytest.mark.parametrize("field", ["nickname", "signature"])

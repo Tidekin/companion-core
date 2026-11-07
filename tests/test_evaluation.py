@@ -2,121 +2,20 @@
 
 import asyncio
 import copy
-import hashlib
 import json
 
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from companion import budget, cloud_budget, evaluation, owner_authority, owner_input, paid_budget
+from companion import budget, cloud_budget, evaluation, paid_budget
 from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
-from companion.model import ModelClient, ModelResponse, model_payload
+from companion.model import ModelResponse
 from companion.policy import ConsentRequest, ConsentService
-from companion.qq_rich import input_digest
 from companion.runtime import Runtime
-from companion_delivery_protocol.authority import capture_signing_payload
-from tests.conftest import event, ingest
-from tests.test_paid_model_gate import approved_live
-
-
-def prepare(core, tmp_path, *, chat=False, **limits):
-    source = None if chat else ingest(core, text="SYNTHETIC private source")
-    if source:
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (source["job_id"],))
-    core.settings.evaluation_enabled = True
-    core.settings.max_output_tokens = 2048
-    approved_live(core, tmp_path, provider="deepseek", model="deepseek-flash",
-                  max_output_tokens=2048, input_rate=300000, cached_input_rate=6000,
-                  output_rate=1200000, **limits)
-    from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
-    from tests.support.owner_authority import activate
-
-    core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
-    key = Ed25519PrivateKey.generate() if chat else None
-    core.evaluation_test_key = key
-    activate(core, OwnerGrantPolicy(
-        owner_qq_id=core.settings.owner_qq_id,
-        purposes=["evaluation", "chat"] if chat else ["evaluation"],
-        authorization_sha256="d" * 64,
-        paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
-        capture={"public_key": key.public_key().public_bytes_raw().hex(),
-                 "identity_sha256": paid_budget.sha(
-                     [core.settings.owner_qq_id, core.settings.bot_qq_id]),
-                 "protocol_epoch": "evaluation-chat-test"} if key else None,
-    ))
-    if chat:
-        source = admitted_chat(core, 1, text="SYNTHETIC private source")
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (source["job_id"],))
-    rows = []
-    for repetition in range(3):
-        for strategy in (("baseline", "participation_v1") if repetition % 2 == 0 else (
-            "participation_v1", "baseline")
-        ):
-            messages = [{"role": "system", "content": "Synthetic " + strategy},
-                        {"role": "user", "content": "SYNTHETIC private source"}]
-            payload = model_payload(core.settings, messages, "evaluation")
-            rows.append(dict(case="synthetic", repetition=repetition, strategy=strategy,
-                             payload=payload, payload_sha256=paid_budget.sha(payload),
-                             shared_context_sha256=paid_budget.sha(messages[1:]),
-                             planned_max_output_tokens=2048))
-    plan = dict(requests=rows, request_count=6, case_count=1, provider="deepseek",
-                model="deepseek-flash", actual_provider_calls=0, actual_cost_micro_usd=0,
-                status="PREPARED_NO_MODEL_CALLS", rates_micro_usd_per_million={
-                    "input": 300000, "cached_input": 6000, "output": 1200000})
-    plan["plan_sha256"] = paid_budget.sha(plan)
-    return evaluation.Manifest(plan=plan, source_event_ids=[source["event_id"]],
-                               baseline_sha256="a" * 64, source_document_sha256="b" * 64)
-
-
-def admitted_chat(core, number=2, *, text="synthetic independent chat"):
-    from companion.owner_authority_protocol import OwnerCapture
-
-    view = owner_authority.current(core.store, core.settings, core.clock, purpose="chat")
-    source = (f"{core.settings.bot_qq_id}:onebot-direct:FriendMessage:"
-              f"{core.settings.owner_qq_id}:epoch:evaluation-chat-test:{number}")
-    event_id = "evt_" + hashlib.sha256(source.encode()).hexdigest()
-    value = dict(authority=view.authority.as_dict(), kind="authenticated_onebot_ws",
-                 source_event_id=source, event_id=event_id,
-                 input_sha256=input_digest({"text": text}), frame_sha256="b" * 64,
-                 evidence_sha256="c" * 64, identity_sha256=view.policy.capture.identity_sha256,
-                 protocol_epoch=view.policy.capture.protocol_epoch,
-                 occurred_at=core.clock(), received_at=core.clock())
-    value["signature"] = core.evaluation_test_key.sign(capture_signing_payload(value)).hex()
-    capture = OwnerCapture.model_validate(value)
-    owner_input.approve(core.store, core.settings, core.clock, capture)
-    incoming = event(core, number, text, origin="onebot-direct:FriendMessage:10001").model_copy(
-        update={"event_id": event_id, "source_event_id": source})
-    return core.ingest(incoming, "evaluation-chat-" + str(number))
-
-
-def authorize(core, manifest):
-    view = evaluation.preview(core.store, core.settings, core.clock, manifest)
-    consent = ConsentService(core.store, core.settings, core.clock).grant(
-        ConsentRequest(**view["consent_scope"], duration_seconds=600))
-    return evaluation.Submission(manifest=manifest, consent_id=consent["consent_id"])
-
-
-def response(request):
-    return httpx.Response(200, json={
-        "choices": [{"message": {"content": "SYNTHETIC observed reply"}, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 30, "completion_tokens": 2}})
-
-
-def work(core, handler=response, hooks=None):
-    async def execute():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler), trust_env=False,
-                                     event_hooks=hooks or {}) as client:
-            core.model = ModelClient(core.settings, client)
-            return await core.run_once("evaluation-test")
-    return asyncio.run(execute())
-
-
-def result(core, submitted):
-    return evaluation.results(core.store, core.settings, core.clock, submitted["evaluation_id"])
+from tests.support.evaluation import admitted_chat, authorize, prepare, response, result, work
 
 
 def test_six_frozen_payloads_use_native_job_usage_cloud_and_no_delivery(core, tmp_path):
@@ -166,7 +65,7 @@ def test_expired_source_is_not_reauthorized_by_fresh_consent(core, tmp_path):
     from companion.store import after
 
     manifest = prepare(core, tmp_path)
-    core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?", (
+    core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s', (
         after(core.clock(), -86400 * (core.settings.raw_event_retention_days + 1)),
         manifest.source_event_ids[0]))
     with pytest.raises(CoreError, match="SOURCE_EXPIRED"):
@@ -177,8 +76,8 @@ def test_expired_source_is_not_reauthorized_by_fresh_consent(core, tmp_path):
 def test_preexisting_cumulative_liability_blocks_evaluation(core, tmp_path):
     from companion import owner_authority
     from companion.owner_authority_protocol import OwnerGrantPolicy
+    from tests.support.cumulative_budget import policy
     from tests.support.owner_authority import activate
-    from tests.test_cumulative_budget import policy
 
     manifest = prepare(core, tmp_path, chat=True)
     policy(core, account={"model_attempts": 1})
@@ -193,7 +92,7 @@ def test_preexisting_cumulative_liability_blocks_evaluation(core, tmp_path):
                            [{"role": "user", "content": "prior responsibility"}], core.clock(),
                            clock=core.clock)
     budget.settle(core.store, core.settings, prior, ModelResponse("old", 30, 2))
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (normal["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (normal["job_id"],))
     submitted = evaluation.submit(core, authorize(core, manifest))
     calls = []
     work(core, lambda req: (calls.append(1) or response(req)))
@@ -212,7 +111,7 @@ def test_changes_block_execution_without_io(core, tmp_path, condition):
     elif condition == "expired":
         core.clock.advance(601)
     elif condition == "source":
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
+        core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s',
                            (manifest.source_event_ids[0],))
     elif condition == "window":
         core.settings.paid_model = core.settings.paid_model.model_copy(
@@ -221,11 +120,11 @@ def test_changes_block_execution_without_io(core, tmp_path, condition):
         core.settings.evaluation_enabled = False
     else:
         newer = admitted_chat(core)
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (newer["job_id"],))
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (newer["job_id"],))
     calls = []
     work(core, lambda req: (calls.append(1) or response(req)))
     assert calls == []
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (submitted["job_id"],))[
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (submitted["job_id"],))[
         "state"] in {"FAILED", "CANCELLED"}
 
 
@@ -262,7 +161,7 @@ def test_normal_task_spend_competes_for_same_cloud_ceiling(core, tmp_path):
     prior = budget.reserve(core.store, core.settings, normal["job_id"], "chat",
                            [{"role": "user", "content": "prior"}], core.clock(), clock=core.clock)
     budget.settle(core.store, core.settings, prior, ModelResponse("old", 30, 2048))
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (normal["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (normal["job_id"],))
     submitted = evaluation.submit(core, authorize(core, manifest))
     calls = []
     work(core, lambda req: (calls.append(1) or response(req)))

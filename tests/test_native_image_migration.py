@@ -14,12 +14,12 @@ from companion.core import Core
 from companion.store import Store, after, encode, migrate, uid
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
+from tests.support.historical_schema import historical_database
+from tests.support.live_image_input import options as legacy_image_options
+from tests.support.native_image_pipeline import pixels
+from tests.support.onebot_capture import pinned_plan
 from tests.support.onebot_events import raw_event
-from tests.test_live_image_input import options as legacy_image_options
-from tests.test_native_image_pipeline import pixels
-from tests.test_onebot_capture import pinned_plan
-from tests.test_prepare_owner_input import window
-from tests.test_test_fixtures import historical_database
+from tests.support.prepare_owner_input import window
 
 
 @pytest.mark.parametrize("retire", ["expiry", "recall"])

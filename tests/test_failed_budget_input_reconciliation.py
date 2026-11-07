@@ -13,7 +13,7 @@ from companion.retrieval import SemanticIndex
 from companion.store import encode, uid
 from tests.conftest import run
 from tests.historical_input_retirement import historical_input
-from tests.test_qq_rich_input import rich_event
+from tests.support.qq_rich_input import rich_event
 
 
 @pytest.fixture(autouse=True)
@@ -53,12 +53,14 @@ def test_historical_failed_budget_retirement_preserves_original_accounts(core, t
             assert core.store.rows("SELECT * FROM model_usage") == []
             assert core.store.rows("SELECT * FROM model_admissions") == []
             assert core.store.rows("SELECT * FROM outbox") == []
-            failure = core.store.one("SELECT * FROM audit_log WHERE action='job.failed' "
-                                     "AND entity_id=?", (job["job_id"],))
+            failure = core.store.one((
+                "SELECT * FROM audit_log WHERE action='job.failed' AND "
+                'entity_id=%s'
+            ), (job["job_id"],))
             assert json.loads(failure["safe_detail_json"]) == {
                 "code": "MONTHLY_BUDGET_EXHAUSTED", "state": "FAILED",
             }
-            original_job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+            original_job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],))
             assert original_job["state"] == "FAILED"
             assert original_job["last_error_code"] == "MONTHLY_BUDGET_EXHAUSTED"
             core.clock.advance(core.settings.lease_seconds + 1)
@@ -77,17 +79,19 @@ def test_historical_failed_budget_retirement_preserves_original_accounts(core, t
             elif mutation == "missing_failure":
                 core.store.execute("DELETE FROM audit_log WHERE action='job.failed'")
             elif mutation == "wrong_failure":
-                core.store.execute("UPDATE audit_log SET safe_detail_json=? "
-                                   "WHERE action='job.failed'",
+                core.store.execute((
+                    'UPDATE audit_log SET safe_detail_json=%s WHERE '
+                    "action='job.failed'"
+                ),
                                    (encode({"code": "OTHER_FAILURE", "state": "FAILED"}),))
             elif mutation == "not_stopped":
-                core.store.execute("DELETE FROM runtime_meta WHERE key IN (?,?)",
+                core.store.execute('DELETE FROM runtime_meta WHERE key IN (%s,%s)',
                                    (live_text.STOP + window.plan.sha256, "live_text_stopped"))
             elif mutation == "rich":
                 reference = {"window_sha256": window.plan.sha256, "event_id": job["event_id"]}
                 plain = await client.post("/internal/v1/live-text/inputs/cancelled", json=reference)
                 assert plain.status_code == 200, plain.text
-                body = json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                body = json.loads(core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                                 (job["event_id"],))["body_json"])
                 body["rich"] = rich_event([
                     {"type": "text", "data": {"text": body["text"]}},
@@ -95,16 +99,16 @@ def test_historical_failed_budget_retirement_preserves_original_accounts(core, t
                 ])["payload"]["rich"]
                 qq_rich.validate(body["rich"])
                 key = live_text.INPUT + job["event_id"]
-                receipt = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                receipt = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                                    (key,))["value"])
                 receipt["input_sha256"] = qq_rich.input_digest(body)
                 assert receipt["input_sha256"] != plain.json()["input_sha256"]
                 # Keep the Core input-digest guard satisfied to isolate the plain-input
                 # restriction. The original Bridge capture and journal remain intact.
                 with core.store.transaction():
-                    core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                    core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                        (encode(body), job["event_id"]))
-                    core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                    core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                                        (encode(receipt), key))
             elif mutation in {"forged_phase", "forged_attempt"}:
                 original = window.core_post
@@ -165,7 +169,7 @@ def test_historical_failed_budget_retirement_preserves_original_accounts(core, t
                 retired_head = window.row()["journal_head"]
                 assert (await window.reconcile_cancelled_inputs(client))["cancelled_inputs"] == 0
                 assert window.row()["journal_head"] == retired_head
-            assert core.store.one("SELECT * FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT * FROM jobs WHERE job_id=%s',
                                   (job["job_id"],)) == original_job
             assert {table: core.store.rows(f"SELECT * FROM {table} ORDER BY rowid")
                     for table in tables} == before

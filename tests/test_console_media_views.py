@@ -6,9 +6,9 @@ from companion import console_media_views, paid_budget
 from companion.social_autonomy_protocol import ProfileBaseline
 from companion.store import after, encode
 from companion.voice_protocol import VoiceLeaseRef
-from tests.test_owner_console import client as client  # noqa: F401 -- pytest fixture
-from tests.test_owner_console import login
-from tests.test_social_autonomy import (
+from tests.support.owner_console import client as client  # noqa: F401 -- pytest fixture
+from tests.support.owner_console import login
+from tests.support.social_autonomy import (
     avatar,
     background,
     dispatch,
@@ -17,7 +17,7 @@ from tests.test_social_autonomy import (
     queue,
     service,
 )
-from tests.test_voice_jobs import TEXT, TOKEN, claim, create_asr, create_tts, prepared, result
+from tests.support.voice_jobs import TEXT, TOKEN, claim, create_asr, create_tts, prepared, result
 
 
 def view(client, route):
@@ -142,7 +142,7 @@ def test_manual_sent_or_incomplete_receipt_is_not_platform_success(client, core,
     queue(module, plan, conversation)
     core.store.execute("UPDATE outbox SET state='SENT'")
     core.store.execute(
-        "UPDATE social_autonomy_reservations SET receipt_json=?,receipt_sha256=?",
+        'UPDATE social_autonomy_reservations SET receipt_json=%s,receipt_sha256=%s',
         (encode(receipt), paid_budget.sha(receipt)),
     )
     login(client)
@@ -181,7 +181,7 @@ def test_profile_freshness_asset_license_and_secret_redaction(client, core):
         next(item for item in value["items"] if item["id"] == "profile:nickname")["status"]
         == "STALE"
     )
-    core.store.execute("UPDATE social_autonomy_assets SET revoked_at=?", (core.clock(),))
+    core.store.execute('UPDATE social_autonomy_assets SET revoked_at=%s', (core.clock(),))
     assert (
         next(
             item
@@ -214,7 +214,7 @@ def test_projection_never_returns_private_plan_snapshot(client, core):
     plan = planned(module, source)
     private = "private-current-dialogue-never-display"
     core.store.execute(
-        "UPDATE social_autonomy_plans SET input_snapshot_json=? WHERE plan_id=?",
+        'UPDATE social_autonomy_plans SET input_snapshot_json=%s WHERE plan_id=%s',
         (json.dumps({"private": private}), plan["plan_id"]),
     )
     login(client)

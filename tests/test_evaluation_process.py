@@ -1,8 +1,6 @@
 """Actual TCP API and independent processes; provider transport remains mocked."""
 
 import asyncio
-import json
-import sys
 from datetime import datetime
 
 import httpx
@@ -12,60 +10,14 @@ from pydantic import SecretStr
 from companion import evaluation, owner_authority
 from companion.store import after
 from tests.support.core_http import real_core_http
-from tests.test_evaluation import admitted_chat, authorize, prepare, result, work
-
-
-def process_config(core, path):
-    values = core.settings.model_dump(mode="json")
-    assert core.settings.model_key.get_secret_value() == "synthetic-key"
-    for name in ("model_key", "bridge_token", "control_token"):
-        values[name] = getattr(core.settings, name).get_secret_value()
-    path.write_text(json.dumps(values), encoding="utf-8")
-
-
-async def processes(core, directory, *, count=2, mode="normal", drain=False):
-    directory.mkdir()
-    config = directory / "synthetic-config.json"
-    process_config(core, config)
-    gate = directory / "go"
-    children, logs = [], []
-    try:
-        for index in range(count):
-            ready, log = directory / f"ready-{index}", directory / f"calls-{index}.jsonl"
-            child = await asyncio.create_subprocess_exec(
-                sys.executable, "-B", "-m", "tests.evaluation_process", "--config", str(config),
-                "--now", core.clock(), "--ready", str(ready), "--gate", str(gate),
-                "--log", str(log), "--mode", mode,
-                *(["--drain"] if drain else []),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            children.append(child)
-            logs.append(log)
-        async with asyncio.timeout(30):
-            while not all((directory / f"ready-{i}").exists() for i in range(count)):
-                stopped = [child for child in children if child.returncode is not None]
-                if stopped:
-                    errors = [err.decode(errors="replace") for _, err in
-                              await asyncio.gather(*(child.communicate() for child in stopped))]
-                    raise AssertionError("worker setup failed: " + "\n".join(errors))
-                await asyncio.sleep(0.02)
-            gate.write_text("go", encoding="utf-8")
-            outputs = await asyncio.gather(*(child.communicate() for child in children))
-        assert all(child.returncode == (23 if mode == "crash" else 0) for child in children), [
-            (child.returncode, err.decode())
-            for child, (_, err) in zip(children, outputs, strict=True)]
-        return [json.loads(line)["payload_sha256"] for log in logs if log.exists()
-                for line in log.read_text("utf-8").splitlines()]
-    finally:
-        for child in children:
-            if child.returncode is None:
-                child.kill()
-                await child.wait()
+from tests.support.evaluation import admitted_chat, authorize, prepare, result, work
+from tests.support.evaluation_process import processes
 
 
 @pytest.mark.parametrize("visual", [False, True], ids=["text", "image"])
 def test_real_tcp_control_entry_and_two_independent_workers_share_one_job(core, tmp_path, visual):
     if visual:
-        from tests.test_image_evaluation import prepared
+        from tests.support.image_evaluation import prepared
 
         _, manifests = prepared(core, tmp_path)
         from scripts.evaluate_image_understanding import manifest as image_manifest
@@ -134,11 +86,11 @@ def test_two_workers_normal_chat_and_experiment_compete_for_original_cloud_budge
     assert len(hashes) == 1
     usage = core.store.rows("SELECT job_id,state,billed_micro_usd FROM model_usage")
     assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
-    eval_event = core.store.one("SELECT event_id FROM jobs WHERE job_id=?", (submitted["job_id"],))
-    assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+    eval_event = core.store.one('SELECT event_id FROM jobs WHERE job_id=%s', (submitted["job_id"],))
+    assert not core.store.one('SELECT 1 FROM outbox WHERE origin_event_id=%s',
                               (eval_event["event_id"],))
     assert result(core, submitted)["state"] == "FAILED"
-    normal_state = core.store.one("SELECT state FROM jobs WHERE job_id=?", (normal["job_id"],))
+    normal_state = core.store.one('SELECT state FROM jobs WHERE job_id=%s', (normal["job_id"],))
     assert normal_state["state"] in {"SUCCEEDED", "FAILED"}
 
 
@@ -229,7 +181,7 @@ def test_explicit_revision_keeps_old_evaluation_cancelled_and_same_journal(core,
             assert revised.status_code == 200, revised.text
             assert await processes(core, tmp_path / "after-revision") == []
     asyncio.run(scenario())
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (submitted["job_id"],))[
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (submitted["job_id"],))[
         "state"] == "CANCELLED"
     assert core.store.one("SELECT value FROM runtime_meta "
                           "WHERE key='model_budget_journal_id'")["value"] == journal_id

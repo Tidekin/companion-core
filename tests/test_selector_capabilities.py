@@ -1,9 +1,6 @@
 """Optional capability jobs run through the same bounded native selector."""
 
-import asyncio
 import json
-import os
-import sys
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -19,11 +16,11 @@ from tests.meme_authority_fixture import stop as stop_meme
 from tests.poke_authority_fixture import environment as poke_environment
 from tests.poke_authority_fixture import owner_turn, signed
 from tests.support.core_http import real_core_http
+from tests.support.meme_core import body
+from tests.support.meme_owner_authority import configure, discovery
+from tests.support.meme_service import result
 from tests.support.owner_authority import activate
-from tests.test_evaluation_process import process_config
-from tests.test_meme_core import body
-from tests.test_meme_owner_authority import configure, discovery
-from tests.test_meme_service import result
+from tests.support.selector_capabilities import child
 
 
 @pytest.mark.parametrize("memory_enabled", [False, True])
@@ -44,24 +41,6 @@ def test_m0_m1_never_invoke_live_capability_operations(core, monkeypatch, memory
     assert core.store.rows("SELECT * FROM model_usage") == []
 
 
-async def child(core, tmp_path, target, number):
-    config, output = tmp_path / f"capability-{number}.json", tmp_path / f"result-{number}.json"
-    process_config(core, config)
-    process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
-        "tests.selector_capability_process", str(config), core.clock(), str(output), target,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    try:
-        _, error = await asyncio.wait_for(process.communicate(), 60)
-        assert process.returncode == 0, error.decode(errors="replace")
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-    value = json.loads(output.read_text(encoding="utf-8"))
-    assert value["pid"] != os.getpid()
-    return value
-
-
 def test_actual_caption_job_runs_in_independent_selector_without_core_fallback(
     core, tmp_path, monkeypatch,
 ):
@@ -79,7 +58,7 @@ def test_actual_caption_job_runs_in_independent_selector_without_core_fallback(
             first = await child(core, tmp_path, "meme_caption", 1)
             assert len(first["calls"]) == 1, first
             assert {"lane": "meme_caption", "progressed": True} in first["turns"]
-            job = core.store.one("SELECT state,authority_json FROM jobs WHERE job_id=?", (job_id,))
+            job = core.store.one('SELECT state,authority_json FROM jobs WHERE job_id=%s', (job_id,))
             assert job["state"] == "SUCCEEDED"
             assert json.loads(job["authority_json"]) == grant.authority
             usage = core.store.rows("SELECT * FROM model_usage")
@@ -107,7 +86,7 @@ def test_ready_native_caption_remains_fenced_before_selector_dispatch(
                                         json=body(core, event, item, now))
             assert created.status_code == 200, created.text
             job_id = created.json()["job_id"]
-            original = core.store.one("SELECT authority_json FROM jobs WHERE job_id=?", (job_id,))
+            original = core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s', (job_id,))
             if fence == "purpose":
                 policy = grant.policy.model_copy(update={
                     "purposes": [p for p in grant.policy.purposes if p != "meme"],
@@ -122,15 +101,15 @@ def test_ready_native_caption_remains_fenced_before_selector_dispatch(
                 capture = owner_turn(SimpleNamespace(core=core, store=core.store,
                     settings=core.settings, clock=core.clock, approval=view,
                     key=grant.key, config=config), 2, "先处理新输入", approve_only=True)
-                assert not core.store.one("SELECT 1 FROM events WHERE event_id=?",
+                assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s',
                                            (capture["event_id"],))
             report = await child(core, tmp_path, "meme_caption", 1)
             assert report["calls"] == []
             assert core.store.rows("SELECT * FROM model_usage") == []
-            assert core.store.one("SELECT authority_json FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s',
                                    (job_id,)) == original
             if fence == "pre_ingress":
-                assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job_id,)) == {
+                assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job_id,)) == {
                     "state": "QUEUED",
                 }
     run(scenario())
@@ -164,7 +143,7 @@ def test_native_poke_coalescing_and_execution_use_original_selector_process(
                 core.clock.advance(core.settings.poke_policy.coalesce_seconds + 1)
                 if pre_ingress:
                     event = owner_turn(env, 2, "请先看新的输入", approve_only=True)
-                    assert not core.store.one("SELECT 1 FROM events WHERE event_id=?",
+                    assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s',
                                                (event["event_id"],))
                 actual = await child(core, tmp_path, "poke", 2)
                 if pre_ingress:

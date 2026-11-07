@@ -16,21 +16,10 @@ from companion.social_autonomy import SocialAutonomy
 from companion.store import Store, after
 from companion.transport import begin_send, lease_deliveries
 from tests.conftest import run
-from tests.test_life_expression_consumption import prepared
-from tests.test_owner_console import ORIGIN, login
-from tests.test_owner_console import client as client
-from tests.test_social_owner_authority import close_provider_clients, stop  # noqa: F401
-
-
-def setup(core, tmp_path, *, private=False):
-    job, _, ref, source = prepared(core, tmp_path, private=private,
-        purposes=["social", "account_actions", "qzone_publication"],
-        social_options={"qzone_public_enabled": True})
-    data = core.life_topics.retained_result(job)
-    module = SocialAutonomy(core.store, core.settings, clock=core.clock)
-    body = publication.PublicationCreate(job_id=job,
-        expected_content_sha256=data["qzone_draft"]["content_sha256"])
-    return module, body, ref, source
+from tests.support.owner_console import ORIGIN, login
+from tests.support.owner_console import client as client
+from tests.support.qzone_publication import setup
+from tests.support.social_owner_authority import close_provider_clients, stop  # noqa: F401
 
 
 def ready(core, tmp_path):

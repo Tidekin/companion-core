@@ -11,30 +11,10 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityChange, AuthorityPreview, AuthorityStop
 from companion_delivery_protocol import digest
 from tests.model_carry_support import migrated
+from tests.support.evaluation_authority_revision import revise, revised_policy, stop
+from tests.support.model_carry_lifecycle import current_unknown
+from tests.support.model_renewal import renewal
 from tests.support.owner_authority import activate
-from tests.test_model_carry_lifecycle import current_unknown
-from tests.test_model_renewal import renewal
-
-
-def stop(core, case, operation="evaluation-revision-stop"):
-    return owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
-        operation_id=operation, authority=case.successor["authority"]))
-
-
-def revised_policy(case):
-    return case.policy.model_copy(update={
-        "purposes": [*case.policy.purposes, "evaluation"], "authorization_sha256": "a" * 64})
-
-
-def revise(core, case):
-    stop(core, case)
-    policy = revised_policy(case)
-    result, request = activate(core, policy, revision=case.successor["authority"]["revision"] + 1,
-                               operation="evaluation-revision-activate")
-    case.successor, case.policy = result, policy
-    core.authorized_model_test_capture = result, case.key
-    core.authorized_model_test_jobs = {}
-    return request
 
 
 def test_revision_preserves_unknown_journal_records_and_resumes_same_policy(core, tmp_path):
@@ -100,7 +80,7 @@ def test_revision_requires_current_stopped_verified_custody(core, tmp_path, boun
         stop(core, case)
     if boundary in {"restore", "blocked"}:
         name = "model_budget_restore_required" if boundary == "restore" else "model_budget_blocked"
-        core.store.execute("INSERT INTO runtime_meta VALUES (?, '1')", (name,))
+        core.store.execute("INSERT INTO runtime_meta VALUES (%s, '1')", (name,))
     elif boundary == "erased_current":
         core.store.execute("UPDATE owner_authority_revisions "
                            "SET policy_json='{}',policy_redacted=1 "

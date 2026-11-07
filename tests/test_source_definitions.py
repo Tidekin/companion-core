@@ -1,6 +1,5 @@
 """Closed platform policy and accepted-evidence regressions; no external requests."""
 
-import hashlib
 import json
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta
@@ -10,8 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError, InboundEvent
-from companion.observation import ArticleEvidence, ArticleImage, ObservationEvent, ReadingSource
-from companion.privacy import epoch
+from companion.observation import ArticleEvidence, ArticleImage, ReadingSource
 from companion.source_grants import SourceGrantRegistration, SourceGrantSnapshot
 from companion.sources import (
     ContentSource,
@@ -23,10 +21,8 @@ from companion.sources import (
     source_names,
     supports,
 )
-from tests.conftest import ingest, run
-
-BILI = "https://www.bilibili.com/video/BV1xx411c7mD"
-HEYBOX = "https://www.xiaoheihe.cn/app/bbs/link/123456"
+from tests.conftest import run
+from tests.support.source_definitions import BILI, HEYBOX, accepted_text, enable_sharing
 
 
 def test_fixed_definitions_and_protocol_source_types_cannot_enable_third_platform():
@@ -135,33 +131,6 @@ def test_download_normalization_and_persisted_evidence_have_distinct_strict_limi
             ReadingSource(role="metadata", url=url, sha256="a" * 64, bytes=10)
 
 
-def accepted_text(core, source="bilibili", number=1, **changes):
-    core.settings.observation_enabled = True
-    core.settings.observation_adapters["reader"] = ObservationAdapterConfig(
-        source=source, token="synthetic-reader-token"
-    )
-    text = "这是已经成功读取的真实证据文本。"
-    return ObservationEvent(
-        schema_version=2,
-        event_id=f"source_definition_{number}",
-        event_type="content.observed",
-        source=source,
-        source_kind="text",
-        provider_event_id=str(number),
-        occurred_at=core.clock(),
-        trace_id=f"source_trace_{number}",
-        result_status="FETCHED",
-        privacy_epoch=epoch(core.store),
-        source_sha256=hashlib.sha256(text.encode()).hexdigest(),
-        payload={
-            "title": "来源材料",
-            "text": text,
-            "url": BILI if source == "bilibili" else HEYBOX,
-        },
-        **changes,
-    )
-
-
 def test_observation_rejects_cross_platform_url_and_evidence_before_storage(core):
     event = accepted_text(core)
     event.payload.url = HEYBOX
@@ -198,14 +167,6 @@ def test_non_platform_adapter_cannot_register_account_grant(core, source):
     assert core.store.rows("SELECT * FROM source_grants") == []
 
 
-def enable_sharing(core):
-    core.settings.social_enabled = core.settings.proactive_enabled = True
-    core.settings.proactive_idle_seconds = 0
-    core.settings.quiet_start = core.settings.quiet_end = 0
-    ingest(core)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-
-
 @pytest.mark.parametrize("source", ["bilibili", "heybox"])
 @pytest.mark.parametrize("grant_end", ["revoke", "expire"])
 def test_successful_history_can_share_after_future_read_permission_ends(
@@ -234,10 +195,10 @@ def test_successful_history_can_share_after_future_read_permission_ends(
     job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
     assert job and run(core.run_once(job_id=job["job_id"]))
     bodies = [json.loads(row["content_json"])["text"] for row in
-              core.store.rows("SELECT content_json FROM outbox ORDER BY rowid")]
+              core.store.rows('SELECT content_json FROM outbox ORDER BY record_sequence')]
     assert bodies == [core.model.activity, BILI if source == "bilibili" else HEYBOX]
     assert json.loads(core.model.calls[0][0][-1]["content"])["text"] == event.payload.text
-    stored = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event.event_id,))
+    stored = core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event.event_id,))
     assert json.loads(stored["body_json"])["text"] == event.payload.text
     assert len(core.model.calls) == 1 and core.model.calls[0][1] == "activity"
 
@@ -296,7 +257,7 @@ def test_legacy_queued_alias_url_keeps_same_accepted_content(core, source, legac
     assert candidate
     # Before normalization, queued candidates retained the accepted URL verbatim.
     core.store.execute(
-        "UPDATE social_candidates SET canonical_url=? WHERE candidate_id=?",
+        'UPDATE social_candidates SET canonical_url=%s WHERE candidate_id=%s',
         (legacy_url, candidate),
     )
     assert core.social.consider(event.event_id) == candidate
@@ -304,7 +265,7 @@ def test_legacy_queued_alias_url_keeps_same_accepted_content(core, source, legac
     job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
     assert job and run(core.run_once(job_id=job["job_id"]))
     bodies = [json.loads(row["content_json"])["text"] for row in
-              core.store.rows("SELECT content_json FROM outbox ORDER BY rowid")]
+              core.store.rows('SELECT content_json FROM outbox ORDER BY record_sequence')]
     assert bodies == [core.model.activity, BILI if source == "bilibili" else HEYBOX]
     assert core.store.rows("SELECT * FROM exploration_requests") == []
     assert len(core.model.calls) == 1 and core.model.calls[0][1] == "activity"
@@ -327,12 +288,14 @@ def test_legacy_queued_url_still_rejects_invalid_or_different_source(core, sourc
     candidate = core.social.consider(event.event_id)
     assert candidate
     core.store.execute(
-        "UPDATE social_candidates SET canonical_url=? WHERE candidate_id=?",
+        'UPDATE social_candidates SET canonical_url=%s WHERE candidate_id=%s',
         (queued_url, candidate),
     )
     assert not core.social.flush()
     assert core.store.rows("SELECT * FROM outbox") == []
-    assert core.store.one("SELECT state FROM social_candidates WHERE candidate_id=?", (candidate,))[
+    assert core.store.one((
+        'SELECT state FROM social_candidates WHERE candidate_id=%s'
+    ), (candidate,))[
         "state"
     ] == "SKIPPED"
 
@@ -346,21 +309,21 @@ def test_queued_share_rechecks_same_platform_url_and_accepted_text(core, mutatio
     assert candidate
     if mutation == "platform":
         core.store.execute(
-            "UPDATE events SET source='observation.unknown' WHERE event_id=?", (event.event_id,)
+            "UPDATE events SET source='observation.unknown' WHERE event_id=%s", (event.event_id,)
         )
     elif mutation == "url":
         core.store.execute(
-            "UPDATE observations SET canonical_url=? WHERE event_id=?", (HEYBOX, event.event_id)
+            'UPDATE observations SET canonical_url=%s WHERE event_id=%s', (HEYBOX, event.event_id)
         )
     else:
         core.store.execute(
-            "UPDATE events SET body_json=? WHERE event_id=?",
+            'UPDATE events SET body_json=%s WHERE event_id=%s',
             (json.dumps({"title": "来源材料", "text": "未经读取的替换文本"}), event.event_id),
         )
     assert not core.social.flush()
     assert core.store.rows("SELECT * FROM outbox") == []
     assert (
-        core.store.one("SELECT state FROM social_candidates WHERE candidate_id=?", (candidate,))[
+        core.store.one('SELECT state FROM social_candidates WHERE candidate_id=%s', (candidate,))[
             "state"
         ]
         == "SKIPPED"

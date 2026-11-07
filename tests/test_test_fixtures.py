@@ -1,55 +1,12 @@
 """Shared setup must preserve the isolation and schema exercised by runtime tests."""
 
-import re
-import sqlite3
-from contextlib import closing
+from pathlib import Path
 
 import pytest
+from psycopg import sql
 
-from companion.store import migrate
+from companion.postgres import Database
 from tests.conftest import ingest
-
-
-def assert_schema_metadata(db):
-    rows = dict(db.execute("SELECT key,value FROM runtime_meta").fetchall())
-    assert set(rows) == {"voice_incarnation", "owner_authority_restore_generation",
-                         "owner_authority_mode"}
-    assert re.fullmatch(r"[a-f0-9]{32}", rows["voice_incarnation"])
-    assert rows["owner_authority_restore_generation"] == "initial"
-    assert rows["owner_authority_mode"] == "OFF"
-
-
-def historical_database(source, path, revision):
-    """Reuse the migration fixtures' schema-column copy into a real historical DB."""
-    migrate(path, revision)
-    with sqlite3.connect(path) as target:
-        tables = target.execute("SELECT name FROM sqlite_master WHERE type='table' "
-                                "AND name NOT LIKE 'sqlite_%' AND name!='alembic_version'")
-        for (table,) in tables.fetchall():
-            if table.startswith("memories_fts"):
-                continue  # Native memory triggers rebuild the historical FTS index.
-            if not source.one(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
-            ):
-                continue
-            columns = [row[1] for row in target.execute(f'PRAGMA table_info("{table}")')]
-            for row in source.rows(f'SELECT * FROM "{table}" ORDER BY rowid'):
-                if table == "runtime_meta" and row["key"] == "voice_incarnation":
-                    continue
-                if table == "runtime_meta" and row["key"] in {
-                    "owner_authority_restore_generation", "owner_authority_mode",
-                }:
-                    # A historical fixture retains actual custody rather than a fresh
-                    # migration's bootstrap marker; no runtime grant is synthesized.
-                    target.execute("INSERT INTO runtime_meta(key,value) VALUES (?,?) "
-                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        (row["key"], row["value"]))
-                    continue
-                target.execute(f'INSERT INTO "{table}" ({",".join(columns)}) '
-                               f'VALUES ({",".join("?" for _ in columns)})',
-                               tuple(row[column] for column in columns))
-        assert target.execute("PRAGMA foreign_key_check").fetchall() == []
-    return path
 
 
 @pytest.mark.parametrize("attempt", [1, 2])
@@ -57,18 +14,61 @@ def test_core_fixture_keeps_runtime_data_out_of_the_template(core, migrated_data
     # Both invocations start empty even though the prior invocation wrote an event.
     assert core.store.rows("SELECT event_id FROM events") == []
     assert core.store.schema_capabilities()
-    assert core.store.one("PRAGMA foreign_keys")["foreign_keys"] == 1
-    assert core.store.one("PRAGMA synchronous")["synchronous"] == 2
-    assert core.store.one("PRAGMA secure_delete")["secure_delete"] == 1
+    assert core.store.rows(
+        "SELECT conname FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+        "AND contype='f' AND NOT convalidated"
+    ) == []
+    assert core.store.one("SHOW synchronous_commit")["synchronous_commit"] == "on"
+    assert core.store.one("SHOW full_page_writes")["full_page_writes"] == "on"
     ingest(core, attempt, text="合成夹具隔离检查")
     assert len(core.store.rows("SELECT event_id FROM events")) == 1
 
-    with closing(sqlite3.connect(migrated_database)) as template:
-        # Only migration-owned identity/OFF markers and FTS internal rows may exist;
-        # identities, privacy epochs, leases, erasure and budget state stay empty.
-        assert_schema_metadata(template)
-        tables = template.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        for (name,) in tables:
-            if (name not in {"alembic_version", "runtime_meta"}
-                and not name.startswith("memories_fts_")):
-                assert template.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0] == 0
+    with Database(migrated_database) as database, database.session() as template:
+        # Bootstrap identities, epochs, authority and journals belong to each clone.
+        tables = template.rows(
+            "SELECT tablename FROM pg_tables WHERE schemaname=current_schema() "
+            "AND tablename<>'alembic_version' ORDER BY tablename"
+        )
+        for row in tables:
+            assert template.one(sql.SQL("SELECT COUNT(*) AS n FROM {}").format(
+                sql.Identifier(row["tablename"]),
+            ))["n"] == 0
+
+
+def test_reusable_setup_never_imports_a_business_test_suite():
+    import ast
+    import re
+    from itertools import pairwise
+
+    root = Path(__file__).resolve().parents[1]
+    bad = []
+    # Workers also load Python through -c scripts and -m module arguments.
+    child_import = re.compile(
+        r"(?:^|;)\s*(?:from\s+tests\.test_\w+\s+import\b|"
+        r"from\s+tests\s+import\s+test_\w+|import\s+tests\.test_\w+)", re.MULTILINE)
+    for directory in ("tests", "scripts", "benchmarks"):
+        for path in (root / directory).rglob("*.py"):
+            text = path.read_text(encoding="utf-8-sig")
+            if "tests.test_" not in text and not re.search(r"from\s+tests\s+import\b", text):
+                continue
+            tree = ast.parse(text)
+            docstrings = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Expr)}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    names = [f"{node.module}.{alias.name}" for alias in node.names]
+                elif isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if id(node) not in docstrings and child_import.search(node.value):
+                        bad.append(f"{path.relative_to(root)}:{node.lineno}")
+                    continue
+                elif isinstance(node, (ast.Call, ast.List, ast.Tuple)):
+                    args = node.args if isinstance(node, ast.Call) else node.elts
+                    names = [module.value for option, module in pairwise(args)
+                             if isinstance(option, ast.Constant) and option.value == "-m"
+                             and isinstance(module, ast.Constant) and isinstance(module.value, str)]
+                else:
+                    continue
+                if any(name.startswith("tests.test_") for name in names):
+                    bad.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert bad == []

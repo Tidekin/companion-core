@@ -14,12 +14,12 @@ from companion.model import ModelClient
 from companion.store import Store, encode
 from tests.conftest import run
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.live_image_input import options
+from tests.support.memory_commands import fact
 from tests.support.native_image_memory import native_image_memory
+from tests.support.onebot_capture import capture_approval, source_window
 from tests.support.onebot_events import raw_event
-from tests.test_live_image_input import options
-from tests.test_memory_commands import fact
-from tests.test_onebot_capture import capture_approval, source_window
-from tests.test_onebot_images import image_segment
+from tests.support.onebot_images import image_segment
 
 PREFERENCE = "我挑选耳机优先考虑轻便和隔音。"
 CUES = "图片1：红色轻便头戴耳机；图片2：蓝色头戴耳机。检索主题：耳机、轻便、隔音。"
@@ -164,7 +164,7 @@ def test_originals_and_image_topic_retrieval_share_paid_job_and_verified_reply(
                 reopened.close()
             assert await value.worker.run_once("native-image-memory")
             assert len(value.calls) == 2, core.store.one(
-                "SELECT last_error_code FROM jobs WHERE job_id=?", (value.job["job_id"],))
+                'SELECT last_error_code FROM jobs WHERE job_id=%s', (value.job["job_id"],))
             final = value.calls[-1]["messages"]
             images = [part for message in final if isinstance(message["content"], list)
                       for part in message["content"] if part["type"] == "image_url"]
@@ -180,9 +180,12 @@ def test_originals_and_image_topic_retrieval_share_paid_job_and_verified_reply(
             assert json.loads(requested["function"]["arguments"])["query"] == CUES
             assert "过期秘密偏好" not in encode(value.calls)
             assert (PREFERENCE in encode(final)) == (not no_candidates)
-            assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+            assert core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            ) == [
                 {"scenario": "chat", "state": "SETTLED"}] * 2
-            admissions = core.store.rows("SELECT * FROM model_admissions ORDER BY rowid")
+            admissions = core.store.rows('SELECT * FROM model_admissions ORDER BY record_sequence')
             assert {row["logical_request_id"] for row in admissions} == {value.job["job_id"]}
             assert [row["input_bound"] for row in admissions] == [
                 paid_budget.estimate_input_tokens(core.settings.paid_model, call["messages"],
@@ -210,7 +213,7 @@ def test_five_image_memory_inputs_obey_the_explicit_model_attempt_cap(core, tmp_
                 job = value.job if number == 1 else await value.admit_image(number)
                 assert await value.worker.run_once("bounded-native-image-memory")
                 assert len(value.calls) == min(number * 2, limit)
-                current = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                current = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                          (job["job_id"],))
                 if number * 2 > limit:
                     assert current["state"] == "FAILED", current
@@ -227,7 +230,7 @@ def test_five_image_memory_inputs_obey_the_explicit_model_attempt_cap(core, tmp_
             if limit == 10:
                 event = await value.entry.admit(6, "预算已满后的新输入")
                 assert await value.worker.run_once("no-eleventh-model-call")
-                refused = core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+                refused = core.store.one('SELECT state,last_error_code FROM jobs WHERE event_id=%s',
                                          (event["event_id"],))
                 assert refused["state"] == "FAILED", refused
                 assert refused["last_error_code"] == "MODEL_DAILY_BUDGET_EXHAUSTED", refused
@@ -249,7 +252,7 @@ def test_joint_image_memory_flow_stops_before_final_io_on_lost_evidence(core, tm
                 assert_failure_notice(core)
             else:
                 assert not core.store.one("SELECT 1 FROM outbox")
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                 (value.job["job_id"],))["state"] == (
                     "CANCELLED" if mutation == "erased_current" else "FAILED")
             usage = core.store.rows("SELECT * FROM model_usage")

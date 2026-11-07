@@ -10,11 +10,7 @@ from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, until, worker
-
-
-def model_response(text):
-    return httpx.Response(200, json={"choices": [{"message": {"content": text}}],
-                                    "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+from tests.support.input_interrupt_bridge import model_response
 
 
 def test_slow_reply_does_not_block_accepting_new_input_with_independent_api_worker(
@@ -75,7 +71,10 @@ def test_slow_reply_does_not_block_accepting_new_input_with_independent_api_work
                 assert window.runtime.row()["state"] == "ACTIVE" and window.captures() == 2
                 assert [item["message"][0]["data"]["text"] for item in sends] == [
                     "第二件事的新回复"]
-                jobs = core.store.rows("SELECT state FROM jobs WHERE kind='chat' ORDER BY rowid")
+                jobs = core.store.rows(
+                    "SELECT state FROM jobs WHERE kind='chat' ORDER BY "
+                    'record_sequence'
+                )
                 assert [item["state"] for item in jobs] == ["CANCELLED", "SUCCEEDED"]
                 assert core.store.one("SELECT reply_revision FROM conversations")[
                     "reply_revision"] == 2
@@ -126,9 +125,11 @@ def test_new_input_between_bubbles_keeps_ack_prefix_and_cancels_old_tail(
                 assert window.runtime.row()["state"] == "ACTIVE"
                 assert [item["message"][0]["data"]["text"] for item in sends] == [
                     "第一段", "新的话题"]
-                original = core.store.rows("SELECT state FROM outbox WHERE origin_event_id="
-                    "(SELECT event_id FROM jobs WHERE kind='chat' ORDER BY rowid LIMIT 1) "
-                    "ORDER BY segment_index")
+                original = core.store.rows(
+                    'SELECT state FROM outbox WHERE origin_event_id=(SELECT '
+                    "event_id FROM jobs WHERE kind='chat' ORDER BY "
+                    'record_sequence LIMIT 1) ORDER BY segment_index'
+                )
                 assert [row["state"] for row in original] == ["SENT", "CANCELLED", "CANCELLED"]
                 assert len(calls) == 2
                 assert core.store.one("SELECT reply_revision FROM conversations")[

@@ -14,7 +14,7 @@ from companion.store import after, encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, worker_for
 from tests.support.native_consumer_entry import environment
-from tests.test_native_history_delivery import sdk_step
+from tests.support.native_history_delivery import sdk_step
 
 
 async def native_history(core, tmp_path, check, *, turns=3, independent=False):
@@ -35,16 +35,20 @@ async def native_history(core, tmp_path, check, *, turns=3, independent=False):
                 core.clock.advance(1)
             assert len(sends) == turns
             source = await entry.admit(turns + 1, "合成当前输入。")
-            job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e "
-                                 "USING(event_id) WHERE event_id=?", (source["event_id"],))
+            job = core.store.one((
+                'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+                'USING(event_id) WHERE event_id=%s'
+            ), (source["event_id"],))
             expected = owner_input.history_sources(core.store, core.settings, core.clock, job)
             assert len(expected) == turns
             check(job, expected)
             if independent:
                 job_id, wire = await sdk_step(core, tmp_path, source["event_id"], turns + 1)
                 assert sum(message["role"] == "assistant" for message in wire["messages"]) == turns
-                row = core.store.one("SELECT snapshots_json FROM agent_conversations "
-                                     "WHERE job_id=?", (job_id,))
+                row = core.store.one((
+                    'SELECT snapshots_json FROM agent_conversations WHERE '
+                    'job_id=%s'
+                ), (job_id,))
                 history = next(item["proof"] for item in json.loads(row["snapshots_json"])
                                if item["kind"] == "history")
                 assert history == owner_input.history_proof(expected)
@@ -172,7 +176,7 @@ def test_transaction_history_still_checks_every_selected_source(
                         (after(core.clock(), 100), target))
             else:
                 key = owner_input.INPUT + target
-                row = core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+                row = core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))
                 value = json.loads(row["value"])
                 value["capture"]["signature"] = "0" * 128
                 execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), key))
@@ -238,7 +242,7 @@ def test_native_history_is_rechecked_after_the_model_await(core, tmp_path):
                 assert not worker.store.db.in_transaction
                 if len(requests) == 2:
                     # A separate live connection can change custody during model I/O.
-                    core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
+                    core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s',
                                        (first["event_id"],))
                 return httpx.Response(200, json=answer("合成答复。"))
 
@@ -252,9 +256,9 @@ def test_native_history_is_rechecked_after_the_model_await(core, tmp_path):
                 assert not await worker.run_once("history-no-replay")
             assert len(requests) == 2 and len(sends) == 1
             assert any(message["role"] == "assistant" for message in requests[1]["messages"])
-            assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE event_id=%s',
                                   (current["event_id"],))["state"] == "CANCELLED"
-            assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+            assert not core.store.one('SELECT 1 FROM outbox WHERE origin_event_id=%s',
                                       (current["event_id"],))
             assert len(core.store.rows("SELECT 1 FROM model_usage WHERE state='SETTLED'")) == 2
 

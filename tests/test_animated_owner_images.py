@@ -13,31 +13,18 @@ from PIL import Image
 
 from companion.contracts import CoreError
 from companion.core import Core
-from companion.image_input import ImageInputPolicy, text_and_estimate
+from companion.image_input import text_and_estimate
 from companion.reply_segments import SEMANTIC_RULES, SegmentedReplyConfig
 from companion_onebot_bridge import app, images
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.pending_media import MediaPump
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, until
+from tests.support.animated_owner_images import animation, policy
+from tests.support.image_connect_recovery import ConnectThenGet
+from tests.support.live_image_input import options as image_options
 from tests.support.onebot_events import config, raw_event
-from tests.test_image_connect_recovery import ConnectThenGet
-from tests.test_live_image_input import options as image_options
-from tests.test_onebot_images import image_segment
-
-
-def animation(format="GIF", *, count=3, size=(12, 8)):
-    frames = [Image.new("RGBA", size, color) for color in ("red", "green", "blue")]
-    output = io.BytesIO()
-    frames[0].save(output, format=format, save_all=True,
-                   append_images=[frames[i % 3] for i in range(1, count)],
-                   duration=100, loop=0, lossless=True)
-    return output.getvalue()
-
-
-def policy(**changes):
-    return ImageInputPolicy(approval_sha256="a" * 64, estimated_tokens_per_image=100,
-                            max_bytes_per_image=50000, max_pixels_per_image=10000, **changes)
+from tests.support.onebot_images import image_segment
 
 
 @pytest.mark.parametrize("subtype", [0, 1, 7, 11])
@@ -228,7 +215,9 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
         content = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
         assert content["state"] == "SUCCEEDED"
         assert content["media_sha256"] == hashlib.sha256(original).hexdigest()
-        assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+        assert core.store.rows(
+            'SELECT scenario,state FROM model_usage ORDER BY record_sequence'
+        ) == [
             {"scenario": "chat", "state": "SETTLED"},
             {"scenario": "chat", "state": "SETTLED"}]
         assert core.store.one("SELECT COUNT(*) n FROM captured_images")["n"] == 1

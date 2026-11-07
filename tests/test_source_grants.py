@@ -1,6 +1,5 @@
 import json
 from contextlib import closing
-from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -12,7 +11,6 @@ from companion.api import create_app
 from companion.backup import backup, restore
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
-from companion.exploration import ReadItem, ReadResult
 from companion.privacy import epoch
 from companion.source_grants import SourceGrantRegistration, SourceGrantSnapshot, grant_tombstone
 from companion.store import Store, migrate
@@ -22,139 +20,22 @@ from source_reader.heybox_source import NativeHeyboxSource
 from source_reader.network import ReadFailure
 from source_reader.worker import read_result, tick
 from tests.conftest import run
-from tests.test_exploration import configure
-from tests.test_heybox_reader import URL, mock_pool
-from tests.test_input_reply_migration import config_for
-from tests.test_observations import observation
-from tests.test_plugin_readonly import NOW_DT, grant
-from tests.test_test_fixtures import historical_database
-
-GRANT_ID = "grant_" + "1" * 32
-
-
-def authorization(core, **changes):
-    return SourceGrantSnapshot.model_validate(
-        {
-            "grant_id": GRANT_ID,
-            "epoch": 1,
-            "fingerprint": "a" * 64,
-            "expires_at": (datetime.fromisoformat(core.clock()) + timedelta(hours=1)).isoformat(),
-            **changes,
-        }
-    )
-
-
-def prepare(core):
-    configure(core)
-    core.settings.observation_adapters["heybox"].source_grant_required = True
-    snapshot = authorization(core)
-    core.observations.grants.register(
-        SourceGrantRegistration(adapter_id="heybox", **snapshot.snapshot())
-    )
-    return snapshot
-
-
-def lease(core, snapshot, key="read-1"):
-    with core.store.transaction():
-        core.exploration.create("heybox", "read", key, URL)
-    return core.exploration.lease("heybox", snapshot)
-
-
-def receipt(item, snapshot):
-    return ReadResult(
-        lease_token=item["lease_token"],
-        status="SUCCESS",
-        used_bytes=400,
-        used_requests=1,
-        source_grant=snapshot,
-        items=[ReadItem(title="Private fixture", text="Source-grant private fixture", url=URL)],
-    )
-
-
-def accepted(core, snapshot):
-    item = lease(core, snapshot)
-    result = core.exploration.complete("heybox", item["request_id"], receipt(item, snapshot))
-    return result["event_ids"][0]
-
-
-def derived_records(core, event_id):
-    s, now = core.store, core.clock()
-    with s.transaction():
-        s.insert(
-            "memories",
-            memory_id="mem_grant_fixture",
-            subject="self",
-            kind="fact",
-            content="Private derived memory",
-            status="CONFIRMED",
-            origin="event_observed",
-            confidence=1,
-            importance=0.5,
-            privacy_scope="private",
-            created_at=now,
-            updated_at=now,
-        )
-        s.insert(
-            "memory_evidence",
-            memory_id="mem_grant_fixture",
-            event_id=event_id,
-            polarity=1,
-            created_at=now,
-        )
-        s.insert(
-            "memory_vectors",
-            memory_id="mem_grant_fixture",
-            model_version="fixture",
-            content_hash="a" * 64,
-            vector=b"\0" * 16,
-        )
-        s.insert(
-            "diary_runs",
-            run_id="diary_grant_fixture",
-            identity_id="companion",
-            local_date="2026-10-18",
-            timezone="Asia/Shanghai",
-            state="COMMITTED",
-            max_attempts=1,
-            created_at=now,
-            updated_at=now,
-        )
-        s.insert(
-            "diary_entries",
-            entry_id="entry_grant_fixture",
-            run_id="diary_grant_fixture",
-            identity_id="companion",
-            local_date="2026-10-18",
-            timezone="Asia/Shanghai",
-            title="Private diary",
-            body_md="Private derived diary",
-            status="COMMITTED",
-            source_set_sha256="a" * 64,
-            captured_privacy_epoch=epoch(s),
-            generator_version="fixture",
-            model_name="fixture",
-            created_at=now,
-            updated_at=now,
-        )
-        s.insert(
-            "diary_evidence",
-            entry_id="entry_grant_fixture",
-            source_id="source_1",
-            event_id=event_id,
-            excerpt_sha256="a" * 64,
-        )
-        s.insert(
-            "social_candidates",
-            candidate_id="candidate_grant_fixture",
-            event_id=event_id,
-            canonical_url=URL,
-            content_sha256="a" * 64,
-            comparison_text="Private candidate",
-            state="CANDIDATE",
-            expires_at=now,
-            created_at=now,
-            updated_at=now,
-        )
+from tests.support.exploration import configure
+from tests.support.heybox_reader import mock_pool
+from tests.support.historical_schema import historical_database
+from tests.support.input_reply_migration import config_for
+from tests.support.observation_capture import observation
+from tests.support.plugin_readonly import NOW_DT, grant
+from tests.support.source_grants import (
+    GRANT_ID,
+    URL,
+    accepted,
+    authorization,
+    derived_records,
+    lease,
+    prepare,
+    receipt,
+)
 
 
 @pytest.mark.parametrize("stop", ["expiry", "read_revoke"])
@@ -170,7 +51,7 @@ def test_expiry_and_future_read_revocation_retain_existing_history(core, stop):
         assert result["history_erased"] is False
     with pytest.raises(CoreError, match="SOURCE_GRANT_(EXPIRED|REVOKED)"):
         lease(core, snapshot, "read-2")
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (event_id,))
     assert not event["redacted"] and "private fixture" in event["body_json"]
     assert epoch(core.store) == before_epoch
     assert len(core.ledger.read()) == 1
@@ -212,7 +93,7 @@ def test_late_result_cannot_commit_after_authorization_changes(core, change, hot
         core.exploration.complete("heybox", item["request_id"], receipt(item, snapshot))
     assert not core.store.rows("SELECT * FROM observations")
     row = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (item["request_id"],)
     )
     assert row["reserved_requests"] == 1 and row["used_requests"] is None
 
@@ -365,7 +246,7 @@ def test_forget_erases_derived_closure_and_newest_ledger_prevents_backup_resurre
                     "state": "ERASED",
                     "comparison_text": "",
                 }
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (derived.event_id,))[
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (derived.event_id,))[
         "redacted"
     ]
     with pytest.raises(CoreError, match="FORGOTTEN"):
@@ -393,16 +274,16 @@ def test_complete_projection_rebuilds_grant_tombstone_and_clears_late_stale_cont
     event_id = accepted(core, snapshot)
     core.observations.grants.forget(GRANT_ID, core.ledger)
     with core.store.transaction():
-        core.store.execute("DELETE FROM runtime_meta WHERE key=?", (grant_tombstone(GRANT_ID),))
+        core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (grant_tombstone(GRANT_ID),))
         core.store.execute(
-            "UPDATE events SET redacted=0,body_json=? WHERE event_id=?",
+            'UPDATE events SET redacted=0,body_json=%s WHERE event_id=%s',
             ('{"text":"PRIVATE_STALE_CONTENT"}', event_id),
         )
     core.ledger.replay(core.store)
     assert core.store.one(
-        "SELECT body_json,redacted FROM events WHERE event_id=?", (event_id,)
+        'SELECT body_json,redacted FROM events WHERE event_id=%s', (event_id,)
     ) == {"body_json": "{}", "redacted": 1}
-    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (grant_tombstone(GRANT_ID),))
+    assert core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s', (grant_tombstone(GRANT_ID),))
     assert len(core.ledger.read()) == 2
 
 
@@ -414,7 +295,7 @@ def test_empty_grant_forget_preserves_unrelated_history(core):
     event = observation(core)
     core.observations.append("public", event)
     core.observations.grants.forget(GRANT_ID, core.ledger)
-    assert not core.store.one("SELECT redacted FROM events WHERE event_id=?", (event.event_id,))[
+    assert not core.store.one('SELECT redacted FROM events WHERE event_id=%s', (event.event_id,))[
         "redacted"
     ]
 
@@ -491,7 +372,7 @@ def test_legacy_migration_inventory_preserves_unknown_records_without_invented_a
     event = observation(core, source="heybox")
     event.payload.url = URL
     core.observations.append("heybox", event)
-    before = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event.event_id,))
+    before = core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event.event_id,))
     database = historical_database(core.store, tmp_path / "grants.db", "0015_article_images")
     migrate(database, "0016_source_grants")
     with closing(Store(database)) as store:

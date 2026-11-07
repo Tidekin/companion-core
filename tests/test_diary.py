@@ -25,70 +25,9 @@ from companion.store import Store, encode, migrate
 from companion.transport import enqueue
 from companion.worker_lock import single_worker
 from tests.conftest import FakeModel, ingest, run
-from tests.test_m1 import remember
-from tests.test_test_fixtures import historical_database
-
-DAY = date(2026, 10, 18)
-
-
-class DiaryModel(FakeModel):
-    def __init__(self):
-        super().__init__()
-        self.transform = None
-
-    async def complete(self, messages, scenario):
-        if scenario != "diary":
-            return await super().complete(messages, scenario)
-        self.calls.append((messages, scenario))
-        if self.callback:
-            self.callback()
-        if self.error:
-            raise self.error
-        data = json.loads(messages[-1]["content"])
-        source = next(row for row in data["sources"] if row["kind"] == "owner_message")
-        draft = {
-            "schema_version": 1,
-            "local_date": data["local_date"],
-            "title": "关于今天的交流",
-            "worth_saving": True,
-            "sections": [
-                {
-                    "kind": "observation",
-                    "text": source["text"],
-                    "evidence": [{"source_id": source["source_id"], "exact_quote": source["text"]}],
-                },
-                {
-                    "kind": "question",
-                    "text": "下次可以再问问这件事。",
-                    "evidence": [{"source_id": source["source_id"], "exact_quote": ""}],
-                },
-            ],
-        }
-        if self.transform:
-            self.transform(draft)
-        return ModelResponse(encode(draft), 140, 80, 20)
-
-
-def seed_day(core, texts=None, day=DAY):
-    core.settings.diary_enabled = True
-    model = DiaryModel()
-    core.diary.model = model
-    texts = texts or [
-        "今天讨论了我的读书计划。",
-        "这周想先读科幻小说。",
-        "我喜欢先列出章节再开始阅读。",
-    ]
-    for i, text in enumerate(texts, 1):
-        ingest(core, i, text, at=day.isoformat() + "T04:00:00+00:00")
-    # Historical owner events are real accepted inbox records; their chat jobs already ended.
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    return model
-
-
-def generate(core):
-    core.diary.schedule_day(DAY)
-    assert run(core.diary.generate_once("diary-worker"))
-    return core.store.one("SELECT * FROM diary_runs WHERE local_date=%s", (DAY.isoformat(),))
+from tests.support.confirmed_memory import remember
+from tests.support.diary import DAY, DiaryModel, generate, seed_day
+from tests.support.historical_schema import historical_database
 
 
 def test_d01_disabled_means_no_jobs_or_model_calls(core):
@@ -144,7 +83,7 @@ def test_d05_only_sent_replies_in_same_day_are_sources(core):
             key=f"reply-{i}",
         )
         core.store.execute(
-            "UPDATE outbox SET state=?,sent_at=? WHERE message_id=?",
+            'UPDATE outbox SET state=%s,sent_at=%s WHERE message_id=%s',
             (state, "2026-10-18T04:01:00.000000+00:00", mid),
         )
     sources = core.diary.repo.sources(DAY)
@@ -362,7 +301,7 @@ def test_d15_memory_erasure_and_retention_reach_diary(core):
     seed_day(core)
     memory_id = remember(core, 50, "我的最爱饮料是茉莉绿茶", confirmed=True)
     core.store.execute(
-        "UPDATE events SET occurred_at=? WHERE event_id='evt_test_50'",
+        "UPDATE events SET occurred_at=%s WHERE event_id='evt_test_50'",
         ("2026-10-18T05:00:00.000000+00:00",),
     )
     assert generate(core)["state"] == "COMMITTED"
@@ -424,7 +363,7 @@ def test_g0_delete_one_day_preserves_independent_diary_and_reply(core, tmp_path)
         core.store, "evt_test_1", first["conversation_id"], "第一天回复", core.clock()
     )
     core.store.execute(
-        "UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+        "UPDATE outbox SET state='SENT',sent_at=%s WHERE message_id=%s",
         (DAY.isoformat() + "T05:00:00.000000+00:00", first_reply),
     )
     generate(core)
@@ -436,7 +375,7 @@ def test_g0_delete_one_day_preserves_independent_diary_and_reply(core, tmp_path)
         core.store, "evt_test_11", first["conversation_id"], "独立的一天", core.clock()
     )
     core.store.execute(
-        "UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+        "UPDATE outbox SET state='SENT',sent_at=%s WHERE message_id=%s",
         (other_day.isoformat() + "T05:00:00.000000+00:00", other_reply),
     )
     core.diary.schedule_day(other_day)
@@ -470,7 +409,7 @@ def test_g0_delete_one_day_preserves_independent_diary_and_reply(core, tmp_path)
             assert (
                 json.loads(
                     instance.store.one(
-                        "SELECT content_json FROM outbox WHERE message_id=?", (other_reply,)
+                        'SELECT content_json FROM outbox WHERE message_id=%s', (other_reply,)
                     )["content_json"]
                 )["text"]
                 == "独立的一天"
@@ -533,7 +472,7 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
     core.settings.memory_daily_micro_usd = 0
     core.settings.diary_max_output_tokens = 350
     request_id = budget.reserve(core.store, core.settings, None, "diary", [], core.clock())
-    row = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+    row = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,))
     assert row["output_tokens"] == 350
     # Finish the no-I/O Demo probe before entering a separately approved mock-live scope.
     budget.settle(core.store, core.settings, request_id, ModelResponse("demo", 0, 0))
@@ -551,7 +490,7 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
 
     async def execute():
         from tests.support.owner_authority import activate
-        from tests.test_owner_authority import prepare
+        from tests.support.owner_authority_setup import prepare
 
         policy = prepare(core, tmp_path).model_copy(update={"purposes": ["diary"]})
         activate(core, policy)
@@ -776,7 +715,7 @@ def test_diary_readback_is_excluded_from_later_model_and_diary_sources(core):
     generate(core)
     ingest(core, 100, "/读日记")
     assert run(core.run_once("chat"))
-    core.store.execute("UPDATE outbox SET state='SENT',sent_at=?", (core.clock(),))
+    core.store.execute("UPDATE outbox SET state='SENT',sent_at=%s", (core.clock(),))
     ingest(core, 101, "现在讨论新的事情")
     job = core.store.one(
         "SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
@@ -820,7 +759,9 @@ def test_previous_episode_does_not_fill_an_empty_current_day(core):
         ingest(core, i, "之前已经讨论过的事情", at="2026-10-17T04:00:00+00:00")
     with core.store.transaction():
         core.memory.episodes(
-            core.store.rows("SELECT * FROM events WHERE event_id LIKE 'evt_test_10%'"), core.clock()
+            core.store.rows(
+                "SELECT * FROM events WHERE event_id LIKE 'evt_test_10%%'"
+            ), core.clock()
         )
     assert generate(core)["state"] == "SKIPPED"
     assert model.calls == []

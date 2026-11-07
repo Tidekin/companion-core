@@ -10,14 +10,14 @@ from companion.diary import DiaryDraft, render_draft
 from companion.goals import GoalProposal, GoalScope
 from companion.source_grants import ReaderReadValidation
 from tests.conftest import ingest, run
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY
+from tests.support.growth_foundations import complete_read, view
+from tests.support.heybox_reader import URL
+from tests.support.observation_capture import enable_observations, observation
 from tests.support.owner_authority import activate as activate_owner
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
-from tests.test_growth_foundations import complete_read, view
-from tests.test_heybox_reader import URL
-from tests.test_observations import enable_observations, observation
-from tests.test_owner_authority import prepare as prepare_owner
-from tests.test_source_grants import prepare, receipt
+from tests.support.owner_authority_setup import prepare as prepare_owner
+from tests.support.source_grants import prepare, receipt
 
 
 def test_live_daily_sources_exclude_retained_simulation_before_any_model_request(core, tmp_path):
@@ -91,7 +91,7 @@ def reflected_proposal(core, scope=None):
     assert run(core.reflections.run_day(DAY))["state"] == "COMMITTED"
     suggestion = core.reflections.recent()[0]
     source_ids = [row["event_id"] for row in core.store.rows(
-        "SELECT event_id FROM reflection_evidence WHERE run_id=?", (suggestion["run_id"],)
+        'SELECT event_id FROM reflection_evidence WHERE run_id=%s', (suggestion["run_id"],)
     )]
     proposal = GoalProposal(
         topic=suggestion["content"], source_event_ids=source_ids, scope=scope or GoalScope()
@@ -241,7 +241,7 @@ def test_latest_ledger_replay_erases_attributed_goal_but_keeps_independent_sourc
     try:
         assert restored.reflections.recent() == []
         assert [row["goal_id"] for row in restored.goals.recent()] == [independent]
-        row = restored.store.one("SELECT redacted FROM goals WHERE goal_id=?", (derived,))
+        row = restored.store.one('SELECT redacted FROM goals WHERE goal_id=%s', (derived,))
         assert row["redacted"]
         assert restored.store.rows("PRAGMA foreign_key_check") == []
     finally:

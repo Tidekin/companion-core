@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 from contextlib import asynccontextmanager
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -25,9 +25,14 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.native_continuous_support import answer, frame, host
-from tests.native_owner_recovery_support import CONTROL_TOKEN, reopen_host, stop_host
-from tests.support.owner_authority import activate
-from tests.test_poke import native_frame
+from tests.native_owner_recovery_support import CONTROL_TOKEN, stop_host
+from tests.support.onebot_owner_resolution import (
+    assert_custody_counts,
+    original_rows,
+    reopen,
+    successor,
+)
+from tests.support.poke import native_frame
 
 
 @asynccontextmanager
@@ -84,35 +89,10 @@ async def uncertain(core, tmp_path, monkeypatch, *, crash=False, kind="poke", se
             core=core, cfg=active.config, policy=grant, monkeypatch=monkeypatch)
 
 
-def reopen(env):
-    return reopen_host(env.active, env.monkeypatch)
-
-
 def decide(env, outcome):
     return reconciliation.resolve(env.core.store, env.core.settings, env.message_id, outcome,
         env.core.clock(), operation_id="owner-native-resolution",
         operation_sha256=wire.digest([env.message_id, outcome]))
-
-
-async def successor(env, old):
-    await owner_handoff.prepare(old, env.client)
-    approved, _ = activate(env.core, env.policy, revision=old.authority["revision"] + 1,
-                           operation="native-recovery-successor")
-    result = await owner_handoff.handoff(old, env.client, approved["authority"])
-    assert result["state"] == "ACTIVE"
-    return replace(env.cfg, owner_authority=approved["authority"])
-
-
-def original_rows(runtime, table):
-    return owner_handoff._rows(runtime.db, f"SELECT * FROM {table} ORDER BY rowid")
-
-
-def assert_custody_counts(runtime, *, inputs=1, sends=1):
-    records = runtime.verify(active=False)
-    assert sum(row["kind"] == "CAPTURED" for row in records) == inputs
-    assert sum(row["kind"] == "RESERVED" for row in records) == sends
-    assert runtime.db.execute("SELECT COUNT(*) FROM window_inputs").fetchone()[0] == inputs
-    assert runtime.db.execute("SELECT COUNT(*) FROM window_attempts").fetchone()[0] == sends
 
 
 @pytest.mark.parametrize("outcome", ["SENT", "CANCELLED"])

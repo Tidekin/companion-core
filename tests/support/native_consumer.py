@@ -18,7 +18,7 @@ from tests.support.core_http import real_core_http
 from tests.support.native_context import Capture
 from tests.support.onebot import onebot_http
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 @asynccontextmanager
@@ -106,4 +106,4 @@ async def admit(client, core, entry, number, text, *, reference=None):
         peer=("127.0.0.1", 3001), media=prepared["media"])
     assert await entry.runtime.flush_one(client)
     event = prepared["event"]
-    return event, core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+    return event, core.store.one('SELECT * FROM jobs WHERE event_id=%s', (event["event_id"],))

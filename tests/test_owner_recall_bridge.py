@@ -13,15 +13,10 @@ from companion_onebot_bridge.event_normalizer import normalize, normalize_recall
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.native_continuous_support import recall_frame as native_recall_frame
+from tests.support.onebot_capture import source_window
 from tests.support.onebot_events import config, raw_event
-from tests.test_onebot_capture import source_window
-from tests.test_private_companion import companion_options
-
-
-def recall_frame(message_id=1, **changes):
-    return json.dumps({"time": raw_event()["time"], "self_id": 10002, "post_type": "notice",
-                       "notice_type": "friend_recall", "user_id": 10001,
-                       "message_id": message_id, **changes})
+from tests.support.owner_recall_bridge import recall_frame
+from tests.support.private_companion import companion_options
 
 
 def test_recall_uses_canonical_inbound_id_and_isolates_protocol_epoch():

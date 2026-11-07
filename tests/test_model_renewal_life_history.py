@@ -16,11 +16,11 @@ from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.life_worker_integration import process_worker
+from tests.support.model_carry_native import child, finished
+from tests.support.model_renewal import renewal
+from tests.support.model_renewal_native import life_case, source_and_renewal
 from tests.support.owner_authority import activate
-from tests.test_life_worker_integration import process_worker
-from tests.test_model_carry_native import child, finished
-from tests.test_model_renewal import renewal
-from tests.test_model_renewal_native import life_case, source_and_renewal
 
 
 async def selected_then_history(core, tmp_path, case, http):
@@ -79,7 +79,7 @@ def test_selected_to_history_renewal_cli_http_and_independent_life_worker(
             assert first["provider_calls"] == 1 and first["results"][0]["state"] == "SHADOW"
             second = await process_worker(core, tmp_path, "bug", source, restart=True)
             assert second["provider_calls"] == 0
-            assert all(core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+            assert all(core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                      (row["request_id"],)) == row for row in before)
     run(scenario())
 

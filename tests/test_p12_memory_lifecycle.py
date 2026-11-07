@@ -41,7 +41,7 @@ def test_native_lifecycle_restore_and_rebuild_preserve_independent_fact(core, tm
     assert core.store.one("SELECT COUNT(*) n FROM memory_revisions")["n"] == 1
     assert core.store.one("SELECT COUNT(*) n FROM memory_vectors")["n"] >= 1
     with core.store.transaction():
-        memory.episodes(core.store.rows("SELECT * FROM events WHERE event_id IN (?,?)",
+        memory.episodes(core.store.rows('SELECT * FROM events WHERE event_id IN (%s,%s)',
                                        (first["event_id"], correction["event_id"])), core.clock())
     key = Fernet.generate_key()
     archive, restored = tmp_path / "before-forget.enc", tmp_path / "restored.db"
@@ -115,7 +115,9 @@ def test_native_control_lifecycle_preserves_paid_and_authority_journals(core, tm
                 assert core.store.rows("SELECT * FROM owner_authority_revisions") == authority
                 assert len(model.requests) == 1 and len(sends) == 4
                 assert len(core.ledger.read()) == 2
-                assert not core.store.rows("SELECT * FROM memory_evidence WHERE memory_id IN (?,?)",
+                assert not core.store.rows((
+                    'SELECT * FROM memory_evidence WHERE memory_id IN (%s,%s)'
+                ),
                                            (mid, revised))
 
                 await entry.stop()

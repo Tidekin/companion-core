@@ -8,7 +8,7 @@ import pytest
 from companion.contracts import CoreError
 from companion.store import encode
 from companion.voice_jobs import erase_voice_jobs, fence_conversation, restore_voice_jobs
-from tests.test_voice_flow import finish_node, flow_fixture, prepare
+from tests.support.voice_flow import finish_node, flow_fixture, prepare
 
 
 @pytest.mark.parametrize("action", ["erase", "restore", "revision"])
@@ -21,7 +21,7 @@ def test_voice_fence_retires_content_and_keeps_only_random_prior_delivery_proof(
     prepare(core, flow, message_id)
     key = "voice_reply:" + message_id
     original = json.loads(
-        core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))["value"]
+        core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))["value"]
     )
     with core.store.transaction():
         if action == "erase":
@@ -30,11 +30,11 @@ def test_voice_fence_retires_content_and_keeps_only_random_prior_delivery_proof(
             restore_voice_jobs(core.store)
         else:
             conversation = core.store.one(
-                "SELECT conversation_id FROM events WHERE event_id=?", (event_id,)
+                'SELECT conversation_id FROM events WHERE event_id=%s', (event_id,)
             )["conversation_id"]
             fence_conversation(core.store, conversation)
     retained = json.loads(
-        core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))["value"]
+        core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))["value"]
     )
     assert set(retained) == {"state", "reason", "job_id", "retired"}
     assert retained["state"] == "FENCED"
@@ -45,7 +45,7 @@ def test_voice_fence_retires_content_and_keeps_only_random_prior_delivery_proof(
         original["binding"]["retirement_token"].encode()).hexdigest()
     for field in ("reply_sha256", "result_sha256", "source_sha256", "audio_sha256"):
         assert original["binding"][field] not in json.dumps(retained)
-    row = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (retained["job_id"],))
+    row = core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s', (retained["job_id"],))
     assert row["input_blob"] is None and row["result_blob"] is None
     assert row["result_sha256"] is None
     with pytest.raises(CoreError, match="VOICE_FLOW_FENCED"):
@@ -70,7 +70,7 @@ def test_erasure_does_not_keep_arbitrary_fields_from_corrupt_voice_binding(core,
     with core.store.transaction():
         erase_voice_jobs(core.store, [event_id])
     assert json.loads(
-        core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))["value"]
+        core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))["value"]
     ) == {
         "state": "FENCED",
         "reason": "VOICE_SOURCE_ERASED",

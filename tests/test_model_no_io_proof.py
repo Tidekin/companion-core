@@ -8,7 +8,7 @@ from companion.contracts import CoreError
 from companion.model import ModelAdmission, ModelClient, ModelDispatchRefused
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 @pytest.mark.parametrize("foreign_proof", [False, True])
@@ -34,7 +34,7 @@ def test_delegate_background_error_keeps_uncertainty(core, tmp_path, foreign_pro
 
     run(scenario())
     assert len(calls) == 1
-    row = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+    row = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,))
     assert row["state"] == "UNKNOWN" and row["billed_micro_usd"] > 0
     assert not core.store.rows("SELECT * FROM audit_log WHERE action='model.not_dispatched'")
     paid_budget.journal(core.store, core.settings.paid_model)

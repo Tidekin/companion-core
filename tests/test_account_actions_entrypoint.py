@@ -15,8 +15,8 @@ from companion.store import encode
 from tests.conftest import ingest, run
 from tests.social_model_transport import next_social_turn
 from tests.support.core_http import real_core_http
-from tests.test_social_autonomy import read_public
-from tests.test_social_owner_authority import authorize
+from tests.support.social_autonomy import read_public
+from tests.support.social_owner_authority import authorize
 
 
 @pytest.mark.parametrize("outcome", ["SUCCEEDED", "REJECTED", "UNKNOWN", "CANCELLED", "ERASED"])
@@ -30,7 +30,7 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
     ref = read_public(core, "bilibili")
     owner = ingest(core, 99, "用于绑定的合成输入", origin="onebot-direct:FriendMessage:10001")
     conversation = core.store.one(
-        "SELECT conversation_id FROM events WHERE event_id=?", (owner["event_id"],)
+        'SELECT conversation_id FROM events WHERE event_id=%s', (owner["event_id"],)
     )["conversation_id"]
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     policy = SocialAutonomyConfig(

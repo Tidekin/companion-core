@@ -4,8 +4,8 @@ from cryptography.fernet import Fernet
 
 from companion.backup import backup, restore
 from companion.core import Core
-from tests.test_mood import erase
-from tests.test_mood_appraisals import appraise
+from tests.support.mood import erase
+from tests.support.mood_appraisals import appraise
 
 
 def test_event_cleanup_registered_for_appraisals(core):

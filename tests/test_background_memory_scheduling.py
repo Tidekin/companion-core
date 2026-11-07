@@ -55,7 +55,7 @@ def test_chat_restart_does_not_reclassify_another_workers_reserved_request(core,
         core.store, core.settings, None, "memory_review", [{"role": "user", "content": "合成数据"}],
         core.clock(),
     )
-    original = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+    original = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,))
     use_core(core, monkeypatch)
 
     async def stop(_worker):
@@ -83,7 +83,7 @@ def test_life_worker_extracts_without_nightly_enabled_and_yields_to_chat(
 ):
     if state:
         ingest(core)
-        core.store.execute("UPDATE jobs SET state=?,next_attempt_at=?", (
+        core.store.execute('UPDATE jobs SET state=%s,next_attempt_at=%s', (
             state, after(core.clock(), delay) if delay is not None else None,
         ))
     core.settings.memory_enabled = True

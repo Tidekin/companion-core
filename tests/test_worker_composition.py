@@ -146,8 +146,8 @@ def test_content_worker_finishes_queued_article_images_without_semantic_startup(
     core, unavailable_semantics, opened_stores, monkeypatch,
 ):
     from companion import content, content_worker
-    from tests.test_article_vision import article
-    from tests.test_content import enable, png
+    from tests.support.article_vision import article
+    from tests.support.content import enable, png
 
     service, _ = enable(core)
     owner_id, article_id = article(core, 1)
@@ -189,10 +189,10 @@ def test_content_worker_finishes_queued_article_images_without_semantic_startup(
         assert image["state"] == "SUCCEEDED"
         assert (image["owner_event_id"], image["source_event_id"]) == (owner_id, article_id)
         assert runtime.store.one(
-            "SELECT result_status FROM observations WHERE event_id=?", (image["output_event_id"],)
+            'SELECT result_status FROM observations WHERE event_id=%s', (image["output_event_id"],)
         ) == {"result_status": "FETCHED"}
         assert runtime.store.one(
-            "SELECT state FROM model_usage WHERE request_id=?", (image["usage_request_id"],)
+            'SELECT state FROM model_usage WHERE request_id=%s', (image["usage_request_id"],)
         ) == {"state": "SETTLED"}
 
 
@@ -200,8 +200,8 @@ def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_ret
     core, unavailable_semantics, opened_stores, monkeypatch,
 ):
     from companion import content, content_worker
-    from tests.test_article_vision import article
-    from tests.test_content import enable, png
+    from tests.support.article_vision import article
+    from tests.support.content import enable, png
 
     service, vision = enable(core)
     owner_id, article_id = article(core, 1)
@@ -223,7 +223,7 @@ def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_ret
         asyncio.run(service.run_once())
     image = core.store.one("SELECT * FROM content_items WHERE kind='link_image'")
     usage = core.store.one(
-        "SELECT * FROM model_usage WHERE request_id=?", (image["usage_request_id"],),
+        'SELECT * FROM model_usage WHERE request_id=%s', (image["usage_request_id"],),
     )
     assert len(fetches) == 1 and vision.calls == []
     assert usage["state"] == "RESERVED" and usage["billed_micro_usd"] > 0
@@ -253,7 +253,7 @@ def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_ret
             store.one("SELECT 1")
     with Runtime(settings, clock) as runtime:
         recovered = runtime.store.one(
-            "SELECT * FROM content_items WHERE item_id=?", (image["item_id"],),
+            'SELECT * FROM content_items WHERE item_id=%s', (image["item_id"],),
         )
         assert recovered["state"] == "UNKNOWN"
         assert recovered["error_code"] == "CONTENT_PROCESSOR_LOST"
@@ -261,7 +261,7 @@ def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_ret
         assert (recovered["owner_event_id"], recovered["source_event_id"]) == (owner_id, article_id)
         assert recovered["reserved_bytes"] == image["reserved_bytes"]
         assert runtime.store.one(
-            "SELECT * FROM model_usage WHERE request_id=?", (image["usage_request_id"],),
+            'SELECT * FROM model_usage WHERE request_id=%s', (image["usage_request_id"],),
         ) == {**usage, "state": "UNKNOWN"}
 
 

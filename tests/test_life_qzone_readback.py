@@ -12,9 +12,7 @@ from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from tests.conftest import run
 from tests.support.core_http import real_core_http
-from tests.test_life_worker_integration import (
-    test_real_http_source_to_independent_worker_shadow as produce,
-)
+from tests.support.life_worker_integration import check_independent_life_worker as produce
 
 
 def test_tampered_or_revoked_artifacts_are_hidden_individually_without_readback_writes(
@@ -30,7 +28,7 @@ def test_tampered_or_revoked_artifacts_are_hidden_individually_without_readback_
     assert draft.source_snapshot_sha256 == paid_budget.sha(
         {g.event_id: g.source_sha256 for g in draft.sources}
     )
-    source = core.store.one("SELECT * FROM events WHERE event_id=?", (draft.sources[0].event_id,))
+    source = core.store.one('SELECT * FROM events WHERE event_id=%s', (draft.sources[0].event_id,))
     usage = core.store.rows("SELECT * FROM model_usage")
     jobs = core.store.rows("SELECT * FROM jobs")
     headers = {"Authorization": "Bearer " + core.settings.control_token.get_secret_value()}
@@ -63,10 +61,10 @@ def test_tampered_or_revoked_artifacts_are_hidden_individually_without_readback_
         value = copy.deepcopy(proposal)
         nested = value["qzone_draft"]
         core.store.execute(
-            "UPDATE events SET body_json=?,redacted=0 WHERE event_id=?",
+            'UPDATE events SET body_json=%s,redacted=0 WHERE event_id=%s',
             (source["body_json"], source["event_id"]),
         )
-        core.store.execute("UPDATE life_activity_results SET text=?", (original["text"],))
+        core.store.execute('UPDATE life_activity_results SET text=%s', (original["text"],))
         if case == "text_tampered":
             nested["text"] = "篡改后的合成正文"
         elif case == "content_hash_tampered":
@@ -97,11 +95,11 @@ def test_tampered_or_revoked_artifacts_are_hidden_individually_without_readback_
             core.store.execute("UPDATE life_activity_results SET text='改写存储正文'")
         elif case == "source_changed":
             core.store.execute(
-                "UPDATE events SET body_json=? WHERE event_id=?",
+                'UPDATE events SET body_json=%s WHERE event_id=%s',
                 (encode({"text": "变更后的合成来源"}), source["event_id"]),
             )
         core.store.execute(
-            "UPDATE life_activity_results SET proposal_json=?",
+            'UPDATE life_activity_results SET proposal_json=%s',
             ("{" if case == "malformed_json" else encode(value),),
         )
         before = core.store.db.total_changes
@@ -173,7 +171,7 @@ def test_native_revocation_and_unknown_preserve_readback_accounting(
             elif change == "source_withdrawn":
                 with core.store.transaction():
                     core.ledger.expire_events(core.store, [source_id], core.clock())
-                assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                       (source_id,))["redacted"]
             elif change == "natural_expiry":
                 core.clock.advance(86401)

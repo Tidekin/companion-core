@@ -7,11 +7,11 @@ import pytest
 from companion import beta_observation, paid_budget
 from companion.privacy import advance_epoch, epoch
 from companion.store import encode
-from scripts.summarize_beta_feedback import snapshot
+from scripts.summarize_beta_feedback import snapshot, summarize
 from scripts.validate_beta_feedback import validate_record
 from tests.conftest import ingest, run
-from tests.test_beta_observation import feedback_template, paid_fixture
-from tests.test_p12_beta_operations import bundle, feedback, inspector, summarize
+from tests.support.beta_observation import feedback_template, paid_fixture
+from tests.support.p12_beta_operations import bundle, feedback, inspector
 
 
 def selection_fixture(core):
@@ -86,7 +86,7 @@ def test_inspector_suppresses_invalid_or_unbound_selection(core, damage):
     elif damage == "payload":
         record["review_payload_sha256"] = "d" * 64
     raw = "[" if damage == "invalid" else "x" * 131073 if damage == "oversized" else encode(record)
-    core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+    core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                        (raw, "live_text_memory:" + job["job_id"]))
     result = inspect(core)
     assert not result["blockers"]
@@ -96,18 +96,18 @@ def test_inspector_suppresses_invalid_or_unbound_selection(core, damage):
 
 def test_inspector_distinguishes_pending_empty_and_absent_selection(core):
     job, record = selection_fixture(core)
-    core.store.execute("DELETE FROM runtime_meta WHERE key=?",
+    core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
                        ("live_text_context:" + job["job_id"],))
     record.update(selected=None, selected_sha256=None, review_request_id=None)
     for state in ("REVIEW_PENDING", "NO_CANDIDATES"):
-        core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+        core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                            (encode(record), "live_text_memory:" + job["job_id"]))
         result = inspect(core)["trace"]["jobs"][0]["memory_selection"]
         assert result["state"] == state
         assert result["frozen_context_count"] is None
         record.update(candidates=[], candidates_sha256=paid_budget.sha([]), selected=[],
                       selected_sha256=paid_budget.sha([]), review_payload_sha256=None)
-    core.store.execute("DELETE FROM runtime_meta WHERE key=?",
+    core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
                        ("live_text_memory:" + job["job_id"],))
     assert inspect(core)["trace"]["jobs"][0]["memory_selection"]["state"] == "NOT_RECORDED"
 

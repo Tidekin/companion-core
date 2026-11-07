@@ -9,7 +9,7 @@ from alembic import command
 from alembic.config import Config
 
 from companion.store import Store, encode, migrate
-from tests.test_test_fixtures import historical_database
+from tests.support.historical_schema import historical_database
 
 
 @pytest.mark.parametrize("state", ["RUNNING", "EXECUTION_UNCERTAIN"])

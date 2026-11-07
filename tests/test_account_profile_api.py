@@ -10,8 +10,8 @@ from companion.social_autonomy_protocol import SocialAutonomyConfig
 from companion.store import after
 from tests.conftest import run
 from tests.support.core_http import real_core_http
-from tests.test_social_autonomy import avatar
-from tests.test_social_owner_authority import authorize
+from tests.support.social_autonomy import avatar
+from tests.support.social_owner_authority import authorize
 
 
 def test_real_profile_batch_and_asset_api_preserve_scope_and_transaction(

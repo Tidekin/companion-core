@@ -6,7 +6,7 @@ import json
 import psycopg
 from pydantic_ai import DeferredToolRequests
 
-from companion import qq_video, reply_revision
+from companion import job_queue, qq_video, reply_revision
 from companion.agent_persistence import ConversationStore
 from companion.agent_reading import deferred_results, reader_tools
 from companion.agent_runtime import check_conversation, run_conversation
@@ -115,9 +115,5 @@ async def reply(core, job, snapshots):
 def wait(core, job, persistence):
     with core.store.transaction():
         persistence.check()
-        core.store.execute(
-            "UPDATE jobs SET state = 'RETRY_WAIT', lease_token = NULL, next_attempt_at = %s, "
-            'attempts = GREATEST(0, attempts - 1), updated_at = %s WHERE job_id = %s AND '
-            'lease_token = %s',
-            (after(core.clock(), 1), core.clock(), job["job_id"], job["lease_token"]),
-        )
+        job_queue.retry_outcome(core.store, job["job_id"], "RETRY_WAIT", core.clock(),
+                                after(core.clock(), 1), token=job["lease_token"], refund=True)

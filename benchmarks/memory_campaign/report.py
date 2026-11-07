@@ -18,7 +18,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parent / "runner")]
+from integrity import check_grading_freeze, grading_identity  # noqa: E402
 from roundcfg import Round, ledger_total, read_rows, save, sha  # noqa: E402
+from rubrics import rubric  # noqa: E402
 
 R = Round()
 ARMS = tuple(R.cfg["arms"]) + R.references
@@ -44,32 +46,60 @@ def latency(answer):
     return None
 
 
-def load():
-    frozen = json.loads((ROOT / "all-answers-frozen.json").read_text("utf-8"))
-    for name, digest in frozen["files_sha256"].items():
-        assert sha(ROOT / name) == digest, name
-    answers = {a: {r["id"]: r for r in R.arm_answers(a)} for a in R.graded_arms}
+def load(*, allow_failed_gate=False):
+    freeze_path = GRADING / "grading-freeze.json"
+    frozen = json.loads(freeze_path.read_text("utf-8"))
+    rules, _, _ = rubric(frozen["rubric"])
+    assert "effective_votes" in frozen, "Grading freeze lacks resolved votes; use a fresh --out directory"
+    check_grading_freeze(frozen, grading_identity(R, frozen["rubric"], rules, frozen["effective_votes"]))
+    manifest = json.loads((GRADING / "manifest.json").read_text("utf-8"))
+    assert manifest["grading_freeze_sha256"] == sha(freeze_path), "Grading manifest freeze changed"
+    assert manifest["raw_grades_sha256"] == sha(GRADING / "grades.jsonl"), "Raw grades changed"
+    assert manifest["status"] in ({"AUTO_COMPLETE_REVIEW_PENDING", "ANCHOR_GATE_FAILED"}
+                                  if allow_failed_gate else {"AUTO_COMPLETE_REVIEW_PENDING"}), "Anchor gate failed"
+    if not allow_failed_gate:
+        gates = manifest["anchor_gates"]
+        if frozen["anchors"]:
+            assert len(gates) == frozen["effective_votes"], "Anchor gates incomplete"
+            assert all(g and g["passed"] is True for g in gates.values()), "Anchor gate failed"
+    answers = {}
+    for a in R.graded_arms:
+        raw = R.arm_answers(a)
+        answers[a] = {r["id"]: r for r in raw}
+        assert len(raw) == len(answers[a]) == R.total, "Answers incomplete or duplicated: " + a
+        assert set(answers[a]) == {q["id"] for q in R.questions}, "Answer IDs changed: " + a
     mapping = json.loads((GRADING / "blind-mapping.json").read_text("utf-8"))
-    grades = {r["key"]: r for r in read_rows(GRADING / "grades.jsonl")}
-    assert len(grades) == len(mapping) == R.answers_total, "grading incomplete"
+    raw_grades = read_rows(GRADING / "grades.jsonl")
+    grades = {r["key"]: r for r in raw_grades}
+    assert len(raw_grades) == len(grades) == len(mapping) == R.answers_total, "grading incomplete or duplicated"
+    assert set(grades) == {m["key"] for m in mapping}, "Grading key mismatch"
+    assert all(type(g["pass"]) is bool for g in raw_grades), "Non-boolean grade"
     final = {k: dict(v) for k, v in grades.items()}
+    overridden = set()
     for row in read_rows(GRADING / "overrides.jsonl"):
         assert row["original_grade"] == grades[row["key"]] and type(row["pass"]) is bool
+        overridden.add(row["key"])
         final[row["key"]] = {**grades[row["key"]], "pass": row["pass"],
                              "review_reason": row["reason"]}
+    unresolved = {k for k, g in grades.items() if g.get("judge_unresolved") or g.get("anchor_failed")}
+    assert allow_failed_gate or not unresolved - overridden, "Unresolved judgments need explicit review overrides"
     reverse = {(m["arm"], m["id"]): m for m in mapping}
+    assert set(reverse) == {(a, q["id"]) for a in R.graded_arms for q in R.questions}, "Mapping mismatch"
     inputs = {r["id"]: r for p in (R.suite / "inputs").glob("*.jsonl") for r in read_rows(p)}
     rows = []
     for q in sorted(R.questions, key=lambda r: r["id"]):
         arms = {}
         for a in R.graded_arms:
             ans, m = answers[a][q["id"]], reverse[a, q["id"]]
+            assert m["key"] == hashlib.sha256((frozen["answers_freeze_sha256"] + a + q["id"])
+                                              .encode()).hexdigest()[:24], "Blind key mismatch"
             assert m["answer_sha256"] == hashlib.sha256(ans.get("answer", "").encode()).hexdigest()
             arms[a] = dict(key=m["key"], answer=ans.get("answer", ""), status=ans["status"],
                            error=ans.get("error"), auto_grade=grades[m["key"]],
                            passed=final[m["key"]]["pass"], elapsed_seconds=latency(ans),
                            answer_sha256=m["answer_sha256"],
                            exact_pass=exact(R.criteria[q["id"]], ans.get("answer", "")))
+            assert has_answer(arms[a]) or not arms[a]["passed"], "Unanswered instance cannot pass"
         change = "pass" if arms[ARMS[0]]["passed"] else "fail"
         if PAIRED:
             op, npass = arms["old"]["passed"], arms["new"]["passed"]
@@ -103,8 +133,17 @@ def z_drop(low, high):
 def score(rows, arm):
     n = len(rows)
     passed = sum(r["arms"][arm]["passed"] for r in rows)
+    answered = sum(has_answer(r["arms"][arm]) for r in rows)
     return dict(passed=passed, total=n, rate=passed / n if n else None,
+                answered=answered, unanswered=n - answered, semantic_failures=answered - passed,
+                answered_rate=passed / answered if answered else None,
+                empty_answers=sum(r["arms"][arm]["status"] == "SUCCEEDED"
+                                  and not r["arms"][arm]["answer"].strip() for r in rows),
                 execution_failures=sum(r["arms"][arm]["status"] != "SUCCEEDED" for r in rows))
+
+
+def has_answer(answer):
+    return answer["status"] == "SUCCEEDED" and bool(answer["answer"].strip())
 
 
 def finance(path, cap):
@@ -136,11 +175,16 @@ def modality_groups(rows):
 
 def summarize(rows):
     excluded = set(R.cfg["sensitivity_exclude_categories"])
-    answered = [r for r in rows if all(r["arms"][a]["status"] == "SUCCEEDED" for a in ARMS)]
+    answered = [r for r in rows if all(has_answer(r["arms"][a]) for a in ARMS)]
     summary = dict(
         round=R.name, at=datetime.now(UTC).isoformat(), grading=GRADING.name,
         overall={a: score(rows, a) for a in ARMS},
         all_arms_answered={a: score(answered, a) for a in ARMS},
+        all_arms_answered_ids=sorted(r["id"] for r in answered),
+        sample_counts=dict(question_instances=len(rows), personas=len({r["persona"] for r in rows}),
+                           fact_groups=len({(r["persona"], r["group_id"]) for r in rows})),
+        by_persona={p: {a: score([r for r in rows if r["persona"] == p], a) for a in ARMS}
+                    for p in R.personas},
         by_delay={str(d): {a: score([r for r in rows if r["delay_days"] == d], a) for a in ARMS}
                   for d in R.delays},
         by_category={c: {a: score([r for r in rows if r["category_id"] == c], a) for a in ARMS}
@@ -196,7 +240,8 @@ def summarize(rows):
         summary["new_minus_old_points"] = (summary["overall"]["new"]["rate"]
                                            - summary["overall"]["old"]["rate"]) * 100
     summary["latency"] = {a: dict(median_seconds=statistics.median(v),
-                                  p95_seconds=statistics.quantiles(v, n=100, method="inclusive")[94],
+                                  p95_seconds=statistics.quantiles(v, n=100, method="inclusive")[94]
+                                  if len(v) > 1 else v[0],
                                   n=len(v))
                           for a in ARMS if (v := [r["arms"][a]["elapsed_seconds"] for r in rows
                                                   if r["arms"][a]["elapsed_seconds"] is not None])}
@@ -219,8 +264,10 @@ def prepare_review(rows, grades):
         for a in ARMS:
             if r["arms"][a]["exact_pass"] not in (None, r["arms"][a]["auto_grade"]["pass"]):
                 selected.append((r, a, "exact_check_disagrees"))
-        for a in ARMS:
+        for a in R.graded_arms:
             g = r["arms"][a]["auto_grade"]
+            if g.get("judge_unresolved") or g.get("anchor_failed"):
+                selected.append((r, a, "unresolved_judgment"))
             if g.get("agreement", 1) < 1:
                 selected.append((r, a, "split_judge_vote"))
             if g.get("index_annotation_errors") or (not g["pass"] and not g.get("missing")
@@ -324,7 +371,19 @@ def charts(rows, summary):
 
 def extras(summary, e):
     """Controls, anchor gates, exact checks and strata as short paragraphs."""
-    out = []
+    counts = summary["sample_counts"]
+    common = summary["all_arms_answered"]
+    out = [f'<p>{counts["question_instances"]} 个题目实例，{counts["personas"]} 个人物，'
+           f'{counts["fact_groups"]} 个事实组。同一事实组的多次提问相关，不能当作独立样本；'
+           '分层 z 值仅供探索，未校正组内相关性。</p>',
+           '<p>三路共同已作答：' + e("；".join(
+               f'{LABELS[a]} {v["passed"]}/{v["total"]}' for a, v in common.items()))
+           + '。主通过率仍以全部题目实例为分母，保留执行失败和空回答。</p>']
+    out.append('<table><caption>按人物统计：通过 / 全部（已作答）</caption><thead><tr><th>人物</th>'
+               + "".join(f'<th>{LABELS[a]}</th>' for a in ARMS) + '</tr></thead><tbody>'
+               + "".join('<tr><th>' + e(p) + '</th>' + "".join(
+                   f'<td>{v[a]["passed"]}/{v[a]["total"]}（{v[a]["answered"]}）</td>' for a in ARMS)
+                   + '</tr>' for p, v in summary["by_persona"].items()) + '</tbody></table>')
     if "controls" in summary:
         c = ", ".join(f'{LABELS.get(k, k)} {v["passed"]}/{v["total"]}'
                       for k, v in summary["controls"].items())
@@ -350,8 +409,11 @@ def extras(summary, e):
 def render(rows, summary, figures):
     e = lambda s: html.escape(str(s), quote=True)  # noqa: E731
     cards = "".join(f'<div class="kpi"><span>{LABELS[a]}</span><strong>{summary["overall"][a]["rate"]:.1%}'
-                    f'</strong><small>{summary["overall"][a]["passed"]}/{R.total} · 执行失败 '
-                    f'{summary["overall"][a]["execution_failures"]}</small></div>' for a in ARMS)
+                    f'</strong><small>{summary["overall"][a]["passed"]}/{R.total} · 已作答 '
+                    f'{summary["overall"][a]["answered"]} · 答错 {summary["overall"][a]["semantic_failures"]}'
+                    f' · 未作答 {summary["overall"][a]["unanswered"]}（执行失败 '
+                    f'{summary["overall"][a]["execution_failures"]}，空回答 '
+                    f'{summary["overall"][a]["empty_answers"]}）</small></div>' for a in ARMS)
     figs = "".join(f'<figure><h3>{e(f["title"])}</h3><img src="{f["stem"]}.png"></figure>'
                    for f in figures)
     review = {r["key"]: r["reason"] for r in read_rows(GRADING / "review.jsonl")}
@@ -359,7 +421,7 @@ def render(rows, summary, figures):
     for r in rows:
         parts = "".join(
             f'<section class="answer"><h4>{LABELS[a]} <b class="{"pass" if v["passed"] else "fail"}">'
-            f'{"通过" if v["passed"] else ("执行失败" if v["status"] != "SUCCEEDED" else "未通过")}</b>'
+            f'{"通过" if v["passed"] else ("未通过" if has_answer(v) else "未作答")}</b>'
             f'</h4><pre>{e(v["answer"] or v["error"] or "无可见回答")}</pre>'
             + (f'<p class="note">复核：{e(review[v["key"]])}</p>' if v["key"] in review else "")
             + "</section>" for a, v in r["arms"].items())
@@ -379,6 +441,7 @@ def render(rows, summary, figures):
            '{display:block;font-size:38px}figure{background:#fff;margin:20px 0;padding:12px}figure img'
            '{width:100%}.answers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.answer'
            '{background:#fff;padding:10px}pre{white-space:pre-wrap;font:inherit}.pass{color:#087869}'
+           'table{border-collapse:collapse;margin:16px 0}th,td{padding:4px 12px;text-align:left}'
            '.fail{color:#a43d40}.q{border-bottom:1px solid #d1dce9;padding:10px 0}.note{font-size:12px;'
            'color:#586c81}</style><main><h1>' + e(R.name) + '</h1>'
            f'<p>{R.total}题 × {e(" / ".join(LABELS[a] for a in ARMS))} · '
@@ -393,7 +456,7 @@ def render(rows, summary, figures):
 
 
 def main():
-    rows, grades = load()
+    rows, grades = load(allow_failed_gate="--prepare-review" in ARGS)
     selection = prepare_review(rows, grades)
     if "--prepare-review" in ARGS:
         print("review_selection", len(selection))

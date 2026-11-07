@@ -66,15 +66,14 @@ def _packaged_revisions(head):
 
 def schema_readiness(view):
     versions = []
-    if view.one("SELECT 1 FROM pg_catalog.pg_class WHERE "
-                "relnamespace=current_schema()::regnamespace AND relname='alembic_version' "
-                "AND relkind IN ('r','p')"):
+    if view.has_table("alembic_version"):
         versions = view.rows("SELECT version_num FROM alembic_version LIMIT 2")
     version = versions[0]["version_num"] if len(versions) == 1 else None
     details = {"schema": version, "expected_schema": None}
     try:
         head = details["expected_schema"] = schema_head()
         capable = details["capabilities_present"] = Store.schema_capabilities(view)
+        # A rollback may encounter a newer compatible schema. Known ancestors need migration.
         if capable and version and (version == head or version not in _packaged_revisions(head)):
             return details, None
     except CoreError as error:

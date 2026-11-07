@@ -22,7 +22,7 @@ from companion.store import Store
 from companion.transport import begin_send, delivery_result, digest
 from tests.conftest import ingest, run
 from tests.support.astrbot_delivery import deliver_expression, journal
-from tests.test_m0 import lease
+from tests.support.basic_chat import lease
 
 
 def engine(core, enabled=True):
@@ -39,12 +39,12 @@ def queued(core, number=1, text="做到了", reply="真不错。⬡happy⬡"):
     ingest(core, number, text)
     event_id = f"evt_test_{number}"
     conversation = core.store.one(
-        "SELECT conversation_id FROM events WHERE event_id=?", (event_id,)
+        'SELECT conversation_id FROM events WHERE event_id=%s', (event_id,)
     )
     message_id = engine(core).enqueue(
         event_id, conversation["conversation_id"], reply, core.clock()
     )
-    return core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    return core.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
 
 
 def picture(root, name="happy/a.png", size=(32, 24), color="green"):
@@ -179,7 +179,7 @@ def test_outbox_cooldown_and_repeat_window_survive_restart_without_starvation(co
     first = queued(core)
     # Pending and uncertain sends count too: neither can establish non-delivery.
     core.store.execute(
-        "UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=?", (first["message_id"],)
+        "UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=%s", (first["message_id"],)
     )
     second = queued(core, 2, reply="另一个好消息。⬡like⬡")
     assert "image" not in json.loads(second["content_json"])
@@ -220,7 +220,7 @@ def test_expression_erasure_and_old_backup_replay_clear_text_and_media_intent(
     try:
         for instance in (core, restored):
             stored = instance.store.one(
-                "SELECT * FROM outbox WHERE message_id=?", (row["message_id"],)
+                'SELECT * FROM outbox WHERE message_id=%s', (row["message_id"],)
             )
             assert stored["content_json"] == "{}" and stored["content_sha256"] == ""
             assert stored["state"] == ("DELIVERY_UNCERTAIN" if sending else "CANCELLED")

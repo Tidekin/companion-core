@@ -29,7 +29,7 @@ def test_native_reply_rechecks_memory_after_generation(core, tmp_path, drift, bo
                 await admit(1, "/记住这个 " + FACT)
                 assert await worker.run_once("seed-native-memory")
                 source, _ = await admit(2, "项目是什么配色？")
-                core.store.execute("UPDATE memories SET valid_to=?", (after(core.clock(), 2),))
+                core.store.execute('UPDATE memories SET valid_to=%s', (after(core.clock(), 2),))
                 assert await worker.run_once("generate-source-bound-answer")
             assert len(model.requests) == 2
             assert any(message["role"] == "tool" and FACT in message["content"]
@@ -46,8 +46,10 @@ def test_native_reply_rechecks_memory_after_generation(core, tmp_path, drift, bo
                     rows = core.store.rows("SELECT job_id,snapshots_json FROM agent_conversations")
                     for row in rows:
                         snapshots = json.loads(row["snapshots_json"])
-                        core.store.execute("UPDATE agent_conversations SET snapshots_json=? "
-                            "WHERE job_id=?", (json.dumps([item for item in snapshots
+                        core.store.execute((
+                            'UPDATE agent_conversations SET snapshots_json=%s'
+                            ' WHERE job_id=%s'
+                        ), (json.dumps([item for item in snapshots
                                 if item["kind"] != "memory"]), row["job_id"]))
 
             async with real_core_http(core) as port, httpx.AsyncClient(

@@ -68,7 +68,7 @@ def test_carry_cannot_omit_even_one_unknown(core, tmp_path):
 def test_pending_delivery_cannot_be_carried(core, tmp_path):
     case = stranded(core, tmp_path)
     source = core.store.one(
-        "SELECT conversation_id FROM events WHERE event_id=?", (case.capture.event_id,)
+        'SELECT conversation_id FROM events WHERE event_id=%s', (case.capture.event_id,)
     )
     pending = enqueue(
         core.store,
@@ -157,7 +157,7 @@ def test_fsync_before_projection_failure_requires_exact_controlled_recovery(
 
 
 def test_enrolled_cumulative_or_projection_is_an_explicit_blocker(core, tmp_path):
-    from tests.test_cumulative_budget import enable
+    from tests.support.cumulative_budget import enable
 
     enable(core, tmp_path)
     original = core.settings.paid_model
@@ -205,7 +205,7 @@ def test_carry_journal_preserves_hashes_instead_of_private_policy(core, tmp_path
 
 
 def test_legacy_defaults_do_not_change_frozen_approval_bytes(core, tmp_path):
-    from tests.test_owner_authority import prepare
+    from tests.support.owner_authority_setup import prepare
 
     policy = prepare(core, tmp_path)
     assert "concurrency_basis" not in paid_budget.snapshot(core.settings)
@@ -226,7 +226,7 @@ def test_local_close_projection_failure_keeps_future_admission_blocked(core, tmp
     job = authorized_job(core, number=2)
     request_id = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
     original = core.store.one(
-        "SELECT billed_micro_usd FROM model_usage WHERE request_id=?", (request_id,)
+        'SELECT billed_micro_usd FROM model_usage WHERE request_id=%s', (request_id,)
     )["billed_micro_usd"]
     execute = core.store.execute
 
@@ -257,7 +257,7 @@ def test_local_close_projection_failure_keeps_future_admission_blocked(core, tmp
     asyncio.run(exercise())
     monkeypatch.setattr(core.store, "execute", execute)
     assert core.store.one(
-        "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?", (request_id,)
+        'SELECT billed_micro_usd,state FROM model_usage WHERE request_id=%s', (request_id,)
     ) == {"billed_micro_usd": original, "state": "UNKNOWN"}
     with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
         owner_authority.custody(core.store, core.settings, settlement=True)
@@ -341,7 +341,7 @@ def test_native_erasure_and_restore_preserve_carry_finance_without_reactivating(
             == before
         )
         assert runtime.store.one(
-            "SELECT redacted FROM events WHERE event_id=?", (case.capture.event_id,)
+            'SELECT redacted FROM events WHERE event_id=%s', (case.capture.event_id,)
         )["redacted"]
         with pytest.raises(CoreError):
             model_carry.read(

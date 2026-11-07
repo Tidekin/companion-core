@@ -10,9 +10,9 @@ from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.native_image_pipeline import admit_image
 from tests.support.onebot import provider
-from tests.test_native_image_pipeline import admit_image
-from tests.test_prepare_owner_input import native_spool, window
+from tests.support.prepare_owner_input import native_spool, window
 
 
 def test_preflight_failure_does_not_poison_retry_or_restart(core, tmp_path):
@@ -25,7 +25,7 @@ def test_preflight_failure_does_not_poison_retry_or_restart(core, tmp_path):
             model = Provider(answer("synthetic reply"))
             async with worker_for(core, model) as worker:
                 assert await worker.run_once("preflight-reservation-worker")
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert len(model.requests) == len(usage) == 1 and usage[0]["state"] == "SETTLED"
             fail = True
             cancellations, sends = [], []
@@ -82,7 +82,9 @@ def test_preflight_failure_does_not_poison_retry_or_restart(core, tmp_path):
                     "state": "SENT", "attempt_count": 1}
                 body, state = reopened.db.execute("SELECT body,state FROM results").fetchone()
                 assert state == "accepted" and json.loads(body)["result"] == "SENT"
-                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+                assert core.store.rows(
+                    'SELECT * FROM model_usage ORDER BY record_sequence'
+                ) == usage
                 recovered.verify()
             finally:
                 reopened.close()

@@ -7,9 +7,9 @@ import httpx
 import pytest
 
 from tests.conftest import run
+from tests.support.live_image_input import options, png
 from tests.support.native_images import image_host, raw_event, upload
-from tests.test_live_image_input import options, png
-from tests.test_onebot_images import URL, image_segment
+from tests.support.onebot_images import URL, image_segment
 
 
 @pytest.mark.parametrize("failure", ["read_timeout", "stream_over_limit"])

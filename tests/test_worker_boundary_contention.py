@@ -11,7 +11,7 @@ from companion import runtime_config, shutdown
 from companion.autonomous_selector import Selection
 from companion.worker_schedule import UnitResult
 from tests.conftest import run
-from tests.test_worker_shutdown import NoNetworkClient
+from tests.support.worker_shutdown import NoNetworkClient
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +54,7 @@ def test_native_worker_survives_real_boundary_lock(
         async def unit(instance, *_):
             units.append(1)
             # The complete configuration is published before any business work.
-            assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                   (runtime_config.PREFIX + role,))
             shutdown.request()
             return Selection("lane", UnitResult(True), True) if role == "life-worker" else True

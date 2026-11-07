@@ -5,7 +5,7 @@ import pytest
 from companion import private_life
 from companion.contracts import CoreError
 from companion.voice_protocol import VoiceLeaseRef
-from tests.test_voice_jobs import (
+from tests.support.voice_jobs import (
     claim,
     control,
     create_asr,
@@ -17,7 +17,7 @@ from tests.test_voice_jobs import (
 
 def archived_asr_rows(core, template, count):
     # Bulk, schema-valid terminal history; active jobs still use native source guards.
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (template["event_id"],))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (template["event_id"],))
     with core.store.transaction():
         for number in range(count):
             event_id = f"evt_archived_voice_{number}"
@@ -56,14 +56,14 @@ def claim_steps(core, jobs):
 def test_claim_sqlite_work_stays_bounded_with_ten_thousand_closed_jobs(core, monkeypatch):
     jobs, _, event_id, key = prepared(core, monkeypatch)
     job = create_asr(core, jobs, event_id, key)
-    current = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job["job_id"],))
+    current = core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s', (job["job_id"],))
     claim_steps(core, jobs)
     without_history = claim_steps(core, jobs)
     archived_asr_rows(core, current, 10_000)
     with_history = claim_steps(core, jobs)
     # A VM instruction count is deterministic across host load and catches historical scans.
     assert 0 < with_history <= without_history + 100
-    assert core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job["job_id"],)) == current
+    assert core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s', (job["job_id"],)) == current
     assert core.store.one("SELECT COUNT(*) AS n FROM voice_jobs")["n"] == 10_001
     assert core.store.one("SELECT active_job_id FROM voice_node_state")["active_job_id"] is None
 
@@ -84,7 +84,7 @@ def test_claim_expires_completed_results_before_replaying_old_request(
     core.clock.advance(6)
     with pytest.raises(CoreError, match="VOICE_CLAIM_RETIRED"):
         jobs.claim("local", request)
-    assert core.store.one("SELECT state,input_blob,result_blob FROM voice_jobs WHERE job_id=?",
+    assert core.store.one('SELECT state,input_blob,result_blob FROM voice_jobs WHERE job_id=%s',
                           (job["job_id"],)) == {
         "state": "EXPIRED", "input_blob": None, "result_blob": None,
     }

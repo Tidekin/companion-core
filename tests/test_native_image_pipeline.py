@@ -1,7 +1,6 @@
 """Native image bytes enter through HTTP and are consumed by the real SDK worker."""
 
 import asyncio
-import hashlib
 import io
 import json
 import pickle
@@ -16,61 +15,13 @@ from companion import image_spool, owner_authority
 from companion.media_config import ContentConfig
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
-from companion_onebot_bridge.capture import prepare_owner_input
 from companion_onebot_bridge.images import OriginalImage, upload_original
 from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
 from tests.support.failure_notice import assert_failure_notice
-from tests.support.onebot_events import raw_event
-from tests.test_prepare_owner_input import native_spool, window
-
-
-def pixels(mime="image/png"):
-    stream = io.BytesIO()
-    first = Image.new("RGB", (8, 8), "teal")
-    if mime == "image/png":
-        first.save(stream, format="PNG")
-    else:
-        first.save(stream, format="GIF" if mime == "image/gif" else "PNG", save_all=True,
-                   append_images=[Image.new("RGB", (8, 8), "orange")], duration=120, loop=0)
-    return stream.getvalue()
-
-
-async def admit_image(core, client, config, plan, tmp_path, *, message=None, number=42):
-    spool, runtime = native_spool(core, tmp_path, config, plan)
-    try:
-        frame = encode(raw_event(number=number, time=int(core.clock.now.timestamp()),
-            message=message or [
-                {"type": "image", "data": {"url": "https://gchat.qpic.cn/original"}}]))
-        prepared = await prepare_owner_input(runtime, client, None, frame, core.clock.now,
-                                              ("127.0.0.1", 3001))
-        event = prepared["event"]
-        assert runtime.persist_capture(event, frame, received_at=core.clock.now,
-                                       peer=("127.0.0.1", 3001))
-        assert await runtime.flush_one(client)
-        assert not await runtime.flush_one(client)
-        return event, next(iter(prepared["media"]["images"]), None)
-    finally:
-        spool.close()
-
-
-async def claim(client, event, image):
-    response = await client.post("/internal/v2/content/" + event["event_id"] + "/image/claim",
-        json={"request_key": "image:0", "source_sha256": image["source_sha256"]})
-    assert response.status_code == 200, response.text
-    return response.json()
-
-
-def upload_headers(plan, event, image, lease, body, mime="image/png"):
-    from companion_delivery_protocol.authority import image_upload_signing_payload
-
-    value = {"authority": plan.authority, "event_id": event["event_id"], "slot": 0,
-        "source_sha256": image["source_sha256"], "lease_token": lease["lease_token"],
-        "media_sha256": hashlib.sha256(body).hexdigest(), "mime": mime}
-    value["signature"] = plan.key.sign(image_upload_signing_payload(value)).hex()
-    return {"Content-Type": mime, "X-Content-Key": "image:0",
-            "X-Content-Lease": lease["lease_token"], "X-Content-Proof": encode(value)}
+from tests.support.native_image_pipeline import admit_image, claim, pixels, upload_headers
+from tests.support.prepare_owner_input import native_spool, window
 
 
 @pytest.mark.parametrize("mime,at_limit", [
@@ -83,7 +34,7 @@ def test_native_upload_is_one_shot_and_sdk_consumes_image(core, tmp_path, mime, 
                                                  max_daily_image_bytes=800 * 1024**2)
         async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
             event, image = await admit_image(core, client, config, plan, tmp_path)
-            job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (event["event_id"],))
             assert core.claim_job("wait-for-original", job_id=job["job_id"]) is None
             body = pixels(mime)
             if at_limit:
@@ -235,17 +186,17 @@ def test_native_upload_rechecks_original_source_and_lease(core, tmp_path, bounda
             elif boundary == "expired":
                 core.clock.advance(61)
             elif boundary == "source_replaced":
-                row = core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                row = core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                      (event["event_id"],))
                 changed = json.loads(row["body_json"])
                 changed["rich"]["segments"][0]["source_sha256"] = "f" * 64
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                    (encode(changed), event["event_id"]))
             elif boundary == "recall":
                 from companion.owner_authority_protocol import OwnerCapture
-                from tests.test_owner_recall import receipt
+                from tests.support.owner_recall import receipt
 
-                saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                saved = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                     ("owner_input:" + event["event_id"],))["value"])
                 capture = OwnerCapture.model_validate(saved["capture"])
                 withdrawn = await client.post("/internal/v1/owner-authority/inputs/recall",
@@ -290,7 +241,7 @@ def test_superseding_text_reuses_the_original_image_lease_and_bytes(core, tmp_pa
             provider = Provider(answer("结合原图回答。"))
             async with worker_for(core, provider) as worker:
                 assert await worker.run_once("latest-image-consumer")
-            status = core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+            status = core.store.one('SELECT state,last_error_code FROM jobs WHERE event_id=%s',
                                     (latest["event_id"],))
             assert status["state"] == "SUCCEEDED", status
             assert len(provider.requests) == 1
@@ -329,10 +280,15 @@ def test_unknown_image_model_call_is_not_replayed_after_restart(core, tmp_path):
             assert len(calls) == 1
             assert core.store.rows("SELECT * FROM model_usage") == before
             assert_failure_notice(core)
-            failed = core.store.one("SELECT job_id,last_error_code FROM jobs WHERE event_id=?",
+            failed = core.store.one('SELECT job_id,last_error_code FROM jobs WHERE event_id=%s',
                                      (event["event_id"],))
-            receipts = core.store.rows("SELECT safe_detail_json FROM audit_log "
-                "WHERE action='job.failed' AND entity_id=? ORDER BY rowid", (failed["job_id"],))
+            receipts = core.store.rows((
+                (
+                    'SELECT safe_detail_json FROM audit_log WHERE '
+                    "action='job.failed' AND entity_id=%s ORDER BY "
+                    'record_sequence'
+                )
+            ), (failed["job_id"],))
             assert [json.loads(row["safe_detail_json"]) for row in receipts] == [
                 {"code": "MODEL_RETRYABLE", "state": "RETRY_WAIT"},
                 {"code": "CONVERSATION_OUTCOME_UNAVAILABLE", "state": "FAILED"}]
@@ -342,7 +298,7 @@ def test_unknown_image_model_call_is_not_replayed_after_restart(core, tmp_path):
 
 def test_native_recall_erases_uploaded_original_and_rejects_replay(core, tmp_path):
     from companion.owner_authority_protocol import OwnerCapture
-    from tests.test_owner_recall import receipt
+    from tests.support.owner_recall import receipt
 
     async def scenario():
         async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
@@ -356,7 +312,7 @@ def test_native_recall_erases_uploaded_original_and_rejects_replay(core, tmp_pat
             row = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
             path = image_spool.directory(core.store) / (row["item_id"] + ".raw")
             assert path.exists()
-            saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            saved = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                 ("owner_input:" + event["event_id"],))["value"])
             notice = receipt(core, OwnerCapture.model_validate(saved["capture"]), plan.key)
             withdrawn = await client.post("/internal/v1/owner-authority/inputs/recall",

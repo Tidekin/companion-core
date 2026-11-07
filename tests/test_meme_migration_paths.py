@@ -12,12 +12,12 @@ import pytest
 
 from companion import meme_asset_migration as migration
 from companion_onebot_bridge import meme_export
-from tests.test_meme_asset_migration import (
+from tests.support.meme_asset_migration import (
     ROOT,
     logical_database,
     original_work,
 )
-from tests.test_meme_asset_migration import (
+from tests.support.meme_asset_migration import (
     bundle as bundle,
 )
 

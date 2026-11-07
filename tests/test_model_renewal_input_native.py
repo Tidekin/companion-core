@@ -17,12 +17,12 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.life_worker_integration import process_worker
+from tests.support.model_carry_native import child, finished
+from tests.support.model_renewal_native import life_case, source_and_renewal
 from tests.support.native_context import Capture
 from tests.support.onebot import provider as onebot_provider
 from tests.support.onebot_events import raw_event
-from tests.test_life_worker_integration import process_worker
-from tests.test_model_carry_native import child, finished
-from tests.test_model_renewal_native import life_case, source_and_renewal
 
 
 @pytest.mark.parametrize("history_source", [False, True])
@@ -65,7 +65,7 @@ def test_closed_unknown_renewal_native_input_handoff_and_private_life(
                 earlier = await child(tmp_path, "settled-history", core, mode="worker-text",
                                       output=str(tmp_path / "history-provider.json"))
                 await finished(earlier)
-                assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
+                assert core.store.one('SELECT state FROM jobs WHERE event_id=%s',
                                        (history,))["state"] == "SUCCEEDED"
                 sends = []
                 async with private_http_client(config.onebot_http_url, config.onebot_token,
@@ -83,12 +83,12 @@ def test_closed_unknown_renewal_native_input_handoff_and_private_life(
             await finished(worker)
             assert len(json.loads(output.read_text())) == 1
             current = core.store.one(
-                "SELECT m.* FROM model_usage m JOIN jobs j USING(job_id) WHERE j.event_id=?",
+                'SELECT m.* FROM model_usage m JOIN jobs j USING(job_id) WHERE j.event_id=%s',
                 (event_id,),
             )
             assert current["state"] == "UNKNOWN"
             if history:
-                assert core.store.one("SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
+                assert core.store.one('SELECT 1 FROM job_sources WHERE job_id=%s AND event_id=%s',
                                        (current["job_id"], history))
             with core.store.transaction():
                 view = owner_authority.custody(core.store, core.settings, settlement=True)
@@ -187,7 +187,7 @@ def test_closed_unknown_renewal_native_input_handoff_and_private_life(
                     not history_source)
             assert all(event_id not in encode(item) for item in first["materials"])
             for row in historical:
-                assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                        (row["request_id"],)) == row
 
     run(scenario())

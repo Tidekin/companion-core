@@ -2,9 +2,9 @@
 
 from companion.memory_context import MemoryContext
 from tests.conftest import ingest
-from tests.test_goals import setup_goal
-from tests.test_m1 import remember
-from tests.test_next_memory_context import episode
+from tests.support.confirmed_memory import remember
+from tests.support.goals import setup_goal
+from tests.support.next_memory_context import episode
 
 
 def read(core, **kwargs):
@@ -66,8 +66,10 @@ def test_current_event_and_unknown_execution_reactivate_context(core):
     assert read(core, current_event_ids=["evt_test_1"])[0]["temperature"] == "Hot"
     core.goals.accept(goal)
     core.goals.claim()
-    core.store.execute("UPDATE goals SET state='FAILED' WHERE goal_id=?", (goal,))
-    core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE goal_id=?", (goal,))
+    core.store.execute("UPDATE goals SET state='FAILED' WHERE goal_id=%s", (goal,))
+    core.store.execute((
+        "UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE goal_id=%s"
+    ), (goal,))
     assert read(core)[0]["attention_reasons"] == ["UNRESOLVED_GOAL"]
     core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
     assert not read(core)

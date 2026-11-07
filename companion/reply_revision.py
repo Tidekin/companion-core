@@ -4,6 +4,7 @@ The event owns its revision. Jobs and deliveries inherit it rather than keeping
 independent version counters. Callers still own admission, accounting and I/O.
 """
 
+from companion import job_queue
 from companion.contracts import CoreError
 
 SUPERSEDED = "REPLY_SUPERSEDED"
@@ -148,6 +149,7 @@ def advance(store, conversation_id, event_id, now):
     """Accept one new owner turn inside the caller's ingestion transaction."""
     if not store.in_transaction:
         raise RuntimeError("REPLY_REVISION_TRANSACTION_REQUIRED")
+    from companion.transport import cancel_superseded_replies
     from companion.voice_jobs import fence_conversation
 
     fence_conversation(store, conversation_id)
@@ -174,46 +176,23 @@ def advance(store, conversation_id, event_id, now):
     )
     if not source or source["reply_revision"] != 0:
         raise CoreError("REPLY_REVISION_SOURCE_CHANGED", 409)
-    store.execute(
-        ("UPDATE conversations SET reply_revision = reply_revision + 1 WHERE conversation_id = %s"),
-        (conversation_id,),
+    store.execute((
+        'UPDATE conversations SET reply_revision=reply_revision+1 WHERE '
+        'conversation_id=%s'
+    ), (conversation_id,))
+    revision = store.one('SELECT reply_revision FROM conversations WHERE conversation_id=%s',
+                         (conversation_id,))["reply_revision"]
+    store.execute('UPDATE events SET reply_revision=%s WHERE event_id=%s', (revision, event_id))
+    job_queue.cancel_active(
+        store, (
+            "kind='chat' AND event_id IN (SELECT event_id FROM events WHERE "
+            'conversation_id=%s AND event_id!=%s AND '
+        ) + OWNER_INPUT + " AND "
+        "COALESCE((body_json::json->'control_command')::text,'null') NOT IN ('true','1') AND "
+        "COALESCE((body_json::json->'diary_command')::text,'null') NOT IN ('true','1'))",
+        (conversation_id, event_id), SUPERSEDED, now,
     )
-    revision = store.one(
-        ("SELECT reply_revision FROM conversations WHERE conversation_id = %s"), (conversation_id,)
-    )["reply_revision"]
-    store.execute("UPDATE events SET reply_revision = %s WHERE event_id = %s", (revision, event_id))
-    store.execute(
-        (
-            "UPDATE jobs SET "
-            "state='CANCELLED',lease_token=NULL,last_error_code=%s,updated_at=%s"
-            " WHERE kind='chat' AND state IN "
-            "('QUEUED','RUNNING','RETRY_WAIT') AND event_id IN (SELECT "
-            "event_id FROM events WHERE conversation_id=%s AND "
-            "event_id!=%s AND "
-        )
-        + OWNER_INPUT
-        + (
-            " AND "
-            "COALESCE((body_json::json->'control_command')::text,'null') "
-            "NOT IN ('true','1') AND "
-            "COALESCE((body_json::json->'diary_command')::text,'null') "
-            "NOT IN ('true','1'))"
-        ),
-        (SUPERSEDED, now, conversation_id, event_id),
-    )
-    store.execute(
-        (
-            "UPDATE outbox SET "
-            "state='CANCELLED',last_error_code=%s,updated_at=%s WHERE "
-            "conversation_id=%s AND action_type='qq.private.reply' AND "
-            "origin_event_id!=%s AND state IN "
-            "('PENDING','LEASED','RETRY_WAIT') AND origin_event_id IN "
-            "(SELECT event_id FROM events WHERE "
-        )
-        + OWNER_INPUT
-        + ")",
-        (SUPERSEDED, now, conversation_id, event_id),
-    )
+    cancel_superseded_replies(store, conversation_id, event_id, now)
     store.audit("reply.superseded", event_id, source["trace_id"], now, reply_revision=revision)
     return revision
 

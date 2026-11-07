@@ -12,10 +12,10 @@ from companion.contracts import Candidate
 from companion.goals import GoalProposal, GoalScope
 from companion.store import encode
 from tests.conftest import run
+from tests.support.goals import result_for
 from tests.support.native_consumer_entry import environment
-from tests.test_goals import result_for
-from tests.test_observations import enable_observations
-from tests.test_subjective_cognition import ASTRONOMY, judge
+from tests.support.observation_capture import enable_observations
+from tests.support.subjective_cognition import ASTRONOMY, judge
 
 
 @pytest.mark.parametrize("hot_reload", [False, True])
@@ -109,9 +109,9 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             assert "光谱标注那个疑问还没解释清楚" in prompt
             assert '"negative"' in prompt
             assert "小肥鱼的心情参考" not in prompt
-            job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?", (event["event_id"],))
+            job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s', (event["event_id"],))
             frozen = json.loads(core.store.one(
-                "SELECT snapshots_json FROM agent_conversations WHERE job_id=?", (job["job_id"],)
+                'SELECT snapshots_json FROM agent_conversations WHERE job_id=%s', (job["job_id"],)
             )["snapshots_json"])
             plan = next(p["metadata"]["core_context"] for p in frozen
                         if p["kind"] == "context_plan")

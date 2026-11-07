@@ -10,8 +10,8 @@ from companion_meme_protocol import digest
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
 from tests.support.core_http import real_core_http
-from tests.test_meme_asset_migration import original_work
-from tests.test_meme_core_runtime import runtime_case as runtime_case
+from tests.support.meme_asset_migration import original_work
+from tests.support.meme_core_runtime import runtime_case as runtime_case
 
 
 async def settled_reply(c):
@@ -19,7 +19,7 @@ async def settled_reply(c):
     # process tests exercise automatic Worker offer generation after integration.
     await c.service.prepare_offer(c.job)
     c.core.store.execute(
-        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=?", (c.job["job_id"],)
+        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=%s", (c.job["job_id"],)
     )
     provider = Provider(answer("给你温暖的抱抱。⬡" + c.item["asset_sha256"] + "⬡"))
     async with worker_for(c.core, provider) as independent:
@@ -77,7 +77,7 @@ def test_delivery_byte_read_is_bounded_idempotent_and_lease_scoped(runtime_case)
                     value["binding_sha256"]
                     == json.loads(
                         c.core.store.one(
-                            "SELECT value FROM runtime_meta WHERE key=?",
+                            'SELECT value FROM runtime_meta WHERE key=%s',
                             ("owner_delivery:" + item["message_id"],),
                         )["value"]
                     )["meme_binding_sha256"]

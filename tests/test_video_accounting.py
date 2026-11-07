@@ -2,69 +2,17 @@
 
 import hashlib
 import json
-import sqlite3
-from datetime import datetime
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from companion import __main__, budget, live_text, paid_budget, video_accounting
-from companion.config import Settings
 from companion.contracts import CoreError
-from companion.core import Core
-from companion.store import encode, migrate
-from tests.conftest import Clock, FakeModel, run
-
-
-@pytest.fixture
-def core(tmp_path):
-    """Upgrade actual frozen v1 evidence; never execute a retired capture workflow."""
-    fixture = json.loads((Path(__file__).parent / "fixtures/video-rate-defect-v1.json").read_text(
-        encoding="utf-8"))
-    database = tmp_path / "history.db"
-    migrate(database, fixture["revision"])
-    with sqlite3.connect(database) as connection:
-        connection.execute("PRAGMA foreign_keys=OFF")
-        for table in fixture["tables"]:
-            connection.execute('DELETE FROM "' + table + '"')
-        for table, rows in fixture["tables"].items():
-            columns = list(rows[0])
-            sql = ('INSERT INTO "' + table + '" ('
-                   + ','.join('"' + key + '"' for key in columns)
-                   + ') VALUES (' + ','.join('?' for _ in columns) + ')')
-            connection.executemany(sql, [[row[key] for key in columns] for row in rows])
-    migrate(database)
-    journal = tmp_path / "original-budget.jsonl"
-    journal.write_text(fixture["journal"], encoding="utf-8")
-    (tmp_path / "privacy.jsonl").write_text(fixture["erasure_ledger"], encoding="utf-8")
-    settings = Settings.model_validate({**fixture["settings"], "database": str(database),
-        "erasure_ledger": str(tmp_path / "privacy.jsonl"),
-        "bridge_token": "test-token-" * 4, "model_key": "synthetic-key",
-        "video_model_key": "synthetic-video-provider-key-12345",
-        "observation_adapters": {name: {**value, "token": "synthetic-history-" + name * 4}
-            for name, value in fixture["settings"]["observation_adapters"].items()},
-        "paid_model": {**fixture["settings"]["paid_model"], "journal_path": str(journal)}})
-    clock = Clock()
-    clock.now = datetime.fromisoformat(fixture["clock"])
-    with Core(settings, FakeModel(), clock) as instance:
-        yield instance
-
-
-@pytest.fixture
-def failed_video(core):
-    row = core.store.one("SELECT * FROM model_usage WHERE scenario='content_video'")
-    assert row["state"] == "UNKNOWN" and row["input_tokens"] == 100
-    path = Path(core.settings.paid_model.journal_path)
-    lines = [json.loads(line) for line in path.read_text().splitlines()]
-    request = {"request_id": row["request_id"], "journal_id": lines[0]["journal_id"],
-        "expected_head_sha256": lines[-1]["sha256"], "authorization_sha256": "a" * 64,
-        "deployment_sha256": "b" * 64, "idempotency_key": "c" * 64}
-    return request, path, row
-
-
-def correct(core, request):
-    return video_accounting.reconcile(core.store, core.settings, request, core.clock)
+from companion.store import encode
+from tests.conftest import run
+from tests.support.video_accounting import core as core
+from tests.support.video_accounting import correct
+from tests.support.video_accounting import failed_video as failed_video
 
 
 def test_native_correction_retains_charge_stop_and_exact_original_journal(core, failed_video):
@@ -75,12 +23,14 @@ def test_native_correction_retains_charge_stop_and_exact_original_journal(core, 
         "billed_micro_usd"]
     assert path.read_bytes().startswith(original)
     assert len(path.read_text().splitlines()) == len(original.splitlines()) + 1
-    after = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request["request_id"],))
+    after = core.store.one((
+        'SELECT * FROM model_usage WHERE request_id=%s'
+    ), (request["request_id"],))
     assert after == {**before, "state": "SETTLED"}
     assert live_text.stopped(core.store)
     assert not core.store.rows("SELECT * FROM outbox") and not run(core.run_once())
     assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
-    assert budget.usage_diagnostics(core.store.db)["calibrated_calls"] == 1
+    assert budget.usage_diagnostics(core.store)["calibrated_calls"] == 1
     corrected = path.read_bytes()
     assert correct(core, request) == result and path.read_bytes() == corrected
     with core.store.transaction():
@@ -90,7 +40,7 @@ def test_native_correction_retains_charge_stop_and_exact_original_journal(core, 
     proof = live_text.cancelled_input(core.store, core.settings, core.clock,
         live_text.CancelledInputReference(
         window_sha256=core.settings.live_text_window.plan_sha256,
-        event_id=core.store.one("SELECT event_id FROM jobs WHERE job_id=?",
+        event_id=core.store.one('SELECT event_id FROM jobs WHERE job_id=%s',
                                (before["job_id"],))["event_id"],
     ))
     assert proof["model_attempts"] == 2
@@ -106,11 +56,13 @@ def test_correction_rejects_other_uncertainty_without_mutating_custody(
 ):
     request, path, _ = failed_video
     if fault == "missing_usage":
-        core.store.execute("UPDATE model_usage SET input_tokens=0 WHERE request_id=?",
+        core.store.execute('UPDATE model_usage SET input_tokens=0 WHERE request_id=%s',
                            (request["request_id"],))
     elif fault == "diagnostic":
-        core.store.execute("UPDATE audit_log SET safe_detail_json='{}' "
-            "WHERE action='model.usage_diagnostic' AND entity_id=?", (request["request_id"],))
+        core.store.execute((
+            "UPDATE audit_log SET safe_detail_json='{}' WHERE "
+            "action='model.usage_diagnostic' AND entity_id=%s"
+        ), (request["request_id"],))
     elif fault == "head":
         request["expected_head_sha256"] = "0" * 64
     elif fault == "rates":
@@ -134,12 +86,12 @@ def test_correction_rejects_other_uncertainty_without_mutating_custody(
         budget.record_provider_discrepancy(core.store, core.settings, request["request_id"],
                                           10000, "USD", "e" * 64)
         monkeypatch.setattr(paid_budget, "journal", original)
-        assert core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=?",
+        assert core.store.one('SELECT billed_micro_usd FROM model_usage WHERE request_id=%s',
                               (request["request_id"],))["billed_micro_usd"] == 10000
     elif fault == "restore":
         core.store.execute("INSERT INTO runtime_meta VALUES ('model_budget_restore_required','1')")
     elif fault == "open":
-        core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'live_text_stopped%'")
+        core.store.execute("DELETE FROM runtime_meta WHERE key LIKE %s", ("live_text_stopped%",))
     elif fault == "extra_field":
         request["amount"] = 0
     original = path.read_bytes()

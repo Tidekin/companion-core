@@ -14,8 +14,8 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
 from source_reader.worker import tick
 from tests.conftest import ingest, run
-from tests.test_consolidation import enable_nightly
-from tests.test_source_reader import ITEM, META, Responses, read, response
+from tests.support.consolidation import enable_nightly
+from tests.support.source_reader import ITEM, META, Responses, read, response
 
 
 def test_bilibili_discovery_reads_the_bounded_public_feed_once():
@@ -79,10 +79,15 @@ def test_nightly_recovers_legacy_unadmitted_reflection_without_regenerating_diar
     assert core.consolidation.status(first)["state"] == "COMPLETE"
     assert core.consolidation.status(second)["state"] == "PARTIAL"
     # A previous release recorded an unadmitted quota failure, then a clean window STOP.
-    core.store.execute("UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL "
-                       "WHERE local_date=?", (second.isoformat(),))
-    core.store.execute("UPDATE consolidation_runs SET state='CANCELLED',"
-                       "last_error_code='LIVE_WINDOW_STOPPED' WHERE local_date=?",
+    core.store.execute((
+        "UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL WHERE"
+        ' local_date=%s'
+    ), (second.isoformat(),))
+    core.store.execute((
+        'UPDATE consolidation_runs SET '
+        "state='CANCELLED',last_error_code='LIVE_WINDOW_STOPPED' WHERE "
+        'local_date=%s'
+    ),
                        (second.isoformat(),))
     before = list(model.calls)
     core.settings.reflection_max_daily_calls = 3
@@ -104,7 +109,7 @@ def test_waiting_reflection_never_reuses_changed_or_erased_sources(core, change)
         with core.store.transaction():
             core.ledger.expire_events(core.store, ["evt_test_20"], core.clock())
     else:
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_20'",
+        core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_20'",
                            ('{"text":"来源发生变化","media":[]}',))
     core.clock.now = datetime.fromisoformat(waiting["next_attempt_at"])
     assert run(core.reflections.run_day(second))["state"] == "CANCELLED"
@@ -139,7 +144,7 @@ def test_stop_cancels_an_unadmitted_reflection_wait(core):
     assert waiting["state"] == "RETRY_WAIT"
     with core.store.transaction():
         private_life.stop_work(core.store, core.clock())
-    row = core.store.one("SELECT * FROM reflection_runs WHERE run_id=?", (waiting["run_id"],))
+    row = core.store.one('SELECT * FROM reflection_runs WHERE run_id=%s', (waiting["run_id"],))
     assert row["state"] == "CANCELLED" and row["last_error_code"] == "LIVE_WINDOW_STOPPED"
     assert row["model_request_id"] is None
 
@@ -166,9 +171,9 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
     from companion.model import ModelClient
     from companion.reflection import REFLECTION_RULES
     from tests.native_continuous_support import host
+    from tests.support.consolidation import ReflectionModel
     from tests.support.native_context import Capture
     from tests.support.onebot_events import raw_event
-    from tests.test_consolidation import ReflectionModel
 
     fixture_model = ReflectionModel()
     calls, instances = [], []
@@ -230,13 +235,18 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
                 assert await core.consolidation.run_once()
             assert core.consolidation.status(first)["state"] == "COMPLETE"
             assert core.consolidation.status(second)["state"] == "PARTIAL"
-            pending = core.store.one("SELECT * FROM reflection_runs WHERE local_date=?",
+            pending = core.store.one('SELECT * FROM reflection_runs WHERE local_date=%s',
                                      (second.isoformat(),))
             assert pending["state"] == "RETRY_WAIT" and pending["model_request_id"] is None
-            core.store.execute("UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL "
-                               "WHERE local_date=?", (second.isoformat(),))
-            core.store.execute("UPDATE consolidation_runs SET state='CANCELLED',"
-                "last_error_code='LIVE_WINDOW_STOPPED' WHERE local_date=?", (second.isoformat(),))
+            core.store.execute((
+                'UPDATE reflection_runs SET '
+                "state='FAILED',next_attempt_at=NULL WHERE local_date=%s"
+            ), (second.isoformat(),))
+            core.store.execute((
+                'UPDATE consolidation_runs SET '
+                "state='CANCELLED',last_error_code='LIVE_WINDOW_STOPPED' "
+                'WHERE local_date=%s'
+            ), (second.isoformat(),))
             diaries = core.store.rows("SELECT * FROM diary_runs ORDER BY local_date")
             existing_usage = core.store.rows("SELECT * FROM model_usage")
             baseline_sends = len(sends)
@@ -269,10 +279,12 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
                     await asyncio.gather(task, return_exceptions=True)
             assert len(instances) == 2 and all(instance is not core for instance in instances)
             assert calls.count(REFLECTION_RULES) == 1
-            assert core.store.rows("SELECT * FROM diary_runs WHERE local_date IN (?,?) "
-                "ORDER BY local_date", (first.isoformat(), second.isoformat())) == diaries
+            assert core.store.rows((
+                'SELECT * FROM diary_runs WHERE local_date IN (%s,%s) ORDER '
+                'BY local_date'
+            ), (first.isoformat(), second.isoformat())) == diaries
             for row in existing_usage:
-                assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                       (row["request_id"],)) == row
             assert len(sends) == baseline_sends + 1
             with core.store.transaction():
@@ -295,7 +307,10 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
                 assert await tick(bridge.client, reader, "bili")
                 assert not await tick(bridge.client, reader, "bili")
             assert core.goals.get(goal["goal_id"])["state"] == "DONE"
-            assert core.store.rows("SELECT result_status FROM observations ORDER BY rowid") == [
+            assert core.store.rows(
+                'SELECT result_status FROM observations ORDER BY '
+                'record_sequence'
+            ) == [
                 {"result_status": "DISCOVERED"}, {"result_status": "FETCHED"}]
             assert len(backend.requests) == 2
             assert backend.server_names == ["api.bilibili.com"] * 2

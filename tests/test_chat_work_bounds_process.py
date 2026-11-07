@@ -73,7 +73,7 @@ def test_independent_chat_survives_writer_contention_without_scanning_media(
                     child.kill()
                     await child.wait()
             assert len(list(root.iterdir())) == 97
-            job = core.store.one("SELECT state,attempts FROM jobs WHERE event_id=?",
+            job = core.store.one('SELECT state,attempts FROM jobs WHERE event_id=%s',
                                  (event["event_id"],))
             assert job == {"state": "SUCCEEDED", "attempts": 1}
             assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]

@@ -31,91 +31,12 @@ from source_reader.network import (
     permitted_url,
     public_addresses,
 )
-from source_reader.worker import read_result, tick
+from source_reader.worker import tick
 from tests.conftest import ingest, run
-from tests.test_exploration import URL, configure, discover
-from tests.test_observations import enable_observations, observation
-from tests.test_test_fixtures import historical_database
-
-NOW = "2026-10-19T04:00:00+00:00"
-CAPTION = "https://aisubtitle.hdslb.com/bfs/subtitle/example.json?auth_key=transient-reference"
-ITEM = {
-    "lease_token": "lease_fixture",
-    "operation": "read",
-    "url": URL,
-    "max_bytes": 50000,
-    "max_requests": 4,
-    "max_items": 1,
-}
-META = {
-    "code": 0,
-    "data": {
-        "title": "星空的颜色",
-        "desc": "公开简介：讨论恒星与光谱。",
-        "cid": 1234,
-        "owner": {"name": "公开作者"},
-    },
-}
-PLAYER = {
-    "code": 0,
-    "data": {"subtitle": {"subtitles": [{"lan": "zh-CN", "subtitle_url": CAPTION}]}},
-}
-SUBTITLE = {
-    "body": [
-        {"from": 0, "to": 2.5, "content": "恒星的颜色与温度有关。"},
-        {"from": 4, "to": 6, "content": "这里有两秒没有字幕。"},
-    ]
-}
-
-
-def response(body=b"", status=200, headers=None):
-    if isinstance(body, dict):
-        body = json.dumps(body, ensure_ascii=False).encode()
-    headers = {"Content-Length": str(len(body)), "Connection": "close", **(headers or {})}
-    return (
-        f"HTTP/1.1 {status} test\r\n"
-        + "".join(f"{k}: {v}\r\n" for k, v in headers.items())
-        + "\r\n"
-    ).encode() + body
-
-
-class RecordingStream(httpcore.AsyncMockStream):
-    def __init__(self, raw, backend):
-        super().__init__([raw])
-        self.backend = backend
-
-    async def write(self, buffer, timeout=None):  # noqa: ASYNC109
-        if buffer:
-            self.backend.requests.append(buffer)
-
-    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):  # noqa: ASYNC109
-        self.backend.server_names.append(server_hostname)
-        assert ssl_context.check_hostname
-        return self
-
-
-class Responses(httpcore.AsyncNetworkBackend):
-    def __init__(self, *rows):
-        self.rows, self.requests, self.server_names, self.hosts = list(rows), [], [], []
-
-    async def connect_tcp(self, host, port, **kwargs):
-        self.hosts.append(host)
-        row = self.rows.pop(0)
-        if isinstance(row, Exception):
-            raise row
-        return RecordingStream(row, self)
-
-
-async def read(*rows, item=None):
-    backend = Responses(*rows)
-    pool = httpcore.AsyncConnectionPool(
-        ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
-        network_backend=backend,
-        max_keepalive_connections=0,
-    )
-    async with PublicHTTP(pool) as public:
-        result = await read_result(BilibiliReader(public, clock=lambda: NOW), item or ITEM)
-    return result, backend
+from tests.support.exploration import URL, configure, discover
+from tests.support.historical_schema import historical_database
+from tests.support.observation_capture import enable_observations, observation
+from tests.support.source_reader import ITEM, META, NOW, PLAYER, SUBTITLE, Responses, read, response
 
 
 @pytest.mark.parametrize("sample", range(10))
@@ -391,7 +312,7 @@ def test_core_reserves_all_requests_reconciles_usage_and_keeps_unknown(core):
         ),
     )
     row = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (second["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (second["request_id"],)
     )
     assert row["used_requests"] is None and row["reserved_requests"] == 4
     assert not core.exploration.budget_available()
@@ -410,7 +331,7 @@ def test_layered_evidence_survives_core_context_and_is_erased_after_old_backup_r
     completed = core.exploration.complete("bili", lease["request_id"], receipt)
     assert core.exploration.complete("bili", lease["request_id"], receipt)["duplicate"]
     output = completed["event_ids"][0]
-    row = core.store.one("SELECT * FROM observations WHERE event_id=?", (output,))
+    row = core.store.one('SELECT * FROM observations WHERE event_id=%s', (output,))
     assert row["result_status"] == "FETCHED" and row["source_kind"] == "text"
     assert json.loads(row["evidence_json"])["reading"]["level"] == "L2"
     context = core.content.context_message("evt_test_1", 3000)
@@ -544,7 +465,7 @@ def test_pre_v06_observation_fingerprint_still_replays(core):
     )
     old_receipt["payload"].pop("reading")
     old_receipt["payload"].pop("article")
-    assert core.store.one("SELECT fingerprint FROM events WHERE event_id=?", (item.event_id,))[
+    assert core.store.one('SELECT fingerprint FROM events WHERE event_id=%s', (item.event_id,))[
         "fingerprint"
     ] == digest(old_receipt)
     assert core.observations.append("reader", item)["duplicate"]
@@ -602,7 +523,7 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(
     ingest(core, text=URL)
     lease = core.exploration.lease("bili")
     before = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (lease["request_id"],)
     )
     assert before["authority_json"] == "{}"
     before_0014 = {

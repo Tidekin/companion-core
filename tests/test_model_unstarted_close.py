@@ -7,8 +7,8 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from tests.model_carry_support import MESSAGES, migrated
 from tests.owner_model_fixtures import authorized_job
+from tests.support.model_carry_lifecycle import current_unknown
 from tests.support.owner_authority import activate
-from tests.test_model_carry_lifecycle import current_unknown
 
 
 def unstarted_unknown(core):
@@ -17,7 +17,7 @@ def unstarted_unknown(core):
     job = authorized_job(core, number=2)
     request_id = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
     budget.settle(core.store, core.settings, request_id)
-    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                           (request_id,))["state"] == "UNKNOWN"
     return request_id
 

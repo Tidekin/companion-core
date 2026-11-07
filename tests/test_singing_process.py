@@ -19,11 +19,11 @@ from companion_onebot_bridge.voice_media import prepare_delivery
 from companion_voice_node.worker import VoiceNodeConfig, local_manifest
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, worker_for
-from tests.test_applio_render import resources
-from tests.test_singing_integration import queue_song, select_song, singing_window
-from tests.test_voice_jobs import TOKEN
-from tests.test_voice_node_api import tls_core
-from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
+from tests.support.applio_render import resources
+from tests.support.singing_integration import queue_song, select_song, singing_window
+from tests.support.voice_jobs import TOKEN
+from tests.support.voice_node_api import tls_core
+from tests.support.voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 
 
 async def independent(config, cert, counter, tmp_path, timestamp):

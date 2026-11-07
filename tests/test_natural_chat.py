@@ -126,7 +126,7 @@ def test_received_facts_reach_real_paid_model_and_duplicate_does_not_pay_twice(
             assert len(calls) == 1
             messages = core.store.rows("SELECT content_json FROM outbox")
             assert [json.loads(row["content_json"])["text"] for row in messages] == [wording]
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                   (accepted["job_id"],))["state"] == "SUCCEEDED"
             assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage") == [
                 {"state": "SETTLED", "billed_micro_usd": 44},
@@ -160,12 +160,14 @@ def test_failed_generation_keeps_one_fault_receipt_without_another_model_call(
             else:
                 await accept(api, value, duplicate=True)
             assert not await worker.run_once("failed-natural-chat-replay")
-            job = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+            job = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                  (accepted["job_id"],))
             code = "MODEL_INPUT_LIMIT" if failure == "budget" else "MODEL_INVALID_RESPONSE"
             assert job == {"state": "FAILED", "last_error_code": code}
-            receipts = core.store.rows("SELECT safe_detail_json FROM audit_log "
-                "WHERE action='job.failed' AND entity_id=?", (accepted["job_id"],))
+            receipts = core.store.rows((
+                'SELECT safe_detail_json FROM audit_log WHERE '
+                "action='job.failed' AND entity_id=%s"
+            ), (accepted["job_id"],))
             assert len(receipts) == 1
             assert json.loads(receipts[0]["safe_detail_json"]) == {"code": code, "state": "FAILED"}
             if failure == "budget":
@@ -201,9 +203,9 @@ def test_source_erased_during_provider_response_never_publishes_old_reply(
             assert await worker.run_once("recalled-natural-chat")
             assert not await worker.run_once("recalled-natural-chat-replay")
             assert len(calls) == 1 and core.store.rows("SELECT * FROM outbox") == []
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                   (accepted["job_id"],))["state"] == "CANCELLED"
-            assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+            assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                   (value["event_id"],))["redacted"] == 1
             assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage") == [
                 {"state": "SETTLED", "billed_micro_usd": 44},

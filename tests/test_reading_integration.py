@@ -23,10 +23,10 @@ from tests.sdk_reader_fixture import Provider, answer, call, worker_for
 from tests.support.core_http import real_core_http
 from tests.support.native_consumer_entry import environment
 from tests.support.native_http import owned_http_protocol
-from tests.test_next_reading import HTML, WEB
-from tests.test_reading_protocol import envelope
-from tests.test_reading_service import TOKEN, configure
-from tests.test_source_reader import ITEM, META, PLAYER, SUBTITLE
+from tests.support.next_reading import HTML, WEB
+from tests.support.reading_protocol import envelope
+from tests.support.reading_service import TOKEN, configure
+from tests.support.source_reader import ITEM, META, PLAYER, SUBTITLE
 
 
 @pytest.mark.parametrize("hosts", [("articles.example",), ("*",)])
@@ -122,7 +122,7 @@ runpy.run_module('source_reader', run_name='__main__')
             assert evidence["provenance"]["source_event_ids"] == ["evt_test_1"]
             assert evidence["coverage"]["scope"] == "extracted_page_text"
             assert evidence["trust"] == "untrusted_external"
-            body = core.store.one("SELECT body_json FROM events WHERE event_id=?",
+            body = core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                   (observations[0]["event_id"],))
             assert "恒星" in json.loads(body["body_json"])["text"]
             assert not core.store.one("SELECT 1 FROM outbox")

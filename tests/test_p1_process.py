@@ -17,9 +17,9 @@ from companion.owner_authority_protocol import OwnerCapture, OwnerGrantPolicy
 from companion.qq_rich import input_digest
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.support.core_http import real_core_http
+from tests.support.evaluation_process import process_config
 from tests.support.owner_authority import activate
-from tests.test_evaluation_process import process_config
-from tests.test_owner_input import captured, inbound
+from tests.support.owner_input import captured, inbound
 
 
 def v1_policy(**values):
@@ -61,7 +61,7 @@ def prepare(core, tmp_path):
     core.settings.affect_enabled = True
     core.settings.control_token = SecretStr("synthetic-owner-control-" * 3)
     accepted = signed_ingest(core, template, key, 1, "简短一点")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (accepted["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (accepted["job_id"],))
     assert core.affect.snapshot()["evidence"]
     core.clock.advance(1)
     return template, key

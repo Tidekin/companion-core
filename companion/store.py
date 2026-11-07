@@ -114,6 +114,13 @@ class Store:
     def rows(self, statement, parameters=()):
         return self._session.rows(statement, parameters)
 
+    def has_table(self, name):
+        return bool(self.one(
+            "SELECT 1 FROM pg_catalog.pg_class WHERE "
+            "relnamespace=current_schema()::regnamespace AND relname=%s "
+            "AND relkind IN ('r','p')", (name,),
+        ))
+
     def bounded_read(self, statement, parameters, *, limit, timeout_ms):
         if self.in_transaction and not self.in_read_snapshot:
             raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
@@ -382,8 +389,28 @@ class Store:
             "WHERE connamespace=current_schema()::regnamespace AND contype='c' "
             "AND conrelid='content_items'::regclass"
         )
-        return any("slot<64" in "".join(row["definition"].split()).replace('"', '')
-                   for row in constraints)
+        if not any("slot<64" in "".join(row["definition"].split()).replace('"', '')
+                   for row in constraints):
+            return False
+        # These are required runtime shapes, including for an unknown future head.
+        # The native baseline already supplies all four; inspection never migrates it.
+        return bool(self.one(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM pg_index i JOIN pg_class x "
+            "ON x.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid "
+            "WHERE t.relnamespace=current_schema()::regnamespace "
+            "AND t.relname='life_topics' AND x.relname='idx_life_active_conversation' "
+            "AND NOT i.indisunique) AND EXISTS (SELECT 1 FROM pg_index i "
+            "JOIN pg_class x ON x.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid "
+            "WHERE t.relnamespace=current_schema()::regnamespace AND t.relname='memories' "
+            "AND x.relname='idx_memories_relationship_standing') "
+            "AND EXISTS (SELECT 1 FROM pg_index i JOIN pg_class x ON x.oid=i.indexrelid "
+            "JOIN pg_class t ON t.oid=i.indrelid "
+            "WHERE t.relnamespace=current_schema()::regnamespace AND t.relname='runtime_meta' "
+            "AND x.relname='idx_memory_image_review_target') "
+            "AND EXISTS (SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema=current_schema() AND table_name='source_grant_revisions' "
+            "AND column_name='expires_at' AND is_nullable='YES')"
+        ))
 
     def insert(self, table, **values):
         self.execute(sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(

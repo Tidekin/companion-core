@@ -4,121 +4,27 @@ import hashlib
 import json
 import sqlite3
 from contextlib import closing
-from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from companion import live_text, ops_status, paid_budget
 from companion.backup import backup, restore
-from companion.config import LiveTextWindowApproval
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.store import Store, encode
 from tests.conftest import event, run
-from tests.test_onebot_delivery import core_client
-from tests.test_paid_model_gate import approved_live
-
-KEY = Ed25519PrivateKey.from_private_bytes(bytes.fromhex("e" * 64))
-
-
-def configure(core, tmp_path, *, successor=False, handoff_changes=None):
-    old = core.settings.live_text_window
-    core.settings.max_recent_messages = 0
-    paid = approved_live(
-        core,
-        tmp_path,
-        window_id="win_" + ("2" if successor else "1") * 32,
-        concurrency=1,
-        per_request_calls=1,
-        window_calls=5,
-    )
-    with core.store.transaction():
-        custody = paid_budget.journal(core.store, paid, allow_settlement=successor)
-    handoff = None
-    if successor:
-        handoff = {
-            "predecessor_plan_sha256": old.plan_sha256,
-            "predecessor_window_id": old.window_id,
-            "budget_journal_head_sha256": custody["head_sha256"],
-            "bridge_journal_head_sha256": "b" * 64,
-            "identity_sha256": paid_budget.sha(
-                [core.settings.owner_qq_id, core.settings.bot_qq_id]
-            ),
-            "protocol_epoch": "SYNTHETIC_ORIGINAL_EPOCH",
-            "privacy_epoch": epoch(core.store),
-            "erasure_ledger_sha256": hashlib.sha256(
-                Path(core.settings.erasure_ledger).read_bytes()
-            ).hexdigest(),
-            "evidence_sha256": "d" * 64,
-            **(handoff_changes or {}),
-        }
-    core.settings.live_text_window = LiveTextWindowApproval(
-        live_approved=True,
-        window_id=paid.window_id,
-        plan_sha256=("2" if successor else "1") * 64,
-        starts_at=core.clock.now - timedelta(seconds=60),
-        ends_at=core.clock.now + timedelta(seconds=600),
-        core_config_sha256=live_text.config_sha256(core.settings),
-        core_code_sha256=live_text.code_sha256(),
-        bridge_code_sha256="b" * 64,
-        candidate_sha="c" * 40,
-        paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
-        budget_journal_id=core.store.one(
-            "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
-        )["value"],
-        custodian_sha256="c" * 64,
-        approval_sha256="d" * 64,
-        capture_public_key=KEY.public_key().public_bytes_raw().hex(),
-        handoff=handoff,
-    )
-    return core.settings.live_text_window
-
-
-def reference(approval):
-    return live_text.WindowReference(window_sha256=approval.plan_sha256)
-
-
-def journal_bytes(core):
-    return Path(core.settings.paid_model.journal_path).read_bytes()
-
-
-def initial(core, tmp_path):
-    approval = configure(core, tmp_path)
-    assert live_text.open_window(core.store, core.settings, core.clock, reference(approval))[
-        "approved"
-    ]
-    return approval
-
-
-def stop_and_successor(core, tmp_path, **changes):
-    old = core.settings.live_text_window
-    live_text.stop_window(core.store, reference(old))
-    new = configure(core, tmp_path, successor=True, **changes)
-    return old, new
-
-
-def bridge_receipt(approval, prepared, **changes):
-    value = {
-        "kind": "stopped_window_handoff",
-        "window_sha256": approval.plan_sha256,
-        "predecessor_window_sha256": approval.handoff.predecessor_plan_sha256,
-        "handoff_sha256": paid_budget.sha(approval.handoff.model_dump(mode="json")),
-        "core_receipt_sha256": paid_budget.sha(prepared),
-        "bridge_journal_head_sha256": "f" * 64,
-        **changes,
-    }
-    signature = KEY.sign(live_text.HANDOFF_SIGNATURE_DOMAIN + encode(value).encode()).hex()
-    return {**value, "signature": signature}
-
-
-def open_successor(core, new, prepared):
-    body = live_text.OpenWindow(
-        window_sha256=new.plan_sha256, handoff_receipt=bridge_receipt(new, prepared)
-    )
-    return live_text.open_window(core.store, core.settings, core.clock, body)
+from tests.support.live_text_handoff import (
+    bridge_receipt,
+    configure,
+    initial,
+    journal_bytes,
+    open_successor,
+    reference,
+    stop_and_successor,
+)
+from tests.support.onebot_delivery import core_client
 
 
 def test_http_zero_call_handoff_needs_signed_bridge_commit_then_separate_open(core, tmp_path):
@@ -295,7 +201,11 @@ def test_change_after_prepare_or_successor_failure_never_opens(core, tmp_path, c
     _, new = stop_and_successor(core, tmp_path)
     prepared = live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))
     if case == "privacy_epoch":
-        core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch','1')")
+        core.store.execute(
+            'INSERT INTO runtime_meta (key,value) VALUES '
+            "('privacy_epoch','1') ON CONFLICT(key) DO UPDATE SET "
+            'value=excluded.value,record_sequence=DEFAULT'
+        )
     elif case == "ledger":
         Path(core.settings.erasure_ledger).write_text(
             encode({"ledger_id": "ledger_changed"}) + "\n"
@@ -362,7 +272,11 @@ def test_handoff_refuses_unresolved_or_changed_custody_without_writing_journal(
     elif case == "ledger_identity":
         Path(core.settings.erasure_ledger).write_text(encode({"ledger_id": "ledger_wrong"}) + "\n")
     elif case == "epoch":
-        core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch','1')")
+        core.store.execute(
+            'INSERT INTO runtime_meta (key,value) VALUES '
+            "('privacy_epoch','1') ON CONFLICT(key) DO UPDATE SET "
+            'value=excluded.value,record_sequence=DEFAULT'
+        )
     elif case == "budget_head":
         core.settings.live_text_window = new.model_copy(
             update={
@@ -412,14 +326,14 @@ def test_old_approved_inputs_do_not_consume_or_authorize_successor_inputs(core, 
             ingested_at=core.clock(), privacy_scope="private",
             body_json=encode(inbound.payload.model_dump(mode="json")), trace_id=inbound.trace_id)
         job_id = core.new_job(inbound.event_id, "chat", inbound.event_id, core.clock())
-        core.store.execute("UPDATE jobs SET state='FAILED' WHERE job_id=?", (job_id,))
+        core.store.execute("UPDATE jobs SET state='FAILED' WHERE job_id=%s", (job_id,))
         prior.append(inbound)
     _, new = stop_and_successor(core, tmp_path)
     prepared = live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))
     assert open_successor(core, new, prepared)["approved"]
     with pytest.raises(CoreError, match="LIVE_TEXT_APPROVED_INPUT_REQUIRED"):
         live_text.check_input(core.store, core.settings, core.clock, prior[0])
-    old_job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (prior[0].event_id,))
+    old_job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (prior[0].event_id,))
     with pytest.raises(CoreError, match="LIVE_TEXT_APPROVED_JOB_REQUIRED"):
         live_text.check_job(core.store, core.settings, core.clock, old_job)
     inbound = event(core, "new-input", text="new synthetic input").model_copy(

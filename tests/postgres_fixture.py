@@ -18,6 +18,8 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from pydantic import SecretStr
 
+from companion.postgres import Database, migrate
+
 
 def connection_parameters():
     path = os.environ.get("COMPANION_POSTGRES_TEST_CONFIG")
@@ -39,8 +41,11 @@ def logical_state(store):
             "SELECT %s::text AS name,COALESCE(jsonb_agg(to_jsonb(t) "
             "ORDER BY to_jsonb(t)::text),'[]'::jsonb) AS rows FROM {} AS t"
         ).format(sql.Identifier(row['schemaname'], row['tablename'])) for row in tables]
-        return store.rows(sql.SQL(" UNION ALL ").join(statements),
-                          [row['tablename'] for row in tables]) if statements else []
+        if not statements:
+            return []
+        # Parallel Append may return UNION ALL branches in any order.
+        query = sql.SQL(" UNION ALL ").join(statements) + sql.SQL(" ORDER BY name")
+        return store.rows(query, [row["tablename"] for row in tables])
 
 
 @contextmanager
@@ -66,3 +71,26 @@ def isolated_database(*, template=None):
         assert re.fullmatch("fixture_[a-f0-9]{32}", name)
         with psycopg.connect(**connection, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+@contextmanager
+def isolated_native():
+    configuration = os.environ.get("COMPANION_POSTGRES_TEST_CONFIG")
+    if not configuration:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail("native PostgreSQL test service is mandatory in CI")
+        pytest.skip("isolated PostgreSQL integration service is not configured")
+    value = json.loads(Path(configuration).read_text("utf8"))
+    connection = {key: value[key] for key in ["host", "port", "dbname", "user", "password"]}
+    namespace = "pytest_" + uuid4().hex
+    with psycopg.connect(**connection, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(namespace)))
+    info = SecretStr(make_conninfo(**connection, options=f"-c search_path={namespace},pg_catalog"))
+    try:
+        migrate(info)
+        with Database(info, max_connections=4) as database:
+            yield database, info
+    finally:
+        assert re.fullmatch(r"pytest_[a-f0-9]{32}", namespace)
+        with psycopg.connect(**connection, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(namespace)))

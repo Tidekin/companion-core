@@ -14,8 +14,8 @@ from companion.meme_core import MemeCaptionService
 from companion.worker_lock import single_worker
 from companion.worker_schedule import ClaimBusy
 from tests.conftest import run
-from tests.test_evaluation_process import process_config
-from tests.test_meme_core import body, caption_environment
+from tests.support.evaluation_process import process_config
+from tests.support.meme_core import body, caption_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -140,7 +140,7 @@ def test_http_caption_and_independent_worker_yield_or_stop_before_io(
             if stop_while_busy:
                 assert custody(core) == before
             else:
-                assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?",
+                assert core.store.one('SELECT state,attempts FROM jobs WHERE job_id=%s',
                                       (job_id,)) == {"state": "SUCCEEDED", "attempts": 1}
                 assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]
                 assert not core.store.rows("SELECT * FROM outbox")

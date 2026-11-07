@@ -13,11 +13,11 @@ from companion.qq_rich import input_digest
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import run
 from tests.support.core_http import real_core_http
-from tests.support.owner_authority import activate
-from tests.test_life_expression_consumption import (
+from tests.support.life_expression_consumption import (
     close_provider_clients as close_provider_clients,
 )
-from tests.test_life_expression_consumption import prepared
+from tests.support.life_expression_consumption import prepared
+from tests.support.owner_authority import activate
 
 
 @pytest.mark.parametrize("action,destination", [
@@ -70,12 +70,12 @@ def test_signed_capture_preempts_final_automatic_channel_dispatch(core, tmp_path
                 received = await client.post("/internal/v1/owner-authority/inputs/approve",
                                              json=capture)
                 assert received.status_code == 200, received.text
-                assert not core.store.one("SELECT 1 FROM events WHERE event_id=?",
+                assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s',
                                            (capture["event_id"],))
                 check = {"authority": authority, "message_id": item["message_id"],
                          "lease_token": item["lease_token"],
                          "content_sha256": item["content_sha256"]}
-                row = core.store.one("SELECT * FROM outbox WHERE message_id=?",
+                row = core.store.one('SELECT * FROM outbox WHERE message_id=%s',
                                       (item["message_id"],))
                 if action == "qzone.publish":
                     check["payload_sha256"] = json.loads(row["content_json"])["payload_sha256"]

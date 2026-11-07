@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import UTC
 
-from companion import owner_authority, owner_input, reply_revision
+from companion import job_queue, owner_authority, owner_input, reply_revision
 from companion.contracts import CoreError
 from companion.exploration import ReadItem, ReadResult
 from companion.observation import ArticleEvidence, ReadingEvidence
@@ -21,7 +21,6 @@ FOLLOWUP = "reading_followup:"
 def service_for_store(store, settings, clock):
     """Compose native receipt handling on one caller-owned connection, without startup I/O."""
     from companion.bili_video import BiliVideoService
-    from companion.content import register_link_images
     from companion.exploration import ExplorationService
     from companion.goals import GoalEngine
     from companion.observation import ObservationService
@@ -31,26 +30,9 @@ def service_for_store(store, settings, clock):
     observations = ObservationService(store, settings, clock)
     goals = GoalEngine(store, settings, ErasureLedger(settings.erasure_ledger), clock)
     social = SocialPlanner(store, settings, clock)
-    exploration = ExplorationService(
-        store,
-        settings,
-        observations,
-        goals,
-        social,
-        lambda owner, event, urls: register_link_images(
-            store,
-            settings,
-            clock,
-            settings.content,
-            owner,
-            event,
-            urls,
-        ),
-        clock,
-    )
-    reading = ReadingService(store, settings, exploration, clock)
-    reading.video = BiliVideoService(store, settings, reading, clock=clock)
-    return reading
+    exploration = ExplorationService(store, settings, observations, goals, social, clock)
+    video = BiliVideoService(store, settings, exploration, clock=clock)
+    return ReadingService(store, settings, exploration, clock, video=video)
 
 
 def followup_item(store, settings, event_id, *, clock=utcnow):
@@ -158,8 +140,101 @@ def erase_reading(store, event_ids):
         )
 
 
+def _validate_sources(store, settings, clock, exploration, row, context):
+    exploration.goals.validate_sources(context.source_event_ids)
+    for source_id in context.source_event_ids:
+        if not reply_revision.source_active(store, source_id):
+            raise CoreError("REPLY_SOURCE_RECALLED", 409)
+        captured_owner = store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
+                                   (owner_input.INPUT + source_id,))
+        if row["goal_step_json"] == "{}" and (
+            captured_owner or reply_revision.owner_input(store, source_id)
+        ):
+            if settings.owner_runtime.mode == "ENABLED":
+                view = owner_authority.current(store, settings, clock,
+                                               purpose="content")
+                owner_input.source(store, settings, view, source_id, clock())
+            else:
+                reply_revision.require_current(store, source_id)
+
+
+def reading_attempt(store, adapter_id, request_id, token):
+    attempt = store.one(
+        (
+            'SELECT reading_attempts.request_id, reading_attempts.adapter_id,'
+            ' reading_attempts.lease_token, reading_attempts.lease_until, '
+            'reading_attempts.context_json, '
+            'reading_attempts.allowed_hosts_json, '
+            'reading_attempts.original_url_sha256, '
+            'reading_attempts.source_grant_json, reading_attempts.state, '
+            'reading_attempts.result_sha256, '
+            'reading_attempts.result_event_ids_json, '
+            'reading_attempts.observed_requests, '
+            'reading_attempts.observed_bytes, reading_attempts.created_at, '
+            'reading_attempts.updated_at FROM reading_attempts WHERE '
+            'request_id=%s AND adapter_id=%s'
+        ),
+        (request_id, adapter_id),
+    )
+    if not attempt or attempt["lease_token"] != token:
+        raise CoreError("STALE_READER_LEASE", 409)
+    return attempt
+
+
+def validate_attempt(store, settings, clock, exploration, attempt, validation, *,
+                     current_request=None):
+    if attempt["state"] != "RUNNING" or attempt["lease_until"] <= clock():
+        raise CoreError("STALE_READER_LEASE", 409)
+    if attempt["context_json"] == "{}":
+        raise CoreError("PRIVACY_CHANGED", 409)
+    context = ReadingContext.model_validate_json(attempt["context_json"])
+    if context.privacy_epoch != epoch(store):
+        raise CoreError("PRIVACY_CHANGED", 409)
+    exploration.validate_read(
+        attempt["adapter_id"], attempt["request_id"], validation, reading=True,
+        current_request=current_request,
+    )
+    row = store.one((
+        'SELECT exploration_requests.request_id, '
+        'exploration_requests.request_key, exploration_requests.adapter_id, '
+        'exploration_requests.operation, exploration_requests.url, '
+        'exploration_requests.goal_step_json, exploration_requests.state, '
+        'exploration_requests.lease_token, exploration_requests.lease_until, '
+        'exploration_requests.captured_privacy_epoch, '
+        'exploration_requests.reserved_bytes, '
+        'exploration_requests.used_bytes, exploration_requests.result_sha256,'
+        ' exploration_requests.last_error_code, '
+        'exploration_requests.created_at, exploration_requests.started_at, '
+        'exploration_requests.updated_at, exploration_requests.redacted, '
+        'exploration_requests.reserved_requests, '
+        'exploration_requests.used_requests, '
+        'exploration_requests.source_grant_id, '
+        'exploration_requests.source_grant_epoch, '
+        'exploration_requests.authority_json, exploration_requests.query, '
+        'exploration_requests.discovery_mode FROM exploration_requests WHERE '
+        'request_id=%s'
+    ),
+                (attempt["request_id"],))
+    if hashlib.sha256(row["url"].encode()).hexdigest() != attempt["original_url_sha256"]:
+        raise CoreError("READER_TARGET_MISMATCH", 409)
+    _validate_sources(store, settings, clock, exploration, row, context)
+    paused = store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
+    if paused and paused["value"] == "1" and exploration.autonomous(
+        row, json.loads(row["goal_step_json"]),
+    ):
+        raise CoreError("AUTONOMY_PAUSED", 409)
+    policy = exploration.adapter(attempt["adapter_id"])
+    if policy.source != context.source or (
+        policy.source == "web" and not set(json.loads(attempt["allowed_hosts_json"]))
+        <= set(settings.web_reading_hosts)
+    ):
+        raise CoreError("READER_SCOPE_CHANGED", 409)
+    return row, context
+
+
 class ReadingService:
-    def __init__(self, store, settings, exploration, clock=utcnow):
+    def __init__(self, store, settings, exploration, clock=utcnow, *, video=None):
+        self.video = video
         self.store, self.settings, self.exploration, self.clock = (
             store,
             settings,
@@ -200,25 +275,6 @@ class ReadingService:
             privacy_epoch=row["captured_privacy_epoch"],
         )
 
-    def _sources(self, row, context):
-        self.exploration.goals.validate_sources(context.source_event_ids)
-        for source_id in context.source_event_ids:
-            if not reply_revision.source_active(self.store, source_id):
-                raise CoreError("REPLY_SOURCE_RECALLED", 409)
-            captured_owner = self.store.one(
-                "SELECT 1 FROM runtime_meta WHERE key = %s", (owner_input.INPUT + source_id,)
-            )
-            if row["goal_step_json"] == "{}" and (
-                captured_owner or reply_revision.owner_input(self.store, source_id)
-            ):
-                if self.settings.owner_runtime.mode == "ENABLED":
-                    view = owner_authority.current(
-                        self.store, self.settings, self.clock, purpose="content"
-                    )
-                    owner_input.source(self.store, self.settings, view, source_id, self.clock())
-                else:
-                    reply_revision.require_current(self.store, source_id)
-
     def lease(self, adapter_id, source_grant=None, *, capabilities=()):
         s = self.store
         with s.transaction():
@@ -232,34 +288,28 @@ class ReadingService:
                     if captured is None or captured != source_grant:
                         return False
                     validate_target(s, self.settings, self.clock, row)
-                    return {
-                        "max_items": 1,
-                        "max_requests": 1,
-                        "deadline": min(
-                            after(self.clock(), 30),
-                            after(row["created_at"], TARGET_TTL_SECONDS),
-                            captured.snapshot()["expires_at"],
-                        ),
-                    }
-                video = getattr(self, "video", None)
+                    return {"max_items": 1, "max_requests": 1,
+                            "deadline": min(after(self.clock(), 30),
+                                after(row["created_at"], TARGET_TTL_SECONDS),
+                                captured.snapshot()["expires_at"])}
+                video = self.video
                 exists = s.one(
-                    "SELECT 1 FROM pg_catalog.pg_class WHERE "
-                    "relnamespace=current_schema()::regnamespace AND relname='bili_video_items' "
-                    "AND relkind IN ('r','p')"
+                    'SELECT 1 FROM pg_catalog.pg_class WHERE '
+                    'relnamespace=current_schema()::regnamespace AND '
+                    "relname='bili_video_items' AND relkind IN ('r','p')"
                 )
-                if not exists or not s.one(
-                    "SELECT 1 FROM bili_video_items WHERE request_id = %s", (row["request_id"],)
-                ):
+                if not exists or not s.one('SELECT 1 FROM bili_video_items WHERE request_id=%s',
+                                          (row["request_id"],)):
                     return None
                 if video is None or "bounded_video_media_v1" not in capabilities:
                     return False
                 return {**video.lease_limits(row["request_id"], source_grant), "max_items": 1}
 
             item = self.exploration.lease(
-                adapter_id,
-                source_grant,
-                reading=True,
-                source_check=lambda row: self._sources(row, self._context(row, policy.source)),
+                adapter_id, source_grant, reading=True,
+                source_check=lambda row: _validate_sources(
+                    s, self.settings, self.clock, self.exploration, row,
+                    self._context(row, policy.source)),
                 request_limits=request_limits,
             )
             if item is None:
@@ -288,7 +338,7 @@ class ReadingService:
                 (item["request_id"],),
             )
             context = self._context(row, policy.source)
-            self._sources(row, context)
+            _validate_sources(self.store, self.settings, self.clock, self.exploration, row, context)
             hosts = list(self.settings.web_reading_hosts) if policy.source == "web" else []
             if row["operation"] == "read":
                 source, canonical = content_target(row["url"], web_hosts=hosts)
@@ -310,102 +360,16 @@ class ReadingService:
                 created_at=self.clock(),
                 updated_at=self.clock(),
             )
-            result = {
-                **item,
-                "schema_version": 1,
-                "lease_until": row["lease_until"],
-                "context": context.model_dump(),
-                "allowed_hosts": hosts,
-            }
-            video = getattr(self, "video", None)
+            result = {**item, "schema_version": 1, "lease_until": row["lease_until"],
+                      "context": context.model_dump(), "allowed_hosts": hosts}
+            video = self.video
             return video.bind_lease(result) if video is not None else result
-
-    def _attempt(self, adapter_id, request_id, token):
-        attempt = self.store.one(
-            "SELECT reading_attempts.request_id AS request_id, reading_attempts.adapter_id AS "
-            "adapter_id, reading_attempts.lease_token AS lease_token, reading_attempts.lease_until "
-            "AS lease_until, reading_attempts.context_json AS context_json, "
-            "reading_attempts.allowed_hosts_json AS allowed_hosts_json, "
-            "reading_attempts.original_url_sha256 AS original_url_sha256, "
-            "reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state AS "
-            "state, reading_attempts.result_sha256 AS result_sha256, "
-            "reading_attempts.result_event_ids_json AS result_event_ids_json, "
-            "reading_attempts.observed_requests AS observed_requests, "
-            "reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS "
-            "created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS "
-            "reading_attempts WHERE reading_attempts.request_id = %s AND "
-            "reading_attempts.adapter_id = %s",
-            (request_id, adapter_id),
-        )
-        if not attempt or attempt["lease_token"] != token:
-            raise CoreError("STALE_READER_LEASE", 409)
-        return attempt
-
-    def _validate(self, attempt, validation, *, current_request=None):
-        s = self.store
-        if attempt["state"] != "RUNNING" or attempt["lease_until"] <= self.clock():
-            raise CoreError("STALE_READER_LEASE", 409)
-        if attempt["context_json"] == "{}":
-            raise CoreError("PRIVACY_CHANGED", 409)
-        context = ReadingContext.model_validate_json(attempt["context_json"])
-        if context.privacy_epoch != epoch(s):
-            raise CoreError("PRIVACY_CHANGED", 409)
-        self.exploration.validate_read(
-            attempt["adapter_id"],
-            attempt["request_id"],
-            validation,
-            reading=True,
-            current_request=current_request,
-        )
-        row = s.one(
-            "SELECT exploration_requests.request_id AS request_id, "
-            "exploration_requests.request_key AS request_key, exploration_requests.adapter_id AS "
-            "adapter_id, exploration_requests.operation AS operation, exploration_requests.url AS "
-            "url, exploration_requests.goal_step_json AS goal_step_json, "
-            "exploration_requests.state AS state, exploration_requests.lease_token AS lease_token, "
-            "exploration_requests.lease_until AS lease_until, "
-            "exploration_requests.captured_privacy_epoch AS captured_privacy_epoch, "
-            "exploration_requests.reserved_bytes AS reserved_bytes, "
-            "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 AS "
-            "result_sha256, exploration_requests.last_error_code AS last_error_code, "
-            "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
-            "started_at, exploration_requests.updated_at AS updated_at, "
-            "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests AS "
-            "reserved_requests, exploration_requests.used_requests AS used_requests, "
-            "exploration_requests.source_grant_id AS source_grant_id, "
-            "exploration_requests.source_grant_epoch AS source_grant_epoch, "
-            "exploration_requests.authority_json AS authority_json, exploration_requests.query AS "
-            "query, exploration_requests.discovery_mode AS discovery_mode FROM "
-            "exploration_requests AS exploration_requests WHERE exploration_requests.request_id = "
-            "%s",
-            (attempt["request_id"],),
-        )
-        if hashlib.sha256(row["url"].encode()).hexdigest() != attempt["original_url_sha256"]:
-            raise CoreError("READER_TARGET_MISMATCH", 409)
-        self._sources(row, context)
-        paused = s.one("SELECT value FROM runtime_meta WHERE key = 'life_paused'")
-        if (
-            paused
-            and paused["value"] == "1"
-            and self.exploration.autonomous(
-                row,
-                json.loads(row["goal_step_json"]),
-            )
-        ):
-            raise CoreError("AUTONOMY_PAUSED", 409)
-        policy = self.exploration.adapter(attempt["adapter_id"])
-        if policy.source != context.source or (
-            policy.source == "web"
-            and not set(json.loads(attempt["allowed_hosts_json"]))
-            <= set(self.settings.web_reading_hosts)
-        ):
-            raise CoreError("READER_SCOPE_CHANGED", 409)
-        return row, context
 
     def validate_read(self, adapter_id, request_id, validation):
         with self.store.transaction():
-            attempt = self._attempt(adapter_id, request_id, validation.lease_token)
-            self._validate(attempt, validation)
+            attempt = reading_attempt(self.store, adapter_id, request_id, validation.lease_token)
+            validate_attempt(self.store, self.settings, self.clock, self.exploration,
+                                 attempt, validation)
         return {"valid": True}
 
     def _evidence(self, attempt, row, context, result):
@@ -484,7 +448,7 @@ class ReadingService:
                 (request_id,),
             ):
                 raise CoreError("READER_MEDIA_PROTOCOL_REQUIRED", 409)
-            attempt = self._attempt(adapter_id, request_id, result.lease_token)
+            attempt = reading_attempt(self.store, adapter_id, request_id, result.lease_token)
             if attempt["result_sha256"]:
                 if attempt["result_sha256"] != fingerprint:
                     raise CoreError("IDEMPOTENCY_CONFLICT", 409)
@@ -498,7 +462,8 @@ class ReadingService:
                 source_grant=result.source_grant,
             )
             try:
-                row, context = self._validate(attempt, validation)
+                row, context = validate_attempt(
+                    s, self.settings, self.clock, self.exploration, attempt, validation)
             except CoreError as error:
                 # Identity still authenticates metering, never expired/revoked content.
                 row = s.one(
@@ -619,24 +584,16 @@ class ReadingService:
                 ),
             )
             # Wake the original Core worker after committing the correlated Reader result.
-            s.execute(
-                "UPDATE jobs SET next_attempt_at = %s, updated_at = %s WHERE state = "
-                "'RETRY_WAIT' AND job_id IN (SELECT a.job_id FROM agent_tool_calls AS a JOIN "
-                "agent_conversations AS c USING (job_id) WHERE a.request_id = %s AND a.state = "
-                "'DEFERRED' AND c.phase = 'WAITING')",
-                (self.clock(), self.clock(), request_id),
-            )
-            video = getattr(self, "video", None)
-            if (
-                not owner_authority.required(s, self.settings)
-                and video is not None
-                and self.settings.bili_video.enabled
-            ) and (outcome["state"] == "DONE"):
-                for content in s.rows(
-                    "SELECT item_id FROM content_items WHERE read_request_id = "
-                    "%s AND kind = 'link' AND redacted = 0",
-                    (request_id,),
-                ):
+            job_queue.reader_ready(s, request_id, self.clock())
+            video = self.video
+            if (not owner_authority.required(s, self.settings)
+                and video is not None and self.settings.bili_video.enabled) and (
+                outcome["state"] == "DONE"
+            ):
+                for content in s.rows((
+                    'SELECT item_id FROM content_items WHERE read_request_id=%s AND'
+                    " kind='link' AND redacted=0"
+                ), (request_id,)):
                     for event_id in outcome["event_ids"]:
                         source = s.one("SELECT source FROM events WHERE event_id = %s", (event_id,))
                         if source["source"] != "observation.bilibili":

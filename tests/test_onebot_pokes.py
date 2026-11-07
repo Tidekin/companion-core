@@ -22,15 +22,16 @@ from tests.conftest import run
 from tests.native_continuous_support import Host
 from tests.poke_authority_fixture import environment as native_environment
 from tests.support.core_http import real_core_http
+from tests.support.cumulative_budget import policy as quota_policy
+from tests.support.cumulative_budget import view
 from tests.support.onebot import provider
+from tests.support.onebot_capture import source_window
 from tests.support.onebot_events import raw_event
+from tests.support.onebot_pokes import silent
 from tests.support.owner_authority import activate
-from tests.test_cumulative_budget import policy as quota_policy
-from tests.test_cumulative_budget import view
-from tests.test_onebot_capture import source_window
-from tests.test_poke import native_frame
-from tests.test_private_companion import companion_options
-from tests.test_social_owner_authority import stop
+from tests.support.poke import native_frame
+from tests.support.private_companion import companion_options
+from tests.support.social_owner_authority import stop
 
 
 @asynccontextmanager
@@ -117,10 +118,6 @@ async def admit(window, client):
     source.consume(observed)
     return observed
 
-
-
-async def silent(ws):
-    await ws.wait_closed()
 
 
 def queue(window):
@@ -288,7 +285,7 @@ def test_poke_model_result_dispatch_uses_real_receipt(core, tmp_path, decision):
                 assert json.loads(result["native_ack_json"])["response_sha256"] == content_hash(
                     {"status": "ok", "retcode": 0, "data": None})
             assert active.db.execute("SELECT state FROM inbox").fetchone()[0] == "accepted"
-            assert core.store.one("SELECT reply_revision FROM events WHERE event_id=?",
+            assert core.store.one('SELECT reply_revision FROM events WHERE event_id=%s',
                                   (receipt["event_id"],))["reply_revision"] == 0
             assert core.store.rows("SELECT * FROM model_usage") == usage
             active.runtime.verify()

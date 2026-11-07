@@ -13,7 +13,7 @@ from companion.model_carry_controller import verify
 from companion.owner_authority_protocol import AuthorityStop, OwnerCapture
 from companion_delivery_protocol import digest
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 MESSAGES = [{"role": "user", "content": "synthetic completion"}]
 
@@ -140,7 +140,10 @@ def stranded(core, tmp_path, **approval_changes):
     }
     capture = OwnerCapture.model_validate(
         json.loads(
-            core.store.one("SELECT value FROM runtime_meta WHERE key LIKE 'owner_input:%'")["value"]
+            core.store.one(
+                'SELECT value FROM runtime_meta WHERE key LIKE '
+                "'owner_input:%%'"
+            )["value"]
         )["capture"]
     )
     return SimpleNamespace(

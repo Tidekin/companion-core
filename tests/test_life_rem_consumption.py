@@ -1,98 +1,31 @@
 """Signed Life input and native workers save exact fiction in existing REM custody."""
 
 import hashlib
-from contextlib import asynccontextmanager
 
 import httpx
 import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
-from companion import budget, owner_authority, paid_budget, rem
+from companion import budget, rem
 from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
-from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
+from companion.life_protocol import LifeShadowApproval
 from companion.model import ModelClient
-from companion.owner_authority_protocol import AuthorityStop, OwnerCapture, OwnerGrantPolicy
+from companion.owner_authority_protocol import OwnerCapture
 from companion.qq_rich import input_digest
 from companion.rem_protocol import RemConfig
-from companion.store import after
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.life_expression_consumption import request
+from tests.support.life_expression_entrypoint import native_child
+from tests.support.life_rem_consumption import draft, prepared
 from tests.support.owner_authority import activate
-from tests.support.owner_memory import environment
-from tests.test_life_expression_consumption import request
-from tests.test_life_expression_entrypoint import native_child
-from tests.test_owner_recall import receipt
-from tests.test_rem_native import response
-from tests.test_social_owner_authority import stop
-
-
-@asynccontextmanager
-async def prepared(core, tmp_path, *, automatic=False, purposes=("rem", "memory"),
-                   creation=True, enabled=True, capture_key=None):
-    core.settings.rem = RemConfig(enabled=enabled, local_hour=0,
-                                  daily_micro_usd=50000, monthly_micro_usd=200000)
-    core.settings.life_loop = LifeLoopConfig(mode="SHADOW", follow_up_delay_seconds=60)
-    core.settings.wake_enabled = True
-    core.settings.quiet_start = core.settings.quiet_end = 0
-    core.settings.control_token = SecretStr("synthetic-life-rem-control")
-    async with environment(core, tmp_path, history=False) as (admit, recall, original):
-        capture, _ = await admit(11, "我想把夜空和纸上的花园写成一个小故事。")
-        policy = owner_authority.current(core.store, core.settings, core.clock).policy
-        # Native STOP cancels pending foreground custody before this explicit new scope.
-        stopped = owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
-            operation_id="stop-seed-foreground", authority=original))
-        conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
-                                      (capture.event_id,))["conversation_id"]
-        scope = LifeShadowApproval(
-            scope="owner_private_life_shadow_v1", authorization_sha256="c" * 64,
-            conversation_id=conversation, source_event_ids=[capture.event_id],
-            purposes=["PRIVATE_CREATION"] if creation else ["PRIVATE_DIARY"],
-            expires_at=after(core.clock(), 86400), max_items=3,
-            automatic_actions=["rem.save"] if automatic else [],
-        )
-        policy = OwnerGrantPolicy.model_validate({**policy.model_dump(),
-            "purposes": ["chat", "life", *purposes], "life_shadow": scope,
-            "capture": {**policy.capture.model_dump(),
-                        "public_key": capture_key.public_key().public_bytes_raw().hex()}
-            if capture_key else policy.capture,
-            "memory_scope": "owner_private" if "memory" in purposes else "none",
-            "capability_policies": {"rem": paid_budget.sha(core.settings.rem.model_dump())}
-            if "rem" in purposes else {}})
-        reference = activate(core, policy, revision=stopped["authority"]["revision"],
-                             operation="enable-life-private-creation")[0]["authority"]
-        core.clock.advance(max(61, core.settings.proactive_idle_seconds + 1))
-        yield reference, capture, recall, policy
-
-
-async def draft(core, tmp_path, capture, *, independent=False):
-    if independent:
-        outcome = await native_child(core, tmp_path, capture.event_id, "PRIVATE_CREATION", "draft")
-        assert outcome["provider_calls"] == 1, outcome
-        rows = [row for row in outcome["results"] if row["state"] == "SHADOW"]
-        assert len(rows) == 1, outcome
-        return rows[0]
-    job_id = core.life_topics.schedule()
-    assert job_id
-    value = {"action": "SHARE", "destination": "PRIVATE_CREATION",
-             "source_event_ids": [capture.event_id], "reason": "私人虚构创作",
-             "text": "虚构：夜空化成了纸上的花园。"}
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda _: response(value)),
-    ) as client:
-        previous = core.model
-        core.model = ModelClient(core.settings, client)
-        try:
-            assert await core.run_once(job_id=job_id)
-        finally:
-            core.model = previous
-    row = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (job_id,))
-    assert row["state"] == "SHADOW", core.store.rows("SELECT * FROM jobs")
-    return row
+from tests.support.owner_recall import receipt
+from tests.support.social_owner_authority import stop
 
 
 def test_signed_http_life_to_independent_rem_worker_is_exact_once(core, tmp_path):
@@ -163,7 +96,7 @@ def test_diary_or_partial_scope_cannot_grant_creation(core, tmp_path, options):
         async with prepared(core, tmp_path, **options):
             job_id = core.life_topics.schedule()
             assert job_id
-            topic = core.store.one("SELECT topic_id FROM life_activity_results WHERE job_id=?",
+            topic = core.store.one('SELECT topic_id FROM life_activity_results WHERE job_id=%s',
                                    (job_id,))["topic_id"]
             material = core.life_topics.material(topic)
             assert "PRIVATE_CREATION" not in material["allowed_destinations"]
@@ -189,10 +122,13 @@ def test_queued_creation_rechecks_original_source_authority_and_settlement(core,
                 activate(core, policy, revision=stopped["authority"]["revision"],
                          operation="revise-rem-queue")
             elif fence == "changed":
-                core.store.execute("UPDATE life_activity_results SET text='changed' WHERE job_id=?",
+                core.store.execute((
+                    "UPDATE life_activity_results SET text='changed' WHERE "
+                    'job_id=%s'
+                ),
                                    (retained["job_id"],))
             else:
-                core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE job_id=?",
+                core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE job_id=%s",
                                    (retained["job_id"],))
             before = core.store.rows("SELECT * FROM model_usage")
             await core.run_once(job_id=queued["job_id"])
@@ -269,7 +205,7 @@ def test_signed_pending_input_preempts_queued_save_without_second_payment(core, 
                 accepted = await client.post("/internal/v1/owner-authority/inputs/approve",
                                              json=capture.model_dump(mode="json"))
                 assert accepted.status_code == 200, accepted.text
-                assert not core.store.one("SELECT 1 FROM events WHERE event_id=?",
+                assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s',
                                            (capture.event_id,))
                 assert await core.run_once(job_id=queued["job_id"])
                 result = rem.records(core)[0]

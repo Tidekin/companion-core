@@ -10,16 +10,18 @@ from companion.contracts import InteractionSignal
 from companion.model import EXTRACT_RULES
 from companion.store import encode
 from tests.conftest import ingest, run
-from tests.test_mood import erase, feedback
-from tests.test_mood_appraisals import appraise
-from tests.test_mood_appraisals_integration import prepare_extraction
+from tests.support.mood import erase, feedback
+from tests.support.mood_appraisals import appraise
+from tests.support.mood_appraisals_integration import prepare_extraction
 
 
 def settle(core, request_id):
     core.store.execute(
-        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
-        "output_tokens,occurred_at) VALUES (?, 'memory_extract','synthetic','synthetic',"
-        "'SETTLED',100,20,?)", (request_id, core.clock()),
+        (
+            'INSERT INTO model_usage (request_id,scenario,provider,model,stat'
+            'e,input_tokens,output_tokens,occurred_at) VALUES (%s, '
+            "'memory_extract','synthetic','synthetic','SETTLED',100,20,%s)"
+        ), (request_id, core.clock()),
     )
 
 
@@ -135,12 +137,12 @@ def test_hurt_drops_when_its_reply_no_longer_matches(core, damage):
     _, target = hurt(core)
     assert core.mood.snapshot()["signals"]
     if damage == "deleted":
-        core.store.execute("DELETE FROM outbox WHERE message_id=?", (target,))
+        core.store.execute('DELETE FROM outbox WHERE message_id=%s', (target,))
     elif damage == "changed":
         core.store.execute(
-            "UPDATE outbox SET content_sha256='other' WHERE message_id=?", (target,))
+            "UPDATE outbox SET content_sha256='other' WHERE message_id=%s", (target,))
     else:
-        core.store.execute("UPDATE outbox SET state='FAILED' WHERE message_id=?", (target,))
+        core.store.execute("UPDATE outbox SET state='FAILED' WHERE message_id=%s", (target,))
     assert core.mood.snapshot()["signals"] == []
 
 
@@ -148,10 +150,12 @@ def test_hurt_needs_an_unambiguous_reply(core):
     key = feedback(core, 1, text="你刚才那样说让我有点难受")
     reply = core.store.one("SELECT * FROM outbox")
     core.store.execute(
-        "INSERT INTO outbox(message_id,origin_event_id,conversation_id,action_type,"
-        "content_json,content_sha256,state,delivery_key,attempt_count,created_at,updated_at) "
-        "VALUES ('msg_newer',?,?,'qq.private.proactive','{}','x','DELIVERY_UNCERTAIN',"
-        "'newer',1,?,?)",
+        (
+            'INSERT INTO outbox(message_id,origin_event_id,conversation_id,ac'
+            'tion_type,content_json,content_sha256,state,delivery_key,attempt'
+            "_count,created_at,updated_at) VALUES ('msg_newer',%s,%s,'qq.priv"
+            "ate.proactive','{}','x','DELIVERY_UNCERTAIN','newer',1,%s,%s)"
+        ),
         (reply["origin_event_id"], reply["conversation_id"], reply["created_at"],
          reply["created_at"]),
     )

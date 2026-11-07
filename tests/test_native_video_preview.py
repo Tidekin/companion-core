@@ -15,10 +15,10 @@ from companion import budget, owner_authority
 from companion.owner_authority_protocol import AuthorityStop, OwnerCapture
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
-from tests.test_native_image_pipeline import admit_image, claim, upload_headers
-from tests.test_owner_recall import receipt
-from tests.test_prepare_owner_input import window
-from tests.test_video_preview import FORMATS, animation
+from tests.support.native_image_pipeline import admit_image, claim, upload_headers
+from tests.support.owner_recall import receipt
+from tests.support.prepare_owner_input import window
+from tests.support.video_preview import FORMATS, animation
 
 
 async def upload(core, client, config, plan, tmp_path, format, mime):
@@ -32,7 +32,7 @@ async def upload(core, client, config, plan, tmp_path, format, mime):
 
 
 async def recall(core, client, event, plan):
-    saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    saved = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
         ("owner_input:" + event["event_id"],))["value"])
     capture = OwnerCapture.model_validate(saved["capture"])
     response = await client.post("/internal/v1/owner-authority/inputs/recall",
@@ -49,7 +49,7 @@ def test_signed_animation_is_one_chat_call_with_later_frames_in_fresh_worker(
             client, config, plan,
         ):
             event = await upload(core, client, config, plan, tmp_path, format, mime)
-            job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?", (event["event_id"],))
+            job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s', (event["event_id"],))
             config_path, output = tmp_path / "preview-worker.pickle", tmp_path / "preview-wire.json"
             config_path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
                 [answer("Synthetic preview reply.")], "SUCCEEDED", str(output))))
@@ -97,7 +97,7 @@ def test_preview_keeps_native_dispatch_fences_and_budget_responsibility(core, tm
             if boundary == "budget":
                 other, _ = await admit_image(core, client, config, plan, tmp_path, number=41,
                     message=[{"type": "text", "data": {"text": "Synthetic concurrent source."}}])
-                job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
+                job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s',
                                      (other["event_id"],))
                 other_job = core.claim_job("preview-concurrent-reservation", job_id=job["job_id"])
                 assert other_job
@@ -119,16 +119,16 @@ def test_preview_keeps_native_dispatch_fences_and_budget_responsibility(core, tm
                 assert await worker.run_once("preview-native-boundary") is (boundary != "budget")
             # The concurrently failed job may carry Core's fixed failure notice only.
             assert not provider.requests and not core.store.one(
-                "SELECT 1 FROM outbox WHERE delivery_key NOT LIKE 'failure:%'")
+                "SELECT 1 FROM outbox WHERE delivery_key NOT LIKE 'failure:%%'")
             usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
             if boundary == "budget":
                 assert len(usage) == 1 and usage[0]["state"] == "RESERVED"
-                assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+                assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                                       (reserved,))["state"] == "RESERVED"
-                waiting = core.store.one("SELECT state FROM jobs WHERE event_id=?",
+                waiting = core.store.one('SELECT state FROM jobs WHERE event_id=%s',
                                          (event["event_id"],))
                 assert waiting["state"] == "QUEUED"
-                assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                       (other_job["job_id"],))["state"] == "FAILED"
             else:
                 assert usage == [{"state": "SETTLED", "billed_micro_usd": 0}]

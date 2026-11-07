@@ -17,17 +17,17 @@ from companion.reading_protocol import ReadObservation
 from companion.source_grants import ReaderReadValidation
 from companion.store import Store, after, encode, migrate
 from tests.conftest import FakeModel
-from tests.test_exploration import configure
-from tests.test_input_recall import incoming, recall
-from tests.test_input_reply_migration import config_for
-from tests.test_reading_protocol import envelope
-from tests.test_release_migration import (
+from tests.support.exploration import configure
+from tests.support.input_recall import incoming, recall
+from tests.support.input_reply_migration import config_for
+from tests.support.reading_protocol import envelope
+from tests.support.release_migration import (
     TIMES,
     assert_old_columns_unchanged,
     seed_legacy,
     table_snapshot,
 )
-from tests.test_source_grants import prepare
+from tests.support.source_grants import prepare
 
 READING_REVISION = "0024_reading_attempts"
 PREVIOUS = "0023_meme_discovery_reservations"
@@ -130,9 +130,9 @@ def reading_fixture(core, source="web"):
 def test_restore_quarantines_running_read_but_keeps_late_metering_identity(core, tmp_path):
     _, service, lease = reading_fixture(core)
     item, result = lease("restore-running")
-    before = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?",
+    before = core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s',
                             (item["request_id"],))
-    attempt = core.store.one("SELECT * FROM reading_attempts WHERE request_id=?",
+    attempt = core.store.one('SELECT * FROM reading_attempts WHERE request_id=%s',
                              (item["request_id"],))
     validation = ReaderReadValidation(lease_token=item["lease_token"])
     assert service.validate_read("web", item["request_id"], validation) == {"valid": True}
@@ -219,7 +219,7 @@ def test_source_erasure_and_backup_replay_clear_reading_authority_and_late_conte
     items = (finished, pending)
     reservations = {row["request_id"]: (row["reserved_requests"], row["reserved_bytes"])
                     for row in core.store.rows("SELECT * FROM exploration_requests")}
-    before = core.store.one("SELECT * FROM reading_attempts WHERE request_id=?",
+    before = core.store.one('SELECT * FROM reading_attempts WHERE request_id=%s',
                             (finished["request_id"],))
     assert json.loads(before["result_event_ids_json"]) == [output_id]
     assert before["context_json"] != "{}" and before["original_url_sha256"]
@@ -263,7 +263,7 @@ def test_forgetting_grant_without_observations_erases_pending_attempt_and_replay
     owner_id, _, lease = reading_fixture(core, "heybox")
     item, receipt = lease("pending-grant-only")
     assert not core.store.rows("SELECT * FROM source_grant_events")
-    before = core.store.one("SELECT * FROM reading_attempts WHERE request_id=?",
+    before = core.store.one('SELECT * FROM reading_attempts WHERE request_id=%s',
                             (item["request_id"],))
     assert before["context_json"] != "{}" and before["source_grant_json"] != "null"
     assert before["original_url_sha256"]

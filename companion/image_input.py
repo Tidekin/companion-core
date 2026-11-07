@@ -154,3 +154,32 @@ def contract(settings, job_id, logical_request_id):
 
     if not call_limit_matches(settings, calls):
         raise CoreError("MODEL_IMAGE_TWO_CALL_CONTRACT_REQUIRED", 503)
+
+
+def check_evaluation_input(approval, messages):
+    if not approval or not approval.image_input:
+        raise CoreError("PAID_IMAGE_APPROVAL_REQUIRED", 503)
+    messages_and_estimate(approval.image_input, messages)
+
+
+def check_chat_scope(store, settings, job_id, logical_id, scenario):
+    from companion import owner_authority
+
+    contract(settings, job_id, logical_id)
+    if scenario == "chat" and owner_authority.required(store, settings):
+        return True
+    if scenario != "content_vision" and (
+        scenario != "chat" or not settings.live_text_window
+        or settings.live_text_window.image_scope != "owner_image_v1"
+    ):
+        raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
+    return False
+
+
+def check_attempt(store, job_id, scenario, video_binding):
+    if not store.one("SELECT 1 FROM jobs WHERE job_id=%s AND kind='chat'", (job_id,)):
+        raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
+    if video_binding is None and store.one(
+        'SELECT 1 FROM model_usage WHERE job_id=%s AND scenario=%s', (job_id, scenario),
+    ):
+        raise CoreError("MODEL_IMAGE_ALREADY_ATTEMPTED", 409)

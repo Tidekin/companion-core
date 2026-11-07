@@ -6,8 +6,8 @@ import sys
 
 from companion import rem
 from tests.conftest import run
-from tests.test_evaluation_process import process_config
-from tests.test_rem_native import prepared, usage
+from tests.support.evaluation_process import process_config
+from tests.support.rem_native import prepared, usage
 
 
 def test_signed_http_input_reaches_rem_through_independent_life_worker(core, tmp_path):

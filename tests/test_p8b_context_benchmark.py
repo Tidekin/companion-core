@@ -21,7 +21,7 @@ from scripts.benchmark_p8b_context import (
     quantiles,
     synthetic_units,
 )
-from tests.test_test_fixtures import assert_schema_metadata
+from tests.support.historical_schema import assert_schema_metadata
 
 
 @pytest.fixture(scope="module")

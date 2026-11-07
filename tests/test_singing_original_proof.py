@@ -6,8 +6,8 @@ import pytest
 from companion import voice_protocol
 from companion.voice_original_proof import validate_original_voice_binding
 from companion.voice_protocol import VoiceDeliveryBinding
-from tests.test_singing_protocol import result
-from tests.test_voice_original_proof import original
+from tests.support.singing_protocol import result
+from tests.support.voice_original_proof import original
 
 
 def records(*, retired=False, index=0):

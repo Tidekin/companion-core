@@ -10,7 +10,7 @@ from companion import file_parser
 from companion.retrieval import SemanticIndex
 from tests.conftest import Clock
 from tests.sdk_reader_fixture import Provider, answer, worker_for
-from tests.test_file_parser import FakeProcess
+from tests.support.file_parser import FakeProcess
 
 with open(sys.argv[1], "rb") as stream:
     settings, now, job_id, data, output = pickle.load(stream)
@@ -37,7 +37,7 @@ async def scenario():
         assert await worker.content.run_once()
         assert worker.store.one("SELECT state FROM content_items")["state"] == "SUCCEEDED"
         assert await worker.run_once("independent-file-sdk", job_id=job_id)
-        assert worker.store.one("SELECT state FROM jobs WHERE job_id=?",
+        assert worker.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                 (job_id,))["state"] == "SUCCEEDED"
         assert len(launches) == 1
         assert not provider.responses

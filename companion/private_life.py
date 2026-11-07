@@ -457,21 +457,12 @@ def check_model(store, settings, clock, request_id):
         event = check_job(store, settings, approval, job)
         if event_digest(event) != record["event_sha256"]:
             raise CoreError("COMPANION_MODEL_SOURCE_CHANGED", 503)
-        from companion.budget import reader_video_binding
+        from companion.bili_video import model_binding
 
-        reader_binding = (
-            reader_video_binding(
-                store,
-                settings,
-                clock,
-                request_id,
-                job_id=row["job_id"],
-                scenario=row["scenario"],
-                logical_request_id=row["logical_request_id"],
-            )
-            if row["scenario"] in {"content_video", "content_video_preview"}
-            else None
-        )
+        reader_binding = (model_binding(store, settings, clock, request_id,
+            job_id=row["job_id"], scenario=row["scenario"],
+            logical_request_id=row["logical_request_id"])
+            if row["scenario"] in {"content_video", "content_video_preview"} else None)
         if row["scenario"] == "content_video_preview" and reader_binding is None:
             raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
         if reader_binding is not None:

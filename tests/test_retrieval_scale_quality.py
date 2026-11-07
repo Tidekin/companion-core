@@ -3,8 +3,8 @@
 import pytest
 
 from companion.store import after, encode
-from tests.test_m1 import remember
-from tests.test_retrieval_work_bounds import assert_bounded
+from tests.support.confirmed_memory import remember
+from tests.support.retrieval_work_bounds import assert_bounded
 
 
 @pytest.mark.parametrize("scale", [120, 1200])
@@ -24,10 +24,10 @@ def test_old_facts_synonyms_corrections_and_negative_scope_at_scale(core, scale,
     old_delivery = ids["delivery"]
     ids["delivery"] = core.memory.decide(old_delivery, "correct", core.clock(),
                                          "项目资料现在放在西门值班室，南门接待处已停用。")['memory_id']
-    core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+    core.store.execute('UPDATE memories SET valid_to=%s WHERE memory_id=%s',
                        (after(core.clock(), -1), ids["expired"]))
     core.memory.decide(ids["forgotten"], "forget", core.clock())
-    core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=?",
+    core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=%s",
                        (ids["denied"],))
     core.clock.advance(60)
     for number in range(10, scale + 10):

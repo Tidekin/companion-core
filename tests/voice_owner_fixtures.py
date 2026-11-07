@@ -14,8 +14,8 @@ from companion.store import after
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import event
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
-from tests.test_voice_jobs import voice_config
+from tests.support.paid_model import approved_live
+from tests.support.voice_jobs import voice_config
 
 
 def native_voice(core, tmp_path, *, record=True, record_count=1,

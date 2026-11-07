@@ -3,40 +3,14 @@
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import SecretStr, ValidationError
 
 from companion import operator_config
-from companion.api import create_app
 from companion.contracts import Candidate
-from companion.retrieval import SemanticIndex
 from companion.store import after, encode
 from tests.conftest import ingest, run
-
-ORIGIN = "https://console.example.test"
-PASSWORD = "owner-console-test-password-" * 2
-
-
-@pytest.fixture
-def client(core, monkeypatch):
-    core.settings.console.enabled = True
-    core.settings.console.public_origin = ORIGIN
-    core.settings.control_token = SecretStr(PASSWORD)
-    core.settings.memory_enabled = True
-    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
-    app = create_app(core.settings)
-    with TestClient(app, base_url=ORIGIN) as http:
-        app.state.core.clock = core.clock
-        http.app_core = app.state.core
-        yield http
-
-
-def login(client):
-    response = client.post("/v1/console/session", json={"password": PASSWORD},
-                           headers={"Origin": ORIGIN})
-    assert response.status_code == 200, response.text
-    return {"Origin": ORIGIN, "X-CSRF-Token": response.json()["csrf_token"],
-            "Idempotency-Key": "console-test-operation"}
+from tests.support.owner_console import ORIGIN, PASSWORD, login, stored_memory
+from tests.support.owner_console import client as client
 
 
 def test_console_requires_its_own_owner_session_origin_and_csrf(client, core):
@@ -240,20 +214,6 @@ def test_nested_configuration_errors_do_not_echo_or_persist_secret_input(client,
     assert secret not in encode(core.store.rows("SELECT * FROM audit_log"))
 
 
-def stored_memory(core, number=1, *, source=None, content="主人喜欢龙井茶", review=False,
-                  confirmed=True):
-    if source is None:
-        source = ingest(core, number, "这是主人确认的项目目录")
-    with core.store.transaction():
-        memory_id = core.memory.add(Candidate(
-            subject="project", kind="fact", fact_key=f"console_{number}", content=content,
-            evidence_event_id=source["event_id"], evidence_quote="项目目录",
-        ), core.clock(), confirmed=confirmed)
-        if review:
-            core.store.execute("UPDATE memories SET needs_review=1 WHERE memory_id=?", (memory_id,))
-    return memory_id, source
-
-
 def test_extracted_candidate_appears_in_pending_and_leaves_after_owner_confirmation(client, core):
     from companion.core import Core
 
@@ -365,10 +325,10 @@ def test_memory_projection_preserves_native_source_and_validity_filters(
     if invalid == "negative":
         core.store.execute("UPDATE memory_evidence SET polarity=-1")
     elif invalid == "tombstone":
-        core.store.execute("INSERT INTO runtime_meta VALUES (?, 'erased')",
+        core.store.execute("INSERT INTO runtime_meta VALUES (%s, 'erased')",
                            ("erased_event:" + source["event_id"],))
     elif invalid == "expired":
-        core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s',
                            (after(core.clock(), -366 * 86400), source["event_id"]))
     elif invalid == "conversation":
         core.store.execute("UPDATE conversations SET scope='group'")
@@ -376,11 +336,13 @@ def test_memory_projection_preserves_native_source_and_validity_filters(
         upstream = ingest(core, 2, "原始来源")
         core.store.insert("event_dependencies", event_id=source["event_id"],
                           source_event_id=upstream["event_id"])
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (upstream["event_id"],))
+        core.store.execute((
+            'UPDATE events SET redacted=1 WHERE event_id=%s'
+        ), (upstream["event_id"],))
     elif invalid == "future":
-        core.store.execute("UPDATE memories SET valid_from=?", (after(core.clock(), 1),))
+        core.store.execute('UPDATE memories SET valid_from=%s', (after(core.clock(), 1),))
     else:
-        core.store.execute("UPDATE memories SET valid_to=?", (core.clock(),))
+        core.store.execute('UPDATE memories SET valid_to=%s', (core.clock(),))
     result = client.get("/v1/console/memories")
     assert result.status_code == 200, result.text
     assert result.json()["items"] == []
@@ -421,8 +383,10 @@ def test_memory_projection_does_not_mask_disabled_access_as_an_empty_collection(
 
 def source_projection_records(core):
     source = ingest(core, 1, "主人发送的图片")
-    core.store.execute("UPDATE events SET body_json=?,event_type='message.media_received' "
-                       "WHERE event_id=?", (encode({"text": "", "media": []}), source["event_id"]))
+    core.store.execute((
+        "UPDATE events SET body_json=%s,event_type='message.media_received' "
+        'WHERE event_id=%s'
+    ), (encode({"text": "", "media": []}), source["event_id"]))
     now = core.clock()
     core.store.insert(
         "content_items", item_id="content_console", owner_event_id=source["event_id"],
@@ -448,10 +412,10 @@ def test_content_and_meme_views_require_current_private_source_custody(client, c
         assert response.status_code == 200, response.text
         assert len(response.json()["items"]) == 1
     if invalid == "expired":
-        core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s',
                            (after(core.clock(), -366 * 86400), source["event_id"]))
     elif invalid == "tombstone":
-        core.store.execute("INSERT INTO runtime_meta VALUES (?, 'erased')",
+        core.store.execute("INSERT INTO runtime_meta VALUES (%s, 'erased')",
                            ("erased_event:" + source["event_id"],))
     elif invalid == "conversation":
         core.store.execute("UPDATE conversations SET scope='group'")
@@ -459,7 +423,9 @@ def test_content_and_meme_views_require_current_private_source_custody(client, c
         upstream = ingest(core, 2, "上游原始证据")
         core.store.insert("event_dependencies", event_id=source["event_id"],
                           source_event_id=upstream["event_id"])
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (upstream["event_id"],))
+        core.store.execute((
+            'UPDATE events SET redacted=1 WHERE event_id=%s'
+        ), (upstream["event_id"],))
     for view in ("content", "memes"):
         response = client.get("/v1/console/" + view)
         assert response.status_code == 200 and response.json()["items"] == []
@@ -470,12 +436,12 @@ def test_content_and_meme_views_require_current_private_source_custody(client, c
 def test_content_and_meme_views_check_independent_related_sources(client, core):
     _, job = source_projection_records(core)
     related = ingest(core, 2, "另一个被引用的来源")
-    core.store.execute("UPDATE content_items SET source_event_id=?", (related["event_id"],))
+    core.store.execute('UPDATE content_items SET source_event_id=%s', (related["event_id"],))
     core.store.insert("job_sources", job_id=job, event_id=related["event_id"])
     login(client)
     assert len(client.get("/v1/console/content").json()["items"]) == 1
     assert len(client.get("/v1/console/memes").json()["items"]) == 1
-    core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (related["event_id"],))
+    core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (related["event_id"],))
     assert client.get("/v1/console/content").json()["items"] == []
     assert client.get("/v1/console/memes").json()["items"] == []
 
@@ -486,7 +452,7 @@ def test_overview_review_count_matches_visible_sources_and_reports_disabled_as_u
     _, source = stored_memory(core, review=True)
     login(client)
     assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 1
-    core.store.execute("INSERT INTO runtime_meta VALUES (?, 'erased')",
+    core.store.execute("INSERT INTO runtime_meta VALUES (%s, 'erased')",
                        ("erased_event:" + source["event_id"],))
     assert client.get("/v1/console/memories", params={"review": "true"}).json()["items"] == []
     assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 0
@@ -498,7 +464,7 @@ def test_overview_review_count_matches_visible_sources_and_reports_disabled_as_u
 
 def test_life_projection_rejects_diary_erasure_during_combined_read(client, core, monkeypatch):
     from companion.core import Core
-    from tests.test_diary import DAY, generate, seed_day
+    from tests.support.diary import DAY, generate, seed_day
 
     seed_day(core)
     assert generate(core)["state"] == "COMMITTED"

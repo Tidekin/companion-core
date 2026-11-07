@@ -10,7 +10,7 @@ from companion import meme_assets, meme_service, owner_authority
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import Store
 from tests.conftest import run
-from tests.test_meme_native_discovery import native_case, release_foreground
+from tests.support.meme_native_discovery import native_case, release_foreground
 
 
 @pytest.mark.parametrize("phase", ["stage", "before_commit", "after_commit", "after_marker"])

@@ -25,7 +25,7 @@ def test_segment_interval_does_not_enter_slow_account_poll(core, tmp_path, monke
             model = Provider(answer("第一段合成回复\n第二段合成回复"))
             async with worker_for(core, model) as worker:
                 assert await worker.run_once("segment-account-priority")
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert len(model.requests) == len(usage) == 1 and usage[0]["state"] == "SETTLED"
             assert await active.pump() and len(sends) == 1
             core.clock.advance(0.59)
@@ -65,7 +65,9 @@ def test_segment_interval_does_not_enter_slow_account_poll(core, tmp_path, monke
                 assert requests[0] == ("lease", "owner_private")
                 assert core.store.rows("SELECT state FROM outbox ORDER BY segment_index") == [
                     {"state": "SENT"}, {"state": "SENT"}]
-                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+                assert core.store.rows(
+                    'SELECT * FROM model_usage ORDER BY record_sequence'
+                ) == usage
             finally:
                 stop.set()
                 release.set()

@@ -14,8 +14,9 @@ from companion.core import Core
 from companion.model import ModelResponse
 from scripts import evaluate_r1_conversation as experiment
 from tests.support.core_http import real_core_http
-from tests.test_evaluation import authorize, prepare, response, result, work
-from tests.test_evaluation_process import processes
+from tests.support.evaluation import authorize, prepare, response, result, work
+from tests.support.evaluation_measurement_v2 import rehash
+from tests.support.evaluation_process import processes
 
 
 def v2(core, tmp_path):
@@ -31,10 +32,6 @@ def v2(core, tmp_path):
     return manifest
 
 
-def rehash(plan):
-    plan["plan_sha256"] = paid_budget.sha({k: v for k, v in plan.items() if k != "plan_sha256"})
-
-
 def test_v2_receipts_equal_native_reservations_and_restart_does_not_repay(core, tmp_path):
     manifest = v2(core, tmp_path)
     submitted = evaluation.submit(core, authorize(core, manifest))
@@ -43,7 +40,10 @@ def test_v2_receipts_equal_native_reservations_and_restart_does_not_repay(core, 
     view = result(core, submitted)
     assert view["state"] == "SUCCEEDED", view["error_code"]
     assert wire == [r["payload_sha256"] for r in manifest.plan["requests"]]
-    admissions = core.store.rows("SELECT measurement_json FROM model_admissions ORDER BY rowid")
+    admissions = core.store.rows(
+        'SELECT measurement_json FROM model_admissions ORDER BY '
+        'record_sequence'
+    )
     assert [json.loads(r["measurement_json"]) for r in admissions] == [
         r["measurement"] for r in manifest.plan["requests"]]
     assert len(view["requests"]) == 6
@@ -197,8 +197,10 @@ def test_v2_real_tcp_and_independent_worker_preserve_owner_fences(core, tmp_path
                                                 + submitted.json()["evaluation_id"])
                     assert observed.status_code == 200, observed.text
                     assert observed.json()["state"] == "SUCCEEDED"
-                    measured = core.store.rows("SELECT measurement_json FROM model_admissions "
-                                                "ORDER BY rowid")
+                    measured = core.store.rows(
+                        'SELECT measurement_json FROM model_admissions ORDER '
+                        'BY record_sequence'
+                    )
                     assert [json.loads(row["measurement_json"]) for row in measured] == [
                         row["measurement"] for row in manifest.plan["requests"]]
             assert core.store.rows("SELECT * FROM outbox") == []

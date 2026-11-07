@@ -14,9 +14,9 @@ from companion.store import Store, encode
 from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import run
 from tests.support.native_context import source_window
+from tests.support.onebot_capture import bootstrap_frames
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_capture import bootstrap_frames
-from tests.test_qq_rich_input import card
+from tests.support.qq_rich_input import card
 
 
 @pytest.mark.parametrize("change", [None, "spool", "job", "delivery", "erase", "replay"])
@@ -88,7 +88,7 @@ def test_signed_rich_source_survives_existing_pipeline_and_drift_is_fenced(core,
             original_body = json.loads(stored["body_json"])
             if change == "job":
                 core.store.execute(
-                    "UPDATE events SET body_json=?", (encode(mutate(original_body)),)
+                    'UPDATE events SET body_json=%s', (encode(mutate(original_body)),)
                 )
             assert await core.run_once()
             if change == "job":
@@ -104,7 +104,7 @@ def test_signed_rich_source_survives_existing_pipeline_and_drift_is_fenced(core,
             assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
             if change == "delivery":
                 core.store.execute(
-                    "UPDATE events SET body_json=?", (encode(mutate(original_body)),)
+                    'UPDATE events SET body_json=%s', (encode(mutate(original_body)),)
                 )
             elif change == "erase":
                 restored_path = tmp_path / "before-erasure.db"
@@ -366,7 +366,9 @@ def test_actual_rich_history_is_counted_and_bound_through_delivery(
             body = json.loads(prior["body_json"])
             body["rich"]["segments"][0]["fields"][0]["value"] = "mutated old card"
             core.store.execute(
-                "UPDATE events SET body_json=? WHERE event_id=?", (encode(body), prior["event_id"])
+                (
+                    'UPDATE events SET body_json=%s WHERE event_id=%s'
+                ), (encode(body), prior["event_id"])
             )
             if include_history:
                 rejected = False
@@ -375,7 +377,9 @@ def test_actual_rich_history_is_counted_and_bound_through_delivery(
                 except (ValueError, httpx.HTTPStatusError):
                     rejected = True
                 assert len(sends) == 1
-                assert rejected or core.store.one("SELECT state FROM outbox ORDER BY rowid DESC")[
+                assert rejected or core.store.one(
+                    'SELECT state FROM outbox ORDER BY record_sequence DESC'
+                )[
                     "state"] == "CANCELLED"
             else:
                 await window.send(client, protocol)

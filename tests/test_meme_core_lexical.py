@@ -3,11 +3,9 @@
 import pytest
 
 from companion.meme_policy import lexical_score
-from tests.test_next_memes_semantic import semantic as semantic
-from tests.test_next_memes_semantic_quality import CASES
-from tests.test_next_memes_semantic_quality import (
-    test_fixed_caption_fixture_quality as bridge_corpus,
-)
+from tests.support.next_memes_semantic import semantic as semantic
+from tests.support.next_memes_semantic_quality import CASES
+from tests.support.next_memes_semantic_quality import check_caption_fixture_quality as bridge_corpus
 
 
 @pytest.mark.parametrize("name,text,intent,target,expected", CASES, ids=[c[0] for c in CASES])

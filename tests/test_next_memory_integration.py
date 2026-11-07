@@ -12,8 +12,8 @@ from companion.model import EXTRACT_RULES, ModelClient
 from companion.store import after, encode
 from tests.conftest import ingest, run
 from tests.support.core_http import real_core_http
+from tests.support.next_life_growth import feedback_days
 from tests.support.owner_memory import environment as owner_memory_environment
-from tests.test_next_life_growth import feedback_days
 
 FACT = "青禾项目下一步检查配色"
 
@@ -398,7 +398,7 @@ def test_strict_fact_scope_does_not_authorize_episode_context(core, tmp_path):
                     _, accepted = await admit_input(82, "配色")
                     assert await worker.run_once()
                     assert len(calls) == 2, worker.store.rows(
-                        "SELECT * FROM audit_log WHERE action LIKE 'memory.%'")
+                        "SELECT * FROM audit_log WHERE action LIKE 'memory.%%'")
                     assert FACT in encode(calls)
                     assert "相关情景接续" not in encode(calls) and canary not in encode(calls)
                     assert source.event_id not in {row["event_id"] for row in worker.store.rows(

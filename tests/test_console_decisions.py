@@ -4,10 +4,10 @@ import pytest
 
 from companion.store import after
 from tests.conftest import run
-from tests.test_console_cognition import client as client
-from tests.test_console_cognition import login
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
+from tests.support.console_cognition import client as client
+from tests.support.console_cognition import login
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY
 
 
 def test_decisions_list_wake_and_reflection_records_without_reasoning(core, client):
@@ -44,7 +44,7 @@ def test_decisions_list_wake_and_reflection_records_without_reasoning(core, clie
     assert item["id"] == reflection["run_id"] and item["state"] == "COMMITTED"
     assert item["source_evidence"] == "RECORDED"
     original = core.store.one(
-        "SELECT model_request_id,created_at FROM reflection_runs WHERE run_id=?",
+        'SELECT model_request_id,created_at FROM reflection_runs WHERE run_id=%s',
         (reflection["run_id"],))
     assert item["model_request_id"] == original["model_request_id"]
     assert item["occurred_at"] == original["created_at"] != pages[1]["as_of"]
@@ -71,11 +71,11 @@ def test_console_decisions_hide_reflection_when_original_source_is_unavailable(
     assert before.status_code == 200 and len(before.json()["items"]) == 1
     source = before.json()["items"][0]["source_event_ids"][0]
     if withdrawal == "redacted":
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (source,))
+        core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (source,))
     elif withdrawal == "non_owner":
-        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=?", (source,))
+        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=%s", (source,))
     else:
-        core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?", (
+        core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s', (
             after(core.clock(), -86400 * (core.settings.raw_event_retention_days + 1)), source))
     calls = list(model.calls)
     changes = client.app.state.core.store.db.total_changes

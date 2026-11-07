@@ -3,40 +3,15 @@
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from companion.api import create_app
-from companion.retrieval import SemanticIndex
 from companion.store import after
 from tests.conftest import run
-from tests.test_cognition_goal_steps import finish_record, retained_plan
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
-
-ORIGIN = "https://console.example.test"
-PASSWORD = "owner-console-cognition-password-" * 2
-
-
-@pytest.fixture
-def client(core, monkeypatch):
-    core.settings.console.enabled = True
-    core.settings.console.public_origin = ORIGIN
-    core.settings.control_token = SecretStr(PASSWORD)
-    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
-    app = create_app(core.settings)
-    with TestClient(app, base_url=ORIGIN) as http:
-        app.state.core.clock = core.clock
-        app.state.core.mood.clock = core.clock
-        app.state.core.goals.clock = core.clock
-        app.state.core.executive.clock = core.clock
-        yield http
-
-
-def login(client):
-    csrf = client.post("/v1/console/session", json={"password": PASSWORD},
-                       headers={"Origin": ORIGIN}).json()["csrf_token"]
-    return {"Origin": ORIGIN, "X-CSRF-Token": csrf}
+from tests.support.cognition_goal_steps import finish_record, retained_plan
+from tests.support.console_cognition import ORIGIN, PASSWORD, login
+from tests.support.console_cognition import client as client
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY
 
 
 @pytest.mark.parametrize("path", ["/cognition?kind=goal", "/affect", "/goals", "/reflections",
@@ -131,7 +106,7 @@ def test_goal_console_keeps_history_without_continuation_authority(client, core,
     if blocked == "disabled":
         core.settings.goals_enabled = False
     else:
-        core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=?",
+        core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=%s",
                            (steps[0],))
     login(client)
     item = client.get("/v1/console/goals").json()["items"][0]
@@ -140,7 +115,7 @@ def test_goal_console_keeps_history_without_continuation_authority(client, core,
 
 
 def test_tool_list_shows_the_exact_scope_an_approval_releases(client, core):
-    from tests.test_executive import configured, proposal
+    from tests.support.executive import configured, proposal
 
     executive = configured(core, allow_changes=True)
     task = executive.submit(proposal(2, "windows.write_text", text="明天的购物清单"))
@@ -158,18 +133,18 @@ def test_tool_list_shows_the_exact_scope_an_approval_releases(client, core):
     body = {"decision": "APPROVE", "scope_sha256": item["scope_sha256"]}
     response = client.post(url, json=body, headers={**headers, "Idempotency-Key": "approve-1"})
     assert response.status_code == 200, response.text
-    assert core.store.one("SELECT state FROM tool_tasks WHERE task_id=?",
+    assert core.store.one('SELECT state FROM tool_tasks WHERE task_id=%s',
                           (task["task_id"],))["state"] == "QUEUED"
 
 
 def test_tool_scope_that_no_longer_matches_its_digest_is_not_shown(client, core):
-    from tests.test_executive import configured, proposal
+    from tests.support.executive import configured, proposal
 
     executive = configured(core, allow_changes=True)
     task = executive.submit(proposal(3, "windows.write_text", text="原始内容"))
     scope = json.loads(task["scope_json"])
     scope["arguments"]["text"] = "被改过的内容"
-    core.store.execute("UPDATE tool_tasks SET scope_json=? WHERE task_id=?",
+    core.store.execute('UPDATE tool_tasks SET scope_json=%s WHERE task_id=%s',
                        (json.dumps(scope, ensure_ascii=False), task["task_id"]))
     login(client)
     item = next(row for row in client.get("/v1/console/tools").json()["items"]
@@ -179,7 +154,7 @@ def test_tool_scope_that_no_longer_matches_its_digest_is_not_shown(client, core)
 
 @pytest.mark.parametrize("source_state", ["expired", "missing_evidence", "redacted"])
 def test_tool_scope_hides_arguments_when_owner_sources_are_unavailable(client, core, source_state):
-    from tests.test_executive import configured, proposal
+    from tests.support.executive import configured, proposal
 
     executive = configured(core, allow_changes=True)
     text = "synthetic-private-tool-content"
@@ -187,9 +162,11 @@ def test_tool_scope_hides_arguments_when_owner_sources_are_unavailable(client, c
     login(client)
     if source_state == "expired":
         cutoff = after(core.clock(), -86400 * core.settings.raw_event_retention_days - 1)
-        core.store.execute("UPDATE events SET ingested_at=? WHERE event_id='evt_test_1'", (cutoff,))
+        core.store.execute((
+            "UPDATE events SET ingested_at=%s WHERE event_id='evt_test_1'"
+        ), (cutoff,))
     elif source_state == "missing_evidence":
-        core.store.execute("DELETE FROM tool_evidence WHERE task_id=?", (task["task_id"],))
+        core.store.execute('DELETE FROM tool_evidence WHERE task_id=%s', (task["task_id"],))
     else:
         core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
     response = client.get("/v1/console/tools")
@@ -207,7 +184,7 @@ def test_tool_scope_hides_arguments_when_owner_sources_are_unavailable(client, c
 def test_tool_scope_privacy_change_during_http_read_fails_closed(client, core, monkeypatch, change):
     from companion import console_cognition
     from companion.privacy import advance_epoch
-    from tests.test_executive import configured, proposal
+    from tests.support.executive import configured, proposal
 
     executive = configured(core, allow_changes=True)
     text = "synthetic-private-tool-content"
@@ -246,7 +223,7 @@ def test_affect_view_distinguishes_disabled_from_neutral(client, core):
 
 @pytest.mark.parametrize("appraisal", ["这个回答很有帮助", "这个想法很有意思"])
 def test_mood_console_authentication_controls_and_idempotent_clear(client, core, appraisal):
-    from tests.test_mood import feedback
+    from tests.support.mood import feedback
 
     feedback(core, text=appraisal)
     assert client.get("/v1/console/mood").status_code == 401

@@ -18,9 +18,9 @@ from companion.file_evidence import PrivateFilesConfig
 from companion.privacy import advance_epoch
 from companion.store import Store, migrate
 from tests.conftest import run
-from tests.test_input_reply_migration import config_for
-from tests.test_qq_files import IMAGE, prepared, signed_upload
-from tests.test_release_migration import (
+from tests.support.input_reply_migration import config_for
+from tests.support.qq_files import IMAGE, prepared, signed_upload
+from tests.support.release_migration import (
     TIMES,
     assert_old_columns_unchanged,
     seed_legacy,
@@ -80,7 +80,7 @@ def test_upload_only_stages_and_worker_commits_existing_observation_chain(core, 
     assert core.store.one("SELECT * FROM event_dependencies")["source_event_id"] == event_id
     assert not core.store.rows("SELECT * FROM model_usage")
     assert not core.store.rows("SELECT * FROM exploration_requests")
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                               (qq_files.STAGED + row["item_id"],))
     assert list(image_spool.directory(core.store).glob("*.raw")) == []
     context = core.content.context(event_id)
@@ -193,7 +193,7 @@ def test_bad_upload_never_creates_an_original(core, monkeypatch, failure):
         content_files.stage_file(core.content, event_id, "file:0", uploaded, mime,
                                  claim["lease_token"], proof)
     assert not image_spool.directory(core.store).exists()
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE ?",
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key LIKE %s',
                               (qq_files.STAGED + "%",))
 
 
@@ -244,7 +244,7 @@ def test_damaged_staged_input_is_rejected_before_parser(core, monkeypatch, damag
         original = path.read_bytes()
         path.write_bytes(original[:-1] + b"X")
     else:
-        core.store.execute("UPDATE runtime_meta SET value='{' WHERE key LIKE ?",
+        core.store.execute("UPDATE runtime_meta SET value='{' WHERE key LIKE %s",
                            (qq_files.STAGED + "%",))
     assert run(content_files.run_file_once(core.content,
         parse=lambda *args, **kwargs: pytest.fail("tampered original reached parser")))
@@ -324,7 +324,7 @@ def test_erasure_replay_removes_copied_file_spool_and_metadata(core, monkeypatch
               clock=core.clock) as recovered:
         row = recovered.store.one("SELECT * FROM content_items")
         assert row["state"] == "ERASED" and row["attachment_json"] == "{}"
-        assert not recovered.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE ?",
+        assert not recovered.store.one('SELECT 1 FROM runtime_meta WHERE key LIKE %s',
                                        (qq_files.STAGED + "%",))
         assert not run(content_files.run_file_once(recovered.content,
             parse=lambda *args, **kwargs: pytest.fail("erased file replayed")))

@@ -10,8 +10,8 @@ from companion.social_autonomy_runtime import run_once
 from companion.store import after
 from tests.conftest import ingest, run
 from tests.social_profile_support import confirmed_profile_material
-from tests.test_reading_protocol import envelope
-from tests.test_social_autonomy import (
+from tests.support.reading_protocol import envelope
+from tests.support.social_autonomy import (
     MockPlanner,
     avatar,
     background,
@@ -134,7 +134,7 @@ def test_avatar_choices_include_only_current_reviewed_assets_and_real_baseline(c
     module.register_asset(valid)
     module.register_asset(avatar(core, asset_id="expired", expires_at=after(core.clock(), 1)))
     module.register_asset(avatar(core, asset_id="revoked"))
-    core.store.execute("UPDATE social_autonomy_assets SET revoked_at=? WHERE asset_id='revoked'",
+    core.store.execute("UPDATE social_autonomy_assets SET revoked_at=%s WHERE asset_id='revoked'",
                        (core.clock(),))
     core.clock.advance(2)
     module.model.proposal = {"kind": "avatar", "asset_id": valid.asset_id}
@@ -172,7 +172,7 @@ def test_expired_unreserved_plan_becomes_terminal_without_refunding_or_retry(cor
 def test_invalid_public_source_cancels_ready_plan_without_an_outbox(core):
     module, ref, _ = background(core)
     planned(module, ref)
-    core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (ref,))
+    core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (ref,))
     assert tick(module) is True
     assert core.store.one("SELECT state FROM social_autonomy_plans")["state"] == "CANCELLED"
     assert tick(module) is False

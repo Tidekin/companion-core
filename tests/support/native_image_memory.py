@@ -15,7 +15,7 @@ from companion.store import after
 from companion_onebot_bridge import pending_media
 from tests.sdk_reader_fixture import answer, call, worker_for
 from tests.support.native_consumer_entry import environment
-from tests.test_onebot_images import image_segment
+from tests.support.onebot_images import image_segment
 
 PREFERENCE = "我挑选耳机优先考虑轻便和隔音。"
 CUES = "图片1：红色轻便头戴耳机；图片2：蓝色头戴耳机。检索主题：耳机、轻便、隔音。"

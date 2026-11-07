@@ -23,14 +23,14 @@ from source_reader.web import WebHTTP
 from source_reader.worker_v1 import tick
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.exploration import URL, configure
+from tests.support.heybox_reader import mock_pool
+from tests.support.life_topics import assert_no_delivery, bug, due, proposal
+from tests.support.life_worker_integration import native_worker
+from tests.support.next_reading import WEB, web_response
 from tests.support.owner_authority import activate
 from tests.support.owner_memory import environment
-from tests.test_exploration import URL, configure
-from tests.test_heybox_reader import mock_pool
-from tests.test_life_topics import assert_no_delivery, bug, due, proposal
-from tests.test_life_worker_integration import native_worker
-from tests.test_next_reading import WEB, web_response
-from tests.test_source_reader import META, PLAYER, SUBTITLE, response
+from tests.support.source_reader import META, PLAYER, SUBTITLE, response
 
 
 @pytest.mark.parametrize("action", ["CONTINUE", "EXPLORE"])
@@ -62,7 +62,7 @@ def test_choice_submits_native_goal_once(core, action, enabled, source):
     job = due(core)
     assert job
     assert run(core.run_once(job_id=job))
-    result = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (job,))
+    result = core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (job,))
     assert result["state"] == "SHADOW", core.store.rows("SELECT * FROM jobs")
     assert bool(result["goal_id"]) == enabled
     if enabled:
@@ -146,8 +146,10 @@ def test_live_authority_full_loop_independent_workers(
                 response.text,
                 core.store.rows("SELECT scenario,state FROM model_usage"),
                 core.store.rows(
-                    "SELECT key,value FROM runtime_meta WHERE key LIKE '%stop%' "
-                    "OR key LIKE '%blocked%'"
+
+                        'SELECT key,value FROM runtime_meta WHERE key LIKE '
+                        "'%stop%%' OR key LIKE '%blocked%%'"
+
                 ),
             )
 
@@ -165,8 +167,9 @@ def test_live_authority_full_loop_independent_workers(
                 assert stopped.status_code == 200
                 scope = LifeShadowApproval(scope="owner_private_life_shadow_v1",
                     authorization_sha256="e" * 64,
-                    conversation_id=core.store.one("SELECT conversation_id FROM events "
-                        "WHERE event_id=?", (inbound.event_id,))["conversation_id"],
+                    conversation_id=core.store.one((
+                        'SELECT conversation_id FROM events WHERE event_id=%s'
+                    ), (inbound.event_id,))["conversation_id"],
                     source_scope=source_scope,
                     source_event_ids=[inbound.event_id] if source_scope == "selected" else [],
                     purposes=["PRIVATE_MESSAGE_DRAFT"],
@@ -458,7 +461,7 @@ def test_native_goal_receipt_becomes_next_life_source(core):
     next_job = core.life_topics.schedule()
     assert next_job
     assert run(core.run_once(job_id=next_job))
-    result = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (next_job,))
+    result = core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (next_job,))
     assert result["state"] == "SHADOW", core.store.rows("SELECT * FROM jobs")
     assert result["action"] == "SHARE"
     assert_no_delivery(core)

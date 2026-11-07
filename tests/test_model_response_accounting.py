@@ -11,7 +11,7 @@ from companion.contracts import CoreError
 from companion.model import ModelClient
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 MESSAGES = [{"role": "user", "content": "synthetic accounting boundary"}]
 
@@ -31,11 +31,11 @@ def rejected_response(core, response):
             with pytest.raises(CoreError) as caught:
                 await budget.complete(ModelClient(core.settings, client), core.store, core.settings,
                                       request_id, MESSAGES, "chat", core.clock)
-            before = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+            before = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,))
             # A duplicate recovery callback cannot discard known usage or reduce
             # the amount already settled by the calling seam.
             budget.settle(core.store, core.settings, request_id)
-            after = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+            after = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,))
             assert after == before
             return caught.value.code, after
 

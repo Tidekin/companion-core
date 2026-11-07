@@ -11,7 +11,7 @@ from companion.core import Core
 from companion_onebot_bridge import app, pending_media
 from tests.conftest import run
 from tests.native_continuous_support import until
-from tests.test_native_image_bursts import (
+from tests.support.native_image_bursts import (
     bridge_tasks,
     model_images,
     native_host,
@@ -20,8 +20,8 @@ from tests.test_native_image_bursts import (
     send,
     wait_for_ack,
 )
-from tests.test_onebot_images import image_segment
-from tests.test_owner_image_recovery import run_worker
+from tests.support.onebot_images import image_segment
+from tests.support.owner_image_recovery import run_worker
 
 
 @pytest.mark.parametrize("failure", ["outer_timeout", "transport"])

@@ -20,14 +20,11 @@ from companion_onebot_bridge import images
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
 from tests.native_continuous_support import frame
+from tests.support.live_image_input import options
 from tests.support.native_images import image_host, upload
 from tests.support.onebot_events import config, raw_event
-from tests.test_live_image_input import options
-from tests.test_onebot_images import image_segment
-
-
-def face(identifier="277"):
-    return {"type": "face", "data": {"id": identifier}}
+from tests.support.onebot_images import image_segment
+from tests.support.qq_face_images import face
 
 
 def test_known_face_gets_an_ordered_image_slot_without_changing_owner_text():
@@ -206,7 +203,7 @@ def test_signed_face_graphic_crosses_api_independent_worker_and_qq_ack(core, tmp
             usage = core.store.rows("SELECT * FROM model_usage")
             if mode == "source_change":
                 body["rich"]["segments"][0]["face_id"] = "14"
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                     (json.dumps(body, ensure_ascii=False), owner["event_id"]))
             elif mode == "erasure":
                 with core.store.transaction():

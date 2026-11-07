@@ -9,8 +9,8 @@ from pydantic import SecretStr
 from companion.transport import recover_deliveries
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
-from tests.test_bridge_owner_resolution import child
-from tests.test_evaluation_process import process_config
+from tests.support.bridge_owner_resolution import child
+from tests.support.evaluation_process import process_config
 
 
 @pytest.mark.parametrize("stage", ["begin-send", "send-check"])
@@ -45,7 +45,7 @@ def test_lost_preflight_response_closes_without_provider_io_and_next_input_works
             await active.capture()
             await active.flush()
             await work()
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             lost, proofs = [], []
 
             async def lose_response(response):
@@ -68,7 +68,7 @@ def test_lost_preflight_response_closes_without_provider_io_and_next_input_works
             assert not sends and active.attempts() == {"NOT_SENT": 1}
             assert core.store.rows("SELECT state,attempt_count FROM outbox") == [
                 {"state": "CANCELLED", "attempt_count": 1}]
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usage
             assert active.runtime.row()["state"] == "ACTIVE"
             active.restart()
             assert active.runtime.row()["state"] == "ACTIVE"

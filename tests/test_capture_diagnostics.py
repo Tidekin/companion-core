@@ -11,8 +11,9 @@ import pytest
 from companion_onebot_bridge import app, capture
 from companion_onebot_bridge import window as window_module
 from tests.conftest import run
+from tests.support.capture_diagnostics import lifecycle_frames
+from tests.support.onebot_capture import source_window
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_capture import bootstrap_frames, source_window
 
 
 def cli_failure(monkeypatch, capsys, error):
@@ -28,13 +29,6 @@ def cli_failure(monkeypatch, capsys, error):
     output = capsys.readouterr().out
     assert len(output.splitlines()) == 1
     return output, json.loads(output)
-
-
-def lifecycle_frames():
-    frames = bootstrap_frames()
-    for frame in frames[:2]:
-        frame["status"] = {"online": True, "good": True}
-    return frames
 
 
 def test_snowluma_status_lifecycle_bootstrap_then_owner_text(core, tmp_path):

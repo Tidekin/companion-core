@@ -13,26 +13,15 @@ from companion import budget, owner_authority, paid_budget
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
-from companion.video_input import VideoInputPolicy, encode_animation, preview, text_and_estimate
+from companion.video_input import encode_animation, preview, text_and_estimate
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call, worker_for
+from tests.support.animated_owner_images import animation, policy
 from tests.support.failure_notice import assert_failure_notice
-from tests.test_animated_owner_images import animation, policy
-from tests.test_live_image_input import options as image_options
-from tests.test_live_image_input import png
-from tests.test_onebot_images import image_segment
-from tests.test_prepare_owner_input import native_spool, window
-from tests.test_private_companion import companion_options
-
-
-def video_policy(**changes):
-    return VideoInputPolicy(**{
-        "approval_sha256": "d" * 64, "provider": "synthetic-video",
-        "endpoint": "https://video.example.test/v1", "model": "configurable-video-one",
-        "input_rate": 1000000, "cached_input_rate": 100000, "output_rate": 2000000,
-        "estimated_tokens_per_second": 200, "max_output_tokens": 128,
-        **changes,
-    })
+from tests.support.live_image_input import png
+from tests.support.onebot_images import image_segment
+from tests.support.prepare_owner_input import native_spool, window
+from tests.support.video_understanding import video_policy
 
 
 @pytest.mark.parametrize("format,mime", [
@@ -90,26 +79,10 @@ def test_fractional_apng_frame_durations_do_not_accumulate_rounding_drift():
     assert abs(encoded.seconds - duration / 1000) <= 0.040001
 
 
-def scope_options(core, *, model, different_rates=False):
-    options, image = companion_options(core), image_options()
-    options.update(image_scope=image["image_scope"],
-                   image_approval_sha256=image["image_approval_sha256"])
-    options["core_options"].update(image["core_options"], video_model_key=SecretStr(
-        "synthetic-video-provider-key-12345",
-    ))
-    prices = ({"input_rate": 8990, "cached_input_rate": 899, "output_rate": 44949,
-               "max_output_tokens": 1000} if different_rates else {})
-    options["paid_options"].update(
-        image_input=image["paid_options"]["image_input"],
-        video_input=video_policy(model=model, **prices), per_request_calls=4,
-    )
-    return options
-
-
 async def native_media(core, tmp_path, client, config, plan, *, extra_static=False):
     from companion_onebot_bridge.images import OriginalImage, upload_original
     from companion_onebot_bridge.network import private_http_client
-    from tests.test_native_image_pipeline import admit_image
+    from tests.support.native_image_pipeline import admit_image
 
     message = [image_segment("https://gchat.qpic.cn/animation")]
     if extra_static:
@@ -192,7 +165,7 @@ def test_sdk_selects_video_tool_then_independent_worker_chats(
             async with worker_for(core, respond) as worker:
                 assert await worker.run_once("native-video-models")
             assert len(calls) == (3 if selected else 1)
-            usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usages = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert [row["scenario"] for row in usages] == (
                 ["chat", "content_video", "chat"] if selected else ["chat"])
             assert all(row["state"] == "SETTLED" for row in usages)
@@ -271,17 +244,20 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp
             expected_video = boundary in {
                 "unknown", "missing_usage", "video_price", "video_disabled"}
             assert len(video_calls) == int(expected_video)
-            usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usages = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert usages[0]["state"] == "SETTLED"
             if not invalid:
                 assert len(usages) == 2
                 if boundary in {"stop", "key", "payload"}:
                     assert usages[1]["state"] == "SETTLED"
                     assert usages[1]["billed_micro_usd"] == 0
-                    admission = core.store.one("SELECT * FROM model_admissions "
-                        "WHERE request_id=?", (usages[1]["request_id"],))
-                    proof = core.store.one("SELECT safe_detail_json FROM audit_log "
-                        "WHERE action='model.not_dispatched' AND entity_id=?",
+                    admission = core.store.one((
+                        'SELECT * FROM model_admissions WHERE request_id=%s'
+                    ), (usages[1]["request_id"],))
+                    proof = core.store.one((
+                        'SELECT safe_detail_json FROM audit_log WHERE '
+                        "action='model.not_dispatched' AND entity_id=%s"
+                    ),
                         (usages[1]["request_id"],))
                     detail = json.loads(proof["safe_detail_json"])
                     assert detail["evidence_sha256"] == paid_budget.sha({
@@ -292,8 +268,10 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp
                     assert usages[1]["state"] == "UNKNOWN"
                     assert usages[1]["billed_micro_usd"] > 0
                 if boundary in {"video_price", "video_disabled"}:
-                    detail = core.store.one("SELECT safe_detail_json FROM audit_log WHERE "
-                        "action='model.usage_diagnostic' AND entity_id=?",
+                    detail = core.store.one((
+                        'SELECT safe_detail_json FROM audit_log WHERE '
+                        "action='model.usage_diagnostic' AND entity_id=%s"
+                    ),
                         (usages[1]["request_id"],))
                     assert json.loads(detail["safe_detail_json"])["code"] == (
                         "PRICING_CONFIG_CHANGED")
@@ -310,7 +288,7 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp
             async with worker_for(core, respond) as restarted:
                 await restarted.run_once("native-video-no-replay")
             assert len(calls) == before
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usages
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usages
     run(scenario())
 
 

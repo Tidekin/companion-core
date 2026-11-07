@@ -16,34 +16,13 @@ import pytest
 from companion_onebot_bridge import meme_accounting_drain as drain
 from companion_onebot_bridge.meme_runtime import MemeRuntime
 from tests.conftest import run
-from tests.test_meme_asset_migration import config_file
-from tests.test_meme_core import worker
-from tests.test_meme_responsibility import snapshot
-from tests.test_meme_responsibility_bridge import bridge_case
+from tests.support.meme_accounting_drain import config_path, stopped_case
+from tests.support.meme_asset_migration import config_file
+from tests.support.meme_core import worker
+from tests.support.meme_responsibility import snapshot
+from tests.support.meme_responsibility_bridge import bridge_case
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def config_path(c, tmp_path):
-    config = c.owner.config
-    return config_file(
-        tmp_path / "accounting.toml",
-        {
-            key: getattr(config, key)
-            for key in (
-                "owner_qq_id",
-                "bot_qq_id",
-                "bridge_token",
-                "onebot_token",
-                "protocol_epoch",
-                "data_dir",
-                "core_url",
-                "capture_signing_key",
-                "owner_authority",
-                "meme_enabled",
-            )
-        },
-    )
 
 
 async def cli(path, command="owner-meme-accounting-drain"):
@@ -108,26 +87,6 @@ def test_actual_stopped_cli_retains_original_settled_fee_without_content_state_w
             assert c.job_id not in json.dumps(value) and str(tmp_path) not in json.dumps(value)
 
     run(scenario())
-
-
-@asynccontextmanager
-async def stopped_case(core, tmp_path, monkeypatch, *, state="SETTLED"):
-    async with bridge_case(core, tmp_path, monkeypatch) as c:
-        MemeRuntime(c.owner)
-        calls = []
-
-        async def lost():
-            raise ValueError("Synthetic loss after actual model dispatch")
-
-        assert await worker(core, calls, hook=lost if state == "UNKNOWN" else None)
-        assert len(calls) == 1
-        c.owner.stop()
-        c.path = config_path(c, tmp_path)
-        c.database = c.owner.spool.directory / "spool.sqlite3"
-        c.directory = c.owner.spool.directory
-        c.config = c.owner.config
-        c.owner.spool.close()
-        yield c
 
 
 @pytest.mark.parametrize("damage", ["missing_job", "duplicate_job", "over_limit", "active"])
@@ -369,8 +328,8 @@ async def native_case(core, tmp_path, monkeypatch, *, cap=50000):
     from companion_onebot_bridge.network import private_http_client
     from companion_onebot_bridge.owner_runtime import OwnerRuntime
     from companion_onebot_bridge.spool import Spool
+    from tests.support.meme_responsibility import liability_case
     from tests.support.onebot_events import raw_event
-    from tests.test_meme_responsibility import liability_case
 
     async with liability_case(core, tmp_path, monkeypatch, cap=cap) as c:
         config = replace(
@@ -562,10 +521,10 @@ def test_actual_native_host_stop_exit_restart_gate_then_explicit_cli_is_the_reac
     from companion_onebot_bridge.meme_semantic import SemanticLibrary
     from companion_onebot_bridge.meme_semantic_http import CaptionHTTP, SemanticHTTP
     from tests.native_continuous_support import until
+    from tests.support.meme_core import body
+    from tests.support.meme_service import claim, reservation, result, submit
     from tests.support.native_meme import NativeCase, capture
     from tests.support.onebot import onebot_http
-    from tests.test_meme_core import body
-    from tests.test_meme_service import claim, reservation, result, submit
 
     async def spawn(path, operation, log):
         return await asyncio.create_subprocess_exec(

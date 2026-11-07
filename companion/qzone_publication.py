@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import AwareDatetime, Field, model_validator
 
-from companion import owner_authority
+from companion import owner_authority, transport
 from companion.account_actions import scope
 from companion.contracts import CoreError, StrictModel
 from companion.paid_budget import sha
@@ -296,9 +296,9 @@ def decide(module, plan_id, body, key, *, owner_check=None):
                 'AND dispatched_at IS NULL AND message_id IN (SELECT message_id FROM outbox WHERE '
                 "attempt_count = 0 AND state IN ('PENDING', 'LEASED', 'RETRY_WAIT'))",
                 (now, plan_id))
-            s.execute("UPDATE outbox SET state = CASE WHEN state = 'SENDING' THEN "
-                "'DELIVERY_UNCERTAIN' WHEN state IN ('PENDING', 'LEASED', 'RETRY_WAIT') THEN "
-                "'CANCELLED' ELSE state END, last_error_code = 'QZONE_PUBLICATION_REVOKED' WHERE "
-                'message_id IN (SELECT message_id FROM social_autonomy_reservations WHERE plan_id '
-                '= %s)', (plan_id,))
+            transport.revoke_deliveries(s, (
+                'message_id IN (SELECT message_id FROM social_autonomy_reservations'
+                ' WHERE plan_id=%s)'
+            ),
+                                        (plan_id,), reason="QZONE_PUBLICATION_REVOKED")
         return _save_receipt(module, key, fingerprint, plan_id)

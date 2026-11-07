@@ -78,8 +78,10 @@ def test_inference_keeps_http_responsive_and_worker_fenced(core, tmp_path, monke
                         if path in {"worker_forget", "worker_tool_forget"}:
                             paid = path == "worker_tool_forget"
                             assert result and len(calls) == int(paid)
-                            job = core.store.one("SELECT state,last_error_code FROM jobs "
-                                "WHERE event_id=?", (question["event_id"],))
+                            job = core.store.one((
+                                'SELECT state,last_error_code FROM jobs WHERE'
+                                ' event_id=%s'
+                            ), (question["event_id"],))
                             assert job == {"state": "CANCELLED",
                                            "last_error_code": (
                                                "REPLY_SOURCE_RECALLED" if paid

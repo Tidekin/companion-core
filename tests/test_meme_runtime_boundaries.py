@@ -7,11 +7,9 @@ import pytest
 
 from companion.meme_retrieval import media
 from companion_onebot_bridge.config import BridgeConfig
-from tests.test_meme_asset_migration import (
-    test_offline_entrypoints_do_not_import_the_opposite_application as isolated_import,
-)
-from tests.test_next_memes_animation import canvas_gif
-from tests.test_next_memes_catalog import png
+from tests.support.meme_asset_migration import check_entrypoint_import_isolation as isolated_import
+from tests.support.next_memes_animation import canvas_gif
+from tests.support.next_memes_catalog import png
 
 
 @pytest.mark.parametrize(

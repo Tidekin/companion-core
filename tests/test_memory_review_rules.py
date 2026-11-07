@@ -3,7 +3,7 @@
 from companion.contracts import Candidate
 from companion.model import REVIEW_RULES
 from tests.conftest import event
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
 
 
 def add_episode(core, number, content, fact_key):
@@ -64,7 +64,7 @@ def test_console_recall_explains_the_chat_ranking(core, monkeypatch):
     from pydantic import SecretStr
 
     from companion.api import create_app
-    from tests.test_console_cognition import ORIGIN, PASSWORD, login
+    from tests.support.console_cognition import ORIGIN, PASSWORD, login
 
     remember(core, 1, "我喜欢绿茶", fact_key="饮料", confirmed=True)
     remember(core, 2, "我住在杭州", fact_key="城市", confirmed=True)

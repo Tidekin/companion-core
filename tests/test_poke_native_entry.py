@@ -14,7 +14,7 @@ from companion.model import ModelClient
 from companion.owner_authority_protocol import OwnerSendCheck
 from companion.transport import begin_send, lease_deliveries
 from tests.poke_authority_fixture import environment, settle, signed
-from tests.test_poke import claim, receive
+from tests.support.poke import claim, receive
 
 
 @pytest.mark.parametrize("kind", ["text", "poke", "none"])
@@ -92,7 +92,7 @@ def test_native_cancel_preserves_original_pre_dispatch_proof(core, tmp_path, evi
     else:
         with pytest.raises(CoreError, match="INPUT_CANCEL_BEFORE_SEND_UNPROVEN"):
             input_protocol.cancel_before_send(core.store, core.settings, core.clock, body)
-    stored = core.store.one("SELECT state,attempt_count FROM outbox WHERE message_id=?",
+    stored = core.store.one('SELECT state,attempt_count FROM outbox WHERE message_id=%s',
                             (message_id,))
     assert stored == {"state": "CANCELLED" if evidence == "valid" else "DELIVERY_UNCERTAIN",
                       "attempt_count": 1}

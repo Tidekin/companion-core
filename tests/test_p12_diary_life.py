@@ -16,13 +16,12 @@ from companion.privacy import epoch
 from companion.store import encode
 from companion.transport import begin_send, delivery_result, enqueue, lease_deliveries
 from tests.conftest import ingest, run
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
-from tests.test_exploration import configure
-from tests.test_goals import result_for, setup_goal
-from tests.test_heybox_reader import URL
-from tests.test_observations import observation
-from tests.test_source_grants import prepare
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY
+from tests.support.goals import result_for, setup_goal
+from tests.support.heybox_reader import URL
+from tests.support.p12_diary_life import source_with_older_parent
+from tests.support.source_grants import prepare
 
 
 def test_native_daily_pipeline_revision_next_day_and_latest_ledger_restore(core, tmp_path):
@@ -131,23 +130,6 @@ def test_completed_commitment_is_not_delivered_until_outbox_ack_and_never_claims
     assert sent["commitment_state"] == "FULFILLED" and sent["phone_confirmation"] is None
 
 
-def source_with_older_parent(core):
-    configure(core, social=True)
-    core.settings.raw_event_retention_days = 2
-    core.settings.proactive_enabled = True
-    core.settings.proactive_idle_seconds = 0
-    ingest(core, 1, "主人提供的阅读线索")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    core.clock.advance(86400)
-    item = observation(
-        core, source="heybox", source_event_ids=["evt_test_1"], text="有据的天文阅读正文",
-        payload={"title": "天文进展", "text": "有据的天文阅读正文", "url": URL},
-    )
-    core.observations.append("heybox", item)
-    core.clock.advance(86399)
-    return item.event_id
-
-
 def queued_share(core):
     source = source_with_older_parent(core)
     core.social.consider(source)
@@ -170,7 +152,7 @@ def test_upstream_expiry_blocks_goal_acceptance_and_retracts_the_native_view(cor
     with pytest.raises(CoreError, match="GOAL_SOURCE_UNAVAILABLE"):
         core.goals.accept(goal_id)
     assert core.goals.recent() == []
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (source,))["redacted"]
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (source,))["redacted"]
     assert core.store.rows("SELECT * FROM goal_steps") == []
     restore(archive, dest, key, core.settings.erasure_ledger)
     restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
@@ -227,11 +209,11 @@ def test_share_final_dispatch_rejects_changed_source_candidate_content_and_disab
         core.store, core.settings, LeaseRequest(worker_id="fixture"), core.clock()
     )["items"][0]
     if mutation == "source":
-        core.store.execute("UPDATE observations SET source_sha256=?", ("0" * 64,))
+        core.store.execute('UPDATE observations SET source_sha256=%s', ("0" * 64,))
     elif mutation == "candidate":
         core.store.execute("UPDATE social_candidates SET state='SKIPPED'")
     elif mutation == "content":
-        core.store.execute("UPDATE outbox SET content_json=?", (encode({"text": "被替换的正文"}),))
+        core.store.execute('UPDATE outbox SET content_json=%s', (encode({"text": "被替换的正文"}),))
     elif mutation == "disabled":
         core.settings.social_enabled = False
     elif mutation == "action":
@@ -242,7 +224,7 @@ def test_share_final_dispatch_rejects_changed_source_candidate_content_and_disab
         core.store.execute("UPDATE conversations SET scope='group'")
     with pytest.raises(CoreError, match="NOTICE_"):
         begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
-    result = core.store.one("SELECT * FROM outbox WHERE message_id=?", (queued["message_id"],))
+    result = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (queued["message_id"],))
     assert result["state"] == "CANCELLED" and result["attempt_count"] == 0
     restarted = Core(core.settings, clock=core.clock)
     try:
@@ -296,7 +278,7 @@ def test_interest_or_goal_does_not_substitute_for_reader_grant(core):
     before = core.store.db.total_changes
     with pytest.raises(CoreError, match="SOURCE_GRANT_REQUIRED"):
         core.exploration.lease("heybox")
-    row = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?", (request,))
+    row = core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s', (request,))
     assert row["state"] == "QUEUED" and row["started_at"] is None
     assert core.store.db.total_changes == before
     assert not core.store.rows("SELECT * FROM outbox") and not core.model.calls

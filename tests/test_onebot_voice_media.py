@@ -8,7 +8,6 @@ import os
 import shutil
 import subprocess
 import sys
-import wave
 from contextlib import asynccontextmanager
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
@@ -32,28 +31,13 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.onebot_client import OneBotClient, http_client
 from tests.conftest import run
 from tests.support.onebot_events import config, raw_event
+from tests.support.onebot_voice_media import URL, public, segment, wav
 
 NOW = datetime(2026, 10, 24, tzinfo=UTC)
-URL = "https://multimedia.nt.qq.com.cn/download/voice?key=private-signed-token"
 KEY = "11" * 32
 AUTHORITY = {"version": 2, "grant_id": "grant_" + "a" * 32, "revision": 1,
              "policy_sha256": "a" * 64, "restore_generation": "voice-native-test"}
 POLICY = "b" * 64
-
-
-def wav(seconds=1, *, rate=16000, channels=1):
-    result = BytesIO()
-    with wave.open(result, "wb") as stream:
-        stream.setnchannels(channels)
-        stream.setsampwidth(2)
-        stream.setframerate(rate)
-        stream.writeframes(b"\x01\x00" * (int(seconds * rate) * channels))
-    return result.getvalue()
-
-
-def segment(**changes):
-    return {"type": "record", "data": {"file": "cache-123.amr",
-                                        "url": URL, **changes}}
 
 
 def original():
@@ -68,11 +52,6 @@ def event():
 
 async def valid():
     return None
-
-
-async def public(host, port):
-    assert (host, port) == ("multimedia.nt.qq.com.cn", 443)
-    return ["93.184.216.34"]
 
 
 @asynccontextmanager

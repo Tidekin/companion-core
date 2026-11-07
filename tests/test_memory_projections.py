@@ -1,5 +1,4 @@
 """Native evidence transitions, reconstruction and withdrawal of attention views."""
-
 from contextlib import closing
 
 import pytest
@@ -16,19 +15,11 @@ from companion.store import Store
 from companion.transport import begin_send, delivery_result, lease_deliveries, reconcile_delivery
 from tests.conftest import ingest, run
 from tests.postgres_fixture import isolated_database, logical_state
-from tests.test_goals import setup_goal
-from tests.test_m1 import remember
-from tests.test_next_memory_context import episode
-from tests.test_observations import enable_observations, observation
-
-
-def fetched(core, goal):
-    enable_observations(core, "web")
-    core.settings.web_reading_enabled = True
-    core.settings.web_reading_hosts = ("example.org",)
-    item = observation(core, source="web", source_event_ids=core.goals.source_ids(goal))
-    core.observations.append("reader", item, reading=True)
-    return item.event_id
+from tests.support.confirmed_memory import remember
+from tests.support.goals import setup_goal
+from tests.support.memory_projections import fetched
+from tests.support.next_memory_context import episode
+from tests.support.observation_capture import enable_observations
 
 
 def test_temperature_is_rebuilt_without_changing_recall_or_facts(core):

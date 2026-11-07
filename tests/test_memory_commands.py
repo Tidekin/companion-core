@@ -1,5 +1,4 @@
 """QQ memory controls retain their actual source without becoming chat/extraction input."""
-
 import json
 from contextlib import closing
 
@@ -8,32 +7,13 @@ from cryptography.fernet import Fernet
 
 from companion import dialogue_history
 from companion.backup import backup, restore
-from companion.contracts import Candidate, CoreError
+from companion.contracts import CoreError
 from companion.postgres import Database
 from companion.privacy import epoch
 from companion.store import Store, encode
 from tests.conftest import ingest, run
 from tests.postgres_fixture import isolated_database
-
-
-def fact(core, number, text):
-    core.settings.memory_enabled = True
-    event = ingest(core, number, text)
-    with core.store.transaction(control_write=True):
-        memory_id = core.memory.add(
-            Candidate(
-                subject="project",
-                kind="fact",
-                fact_key=text,
-                content=text,
-                evidence_event_id=event["event_id"],
-                evidence_quote=text,
-            ),
-            core.clock(),
-            confirmed=True,
-        )
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (event["job_id"],))
-    return memory_id
+from tests.support.memory_commands import fact
 
 
 @pytest.mark.parametrize(

@@ -17,9 +17,9 @@ from companion.model import ModelClient, ModelResponse, model_payload
 from companion.owner_authority_protocol import AuthorityStop, OwnerRuntimeConfig
 from companion.store import after
 from tests.conftest import run
-from tests.test_meme_core import body
-from tests.test_meme_service import claim, discovery_environment, reservation, result, submit
-from tests.test_paid_model_gate import approved_live
+from tests.support.meme_core import body
+from tests.support.meme_service import claim, discovery_environment, reservation, result, submit
+from tests.support.paid_model import approved_live
 
 
 def policy(**changes):
@@ -69,8 +69,11 @@ def setup_caption(core, tmp_path, monkeypatch, *, daily=30000, paid=None, second
                 assert created.status_code == 200, created.text
                 jobs.append(created.json()["job_id"])
             for job_id in jobs:
-                core.store.execute("UPDATE jobs SET state='RUNNING',lease_token=?,"
-                    "lease_until=? WHERE job_id=?",
+                core.store.execute((
+                    'UPDATE jobs SET '
+                    "state='RUNNING',lease_token=%s,lease_until=%s WHERE "
+                    'job_id=%s'
+                ),
                     ("caption-lease", after(core.clock(), 120), job_id))
             return jobs if second else jobs[0]
 
@@ -198,7 +201,7 @@ def test_caption_settles_one_native_attempt_and_cannot_reuse_chat_or_background_
         owner_authority.admit_model(core.store, core.settings, core.clock, job_id, "chat")
     with pytest.raises(CoreError, match="COMPANION_BACKGROUND_SCOPE_REQUIRED"):
         owner_authority.admit_model(core.store, core.settings, core.clock, None, "meme_caption")
-    core.store.execute("UPDATE jobs SET kind='chat' WHERE job_id=?", (job_id,))
+    core.store.execute("UPDATE jobs SET kind='chat' WHERE job_id=%s", (job_id,))
     with pytest.raises(CoreError, match="MODEL_MEME_JOB_REQUIRED"):
         reserve(core, job_id)
 
@@ -275,7 +278,7 @@ def test_caption_rechecks_source_stop_job_lease_and_frozen_event_after_http_hook
             raise CoreError("MEME_SOURCE_CHANGED", 409)
         view = owner_authority.current(core.store, core.settings, core.clock, purpose="meme")
         meme_core.check_caption_job(core.store, core.settings, view,
-            core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)), clock=core.clock)
+            core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job_id,)), clock=core.clock)
 
     changed = False
 

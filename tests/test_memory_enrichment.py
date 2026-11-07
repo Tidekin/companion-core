@@ -1,5 +1,4 @@
 """Semantic projections must follow native evidence, cost and erasure lifecycles."""
-
 import json
 from contextlib import closing
 
@@ -17,8 +16,8 @@ from companion.postgres import Database
 from companion.store import Store, after, encode
 from tests.conftest import ingest, run
 from tests.postgres_fixture import isolated_database, logical_state
-from tests.test_diary import DAY
-from tests.test_nightly_stages import staged, step
+from tests.support.diary import DAY
+from tests.support.nightly_stages import staged, step
 
 IDS = [f"evt_test_{number}" for number in (1, 2, 3)]
 

@@ -7,6 +7,7 @@ from pydantic import SecretStr
 from companion.contracts import CoreError
 from companion.model import ModelClient
 from tests.owner_model_fixtures import authorized_job
+from tests.support.paid_model import approved_live
 
 
 def test_mode_live_and_key_alone_cannot_start_http(core):
@@ -46,49 +47,6 @@ def test_reserve_rejects_missing_approval_before_model(core):
             core.clock(),
         )
     assert core.store.rows("SELECT * FROM model_usage") == []
-
-
-def approved_live(core, tmp_path, **changes):
-    from companion.config import PaidModelApproval
-
-    values = dict(
-        live_approved=True,
-        window_id="offline-window-1",
-        approval_sha256="a" * 64,
-        provider="offline-fixture",
-        model="offline-text",
-        endpoint="https://synthetic.invalid/v1",
-        currency="USD",
-        timezone="Asia/Shanghai",
-        starts_at="2026-10-01T00:00:00+08:00",
-        expires_at="2026-12-01T00:00:00+08:00",
-        rates_valid_until="2026-12-01T00:00:00+08:00",
-        input_rate=1000000,
-        cached_input_rate=100000,
-        output_rate=2000000,
-        max_input_tokens=20000,
-        max_output_tokens=1000,
-        per_attempt_micro_usd=30000,
-        per_request_micro_usd=60000,
-        per_request_calls=3,
-        daily_micro_usd=200000,
-        daily_calls=10,
-        monthly_micro_usd=1000000,
-        window_micro_usd=2000000,
-        window_calls=20,
-        concurrency=2,
-        journal_path=str(tmp_path / "budget.jsonl"),
-    )
-    values.update(changes)
-    core.settings.paid_model = PaidModelApproval.model_validate(values)
-    core.settings.mode = "live"
-    core.settings.provider = values["provider"]
-    core.settings.model_name = values["model"]
-    core.settings.model_url = values["endpoint"]
-    core.settings.model_key = SecretStr("synthetic-key")
-    for name in ("input_rate", "cached_input_rate", "output_rate"):
-        setattr(core.settings, name, values[name])
-    return core.settings.paid_model
 
 
 def test_input_hard_limit_blocks_reservation(core, tmp_path):
@@ -211,10 +169,10 @@ def test_all_scenarios_share_daily_call_limit(core, tmp_path, scenario):
     target = job_id
     if scenario not in {"chat", "memory_review"}:
         # This accounting unit finishes its synthetic chat before background admission.
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job_id,))
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (job_id,))
         target = None
         if scenario == "activity":
-            event_id = core.store.one("SELECT event_id FROM jobs WHERE job_id=?",
+            event_id = core.store.one('SELECT event_id FROM jobs WHERE job_id=%s',
                                       (job_id,))["event_id"]
             with core.store.transaction():
                 target = core.new_job(event_id, "activity", "budget-activity", core.clock())
@@ -762,7 +720,10 @@ def test_extraction_and_reconciliation_share_one_logical_request_cap(core, tmp_p
                 assert await worker.run_once("budget-extraction-chat")
                 assert not await worker.extract_once()
             assert len(model.requests) == 2
-            assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+            assert core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            ) == [
                 {"scenario": "chat", "state": "SETTLED"},
                 {"scenario": "memory_extract", "state": "SETTLED"},
             ]
@@ -904,14 +865,17 @@ def test_stopping_admission_does_not_discard_later_inflight_cost_evidence(core, 
                            "chat", messages, core.clock())
     budget.settle(core.store, core.settings, first, ModelResponse("ok", 999999, 2))
     budget.settle(core.store, core.settings, second, ModelResponse("ok", 888888, 2))
-    rows = core.store.rows("SELECT state,billed_micro_usd FROM model_usage ORDER BY rowid")
+    rows = core.store.rows(
+        'SELECT state,billed_micro_usd FROM model_usage ORDER BY '
+        'record_sequence'
+    )
     assert rows == [
         {"state": "UNKNOWN", "billed_micro_usd": 1000003},
         {"state": "UNKNOWN", "billed_micro_usd": 888892},
     ]
     budget.record_provider_discrepancy(core.store, core.settings, second, 2000000, "USD", "f" * 64)
     assert (
-        core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=?", (second,))[
+        core.store.one('SELECT billed_micro_usd FROM model_usage WHERE request_id=%s', (second,))[
             "billed_micro_usd"
         ]
         == 2000000
@@ -1040,7 +1004,6 @@ def test_unknown_settlement_cannot_be_rolled_back_to_reserved(core, tmp_path):
         old.close()
 
 
-
 def test_open_ended_approval_keeps_hash_shape_and_caps(core, tmp_path):
     from datetime import datetime, timedelta
 
@@ -1068,7 +1031,7 @@ def test_finite_approval_needs_rate_validity_and_open_rates_follow_start(core, t
 
 def test_open_ended_approval_cannot_escape_a_cumulative_scope(core, tmp_path):
     from companion.config import PaidModelApproval
-    from tests.test_cumulative_budget import policy
+    from tests.support.cumulative_budget import policy
 
     approved_live(core, tmp_path)
     scope = policy(core)

@@ -13,7 +13,7 @@ from companion.owner_authority_protocol import OwnerCapture, OwnerGrantPolicy
 from companion.store import after
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.support.owner_authority import activate
-from tests.test_owner_input import captured, inbound
+from tests.support.owner_input import captured, inbound
 
 
 def test_signed_pre_ingress_arriving_in_final_hook_preempts_life_provider(core, tmp_path):
@@ -25,7 +25,7 @@ def test_signed_pre_ingress_arriving_in_final_hook_preempts_life_provider(core, 
     core.ingest(inbound(core, capture), "preempt-source-input")
     core.store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL")
     policy = owner_authority.current(core.store, core.settings, core.clock).policy
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+    conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                   (capture.event_id,))["conversation_id"]
     shadow = LifeShadowApproval(
         scope="owner_private_life_shadow_v1", authorization_sha256="d" * 64,
@@ -66,15 +66,18 @@ def test_signed_pre_ingress_arriving_in_final_hook_preempts_life_provider(core, 
             assert await core.run_once(job_id=job_id)
 
     asyncio.run(execute())
-    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                           (owner_input.INPUT + arriving.event_id,)), core.store.rows(
-        "SELECT state,last_error_code FROM jobs WHERE job_id=?", (job_id,),
+        'SELECT state,last_error_code FROM jobs WHERE job_id=%s', (job_id,),
     )
-    assert not core.store.one("SELECT 1 FROM events WHERE event_id=?", (arriving.event_id,))
+    assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s', (arriving.event_id,))
     assert calls == [], "An approved owner capture must preempt before external background I/O"
     assert core.store.one(
-        "SELECT state,input_tokens,output_tokens,billed_micro_usd,is_estimate "
-        "FROM model_usage WHERE job_id=?", (job_id,),
+        (
+            'SELECT '
+            'state,input_tokens,output_tokens,billed_micro_usd,is_estimate '
+            'FROM model_usage WHERE job_id=%s'
+        ), (job_id,),
     ) == {"state": "SETTLED", "input_tokens": 0, "output_tokens": 0,
           "billed_micro_usd": 0, "is_estimate": 0}
     assert core.store.rows("SELECT * FROM outbox") == []

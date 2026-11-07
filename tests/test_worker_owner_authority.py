@@ -10,10 +10,10 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import after
 from tests.conftest import run
+from tests.support.autonomous_selector import drain
 from tests.support.owner_authority import activate
-from tests.test_autonomous_selector import drain
-from tests.test_owner_authority import prepare
-from tests.test_owner_input import captured, inbound
+from tests.support.owner_authority_setup import prepare
+from tests.support.owner_input import captured, inbound
 
 
 def test_selector_stays_silent_without_owner_grant_in_live_mode(core):
@@ -46,7 +46,7 @@ def test_signed_pre_ingress_and_pending_chat_preempt_every_native_turn(core, tmp
     capture, _ = captured(core, tmp_path)
     assert foreground_clear(core)
     owner_input.approve(core.store, core.settings, core.clock, capture)
-    assert not core.store.one("SELECT 1 FROM events WHERE event_id=?", (capture.event_id,))
+    assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s', (capture.event_id,))
     assert not foreground_clear(core)
     assert run(native_selector(core, "owner-worker").step()).blocked
     core.ingest(inbound(core, capture), "owner-selector-ingress")

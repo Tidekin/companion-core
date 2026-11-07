@@ -7,12 +7,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from companion import topic_selection as ts
-from companion.store import after
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import ReadFailure
 from source_reader.protocol import decode_lease
-from tests.test_exploration import configure
-from tests.test_watch_ledger import observe
+from tests.support.exploration import configure
+from tests.support.topic_selection import judged
 
 
 class Rng:
@@ -21,17 +20,6 @@ class Rng:
 
     def random(self):
         return self.values.pop(0)
-
-
-def judged(core, number, tags, rating, *, days_ago=0, url=None):
-    event_id = observe(core, number, url=url)
-    at = after(core.clock(), -days_ago * 86400)
-    core.store.execute(
-        "INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_ref,depth,state,rating,"
-        "take,topic_tags_json,created_at,updated_at) VALUES(?,?,'bilibili',?,'text','JUDGED',"
-        "?,'看过',?,?,?)", (f"watch_{number}", event_id, url or event_id, rating,
-                           json.dumps(tags, ensure_ascii=False), at, at))
-    return event_id
 
 
 def test_clean_keeps_short_plain_terms_only():
@@ -174,5 +162,8 @@ def test_watched_items_are_not_proposed_as_new_reads(core):
     core.exploration.complete("bili", request, ReadResult(
         lease_token=token, status="SUCCESS", used_bytes=100,
         items=[ReadItem(title="已经看过的视频", url=url)]))
-    assert core.store.one("SELECT 1 FROM goals WHERE json_extract(scope_json,'$.url')=?",
+    assert core.store.one((
+        'SELECT 1 FROM goals WHERE (CASE WHEN scope_json IS JSON THEN '
+        "scope_json::json #>> '{url}' END)=%s"
+    ),
                           (url,)) is None

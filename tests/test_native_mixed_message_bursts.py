@@ -13,13 +13,13 @@ from companion_onebot_bridge import pending_media
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.sdk_reader_fixture import answer, call
-from tests.test_live_card_content import TOKEN, URL, result
-from tests.test_live_card_content import options as card_options
-from tests.test_live_image_input import options as image_options
-from tests.test_live_image_input import png
-from tests.test_native_bili_video import sdk_step
-from tests.test_onebot_images import image_segment
-from tests.test_qq_rich_input import card
+from tests.support.live_card_content import TOKEN, URL, result
+from tests.support.live_card_content import options as card_options
+from tests.support.live_image_input import options as image_options
+from tests.support.live_image_input import png
+from tests.support.native_bili_video import sdk_step
+from tests.support.onebot_images import image_segment
+from tests.support.qq_rich_input import card
 
 
 @pytest.mark.parametrize("layout", ["same_message", "card_image_text", "image_card_text"])
@@ -82,7 +82,7 @@ def test_card_image_and_question_keep_all_sources_through_independent_workers(
             core.clock.now = max(core.clock.now, datetime.now(UTC))
             assert handshakes == ["Bearer " + active.config.onebot_token]
             latest = core.store.one(
-                "SELECT * FROM jobs WHERE kind='chat' ORDER BY rowid DESC LIMIT 1")
+                "SELECT * FROM jobs WHERE kind='chat' ORDER BY record_sequence DESC LIMIT 1")
             assert core.claim_job("wait-for-mixed-original", job_id=latest["job_id"]) is None
             pump = pending_media.MediaPump(active.runtime, active.client, protocol=active.onebot,
                 image_transport=httpx.MockTransport(download), image_resolver=resolve)

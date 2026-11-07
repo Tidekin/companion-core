@@ -7,7 +7,7 @@ from companion import meme_service
 from companion.config import Settings
 from companion.contracts import CoreError
 from tests.conftest import run
-from tests.test_meme_core_runtime import runtime_case as runtime_case
+from tests.support.meme_core_runtime import runtime_case as runtime_case
 
 
 @pytest.mark.parametrize("runtime_case", ["two_sources"], indirect=True)
@@ -20,7 +20,7 @@ def test_retired_bytes_are_excluded_for_every_source_without_erasing_originals(r
     c.core.settings.meme_excluded_sha256 = [c.item["asset_sha256"]]
     for asset in before:
         caption = c.core.store.one(
-            "SELECT caption_job_id FROM meme_asset_sources WHERE asset_id=?",
+            'SELECT caption_job_id FROM meme_asset_sources WHERE asset_id=%s',
             (asset["asset_id"],),
         )
         with pytest.raises(CoreError, match="MEME_ASSET_UNAVAILABLE"):

@@ -12,8 +12,8 @@ from companion.reply_segments import SegmentedReplyConfig
 from companion.voice_jobs import VoiceJobs
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
-from tests.test_voice_flow import finish_node, prepare
-from tests.test_voice_jobs import voice_config
+from tests.support.voice_flow import finish_node, prepare
+from tests.support.voice_jobs import voice_config
 from tests.voice_owner_fixtures import native_voice
 
 PARTS = ["今天想和你聊聊刚才那件有趣的事情。", "你说的时候我也忍不住跟着笑了起来。"]
@@ -153,7 +153,7 @@ def test_frozen_delivery_rejects_replacing_the_model_choice(core, tmp_path, choi
             del response["metadata"]["core_reply_format"]
         else:
             response.setdefault("metadata", {})["core_reply_format"] = "voice"
-        core.store.execute("UPDATE agent_conversations SET conversation_json=? WHERE job_id=?",
+        core.store.execute('UPDATE agent_conversations SET conversation_json=%s WHERE job_id=%s',
                            (json.dumps(conversation), saved["job_id"]))
         row = core.store.one("SELECT message_id FROM outbox ORDER BY segment_index LIMIT 1")
         with pytest.raises(CoreError, match="OWNER_DELIVERY_SOURCE_CHANGED"):

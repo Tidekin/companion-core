@@ -9,7 +9,7 @@ from companion.contracts import InboundEvent
 from companion.input_recall import marker_key
 from companion.store import encode
 from tests.support.onebot_events import normalized, raw_event
-from tests.test_quote_attribution import QUOTE, delivered, quoted_job
+from tests.support.quote_attribution import QUOTE, delivered, quoted_job
 
 OWNER_TEXT = "我上周说的那个私事其实是这样的"
 
@@ -17,8 +17,8 @@ OWNER_TEXT = "我上周说的那个私事其实是这样的"
 def owner_message(core, number=7, text=OWNER_TEXT):
     event = InboundEvent.model_validate(normalized(raw_event(number, text=text)))
     saved = core.ingest(event, event.event_id)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (saved["job_id"],))
-    return core.store.one("SELECT * FROM events WHERE event_id=?", (event.event_id,))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (saved["job_id"],))
+    return core.store.one('SELECT * FROM events WHERE event_id=%s', (event.event_id,))
 
 
 def erase(core, event_id):
@@ -27,7 +27,7 @@ def erase(core, event_id):
 
 
 def recall(core, source_event_id):
-    core.store.execute("INSERT INTO runtime_meta(key,value) VALUES(?,?)",
+    core.store.execute('INSERT INTO runtime_meta(key,value) VALUES(%s,%s)',
                        (marker_key(source_event_id), encode({"state": "RECALLED"})))
 
 
@@ -47,13 +47,13 @@ def test_quoted_owner_message_is_withdrawn(core, fault):
     assert OWNER_TEXT not in text
     assert "原文已被主人删除或撤回" in text
     # The signed capture stays as the Bridge recorded it, so replay still verifies.
-    stored = core.store.one("SELECT body_json FROM events WHERE event_id=?", (job["event_id"],))
+    stored = core.store.one('SELECT body_json FROM events WHERE event_id=%s', (job["event_id"],))
     assert OWNER_TEXT in stored["body_json"]
 
 
 def test_quote_of_an_erased_own_reply_is_withdrawn_and_not_attributed(core):
     message_id = delivered(core)
-    origin = core.store.one("SELECT origin_event_id FROM outbox WHERE message_id=?",
+    origin = core.store.one('SELECT origin_event_id FROM outbox WHERE message_id=%s',
                             (message_id,))["origin_event_id"]
     erase(core, origin)
     job, _ = quoted_job(core)
@@ -74,8 +74,13 @@ def test_a_later_erasure_also_withdraws_the_quote_from_history(core):
     row = owner_message(core)
     job, _ = quoted_job(core, quote=OWNER_TEXT, reference="7")
     source = core.store.one(
-        "SELECT event_id,body_json,json_extract(body_json,'$.text') AS user_text,"
-        "'' AS reply_text FROM events WHERE event_id=?", (job["event_id"],))
+        (
+            (
+                'SELECT event_id,body_json,(CASE WHEN body_json IS JSON THEN '
+                "body_json::json #>> '{text}' END) AS user_text,'' AS "
+                'reply_text FROM events WHERE event_id=%s'
+            )
+        ), (job["event_id"],))
     assert OWNER_TEXT in json.dumps(dialogue_history.turn_messages(source, core.store),
                                     ensure_ascii=False)
     erase(core, row["event_id"])

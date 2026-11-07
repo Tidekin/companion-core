@@ -56,7 +56,7 @@ def test_supersession_in_last_http_hook_never_calls_old_provider_or_freezes_budg
                     assert await worker.run_once("latest-input")
             assert len(calls) == 1, core.store.rows(
                 "SELECT kind,state,last_error_code FROM jobs")
-            assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE event_id=%s',
                                   (first["event_id"],))["state"] == "CANCELLED"
             assert core.store.one("SELECT COUNT(*) AS n FROM model_admissions")["n"] == 2
             assert all(row["state"] == "SETTLED" for row in core.store.rows(

@@ -8,7 +8,7 @@ import pytest
 from companion.video_evidence import prepare_sampling_input, validate_media_result
 from companion.video_media_contract import AssetManifest, MediaAsset, MediaLimits
 from companion.video_sampling import VideoSamplingConfig, plan_segments
-from tests.test_video_media_contract import clips, preview, target
+from tests.support.video_media_contract import clips, preview, target
 
 
 def reading(value):

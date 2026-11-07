@@ -9,7 +9,6 @@ from cryptography.fernet import Fernet
 
 from companion.autonomous_selector import native_selector
 from companion.backup import backup, restore
-from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError, LeaseRequest
 from companion.core import Core
 from companion.exploration import ReadItem, ReadResult, content_target
@@ -22,43 +21,7 @@ from source_reader.heybox import HeyboxReader, SourceAPI
 from source_reader.network import PublicHTTP, ReadBudget, ReadFailure
 from source_reader.worker import read_result, tick
 from tests.conftest import FakeModel, ingest, run
-
-URL = "https://www.bilibili.com/video/BV1xx411c7mD"
-
-
-def configure(core, social=False):
-    cfg = core.settings
-    cfg.observation_enabled = True
-    cfg.observation_adapters = {
-        "bili": ObservationAdapterConfig(source="bilibili", token="bili-reader-token-" * 3),
-        "heybox": ObservationAdapterConfig(source="heybox", token="heybox-reader-token-" * 3),
-    }
-    cfg.goals_enabled = cfg.exploration_enabled = True
-    cfg.social_enabled = social
-    cfg.exploration_daily_requests = 8
-    cfg.exploration_monthly_requests = 30
-    cfg.exploration_daily_bytes = 8 * cfg.exploration_max_response_bytes
-
-
-def discover(core, key="wake-1", url=URL, title="独立游戏新消息"):
-    with core.store.transaction():
-        request = core.exploration.create("bili", "discover", key)
-    lease = core.exploration.lease("bili")
-    result = ReadResult(
-        lease_token=lease["lease_token"],
-        status="SUCCESS",
-        used_bytes=1200,
-        items=[ReadItem(title=title, url=url)],
-    )
-    return core.exploration.complete("bili", request, result), result
-
-
-def read_goal(core):
-    goal = core.store.one("SELECT * FROM goals ORDER BY rowid DESC LIMIT 1")
-    core.goals.accept(goal["goal_id"])
-    assert core.exploration.schedule_goal()
-    item = core.exploration.lease("bili")
-    return goal, item
+from tests.support.exploration import URL, configure, discover, read_goal
 
 
 def test_discover_read_provenance_and_idempotency(core):
@@ -83,12 +46,12 @@ def test_discover_read_provenance_and_idempotency(core):
     )
     assert core.goals.get(goal["goal_id"])["state"] == "DONE"
     observation = core.store.one(
-        "SELECT * FROM observations WHERE event_id=?", (result["event_ids"][0],)
+        'SELECT * FROM observations WHERE event_id=%s', (result["event_ids"][0],)
     )
     assert observation["result_status"] == "FETCHED"
     assert (
         core.store.one(
-            "SELECT * FROM event_dependencies WHERE event_id=?", (result["event_ids"][0],)
+            'SELECT * FROM event_dependencies WHERE event_id=%s', (result["event_ids"][0],)
         )["source_event_id"]
         == source["event_id"]
     )
@@ -223,7 +186,7 @@ def test_erase_during_read_rejects_old_output_and_restore_clears_sources(core, t
 
 def test_sharing_uses_same_outbox_and_common_proactive_limit(core, monkeypatch):
     from companion.social import proactive_counts
-    from tests.test_autonomous_selector import drain
+    from tests.support.autonomous_selector import drain
 
     configure(core, social=True)
     core.settings.proactive_enabled = True
@@ -252,7 +215,10 @@ def test_sharing_uses_same_outbox_and_common_proactive_limit(core, monkeypatch):
     outbox = core.store.one("SELECT * FROM outbox WHERE action_type='qq.private.proactive'")
     assert json.loads(outbox["content_json"])["text"] == core.model.activity
     assert [json.loads(row["content_json"])["text"] for row in core.store.rows(
-        "SELECT content_json FROM outbox WHERE action_type='qq.private.proactive' ORDER BY rowid"
+
+            'SELECT content_json FROM outbox WHERE '
+            "action_type='qq.private.proactive' ORDER BY record_sequence"
+
     )] == [core.model.activity, URL]
     assert "看完" not in outbox["content_json"]
     core.settings.quiet_start, core.settings.quiet_end = 0, 23
@@ -281,20 +247,20 @@ def test_similar_content_different_urls_is_suppressed(core, monkeypatch):
                 ],
             ),
         )
-    rows = core.store.rows("SELECT * FROM social_candidates ORDER BY rowid")
+    rows = core.store.rows('SELECT * FROM social_candidates ORDER BY record_sequence')
     assert rows[0]["state"] == "CANDIDATE"
     assert rows[1]["reason_code"] == "SIMILAR_CONTENT"
 
 
 def public_fixture(*responses):
-    from tests.test_heybox_reader import mock_pool
+    from tests.support.heybox_reader import mock_pool
 
     pool, backend = mock_pool(*responses)
     return PublicHTTP(pool), backend
 
 
 def test_public_reader_real_http_contract_only_get_and_no_core_auth():
-    from tests.test_source_reader import META, response
+    from tests.support.source_reader import META, response
 
     async def scenario():
         public, backend = public_fixture(response(META))
@@ -312,7 +278,7 @@ def test_public_reader_real_http_contract_only_get_and_no_core_auth():
 
 
 def test_public_html_discovers_titles_but_spa_shell_is_not_read_body():
-    from tests.test_source_reader import response
+    from tests.support.source_reader import response
 
     html = b'<title>title</title><a href="/app/bbs/link/123">article</a>'
 
@@ -332,7 +298,7 @@ def test_public_html_discovers_titles_but_spa_shell_is_not_read_body():
 
 
 def test_reader_size_and_redirects_fail_without_followup():
-    from tests.test_source_reader import response
+    from tests.support.source_reader import response
 
     async def scenario():
         for row in (response(status=302, headers={"Location": "https://127.0.0.1/"}),
@@ -348,7 +314,7 @@ def test_reader_size_and_redirects_fail_without_followup():
 
 
 def test_bridge_result_report_failure_does_not_repeat_public_io():
-    from tests.test_source_reader import META, response
+    from tests.support.source_reader import META, response
 
     reports = []
 
@@ -373,8 +339,8 @@ def test_bridge_result_report_failure_does_not_repeat_public_io():
 
 
 def test_optional_heybox_http_contract_keeps_get_scope_and_business_status():
-    from tests.test_heybox_reader import ITEM, POST, SOURCE_TOKEN, URL, mock_pool
-    from tests.test_source_reader import response
+    from tests.support.heybox_reader import ITEM, POST, SOURCE_TOKEN, URL, mock_pool
+    from tests.support.source_reader import response
 
     async def scenario():
         pool, backend = mock_pool(response({"status": "ok", "result": {"links": [{
@@ -500,7 +466,7 @@ def test_unknown_zero_usage_cannot_release_reserved_traffic(core):
 
 
 def test_html_void_elements_do_not_truncate_read_content():
-    from tests.test_source_reader import response
+    from tests.support.source_reader import response
 
     html = b"<title>post</title><article><p>first</p><img/><p>second<br/>last</p></article>"
 

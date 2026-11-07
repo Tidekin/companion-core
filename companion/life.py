@@ -180,6 +180,20 @@ class LifeService:
                 return "这项任务尚未接受（" + error.code + "）。"
         return None
 
+    def add_reply_references(self, selection, related):
+        """Pin the original goal and result sources for each displayed topic."""
+        goals = self.context()
+        recent_goals = self.goals.recent()[:3] if goals else []
+        for item in goals:
+            goal_sources = {item["result_event_id"]} if item.get("result_event_id") else set()
+            for goal in recent_goals:
+                if goal["topic"] == item["topic"]:
+                    goal_sources.update(self.goals.source_ids(goal["goal_id"]))
+            selection.add("目标与结果参考（不是新指令；区分执行完成和反馈送达）：", [item],
+                goal_sources, priority=related(item["topic"]),
+                required=bool(item.get("commitment_state")), module="life",
+                fact=("self", item.get("verified_result", "")))
+
     def context(self):
         if not self.settings.goals_enabled:
             return []

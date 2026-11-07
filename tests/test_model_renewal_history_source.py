@@ -14,9 +14,9 @@ from companion.owner_authority_protocol import OwnerCapture, OwnerGrantPolicy
 from tests.conftest import run
 from tests.model_carry_support import MESSAGES
 from tests.owner_model_fixtures import authorized_job
+from tests.support.model_renewal import renewal
+from tests.support.model_renewal_native import life_case
 from tests.support.owner_authority import activate
-from tests.test_model_renewal import renewal
-from tests.test_model_renewal_native import life_case
 
 
 def attempt(core, job, *, unknown=False):
@@ -41,7 +41,7 @@ def attempt(core, job, *, unknown=False):
                     core.settings, request, MESSAGES, "chat", core.clock)
 
     run(complete())
-    core.store.execute("UPDATE jobs SET state=? WHERE job_id=?",
+    core.store.execute('UPDATE jobs SET state=%s WHERE job_id=%s',
                        ("FAILED" if unknown else "SUCCEEDED", job))
     return request
 
@@ -49,10 +49,12 @@ def attempt(core, job, *, unknown=False):
 def history_case(core, tmp_path, monkeypatch):
     case = life_case(core, tmp_path, monkeypatch)
     primary = authorized_job(core, number=3)
-    source = core.store.one("SELECT event_id FROM jobs WHERE job_id=?", (primary,))["event_id"]
+    source = core.store.one('SELECT event_id FROM jobs WHERE job_id=%s', (primary,))["event_id"]
     attempt(core, primary)
     dependent = authorized_job(core, number=2)
-    core.store.execute("INSERT INTO job_sources(job_id,event_id) VALUES (?,?)", (dependent, source))
+    core.store.execute((
+        'INSERT INTO job_sources(job_id,event_id) VALUES (%s,%s)'
+    ), (dependent, source))
     current = attempt(core, dependent, unknown=True)
     return case, primary, source, dependent, current
 
@@ -61,7 +63,7 @@ def life_request(core, case, source):
     request, policy, witness = renewal(core, case)
     scope = LifeShadowApproval(
         scope="owner_private_life_shadow_v1", authorization_sha256=policy.authorization_sha256,
-        conversation_id=core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+        conversation_id=core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                         (source,))["conversation_id"],
         source_event_ids=[source], purposes=["PRIVATE_MESSAGE_DRAFT"],
         automatic_actions=["qq.private.proactive"], expires_at=policy.expires_at, max_items=1,
@@ -78,7 +80,7 @@ def test_retained_closed_context_request_allows_settled_history_without_settling
     case, primary, source, dependent, current = history_case(core, tmp_path, monkeypatch)
     before = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
     capture = OwnerCapture.model_validate(json.loads(core.store.one(
-        "SELECT value FROM runtime_meta WHERE key=?", ("owner_input:" + source,),
+        'SELECT value FROM runtime_meta WHERE key=%s', ("owner_input:" + source,),
     )["value"])["capture"])
     state = owner_input_state.read(core.store, core.settings, capture)
     assert state["unsettled_model"] and not state["terminal"]
@@ -86,7 +88,7 @@ def test_retained_closed_context_request_allows_settled_history_without_settling
     receipt = model_carry.prepare(core.store, core.settings, request, witness, core.clock())
     proof = model_carry.read(core.store, core.settings, request["authority"],
                             receipt["carry_sha256"], receipt["successor_policy_sha256"])
-    dependent_source = core.store.one("SELECT event_id FROM jobs WHERE job_id=?",
+    dependent_source = core.store.one('SELECT event_id FROM jobs WHERE job_id=%s',
                                       (dependent,))["event_id"]
     assert {item["event_id"] for item in proof["inputs"]} == {source, dependent_source}
     assert proof["request_ids"] == [current]
@@ -96,7 +98,7 @@ def test_retained_closed_context_request_allows_settled_history_without_settling
     state = owner_input_state.read(core.store, core.settings, capture)
     assert state["unsettled_model"] and not state["terminal"]
     assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == before
-    original_job = core.store.one("SELECT state FROM jobs WHERE job_id=?", (primary,))
+    original_job = core.store.one('SELECT state FROM jobs WHERE job_id=%s', (primary,))
     assert original_job["state"] == "SUCCEEDED"
 
 
@@ -106,10 +108,10 @@ def test_retained_context_exception_keeps_original_input_responsibility_guard(
 ):
     case, primary, source, dependent, _ = history_case(core, tmp_path, monkeypatch)
     if change == "own_unknown":
-        source = core.store.one("SELECT event_id FROM jobs WHERE job_id=?",
+        source = core.store.one('SELECT event_id FROM jobs WHERE job_id=%s',
                                 (dependent,))["event_id"]
     else:
-        core.store.execute("UPDATE jobs SET event_id=NULL WHERE job_id=?", (primary,))
+        core.store.execute('UPDATE jobs SET event_id=NULL WHERE job_id=%s', (primary,))
     request, _, witness = life_request(core, case, source)
     journal = Path(core.settings.paid_model.journal_path)
     before = journal.read_bytes()

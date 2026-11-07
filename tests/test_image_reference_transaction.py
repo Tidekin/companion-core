@@ -7,7 +7,7 @@ from companion import retrieval_work
 from companion.contracts import CoreError
 from companion.store import encode
 from tests.conftest import ingest
-from tests.test_memory_references import TEXT, prepared
+from tests.support.memory_references import TEXT, prepared
 
 
 def test_image_memory_proof_revalidates_inside_checkpoint_transaction(core):
@@ -27,7 +27,7 @@ def test_new_dispute_in_same_transaction_invalidates_image_proof(core):
     core.memory.add(item, core.clock())
     proof = core.memory_context.pin(core.clock(), rows=core.memory.search(TEXT, now=core.clock()))
     delivered = core.store.one("SELECT * FROM outbox WHERE origin_event_id='evt_test_1'")
-    core.store.execute("UPDATE outbox SET state='SENT' WHERE message_id=?",
+    core.store.execute("UPDATE outbox SET state='SENT' WHERE message_id=%s",
                        (delivered["message_id"],))
     ingest(core, 2, "图片里的日期不是这个意思。")
     with core.store.transaction():
@@ -46,7 +46,7 @@ def test_review_adjacency_work_does_not_grow_with_unrelated_references(core):
     for start, stop in ((0, 100), (100, 1000)):
         with core.store.transaction():
             for number in range(start, stop):
-                core.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+                core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                     (refs.INPUT + str(number), encode({"kind": "image_review",
                      "receipt": {"target_event_id": f"unrelated-{number}"}})))
         ticks = []
@@ -62,7 +62,7 @@ def test_review_adjacency_work_does_not_grow_with_unrelated_references(core):
 
 @pytest.mark.parametrize("limit", ["attachment_rows", "text_bytes"])
 def test_review_limits_never_return_partial_validity(core, monkeypatch, limit):
-    core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", (refs.INPUT + "synthetic-review",
+    core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)', (refs.INPUT + "synthetic-review",
         encode({"kind": "image_review", "receipt": {"target_event_id": "target"}})))
     monkeypatch.setitem(retrieval_work.LIMITS, limit, 0)
     with core.store.transaction(), pytest.raises(retrieval_work.WorkLimit):

@@ -9,7 +9,7 @@ import pytest
 from companion import reply_revision
 from companion.contracts import CoreError
 from tests.conftest import ingest, run
-from tests.test_memory_commands import fact
+from tests.support.memory_commands import fact
 
 
 @pytest.mark.parametrize(
@@ -59,7 +59,7 @@ def test_async_recall_yields_and_rejects_changes_before_vector_commit(core, monk
                 with core.store.transaction():
                     core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
             elif change == "source_edit":
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_1'",
+                core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_1'",
                                    ('{"text":"来源已变更"}',))
             elif change == "expiry":
                 core.clock.advance(core.settings.raw_event_retention_days * 86400 + 1)

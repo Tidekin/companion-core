@@ -5,7 +5,7 @@ import json
 import re
 from contextlib import nullcontext
 
-from companion import owner_authority
+from companion import job_queue, owner_authority
 from companion.contracts import CoreError
 from companion.observation import expired_sources
 from companion.paid_budget import sha
@@ -265,18 +265,7 @@ def schedule(store, settings, kind, ref, conversation_id, now):
                 (event_id, source_id),
             )
         job_id = uid("job")
-        store.insert(
-            "jobs",
-            job_id=job_id,
-            event_id=event_id,
-            kind="activity",
-            state="QUEUED",
-            idempotency_key=key,
-            max_attempts=1,
-            context_tracked=1,
-            created_at=now,
-            updated_at=now,
-        )
+        job_queue.create(store, job_id, event_id, "activity", key, now)
         if owner_authority.required(store, settings):
             owner_authority.bind_job(
                 store,
@@ -380,6 +369,26 @@ def validate(store, settings, job, now):
     if sha(data) != value["material_sha256"] or dependencies != set(data["source_events"]):
         raise CoreError("NOTICE_SOURCE_CHANGED", 409)
     return data
+
+
+def admit_activity(store, settings, job_id, now):
+    from companion.social import proactive_allowed
+
+    job = store.one((
+        (
+            'SELECT j.job_id, j.event_id, j.kind, j.state, j.idempotency_key,'
+            ' j.attempts, j.max_attempts, j.lease_owner, j.lease_until, '
+            'j.next_attempt_at, j.last_error_code, j.created_at, '
+            'j.updated_at, j.lease_token, j.context_tracked, '
+            'j.authority_json,e.body_json FROM jobs j JOIN events e '
+            'USING(event_id) WHERE job_id=%s'
+        )
+    ), (job_id,))
+    if reference(job) is not None:
+        validate(store, settings, job, now)
+    if (not shadow(job) and not required(store, job_id)
+        and not proactive_allowed(store, settings, now)):
+        raise CoreError("AUTONOMY_PAUSED", 409)
 
 
 def check_request(store, settings, request_id, now):
@@ -633,19 +642,9 @@ def retry_required_wording(store, settings, job, code, now):
         return False
     state = "RETRY_WAIT" if current["attempts"] == 1 else "FAILED"
     # Keep the original attempt count and charges; next claim/admission owns a fresh request.
-    store.execute(
-        "UPDATE jobs SET state = %s, max_attempts = 2, last_error_code = %s, next_attempt_at = %s, "
-        "lease_token = NULL, updated_at = %s WHERE job_id = %s AND state = 'RUNNING' AND "
-        "lease_token = %s",
-        (
-            state,
-            code,
-            after(now, 5 * 2 ** (current["attempts"] - 1)),
-            now,
-            job["job_id"],
-            job["lease_token"],
-        ),
-    )
+    job_queue.retry_outcome(store, job["job_id"], state, now,
+                                  after(now, 5 * 2 ** (current["attempts"] - 1)), reason=code,
+                                  token=job["lease_token"], max_attempts=2)
     store.audit("job.failed", job["job_id"], job["trace_id"], now, code=code, state=state)
     return True
 

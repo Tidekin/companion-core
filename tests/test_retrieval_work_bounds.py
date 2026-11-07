@@ -10,13 +10,9 @@ from companion import memory_index_work, memory_references, retrieval, retrieval
 from companion.contracts import CoreError
 from companion.memory_context import MemorySources
 from tests.conftest import ingest, run
-from tests.test_m1 import remember
-from tests.test_retrieval_query_reuse import Encoder
-
-
-def assert_bounded(receipt):
-    assert all(0 <= value <= receipt["limits"][name]
-               for name, value in receipt["counts"].items())
+from tests.support.confirmed_memory import remember
+from tests.support.retrieval_query_reuse import Encoder
+from tests.support.retrieval_work_bounds import assert_bounded
 
 
 def test_old_exact_sources_and_work_survive_tenfold_growth(core, monkeypatch, record_property):
@@ -96,7 +92,7 @@ def test_too_many_evidence_roots_are_partial_coverage_and_never_a_truncated_fact
     assert len(MemorySources(core.memory, core.clock()).evidence(target)) == 65
     with pytest.raises(retrieval_work.WorkLimit):
         core.memory_context.pin(core.clock(), rows=[{
-            **core.store.one("SELECT * FROM memories WHERE memory_id=?", (target,)),
+            **core.store.one('SELECT * FROM memories WHERE memory_id=%s', (target,)),
             "evidence_ids": [f"evt_test_{number}" for number in range(1, 66)],
         }])
 
@@ -106,7 +102,7 @@ def test_cached_semantic_nominee_remains_subject_to_live_evidence(core, monkeypa
     model = Encoder((1., 0.))
     monkeypatch.setattr(core.memory.index, "warmup", lambda: model)
     core.memory.index.scores("初始化", [core.store.one(
-        "SELECT * FROM memories WHERE memory_id=?", (old,))])
+        'SELECT * FROM memories WHERE memory_id=%s', (old,))])
     for number in range(2, 110):
         remember(core, number, f"合成资料{number}在档案室。", confirmed=True)
     # No lexical overlap; the old cached row lies beyond the recency nominee head.
@@ -191,7 +187,7 @@ def test_transcript_nomination_is_indexed_bounded_and_preserves_excerpt(core, mo
 
 
 def test_history_and_episode_limits_are_partial_without_snapshot_write_retry(core, monkeypatch):
-    from tests.test_next_memory_context import episode
+    from tests.support.next_memory_context import episode
 
     target = remember(core, 1, "相机放在湖蓝色硬壳箱。", confirmed=True)
     episode(core, 1)

@@ -1,48 +1,18 @@
 """Native PostgreSQL baseline: accounting types, evidence and concurrent constraints."""
 
 import hashlib
-import json
-import os
-import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
-from pathlib import Path
 from threading import Barrier
 from uuid import uuid4
 
 import psycopg
 import pytest
-from psycopg import sql
-from psycopg.conninfo import make_conninfo
-from pydantic import SecretStr
 
 from companion.legacy_import import import_sqlite_backup
 from companion.legacy_import import migrate_sqlite as migrate_legacy
-from companion.postgres import Database, migrate
-
-
-@contextmanager
-def isolated_native():
-    configuration = os.environ.get("COMPANION_POSTGRES_TEST_CONFIG")
-    if not configuration:
-        if os.environ.get("GITHUB_ACTIONS") == "true":
-            pytest.fail("native PostgreSQL test service is mandatory in CI")
-        pytest.skip("isolated PostgreSQL integration service is not configured")
-    value = json.loads(Path(configuration).read_text("utf8"))
-    connection = {key: value[key] for key in ["host", "port", "dbname", "user", "password"]}
-    namespace = "pytest_" + uuid4().hex
-    with psycopg.connect(**connection, autocommit=True) as admin:
-        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(namespace)))
-    info = SecretStr(make_conninfo(**connection, options=f"-c search_path={namespace},pg_catalog"))
-    try:
-        migrate(info)
-        with Database(info, max_connections=4) as database:
-            yield database, info
-    finally:
-        assert re.fullmatch(r"pytest_[a-f0-9]{32}", namespace)
-        with psycopg.connect(**connection, autocommit=True) as admin:
-            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(namespace)))
+from companion.postgres import migrate
+from tests.postgres_fixture import isolated_native
 
 
 @pytest.fixture(scope="module")

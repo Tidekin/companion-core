@@ -11,17 +11,17 @@ from companion.console_cognition import tool_scope
 from companion.executive_protocol import ExecutorEndpoint, ToolArguments, ToolRequest
 from companion.source_grants import grant_tombstone
 from tests.conftest import run
-from tests.test_console_browser import console_page, navigate, submit_dialog
-from tests.test_executive import FakeExecutor
-from tests.test_executive import configured as configure_executive
-from tests.test_executive import proposal as tool_proposal
-from tests.test_growth_foundations import complete_read, view
-from tests.test_life_topics import bug, due
-from tests.test_life_topics import proposal as life_proposal
-from tests.test_m1 import remember
-from tests.test_next_life_growth import feedback_days, snapshot
-from tests.test_source_grants import accepted, derived_records
-from tests.test_source_grants import prepare as prepare_grant
+from tests.support.confirmed_memory import remember
+from tests.support.console_browser import console_page, navigate, submit_dialog
+from tests.support.executive import FakeExecutor
+from tests.support.executive import configured as configure_executive
+from tests.support.executive import proposal as tool_proposal
+from tests.support.growth_foundations import complete_read, view
+from tests.support.life_topics import bug, due
+from tests.support.life_topics import proposal as life_proposal
+from tests.support.next_life_growth import feedback_days, snapshot
+from tests.support.source_grants import accepted, derived_records
+from tests.support.source_grants import prepare as prepare_grant
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("COMPANION_TEST_BROWSER") != "1", reason="Explicit isolated browser run"
@@ -31,7 +31,7 @@ pytestmark = pytest.mark.skipif(
 def test_memory_candidates_show_in_pending_and_badges_refresh_after_confirmation(core, tmp_path):
     core.clock.now = datetime.now(UTC)
     memory_id = remember(core, 1, "主人喜欢天文主题", confirmed=False)
-    before = core.store.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+    before = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (memory_id,))
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
@@ -45,14 +45,14 @@ def test_memory_candidates_show_in_pending_and_badges_refresh_after_confirmation
             assert "候选记忆已自动保存，可在对话中参考" in await page.locator("#page").inner_text()
             pending = page.locator(".toolbar button[aria-pressed=true]").filter(has_text="待确认")
             assert await pending.locator(".count").inner_text() == "1"
-            unchanged = core.store.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+            unchanged = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (memory_id,))
             assert unchanged == before
             await card.get_by_role("button", name="确认", exact=True).click()
             await submit_dialog(page, "确认", f"/memories/{memory_id}/decision")
             await page.get_by_role("heading", name="没有待确认的记忆", exact=True).wait_for()
             await badge.wait_for(state="detached")
             assert await pending.locator(".count").count() == 0
-            assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (memory_id,))[
+            assert core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_id,))[
                 "status"] == "CONFIRMED"
             operations = core.store.one(
                 "SELECT COUNT(*) n FROM console_operations WHERE state='COMPLETE'")
@@ -65,7 +65,7 @@ def test_memory_candidates_show_in_pending_and_badges_refresh_after_confirmation
 def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
     from pathlib import Path
 
-    from tests.test_mood import feedback
+    from tests.support.mood import feedback
 
     core.clock.now = datetime.now(UTC)
     feedback(core)
@@ -123,7 +123,7 @@ def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
 def test_console_shows_saved_provider_reasoning_as_plain_text(core, tmp_path):
     from pathlib import Path
 
-    from tests.test_model_reasoning import reasoning_chat
+    from tests.support.model_reasoning import reasoning_chat
 
     core.clock.now = datetime.now(UTC)
     text = "<script>window.reasoningInjected=true</script>\n合成私人推理"
@@ -153,11 +153,11 @@ def test_console_shows_saved_provider_reasoning_as_plain_text(core, tmp_path):
 def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(core, tmp_path):
     from pathlib import Path
 
-    from tests.test_context_meter_inspector import recorded_attempts
+    from tests.support.context_meter_inspector import recorded_attempts
 
     core.clock.now = datetime.now(UTC)
     run(recorded_attempts(core, tmp_path, unknown=True))
-    attempts = core.store.rows("SELECT request_id,state FROM model_usage ORDER BY rowid")
+    attempts = core.store.rows('SELECT request_id,state FROM model_usage ORDER BY record_sequence')
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
@@ -183,9 +183,9 @@ def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(
 
 
 def test_console_shows_cache_three_states_from_the_backend_projection(core, tmp_path):
-    from tests.test_cache_usage_presence import ABSENT
-    from tests.test_cache_usage_presence import attempt as cache_attempt
-    from tests.test_paid_model_gate import approved_live
+    from tests.support.cache_usage_presence import ABSENT
+    from tests.support.cache_usage_presence import attempt as cache_attempt
+    from tests.support.paid_model import approved_live
 
     approved_live(core, tmp_path)
     core.clock.now = datetime.now(UTC)
@@ -216,7 +216,10 @@ def test_console_shows_cache_three_states_from_the_backend_projection(core, tmp_
 
 
 def assert_receipts(core, states):
-    receipts = core.store.rows("SELECT state,result_json FROM console_operations ORDER BY rowid")
+    receipts = core.store.rows(
+        'SELECT state,result_json FROM console_operations ORDER BY '
+        'record_sequence'
+    )
     assert all(item["state"] == "COMPLETE" for item in receipts)
     # These native actions intentionally return no business identifier to the UI.
     assert [json.loads(item["result_json"]) for item in receipts] == [
@@ -238,10 +241,10 @@ def test_console_source_grant_revoke_retains_history_then_forget_erases_it(core,
             path = f"/source-grants/{grant.grant_id}"
             await row.get_by_role("button", name="撤回", exact=True).click()
             await submit_dialog(page, "撤回授权", path)
-            saved = core.store.one("SELECT * FROM source_grants WHERE grant_id=?",
+            saved = core.store.one('SELECT * FROM source_grants WHERE grant_id=%s',
                                    (grant.grant_id,))
             assert saved["revoked_at"] and saved["forgotten_at"] is None
-            assert not core.store.one("SELECT redacted FROM events WHERE event_id=?",
+            assert not core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                       (event_id,))["redacted"]
             assert core.store.one("SELECT content FROM memories")["content"] == (
                 "Private derived memory")
@@ -251,13 +254,13 @@ def test_console_source_grant_revoke_retains_history_then_forget_erases_it(core,
 
             await row.get_by_role("button", name="遗忘", exact=True).click()
             await submit_dialog(page, "遗忘这个授权", path)
-            assert core.store.one("SELECT forgotten_at FROM source_grants WHERE grant_id=?",
+            assert core.store.one('SELECT forgotten_at FROM source_grants WHERE grant_id=%s',
                                   (grant.grant_id,))["forgotten_at"]
-            assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+            assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                   (event_id,))["redacted"]
             assert core.store.one("SELECT status,content FROM memories") == {
                 "status": "FORGOTTEN", "content": ""}
-            assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                   (grant_tombstone(grant.grant_id),))
             assert await row.get_by_text("已遗忘", exact=True).count() == 1
             assert await row.get_by_role("button").count() == 0
@@ -312,7 +315,10 @@ def test_console_affect_reset_clears_feedback_but_retains_preferences_and_intere
     learned = snapshot(core)["items"][0]
     assert learned["independent_days"] == 3 and learned["status"] == "EMERGING"
     interests = view(core)
-    events = core.store.rows("SELECT event_id,body_json,redacted FROM events ORDER BY rowid")
+    events = core.store.rows(
+        'SELECT event_id,body_json,redacted FROM events ORDER BY '
+        'record_sequence'
+    )
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
@@ -341,8 +347,8 @@ def test_console_affect_reset_clears_feedback_but_retains_preferences_and_intere
             assert await affect.locator("b").inner_text() == "默认"
             assert "还没有可以学习的反馈" in await expression.inner_text()
             assert core.store.rows(
-                "SELECT event_id,body_json,redacted FROM events ORDER BY rowid") == events
-            assert core.store.one("SELECT status FROM memories WHERE memory_id=?",
+                'SELECT event_id,body_json,redacted FROM events ORDER BY record_sequence') == events
+            assert core.store.one('SELECT status FROM memories WHERE memory_id=%s',
                                   (memory_id,))["status"] == "CONFIRMED"
             after = view(core)
             assert after["privacy_epoch"] == interests["privacy_epoch"] + 1
@@ -372,7 +378,7 @@ def test_console_tools_approve_exact_scope_then_revoke_and_reject_without_dispat
             await page.get_by_role("checkbox", name="我已经看过写入文件的具体内容").check()
             await submit_dialog(page, "批准执行", f"/tools/{approved['task_id']}/decision")
             assert executive.get(approved["task_id"])["state"] == "QUEUED"
-            approval = core.store.one("SELECT * FROM tool_approvals WHERE task_id=?",
+            approval = core.store.one('SELECT * FROM tool_approvals WHERE task_id=%s',
                                       (approved["task_id"],))
             assert approval["decision"] == "APPROVE"
             assert approval["scope_sha256"] == approved["scope_sha256"]
@@ -382,14 +388,14 @@ def test_console_tools_approve_exact_scope_then_revoke_and_reject_without_dispat
             await submit_dialog(page, "撤回任务", f"/tools/{approved['task_id']}/revoke")
             assert executive.get(approved["task_id"])["state"] == "CANCELLED"
             assert executive.get(approved["task_id"])["last_error_code"] == "OWNER_REVOKED"
-            assert core.store.one("SELECT revoked_at FROM tool_approvals WHERE task_id=?",
+            assert core.store.one('SELECT revoked_at FROM tool_approvals WHERE task_id=%s',
                                   (approved["task_id"],))["revoked_at"]
 
             reject_card = page.locator(".tool-card").filter(has_text="待拒绝的另一份合成正文")
             await reject_card.get_by_role("button", name="拒绝", exact=True).click()
             await submit_dialog(page, "拒绝", f"/tools/{rejected['task_id']}/decision")
             assert executive.get(rejected["task_id"])["state"] == "CANCELLED"
-            assert core.store.one("SELECT decision FROM tool_approvals WHERE task_id=?",
+            assert core.store.one('SELECT decision FROM tool_approvals WHERE task_id=%s',
                                   (rejected["task_id"],))["decision"] == "REJECT"
             assert_receipts(core, ["QUEUED", "CANCELLED", "CANCELLED"])
             assert executor.calls == core.model.calls == []
@@ -477,39 +483,36 @@ def model_chart_clock(core, request):
     return core.clock.now
 
 
-def test_today_tokens_page_past_empty_pages_and_never_report_zero_when_unread(
-    core, tmp_path, model_chart_clock,
-):
-    today = synthetic_call(1, model_chart_clock)
-    yesterday = synthetic_call(2, model_chart_clock - timedelta(days=2))
+def test_today_tokens_use_overview_without_cognition_requests(core, tmp_path, model_chart_clock):
+    def record(key, when):
+        core.store.insert("model_usage", usage_id=key, request_id=key, scenario="chat",
+                          provider="demo", model="demo", occurred_at=when, state="UNKNOWN")
 
-    def filtered_first_page(query):
-        # The first page is empty after source filtering but still has a cursor.
-        if "before" not in query:
-            return {"items": [], "next_cursor": "c1", "truncated": True}
-        return {"items": [today, yesterday], "next_cursor": None, "truncated": False}
-
-    def never_ending(query):
-        return {"items": [], "next_cursor": "c" + query.get("before", "0"), "truncated": True}
+    now = model_chart_clock
+    record("today", now.astimezone(UTC).isoformat())
+    record("yesterday", (now - timedelta(days=1)).astimezone(UTC).isoformat())
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
-            await page.clock.set_fixed_time(model_chart_clock)
-            card = page.locator(".sheet.tok")
-            await serve_model_pages(page, filtered_first_page)
+            requests = []
+            page.on("request", lambda request: requests.append(request.url))
             await page.get_by_role("button", name="刷新当前页面").click()
-            await card.filter(has_text="模型调用").locator(".tok-stat b").first.filter(
-                has_text="1").wait_for()
-            text = await card.inner_text()
-            assert "今天还没有模型调用" not in text and "不完整" not in text
-            # Drain callbacks before replacing the paginated response source.
-            await page.unroute_all(behavior="wait")
-            await serve_model_pages(page, never_ending)
+            card = page.locator(".sheet.tok")
+            await card.filter(has_text="1 次结果不明").wait_for()
+            assert await card.locator(".tok-stat b").first.inner_text() == "1"
+
+            async def partial_overview(route):
+                response = await route.fetch()
+                value = await response.json()
+                value["model"]["complete"] = False
+                await route.fulfill(response=response, json=value)
+
+            await page.route("**/v1/console/overview", partial_overview)
             await page.get_by_role("button", name="刷新当前页面").click()
             await card.filter(has_text="没有全部读到").wait_for()
-            text = await card.inner_text()
-            assert "今天还没有模型调用" not in text and "¥0" not in text and "$0" not in text
-            assert "未读完" in text
+            assert await card.locator(".tok-stat b").first.inner_text() == "≥ 1"
+            assert any("/console/overview" in url for url in requests)
+            assert all("/console/cognition" not in url for url in requests)
 
     run(scenario())
 

@@ -11,9 +11,9 @@ from companion_meme_sources.fetch import PublicFetcher
 from companion_onebot_bridge.meme_runtime import MemeRuntime, failure_diagnostic
 from companion_onebot_bridge.meme_semantic_http import SemanticHTTP
 from tests.conftest import run
+from tests.support.meme_runtime import RULE
 from tests.support.native_meme import NativeCase
-from tests.test_meme_runtime import RULE
-from tests.test_next_memes_discovery import resolver
+from tests.support.next_memes_discovery import resolver
 
 
 def test_fragmented_body_finishes_with_bounded_authorization_latency(monkeypatch):
@@ -109,7 +109,7 @@ def test_failure_diagnostics_never_export_exception_text(error, reason):
 
 
 def test_fragmented_acquisition_caption_retrieval_and_native_qq_image(core, tmp_path, monkeypatch):
-    from tests import test_meme_semantic_integration as integration
+    from tests.support import meme_semantic_integration as integration
 
     original = integration.public_transport
 
@@ -132,5 +132,5 @@ def test_fragmented_acquisition_caption_retrieval_and_native_qq_image(core, tmp_
         return httpx.MockTransport(handle)
 
     monkeypatch.setattr(integration, "public_transport", public_transport)
-    integration.test_signed_capture_caption_index_current_offer_and_original_image_delivery(
+    integration.check_signed_caption_and_delivery(
         core, tmp_path, handoff=False, deferred=False, delayed=False)

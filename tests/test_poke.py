@@ -23,26 +23,12 @@ from companion.store import Store, encode, migrate
 from companion.transport import enqueue_reply_parts
 from tests.poke_authority_fixture import environment as native_environment
 from tests.poke_authority_fixture import owner_turn, refresh, settle, signed
-
-
-def native_frame(now=1792382400, **changes):
-    return {"post_type": "notice", "notice_type": "notify", "sub_type": "poke",
-            "time": now, "self_id": 10002, "user_id": 10001, "sender_id": 10001,
-            "target_id": 10002, "action": "拍了拍", "suffix": "", **changes}
+from tests.support.poke import claim, native_frame, receive
 
 
 @pytest.fixture
 def environment(core, tmp_path):
     return native_environment(core, tmp_path)
-
-
-def receive(env, **changes):
-    return poke.receive(env.store, env.settings, env.clock, signed(env, **changes))
-
-
-def claim(env):
-    env.clock.advance(2)
-    return poke.claim_ready(env.store, env.settings, env.clock, "poke-worker")
 
 
 def test_claim_aggregates_day_range_and_keeps_midnight_boundary(environment, monkeypatch):
@@ -70,7 +56,9 @@ def test_claim_aggregates_day_range_and_keeps_midnight_boundary(environment, mon
     env.clock.advance(20)
     third = receive(env)
     assert claim(env) is None
-    assert env.store.one("SELECT last_error_code FROM jobs WHERE job_id=?", (third["job_id"],)) == {
+    assert env.store.one((
+        'SELECT last_error_code FROM jobs WHERE job_id=%s'
+    ), (third["job_id"],)) == {
         "last_error_code": "POKE_RATE_LIMIT",
     }
 
@@ -174,14 +162,14 @@ def test_scope_and_policy_authority_are_independent(environment, change):
 def test_receive_does_not_make_owner_text_or_advance_revision(environment):
     env = environment
     prior = owner_turn(env, 1, "正在读一篇文章", delivered=False)
-    before = env.store.one("SELECT * FROM jobs WHERE job_id=?", (prior["job_id"],))
+    before = env.store.one('SELECT * FROM jobs WHERE job_id=%s', (prior["job_id"],))
     result = receive(env)
-    event = env.store.one("SELECT * FROM events WHERE event_id=?", (result["event_id"],))
+    event = env.store.one('SELECT * FROM events WHERE event_id=%s', (result["event_id"],))
     assert event["event_type"] == "notice.poke" and event["memory_processed"] == 1
     assert event["reply_revision"] == 0
     assert not reply_revision.owner_input(env.store, event["event_id"])
     assert set(json.loads(event["body_json"])) == {"poke", "capture"}
-    assert env.store.one("SELECT * FROM jobs WHERE job_id=?", (prior["job_id"],)) == before
+    assert env.store.one('SELECT * FROM jobs WHERE job_id=%s', (prior["job_id"],)) == before
     assert env.store.one("SELECT reply_revision FROM conversations")["reply_revision"] == 1
     assert claim(env) is None
 
@@ -213,7 +201,7 @@ def test_bounded_coalescing_then_pending_suppression(environment):
     messages = poke.context(env.store, env.settings, job, clock=env.clock)
     interaction = json.loads(messages[-1]["content"])
     assert interaction["count"] == 2
-    assert env.store.one("SELECT attempts,max_attempts FROM jobs WHERE job_id=?",
+    assert env.store.one('SELECT attempts,max_attempts FROM jobs WHERE job_id=%s',
                          (job["job_id"],)) == {"attempts": 1, "max_attempts": 1}
 
 
@@ -225,7 +213,7 @@ def test_claim_reads_latest_confirmed_context_after_notice_was_queued(environmen
     messages = poke.context(env.store, env.settings, job, clock=env.clock)
     assert {"role": "user", "content": "刚才那篇文章讲的是树木"} in messages
     assert {"role": "assistant", "content": "收到：刚才那篇文章讲的是树木"} in messages
-    assert env.store.one("SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
+    assert env.store.one('SELECT 1 FROM job_sources WHERE job_id=%s AND event_id=%s',
                          (job["job_id"], later["event_id"]))
     metadata = env.store.one("SELECT context_json FROM poke_batches")["context_json"]
     assert "树木" not in metadata
@@ -234,16 +222,18 @@ def test_claim_reads_latest_confirmed_context_after_notice_was_queued(environmen
 def test_active_safe_segments_and_reader_are_not_interrupted(environment):
     env = environment
     turn = owner_turn(env, 1, "继续刚才的回答", delivered=False)
-    job = env.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
-                        "WHERE job_id=?", (turn["job_id"],))
+    job = env.store.one((
+        'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+        'USING(event_id) WHERE job_id=%s'
+    ), (turn["job_id"],))
     messages = enqueue_reply_parts(env.store, job, ["第一段安全文字。", "第二段安全文字。"],
                                    1500, env.clock())
-    env.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job["job_id"],))
-    before = env.store.rows("SELECT * FROM outbox ORDER BY rowid")
+    env.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (job["job_id"],))
+    before = env.store.rows('SELECT * FROM outbox ORDER BY record_sequence')
     receive(env)
     assert claim(env) is None
-    assert env.store.rows("SELECT * FROM outbox ORDER BY rowid") == before
-    env.store.execute("UPDATE outbox SET state='SENT',sent_at=?", (env.clock(),))
+    assert env.store.rows('SELECT * FROM outbox ORDER BY record_sequence') == before
+    env.store.execute("UPDATE outbox SET state='SENT',sent_at=%s", (env.clock(),))
     env.store.insert("exploration_requests", request_id="read_test", request_key="read:test",
                      adapter_id="reader", operation="read", url="https://example.test/article",
                      state="RUNNING", captured_privacy_epoch=0, created_at=env.clock(),
@@ -271,7 +261,7 @@ def test_one_decision_commits_at_most_one_native_outbox_entry(environment, kind)
         assert row["provider_message_id"] is None
         if kind == "poke":
             assert json.loads(row["content_json"]) == {"kind": "poke", "target_user_id": "10001"}
-    assert env.store.one("SELECT state FROM jobs WHERE job_id=?",
+    assert env.store.one('SELECT state FROM jobs WHERE job_id=%s',
                          (job["job_id"],))["state"] == "SUCCEEDED"
 
 
@@ -282,7 +272,7 @@ def test_new_owner_text_after_claim_invalidates_poke_only(environment):
     turn = owner_turn(env, 1, "先回答这个", delivered=False)
     with pytest.raises(CoreError, match="POKE_CONTEXT_SUPERSEDED"):
         poke.finish(env.store, env.settings, env.approval, job, {"kind": "poke"}, env.clock())
-    assert env.store.one("SELECT state FROM jobs WHERE job_id=?",
+    assert env.store.one('SELECT state FROM jobs WHERE job_id=%s',
                          (turn["job_id"],))["state"] == "QUEUED"
     assert not env.store.one("SELECT 1 FROM outbox")
 
@@ -304,10 +294,10 @@ def test_changed_actual_assistant_prefix_cannot_enter_frozen_context(environment
     turn = owner_turn(env, 1, "最新话题")
     receive(env)
     job = claim(env)
-    row = env.store.one("SELECT message_id FROM outbox WHERE origin_event_id=?",
+    row = env.store.one('SELECT message_id FROM outbox WHERE origin_event_id=%s',
                         (turn["event_id"],))
     changed = {"text": "后来才变成的回复"}
-    env.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+    env.store.execute('UPDATE outbox SET content_json=%s,content_sha256=%s WHERE message_id=%s',
                       (encode(changed), paid_budget.sha(changed), row["message_id"]))
     with pytest.raises(CoreError, match="POKE_CONTEXT_CHANGED"):
         poke.context(env.store, env.settings, job, clock=env.clock)
@@ -323,14 +313,14 @@ def test_erased_consumed_context_clears_poke_derivatives_but_retains_rate_charge
                           {"kind": "text", "text": "由此产生的回应"}, env.clock())[0]
     original = env.store.one("SELECT * FROM poke_batches")
     with env.store.transaction():
-        env.store.execute("UPDATE events SET redacted=1,body_json='{}' WHERE event_id=?",
+        env.store.execute("UPDATE events SET redacted=1,body_json='{}' WHERE event_id=%s",
                           (turn["event_id"],))
         poke.erase(env.store, [turn["event_id"]])
         poke.erase(env.store, [turn["event_id"]])
     batch = env.store.one("SELECT * FROM poke_batches")
     assert batch["claimed_at"] == original["claimed_at"]
     assert batch["context_json"] == "[]" and batch["decision_sha256"] is None
-    assert env.store.one("SELECT content_json,state FROM outbox WHERE message_id=?",
+    assert env.store.one('SELECT content_json,state FROM outbox WHERE message_id=%s',
                          (message,)) == {"content_json": "{}", "state": "CANCELLED"}
     with pytest.raises(CoreError, match="REPLY_SOURCE_RECALLED"):
         poke.check_delivery(env.store, env.settings, env.approval, message, clock=env.clock)
@@ -346,7 +336,7 @@ def test_no_response_still_uses_cooldown_and_daily_slot(environment):
     env.clock.advance(35)
     other = receive(env)
     assert claim(env) is None
-    assert env.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+    assert env.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                          (other["job_id"],)) == {"state": "CANCELLED",
                                                "last_error_code": "POKE_RATE_LIMIT"}
 
@@ -360,7 +350,7 @@ def test_expired_running_attempt_is_never_requeued(environment):
                      billed_micro_usd=1234, state="RESERVED", occurred_at=env.clock())
     env.clock.advance(env.settings.lease_seconds + 1)
     assert poke.claim_ready(env.store, env.settings, env.clock, "replacement-worker") is None
-    current = env.store.one("SELECT state,attempts,last_error_code FROM jobs WHERE job_id=?",
+    current = env.store.one('SELECT state,attempts,last_error_code FROM jobs WHERE job_id=%s',
                             (job["job_id"],))
     assert current == {"state": "CANCELLED", "attempts": 1,
                        "last_error_code": "POKE_ATTEMPT_EXPIRED"}
@@ -371,7 +361,10 @@ def test_expired_running_attempt_is_never_requeued(environment):
 
 def test_poke_migration_preserves_preceding_outbox_actions_and_foreign_keys(environment):
     env = environment
-    ddl = env.store.one("SELECT sql FROM sqlite_master WHERE name='outbox'")["sql"]
+    ddl = env.store.one(
+        "SELECT string_agg(pg_get_constraintdef(oid),' ') AS sql FROM "
+        "pg_constraint WHERE conrelid='outbox'::regclass AND contype='c'"
+    )["sql"]
     for action in ["qq.private.poke", "qq.profile.nickname", "qq.profile.signature",
                    "qq.profile.avatar", "qq.private.reply", "qq.private.proactive"]:
         assert action in ddl
@@ -392,7 +385,7 @@ def test_tampered_native_content_and_decision_are_not_delivery_authority(environ
     message = poke.finish(env.store, env.settings, env.approval, job,
                           {"kind": "poke"}, env.clock())[0]
     value = {"kind": "poke", "target_user_id": "10003"}
-    env.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+    env.store.execute('UPDATE outbox SET content_json=%s,content_sha256=%s WHERE message_id=%s',
                       (encode(value), hashlib.sha256(encode(value).encode()).hexdigest(), message))
     with pytest.raises(CoreError, match="PRIVATE_POKE_DELIVERY_CHANGED"):
         poke.check_delivery(env.store, env.settings, env.approval, message, clock=env.clock)
@@ -404,9 +397,9 @@ def test_pending_expiry_and_erased_notice_cannot_be_replayed(environment):
     result = poke.receive(env.store, env.settings, env.clock, capture)
     env.clock.advance(301)
     assert poke.claim_ready(env.store, env.settings, env.clock, "worker") is None
-    assert env.store.one("SELECT state FROM jobs WHERE job_id=?",
+    assert env.store.one('SELECT state FROM jobs WHERE job_id=%s',
                          (result["job_id"],))["state"] == "CANCELLED"
-    env.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+    env.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                       ("erased_event:" + capture.event_id, "1"))
     with pytest.raises(CoreError, match="EVENT_ERASED"):
         poke.receive(env.store, env.settings, env.clock, capture)
@@ -415,7 +408,7 @@ def test_pending_expiry_and_erased_notice_cannot_be_replayed(environment):
 def test_input_bound_survives_notice_erasure_without_recreating_content(environment):
     env = environment
     first = receive(env)
-    env.store.execute("UPDATE events SET redacted=1,body_json='{}' WHERE event_id=?",
+    env.store.execute("UPDATE events SET redacted=1,body_json='{}' WHERE event_id=%s",
                       (first["event_id"],))
     assert poke.input_count(env.store, env.approval.authority.as_dict()) == 1
     with env.store.transaction():
@@ -437,7 +430,7 @@ def test_max_coalesced_does_not_extend_deadline_or_add_response(environment):
     env.clock.advance(1)
     assert receive(env)["state"] == "SUPPRESSED"
     assert env.store.one("SELECT coalesce_until FROM poke_batches")["coalesce_until"] == deadline
-    assert env.store.one("SELECT COUNT(*) AS n FROM job_sources WHERE job_id=?",
+    assert env.store.one('SELECT COUNT(*) AS n FROM job_sources WHERE job_id=%s',
                          (first["job_id"],))["n"] == 1
 
 
@@ -457,7 +450,7 @@ def test_stop_allows_only_authenticated_readback_of_prior_intake_ack(environment
     first = poke.receive(env.store, env.settings, env.clock, capture)
     owner_authority.stop(env.store, env.settings, env.clock, AuthorityStop(
         operation_id="stop-poke-ack", authority=capture.authority))
-    state = env.store.one("SELECT state FROM jobs WHERE job_id=?", (first["job_id"],))["state"]
+    state = env.store.one('SELECT state FROM jobs WHERE job_id=%s', (first["job_id"],))["state"]
     before = env.store.db.total_changes
     replay = poke.receive(env.store, env.settings, env.clock, capture)
     assert replay == {"event_id": first["event_id"], "job_id": first["job_id"],
@@ -482,7 +475,7 @@ def test_stopped_receipt_readback_cannot_change_authority_or_recreate_erased_eve
     changed = signed(env, authority={**capture.authority, "revision": 2})
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_EVIDENCE_REQUIRED"):
         poke.receive(env.store, env.settings, env.clock, changed)
-    env.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+    env.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                       ("erased_event:" + capture.event_id, "1"))
     before = env.store.db.total_changes
     with pytest.raises(CoreError, match="EVENT_ERASED"):

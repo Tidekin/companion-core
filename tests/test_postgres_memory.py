@@ -9,7 +9,7 @@ import pytest
 from companion import memory_candidates, retrieval_work
 from companion.privacy import ErasureLedger
 from companion.store import Store
-from tests.test_postgres_schema import isolated_native
+from tests.postgres_fixture import isolated_native
 
 
 @pytest.fixture(scope="module")

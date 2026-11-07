@@ -8,57 +8,14 @@ import pytest
 from PIL import Image
 
 from companion import budget, owner_authority, owner_input, paid_budget
-from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
-from companion.image_input import ImageInputPolicy
-from companion.media_config import ContentConfig
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from tests.conftest import run
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.live_image_input import image_parts, options, png, resolve
 from tests.support.native_images import image_host, raw_event, upload
-from tests.test_onebot_images import image_segment
-
-
-def png():
-    out = io.BytesIO()
-    Image.new("RGB", (3, 2), "blue").save(out, format="PNG")
-    return out.getvalue()
-
-
-def options():
-    image = ImageInputPolicy(
-        approval_sha256="e" * 64,
-        estimated_tokens_per_image=100,
-        max_bytes_per_image=50000,
-        max_pixels_per_image=100,
-    )
-    return {
-        "image_scope": "owner_image_v1",
-        "image_approval_sha256": image.approval_sha256,
-        "core_options": {
-            "content_enabled": True,
-            "observation_enabled": True,
-            "content": ContentConfig(use_chat_model_for_vision=True, image_daily_micro_usd=10000),
-            "observation_adapters": {
-                "content_image": ObservationAdapterConfig(
-                    token="synthetic-image-adapter-token-12345",
-                    source="qq_image",
-                    media_analysis=True,
-                )
-            },
-        },
-        "paid_options": {"per_request_calls": 2, "image_input": image},
-    }
-
-
-def image_parts(request):
-    return [part for message in request["messages"] if isinstance(message["content"], list)
-            for part in message["content"] if part["type"] == "image_url"]
-
-
-async def resolve(host, port):
-    return ["1.1.1.1"]
+from tests.support.onebot_images import image_segment
 
 
 def test_authenticated_image_upload_defers_paid_inference_to_original_sdk_job(core, tmp_path):
@@ -164,7 +121,7 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
     def provider(request):
         calls.append(request)
         if failure == "media_after_dispatch":
-            core.store.execute("UPDATE content_items SET media_sha256=?", ("0" * 64,))
+            core.store.execute('UPDATE content_items SET media_sha256=%s', ("0" * 64,))
         if failure == "source_after_dispatch":
             source_id = core.store.one("SELECT event_id FROM events WHERE source='qq.onebot'")[
                 "event_id"]
@@ -206,10 +163,10 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
             event_id = core.store.one("SELECT event_id FROM events")["event_id"]
             if failure == "signature":
                 key = owner_input.INPUT + event_id
-                value = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                value = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                                   (key,))["value"])
                 value["capture"]["signature"] = "0" * 128
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                                    (encode(value), key))
             elif failure == "ledger":
                 def crash(*args):
@@ -236,7 +193,7 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
                     proof["lease_token"] = "content_lease_" + "0" * 32
                     request.headers["X-Content-Proof"] = encode(proof)
                 elif failure == "lease_before_upload":
-                    core.store.execute("UPDATE content_items SET lease_token=?",
+                    core.store.execute('UPDATE content_items SET lease_token=%s',
                                        ("content_lease_" + "0" * 32,))
             active.client.event_hooks["request"].append(mutate_upload)
             model_cases = {"unknown_usage", "source_after_dispatch", "media_after_dispatch",

@@ -102,18 +102,11 @@ def erase_exploration(store, event_ids):
 
 class ExplorationService:
     def __init__(
-        self,
-        store,
-        settings,
-        observations,
-        goals,
-        social,
-        register_link_images,
-        clock=utcnow,
+        self, store, settings, observations, goals, social, clock=utcnow, *, content_options=None,
     ):
         self.store, self.settings, self.clock = store, settings, clock
         self.observations, self.goals, self.social = observations, goals, social
-        self.register_link_images = register_link_images
+        self.content_options = content_options
 
     def _read_scope(self, row, *, current_request=None):
         """Recheck the current signed card before bounded Reader work can proceed."""
@@ -871,7 +864,13 @@ class ExplorationService:
                                 "AND source = 'qq.onebot'",
                                 (source_id,),
                             ):
-                                self.register_link_images(source_id, event_id, item.image_urls)
+                                from companion.content import register_link_images
+
+                                register_link_images(
+                                    s, self.settings, self.clock,
+                                    self.content_options or self.settings.content,
+                                    source_id, event_id, item.image_urls
+                                )
                     if discovered:
                         count += 1
                         existing = s.one(

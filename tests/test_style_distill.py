@@ -2,62 +2,15 @@
 
 import json
 
-import httpx
 import pytest
 
 from companion import paid_budget, style_distill, style_observation
-from companion.model import ModelClient
-from tests.conftest import run
-from tests.support.owner_authority import activate
-from tests.test_exploration import configure
-from tests.test_owner_authority import prepare
-from tests.test_watch_ledger import Provider, observe
-
-PATTERN = {
-    "context_tags": ["daily_share", "light_humor"],
-    "attention_target": "前文里一个具体的反差细节",
-    "response_action": "抓住这个细节做一次轻度夸张的联想",
-    "appropriate_when": "轻松分享，对方没有求助或表达痛苦",
-    "avoid_when": "认真求助、愤怒指责、痛苦经历或关系不明",
-    "risk_flags": [],
-}
-
-
-def comment(cid, text, parent=None):
-    return {"comment_id": cid, "reply_to_id": parent, "floor": None, "author": "SYNTHETIC作者",
-            "text": text, "image_count": 0, "truncated": False}
-
-
-def thread(core, number, items):
-    event_id = observe(core, number)
-    evidence = {"items": items, "reported_total": 100, "partial": True}
-    core.store.execute(
-        "UPDATE observations SET evidence_json=json_set(evidence_json,'$.reading',json(?)) "
-        "WHERE event_id=?", (json.dumps({"comments": evidence}, ensure_ascii=False), event_id))
-    return event_id
-
-
-def ready(core, tmp_path, *texts):
-    configure(core)
-    core.settings.style_distill = core.settings.style_distill.model_copy(update={"enabled": True})
-    policy = prepare(core, tmp_path)
-    activate(core, policy.model_copy(update={"purposes": ["exploration", "expression"]}))
-    provider = Provider(*texts)
-    core.model = ModelClient(core.settings,
-                             httpx.AsyncClient(transport=httpx.MockTransport(provider)))
-    return provider
-
-
-def step(core):
-    return run(style_distill.run_once(core.store, core.settings, core.model, core.clock))
+from tests.support.exploration import configure
+from tests.support.style_distill import PATTERN, candidates, comment, ready, step, thread
 
 
 def pairs(core):
     return core.store.rows("SELECT * FROM style_pairs ORDER BY pair_key")
-
-
-def candidates(core):
-    return core.store.rows("SELECT * FROM style_candidates")
 
 
 def two_pairs(core, number=1):
@@ -153,9 +106,9 @@ def test_unknown_call_is_never_replayed(core, tmp_path):
         row = style_distill.claim(core.store, core.settings, core.clock())
     request = budget.reserve(core.store, core.settings, None, "style_distill",
                              [{"role": "user", "content": "x"}], core.clock(), clock=core.clock)
-    core.store.execute("UPDATE style_pairs SET model_request_id=? WHERE pair_key=?",
+    core.store.execute('UPDATE style_pairs SET model_request_id=%s WHERE pair_key=%s',
                        (request, row["pair_key"]))
-    core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=?", (request,))
+    core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=%s", (request,))
     core.clock.advance(style_distill.LEASE_SECONDS + 1)
     step(core)
     step(core)
@@ -163,7 +116,7 @@ def test_unknown_call_is_never_replayed(core, tmp_path):
 
 
 def test_disabled_distillation_does_nothing_and_keeps_the_paid_contract(core, tmp_path):
-    from tests.test_paid_model_gate import approved_live
+    from tests.support.paid_model import approved_live
 
     configure(core)
     approved_live(core, tmp_path)
@@ -211,8 +164,10 @@ def owner_turn(core, purposes=("chat", "expression")):
     revision = core.store.one("SELECT MAX(revision) AS r FROM owner_authority_revisions")["r"]
     core.authorized_model_test_capture = ({"authority": {"revision": revision}}, None)
     job_id = authorized_job(core, purposes=purposes, renew=True)
-    return core.store.one("SELECT j.*,e.body_json,e.conversation_id FROM jobs j "
-                          "JOIN events e USING(event_id) WHERE j.job_id=?", (job_id,))
+    return core.store.one((
+        'SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events e '
+        'USING(event_id) WHERE j.job_id=%s'
+    ), (job_id,))
 
 
 def live_on(core):
@@ -284,10 +239,10 @@ def test_an_expired_candidate_or_erased_source_cancels_the_reply(core, tmp_path,
         runtime_config.boundary(core.store, core.settings, core.clock)
         core._check_context_snapshots(job, snapshots)
     [row] = candidates(core)
-    core.store.execute("UPDATE style_candidates SET expires_at=?", (core.clock(),))
+    core.store.execute('UPDATE style_candidates SET expires_at=%s', (core.clock(),))
     with pytest.raises(CoreError, match=CANCELLED):
         core._check_context_snapshots(job, snapshots)
-    core.store.execute("UPDATE style_candidates SET expires_at=?", (row["expires_at"],))
+    core.store.execute('UPDATE style_candidates SET expires_at=%s', (row["expires_at"],))
     core._check_context_snapshots(job, snapshots)
     with core.store.transaction():
         core.ledger.expire_events(core.store, [event_id], core.clock())

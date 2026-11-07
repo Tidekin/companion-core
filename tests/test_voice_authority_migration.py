@@ -10,7 +10,7 @@ from alembic.config import Config
 
 from companion.store import Store, migrate
 from companion.voice_protocol import VoiceLeaseRef
-from tests.test_voice_jobs import claim, create_tts, prepared
+from tests.support.voice_jobs import claim, create_tts, prepared
 
 
 @pytest.mark.parametrize("started", [False, True])

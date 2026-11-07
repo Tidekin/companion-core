@@ -12,9 +12,9 @@ from companion.voice_config import VoiceNode
 from companion.voice_jobs import INPUT_RECEIPT
 from companion.voice_protocol import canonical_bytes
 from tests.conftest import run
-from tests.test_voice_flow import signed_input
-from tests.test_voice_jobs import TOKEN, voice_config
-from tests.test_voice_node_api import tls_core
+from tests.support.voice_flow import signed_input
+from tests.support.voice_jobs import TOKEN, voice_config
+from tests.support.voice_node_api import tls_core
 from tests.voice_owner_fixtures import native_voice
 
 
@@ -24,7 +24,7 @@ def test_tts_only_node_projects_unavailable_asr_and_independent_worker_replies(c
     })
     assert voice.asr.enabled
     capture, key, _ = native_voice(core, tmp_path, config=voice)
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (capture.event_id,))
     calls = []
 
     def model(request):
@@ -51,7 +51,7 @@ def test_tts_only_node_projects_unavailable_asr_and_independent_worker_replies(c
                 "upload_allowed": False,
             }]
             assert core.store.db.total_changes == before
-            assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+            assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                 (INPUT_RECEIPT + event["event_id"],))
             assert "audio_base64" not in state.text and "transcript" not in state.text
 
@@ -80,14 +80,14 @@ def test_tts_only_node_projects_unavailable_asr_and_independent_worker_replies(c
                 "segment_index": 0, "reason": "VOICE_ASR_NODE_UNAVAILABLE",
             }]
             assert evidence[0]["coverage"] == "PARTIAL"
-            assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE event_id=%s',
                                    (event["event_id"],))["state"] == "SUCCEEDED"
             assert core.store.rows("SELECT scenario,state FROM model_usage") == [
                 {"scenario": "chat", "state": "SETTLED"},
             ]
             assert len(core.store.rows("SELECT * FROM outbox")) == 1
             assert not core.store.rows("SELECT * FROM voice_jobs")
-            assert core.store.one("SELECT body_json FROM events WHERE event_id=?",
+            assert core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                    (event["event_id"],))["body_json"] == original_body
             before = core.store.db.total_changes
             settled = await client.get(path + "/state")

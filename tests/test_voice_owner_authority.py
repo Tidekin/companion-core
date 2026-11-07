@@ -15,7 +15,7 @@ def test_native_voice_input_uses_original_reference_without_window(core, tmp_pat
     assert core.settings.live_text_window is None
     flow = VoiceFlow(core.store, core.settings, core.clock)
     assert flow.input_status(capture.event_id, job).state == "WAITING"
-    saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    saved = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                     ("voice_input:" + capture.event_id,))["value"])
     assert saved["authority"] == capture.authority and "window_sha256" not in saved
     assert saved["wait_until"] == after(core.clock(), core.settings.voice.asr.wait_seconds)

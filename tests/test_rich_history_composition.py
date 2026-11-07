@@ -10,10 +10,10 @@ from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.memory_review_output import assert_settled_calls
 from tests.support.native_recall_entry import native_recall, returned
-from tests.test_memory_review_output import assert_settled_calls
-from tests.test_onebot_reference_reader import enriched
-from tests.test_qq_rich_input import card
+from tests.support.onebot_reference_reader import enriched
+from tests.support.qq_rich_input import card
 
 OWNER_FIRST = "本次临时项目的验收代号改说白帆九号。"
 OWNER_NOW = "那这个临时项目的代号还是原来的？"
@@ -47,7 +47,7 @@ def test_references_only_without_owner_or_history_text_freezes_no_facts_and_call
             assert next(item["proof"] for item in snapshots if item["kind"] == "history") == []
             assert REFERENCE in encode(value.calls[0]["messages"])
             assert "青竹七号" not in encode(value.calls[0]["messages"])
-            assert json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+            assert json.loads(core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                 (source["event_id"],))["body_json"])["text"] == ""
             assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
             assert len(value.sends) == 1
@@ -78,20 +78,20 @@ def test_native_rich_history_tool_and_delivery_preserve_source_boundaries(
             assert "非主人" in encode(initial) and qq_rich.RULES in initial[0]["content"]
             assert "青竹七号" in encode(initial)
             assert initial[-1] == {"role": "user", "content": OWNER_NOW}
-            assert core.store.one("SELECT content FROM memories WHERE memory_id=?",
+            assert core.store.one('SELECT content FROM memories WHERE memory_id=%s',
                 (value.memory_id,))["content"].endswith("青竹七号。")
             assert_settled_calls(core, 4)
             usage = core.store.rows("SELECT * FROM model_usage")
             if drift:
-                row = core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                row = core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                      (prior["event_id"],))
                 body = json.loads(row["body_json"])
                 body["rich"]["segments"][1]["fields"][0]["value"] = "changed prior card"
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                    (encode(body), prior["event_id"]))
                 assert not (await value.entry.send(value.entry.client,
                                                    value.entry.protocol))["worked"]
-                assert core.store.one("SELECT state FROM outbox WHERE origin_event_id=?",
+                assert core.store.one('SELECT state FROM outbox WHERE origin_event_id=%s',
                     (source["event_id"],)) == {"state": "CANCELLED"}
             else:
                 assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
@@ -110,7 +110,7 @@ def test_rich_history_byte_limit_counts_and_crops_all_three_messages(core, tmp_p
         async with native_recall(core, tmp_path, history_bytes=actual + delta,
                                  tool_query="临时项目的验收代号") as value:
             source = await value.capture(message=mixed())
-            body = json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+            body = json.loads(core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                 (source["event_id"],))["body_json"])
             assert qq_rich.context(body)["content"] == reference
             assert await value.worker.run_once("rich-byte-bound-first")
@@ -122,10 +122,10 @@ def test_rich_history_byte_limit_counts_and_crops_all_three_messages(core, tmp_p
             assert (REFERENCE in encode(initial)) is kept
             assert (OWNER_FIRST in encode(initial)) is kept
             assert initial[-1] == {"role": "user", "content": OWNER_NOW}
-            job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
+            job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s',
                                  (following["event_id"],))
             snapshots = json.loads(core.store.one(
-                "SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+                'SELECT snapshots_json FROM agent_conversations WHERE job_id=%s',
                 (job["job_id"],))["snapshots_json"])
             proof = next(item["proof"] for item in snapshots if item["kind"] == "history")
             assert [row["event_id"] for row in proof] == ([source["event_id"]] if kept else [])

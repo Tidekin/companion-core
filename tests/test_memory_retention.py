@@ -1,5 +1,4 @@
 """Natural raw retention preserves independent support and explicit erasure."""
-
 from contextlib import closing
 
 import pytest
@@ -13,7 +12,7 @@ from companion.privacy import epoch
 from companion.store import Store
 from tests.conftest import ingest
 from tests.postgres_fixture import isolated_database
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
 
 
 def renewed_fact(core, *, semantic=False):

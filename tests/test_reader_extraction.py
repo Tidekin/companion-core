@@ -10,13 +10,12 @@ import sys
 import time
 from pathlib import Path
 
-import httpx
 import pytest
 
 from source_reader.migrate_astrbot import READER_KEYS, export, plan
 from tests.conftest import ingest, run
 from tests.support.core_http import real_core_http
-from tests.test_exploration import configure
+from tests.support.exploration import configure
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -208,8 +207,8 @@ def test_compose_diagnostic_distinguishes_missing_output_from_received_empty_byt
 @pytest.mark.parametrize("source", ["bilibili", "heybox"])
 @pytest.mark.parametrize("outcome", ["success", "erased", "report_lost", "discover"])
 def test_exported_reader_cli_real_http_and_restart(core, tmp_path, source, outcome):
-    from tests.test_heybox_reader import URL as HEYBOX_URL
-    from tests.test_source_reader import URL as BILI_URL
+    from tests.support.exploration import URL as BILI_URL
+    from tests.support.heybox_reader import URL as HEYBOX_URL
 
     configure(core)
     core.settings.content_enabled = True
@@ -243,7 +242,7 @@ def test_exported_reader_cli_real_http_and_restart(core, tmp_path, source, outco
                           "lose_report": outcome == "report_lost", "args": command,
                           "discover": outcome == "discover", "url": url}
                 child = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
-                    "tests.test_reader_extraction", "--reader", cwd=ROOT, env=env,
+                    "tests.support.reader_extraction", "--reader", cwd=ROOT, env=env,
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE)
                 try:
@@ -264,41 +263,3 @@ def test_exported_reader_cli_real_http_and_restart(core, tmp_path, source, outco
     if outcome == "success":
         assert core.content.context(accepted["event_id"])[0]["trust"] == "external_untrusted"
     assert not core.store.rows("SELECT * FROM model_usage")
-
-
-if __name__ == "__main__" and sys.argv[1:] == ["--reader"]:
-    import runpy
-
-    import source_reader.bilibili as bili
-    import source_reader.heybox as heybox
-    import source_reader.network as network
-    from tests.test_heybox_reader import mock_pool
-    from tests.test_source_reader import META, response
-
-    packet = json.loads(sys.stdin.buffer.read())
-    raw = response(META) if packet["source"] == "bilibili" else response(
-        b"<title>post</title><article><p>synthetic article evidence</p></article>")
-    if packet["discover"]:
-        raw = response({"code": 0, "data": {"list": [{
-            "bvid": packet["url"].rsplit("/", 1)[1], "title": "public title"}]}}) if (
-            packet["source"] == "bilibili") else response(
-                ('<a href="' + packet["url"] + '">public title</a>').encode())
-    pool, backend = mock_pool(raw)
-    public_type = network.PublicHTTP
-    bili_type, heybox_type = bili.BilibiliReader, heybox.HeyboxReader
-    network.PublicHTTP = lambda: public_type(pool)
-    bili.BilibiliReader = lambda *a, **kw: bili_type(*a, **kw, clock=lambda: packet["clock"])
-    heybox.HeyboxReader = lambda *a, **kw: heybox_type(*a, **kw, clock=lambda: packet["clock"])
-    original_post = httpx.AsyncClient.post
-
-    async def post(client, path, **kwargs):
-        if packet["lose_report"] and path.endswith("/result"):
-            raise httpx.ReadTimeout("synthetic result report loss")
-        return await original_post(client, path, **kwargs)
-
-    httpx.AsyncClient.post = post
-    sys.argv = ["source_reader", *packet["args"]]
-    runpy.run_module("source_reader", run_name="__main__")
-    assert all(row.startswith(b"GET ") and b"authorization:" not in row.lower()
-               for row in backend.requests)
-    Path(packet["report"]).write_text(json.dumps({"requests": len(backend.requests)}))

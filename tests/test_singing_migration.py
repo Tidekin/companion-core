@@ -6,8 +6,8 @@ import pytest
 from companion.store import Store, migrate
 from companion.voice_protocol import VoiceLeaseRef
 from tests.conftest import ingest
-from tests.test_test_fixtures import historical_database
-from tests.test_voice_jobs import claim, create_tts, prepared
+from tests.support.historical_schema import historical_database
+from tests.support.voice_jobs import claim, create_tts, prepared
 
 
 def test_singing_migration_preserves_tool_foreign_keys_and_actual_job_delete(core, tmp_path):

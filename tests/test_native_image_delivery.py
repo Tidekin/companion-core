@@ -11,9 +11,9 @@ from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.native_image_pipeline import admit_image, claim, pixels, upload_headers
 from tests.support.onebot import provider
-from tests.test_native_image_pipeline import admit_image, claim, pixels, upload_headers
-from tests.test_prepare_owner_input import native_spool, window
+from tests.support.prepare_owner_input import native_spool, window
 
 
 @pytest.mark.parametrize("drift,boundary", [
@@ -39,18 +39,18 @@ def test_native_reply_rechecks_original_image_after_generation(core, tmp_path, d
             assert usage[0]["state"] == "SETTLED"
             def change():
                 if drift == "media":
-                    core.store.execute("UPDATE content_items SET media_sha256=?", ("0" * 64,))
+                    core.store.execute('UPDATE content_items SET media_sha256=%s', ("0" * 64,))
                 elif drift == "proof":
                     proof = json.loads(core.store.one(
                         "SELECT proof_json FROM captured_images")["proof_json"])
                     proof["signature"] = "0" * 128
-                    core.store.execute("UPDATE captured_images SET proof_json=?",
+                    core.store.execute('UPDATE captured_images SET proof_json=%s',
                                        (json.dumps(proof),))
                 elif drift == "snapshot":
                     snapshots = json.loads(core.store.one(
                         "SELECT snapshots_json FROM agent_conversations")["snapshots_json"])
                     next(item for item in snapshots if item["kind"] == "images")["item_ids"] = []
-                    core.store.execute("UPDATE agent_conversations SET snapshots_json=?",
+                    core.store.execute('UPDATE agent_conversations SET snapshots_json=%s',
                                        (json.dumps(snapshots),))
                 elif drift == "expiry":
                     expiry = core.store.one("SELECT expires_at FROM captured_images")["expires_at"]

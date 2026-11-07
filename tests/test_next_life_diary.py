@@ -10,19 +10,8 @@ from companion.contracts import CoreError
 from companion.core import Core
 from companion.diary import DiaryDraft, render_draft
 from tests.conftest import run
-from tests.test_diary import DAY, DiaryModel, generate, seed_day
-
-
-def seed(core, count=4):
-    model = seed_day(core, [f"今天讨论了读书计划的第 {i} 步。" for i in range(count)])
-    assert generate(core)["state"] == "COMMITTED"
-    return model
-
-
-def withdraw(core, event_id="evt_test_1"):
-    with core.store.transaction():
-        core.ledger.expire_events(core.store, [event_id], core.clock())
-    assert core.diary.get_day(DAY, core.settings.owner_qq_id) is None
+from tests.support.diary import DAY, DiaryModel
+from tests.support.next_life_diary import seed, withdraw
 
 
 def recompute(core):
@@ -53,7 +42,7 @@ def test_withdrawn_source_recomputes_in_independent_worker_without_resetting_usa
             "evt_test_2", "evt_test_3", "evt_test_4",
         ]
         assert worker.store.rows("SELECT * FROM diary_revisions") == []
-        assert worker.store.one("SELECT * FROM model_usage WHERE request_id=?",
+        assert worker.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                 (original_usage["request_id"],)) == original_usage
         assert len(worker.store.rows("SELECT * FROM model_usage")) == 2
         for table in ("memories", "traits", "outbox"):
@@ -102,7 +91,7 @@ def test_recompute_after_old_backup_replay_uses_current_remaining_evidence(core,
 @pytest.mark.parametrize("usage_state", ["UNKNOWN", "RESERVED"])
 def test_recompute_never_replays_or_releases_unresolved_model_attempt(core, usage_state):
     model = seed(core)
-    core.store.execute("UPDATE model_usage SET state=?", (usage_state,))
+    core.store.execute('UPDATE model_usage SET state=%s', (usage_state,))
     withdraw(core)
     before = core.store.rows("SELECT * FROM model_usage")
     with pytest.raises(CoreError, match="DIARY_RECOMPUTE_USAGE_UNRESOLVED"):

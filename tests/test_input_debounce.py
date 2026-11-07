@@ -1,34 +1,18 @@
 """Owner bursts wait briefly, are answered once, and commands are never delayed."""
 
-import json
 from datetime import datetime
 
-from companion import dialogue_history, input_debounce, reply_revision
+from companion import dialogue_history, input_debounce
 from companion.config import Settings
 from companion.input_debounce import InputDebounceConfig
 from companion.store import after
-from tests.conftest import ingest
-from tests.test_runtime_configuration import hot as hot
-from tests.test_runtime_configuration import save
+from tests.support.input_debounce import accept
+from tests.support.runtime_configuration import hot as hot
+from tests.support.runtime_configuration import save
 
 
 def enable(core, **values):
     core.settings.input_debounce = InputDebounceConfig(**values)
-
-
-def accept(core, number, text="在吗"):
-    """The production order: read the waiting batch, supersede, then delay the new job."""
-    result = ingest(core, number, text)
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (result["event_id"],))
-    with core.store.transaction():
-        due = input_debounce.due(core.store, core.settings, event["conversation_id"],
-                                 event["event_id"], json.loads(event["body_json"]), core.clock())
-        reply_revision.advance(core.store, event["conversation_id"], event["event_id"],
-                               core.clock())
-        if due:
-            core.store.execute("UPDATE jobs SET next_attempt_at=? WHERE job_id=?",
-                               (due, result["job_id"]))
-    return result, due
 
 
 def seconds(core, value):
@@ -53,7 +37,7 @@ def test_a_quiet_message_waits_two_seconds_before_it_can_be_claimed(core):
 def test_an_active_chat_waits_longer_to_open_a_batch(core):
     enable(core)
     earlier, _ = accept(core, 1)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (earlier["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (earlier["job_id"],))
     core.clock.advance(10)
     _, due = accept(core, 2)
     assert seconds(core, due) == 5
@@ -65,7 +49,7 @@ def test_a_burst_is_answered_once_with_every_input_in_context(core):
     core.clock.advance(1)
     second, due = accept(core, 2, "今天老板又改需求了")
     assert seconds(core, due) == 2  # Continuation, not a fresh active opening.
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                           (first["job_id"],))["state"] == "CANCELLED"
     core.clock.advance(2)
     job = core.claim_job("worker")
@@ -110,8 +94,10 @@ def test_hot_edit_between_messages_preserves_open_batch_wait_and_cap(hot):
 def test_legacy_timestamp_batch_finishes_with_startup_timing(hot):
     enable(hot)
     first, _ = accept(hot, 1)
-    row = hot.store.one("SELECT conversation_id FROM events WHERE event_id=?", (first["event_id"],))
-    hot.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+    row = hot.store.one((
+        'SELECT conversation_id FROM events WHERE event_id=%s'
+    ), (first["event_id"],))
+    hot.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                       (hot.clock(), input_debounce.BATCH_KEY + row["conversation_id"]))
     save(hot, input_debounce={"continue_seconds": 7})
     hot.clock.advance(1)

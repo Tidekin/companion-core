@@ -56,7 +56,7 @@ def test_claim_rechecks_job_after_snapshot_changes(core, monkeypatch):
 
     monkeypatch.setattr("companion.core.proactive_allowed", check)
     assert core.claim_job("stale-snapshot") is None
-    row = core.store.one("SELECT * FROM jobs WHERE job_id=?", (admitted["job_id"],))
+    row = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (admitted["job_id"],))
     assert (row["lease_owner"], row["lease_token"]) == ("other", "original-token")
     assert checked == [False, True]
 
@@ -69,7 +69,7 @@ def test_chat_worker_survives_busy_before_claim_without_repeating_a_job(
     from companion import __main__, shutdown
     from companion import core as core_module
     from tests.conftest import run
-    from tests.test_worker_shutdown import NoNetworkClient
+    from tests.support.worker_shutdown import NoNetworkClient
 
     admitted = core.ingest(event(core), "busy-claim") if boundary != "poke" else None
     original = (core.recover if boundary == "recovery" else core._claim_job

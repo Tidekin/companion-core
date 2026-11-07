@@ -11,7 +11,7 @@ from companion.contracts import CoreError
 from scripts import release_plan as plan
 from tests.postgres_fixture import isolated_database
 from tests.support.owner_authority import activate
-from tests.test_owner_authority import prepare
+from tests.support.owner_authority_setup import prepare
 
 
 def test_probe_on_current_schema_needs_no_migration(core):

@@ -1,4 +1,4 @@
-"""Settlement of an owner reply whose guarded Core preflight exhausted its lease."""
+"""Settlement of an owner text delivery whose guarded Core preflight exhausted its lease."""
 
 import json
 from typing import Literal
@@ -8,9 +8,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import Field
 
 import companion_delivery_protocol as wire
-from companion import cumulative, live_text, owner_authority
+from companion import cumulative, input_protocol, live_text, owner_authority
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityReference
+from companion.transport import cancel_segment_tail, mark_not_dispatched, retire_preflight_lease
 from companion_delivery_protocol import preflight
 
 
@@ -28,7 +29,6 @@ class ExpiredPreflight(AuthorityReference):
 def settle(store, settings, clock, body):
     """Consume only the exclusive Bridge's signed RESERVED witness for our last lease."""
     proof = body.model_dump(mode="json")
-    key = "input_cancel_before_send:" + body.message_id
     with store.transaction(delivery_preflight=True):
         view = owner_authority.evidence(store, settings, body.authority)
         try:
@@ -38,10 +38,7 @@ def settle(store, settings, clock, body):
             raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 403) from None
         receipt = {"cancelled": True, "message_id": body.message_id,
                    "state": "CANCELLED", "send_attempt_retained": True}
-        prior = live_text._meta(store, key)
-        if prior is not None:
-            if prior != proof:
-                raise CoreError("INPUT_CANCEL_RECEIPT_CONFLICT", 409)
+        if input_protocol.prior_cancellation(store, body.message_id, proof):
             return receipt
         latest = owner_authority._latest(store)
         if (not latest or latest["state"] != "ACTIVE"
@@ -67,7 +64,7 @@ def settle(store, settings, clock, body):
         # exclusive Bridge still attests RESERVED and no provider dispatch, so
         # retain the actual begun count rather than treating the ACK as an effect.
         begun = body.stage == "send-check" or bool(row and row["attempt_count"] == 1)
-        states = {"SENDING", "DELIVERY_UNCERTAIN"} if begun else {"LEASED", "PENDING"}
+        states = {"SENDING", "DELIVERY_UNCERTAIN"} if begun else {"LEASED", "PENDING", "CANCELLED"}
         if (lease != {k: proof[k] for k in ("item_sha256", "lease_sha256", "lease_until")}
             or not row or not row["authority_json"]
             or json.loads(row["authority_json"]) != body.authority
@@ -83,15 +80,13 @@ def settle(store, settings, clock, body):
             raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
         now = clock()
         cumulative.send_result(store, body.message_id, "FAILED", now)
-        store.execute("UPDATE outbox SET state = 'CANCELLED', last_error_code = "
-            "'REPLY_NOT_DISPATCHED', updated_at = %s WHERE message_id = %s", (now, body.message_id))
-        store.execute("UPDATE outbox SET state = 'CANCELLED', lease_token = NULL, updated_at = %s, "
-            "last_error_code = 'REPLY_SEGMENT_CHAIN_STOPPED' WHERE reply_group_id = %s AND "
-            "segment_index > %s AND state IN ('PENDING', 'RETRY_WAIT', 'LEASED')",
-                      (now, row["reply_group_id"], row["segment_index"]))
-        store.execute('DELETE FROM runtime_meta WHERE key = %s',
-                      ("owner_preflight_lease:" + body.message_id,))
-        live_text._put(store, key, proof)
+        # New owner input can already have cancelled an unstarted lease. Its exact
+        # signed reservation still closes Bridge custody; retain Core's terminal reason.
+        if row["state"] != "CANCELLED":
+            mark_not_dispatched(store, body.message_id, now, attempt_count=row["attempt_count"])
+        cancel_segment_tail(store, row, now)
+        retire_preflight_lease(store, body.message_id)
+        input_protocol.record_cancellation(store, body.message_id, proof)
         store.audit("delivery.preflight_expired", body.message_id, "bridge", now,
                     proof_sha256=wire.digest(proof), stage=body.stage)
         return receipt

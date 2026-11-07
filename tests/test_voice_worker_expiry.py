@@ -12,8 +12,8 @@ from pydantic import SecretStr
 from companion.contracts import CoreError
 from companion.store import after, encode
 from companion.voice_protocol import VoiceLeaseRef
-from tests.test_voice_flow import flow_fixture, upload
-from tests.test_voice_jobs import claim, control, create_asr, create_tts, prepared, result
+from tests.support.voice_flow import flow_fixture, upload
+from tests.support.voice_jobs import claim, control, create_asr, create_tts, prepared, result
 
 
 def test_chat_claim_after_voice_expiry_uses_unavailable_fallback(core, monkeypatch):
@@ -73,7 +73,7 @@ def test_independent_chat_worker_scrubs_offline_voice_but_keeps_unknown_custody(
     outbox = core.store.rows("SELECT * FROM outbox")
     charges = core.store.rows("SELECT * FROM model_usage")
     # Only maintenance is due; the native chat job remains a future retry.
-    core.store.execute("UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=?",
+    core.store.execute("UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=%s",
                        (after(core.clock(), 3600),))
     core.clock.advance(core.settings.voice.job_ttl_seconds + 1)
     settings = core.settings.model_dump(mode="python") | {"memory_enabled": False}

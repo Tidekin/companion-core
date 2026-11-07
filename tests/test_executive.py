@@ -14,81 +14,16 @@ from companion.contracts import CoreError
 from companion.dsh_job import run_job
 from companion.executive import Executive, HTTPExecutor, erase_executive
 from companion.executive_protocol import (
-    ExecutionEnvelope,
-    ExecutiveConfig,
     ExecutorEndpoint,
     ToolArguments,
     ToolDecision,
     ToolReceipt,
-    ToolRequest,
 )
 from companion.executor_budget_proxy import create_budget_proxy
 from companion.executor_gateway import FileExecutor, create_executor_app, receipt
 from companion.privacy import advance_epoch
-from tests.conftest import ingest, run
-
-TOKEN = "executor-test-token-" * 2
-
-
-def configured(core, adapter=None, **changes):
-    config = ExecutiveConfig(
-        enabled=True,
-        daily_calls=3,
-        daily_micro_usd=100000,
-        monthly_micro_usd=200000,
-        endpoints={
-            "windows": ExecutorEndpoint(
-                url="http://127.0.0.1:8991",
-                token=TOKEN,
-                workspace="work",
-                capabilities=["windows.read_text", "windows.write_text"],
-            )
-        },
-        **changes,
-    )
-    object.__setattr__(core.settings, "executive", config)
-    ingest(core, 1, "请读取允许目录的文件")
-    return Executive(core.store, core.settings, core.clock, adapter)
-
-
-def proposal(number=1, capability="windows.read_text", **arguments):
-    return ToolRequest(
-        idempotency_key=f"tool-request-{number}",
-        capability=capability,
-        workspace="work",
-        arguments=ToolArguments(path="result.txt", **arguments),
-        source_event_ids=["evt_test_1"],
-    )
-
-
-def envelope(**changes):
-    values = dict(
-        task_id="tool_test",
-        scope_sha256="a" * 64,
-        capability="windows.read_text",
-        workspace="work",
-        arguments={"path": "result.txt"},
-        max_cost_micro_usd=50000,
-        max_model_calls=1,
-        max_input_bytes=16000,
-        max_output_tokens=1024,
-        timeout_seconds=20,
-    )
-    values.update(changes)
-    return ExecutionEnvelope(**values)
-
-
-class FakeExecutor:
-    def __init__(self):
-        self.calls, self.callback, self.fail = [], None, False
-
-    async def execute(self, endpoint, request):
-        self.calls.append(request)
-        if self.callback:
-            self.callback()
-        if self.fail:
-            raise httpx.ReadTimeout("response lost after execution")
-        return receipt(request, "SUCCEEDED", "实际读取的文本")
+from tests.conftest import run
+from tests.support.executive import TOKEN, FakeExecutor, configured, envelope, proposal
 
 
 def test_tools_are_disabled_by_default_and_l3_cannot_be_requested(core):
@@ -116,14 +51,14 @@ def test_readonly_idempotency_real_receipt_observation_and_ancestry(core):
     result = executive.get(task["task_id"])
     assert result["state"] == "SUCCEEDED"
     observation = core.store.one(
-        "SELECT * FROM observations WHERE event_id=?", (result["result_event_id"],)
+        'SELECT * FROM observations WHERE event_id=%s', (result["result_event_id"],)
     )
     assert observation["source_kind"] == "tool_result"
     assert observation["result_status"] == "FETCHED"
     assert executive.sources(task["task_id"]) == ["evt_test_1"]
     assert (
         core.store.one(
-            "SELECT * FROM event_dependencies WHERE event_id=?", (result["result_event_id"],)
+            'SELECT * FROM event_dependencies WHERE event_id=%s', (result["result_event_id"],)
         )["source_event_id"]
         == "evt_test_1"
     )
@@ -422,7 +357,7 @@ def test_core_approval_http_gateway_real_file_and_observation(core, tmp_path):
         assert run(executive.run_one())
         result = executive.get(read["task_id"])
         event = core.store.one(
-            "SELECT body_json FROM events WHERE event_id=?", (result["result_event_id"],)
+            'SELECT body_json FROM events WHERE event_id=%s', (result["result_event_id"],)
         )
         assert json.loads(event["body_json"])["text"] == "exact bytes 测试"
     finally:

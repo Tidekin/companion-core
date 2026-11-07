@@ -7,7 +7,7 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import after
 from tests.support.owner_authority import activate
-from tests.test_owner_input import captured, inbound
+from tests.support.owner_input import captured, inbound
 
 
 @pytest.mark.parametrize("purpose", ["memory", "diary", "reflection", "consolidation"])

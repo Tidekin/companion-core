@@ -21,7 +21,7 @@ from tests.conftest import run
 from tests.poke_authority_fixture import environment as native_environment
 from tests.poke_authority_fixture import refresh
 from tests.support.core_http import real_core_http
-from tests.test_poke import native_frame
+from tests.support.poke import native_frame
 
 
 @pytest.fixture(autouse=True)
@@ -104,7 +104,9 @@ def test_signed_poke_uses_real_http_worker_budget_and_original_outbox(core, tmp_
             job_id = accepted.json()["job_id"]
             assert accepted.json()["state"] == "QUEUED"
             assert await worker.run_once("independent-poke")
-            job = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job_id,))
+            job = core.store.one((
+                'SELECT state,last_error_code FROM jobs WHERE job_id=%s'
+            ), (job_id,))
             assert job == {"state": "SUCCEEDED", "last_error_code": None}, job
             assert not await worker.run_once("poke-not-repeated")
             assert core.store.one("SELECT reply_revision FROM conversations")["reply_revision"] == 0

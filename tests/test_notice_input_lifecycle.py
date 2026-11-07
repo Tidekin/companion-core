@@ -12,8 +12,8 @@ from companion.model import ModelClient
 from companion_onebot_bridge import owner_notices
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, recall_frame
-from tests.test_input_interrupt_bridge import model_response
-from tests.test_private_companion import companion_options
+from tests.support.input_interrupt_bridge import model_response
+from tests.support.private_companion import companion_options
 
 
 @pytest.mark.parametrize("recall_at", [None, "before_dispatch", "after_dispatch"])
@@ -76,17 +76,17 @@ def test_required_notice_tracks_actual_sources_and_drains_recalled_work(
                 with Core(core.settings, core.model, core.clock) as worker:
                     assert worker.store is not core.store
                     assert await worker.run_once("notice-integration", job_id=notice_job["job_id"])
-                job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (notice_job["job_id"],))
+                job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (notice_job["job_id"],))
                 assert job["context_tracked"] == 1
                 assert {row["event_id"] for row in core.store.rows(
-                    "SELECT event_id FROM job_sources WHERE job_id=?", (job["job_id"],),
+                    'SELECT event_id FROM job_sources WHERE job_id=%s', (job["job_id"],),
                 )} == {owner_id, job["event_id"]}
                 usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage "
                                        "WHERE scenario='activity'")
                 assert usage["state"] == "SETTLED"
                 if recall_at:
                     assert job["state"] == "CANCELLED"
-                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                    assert not core.store.rows('SELECT * FROM outbox WHERE origin_event_id=%s',
                                                (job["event_id"],))
                     assert len(sends) == 1
                     assert provider_calls == ([] if recall_at == "before_dispatch" else ["notice"])

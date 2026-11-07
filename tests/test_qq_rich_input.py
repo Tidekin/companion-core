@@ -11,20 +11,10 @@ from companion import qq_rich
 from companion.api import create_app
 from companion.contracts import Candidate, CoreError, InboundEvent
 from companion.store import encode
-from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.rich_input import input_digest
 from companion_onebot_bridge.window import digest
 from tests.conftest import run
-from tests.support.onebot_events import config, raw_event
-
-
-def rich_event(message, **changes):
-    return normalize(
-        json.dumps(raw_event(message=message, **changes)),
-        config(),
-        now=raw_event()["time"],
-        rich_input_scope="references_v1",
-    )
+from tests.support.qq_rich_input import card, rich_event
 
 
 def test_pinned_reply_and_forward_are_references_without_invented_owner_text():
@@ -84,20 +74,6 @@ def test_multiple_text_positions_preserve_original_layout_but_plain_hash_stays_o
                         {"type": "text", "data": {"text": "后半句"}}])
     assert "rich" not in plain["payload"]
     assert input_digest(plain["payload"]) == digest("前半句后半句")
-
-
-def card(text="引用自述", url="https://m.bilibili.com/video/BV1234567890"):
-    return {
-        "type": "json",
-        "data": {
-            "data": json.dumps(
-                {
-                    "meta": {"detail_1": {"title": text, "desc": "摘要不是正文", "qqdocurl": url}},
-                    "unknown": {"secret": "unapproved raw card field"},
-                }
-            )
-        },
-    }
 
 
 def sample():

@@ -91,25 +91,27 @@ def _reading_result(store, settings, clock, job, request_id, *, executing):
     # These existing services only hold references; no Core lifecycle or model is opened.
     goals = GoalEngine(store, settings, None, clock)
     observations = ObservationService(store, settings, clock)
-    exploration = ExplorationService(store, settings, observations, goals, None, None, clock)
-    row = store.one('SELECT exploration_requests.request_id AS request_id, '
-        'exploration_requests.request_key AS request_key, exploration_requests.adapter_id AS '
-        'adapter_id, exploration_requests.operation AS operation, exploration_requests.url AS url, '
-        'exploration_requests.goal_step_json AS goal_step_json, exploration_requests.state AS '
-        'state, exploration_requests.lease_token AS lease_token, exploration_requests.lease_until '
-        'AS lease_until, exploration_requests.captured_privacy_epoch AS captured_privacy_epoch, '
-        'exploration_requests.reserved_bytes AS reserved_bytes, exploration_requests.used_bytes AS '
-        'used_bytes, exploration_requests.result_sha256 AS result_sha256, '
-        'exploration_requests.last_error_code AS last_error_code, exploration_requests.created_at '
-        'AS created_at, exploration_requests.started_at AS started_at, '
-        'exploration_requests.updated_at AS updated_at, exploration_requests.redacted AS redacted, '
-        'exploration_requests.reserved_requests AS reserved_requests, '
-        'exploration_requests.used_requests AS used_requests, exploration_requests.source_grant_id '
-        'AS source_grant_id, exploration_requests.source_grant_epoch AS source_grant_epoch, '
-        'exploration_requests.authority_json AS authority_json, exploration_requests.query AS '
-        'query, exploration_requests.discovery_mode AS discovery_mode FROM exploration_requests AS '
-        'exploration_requests WHERE exploration_requests.request_id = %s AND '
-        'exploration_requests.redacted = 0',
+    exploration = ExplorationService(store, settings, observations, goals, None, clock)
+    row = store.one((
+        'SELECT exploration_requests.request_id, '
+        'exploration_requests.request_key, exploration_requests.adapter_id, '
+        'exploration_requests.operation, exploration_requests.url, '
+        'exploration_requests.goal_step_json, exploration_requests.state, '
+        'exploration_requests.lease_token, exploration_requests.lease_until, '
+        'exploration_requests.captured_privacy_epoch, '
+        'exploration_requests.reserved_bytes, '
+        'exploration_requests.used_bytes, exploration_requests.result_sha256,'
+        ' exploration_requests.last_error_code, '
+        'exploration_requests.created_at, exploration_requests.started_at, '
+        'exploration_requests.updated_at, exploration_requests.redacted, '
+        'exploration_requests.reserved_requests, '
+        'exploration_requests.used_requests, '
+        'exploration_requests.source_grant_id, '
+        'exploration_requests.source_grant_epoch, '
+        'exploration_requests.authority_json, exploration_requests.query, '
+        'exploration_requests.discovery_mode FROM exploration_requests WHERE '
+        'request_id=%s AND redacted=0'
+    ),
                          (request_id,))
     if not row or row["goal_step_json"] != "{}":
         raise CoreError("CONVERSATION_READER_SOURCE_REQUIRED", 403)

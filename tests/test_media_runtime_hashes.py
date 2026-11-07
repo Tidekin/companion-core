@@ -7,7 +7,7 @@ import pytest
 from companion import live_text
 from companion.contracts import CoreError
 from tests.conftest import run
-from tests.test_onebot_capture import source_window
+from tests.support.onebot_capture import source_window
 
 
 @pytest.mark.parametrize("package", ["companion_delivery_protocol", "companion_voice_node"])

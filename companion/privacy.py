@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from companion import job_queue, transport
 from companion.commands import command_parts
 from companion.contracts import CoreError
 from companion.postgres import ERASURE_LEDGER
@@ -808,7 +809,7 @@ class ErasureLedger:
             store.execute("UPDATE episodes SET title = '', summary = '', status = 'REDACTED'")
             store.execute("DELETE FROM trait_evidence")
             store.execute("DELETE FROM traits")
-            store.execute(self.clear_reply_sql())
+            transport.revoke_deliveries(store, "TRUE", erase_content=True)
         advance_epoch(store)
         self.record_complete(store, record)
 
@@ -960,7 +961,7 @@ class ErasureLedger:
             if repair:
                 self.clear_event_replies(store, event_ids)
             else:
-                store.execute(self.clear_reply_sql())
+                transport.revoke_deliveries(store, "TRUE", erase_content=True)
             return
         events = encode(sorted(event_ids))
         jobs = store.rows(
@@ -975,27 +976,21 @@ class ErasureLedger:
             (events, not repair, not repair),
         )
         job_ids = encode([row["job_id"] for row in jobs])
-        origins = encode(
-            sorted(set(event_ids) | {row["event_id"] for row in jobs if row["event_id"]})
-        )
-        store.execute(
-            "UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, updated_at = %s, "
-            "last_error_code = 'REPLY_SOURCE_RECALLED' WHERE job_id IN (SELECT value COLLATE \"C\" "
-            "FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) AND state IN "
-            "('QUEUED', 'RUNNING', 'RETRY_WAIT')",
-            (at, job_ids),
-        )
-        store.execute(
-            self.clear_reply_sql()
-            + (
-
-                    ' WHERE origin_event_id IN (SELECT value FROM '
-                    'json_array_elements_text(%s::json) AS ids(value)) OR '
-                    '(%s AND NOT EXISTS (SELECT 1 FROM jobs j WHERE '
-                    'j.event_id=outbox.origin_event_id))'
-
+        origins = encode(sorted(set(event_ids) | {row["event_id"] for row in jobs
+                                                  if row["event_id"]}))
+        job_queue.cancel_active(store, (
+            'job_id IN (SELECT value FROM json_array_elements_text(%s::json) AS '
+            'ids(value))'
+        ), (job_ids,),
+                                "REPLY_SOURCE_RECALLED", at)
+        transport.revoke_deliveries(
+            store, (
+                'origin_event_id IN (SELECT value FROM '
+                'json_array_elements_text(%s::json) AS ids(value)) OR (%s AND NOT '
+                'EXISTS (SELECT 1 FROM jobs j WHERE '
+                'j.event_id=outbox.origin_event_id))'
             ),
-            (origins, not repair),
+            (origins, not repair), erase_content=True,
         )
 
     @staticmethod
@@ -1102,24 +1097,12 @@ class ErasureLedger:
                 "event_id = %s",
                 (event_id,),
             )
-            store.execute(
-                "UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, last_error_code = "
-                "'PRIVACY_CHANGED' WHERE event_id = %s AND state IN ('QUEUED', 'RUNNING', "
-                "'RETRY_WAIT')",
-                (event_id,),
-            )
-
-    @staticmethod
-    def clear_reply_sql():
-        return (
-            "UPDATE outbox SET content_json='{}',content_sha256='',"
-            "state=CASE WHEN state='SENDING' THEN 'DELIVERY_UNCERTAIN' "
-            "WHEN state IN ('PENDING','LEASED','RETRY_WAIT') THEN 'CANCELLED' ELSE state END"
-        )
-
+            job_queue.cancel_active(store, 'event_id=%s', (event_id,), "PRIVACY_CHANGED")
     def clear_event_replies(self, store, event_ids):
         for event_id in event_ids:
-            store.execute(self.clear_reply_sql() + " WHERE origin_event_id=%s", (event_id,))
+            transport.revoke_deliveries(
+                store, 'origin_event_id=%s', (event_id,), erase_content=True,
+            )
 
     @staticmethod
     def record_complete(store, record):

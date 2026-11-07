@@ -18,9 +18,10 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
-from tests.test_cumulative_budget import policy, view
-from tests.test_live_text_window import live_clients, live_fixture
-from tests.test_paid_model_gate import approved_live
+from tests.support.cumulative_budget import policy, view
+from tests.support.cumulative_window import bind_policy
+from tests.support.live_text_window import live_clients, live_fixture
+from tests.support.paid_model import approved_live
 
 
 @asynccontextmanager
@@ -48,13 +49,13 @@ async def native_stage(core, bridge, *, count=None):
 def archived_account(core, tmp_path):
     """Original v1 rows and signed timestamp inventory; no legacy live writer."""
     from companion_onebot_bridge import journal
-    from tests.test_legacy_owner_input import archived
+    from tests.support.legacy_owner_input import archived
 
     old, _, job, mids, key = archived(core, tmp_path)
     # Frozen v1 send custody includes the single original reservation/ACK.
-    core.store.execute("UPDATE outbox SET attempt_count=1 WHERE message_id=?", (mids[0],))
-    original = core.store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
-    sent = core.store.one("SELECT * FROM outbox WHERE message_id=?", (mids[0],))
+    core.store.execute('UPDATE outbox SET attempt_count=1 WHERE message_id=%s', (mids[0],))
+    original = core.store.one('SELECT * FROM events WHERE event_id=%s', (job["event_id"],))
+    sent = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (mids[0],))
     path = tmp_path / "original-window-reservations.jsonl"
     reservations, head = [], "0" * 64
     for kind, source_id, at, record_kind, field in (
@@ -119,33 +120,11 @@ async def renew_native(core, bridge, number, **limits):
     bridge.onebot = OneBotClient(bridge.config, bridge.protocol)
     # OneBot timestamps have second precision; the next frame must postdate the grant.
     admitted_at = core.store.one(
-        "SELECT created_at FROM owner_authority_revisions WHERE grant_id=? AND revision=?",
+        'SELECT created_at FROM owner_authority_revisions WHERE grant_id=%s AND revision=%s',
         (successor["grant_id"], successor["revision"]))["created_at"]
     earliest_frame = ceil(datetime.fromisoformat(admitted_at).timestamp())
     await asyncio.sleep(max(0, earliest_frame - datetime.now(UTC).timestamp()) + 0.1)
     assert datetime.now(UTC).timestamp() >= earliest_frame
-
-
-def bind_policy(core, plan, **changes):
-    scope = policy(core, **changes)
-    live = core.settings.live_text_window.model_copy(update={
-        "cumulative": scope,
-        "core_config_sha256": live_text.config_sha256(core.settings),
-        "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings)),
-    })
-    value = deepcopy(plan.value)
-    value["live_text"] = live.model_dump(mode="json", exclude={"plan_sha256"})
-    inventory = {key: value[key] for key in (
-        "identity_sha256", "protocol_epoch", "config_sha256", "config_version", "image_ids",
-    )}
-    authorization = None
-    if value["execution"] == "approved_live":
-        authorization = {"kind": "owner_qq_window", "approved": True,
-            "scope_sha256": digest({k: v for k, v in value.items() if k != "authorization_sha256"}),
-            "evidence_sha256": "a" * 64}
-        value["authorization_sha256"] = digest(authorization)
-    core.settings.live_text_window = live.model_copy(update={"plan_sha256": digest(value)})
-    return WindowPlan(value, plan.config, inventory, authorization)
 
 
 def fixture(core, tmp_path, **changes):
@@ -201,8 +180,10 @@ def test_input_and_send_responsibility_are_retained_in_original_ledgers(core, tm
             operations = view(core)["operations"]
             assert len(operations) == 2
             assert sorted(v["state"] for v in operations.values()) == ["ADMITTED", "SENT"]
-            value = json.loads(core.store.one("SELECT value FROM runtime_meta "
-                "WHERE key LIKE 'owner_input:%'")["value"])
+            value = json.loads(core.store.one(
+                'SELECT value FROM runtime_meta WHERE key LIKE '
+                "'owner_input:%%'"
+            )["value"])
             assert owner_input.approve(core.store, core.settings, core.clock,
                 OwnerCapture.model_validate(value["capture"]))["duplicate"]
             assert len(view(core)["operations"]) == 2
@@ -325,7 +306,7 @@ def test_missing_spool_projection_cannot_reset_cumulative_inputs(core, tmp_path)
 
 
 def test_stop_requires_new_policy_for_successor(core, tmp_path):
-    from tests.test_live_text_handoff import (
+    from tests.support.live_text_handoff import (
         configure,
         open_successor,
         reference,
@@ -417,7 +398,7 @@ def test_real_handoff_preserves_complete_input_send_and_model_history(core, tmp_
                        for key in ("owner_inputs", "send_attempts", "model_attempts"))
             assert len(view(core)["operations"]) == 4
             for row in original_usage:
-                assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                       (row["request_id"],)) == row
             await bridge.capture(3)
             with pytest.raises(httpx.HTTPStatusError):
@@ -450,7 +431,7 @@ def test_forgotten_content_and_old_backup_keep_latest_cumulative_responsibility(
                                     core.settings.erasure_ledger)
             settings = core.settings.model_copy(update={"database": str(destination)})
             with Core(settings, FakeModel(), core.clock) as restored:
-                assert restored.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                assert restored.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                                           ("erased_event:" + event_id,))
                 assert not cumulative.status(restored.store, settings, core.clock())["available"]
                 assert owner_authority.status(

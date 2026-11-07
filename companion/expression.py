@@ -7,7 +7,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, ValidationError, model_validator
 
-from companion import private_life, reply_revision
+from companion import private_life, reply_revision, transport
 from companion.contracts import CoreError, StrictModel
 from companion.conversation_policy import EVERY_TEXT_REQUIRED, TEXT_REQUIRED
 from companion.store import after, encode
@@ -503,9 +503,5 @@ class ExpressionEngine:
             )
             if intent.image is not None and action == "qq.private.reply":
                 content = intent.model_dump(exclude_none=True)
-                self.store.execute(
-                    "UPDATE outbox SET content_json = %s, content_sha256 = %s WHERE message_id = "
-                    "%s",
-                    (encode(content), digest(content), message_id),
-                )
+                transport.set_content(self.store, message_id, content)
             return message_id

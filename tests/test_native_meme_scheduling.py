@@ -16,9 +16,9 @@ from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.meme_authority_fixture import environment
-from tests.test_meme_runtime import RULE, public_transport
-from tests.test_native_meme_host import capture, worker
-from tests.test_next_memes_discovery import resolver
+from tests.support.meme_runtime import RULE, public_transport
+from tests.support.native_meme_host import capture, worker
+from tests.support.next_memes_discovery import resolver
 
 
 @pytest.mark.parametrize("new_input", [False, True])

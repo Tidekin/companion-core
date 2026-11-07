@@ -12,38 +12,14 @@ from companion import budget, input_recall, live_text, paid_budget
 from companion.config import LiveTextHandoff
 from companion.model import ModelResponse
 from companion.privacy import epoch
-from companion.store import encode
-from companion_onebot_bridge.event_normalizer import normalize
-from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import run
-from tests.support.onebot_events import raw_event
-from tests.test_input_protocol import environment, notice, sign
-from tests.test_live_text_handoff import initial, journal_bytes, reference, stop_and_successor
-from tests.test_onebot_delivery import core_client
+from tests.support.handoff_recall_recovery import approve_only
+from tests.support.input_protocol import environment, notice
+from tests.support.live_text_handoff import initial, journal_bytes, reference, stop_and_successor
+from tests.support.onebot_delivery import core_client
 
 HANDOFF = "/internal/v1/live-text/handoff"
 ABORT = HANDOFF + "/abort"
-
-
-async def approve_only(client, config, plan, now):
-    raw = raw_event(1, time=int(now.timestamp()), text="撤回发生在入箱之前")
-    event = normalize(encode(raw), config, now=now.timestamp())
-    capture = sign(config, {
-        "kind": "authenticated_onebot_ws", "window_sha256": plan.sha256,
-        "event_id": event["event_id"], "source_event_id": event["source_event_id"],
-        "input_sha256": input_digest(event["payload"]),
-        "frame_sha256": hashlib.sha256(encode(raw).encode()).hexdigest(),
-        "evidence_sha256": "e" * 64, "identity_sha256": plan.value["identity_sha256"],
-        "config_sha256": plan.value["config_sha256"], "protocol_epoch": config.protocol_epoch,
-        "received_at": now.isoformat(), "occurred_at": event["occurred_at"],
-    }, live_text.CAPTURE_SIGNATURE_DOMAIN)
-    response = await client.post("/internal/v1/live-text/inputs/approve", json={
-        "window_sha256": plan.sha256, "event_id": event["event_id"],
-        "input_sha256": capture["input_sha256"], "evidence_sha256": "f" * 64,
-        "capture": capture,
-    })
-    assert response.status_code == 200, response.text
-    return event
 
 
 async def successor(client, core, config):
@@ -103,10 +79,10 @@ def test_signed_recall_before_inbox_can_prepare_without_recreating_erased_input(
             assert recalled.status_code == 200 and recalled.json()["state"] == "RECALLED"
             marker = live_text._meta(core.store, input_recall.marker_key(event["source_event_id"]))
             assert marker["state"] == "RECALLED" and marker["event_id"] == event["event_id"]
-            assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                   ("erased_event:" + event["event_id"],))["value"] == (
                                       marker["erasure_id"])
-            assert core.store.one("SELECT state FROM privacy_erasure_ledger WHERE erasure_id=?",
+            assert core.store.one('SELECT state FROM privacy_erasure_ledger WHERE erasure_id=%s',
                                   (marker["erasure_id"],)) == {"state": "COMPLETE"}
             assert core.ledger.read()[-1]["target_type"] == "input_recall"
             assert_no_inbox(core)
@@ -152,12 +128,12 @@ def test_missing_inbox_requires_complete_exact_independent_recall_proof(
                 live_text._put(core.store, key, {**source, "state": "RECALLED",
                     "erasure_id": "erase_forged", "event_id": event["event_id"],
                     "occurred_at": now.isoformat()})
-                core.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+                core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                                    ("erased_event:" + event["event_id"], "erase_forged"))
             elif case == "missing_marker":
-                core.store.execute("DELETE FROM runtime_meta WHERE key=?", (key,))
+                core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (key,))
             elif case == "wrong_event_marker":
-                core.store.execute("UPDATE runtime_meta SET value='erase_other' WHERE key=?",
+                core.store.execute("UPDATE runtime_meta SET value='erase_other' WHERE key=%s",
                                    ("erased_event:" + event["event_id"],))
             elif case == "missing_complete":
                 core.store.execute("DELETE FROM privacy_erasure_ledger")
@@ -235,7 +211,7 @@ def test_abort_is_authenticated_cancel_only_with_one_independent_stop_fence(core
                 "ABORTED")
             assert live_text._meta(core.store, live_text.BINDING)["plan_sha256"] == old.plan_sha256
             assert live_text.stopped(core.store, old.plan_sha256)
-            assert not core.store.one("SELECT 1 FROM model_budget_windows WHERE window_id=?",
+            assert not core.store.one('SELECT 1 FROM model_budget_windows WHERE window_id=%s',
                                       (new.window_id,))
             assert_no_inbox(core)
             after = snapshot(core)
@@ -262,16 +238,20 @@ def test_abort_rejects_missing_changed_or_used_custody_without_writes(core, tmp_
     old = initial(core, tmp_path)
     _, new = stop_and_successor(core, tmp_path)
     if case == "no_stop":
-        core.store.execute("DELETE FROM runtime_meta WHERE key IN (?,?)",
+        core.store.execute('DELETE FROM runtime_meta WHERE key IN (%s,%s)',
                            (live_text.STOP + old.plan_sha256, "live_text_stopped"))
     elif case == "no_handoff":
         core.settings.live_text_window = new.model_copy(update={"handoff": None})
     elif case == "missing_binding":
-        core.store.execute("DELETE FROM runtime_meta WHERE key=?", (live_text.BINDING,))
+        core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (live_text.BINDING,))
     elif case == "wrong_owner":
         core.store.execute("UPDATE runtime_meta SET value='10009' WHERE key='owner_qq_id'")
     elif case == "wrong_epoch":
-        core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch','1')")
+        core.store.execute(
+            'INSERT INTO runtime_meta (key,value) VALUES '
+            "('privacy_epoch','1') ON CONFLICT(key) DO UPDATE SET "
+            'value=excluded.value,record_sequence=DEFAULT'
+        )
     elif case == "wrong_budget_head":
         core.settings.live_text_window = new.model_copy(update={
             "handoff": new.handoff.model_copy(update={"budget_journal_head_sha256": "0" * 64}),
@@ -391,7 +371,7 @@ def test_abort_independent_stop_fence_survives_loss_of_database_abort_marker(
                 if rollback == "database":
                     previous.backup(core.store.db)
                 else:
-                    core.store.execute("DELETE FROM runtime_meta WHERE key=?",
+                    core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
                                        (live_text.HISTORY + new.plan_sha256,))
                 before = snapshot(core)
                 rejected = await client.post(HANDOFF, json=reference(new).model_dump())

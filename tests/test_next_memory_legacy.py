@@ -1,5 +1,4 @@
 """Read-time expiry uses the same legacy correction provenance as Ledger cleanup."""
-
 import pytest
 from cryptography.fernet import Fernet
 
@@ -8,7 +7,7 @@ from companion.core import Core
 from companion.memory_context import MemoryContext, MemorySources
 from tests.conftest import ingest
 from tests.postgres_fixture import isolated_database
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
 
 
 def delayed_correction(core, support):

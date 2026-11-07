@@ -17,9 +17,15 @@ from companion.store import after, encode
 from companion_onebot_bridge import owner_notices
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.bili_video import (
+    final_result,
+    model_response,
+    paid_media,
+    phase_usage,
+    upload_body,
+)
 from tests.support.failure_notice import assert_failure_notice
-from tests.test_bili_video import final_result, model_response, paid_media, phase_usage, upload_body
-from tests.test_owner_recall_bridge import recall_frame
+from tests.support.owner_recall_bridge import recall_frame
 
 
 @pytest.mark.parametrize(
@@ -67,40 +73,40 @@ def test_original_visual_result_checked_at_final_model_boundary(
                 event_id = visual["output_event_id"]
                 if boundary == "source":
                     core.store.execute(
-                        "UPDATE events SET source=? WHERE event_id=?",
+                        'UPDATE events SET source=%s WHERE event_id=%s',
                         ("observation.bilibili", visual["owner_event_id"]),
                     )
                 elif boundary in {"body", "coherent_body"}:
                     row = core.store.one(
-                        "SELECT body_json FROM events WHERE event_id=?", (event_id,)
+                        'SELECT body_json FROM events WHERE event_id=%s', (event_id,)
                     )
                     body = json.loads(row["body_json"])
                     body["text"] = body["text"].replace("蓝色区域", "篡改区域")
                     core.store.execute(
-                        "UPDATE events SET body_json=? WHERE event_id=?", (encode(body), event_id)
+                        'UPDATE events SET body_json=%s WHERE event_id=%s', (encode(body), event_id)
                     )
                     if boundary == "coherent_body":
                         core.store.execute(
-                            "UPDATE observations SET source_sha256=? WHERE event_id=?",
+                            'UPDATE observations SET source_sha256=%s WHERE event_id=%s',
                             (hashlib.sha256(body["text"].encode()).hexdigest(), event_id),
                         )
                         core.store.execute(
-                            "UPDATE bili_video_phases SET analysis_json=? WHERE phase='preview'",
+                            "UPDATE bili_video_phases SET analysis_json=%s WHERE phase='preview'",
                             (encode({"analysis": "原采样帧中的篡改区域", "need_clips": False}),),
                         )
                 elif boundary == "evidence":
                     row = core.store.one(
-                        "SELECT evidence_json FROM observations WHERE event_id=?", (event_id,)
+                        'SELECT evidence_json FROM observations WHERE event_id=%s', (event_id,)
                     )
                     evidence = json.loads(row["evidence_json"])
                     evidence["bili_video"]["phases"][0]["payload_sha256"] = "0" * 64
                     core.store.execute(
-                        "UPDATE observations SET evidence_json=? WHERE event_id=?",
+                        'UPDATE observations SET evidence_json=%s WHERE event_id=%s',
                         (encode(evidence), event_id),
                     )
                 elif boundary == "ttl":
                     core.store.execute(
-                        "UPDATE events SET ingested_at=? WHERE event_id=?",
+                        'UPDATE events SET ingested_at=%s WHERE event_id=%s',
                         (
                             after(
                                 core.clock(), -86400 * (core.settings.raw_event_retention_days + 1)
@@ -115,7 +121,7 @@ def test_original_visual_result_checked_at_final_model_boundary(
                     receipt = json.loads(row["response_json"])
                     receipt["receipt_sha256"] = "0" * 64
                     core.store.execute(
-                        "UPDATE bili_video_phases SET response_json=? WHERE phase='preview'",
+                        "UPDATE bili_video_phases SET response_json=%s WHERE phase='preview'",
                         (encode(receipt),),
                     )
                 elif boundary == "paid":
@@ -124,7 +130,7 @@ def test_original_visual_result_checked_at_final_model_boundary(
                     )
                 elif boundary == "result_ids":
                     core.store.execute(
-                        "UPDATE reading_attempts SET result_event_ids_json=? WHERE request_id=?",
+                        'UPDATE reading_attempts SET result_event_ids_json=%s WHERE request_id=%s',
                         (encode([visual["source_event_id"]]), item["request_id"]),
                     )
                 elif boundary == "stop":
@@ -169,7 +175,7 @@ def test_original_visual_result_checked_at_final_model_boundary(
                 )
                 assert len([row for row in proof if row["kind"] == "reader"]) == 2
                 assert core.store.one(
-                    "SELECT 1 FROM job_sources WHERE event_id=?", (visual["output_event_id"],)
+                    'SELECT 1 FROM job_sources WHERE event_id=%s', (visual["output_event_id"],)
                 )
             else:
                 if boundary in {"source", "stop", "recall"}:
@@ -177,13 +183,18 @@ def test_original_visual_result_checked_at_final_model_boundary(
                 else:
                     assert_failure_notice(core)
                 final = core.store.rows(
-                    "SELECT m.request_id,m.state,m.billed_micro_usd,a.io_started_at "
-                    "FROM model_usage m JOIN model_admissions a USING(request_id) "
-                    "WHERE scenario='chat' ORDER BY m.rowid DESC LIMIT 1"
+
+                        'SELECT m.request_id,m.state,m.billed_micro_usd,a.io_'
+                        'started_at FROM model_usage m JOIN model_admissions '
+                        "a USING(request_id) WHERE scenario='chat' ORDER BY "
+                        'm.record_sequence DESC LIMIT 1'
+
                 )[0]
                 assert final["state"] == "SETTLED" and final["billed_micro_usd"] == 0
-                assert core.store.one("SELECT 1 FROM audit_log WHERE entity_id=? "
-                    "AND action='model.not_dispatched'", (final["request_id"],))
+                assert core.store.one((
+                    'SELECT 1 FROM audit_log WHERE entity_id=%s AND '
+                    "action='model.not_dispatched'"
+                ), (final["request_id"],))
 
     run(scenario())
 
@@ -230,7 +241,7 @@ def test_completed_job_reader_proof_revalidates_readonly_before_delivery(core, t
                 assert await worker.run_once("original-visual-completion")
             job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e "
                                  "USING(event_id) WHERE j.state='SUCCEEDED'")
-            saved = core.store.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+            saved = core.store.one('SELECT snapshots_json FROM agent_conversations WHERE job_id=%s',
                                    (job["job_id"],))["snapshots_json"]
             snapshots = json.loads(saved)
             usage = core.store.rows("SELECT * FROM model_usage")
@@ -239,34 +250,41 @@ def test_completed_job_reader_proof_revalidates_readonly_before_delivery(core, t
             assert core.store.db.total_changes == changed
             visual = core.store.one("SELECT * FROM bili_video_items")
             if drift == "body":
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                     (encode({"text": "被更换的视觉正文"}), visual["output_event_id"]))
             elif drift == "phase":
-                core.store.execute("UPDATE bili_video_phases SET payload_sha256=? "
-                                   "WHERE phase='preview'", ("0" * 64,))
+                core.store.execute((
+                    'UPDATE bili_video_phases SET payload_sha256=%s WHERE '
+                    "phase='preview'"
+                ), ("0" * 64,))
             elif drift == "ttl":
-                core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s',
                     (after(core.clock(), -86400 * (core.settings.raw_event_retention_days + 1)),
                      visual["output_event_id"]))
             elif drift == "source":
-                core.store.execute("UPDATE events SET source=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET source=%s WHERE event_id=%s',
                     ("observation.bilibili", visual["owner_event_id"]))
             elif drift == "receipt":
                 core.store.execute("UPDATE bili_video_phases SET response_json='{}' "
                                    "WHERE phase='preview'")
             elif drift == "binding":
-                core.store.execute("DELETE FROM exploration_evidence WHERE request_id IN "
-                    "(SELECT read_request_id FROM content_items WHERE item_id=?) AND event_id=?",
+                core.store.execute((
+                    'DELETE FROM exploration_evidence WHERE request_id IN '
+                    '(SELECT read_request_id FROM content_items WHERE '
+                    'item_id=%s) AND event_id=%s'
+                ),
                     (visual["item_id"], visual["source_event_id"]))
             else:
-                core.store.execute("UPDATE reading_attempts SET result_event_ids_json='[]' "
-                                   "WHERE request_id=?", (item["request_id"],))
+                core.store.execute((
+                    "UPDATE reading_attempts SET result_event_ids_json='[]' "
+                    'WHERE request_id=%s'
+                ), (item["request_id"],))
             changed = core.store.db.total_changes
             with pytest.raises(CoreError):
                 revalidate_results(core.store, core.settings, core.clock, job, snapshots)
             assert core.store.db.total_changes == changed
             assert core.store.rows("SELECT * FROM model_usage") == usage
-            assert core.store.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+            assert core.store.one('SELECT snapshots_json FROM agent_conversations WHERE job_id=%s',
                                    (job["job_id"],))["snapshots_json"] == saved
             assert len(provider.requests) == 1
             assert core.store.one("SELECT state FROM outbox") == {"state": "PENDING"}

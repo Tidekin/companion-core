@@ -16,7 +16,7 @@ from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeCon
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 def test_native_campaign_exam_keeps_memory_and_settled_liability(core, tmp_path):

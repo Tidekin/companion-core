@@ -21,13 +21,19 @@ from zoneinfo import ZoneInfo
 import httpx
 from pydantic import Field
 
-from companion import cloud_budget, owner_authority, owner_delivery, paid_budget, reply_revision
+from companion import (
+    cloud_budget,
+    owner_authority,
+    owner_delivery,
+    paid_budget,
+    reply_revision,
+    transport,
+)
 from companion.budget import total_monthly
 from companion.contracts import CoreError
 from companion.media_provider import HTTPImageGenerator
 from companion.owner_authority_protocol import AuthorityReference
-from companion.store import encode, uid
-from companion.transport import digest
+from companion.store import uid
 from companion_meme_protocol import validate_bytes
 
 SCENARIO = "image_generation"
@@ -510,14 +516,9 @@ def attach(store, job, message_ids, now):
     # A generated picture replaces a meme pick; one image per QQ message.
     content.pop("image", None)
     content["generated_image"] = reference(row)
-    store.execute(
-        "UPDATE outbox SET content_json = %s, content_sha256 = %s WHERE message_id = %s",
-        (encode(content), digest(content), message_id),
-    )
-    store.execute(
-        "UPDATE generated_images SET message_id = %s, updated_at = %s WHERE image_id = %s",
-        (message_id, now, row["image_id"]),
-    )
+    transport.set_content(store, message_id, content)
+    store.execute('UPDATE generated_images SET message_id=%s,updated_at=%s WHERE image_id=%s',
+                  (message_id, now, row["image_id"]))
     return message_id
 
 

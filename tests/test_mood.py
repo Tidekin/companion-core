@@ -14,37 +14,17 @@ from companion.mood import RESET_KEY, MoodService, reset_record, validate_reset_
 from companion.store import Store, encode
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.support.cognition_goal_steps import finish_record, retained_plan
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import generate
+from tests.support.mood import erase, feedback
 from tests.support.owner_authority import activate
-from tests.test_cognition_goal_steps import finish_record, retained_plan
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import generate
-from tests.test_owner_authority import prepare
-from tests.test_watch_ledger import JUDGEMENT, Provider, enable, observe, step
-
-
-def feedback(core, number=1, text="这个回答很有帮助"):
-    core.settings.mood_enabled = True
-    ingest(core, number * 2, "一起看看这个问题")
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (f"evt_test_{number * 2}",))
-    mid = enqueue(
-        core.store, event["event_id"], event["conversation_id"], "有依据的回答", core.clock()
-    )
-    core.store.execute(
-        "UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?", (core.clock(), mid)
-    )
-    core.clock.advance(1)
-    ingest(core, number * 2 + 1, text)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    return f"evt_test_{number * 2 + 1}"
+from tests.support.owner_authority_setup import prepare
+from tests.support.watch_ledger import JUDGEMENT, Provider, enable, observe, step
 
 
 def pleasure(core, layer="expression"):
     return core.mood.snapshot()[layer]["pleasure"]
-
-
-def erase(core, ids):
-    with core.store.transaction():
-        core.ledger.expire_events(core.store, ids, core.clock())
 
 
 def test_continuity_inertia_conflicting_events_and_hourly_decay(core):
@@ -110,10 +90,10 @@ def test_no_inferred_owner_emotion_silence_fiction_or_preferences(core, text):
 def test_feedback_requires_actual_private_interaction_and_live_ancestry(core, damage):
     key = feedback(core)
     if damage == "actor":
-        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=?", (key,))
+        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=%s", (key,))
     elif damage == "quote":
         core.store.execute(
-            "UPDATE events SET body_json=? WHERE event_id=?",
+            'UPDATE events SET body_json=%s WHERE event_id=%s',
             (encode({"text": "这个回答很有帮助", "quote": {"text": "引用"}}), key),
         )
     elif damage == "private":
@@ -151,7 +131,7 @@ def test_source_forgotten_during_chat_cannot_deliver_old_mood(core):
     job = core.store.one("SELECT job_id FROM jobs WHERE event_id='evt_test_100'")
     core.model.callback = lambda: erase(core, [key])
     assert run(core.run_once(job_id=job["job_id"]))
-    state = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+    state = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                            (job["job_id"],))
     assert state == {"state": "CANCELLED", "last_error_code": "REPLY_SOURCE_RECALLED"}
     assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id='evt_test_100'")
@@ -175,12 +155,12 @@ def test_delayed_ingestion_uses_actual_event_time_and_cannot_cross_reset(core):
     key = feedback(core)
     original = core.clock()
     core.clock.advance(6 * 3600)
-    core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?", (core.clock(), key))
+    core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s', (core.clock(), key))
     assert pleasure(core) == pytest.approx(.02, abs=1e-6)
     assert core.mood.snapshot()["signals"][0]["at"] == original
     core.mood.control("clear", core.settings.owner_qq_id, request_id="late-feedback")
     core.clock.advance(1)
-    core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?", (core.clock(), key))
+    core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s', (core.clock(), key))
     assert core.mood.snapshot()["signals"] == []
 
 
@@ -191,7 +171,7 @@ def test_uncertain_new_reply_cannot_retarget_feedback_to_an_older_sent_reply(cor
     event = core.store.one("SELECT * FROM events WHERE event_id='evt_test_10'")
     mid = enqueue(core.store, event["event_id"], event["conversation_id"],
                   "这一次的回答", core.clock())
-    core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=?", (mid,))
+    core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=%s", (mid,))
     core.clock.advance(1)
     ingest(core, 11, "这个回答很有帮助")
     assert [item["event_id"] for item in core.mood.snapshot()["signals"]] == [first]
@@ -264,17 +244,17 @@ def test_goal_success_needs_real_step_receipts_and_simulation_never_counts(core)
     goal, steps = retained_plan(core)
     results = [finish_record(core, step, i) for i, step in enumerate(steps, 1)]
     core.store.execute(
-        "UPDATE goals SET state='DONE',result_event_id=? WHERE goal_id=?", (results[-1], goal)
+        "UPDATE goals SET state='DONE',result_event_id=%s WHERE goal_id=%s", (results[-1], goal)
     )
     assert core.mood.snapshot()["signals"][0]["reason"] == "VERIFIED_GOAL_COMPLETION"
     assert core.mood.snapshot()["expression"]["dominance"] > 0
     core.store.execute(
-        "UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=?", (steps[0],)
+        "UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=%s", (steps[0],)
     )
     assert core.mood.snapshot()["signals"] == []
-    core.store.execute("UPDATE goal_steps SET state='DONE' WHERE step_id=?", (steps[0],))
+    core.store.execute("UPDATE goal_steps SET state='DONE' WHERE step_id=%s", (steps[0],))
     core.store.execute(
-        "UPDATE events SET source='observation.simulation' WHERE event_id=?", (results[0],)
+        "UPDATE events SET source='observation.simulation' WHERE event_id=%s", (results[0],)
     )
     assert core.mood.snapshot()["signals"] == []
 
@@ -283,7 +263,7 @@ def test_watch_uses_settled_judgement_not_self_report_or_title(core, tmp_path):
     import httpx
 
     from companion.model import ModelClient
-    from tests.test_exploration import configure
+    from tests.support.exploration import configure
 
     configure(core)
     enable(core)
@@ -341,7 +321,7 @@ def test_serious_context_uses_existing_expression_guard(core):
 def test_life_job_revalidates_frozen_mood_during_model_and_readback(core):
     import json
 
-    from tests.test_life_topics import configure, due, proposal
+    from tests.support.life_topics import configure, due, proposal
 
     configure(core)
     feedback_id = feedback(core, 2)
@@ -356,9 +336,9 @@ def test_life_job_revalidates_frozen_mood_during_model_and_readback(core):
     core.model.callback = elapsed
     job = due(core)
     assert job and run(core.run_once(job_id=job))
-    row = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job,))
+    row = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s', (job,))
     assert row == {"state": "SUCCEEDED", "last_error_code": None}
-    result = core.store.one("SELECT state FROM life_activity_results WHERE job_id=?", (job,))
+    result = core.store.one('SELECT state FROM life_activity_results WHERE job_id=%s', (job,))
     assert result["state"] == "SHADOW"
     assert core.life_topics.preview(core.settings.owner_qq_id)["items"]
 

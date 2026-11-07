@@ -7,32 +7,11 @@ import pytest
 
 from companion_onebot_bridge import images
 from tests.conftest import run
+from tests.support.image_connect_recovery import ConnectThenGet
+from tests.support.live_image_input import options
 from tests.support.native_images import image_host, upload
 from tests.support.onebot_events import raw_event
-from tests.test_live_image_input import options
-from tests.test_onebot_images import URL, image_segment
-
-
-class ConnectThenGet(httpx.AsyncBaseTransport):
-    def __init__(self, delegate, *, failure="tcp", addresses=None):
-        self.delegate, self.failure = delegate, failure
-        self.addresses = addresses if addresses is not None else []
-        self.gets = 0
-
-    async def handle_async_request(self, request):
-        self.addresses.append(request.url.host)
-        trace = request.extensions["trace"]
-        if len(self.addresses) == 1:
-            if self.failure in {"tcp", "tls"}:
-                name = "connect_tcp" if self.failure == "tcp" else "start_tls"
-                await trace("connection." + name + ".failed", {})
-            elif self.failure == "dispatched":
-                await trace("http11.send_request_headers.started", {})
-                self.gets += 1
-            raise httpx.ConnectError(URL, request=request)
-        await trace("http11.send_request_headers.started", {})
-        self.gets += 1
-        return await self.delegate.handle_async_request(request)
+from tests.support.onebot_images import URL, image_segment
 
 
 @pytest.mark.parametrize("failure", ["tcp", "tls", "dispatched", "unproven"])

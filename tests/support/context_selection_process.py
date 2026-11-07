@@ -46,8 +46,11 @@ def run_worker(settings_path, now):
     async def once(self, *args, **kwargs):
         await original_run(self, *args, **kwargs)
         print(json.dumps({"pid": os.getpid(), "calls": calls, "jobs": self.store.rows(
-            "SELECT job_id,state,last_error_code FROM jobs ORDER BY rowid"),
-            "usage": self.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid")}),
+            'SELECT job_id,state,last_error_code FROM jobs ORDER BY record_sequence'),
+            "usage": self.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            )}),
             flush=True)
         raise Finished
 

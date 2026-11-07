@@ -11,9 +11,9 @@ import pytest
 from companion_onebot_bridge import journal, owner_handoff, profile_probe
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
-from tests.test_bridge_journal_cache import chain, write
-from tests.test_bridge_owner_handoff import core_handler
-from tests.test_bridge_owner_runtime import config as config
+from tests.support.bridge_journal_cache import chain, write
+from tests.support.bridge_owner_handoff import core_handler
+from tests.support.bridge_owner_runtime import config as config
 
 
 @pytest.fixture(autouse=True)
@@ -170,7 +170,7 @@ def test_daily_appends_reuse_history_but_a_new_stop_replays_it(config, monkeypat
 
 @pytest.mark.parametrize("damage", ["journal", "capture", "inbox"])
 def test_historical_proof_changes_invalidate_warm_history(config, damage):
-    from tests.test_bridge_owner_carry_handoff import (
+    from tests.support.bridge_owner_carry_handoff import (
         capture,
         client,
         handler,

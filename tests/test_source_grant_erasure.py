@@ -9,8 +9,8 @@ from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
 from companion.store import Store
 from tests.conftest import event
-from tests.test_observations import observation
-from tests.test_source_grants import accepted, derived_records, prepare
+from tests.support.observation_capture import observation
+from tests.support.source_grants import accepted, derived_records, prepare
 
 
 def corrected_source_memory(core):
@@ -26,7 +26,7 @@ def corrected_source_memory(core):
         )["memory_id"]
         memory_ids.append(corrected)
         correction = core.store.one(
-            "SELECT event_id FROM memory_evidence WHERE memory_id=?", (corrected,)
+            'SELECT event_id FROM memory_evidence WHERE memory_id=%s', (corrected,)
         )["event_id"]
         corrections.append(correction)
         core.store.insert(
@@ -36,7 +36,7 @@ def corrected_source_memory(core):
             content_hash="b" * 64,
             vector=b"\0" * 16,
         )
-    core.store.execute("UPDATE diary_evidence SET event_id=?", (corrections[-1],))
+    core.store.execute('UPDATE diary_evidence SET event_id=%s', (corrections[-1],))
     core.settings.observation_adapters["derived"] = ObservationAdapterConfig(
         source="simulation", token="derived-test-" * 4
     )
@@ -119,12 +119,15 @@ def test_complete_grant_projection_reapplies_stale_recorded_successor(core):
     with core.store.transaction():
         # Keep the root redacted, COMPLETE projection and grant tombstone intact.
         core.store.execute(
-            "UPDATE memories SET content='STALE_PRIVATE_SUCCESSOR',status='CONFIRMED' "
-            "WHERE memory_id=?",
+            (
+                'UPDATE memories SET '
+                "content='STALE_PRIVATE_SUCCESSOR',status='CONFIRMED' WHERE "
+                'memory_id=%s'
+            ),
             (memory_ids[-1],),
         )
         core.store.execute(
-            "UPDATE events SET body_json=?,redacted=0 WHERE event_id=?",
+            'UPDATE events SET body_json=%s,redacted=0 WHERE event_id=%s',
             ('{"text":"STALE_PRIVATE_CORRECTION"}', event_ids[-2]),
         )
     core.ledger.replay(core.store)
@@ -148,11 +151,11 @@ def test_legacy_complete_with_lost_provenance_requires_isolated_review(
         core.observations.grants.forget(snapshot.grant_id, core.ledger)
     record = core.ledger.read()[-1]
     assert record["memory_ids"] == [] and record["event_ids"] == [event_ids[0]]
-    assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (memory_ids[0],)) == {
+    assert core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_ids[0],)) == {
         "status": "FORGOTTEN"
     }
-    assert not core.store.rows("SELECT * FROM memory_evidence WHERE memory_id=?", (memory_ids[0],))
-    assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (memory_ids[-1],)) == {
+    assert not core.store.rows('SELECT * FROM memory_evidence WHERE memory_id=%s', (memory_ids[0],))
+    assert core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_ids[-1],)) == {
         "status": "CONFIRMED"
     }
     ledger_bytes = core.ledger.path.read_bytes()
@@ -174,7 +177,7 @@ def test_legacy_complete_with_lost_provenance_requires_isolated_review(
         core.store.rows("SELECT event_id,body_json,redacted FROM events ORDER BY event_id")
         == before
     )
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (unrelated,)) == {
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (unrelated,)) == {
         "redacted": 0
     }
     assert core.ledger.path.read_bytes() == ledger_bytes

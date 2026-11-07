@@ -9,8 +9,8 @@ from companion import evaluation, paid_budget
 from companion.contracts import CoreError
 from companion.model import model_payload
 from scripts import evaluate_r1_conversation as experiment
-from tests.test_evaluation import authorize, prepare, response, result, work
-from tests.test_evaluation_measurement_v2 import rehash
+from tests.support.evaluation import authorize, prepare, response, result, work
+from tests.support.evaluation_measurement_v2 import rehash
 
 
 def synthetic(core, tmp_path, *, cases=2, repetitions=3, version=2):
@@ -57,7 +57,7 @@ def test_synthetic_plan_runs_in_batches_and_never_repeats_a_request(core, tmp_pa
         return response(req)
 
     assert work(core, observed)
-    job = core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?", (submitted["job_id"],))
+    job = core.store.one('SELECT state,attempts FROM jobs WHERE job_id=%s', (submitted["job_id"],))
     assert job == {"state": "QUEUED", "attempts": 0} and len(wire) == evaluation.BATCH
     assert result(core, submitted)["state"] == "QUEUED"
     assert work(core, observed)
@@ -77,7 +77,7 @@ def test_missing_result_after_a_batch_stops_instead_of_repaying(core, tmp_path):
     core.store.execute("DELETE FROM evaluation_results WHERE ordinal=5")
     work(core, lambda req: wire.append(1) or response(req))
     assert len(wire) == evaluation.BATCH
-    assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+    assert core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                           (submitted["job_id"],)) == {
         "state": "FAILED", "last_error_code": "EVALUATION_PREVIOUS_ATTEMPT_REVIEW_REQUIRED"}
 

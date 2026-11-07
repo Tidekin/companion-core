@@ -11,6 +11,7 @@ from companion import meme_assets, meme_policy, owner_authority, owner_input, re
 from companion import meme_index as index
 from companion.contracts import CoreError
 from companion.expression import MemeOffer, meme_query
+from companion.meme_core import OFFER, freeze_offer
 from companion.privacy import epoch
 from companion.store import after, encode
 from companion_meme_protocol import (
@@ -23,7 +24,6 @@ from companion_meme_protocol import (
 )
 
 SHA = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
-OFFER = "meme_offer:"
 # One unconsumed inventory item can no longer back a new offer. The current chat's own
 # authority, source and revision are checked separately and still stop the turn.
 INVENTORY_UNAVAILABLE = frozenset(
@@ -616,7 +616,7 @@ class MemeRetrieval:
                 "ranking": ranking,
             }
             self._bounded(value)
-            s.insert("runtime_meta", key=OFFER + job["event_id"], value=encode(value))
+            freeze_offer(s, job["event_id"], value)
             self.check(job)
             if not query["intent"] or selected or ambient:
                 return  # Optional ambient misses are routine, never a replenish signal.

@@ -20,8 +20,8 @@ from companion_onebot_bridge.images import fetch_image, original_images
 from source_reader.heybox import HeyboxReader, SourceAPI
 from source_reader.network import PublicHTTP, ReadBudget, ReadFailure
 from tests.conftest import ingest, run
-from tests.test_content import POST, enable
-from tests.test_executive import TOKEN, envelope
+from tests.support.content import POST, enable
+from tests.support.executive import TOKEN, envelope
 
 PATHS = ("public_reader", "source_reader", "qq_image", "link_image")
 BODY = json.dumps(
@@ -138,7 +138,7 @@ def test_content_enabled_commands_and_following_chat_complete(core, command):
             core.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")["value"] == "1"
         )
     assert run(core.run_once())
-    assert core.store.rows("SELECT state FROM jobs ORDER BY rowid") == [
+    assert core.store.rows('SELECT state FROM jobs ORDER BY record_sequence') == [
         {"state": "SUCCEEDED"},
         {"state": "SUCCEEDED"},
     ]
@@ -151,7 +151,7 @@ def test_content_enabled_incomplete_command_falls_back_to_chat(core):
     ingest(core, 2, "普通后续对话")
     assert run(core.run_once())
     assert run(core.run_once())
-    assert core.store.rows("SELECT state FROM jobs ORDER BY rowid") == [
+    assert core.store.rows('SELECT state FROM jobs ORDER BY record_sequence') == [
         {"state": "SUCCEEDED"},
         {"state": "SUCCEEDED"},
     ]

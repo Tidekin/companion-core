@@ -13,12 +13,12 @@ from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.rich_input import input_digest
 from companion_onebot_bridge.window import digest
 from tests.conftest import run
+from tests.support.live_image_input import options
+from tests.support.onebot_capture import source_window
 from tests.support.onebot_events import config, raw_event
-from tests.test_live_image_input import options
-from tests.test_onebot_capture import source_window
-from tests.test_onebot_images import URL, image_segment
-from tests.test_paid_image_budget import image_approval, image_messages
-from tests.test_qq_rich_input import card, rich_event
+from tests.support.onebot_images import URL, image_segment
+from tests.support.paid_image_budget import image_approval, image_messages
+from tests.support.qq_rich_input import card, rich_event
 
 
 @pytest.mark.parametrize("text", [None, "请看这张图"])

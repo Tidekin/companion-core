@@ -7,7 +7,7 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from companion_onebot_bridge.owner_handoff import terminal
-from tests.test_owner_input import captured, inbound
+from tests.support.owner_input import captured, inbound
 
 
 def test_discovered_link_can_finish_handoff_through_native_http(core, tmp_path, monkeypatch):
@@ -17,27 +17,28 @@ def test_discovered_link_can_finish_handoff_through_native_http(core, tmp_path, 
 
     from companion import reply_revision
     from tests.conftest import run
-    from tests.test_reading_followup import URL, admit, window
+    from tests.support.exploration import URL
+    from tests.support.reading_followup import admit, window
 
     core.settings.control_token = SecretStr("synthetic-discovered-link-control")
 
     async def scenario():
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
             original, _ = await admit(client, core, config, plan, 1, "看看 " + URL)
-            item = core.store.one("SELECT * FROM content_items WHERE owner_event_id=?",
+            item = core.store.one('SELECT * FROM content_items WHERE owner_event_id=%s',
                                   (original["event_id"],))
             assert item["state"] == "WAITING" and item["read_request_id"] is None
             assert core.content.status(original["event_id"])["items"][0]["state"] == "DISCOVERED"
             _, accepted = await admit(client, core, config, plan, 2, "先不读了")
-            job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (accepted["job_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (accepted["job_id"],))
             reply_revision.remember_sources(core.store, job, [original["event_id"]])
-            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                (accepted["job_id"],))
             stopped = await client.post("/internal/v1/owner-authority/stop", json={
                 "operation_id": "stop-discovered-link", "authority": plan.authority},
                 headers={"Authorization": "Bearer synthetic-discovered-link-control"})
             assert stopped.status_code == 200, stopped.text
-            saved = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            saved = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                     (owner_input.INPUT + original["event_id"],))
             capture = json.loads(saved["value"])["capture"]
             before = list(core.store.db.iterdump())
@@ -64,7 +65,7 @@ def test_only_unstarted_native_link_discovery_is_not_pending(core, tmp_path, cha
     capture, _ = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
     accepted = core.ingest(inbound(core, capture), "discovered-link-state")
-    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?", (accepted["job_id"],))
+    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=%s", (accepted["job_id"],))
     owner_authority.stop(core.store, core.settings, core.clock,
         AuthorityStop(operation_id="stop-discovery-proof", authority=capture.authority))
     now = core.clock()
@@ -87,13 +88,13 @@ def test_native_input_state_requires_original_capture_and_terminal_work(core, tm
     pending = owner_input_state.read(core.store, core.settings, capture)
     assert not pending["terminal"] and pending["unsettled_work"]
     assert pending["reply_revision"] == 1
-    core.store.execute("UPDATE events SET reply_revision=3 WHERE event_id=?", (capture.event_id,))
+    core.store.execute('UPDATE events SET reply_revision=3 WHERE event_id=%s', (capture.event_id,))
     revised = owner_input_state.read(core.store, core.settings, capture)
     assert revised["reply_revision"] == 3
     assert revised["work_sha256"] == pending["work_sha256"]
     owner_authority.stop(core.store, core.settings, core.clock,
         AuthorityStop(operation_id="stop-input-state", authority=capture.authority))
-    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?", (source["job_id"],))
+    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=%s", (source["job_id"],))
     result = owner_input_state.read(core.store, core.settings, capture)
     assert result["terminal"] and result["authority"] == capture.authority
     assert result["input_sha256"] == capture.input_sha256
@@ -120,14 +121,14 @@ def test_unadmitted_stopped_input_has_zero_revision_without_making_work(core, tm
 
 
 def test_native_input_state_never_treats_unknown_delivery_as_complete(core, tmp_path):
-    from tests.test_owner_delivery_reconciliation import pending
+    from tests.support.owner_delivery_reconciliation import pending
 
     proof, _ = pending(core, tmp_path)
     import json
 
     from companion.owner_authority_protocol import OwnerCapture
 
-    saved = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    saved = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                            (owner_input.INPUT + proof["event_id"],))
     capture = OwnerCapture.model_validate(json.loads(saved["value"])["capture"])
     result = owner_input_state.read(core.store, core.settings, capture)
@@ -139,8 +140,8 @@ def test_unknown_or_unconfirmed_source_work_cannot_authorize_handoff(core, tmp_p
     capture, _ = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
     accepted = core.ingest(inbound(core, capture), "unknown-source-work")
-    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?", (accepted["job_id"],))
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
+    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=%s", (accepted["job_id"],))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (capture.event_id,))
     now = core.clock()
     if kind in {"content", "reader", "video"}:
         core.store.insert("exploration_requests",
@@ -193,7 +194,7 @@ def test_native_agent_read_link_is_judged_by_its_exploration_request(core, tmp_p
     capture, _ = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
     accepted = core.ingest(inbound(core, capture), "agent-read-link-state")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (accepted["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (accepted["job_id"],))
     owner_authority.stop(core.store, core.settings, core.clock,
         AuthorityStop(operation_id="stop-agent-read-link", authority=capture.authority))
     now = core.clock()
@@ -217,20 +218,20 @@ def test_a_reply_cleared_by_a_later_erasure_keeps_the_input_state_readable(core,
     # current input state then failed OWNER_DELIVERY_BINDING_REQUIRED, blocking handoff.
     import json
 
+    from companion import transport
     from companion.owner_authority_protocol import OwnerCapture
-    from companion.privacy import ErasureLedger
-    from tests.test_owner_delivery_reconciliation import pending
+    from tests.support.owner_delivery_reconciliation import pending
 
     proof, _ = pending(core, tmp_path)
-    saved = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    saved = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                            (owner_input.INPUT + proof["event_id"],))
     capture = OwnerCapture.model_validate(json.loads(saved["value"])["capture"])
     before = owner_input_state.read(core.store, core.settings, capture)
     core.clock.advance(1)
     if erasure:
-        core.store.execute("INSERT INTO privacy_erasure_ledger VALUES (?,?,?,?,?,?)",
+        core.store.execute('INSERT INTO privacy_erasure_ledger VALUES (%s,%s,%s,%s,%s,%s)',
                            ("erase_test", "memory", "mem_test", core.clock(), 1, "COMPLETE"))
-    core.store.execute(ErasureLedger.clear_reply_sql())
+    transport.revoke_deliveries(core.store, "1", erase_content=True)
     if erasure:
         after = owner_input_state.read(core.store, core.settings, capture)
         assert after["terminal"] == before["terminal"]

@@ -1,33 +1,34 @@
-# 模块边界与 v0.4 取舍
+# 当前运行拓扑与模块边界
 
-实施依据是提供的 `Companion_Core_v0.3_Contract_Package.zip`。原合同说明保存在 `docs/design-v0.3/`；`db/reference-v0.3.sql` 是原始 DDL，生产初始化通过 Alembic 完成。
-
-## 依赖方向
+主人私聊从 OneBot Bridge 进入 Core。API、聊天 worker、Life worker 及按需启用的内容和执行 worker 共享 Core 数据库。部署服务名及启动参数见[主 Compose](../compose.yaml)，连接配置见[部署说明](deployment.md)。
 
 ```text
-QQ / NapCat → AstrBot bridge ── HTTP v1 ──→ API
-                                              │
-                                      Core orchestration
-                                      /       |        \
-                                Memory     Transport    Budget
-                                   \          |          /
-                                        SQLite Store
-
-聊天 Worker → Core → 可替换的 ModelClient → 模型 HTTP API
-Life Worker → 有界自主选择 → 原生 Life / Diary / Social / Memory 队列与服务
+QQ / NapCat ⇄ OneBot Bridge ⇄ HTTP v1 ⇄ Core API ⇄ Core 数据库
+                                         ↑            ↑
+                 独立 Source Reader ──────┤        聊天 worker → 模型
+                 独立语音节点 ────────────┤        Life worker → Life、日记
+                 主人控制台 ──────────────┘        内容 / 执行 worker（按配置）
 ```
 
-- 插件不导入核心代码、不访问核心数据库、不调用 LLM。它维护仅用于可靠投递的收件箱，成功接收后删除正文。
+- Bridge 在本地 SQLite 持久化接收、重试和发送凭证，通过 Core 的事件与 Outbox 接口交接。平台返回的消息 ID 是发送回执。旧 AstrBot 插件只用于迁移期的历史数据核对。[原生入口与旧数据迁移](deployment.md#主人入口与旧-astrbot-数据迁移)
+- Reader 通过受限的适配器身份领取阅读请求并提交结果。语音节点独立保存本地任务与结果凭证，通过租约回传给 Core。Core 持有来源授权、任务状态和投递决定。
+- 此版本的 Core 运行时使用 SQLite。PostgreSQL 已有原生会话、业务表及离线导入，运行时切换按迁移候选独立验证。Bridge 与语音节点的本地 SQLite 继续承担离线恢复。[存储 ADR](adr/0002-core-postgresql-and-local-sqlite.md) · [迁移进度与验收](postgresql-migration.md)
+
+## Core 模块职责
+
 - API 负责鉴权、大小限制、Pydantic 合同校验和错误映射，不启动后台模型循环。
 - Core 负责事件/任务编排、上下文组装和命令路由；模型、时间源均可注入，测试不依赖真实供应商。
 - 主动跟进保留 notice 调度和来源链，复用普通聊天的历史、情景记忆、来源权限及上下文预算装配。`max_recent_messages` 按消息数配置（20 条对应最多 10 轮），显示时间按配置时区转换，原始事件和来源摘要保持不变。主人最近明确说过的活动安排优先于模型先前的推测，无法确定是否适合接话时沿用 `[SKIP]`。
+- `companion.job_queue` 统一写入 Core 的 `jobs` 表，负责入队、领取和续租、结束尝试、重试、恢复及取消。各业务模块在原事务中核验权限、选择可处理的任务，并记录来源、收费及结果凭证。
 - ModelClient 只处理 HTTP 协议和标准化响应。它不读记忆库、不决定发送、不具备工具执行权限。以后替换提供商只需满足 `complete(messages, scenario)` 返回 `ModelResponse` 的合同。
 - Memory 拥有证据、检索、冲突、修订与自我观察；Transport 拥有 Outbox 状态转换；Budget 独立预留与结算。模型输出不能直接更新权限或配置。
 - Store 提供事务和 SQL 基础设施。跨模块保持一个本地数据库，重要多表变更仍在同一事务内。SQLite 使用 WAL、FULL synchronous、外键与 busy timeout。
 - 聊天 worker 的任务领取先在写事务中完成一次恢复，再以既有 `read_or_write` 快照检查待领任务和权限；空闲校验不占用 SQLite 写锁。领取、取消或其他写入会在独立写事务中重做完整校验，恢复中的文件清理不参与只读重试。
 - Diary 拥有日期调度、真实对话来源、结构化验证、私人正文及其修订。它不写发送 Outbox，也不自动修改 Memory/traits；主人主动读取沿用普通私聊回复。协议后端差异仍留在 Bridge，Core 不依赖 NapCat 或 SnowLuma 的 SDK。
 
-## 这次明确采用的调整
+## v0.4 相对 v0.3 合同的历史取舍
+
+[原始合同](design-v0.3/)及[参考 DDL](../db/reference-v0.3.sql)记录了当时的设计。
 
 1. API 使用原 `/internal/v1` 路径与事件/发送合同；新增租约令牌、请求指纹、预算状态和隐私版本字段，补齐故障恢复所需的数据。
 2. 配置以 TOML 和类型校验实现，减少运行时依赖；原 YAML 的安全和场景含义保留。M0/M1 没有可启用 DSH 或公开发布的开关，预留端点固定拒绝。
@@ -49,7 +50,7 @@ Life Worker → 有界自主选择 → 原生 Life / Diary / Social / Memory 队
 
 ## 并发和恢复合同
 
-API 可以接收并发事件；数据库事务与唯一索引负责幂等。生产各运行一个聊天 Worker 和一个日记 Worker，分别持有 OS 文件锁；租约和 CAS 防止旧实例提交结果。同会话的较早非终态聊天任务阻塞较晚任务，日记网络等待不占聊天 Worker。
+API 可以接收并发事件；数据库事务与唯一索引负责幂等。聊天 worker 和 Life worker 分进程运行，日记由 Life worker 调度；租约和 CAS 防止旧实例提交结果。同会话的较早非终态聊天任务阻塞较晚任务，日记网络等待不占聊天 Worker。
 
 模型网络调用在数据库事务外进行。调用完成后检查任务租约、隐私版本和暂停状态，再事务提交 Outbox。因进程崩溃，模型请求有可能被重复计费；QQ 发送意图仍保持本地唯一。QQ 平台严格 exactly-once 不在能力范围内。
 

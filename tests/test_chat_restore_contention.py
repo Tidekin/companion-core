@@ -14,9 +14,9 @@ from companion import agent_chat, reply_revision
 from companion.agent_persistence import ConversationStore
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
-from tests.test_reading_followup import READER_AUTH, admit, lease, window
-from tests.test_reading_protocol import envelope
-from tests.test_reply_revision import accept
+from tests.support.reading_followup import READER_AUTH, admit, lease, window
+from tests.support.reading_protocol import envelope
+from tests.support.reply_revision import accept
 
 
 def test_recorded_sources_revalidate_without_competing_for_the_writer(core):
@@ -69,7 +69,7 @@ def test_deferred_reader_restore_handles_only_real_busy_and_resumes_once(
                         finally:
                             writer.rollback()
                             if failure == "recalled":
-                                core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
+                                core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s',
                                                    (event["event_id"],))
 
             def restore(persistence):
@@ -91,8 +91,10 @@ def test_deferred_reader_restore_handles_only_real_busy_and_resumes_once(
                     patch.setattr(agent_chat, "wait", waiting)
                     assert await worker.run_once("contended-restore", job_id=accepted["job_id"])
             assert provider.requests == []
-            state = core.store.one("SELECT state,last_error_code,attempts FROM jobs "
-                                   "WHERE job_id=?", (accepted["job_id"],))
+            state = core.store.one((
+                'SELECT state,last_error_code,attempts FROM jobs WHERE '
+                'job_id=%s'
+            ), (accepted["job_id"],))
             if failure == "schema":
                 assert len(attempts) == 1
                 assert state["state"] == "FAILED"
@@ -105,7 +107,7 @@ def test_deferred_reader_restore_handles_only_real_busy_and_resumes_once(
             assert len(attempts) == 2
             assert state["state"] == "RETRY_WAIT", state
             assert state["attempts"] == 0
-            assert core.store.one("SELECT phase FROM agent_conversations WHERE job_id=?",
+            assert core.store.one('SELECT phase FROM agent_conversations WHERE job_id=%s',
                                   (accepted["job_id"],))["phase"] == "WAITING"
             assert not core.store.rows("SELECT * FROM outbox")
             assert len(selected.requests) == 1
@@ -137,13 +139,14 @@ def test_deferred_reader_restore_handles_only_real_busy_and_resumes_once(
             assert len(requests) == 1
             assert any(m["role"] == "tool" for m in requests[0]["messages"])
             assert core.store.one("SELECT COUNT(*) AS n FROM exploration_requests")["n"] == 1
-            calls = core.store.rows("SELECT tool_name,state FROM agent_tool_calls "
-                                   "WHERE job_id=?", (accepted["job_id"],))
+            calls = core.store.rows((
+                'SELECT tool_name,state FROM agent_tool_calls WHERE job_id=%s'
+            ), (accepted["job_id"],))
             assert calls == [{"tool_name": "discover_content", "state": "DEFERRED"}]
-            usage = core.store.rows("SELECT state FROM model_usage WHERE job_id=?",
+            usage = core.store.rows('SELECT state FROM model_usage WHERE job_id=%s',
                                     (accepted["job_id"],))
             assert len(usage) == 2 and all(r["state"] == "SETTLED" for r in usage)
-            replies = core.store.rows("SELECT content_json FROM outbox WHERE origin_event_id=?",
+            replies = core.store.rows('SELECT content_json FROM outbox WHERE origin_event_id=%s',
                                       (event["event_id"],))
             assert len(replies) == 1
             assert json.loads(replies[0]["content_json"])["text"] == "读取完成，正常回复。"

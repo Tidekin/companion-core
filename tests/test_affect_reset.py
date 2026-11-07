@@ -33,7 +33,7 @@ def test_reset_clears_old_feedback_and_growth_without_erasing_facts_or_permissio
     assert not core.affect.observe("evt_test_1")
     assert core.expression_learning.snapshot(core.settings.owner_qq_id)["items"] == []
     assert {table: core.store.rows("SELECT * FROM " + table) for table in before} == before
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE '%paused'")
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE '%%paused'")
     assert core.model.calls == []
     old_epoch = epoch(core.store)
     with core.store.transaction():
@@ -63,7 +63,7 @@ def test_restore_projection_replay_blocks_old_source_even_when_cached_rows_retur
     old = core.store.one("SELECT * FROM affect_evidence")
     record, _ = apply(core)
     with core.store.transaction():
-        core.store.execute("DELETE FROM runtime_meta WHERE key=?", (RESET_KEY,))
+        core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (RESET_KEY,))
         core.store.insert("affect_evidence", **old)
         apply_feedback_reset(core.store, record)
     assert core.affect.snapshot()["state"] == NEUTRAL

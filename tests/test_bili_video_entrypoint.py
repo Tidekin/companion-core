@@ -1,14 +1,7 @@
 """Real HTTP/capture and independent workers; only external transports are synthetic."""
 
 import asyncio
-import base64
 import json
-import os
-import shutil
-import subprocess
-import sys
-import zlib
-from pathlib import Path
 
 import httpx
 import pytest
@@ -20,11 +13,7 @@ from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
-from tests.support.core_http import real_core_http
-from tests.support.native_consumer import source_window
-from tests.support.onebot_events import raw_event
-from tests.test_bili_media import NAV, PLAY, VIEW
-from tests.test_bili_video import (
+from tests.support.bili_video import (
     model_response,
     paid_media,
     paid_options,
@@ -33,120 +22,11 @@ from tests.test_bili_video import (
     receipt,
     upload_body,
 )
-from tests.test_cloud_budget import native
-from tests.test_source_reader import PLAYER, response
-from tests.test_video_extract import local_media
-
-BVID = "BV1xx411c7mD"
-URL = "https://www.bilibili.com/video/" + BVID
-TOKEN = "synthetic-bili-reader-token-123456"
-
-READER = r'''
-import base64, importlib.abc, json, runpy, ssl, sys
-from datetime import datetime
-sys.path.insert(0, sys.argv[1])
-class Boundary(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {'sqlite3', 'fastapi', 'pydantic', 'alembic', 'fastembed'}:
-            raise ImportError('FORBIDDEN_READER_DEPENDENCY:' + fullname)
-        if fullname.startswith('companion.') and fullname not in {
-            'companion.source_policy', 'companion.video_media_contract',
-            'companion.bili_video_protocol',
-        }:
-            raise ImportError('FORBIDDEN_CORE_MODULE:' + fullname)
-sys.meta_path.insert(0, Boundary())
-import httpcore
-from source_reader import worker_v1
-from source_reader.bilibili import BilibiliReader
-from source_reader.network import PublicHTTP, PublicNetwork
-value = json.loads(sys.stdin.read())
-native_reader = BilibiliReader.__init__
-def initialize_reader(self, *args, **kwargs):
-    native_reader(self, *args, clock=lambda: value['now'], **kwargs)
-BilibiliReader.__init__ = initialize_reader
-rows = [base64.b64decode(row) for row in value['responses']]
-seen = []
-class Stream(httpcore.AsyncMockStream):
-    async def write(self, buffer, timeout=None):
-        if buffer:
-            assert b'authorization:' not in buffer.lower()
-            assert b'cookie:' not in buffer.lower()
-            seen.append(buffer.decode('latin1'))
-    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
-        assert ssl_context.check_hostname
-        return self
-class Backend(httpcore.AsyncNetworkBackend):
-    async def connect_tcp(self, host, port, **kwargs):
-        assert host == '93.184.216.34' and port == 443
-        return Stream([rows.pop(0)])
-async def addresses(host, port):
-    assert host in {'api.bilibili.com', 'aisubtitle.hdslb.com', 'cn-test.bilivideo.com'}
-    return ['93.184.216.34']
-original = PublicHTTP.__init__
-def init(self, pool=None):
-    original(self, httpcore.AsyncConnectionPool(
-        ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
-        network_backend=PublicNetwork(resolver=addresses, backend=Backend()),
-        max_keepalive_connections=0, retries=0,
-    ))
-PublicHTTP.__init__ = init
-native_tick = worker_v1.tick
-async def tick(*args, **kwargs):
-    return await native_tick(*args, clock=lambda: datetime.fromisoformat(value['now']), **kwargs)
-worker_v1.tick = tick
-sys.argv = ['source_reader', '--source', 'bilibili', '--protocol', 'reading-v1',
-            '--core-url', sys.argv[2], '--adapter-id', 'bili', '--once',
-            '--video-media' if value['media'] else '--discussion']
-try:
-    runpy.run_module('source_reader', run_name='__main__')
-finally:
-    print(json.dumps({'requests': seen, 'remaining': len(rows)}))
-'''
-
-
-def reader_files(tmp_path):
-    source = Path(__file__).resolve().parents[1]
-    isolated = tmp_path / "reader"
-    shutil.copytree(source / "source_reader", isolated / "source_reader",
-                    ignore=shutil.ignore_patterns("__pycache__"))
-    (isolated / "companion").mkdir()
-    for filename in ("__init__.py", "source_policy.py", "video_media_contract.py",
-                     "bili_video_protocol.py"):
-        shutil.copy2(source / "companion" / filename, isolated / "companion" / filename)
-    return isolated
-
-
-async def reader_once(root, origin, clock, rows, *, media=False):
-    work = root / "owned-temp"
-    work.mkdir(exist_ok=True)
-    completed = await asyncio.to_thread(
-        subprocess.run, [sys.executable, "-I", "-B", "-c", READER, str(root), origin],
-        cwd=root, input=json.dumps({"responses": [base64.b64encode(row).decode() for row in rows],
-                                   "now": clock(), "media": media}),
-        env={**os.environ, "COMPANION_READER_TOKEN": TOKEN, "TMPDIR": str(work)},
-        text=True, capture_output=True, timeout=45, check=False,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert list(work.iterdir()) == [], completed.stdout + completed.stderr
-    return json.loads(completed.stdout.splitlines()[-1])
-
-
-def upstream(tmp_path):
-    local_media(tmp_path)
-    view = {"code": 0, "data": {**VIEW["data"], "bvid": BVID, "aid": 1701,
-                                "title": "Synthetic star colors"}}
-    subtitle = {"body": [{"from": 0, "to": 2.5, "content": "字幕说恒星颜色与温度有关。"}]}
-    comments = {"code": 0, "data": {"page": {"count": 20}, "replies": [{
-        "rpid": 101, "floor": 1, "member": {"uname": "synthetic reader"},
-        "content": {"message": "评论资料：我喜欢蓝色。"},
-    }]}}
-    danmaku = '<i><chatid>123</chatid><d p="1.25,1,25,0,0,0,x,1">弹幕资料</d></i>'
-    return (
-        [response(value) for value in (view, PLAYER, subtitle, comments)]
-        + [response(zlib.compress(danmaku.encode()))],
-        [response(view), response(NAV), response(PLAY),
-         response((tmp_path / "source.mp4").read_bytes())],
-    )
+from tests.support.bili_video_entrypoint import TOKEN, URL, reader_files, reader_once, upstream
+from tests.support.cloud_budget import native
+from tests.support.core_http import real_core_http
+from tests.support.native_consumer import source_window
+from tests.support.onebot_events import raw_event
 
 
 @pytest.mark.parametrize("erase_during_model", [False, True])
@@ -228,20 +108,25 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
                         "content": core.store.rows(
                             "SELECT state,error_code FROM content_items"),
                         "audit": core.store.rows(
-                            "SELECT action,safe_detail_json FROM audit_log "
-                            "ORDER BY rowid DESC LIMIT 4")}
+
+                                'SELECT action,safe_detail_json FROM '
+                                'audit_log ORDER BY record_sequence DESC '
+                                'LIMIT 4'
+                            )}
                     second = await reader_once(
                         isolated, cfg.core_url, core.clock, media, media=True,
                     )
                     assert len(second["requests"]) == 4 and second["remaining"] == 0
                     if not erase_during_model:
                         await asyncio.wait_for(finished.wait(), 8)
-                    snapshot = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+                    snapshot = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
                     restart = await reader_once(
                         isolated, cfg.core_url, core.clock, media, media=True,
                     )
                     assert restart == {"requests": [], "remaining": 4}
-                    assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == (
+                    assert core.store.rows(
+                        'SELECT * FROM model_usage ORDER BY record_sequence'
+                    ) == (
                         snapshot
                     )
                 finally:
@@ -253,7 +138,7 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
     assert len(instances) == 1 and instances[0].store is not core.store
     assert sends == []
     row = core.store.one("SELECT * FROM bili_video_items")
-    usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+    usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
     video = [entry for entry in usage if entry["scenario"].startswith("content_video")]
     assert len(video) == (1 if erase_during_model else 2)
     assert all(entry["state"] == "SETTLED" for entry in video)
@@ -272,7 +157,7 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
         return
     assert row["state"] == "COMPLETE"
     attempts = core.store.rows(
-        "SELECT state,observed_requests FROM reading_attempts ORDER BY rowid"
+        'SELECT state,observed_requests FROM reading_attempts ORDER BY record_sequence'
     )
     assert attempts == [{"state": "DONE", "observed_requests": 5},
                         {"state": "DONE", "observed_requests": 4}]
@@ -283,10 +168,10 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
     assert "采样片段里颜色逐渐变红" in final, {
         "output_event_id": row["output_event_id"],
         "output_has_clip_analysis": "采样片段里颜色逐渐变红" in core.store.one(
-            "SELECT body_json FROM events WHERE event_id=?",
+            'SELECT body_json FROM events WHERE event_id=%s',
             (row["output_event_id"],))["body_json"],
         "output_linked_to_request": bool(core.store.one(
-            "SELECT 1 FROM exploration_evidence WHERE request_id=? AND event_id=?",
+            'SELECT 1 FROM exploration_evidence WHERE request_id=%s AND event_id=%s',
             (row["request_id"], row["output_event_id"]))),
         "tool_items": [json.loads(message["content"])["items"] for message in calls[-1]["messages"]
                        if message.get("tool_call_id") == "analyze_shared_video"],
@@ -406,7 +291,7 @@ def test_real_http_clip_phase_obeys_original_one_cny_and_twenty_cny_ceiling(
                     # claim. Already settled preview evidence remains available.
                     retained = core.store.one("SELECT * FROM bili_video_items")
                     assert retained["state"] == "ANALYZED" and retained["output_event_id"]
-                    observation = core.store.one("SELECT * FROM observations WHERE event_id=?",
+                    observation = core.store.one('SELECT * FROM observations WHERE event_id=%s',
                                                  (retained["output_event_id"],))
                     proof = json.loads(observation["evidence_json"])["bili_video"]
                     assert proof["partial"] and proof["complete_video"] is False

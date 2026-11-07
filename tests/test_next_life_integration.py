@@ -19,12 +19,12 @@ from companion.model import ModelClient
 from companion_onebot_bridge import owner_notices
 from tests.conftest import run
 from tests.native_continuous_support import host
+from tests.support.diary import DAY
 from tests.support.native_context import Capture
+from tests.support.next_life_diary import seed, withdraw
 from tests.support.onebot_events import raw_event
-from tests.test_diary import DAY
-from tests.test_next_life_diary import seed, withdraw
-from tests.test_owner_recall_bridge import recall_frame
-from tests.test_private_companion import companion_options
+from tests.support.owner_recall_bridge import recall_frame
+from tests.support.private_companion import companion_options
 
 ADMIN_TOKEN = "synthetic-diary-owner-token-32-characters"
 
@@ -103,7 +103,7 @@ async def run_native_diary(core, model_http, monkeypatch, day, expected, during=
     async def observe(service, worker_id):
         assert service.store is not core.store
         worked = await original(service, worker_id)
-        row = service.store.one("SELECT state FROM diary_runs WHERE local_date=? AND timezone=?",
+        row = service.store.one('SELECT state FROM diary_runs WHERE local_date=%s AND timezone=%s',
                                 (day.isoformat(), core.settings.timezone))
         if row and row["state"] == expected:
             completed.set()
@@ -194,8 +194,10 @@ def test_real_http_recall_recompute_and_native_worker_preserve_sources_and_accou
                 await Capture(core, window.spool, window.runtime).capture_once(
                     client, window.protocol)
                 await window.flush()
-                return core.store.one("SELECT event_id FROM events WHERE actor_id='owner' "
-                                      "ORDER BY rowid DESC LIMIT 1")["event_id"]
+                return core.store.one(
+                    "SELECT event_id FROM events WHERE actor_id='owner' ORDER"
+                    ' BY record_sequence DESC LIMIT 1'
+                )["event_id"]
 
             async def recall(message_id):
                 assert owner_notices.put(window.runtime,
@@ -215,11 +217,11 @@ def test_real_http_recall_recompute_and_native_worker_preserve_sources_and_accou
             await run_native_diary(core, model, monkeypatch, day, "COMMITTED")
             original = core.diary.get_day(day, core.settings.owner_qq_id)
             assert "准备撤回" in original["body_md"]
-            original_usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            original_usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert len(diary_payloads) == 1
             await recall(1)
             assert core.diary.get_day(day, core.settings.owner_qq_id) is None
-            assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+            assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                   (originals[1],))["redacted"] == 0
             url = f"/internal/v1/diary/{day}/recompute"
             assert (await client.post(url)).status_code == 401  # Bridge is not diary admin.
@@ -233,17 +235,17 @@ def test_real_http_recall_recompute_and_native_worker_preserve_sources_and_accou
             else:
                 command_event = await capture(f"/重算日记 {day}")
                 later_event = await capture("先记着这个问题，继续聊。")
-                command_job = core.store.one("SELECT * FROM jobs WHERE event_id=?",
+                command_job = core.store.one('SELECT * FROM jobs WHERE event_id=%s',
                                              (command_event,))
                 assert command_job["state"] == "QUEUED"
                 assert await core.run_once("superseded-control-worker")
-                assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                       (command_job["job_id"],))["state"] == "SUCCEEDED"
-                assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+                assert not core.store.one('SELECT 1 FROM outbox WHERE origin_event_id=%s',
                                           (command_event,))
-                assert core.store.one("SELECT state FROM diary_runs WHERE local_date=?",
+                assert core.store.one('SELECT state FROM diary_runs WHERE local_date=%s',
                                       (day.isoformat(),))["state"] == "PENDING"
-                assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
+                assert core.store.one('SELECT state FROM jobs WHERE event_id=%s',
                                       (later_event,))["state"] == "QUEUED"
                 assert await core.run_once("new-owner-input-worker")
                 assert await window.pump()
@@ -275,11 +277,11 @@ def test_real_http_recall_recompute_and_native_worker_preserve_sources_and_accou
                 assert (await owner.post(url)).json()["state"] == "NOT_SCHEDULED"
             assert len(sends) == sent_before  # A private diary is not an outbound notification.
             for usage in original_usage:
-                assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                       (usage["request_id"],)) == usage
             diary_usage = core.store.rows("SELECT * FROM model_usage WHERE scenario='diary'")
             assert len(diary_usage) == 2 and all(item["state"] == "SETTLED" for item in diary_usage)
-            assert core.store.one("SELECT attempts FROM diary_runs WHERE local_date=?",
+            assert core.store.one('SELECT attempts FROM diary_runs WHERE local_date=%s',
                                   (day.isoformat(),))["attempts"] == 2
             assert owner_authority.status(
                 core.store, core.settings, core.clock)["state"] == "ACTIVE"

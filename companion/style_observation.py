@@ -11,6 +11,7 @@ revalidates the selection before the reply is sent. Nothing here calls a model o
 
 import copy
 import hashlib
+import json
 import re
 from datetime import datetime
 from typing import Literal
@@ -137,3 +138,35 @@ def live_segment(store, now, text):
 def _policy():
     # Only the surface intent is read; this never enables the live conversation policy.
     return ConversationPolicyConfig(mode="SHADOW", strategy="participation_v2")
+
+
+def reply_reference(store, settings, clock, job, text, *, material=None):
+    """Owner-approved B站 style candidates for this owner chat turn, or None."""
+    from companion import notices, private_life, reply_revision, runtime_config
+
+    cfg = runtime_config.effective(settings, runtime_config.check(
+        store, settings, "job:" + job["job_id"]))
+    if not cfg.style_live.enabled or private_life.strict(store, cfg):
+        return None
+    if notices.reference(job):
+        material = material or notices.validate(store, cfg, job, clock())
+        if "QZONE_DRAFT" in material.get("allowed_destinations", ()):
+            return None
+        text = notices.subject(material)
+    elif (job["kind"] != "chat" or not reply_revision.owner_input(store, job["event_id"])
+          or reply_revision.control_job(store, job)):
+        return None
+    segment, used, decision = live_segment(store, clock(), text)
+    if not used:
+        return None
+    return {"text": segment,
+            "source_event_ids": sorted({ref.event_id for c in used for ref in c.source_refs}),
+            "proof": {"surface_intent": decision.surface_intent,
+                      "candidates": [[c.candidate_id, c.approved_version] for c in used]}}
+
+
+def revalidate_reply(store, settings, clock, job, proof):
+    text = json.loads(job["body_json"]).get("text", "")
+    current = reply_reference(store, settings, clock, job, text)
+    if current is None or current["proof"] != proof:
+        raise CoreError("PRIVACY_CHANGED", 409)

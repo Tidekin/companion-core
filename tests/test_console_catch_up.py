@@ -6,13 +6,13 @@ from pydantic import SecretStr
 
 from companion import operator_config
 from companion.config import Settings
-from tests.test_console_cognition import PASSWORD, client, login  # noqa: F401
-from tests.test_style_distill import PATTERN, candidates, comment, thread
-from tests.test_style_distill import ready as style_ready
-from tests.test_style_distill import step as style_step
-from tests.test_watch_ledger import JUDGEMENT, observe
-from tests.test_watch_ledger import ready as watch_ready
-from tests.test_watch_ledger import step as watch_step
+from tests.support.console_cognition import PASSWORD, client, login  # noqa: F401
+from tests.support.style_distill import PATTERN, candidates, comment, thread
+from tests.support.style_distill import ready as style_ready
+from tests.support.style_distill import step as style_step
+from tests.support.watch_ledger import JUDGEMENT, observe
+from tests.support.watch_ledger import ready as watch_ready
+from tests.support.watch_ledger import step as watch_step
 
 
 def candidate(core, tmp_path, pattern=PATTERN, number=3):

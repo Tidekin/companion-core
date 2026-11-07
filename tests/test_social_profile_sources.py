@@ -13,7 +13,7 @@ from companion.social_autonomy_runtime import run_once
 from companion.store import encode
 from tests.conftest import ingest, run
 from tests.social_profile_support import confirmed_profile_material
-from tests.test_social_autonomy import background, dispatch, queue
+from tests.support.social_autonomy import background, dispatch, queue
 
 
 def setup(core, **kwargs):
@@ -43,7 +43,7 @@ def test_profile_material_requires_owner_decision_and_every_source(core, change)
     if change in {"auto_confirmed", "missing_audit"}:
         core.store.execute("DELETE FROM audit_log WHERE action='memory.owner_decision'")
     elif change == "wrong_command":
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_801'",
+        core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_801'",
                            (encode({"text": "/确认这一条 mem_another"}),))
     elif change == "wrong_actor":
         core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id='evt_test_801'")
@@ -61,9 +61,9 @@ def test_profile_material_requires_owner_decision_and_every_source(core, change)
         with core.store.transaction():
             core.ledger.expire_events(core.store, ["evt_test_801"], core.clock())
     elif change == "needs_review":
-        core.store.execute("UPDATE memories SET needs_review=1 WHERE memory_id=?", (memory_id,))
+        core.store.execute('UPDATE memories SET needs_review=1 WHERE memory_id=%s', (memory_id,))
     else:
-        core.store.execute("UPDATE memories SET subject='project' WHERE memory_id=?", (memory_id,))
+        core.store.execute("UPDATE memories SET subject='project' WHERE memory_id=%s", (memory_id,))
     with pytest.raises(CoreError):
         plan(module, memory_id)
     assert not module.model.calls and not core.store.rows("SELECT * FROM model_usage")
@@ -124,7 +124,7 @@ def test_owner_correction_uses_actual_command_and_preserves_new_proof(core):
                    origin="onebot-direct:FriendMessage:10001")
     result = core.memory.decide(old, "correct", core.clock(), text,
                                 evidence_event_id=event["event_id"])
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (event["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (event["job_id"],))
     material = social_profile_sources.material(core.store, core.settings, core.clock(),
                                                [result["memory_id"]])
     assert material[0]["content"] == text
@@ -142,8 +142,10 @@ def test_legacy_public_profile_plan_is_rejected_without_replaying_liability(core
     legacy.pop("purpose")
     legacy.pop("profile_material")
     legacy["sources"] = module.context(source_ids=[public])["sources"]
-    core.store.execute("UPDATE social_autonomy_plans SET input_snapshot_json=?,"
-                       "source_snapshot_sha256=? WHERE plan_id=?",
+    core.store.execute((
+        'UPDATE social_autonomy_plans SET '
+        'input_snapshot_json=%s,source_snapshot_sha256=%s WHERE plan_id=%s'
+    ),
                        (encode(legacy), _sha(legacy), row["plan_id"]))
     usage = core.store.rows("SELECT * FROM model_usage")
     if state == "READY":
@@ -183,7 +185,7 @@ def test_deferred_profile_reuses_native_job_and_rechecks_owner_material(core, fo
     retry = social_plan_jobs.claim(module, "profile-retry-worker")
     if forget:
         assert retry is None
-        assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],)) == {
+        assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],)) == {
             "state": "CANCELLED"}
         assert not core.store.rows("SELECT * FROM model_usage")
     else:

@@ -7,8 +7,8 @@ from companion import budget
 from companion.model import ModelClient
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
-from tests.test_token_measurement import configure
+from tests.support.paid_model import approved_live
+from tests.support.token_measurement import configure
 
 
 @pytest.mark.parametrize("exact", [False, True])

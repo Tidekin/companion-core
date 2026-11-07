@@ -12,13 +12,13 @@ from companion.cognition_read import CognitionRead
 from companion.contracts import CoreError
 from companion.privacy import advance_epoch
 from companion.store import after, encode
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
 
 
 def retained_record(core, number=1):
     """Use real Memory evidence/proof and the frozen persisted-job/usage schema."""
     mid = remember(core, number, f"合成主题{number}喜欢绿色", confirmed=True)
-    memory = core.store.one("SELECT * FROM memories WHERE memory_id=?", (mid,))
+    memory = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (mid,))
     memory["evidence_ids"] = [f"evt_test_{number}"]
     proof = core.memory_context.pin(core.clock(), rows=[memory])
     job = core.new_job(f"evt_test_{number}", "rem", f"retained-rem-{number}", core.clock())
@@ -56,7 +56,7 @@ def test_rem_native_metadata_pagination_and_usage(core):
     assert item["usage"]["state"] == "UNKNOWN" and item["usage"]["billed_micro_usd"] == 700
     assert item["kind"] == "FICTION" and item["audience"] == "owner_only"
     assert item["occurred_at"] == core.store.one(
-        "SELECT created_at FROM rem_records WHERE rem_id=?", (first,))["created_at"]
+        'SELECT created_at FROM rem_records WHERE rem_id=%s', (first,))["created_at"]
     assert item["questions"] == {"state": "UNVERIFIED", "count": 1}
     assert item["source_available"]
     assert "合成私人" not in json.dumps(item, ensure_ascii=False)
@@ -73,7 +73,7 @@ def test_rem_unavailable_sources_hide_refs_but_preserve_accounting(core, change)
         core.clock.advance(86401)
     elif change == "source_expiry":
         core.settings.raw_event_retention_days = 1
-        core.store.execute("UPDATE rem_records SET expires_at=?", (after(core.clock(), 300000),))
+        core.store.execute('UPDATE rem_records SET expires_at=%s', (after(core.clock(), 300000),))
         core.clock.advance(86401)
     elif change == "erasure":
         with core.store.transaction():
@@ -106,8 +106,10 @@ def test_rem_privacy_race_rejects_entire_page(core, monkeypatch):
 
 def test_rem_source_reference_cannot_disagree_with_saved_proof(core):
     rid, _ = retained_record(core)
-    core.store.execute("UPDATE rem_records SET source_event_ids_json='[\"different\"]' "
-                       "WHERE rem_id=?", (rid,))
+    core.store.execute((
+        'UPDATE rem_records SET source_event_ids_json=\'["different"]\' WHERE '
+        'rem_id=%s'
+    ), (rid,))
     item = CognitionRead(core).page("rem", record_id=rid)["items"][0]
     assert not item["source_available"] and item["source_event_ids"] == []
     assert item["usage"]["billed_micro_usd"] == 700

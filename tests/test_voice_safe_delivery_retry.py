@@ -18,11 +18,11 @@ from companion.voice_jobs import VoiceJobs, erase_voice_jobs
 from companion.voice_protocol import digest
 from companion_voice_node.worker import local_manifest
 from tests.conftest import run
-from tests.test_voice_flow import finish_node, flow_fixture, leased, prepare
-from tests.test_voice_jobs import TEXT, claim, voice_config
-from tests.test_voice_node_api import independent_node, tls_core
-from tests.test_voice_node_worker import child_receipts
-from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
+from tests.support.voice_flow import finish_node, flow_fixture, leased, prepare
+from tests.support.voice_jobs import TEXT, claim, voice_config
+from tests.support.voice_node_api import independent_node, tls_core
+from tests.support.voice_node_worker import child_receipts
+from tests.support.voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 
 
 def safe_retry(core, monkeypatch, stage="retry_wait"):
@@ -87,7 +87,7 @@ def test_safe_retry_does_not_restore_expired_changed_or_unproven_audio(core, mon
     _, jobs, message_id, event_id, _ = safe_retry(core, monkeypatch)
     key = "voice_reply:" + message_id
     if change.startswith("binding_") or change == "missing_binding":
-        value = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))[
+        value = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))[
             "value"])
         if change == "missing_binding":
             value.pop("binding")
@@ -97,14 +97,18 @@ def test_safe_retry_does_not_restore_expired_changed_or_unproven_audio(core, mon
             field = "untrusted_extra" if change == "binding_extra" else "reply_sha256"
             value["binding"][field] = "0" * 64
             value["binding_sha256"] = digest(value["binding"])
-        core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), key))
+        core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s', (encode(value), key))
     elif change == "content":
-        core.store.execute("UPDATE outbox SET content_json=?", (encode({"text": "changed"}),))
+        core.store.execute('UPDATE outbox SET content_json=%s', (encode({"text": "changed"}),))
     elif change == "source_erasure":
         with core.store.transaction():
             erase_voice_jobs(core.store, [event_id])
     elif change == "privacy_epoch":
-        core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch','1')")
+        core.store.execute(
+            'INSERT INTO runtime_meta (key,value) VALUES '
+            "('privacy_epoch','1') ON CONFLICT(key) DO UPDATE SET "
+            'value=excluded.value,record_sequence=DEFAULT'
+        )
     elif change == "reply_revision":
         core.store.execute("UPDATE conversations SET reply_revision=reply_revision+1")
     elif change == "expired_result":
@@ -158,7 +162,7 @@ def test_failure_after_begin_send_stays_uncertain_without_audio_retry(core, monk
     assert core.store.one("SELECT state,result_blob FROM voice_jobs") == {
         "state": "CANCELLED", "result_blob": None,
     }
-    receipt = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    receipt = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                              ("voice_reply:" + message_id,))
     assert json.loads(receipt["value"])["state"] != "TEXT"
     assert core.store.one("SELECT COUNT(*) n FROM voice_jobs")["n"] == 1

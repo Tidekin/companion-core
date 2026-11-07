@@ -13,29 +13,12 @@ import pytest
 
 from companion.store import encode
 from companion_onebot_bridge import pending_media
-from companion_onebot_bridge.capture import prepare_owner_input
 from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
+from tests.support.native_image_pipeline import pixels
+from tests.support.native_media_queue import captured, row
 from tests.support.onebot_events import raw_event
-from tests.test_native_image_pipeline import pixels
-from tests.test_prepare_owner_input import native_spool, window
-
-
-async def captured(core, client, runtime, *, number=42, message=None):
-    frame = encode(raw_event(number=number, time=int(core.clock.now.timestamp()),
-        message=message or [
-        {"type": "image", "data": {"url": "https://gchat.qpic.cn/queue-original"}}]))
-    prepared = await prepare_owner_input(runtime, client, None, frame, core.clock.now,
-                                          ("127.0.0.1", 3001))
-    runtime.persist_capture(prepared["event"], frame, received_at=core.clock.now,
-                            peer=("127.0.0.1", 3001), media=prepared["media"])
-    runtime.verify()
-    assert await runtime.flush_one(client)
-    return prepared
-
-
-def row(runtime):
-    return pending_media._execute(runtime, "SELECT * FROM automatic_media").fetchone()
+from tests.support.prepare_owner_input import native_spool, window
 
 
 @pytest.mark.parametrize("kind", ["text_image", "images_then_text", "card_image"])
@@ -89,7 +72,7 @@ def test_native_image_queue_preserves_lease_under_core_roundtrip_latency(core, t
                 runtime.verify()
             finally:
                 spool.close()
-            job = core.store.one("SELECT * FROM jobs WHERE event_id=?",
+            job = core.store.one('SELECT * FROM jobs WHERE event_id=%s',
                                  (prepared["event"]["event_id"],))
             config_path, output = tmp_path / "latency-worker.pickle", tmp_path / "latency-wire.json"
             config_path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
@@ -325,7 +308,7 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
     from companion_onebot_bridge.metrics import Metrics
     from companion_onebot_bridge.onebot_client import OneBotClient
     from tests.sdk_reader_fixture import answer
-    from tests.test_native_file_pipeline import configure
+    from tests.support.native_file_pipeline import configure
 
     async def scenario():
         if kind.endswith("file"):
@@ -422,7 +405,7 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
             if reference:
                 action = "/get_msg" if reference == "reply" else "/get_forward_msg"
                 assert lookups.count(action) == 1
-                body = json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                body = json.loads(core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                                  (job["event_id"],))["body_json"])
                 nested = body["rich"]["segments"][0]["body"]["media"][0]
                 assert nested["origin"]["kind"] == reference
@@ -432,7 +415,7 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
                 [answer("原图已经收到。")], "SUCCEEDED", str(output)) if media_kind == "image" else
                 (core.settings, core.clock.now, job["job_id"], data, str(output)))
             if kind == "animation":
-                from tests.test_native_video import responses
+                from tests.support.native_video import responses
 
                 arguments = (core.settings, core.clock.now, job["job_id"],
                              responses(), "SUCCEEDED", str(output))

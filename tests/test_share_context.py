@@ -7,8 +7,8 @@ from companion.contracts import Candidate, InboundEvent
 from companion.store import encode
 from tests.conftest import event, run
 from tests.support import native_image_memory as image_fixture
-from tests.test_dialogue_context import current_job, sent_history
-from tests.test_image_review import reply
+from tests.support.dialogue_context import current_job, sent_history
+from tests.support.image_review import reply
 
 
 def test_media_only_input_does_not_inherit_the_previous_text_topic():
@@ -66,10 +66,10 @@ def test_native_new_picture_does_not_reopen_an_unanswered_input_from_a_finished_
             assert await context.worker.run_once()
             await context.entry.send(context.entry.client, context.entry.protocol)
             old = await context.entry.admit(2, "上次的采购预算还没谈完")
-            old_job = core.store.one("SELECT job_id FROM jobs WHERE event_id=? AND kind='chat'",
+            old_job = core.store.one("SELECT job_id FROM jobs WHERE event_id=%s AND kind='chat'",
                                       (old["event_id"],))["job_id"]
             if failed:
-                core.store.execute("UPDATE jobs SET state=?,last_error_code=? WHERE job_id=?",
+                core.store.execute('UPDATE jobs SET state=%s,last_error_code=%s WHERE job_id=%s',
                                    ("FAILED", "MODEL_RETRYABLE", old_job))
             await context.entry.admit(3, "早餐已经吃过了")
             await reply(core, context.entry, "吃过就好", [])
@@ -80,13 +80,13 @@ def test_native_new_picture_does_not_reopen_an_unanswered_input_from_a_finished_
             calls = context.calls[start:]
             assert calls and all(("上次的采购预算还没谈完" in encode(call["messages"])) is keep_old
                                  for call in calls)
-            state = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+            state = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                    (old_job,))
             assert state == ({"state": "FAILED", "last_error_code": "MODEL_RETRYABLE"} if failed
                              else {"state": "CANCELLED", "last_error_code": "REPLY_SUPERSEDED"})
-            assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+            assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                   (old["event_id"],))["redacted"] == 0
-            assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+            assert not core.store.one('SELECT 1 FROM outbox WHERE origin_event_id=%s',
                                       (old["event_id"],))
 
     run(scenario())
@@ -176,9 +176,9 @@ def test_native_new_picture_keeps_relationship_but_not_an_unrelated_sent_guess(
                 assert "采购预算" not in payload
                 assert "你是我女儿，我是爸爸" in payload
                 assert "你们的关系" in payload
-            assert core.store.one("SELECT state FROM outbox WHERE origin_event_id=?",
+            assert core.store.one('SELECT state FROM outbox WHERE origin_event_id=%s',
                                   (old["event_id"],))["state"] == "SENT"
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                   (next_job["job_id"],))["state"] == "SUCCEEDED"
 
     run(scenario())

@@ -3,8 +3,6 @@
 import asyncio
 import hashlib
 import json
-import pickle
-import sys
 from dataclasses import replace
 
 import httpx
@@ -24,25 +22,12 @@ from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.model_carry_support import executors
+from tests.support.model_carry_native import child, finished
+from tests.support.native_video import animation
 from tests.support.onebot import provider
 from tests.support.onebot_events import raw_event
-from tests.test_native_video import animation
-from tests.test_prepare_owner_input import window
-from tests.test_video_understanding import video_policy
-
-
-async def child(tmp_path, name, core, **options):
-    path = tmp_path / (name + ".pickle")
-    bundle = {"settings": core.settings, "now": core.clock.now, **options}
-    path.write_bytes(pickle.dumps(bundle))
-    return await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "tests.model_carry_native_host",
-        str(path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
+from tests.support.prepare_owner_input import window
+from tests.support.video_understanding import video_policy
 
 
 async def marker(process, expected):
@@ -53,12 +38,6 @@ async def marker(process, expected):
         lines.append(line)
         if expected.encode() in line:
             return line
-
-
-async def finished(process):
-    output, _ = await asyncio.wait_for(process.communicate(), 40)
-    assert process.returncode == 0, output.decode(errors="replace")
-    return output.decode().strip()
 
 
 async def stopped(process):
@@ -81,7 +60,7 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
     meme_enabled,
     evaluation_revision,
 ):
-    import tests.test_prepare_owner_input as preparation
+    import tests.support.prepare_owner_input as preparation
 
     original_prepare = preparation.prepare
 
@@ -109,7 +88,7 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                 await pump.close()
             offer = json.loads(
                 core.store.one(
-                    "SELECT value FROM runtime_meta WHERE key=?", ("meme_offer:" + event_id,)
+                    'SELECT value FROM runtime_meta WHERE key=%s', ("meme_offer:" + event_id,)
                 )["value"]
             )
             assert offer["event_id"] == event_id and offer["offer"] is None
@@ -183,11 +162,11 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
             await stopped(worker)
             await stopped(api)
             assert worker.returncode is not None and api.returncode is not None
-            original_usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            original_usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             capture = OwnerCapture.model_validate(
                 json.loads(
                     core.store.one(
-                        "SELECT value FROM runtime_meta WHERE key=?",
+                        'SELECT value FROM runtime_meta WHERE key=%s',
                         ("owner_input:" + event["event_id"],),
                     )["value"]
                 )["capture"]
@@ -466,7 +445,7 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                 assert second_stop.status_code == 200, second_stop.text
                 with Spool(newer) as spool:
                     OwnerRuntime(spool, clock=lambda: core.clock.now).stop()
-                preserved = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+                preserved = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
                 windows = core.store.rows("SELECT * FROM model_budget_windows ORDER BY window_id")
                 if current_timeout:
                     query_carry = {
@@ -524,7 +503,9 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                 final_authority = activated_again.json()["authority"]
                 await retained_scope(final_authority)
                 assert final_authority == successor | {"revision": successor["revision"] + 2}
-                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == preserved
+                assert core.store.rows(
+                    'SELECT * FROM model_usage ORDER BY record_sequence'
+                ) == preserved
                 assert (
                     core.store.rows("SELECT * FROM model_budget_windows ORDER BY window_id")
                     == windows
@@ -545,7 +526,10 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
             assert not core.store.one("SELECT 1 FROM model_usage WHERE scenario='meme_caption'")
             assert (
                 core.store.rows(
-                    "SELECT * FROM model_usage WHERE request_id IN (?,?) ORDER BY rowid",
+                    (
+                        'SELECT * FROM model_usage WHERE request_id IN '
+                        '(%s,%s) ORDER BY record_sequence'
+                    ),
                     tuple(item["request_id"] for item in original_usage),
                 )
                 == original_usage

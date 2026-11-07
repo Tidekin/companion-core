@@ -11,51 +11,13 @@ from companion.api import create_app
 from companion.backup import backup, restore
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
 from companion.core import Core
-from companion.goals import CommitmentRequest, GoalProposal, GoalScope
+from companion.goals import GoalProposal
 from companion.store import after
 from companion.transport import begin_send, delivery_result, lease_deliveries, reconcile_delivery
 from tests.conftest import ingest, run
-from tests.test_observations import enable_observations, observation
-
-
-def setup_goal(
-    core, number=1, commitment=False, topic="了解天文内容", url="https://example.org/article"
-):
-    core.settings.goals_enabled = core.settings.exploration_enabled = True
-    core.settings.wake_enabled = True
-    enable_observations(core)
-    ingest(core, number, "请阅读这篇天文文章")
-    core.store.execute(
-        "UPDATE jobs SET state='SUCCEEDED' WHERE event_id=%s", (f"evt_test_{number}",)
-    )
-    proposal = GoalProposal(
-        topic=topic,
-        source_event_ids=[f"evt_test_{number}"],
-        scope=GoalScope(operation="read_content", url=url),
-    )
-    if commitment:
-        return core.goals.accept_commitment(
-            CommitmentRequest(
-                proposal=proposal,
-                accepted_event_id=f"evt_test_{number}",
-                deadline=datetime.fromisoformat(after(core.clock(), 86400)),
-            )
-        )["goal_id"]
-    return core.goals.propose(proposal)
-
-
-def result_for(core, goal_id, number=1, **changes):
-    text = f"实际获得的天文内容 {number}"
-    item = observation(
-        core,
-        number,
-        text=text,
-        source_event_ids=core.goals.source_ids(goal_id),
-        payload={"text": text, "url": json.loads(core.goals.get(goal_id)["scope_json"])["url"]},
-        **changes,
-    )
-    core.observations.append("reader", item)
-    return item.event_id
+from tests.postgres_fixture import isolated_database
+from tests.support.goals import result_for, setup_goal
+from tests.support.observation_capture import observation
 
 
 def test_goals_disabled_and_no_source_do_not_create_plans(core):
@@ -270,27 +232,22 @@ def test_goal_source_forget_and_restore_erase_scope_outcomes_and_interest(core, 
     core.goals.accept(goal)
     step = core.goals.claim()
     core.goals.finish(step, result_for(core, goal))
-    key, archive, destination = (
-        Fernet.generate_key(),
-        tmp_path / "goals.enc",
-        tmp_path / "restored.db",
-    )
+    key, archive = Fernet.generate_key(), tmp_path / "goals.enc"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
-    )
-    try:
-        for instance in (core, restored):
-            assert instance.goals.recent() == []
-            raw = instance.store.one("SELECT * FROM goals")
-            assert raw["topic"] == "" and raw["scope_json"] == "{}"
-            assert not instance.store.rows("SELECT * FROM traits")
-            assert instance.observations.recent() == []
-    finally:
-        restored.store.close()
+    with isolated_database() as database:
+        state = tmp_path / "restored-state"
+        restore(archive, database, key, core.settings.erasure_ledger, state_directory=state)
+        settings = core.settings.model_copy(update={"database": database,
+                                                    "state_directory": str(state)})
+        with Core(settings, clock=core.clock) as restored:
+            for instance in (core, restored):
+                assert instance.goals.recent() == []
+                raw = instance.store.one("SELECT * FROM goals")
+                assert raw["topic"] == "" and raw["scope_json"] == "{}"
+                assert not instance.store.rows("SELECT * FROM traits")
+                assert instance.observations.recent() == []
 
 
 def test_wake_dedup_cooldown_and_daily_limit_survive_restart(core):
@@ -373,24 +330,15 @@ def test_restored_pending_commitment_feedback_is_never_blindly_replayed(core, tm
     core.goals.finish(step, result_for(core, goal))
     job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
     assert job and run(core.run_once(job_id=job["job_id"]))
-    key, archive, destination = (
-        Fernet.generate_key(),
-        tmp_path / "delivery.enc",
-        tmp_path / "restored.db",
-    )
+    key, archive = Fernet.generate_key(), tmp_path / "delivery.enc"
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
-    )
-    try:
-        assert (
-            lease_deliveries(
-                restored.store, restored.settings, LeaseRequest(worker_id="bridge"), core.clock()
-            )["items"]
-            == []
-        )
-        assert restored.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
-        assert restored.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
-    finally:
-        restored.store.close()
+    with isolated_database() as database:
+        state = tmp_path / "restored-state"
+        restore(archive, database, key, core.settings.erasure_ledger, state_directory=state)
+        settings = core.settings.model_copy(update={"database": database,
+                                                    "state_directory": str(state)})
+        with Core(settings, clock=core.clock) as restored:
+            assert lease_deliveries(restored.store, restored.settings,
+                                    LeaseRequest(worker_id="bridge"), core.clock())["items"] == []
+            assert restored.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
+            assert restored.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"

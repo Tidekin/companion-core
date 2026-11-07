@@ -12,7 +12,7 @@ from companion.contracts import CoreError
 from companion.model import ModelClient, model_payload
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 class UnreadableStream(httpx.AsyncByteStream):
@@ -78,7 +78,7 @@ def test_only_admitted_content_reaches_actual_receive(core, tmp_path, mutation):
 
 @pytest.mark.parametrize("mutation", [
     "url", "host", "authorization", "method", "transfer_encoding", "credential", "lease",
-    "expired", "approval_removed", "mode", "output_config",
+    "expired", "approval_removed", "mode", "output_config", "logical_request",
 ])
 def test_every_paid_request_rechecks_after_all_user_hooks(core, tmp_path, mutation):
     approved_live(core, tmp_path)
@@ -108,6 +108,11 @@ def test_every_paid_request_rechecks_after_all_user_hooks(core, tmp_path, mutati
             core.settings.mode = "demo"
         elif mutation == "output_config":
             core.settings.max_output_tokens -= 1
+        elif mutation == "logical_request":
+            core.store.execute(
+                'UPDATE model_admissions SET logical_request_id=%s WHERE request_id=%s',
+                ("other", request_id),
+            )
         else:
             core.settings.paid_model = None
 
@@ -212,7 +217,7 @@ def test_final_sample_rechecks_paid_expiry_as_well_as_the_admission_lease(
     run(scenario())
     assert len(checks) == 2 and dispatched == []
     if boundary == "lease":
-        assert core.store.one("SELECT lease_until FROM jobs WHERE job_id=?",
+        assert core.store.one('SELECT lease_until FROM jobs WHERE job_id=%s',
                               (job_id,))["lease_until"] > core.clock()
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
         "state": "SETTLED", "billed_micro_usd": 0}

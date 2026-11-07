@@ -110,7 +110,7 @@ def test_mood_batch_rejects_changes_before_publishing(core, tmp_path, monkeypatc
             else:
                 key = owner_input.INPUT + expected["signals"][0]["event_id"]
                 value = json.loads(core.store.one(
-                    "SELECT value FROM runtime_meta WHERE key=?", (key,))["value"])
+                    'SELECT value FROM runtime_meta WHERE key=%s', (key,))["value"])
                 value["capture"]["signature"] = "0" * 128
                 execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), key))
 

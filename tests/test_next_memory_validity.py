@@ -1,5 +1,4 @@
 """Current confirmations must not rewrite memories for another business interval."""
-
 import pytest
 
 from companion.contracts import Candidate, CoreError
@@ -7,8 +6,8 @@ from companion.privacy import epoch
 from companion.store import after
 from tests.conftest import ingest
 from tests.postgres_fixture import logical_state
-from tests.test_m1 import remember
-from tests.test_memory_workflows import message, reply
+from tests.support.confirmed_memory import remember
+from tests.support.memory_workflows import message, reply
 
 
 def set_inactive_interval(core, memory_id, interval):

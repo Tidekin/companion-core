@@ -1,13 +1,10 @@
 """Synthetic images and Mock HTTP only: no provider or owner data."""
 
-import base64
-import io
 import json
 from copy import deepcopy
 
 import httpx
 import pytest
-from PIL import Image
 from pydantic import ValidationError
 
 from companion import budget, paid_budget
@@ -16,66 +13,8 @@ from companion.model import ModelClient, ModelResponseError, model_payload
 from companion.store import Store
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
-
-
-def image_messages(size=(2, 2)):
-    stream = io.BytesIO()
-    Image.new("RGB", size, "white").save(stream, format="PNG")
-    data = stream.getvalue()
-    return [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "只描述这张当前图片。"},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": "data:image/png;base64," + base64.b64encode(data).decode("ascii"),
-                    },
-                },
-            ],
-        }
-    ]
-
-
-def image_approval(core, tmp_path, **changes):
-    policy = dict(
-        approval_sha256="b" * 64,
-        estimated_tokens_per_image=1000,
-        max_bytes_per_image=100000,
-        max_pixels_per_image=10000,
-        max_images_per_request=1,
-    )
-    policy.update(changes.pop("policy", {}))
-    approval = approved_live(
-        core,
-        tmp_path,
-        **{
-            "image_input": policy,
-            "per_request_calls": 2,
-            **changes,
-        },
-    )
-    core.settings.content.use_chat_model_for_vision = True
-    core.settings.content.image_daily_micro_usd = 100000
-    return approval
-
-
-def reserve_image(core, messages=None, *, number=1, **kwargs):
-    purposes = ("chat", "image") if core.settings.paid_model.image_input else ("chat",)
-    job = authorized_job(core, purposes=purposes, number=number)
-    request = budget.reserve(
-        core.store,
-        core.settings,
-        job,
-        "content_vision",
-        messages or image_messages(),
-        core.clock(),
-        logical_request_id=job,
-        **kwargs,
-    )
-    return job, request
+from tests.support.paid_image_budget import image_approval, image_messages, reserve_image
+from tests.support.paid_model import approved_live
 
 
 def provider_body(**changes):
@@ -150,12 +89,12 @@ def test_image_estimate_uses_policy_not_base64_text_and_binds_payload(core, tmp_
     approval = image_approval(core, tmp_path)
     messages = image_messages()
     job, request = reserve_image(core, messages)
-    usage = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request,))
+    usage = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,))
     expected = 32 + 8 + (len(messages[0]["content"][0]["text"].encode()) + 2) // 3 + 1000
     expected = (expected * approval.input_estimate_safety_percent + 99) // 100
     assert usage["input_tokens"] == expected
     assert usage["output_tokens"] == 300
-    admission = core.store.one("SELECT * FROM model_admissions WHERE request_id=?", (request,))
+    admission = core.store.one('SELECT * FROM model_admissions WHERE request_id=%s', (request,))
     assert admission["logical_request_id"] == job
     assert admission["payload_sha256"]
     assert paid_budget.snapshot(core.settings)["image_input"] == approval.image_input.model_dump()
@@ -188,13 +127,16 @@ def test_exact_image_and_chat_share_job_journal_usage_and_two_attempt_limit(core
         model_payload(core.settings, messages, "content_vision"),
     )
     assert calls[1][2] == model_payload(core.settings, text, "chat")
-    admissions = core.store.rows("SELECT * FROM model_admissions ORDER BY rowid")
+    admissions = core.store.rows('SELECT * FROM model_admissions ORDER BY record_sequence')
     assert {a["logical_request_id"] for a in admissions} == {job}
     assert len({(a["window_id"], a["journal_id"], a["journal_path"]) for a in admissions}) == 1
     assert [a["attempt_number"] for a in admissions] == [1, 2]
     assert core.store.rows(
-        "SELECT scenario,state,input_tokens,output_tokens,cached_input_tokens FROM model_usage "
-        "ORDER BY rowid"
+
+            'SELECT '
+            'scenario,state,input_tokens,output_tokens,cached_input_tokens '
+            'FROM model_usage ORDER BY record_sequence'
+
     ) == [
         {
             "scenario": s,

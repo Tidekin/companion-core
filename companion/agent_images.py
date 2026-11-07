@@ -328,6 +328,13 @@ def input_sources(store, settings, clock, job, *, executing=True):
             for row in rows]
 
 
+def context_item_ids(store, settings, clock, job, *, executing=True):
+    """Revalidate original image custody and return the ordered evidence identity."""
+    return [row["item_id"] for row, _ in input_sources(
+        store, settings, clock, job, executing=executing,
+    )]
+
+
 def _prepared(store, settings, clock, job, item_id, *, executing=True):
     row, image = _source(store, settings, clock, job, item_id, executing=executing)
     if row["expires_at"] <= clock():
@@ -429,6 +436,13 @@ def attach(core, job, messages, sources, turns, current, snapshots, *, priority_
     if snapshots is not None and snapshot not in snapshots:
         snapshots.append(snapshot)
     return ids
+
+
+def check_chat_admission(store, settings, clock, job, messages):
+    if not job or job["kind"] != "chat":
+        raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
+    owner_authority.check_job(store, settings, clock, job, purpose="image", executing=True)
+    check_payload(store, settings, clock, job, messages)
 
 
 def check_payload(store, settings, clock, job, messages):

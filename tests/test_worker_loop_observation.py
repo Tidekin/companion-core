@@ -34,7 +34,7 @@ def sample(sequence=1, *, session="a" * 32, at=0, age=0):
 
 
 def stored(core):
-    row = core.store.one("SELECT value FROM runtime_meta WHERE key=?", (worker_loop.KEY,))
+    row = core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (worker_loop.KEY,))
     return json.loads(row["value"]) if row else None
 
 
@@ -61,7 +61,7 @@ def observation_clock(monkeypatch):
 
 def test_recorder_never_reuses_startup_record_and_throttles_completed_loops(core, monkeypatch):
     prior = encode(record(987))
-    core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", (worker_loop.KEY, prior))
+    core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)', (worker_loop.KEY, prior))
     ticks = [0.0]
     monkeypatch.setattr(worker_loop, "monotonic", lambda: ticks[0])
     monkeypatch.setattr(worker_loop, "utcnow", core.clock)
@@ -174,7 +174,7 @@ def test_actual_worker_blocked_poll_never_advances(core, monkeypatch):
 def test_actual_worker_failed_maintenance_preserves_previous_loop_record(core, monkeypatch):
     worker_fixture(core, monkeypatch)
     previous = encode(record(987))
-    core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", (worker_loop.KEY, previous))
+    core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)', (worker_loop.KEY, previous))
 
     def fail():
         raise RuntimeError("synthetic maintenance failure")
@@ -219,7 +219,7 @@ def test_status_reads_only_a_bounded_safe_record_without_initializing_or_writing
     invalid = record()
     invalid["stage"] = secret
     for raw in (encode(invalid), secret * 1000, "{broken:" + secret):
-        core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?", (raw, worker_loop.KEY))
+        core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s', (raw, worker_loop.KEY))
         result = ops_status.snapshot(core.settings)
         assert result["worker_loop"] == {"state": "INVALID"}
         assert secret not in encode(result)
@@ -243,7 +243,7 @@ def test_invalid_persisted_record_cannot_become_activity(core, change):
         value["completed_at"] = "2026-10-21T08:00:00+08:00"
     else:
         value["completed_at"] = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
-    core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", (worker_loop.KEY, encode(value)))
+    core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)', (worker_loop.KEY, encode(value)))
     assert ops_status.snapshot(core.settings)["worker_loop"] == {"state": "INVALID"}
 
 

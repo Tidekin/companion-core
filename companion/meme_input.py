@@ -46,3 +46,8 @@ def check_attempt(store, job_id, request_id=None):
         (job_id, request_id or ""),
     )):
         raise CoreError("MODEL_MEME_ALREADY_ATTEMPTED", 409)
+
+
+def validate_admission(store, settings, request_id, job_id, logical_id):
+    contract(settings, job_id, logical_id)
+    check_attempt(store, job_id, request_id)

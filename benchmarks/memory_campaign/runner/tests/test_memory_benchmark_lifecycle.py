@@ -11,7 +11,7 @@ from companion.postgres import Database
 from companion.store import Store, encode
 from tests.postgres_fixture import isolated_database
 from tests.conftest import ingest
-from tests.test_memory_commands import fact
+from tests.support.memory_commands import fact
 
 PROFILES = [
     ("P01", "林澄"),

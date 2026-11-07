@@ -5,9 +5,9 @@ import pytest
 from companion.cognition_read import CognitionRead
 from companion.privacy import epoch
 from tests.conftest import run
-from tests.test_diary import generate, seed_day
-from tests.test_life_topics import bug, due, proposal
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
+from tests.support.diary import generate, seed_day
+from tests.support.life_topics import bug, due, proposal
 
 
 def life_result(core, reason="今天先等新线索", action="SKIP"):
@@ -17,7 +17,7 @@ def life_result(core, reason="今天先等新线索", action="SKIP"):
     job = due(core)
     assert job
     assert run(core.run_once("cognition-reason", job_id=job))
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job,))["state"] == "SUCCEEDED"
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job,))["state"] == "SUCCEEDED"
     return job
 
 

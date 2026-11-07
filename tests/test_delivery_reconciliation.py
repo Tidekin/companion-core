@@ -14,259 +14,14 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import companion_delivery_protocol as wire
-from companion import budget, cumulative, live_text, owner_authority, paid_budget
+from companion import cumulative, live_text, paid_budget
 from companion import delivery_reconciliation as reconciliation
 from companion.contracts import CoreError, DeliveryResult
-from companion.model import ModelResponse
 from companion.privacy import ErasureLedger
 from companion.store import Store, after, encode, uid
 from companion.transport import delivery_result
-from tests.conftest import ingest
-from tests.test_cumulative_budget import policy, view
-from tests.test_cumulative_window import bind_policy
-from tests.test_live_text_window import live_fixture
-from tests.test_private_companion import companion_options
-
-
-def put(store, key, value):
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(value)))
-
-
-def signed(env, **changes):
-    proof = {**env.proof, **changes}
-    proof["signature"] = env.key.sign(wire.signing_payload(proof)).hex()
-    return proof
-
-
-def native(core, tmp_path, *, quota=True, uncertain=True, expired=False,
-           action="qq.private.poke", stopped=True, model_unknown=False, legacy=False, voice=False,
-           voice_v1=False):
-    accepted = ingest(core, 1, "synthetic private source")
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (accepted["event_id"],))
-    key = Ed25519PrivateKey.generate()
-    options = {} if legacy else companion_options(core)
-    account = action in wire.ACCOUNT_ACTIONS
-    if account:
-        options.update(account_actions_scope="qq_social_v1",
-                       account_actions_authorization_sha256="a" * 64)
-    if voice:
-        options.update(voice_scope="owner_voice_v1", voice_policy_sha256="b" * 64)
-    cfg, plan = live_fixture(core, tmp_path, bridge_options={
-        "capture_signing_key": key.private_bytes_raw().hex(),
-    }, **options)
-    if quota:
-        plan = bind_policy(core, plan)
-    approval = core.settings.live_text_window
-    binding = {"approval_sha256": paid_budget.sha(approval.model_dump(mode="json")),
-        "privacy_epoch": 0, "plan_sha256": plan.sha256, "window_id": approval.window_id,
-        "budget_journal_id": approval.budget_journal_id,
-        "budget_journal_path": str(Path(core.settings.paid_model.journal_path).resolve())}
-    with core.store.transaction():
-        if quota:
-            cumulative.activate(core.store, core.settings, core.clock())
-        paid_budget.journal(core.store, core.settings.paid_model, {
-            "kind": "window_open", "window_id": approval.window_id,
-            "plan_sha256": plan.sha256, "handoff_sha256": None,
-        })
-        put(core.store, live_text.BINDING, binding)
-        put(core.store, live_text.HISTORY + plan.sha256, {
-            "state": "OPEN", "binding": binding, "approval": approval.model_dump(mode="json"),
-        })
-    # This fixture supplies earlier window authority, while retaining the actual
-    # admission, amount, model journal, settlement and cumulative implementation.
-    with pytest.MonkeyPatch.context() as authority:
-        authority.setattr(live_text, "reserve_model", lambda *args, **kwargs: None)
-        # Historical v1 fixture only: create its already-admitted liability without
-        # opening a new native grant or making any provider request.
-        authority.setattr(owner_authority, "admit_model", lambda *args, **kwargs: None)
-        request_id = budget.reserve(core.store, core.settings, None, "chat",
-            [{"role": "user", "content": "synthetic model input"}], core.clock())
-    message_id, token = uid("msg"), uid("lease")
-    content = ({"kind": "poke", "target_user_id": core.settings.owner_qq_id}
-               if action == "qq.private.poke" else {"text": "synthetic private reply"})
-    if account:
-        content = account_content(core, action, message_id, event["event_id"])
-    kind = "content_sha256" if action == "qq.private.poke" else "reply_sha256"
-    kind = "account_payload_sha256" if account else kind
-    payload = content["payload_sha256"] if account else wire.digest(
-        content if kind == "content_sha256" else content["text"])
-    send_check = {"window_sha256": plan.sha256, "event_id": event["event_id"],
-                  "message_id": message_id, kind: payload, "lease_token": token}
-    if account:
-        send_check = {"window_sha256": plan.sha256, "message_id": message_id,
-                      "content_sha256": wire.digest(content), "payload_sha256": payload,
-                      "lease_token": token}
-    with core.store.transaction():
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
-                           (accepted["job_id"],))
-        core.store.insert("outbox", message_id=message_id,
-            origin_event_id=None if account else event["event_id"],
-            conversation_id=event["conversation_id"], action_type=action,
-            delivery_lane="qq_account" if account else "owner_private",
-            content_json=encode(content), content_sha256=wire.digest(content),
-            delivery_key="synthetic-original:" + message_id, state="SENDING",
-            lease_token=token, lease_until=after(core.clock(), 30), attempt_count=1,
-            created_at=core.clock(), updated_at=core.clock())
-        if account:
-            account_authority(core, content, plan.sha256)
-        else:
-            put(core.store, "private_life_delivery:" + message_id, {
-            "plan_sha256": plan.sha256, "privacy_epoch": 0, "message_id": message_id,
-            "event_id": event["event_id"], "event_sha256": wire.digest(event),
-            "content_sha256": wire.digest(content),
-            "delivery_key": "synthetic-original:" + message_id,
-            "action_type": action, "request_ids": [request_id],
-            })
-        if voice:
-            send_check["voice"] = voice_authority(
-                core, event, content, message_id, plan.sha256, legacy=voice_v1
-            )
-            send_check["reply_revision"] = event["reply_revision"]
-        if legacy:
-            core.store.execute("DELETE FROM runtime_meta WHERE key=?",
-                               ("private_life_delivery:" + message_id,))
-            put(core.store, "live_text_reply:" + message_id, {
-                "message_id": message_id, "event_id": event["event_id"],
-                "job_id": accepted["job_id"], "request_id": request_id,
-                "reply_sha256": payload, "plan_sha256": plan.sha256, "privacy_epoch": 0,
-            })
-        input_receipt = {"window_sha256": plan.sha256, "event_id": event["event_id"],
-            "input_sha256": wire.digest("synthetic private source"), "evidence_sha256": "e" * 64,
-            "capture": None, "privacy_epoch": 0}
-        put(core.store, live_text.INPUT + event["event_id"], input_receipt)
-        cumulative.admit_operation(core.store, core.settings, core.clock(), "input",
-            event["event_id"], wire.digest(input_receipt))
-        cumulative.admit_operation(core.store, core.settings, core.clock(), "send",
-            message_id, wire.digest(send_check),
-            logical=content["plan_id"] if account else event["event_id"])
-    budget.settle(core.store, core.settings, request_id,
-                  None if model_unknown else ModelResponse("synthetic", 100, 20))
-    if uncertain:
-        account_receipt = ({"message_id": message_id, "action_type": action,
-            "lease_token": token, "payload_sha256": payload, "result": "UNKNOWN"}
-            if account else None)
-        delivery_result(core.store, core.settings, message_id, DeliveryResult(
-            lease_token=token, result="DELIVERY_UNCERTAIN",
-            account_action_receipt=account_receipt), core.clock())
-    if expired:
-        core.clock.advance(31)
-    if stopped:
-        live_text.stop_window(core.store, live_text.WindowReference(window_sha256=plan.sha256),
-                              core.clock)
-    env = SimpleNamespace(core=core, key=key, plan=plan, cfg=cfg, message_id=message_id,
-                          token=token, request_id=request_id, proof=None)
-    env.proof = {"kind": wire.QUIESCENCE_KIND, "version": 1, "window_id": approval.window_id,
-        "plan_sha256": plan.sha256, "budget_journal_id": approval.budget_journal_id,
-        "message_id": message_id, "event_id": event["event_id"], "action_type": action,
-        "fence": 1, "item_sha256": wire.digest([message_id, content, token]),
-        "content_sha256": wire.digest(content) if kind == "content_sha256" else None,
-        "payload_sha256": payload, "payload_kind": kind, "lease_sha256": wire.digest(token),
-        "send_check_sha256": wire.digest(send_check), "reply_revision": None,
-        "attempt_state": "UNKNOWN", "attempt_record_sha256": "1" * 64,
-        "reserved_record_sha256": "2" * 64, "stop_record_sha256": "3" * 64,
-        "core_stop_record_sha256": "4" * 64, "bridge_journal_head_sha256": "5" * 64,
-        "original_result_sha256": wire.digest({"lease_token": token,
-                                                "result": "DELIVERY_UNCERTAIN"}),
-        "stopped_at": core.clock(), "quiesced_at": core.clock(), "signature": "0" * 128}
-    if account:
-        env.proof.pop("event_id")
-        env.proof.pop("reply_revision")
-        env.proof.update(account_plan_id=content["plan_id"], authorization_sha256="a" * 64,
-                         content_sha256=wire.digest(content))
-    if voice:
-        env.proof.update(voice_check=send_check["voice"], reply_revision=event["reply_revision"],
-                         content_sha256=wire.digest(content))
-    env.proof = signed(env)
-    return env
-
-
-def account_content(core, action, message_id, event_id):
-    from companion.social_autonomy_protocol import FrozenPlan
-
-    kind = action.rsplit(".", 1)[-1]
-    proposal = ({"kind": "qzone_publish", "text": "synthetic public source",
-                 "source_refs": [event_id]} if kind == "publish" else
-                {"kind": "avatar", "asset_id": "synthetic_reviewed_asset"} if kind == "avatar"
-                else {"kind": kind, "value": "synthetic profile"})
-    material = {"schema_version": 1, "plan_id": uid("social"), "message_id": message_id,
-        "delivery_key": "synthetic-original:" + message_id, "action_type": action,
-        "policy_version": 1, "policy_sha256": "c" * 64, "authorization_sha256": "a" * 64,
-        "bot_qq_id": core.settings.bot_qq_id, "owner_qq_id": core.settings.owner_qq_id,
-        "proposal": proposal, "source_snapshot_sha256": "d" * 64,
-        "profile_baseline_sha256": None if kind == "publish" else "e" * 64,
-        "asset_sha256": "f" * 64 if kind == "avatar" else None,
-        "audience": {"ugc_right": 16, "target_uins": [core.settings.owner_qq_id]}
-            if kind == "publish" else None, "expires_at": after(core.clock(), 60)}
-    return FrozenPlan(**material, payload_sha256=wire.digest(material)).model_dump(mode="json")
-
-
-def account_authority(core, content, window_sha256):
-    core.store.insert("social_autonomy_plans", plan_id=content["plan_id"],
-        idempotency_key=content["plan_id"], request_sha256="1" * 64, candidate_sha256="2" * 64,
-        state="READY", policy_version=1, policy_sha256=content["policy_sha256"],
-        authorization_sha256=content["authorization_sha256"], binding_sha256="3" * 64,
-        timezone="UTC", policy_json="{}", input_snapshot_json="{}",
-        source_snapshot_sha256=content["source_snapshot_sha256"], plan_json=encode(content),
-        payload_sha256=content["payload_sha256"], created_at=core.clock(),
-        expires_at=content["expires_at"], updated_at=core.clock())
-    core.store.insert("social_autonomy_reservations", plan_id=content["plan_id"],
-        message_id=content["message_id"], action_type=content["action_type"],
-        semantic_sha256="4" * 64, reserved_day=core.clock()[:10], reserved_at=core.clock(),
-        dispatched_at=core.clock())
-    put(core.store, "account_action_delivery:" + content["message_id"], {
-        "plan_sha256": window_sha256, "message_id": content["message_id"],
-        "authorization_sha256": content["authorization_sha256"],
-        "payload_sha256": content["payload_sha256"], "content_sha256": wire.digest(content),
-    })
-
-
-def voice_authority(core, event, content, message_id, window_sha256, *, legacy=False):
-    from companion.voice_protocol import LegacyVoiceDeliveryBinding
-
-    job_id = uid("voice")
-    delivery_key = "synthetic-original:" + message_id
-    binding = LegacyVoiceDeliveryBinding(
-        retirement_token="random-proof-" + "x" * 32,
-        job_id=job_id,
-        generation=1,
-        message_id=message_id,
-        delivery_key=delivery_key,
-        event_id=event["event_id"],
-        window_sha256=window_sha256,
-        source_sha256="1" * 64,
-        identity_sha256="2" * 64,
-        privacy_epoch=0,
-        reply_revision=event["reply_revision"],
-        node_id="local",
-        manifest_sha256="3" * 64,
-        node_config_sha256="4" * 64,
-        voice_policy_sha256="b" * 64,
-        content_sha256=wire.digest(content),
-        reply_sha256=wire.digest(content["text"]),
-        result_sha256="5" * 64,
-        audio_sha256="6" * 64,
-        audio_bytes=100,
-        expires_at=after(core.clock(), 60),
-    ).model_dump(mode="json")
-    if legacy:
-        binding.pop("retirement_token")
-        binding["schema_version"] = 1
-    core.store.insert("voice_jobs", job_id=job_id, operation="tts", event_id=event["event_id"],
-        native_source_event_id=event["source_event_id"], conversation_id=event["conversation_id"],
-        message_id=message_id, source_sha256=binding["source_sha256"],
-        identity_sha256=binding["identity_sha256"], window_sha256=window_sha256,
-        captured_privacy_epoch=0, captured_reply_revision=event["reply_revision"],
-        outbox_content_sha256=wire.digest(content), outbox_delivery_key=delivery_key,
-        node_id="local", manifest_sha256=binding["manifest_sha256"],
-        config_sha256=binding["node_config_sha256"], config_json="{}", generation=1,
-        state="READY", input_mime="text/plain", input_sha256="7" * 64, input_bytes=20,
-        source_partial=0, result_sha256=binding["result_sha256"], result_bytes=100,
-        created_at=core.clock(), updated_at=core.clock(), deadline_at=after(core.clock(), 60),
-        result_expires_at=after(core.clock(), 60))
-    put(core.store, "voice_reply:" + message_id, {"state": "AUDIO", "job_id": job_id,
-        "binding": binding, "binding_sha256": wire.digest(binding)})
-    return {"binding_sha256": wire.digest(binding),
-            **{k: binding[k] for k in wire.VOICE_CHECK_FIELDS - {"binding_sha256"} if k in binding}}
+from tests.support.cumulative_budget import policy, view
+from tests.support.delivery_reconciliation import decide, native, prepare, put, signed
 
 
 @pytest.mark.parametrize("action", sorted(wire.ACCOUNT_ACTIONS))
@@ -313,12 +68,12 @@ def test_account_original_binding_drift_rejects_without_append(core, tmp_path, c
     if change == "authorization":
         env.proof = signed(env, authorization_sha256="f" * 64)
     elif change == "receipt":
-        core.store.execute("UPDATE social_autonomy_reservations SET receipt_sha256=?", ("f" * 64,))
+        core.store.execute('UPDATE social_autonomy_reservations SET receipt_sha256=%s', ("f" * 64,))
     elif change == "reservation":
-        core.store.execute("UPDATE social_autonomy_reservations SET action_type=?",
+        core.store.execute('UPDATE social_autonomy_reservations SET action_type=%s',
                            ("qq.profile.avatar",))
     elif change == "plan":
-        core.store.execute("UPDATE social_autonomy_plans SET payload_sha256=?", ("f" * 64,))
+        core.store.execute('UPDATE social_autonomy_plans SET payload_sha256=%s', ("f" * 64,))
     else:
         core.store.execute("UPDATE outbox SET delivery_lane='owner_private'")
     before = rows(env)
@@ -331,7 +86,7 @@ def test_account_resolution_after_source_erasure_keeps_original_hashes(core, tmp
     env = native(core, tmp_path, action="qzone.publish")
     event_id = core.store.one("SELECT event_id FROM events")["event_id"]
     with core.store.transaction():
-        core.store.execute("UPDATE outbox SET origin_event_id=?", (event_id,))
+        core.store.execute('UPDATE outbox SET origin_event_id=%s', (event_id,))
         core.store.insert("social_autonomy_sources", plan_id=env.proof["account_plan_id"],
                           event_id=event_id, role="content", source_sha256="d" * 64)
         ErasureLedger(core.settings.erasure_ledger).expire_events(
@@ -427,7 +182,7 @@ def test_voice_resolution_rejects_changed_original_result(core, tmp_path, change
         value["binding"]["reply_sha256"] = "f" * 64
         put(core.store, "voice_reply:" + env.message_id, value)
     elif change == "result":
-        core.store.execute("UPDATE voice_jobs SET result_sha256=?", ("f" * 64,))
+        core.store.execute('UPDATE voice_jobs SET result_sha256=%s', ("f" * 64,))
     elif change == "generation":
         core.store.execute("UPDATE voice_jobs SET generation=2")
     else:
@@ -485,16 +240,6 @@ def test_shared_wire_imports_without_core_or_bridge(tmp_path):
     assert result.stdout.strip() == "standalone-wire:ok"
 
 
-def decide(env, outcome="CANCELLED", *, operation_id="owner-fixture-op", operation_sha256=None):
-    return reconciliation.resolve(env.core.store, env.core.settings, env.message_id, outcome,
-        env.core.clock(), operation_id=operation_id,
-        operation_sha256=operation_sha256 or wire.digest([env.message_id, outcome]))
-
-
-def prepare(env):
-    return reconciliation.prepare(env.core.store, env.core.settings, env.proof, env.core.clock())
-
-
 def rows(env):
     return [json.loads(line) for line in Path(
         env.core.settings.paid_model.journal_path).read_text("utf-8").splitlines()]
@@ -502,7 +247,7 @@ def rows(env):
 
 def sibling(env, *, state="SENDING", attempted=True):
     core = env.core
-    row = core.store.one("SELECT * FROM outbox WHERE message_id=?", (env.message_id,))
+    row = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (env.message_id,))
     message_id, token = uid("msg"), uid("lease")
     row.update(message_id=message_id, lease_token=token if attempted else None,
                delivery_key="synthetic-sibling:" + message_id, state=state,
@@ -536,7 +281,7 @@ def test_native_resolution_preserves_all_reservations_money_and_stop(
     before = deepcopy(view(core))
     usage = core.store.rows("SELECT * FROM model_usage")
     admissions = core.store.rows("SELECT * FROM model_admissions")
-    original = core.store.one("SELECT * FROM outbox WHERE message_id=?", (env.message_id,))
+    original = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (env.message_id,))
     prefix = rows(env)
     assert prepare(env)["state"] == "READY"
     assert reconciliation.readiness(core.store, core.settings, env.message_id)["prepared"]
@@ -558,7 +303,7 @@ def test_native_resolution_preserves_all_reservations_money_and_stop(
     assert after_state["paused"] and after_state["reason"] == before["reason"]
     assert core.store.rows("SELECT * FROM model_usage") == usage
     assert core.store.rows("SELECT * FROM model_admissions") == admissions
-    changed = core.store.one("SELECT * FROM outbox WHERE message_id=?", (env.message_id,))
+    changed = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (env.message_id,))
     assert changed["state"] == outcome and changed["lease_token"] is None
     for field in ("attempt_count", "native_ack_json", "provider_message_id", "created_at",
                   "lease_until", "content_sha256"):
@@ -591,7 +336,7 @@ def test_changed_signed_or_unsigned_original_binding_is_rejected(core, tmp_path,
     with pytest.raises(CoreError):
         reconciliation.prepare(core.store, core.settings, proof, core.clock())
     assert rows(env) == original
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                           (env.message_id,))["state"] == "DELIVERY_UNCERTAIN"
 
 
@@ -634,7 +379,7 @@ def test_erased_payload_uses_retained_authority_and_historical_public_key(core, 
     assert result["receipt"]["delivery"]["content_sha256"]
     assert result["receipt"]["quiescence"] == env.proof
     assert "synthetic private reply" not in encode(result)
-    assert core.store.one("SELECT content_json,content_sha256 FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT content_json,content_sha256 FROM outbox WHERE message_id=%s',
                           (env.message_id,)) == {"content_json": "{}", "content_sha256": ""}
 
 
@@ -713,7 +458,7 @@ def test_fsynced_decision_recovers_exact_owner_receipt_after_database_failure(
     monkeypatch.setattr(paid_budget.os, "fsync", real_fsync)
     assert failed
     assert rows(env)[-1]["kind"] == reconciliation.KIND
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                           (env.message_id,))["state"] == "DELIVERY_UNCERTAIN"
     with pytest.raises(CoreError):
         paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
@@ -848,7 +593,7 @@ def test_live_without_cumulative_still_requires_proof_and_original_budget_record
     result = decide(env, outcome)
     assert result["receipt"]["account_ref"] is result["receipt"]["policy_sha256"] is None
     assert result["receipt"]["prior_liability_sha256"] is None
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,))
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s', (cumulative.PROJECTION,))
     assert decide(env, outcome) == result
 
 
@@ -912,7 +657,7 @@ def test_last_unknown_delivery_closes_input_without_changing_previous_receipt(
 def test_input_closure_never_hides_unsettled_native_work(core, tmp_path, blocker):
     env = native(core, tmp_path, model_unknown=blocker == "models")
     if blocker == "jobs":
-        core.store.execute("UPDATE jobs SET state='RUNNING' WHERE event_id=?",
+        core.store.execute("UPDATE jobs SET state='RUNNING' WHERE event_id=%s",
                            (env.proof["event_id"],))
     elif blocker == "reads":
         core.store.insert("content_items", item_id=uid("content"),

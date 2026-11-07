@@ -7,50 +7,11 @@ import httpx
 from companion import jargon
 from companion.jargon_config import JargonConfig
 from companion.model import ModelClient
-from tests.conftest import ingest, run
-from tests.support.owner_authority import activate
-from tests.test_exploration import configure
-from tests.test_owner_authority import prepare
-from tests.test_watch_ledger import Provider
+from tests.conftest import ingest
+from tests.support.jargon import EXTRACT, ready, say, step
 
-EXTRACT = {"terms": [{"term": "摸鱼王", "event_ids": ["evt_test_2"]},
-                     {"term": "不存在的词", "event_ids": ["evt_test_1"]}]}
 INFER = {"common_meaning": None, "owner_meaning": "主人自己，上班偷懒时的自称",
          "is_jargon": True, "confident": True}
-
-
-def ready(core, tmp_path, *texts):
-    configure(core)
-    core.settings.jargon = JargonConfig(batch_messages=4)
-    policy = prepare(core, tmp_path)
-    activate(core, policy.model_copy(update={"purposes": ["memory"],
-                                             "memory_scope": "owner_private"}))
-    provider = Provider(*[json.dumps(t, ensure_ascii=False) for t in texts])
-    core.model = ModelClient(core.settings,
-                             httpx.AsyncClient(transport=httpx.MockTransport(provider)))
-    return provider
-
-
-def say(core, number, text):
-    """Before activation use the native ingest; afterwards copy its stored shape."""
-    template = core.store.one("SELECT * FROM events WHERE event_id='evt_test_1'")
-    if template is None or not core.store.one(
-            "SELECT 1 FROM owner_authority_revisions LIMIT 1"):
-        ingest(core, number, text)
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-        return
-    body = {**json.loads(template["body_json"]), "text": text}
-    core.store.execute(
-        "INSERT INTO events(event_id,schema_version,source,source_event_id,conversation_id,"
-        "actor_id,event_type,occurred_at,ingested_at,privacy_scope,body_json,trace_id) "
-        "VALUES(?,1,?,?,?,'owner','message.received',?,?,'private',?,?)",
-        (f"evt_test_{number}", template["source"], f"synthetic-{number}",
-         template["conversation_id"], core.clock(), core.clock(),
-         json.dumps(body, ensure_ascii=False), f"trace_{number:08d}"))
-
-
-def step(core):
-    return run(jargon.run_once(core.store, core.settings, core.model, core.clock))
 
 
 def terms(core):
@@ -148,7 +109,7 @@ def test_owner_forget_while_inference_is_in_flight(core, tmp_path):
     from pydantic import SecretStr
 
     from companion.api import create_app
-    from tests.test_console_cognition import ORIGIN, PASSWORD, login
+    from tests.support.console_cognition import ORIGIN, PASSWORD, login
 
     for number, text in enumerate(["今天好累", "摸鱼王又上线了", "开会", "下班了"], 1):
         say(core, number, text)
@@ -178,9 +139,9 @@ def test_owner_forget_while_inference_is_in_flight(core, tmp_path):
     work = core.store.one("SELECT * FROM jargon_work WHERE kind='infer'")
     assert work["state"] == "CANCELLED" and work["error_code"] == "JARGON_SOURCE_CHANGED"
     assert not step(core) and len(provider.calls) == 2
-    assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE scenario=?",
+    assert core.store.one('SELECT COUNT(*) n FROM model_usage WHERE scenario=%s',
                           (jargon.SCENARIO,))["n"] == 2  # One extraction and one inference.
-    usage = core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+    usage = core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                            (work["model_request_id"],))
     assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
 
@@ -189,8 +150,11 @@ def test_chat_context_carries_meanings_only_for_terms_in_the_message(core):
     core.settings.jargon = JargonConfig()
     say(core, 1, "摸鱼王又上线了")
     core.store.execute(
-        "INSERT INTO jargon_terms(term,refs_json,uses,state,meaning,inferred_uses,created_at,"
-        "updated_at) VALUES('摸鱼王','[\"evt_test_1\"]',4,'INFERRED','主人自己',4,?,?)",
+        (
+            'INSERT INTO jargon_terms(term,refs_json,uses,state,meaning,infer'
+            'red_uses,created_at,updated_at) '
+            'VALUES(\'摸鱼王\',\'["evt_test_1"]\',4,\'INFERRED\',\'主人自己\',4,%s,%s)'
+        ),
         (core.clock(), core.clock()))
     ingest(core, 2, "摸鱼王今天不想动")
     job = core.claim_job("worker")
@@ -207,12 +171,15 @@ def test_console_lists_and_forgets_terms_with_a_receipt(core):
     from pydantic import SecretStr
 
     from companion.api import create_app
-    from tests.test_console_cognition import ORIGIN, PASSWORD, login
+    from tests.support.console_cognition import ORIGIN, PASSWORD, login
 
     say(core, 1, "摸鱼王又上线了")
     core.store.execute(
-        "INSERT INTO jargon_terms(term,refs_json,uses,state,meaning,inferred_uses,created_at,"
-        "updated_at) VALUES('摸鱼王','[\"evt_test_1\"]',4,'INFERRED','主人自己',4,?,?)",
+        (
+            'INSERT INTO jargon_terms(term,refs_json,uses,state,meaning,infer'
+            'red_uses,created_at,updated_at) '
+            'VALUES(\'摸鱼王\',\'["evt_test_1"]\',4,\'INFERRED\',\'主人自己\',4,%s,%s)'
+        ),
         (core.clock(), core.clock()))
     core.settings.console.enabled = True
     core.settings.console.public_origin = ORIGIN

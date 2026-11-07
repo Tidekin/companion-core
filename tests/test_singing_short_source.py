@@ -9,8 +9,9 @@ from companion.contracts import CoreError
 from companion.store import after, encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
-from tests.test_reading_followup import SHORT, URL, admit
-from tests.test_singing_integration import queue_song, singing_window
+from tests.support.exploration import URL
+from tests.support.reading_followup import SHORT, admit
+from tests.support.singing_integration import queue_song, singing_window
 
 
 def test_reader_short_link_observation_queues_the_resolved_song(core, tmp_path, monkeypatch):
@@ -60,11 +61,11 @@ def test_short_link_song_rechecks_original_reader_proof(core, tmp_path, monkeypa
                 core.store.execute(f"UPDATE observations SET {column}=? WHERE event_id=?",
                                    (value, event_id))
             elif change == "event_redacted":
-                core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (event_id,))
+                core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (event_id,))
             else:
-                core.store.execute("UPDATE events SET source='observation.web' WHERE event_id=?",
+                core.store.execute("UPDATE events SET source='observation.web' WHERE event_id=%s",
                                    (event_id,))
-            core.store.execute("UPDATE observations SET evidence_json=? WHERE event_id=?",
+            core.store.execute('UPDATE observations SET evidence_json=%s WHERE event_id=%s',
                                (encode(evidence), event_id))
             with pytest.raises(CoreError):
                 singing.check_source(core.store, core.settings, core.clock, job)

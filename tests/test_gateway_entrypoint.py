@@ -14,7 +14,7 @@ import pytest
 from pydantic import SecretStr
 
 from companion.store import after
-from tests.test_gateway import body, gateway_harness, rotate  # noqa: F401
+from tests.support.gateway import body, gateway_harness, rotate  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 PROCESS = ROOT / "tests/support/gateway_process.py"

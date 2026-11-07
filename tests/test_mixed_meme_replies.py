@@ -19,16 +19,16 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.owner_memes import MemePump
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
+from tests.support.meme_core import CAPTION
+from tests.support.meme_runtime import RULE, public_transport
 from tests.support.native_meme_entry import native_entry
+from tests.support.next_memes_catalog import png
+from tests.support.next_memes_discovery import resolver
 from tests.support.onebot import provider as onebot_provider
 from tests.support.onebot_events import raw_event
-from tests.test_meme_core import CAPTION
-from tests.test_meme_runtime import RULE, public_transport
-from tests.test_next_memes_catalog import png
-from tests.test_next_memes_discovery import resolver
-from tests.test_private_companion import companion_options
-from tests.test_voice_flow import finish_node
-from tests.test_voice_jobs import voice_config
+from tests.support.private_companion import companion_options
+from tests.support.voice_flow import finish_node
+from tests.support.voice_jobs import voice_config
 
 
 def test_current_catalog_meme_is_sent_between_voice_and_text(core, tmp_path, monkeypatch):
@@ -194,8 +194,10 @@ def test_current_catalog_meme_is_sent_between_voice_and_text(core, tmp_path, mon
                         number = 2
                         current = await admit()
                         assert await worker.run_once("mixed-meme-final")
-                        before = core.store.rows("SELECT content_json,state FROM outbox "
-                                                 "WHERE origin_event_id=? ORDER BY segment_index",
+                        before = core.store.rows((
+                            'SELECT content_json,state FROM outbox WHERE '
+                            'origin_event_id=%s ORDER BY segment_index'
+                        ),
                                                  (current,))
                         assert [json.loads(row["content_json"]).get("reply_part", {}).get("kind")
                                 for row in before] == ["voice", "meme", "text"], (
@@ -214,8 +216,10 @@ def test_current_catalog_meme_is_sent_between_voice_and_text(core, tmp_path, mon
                         encoded = sends[2]["message"][0]["data"]["file"].removeprefix("base64://")
                         assert base64.b64decode(encoded) == asset
                         rows = core.store.rows(
-                            "SELECT state,attempt_count FROM outbox "
-                            "WHERE origin_event_id=? ORDER BY segment_index",
+                            (
+                                'SELECT state,attempt_count FROM outbox WHERE'
+                                ' origin_event_id=%s ORDER BY segment_index'
+                            ),
                             (current,),
                         )
                         assert rows == [{"state": "SENT", "attempt_count": 1}] * 3

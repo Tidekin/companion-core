@@ -12,11 +12,18 @@ from companion.owner_authority_protocol import AuthorityStop, OwnerCapture
 from companion.store import utcnow
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.meme_core import body, caption_environment, worker
 from tests.support.owner_authority import activate
-from tests.test_meme_core import body, caption_environment, worker
-from tests.test_owner_authority import prepare
-from tests.test_owner_input import captured
-from tests.test_worker_wakeup_process import close_child, finish, ready, signed_input, start, state
+from tests.support.owner_authority_setup import prepare
+from tests.support.owner_input import captured
+from tests.support.worker_wakeup_process import (
+    close_child,
+    finish,
+    ready,
+    signed_input,
+    start,
+    state,
+)
 
 
 @pytest.mark.parametrize("fence", ["stop", "restore", "disabled"])
@@ -52,7 +59,7 @@ def test_queued_caption_keeps_owner_priority_and_revocation(core, tmp_path, monk
             assert response.status_code == 200, response.text
             job_id = response.json()["job_id"]
             if fence == "owner_waiting":
-                source = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                source = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                         (owner_input.INPUT + event["event_id"],))
                 template = OwnerCapture.model_validate(json.loads(source["value"])["capture"])
                 capture, _ = signed_input(core, template, grant.key, 999)
@@ -64,7 +71,7 @@ def test_queued_caption_keeps_owner_priority_and_revocation(core, tmp_path, monk
             calls = []
             assert await worker(core, calls) == (fence == "restore")
             assert core.store.one(
-                "SELECT state,attempts,lease_token,last_error_code FROM jobs WHERE job_id=?",
+                'SELECT state,attempts,lease_token,last_error_code FROM jobs WHERE job_id=%s',
                 (job_id,),
             ) == {"state": "CANCELLED" if fence == "restore" else "QUEUED",
                   "attempts": 0, "lease_token": None,

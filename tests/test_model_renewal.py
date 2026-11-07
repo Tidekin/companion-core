@@ -20,66 +20,12 @@ from companion import (
 )
 from companion.contracts import CoreError
 from companion.life_topics import _uncertain
-from companion.model_carry_controller import verify
 from companion.owner_authority_protocol import AuthorityStop, OwnerCapture
-from companion_delivery_protocol import digest
 from companion_delivery_protocol import model_carry as wire
-from tests.model_carry_support import MESSAGES, executors, migrated, observer
+from tests.model_carry_support import MESSAGES, migrated
 from tests.owner_model_fixtures import authorized_job
+from tests.support.model_renewal import renewal
 from tests.support.owner_authority import activate
-
-
-def renewal(core, case, *, number=1, offset=timedelta(seconds=1), open_ended=False,
-            concurrency=None):
-    active = case.successor["authority"]
-    previous = paid_budget.snapshot(core.settings)
-    expiry = core.settings.paid_model.expires_at
-    core.clock.now = expiry + offset
-    owner_authority.stop(
-        core.store,
-        core.settings,
-        core.clock,
-        AuthorityStop(operation_id=f"stop-renewal-{number}", authority=active),
-    )
-    expires = None if open_ended else expiry + timedelta(days=1)
-    core.settings.paid_model = core.settings.paid_model.model_copy(
-        update={
-            "window_id": f"renewed-window-{number}",
-            "approval_sha256": str(number) * 64,
-            "expires_at": expires,
-            "concurrency": concurrency or core.settings.paid_model.concurrency,
-            "rates_valid_until": None if open_ended else max(
-                core.settings.paid_model.rates_valid_until, expires),
-        }
-    )
-    items = executors(core.clock())
-    witness = verify(items, observe=observer(items))
-    with core.store.transaction():
-        view = owner_authority.custody(core.store, core.settings, settlement=True)
-        value = model_carry.manifest(
-            core.store, core.settings, active, core.settings.paid_model.window_id, items, view
-        )
-    policy = case.policy.model_copy(
-        update={
-            "authorization_sha256": str(number + 2) * 64,
-            "unknown_carry_sha256": digest(value),
-            "expires_at": expires,
-            "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings)),
-        }
-    )
-    request = {
-        "version": 2,
-        "operation_id": f"renewal-operation-{number}",
-        "authorization_sha256": policy.authorization_sha256,
-        "expected_head_sha256": view["head_sha256"],
-        "authority": active,
-        "successor_window_id": core.settings.paid_model.window_id,
-        "manifest_sha256": digest(value),
-        "successor_policy": policy.model_dump(mode="json"),
-        "executors": items,
-        "previous_paid_contract": previous,
-    }
-    return request, policy, witness
 
 
 def test_reviewed_renewal_can_raise_capacity_to_ten_without_changing_old_liability(core, tmp_path):
@@ -99,7 +45,7 @@ def test_reviewed_renewal_can_raise_capacity_to_ten_without_changing_old_liabili
     with pytest.raises(CoreError, match="MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"):
         budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock(),
                        clock=core.clock, logical_request_id="capacity-renewal-overflow")
-    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                           (case.request_id,)) == before[0]
     with core.store.transaction():
         saved = paid_budget.journal(core.store, core.settings.paid_model)["model_carries"]
@@ -152,7 +98,7 @@ def test_second_renewal_keeps_all_windows_and_immutable_prior_approval(core, tmp
 
 
 def test_renewal_replay_batches_windows_at_each_original_cutoff(core, tmp_path):
-    from tests.test_model_carry_lifecycle import current_unknown
+    from tests.support.model_carry_lifecycle import current_unknown
 
     case = migrated(core, tmp_path, expires_at=core.clock.now + timedelta(hours=2),
                     rates_valid_until=core.clock.now + timedelta(days=4))
@@ -193,11 +139,11 @@ def test_renewal_replay_rejects_changed_baseline_admission(core, tmp_path, chang
     activate(core, policy, revision=4, operation="activate-baseline-custody")
     before = core.store.rows("SELECT * FROM model_usage")
     if change == "missing":
-        core.store.execute("DELETE FROM model_admissions WHERE request_id=?", (case.request_id,))
+        core.store.execute('DELETE FROM model_admissions WHERE request_id=%s', (case.request_id,))
     else:
         core.store.insert("model_budget_windows", window_id="unrelated-window",
                           contract_sha256="0" * 64)
-        core.store.execute("UPDATE model_admissions SET window_id=? WHERE request_id=?",
+        core.store.execute('UPDATE model_admissions SET window_id=%s WHERE request_id=%s',
                            ("unrelated-window", case.request_id))
     with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
         with core.store.transaction():
@@ -311,7 +257,7 @@ def test_renewal_fsync_replay_requires_the_exact_reviewed_request(
 ):
     case = migrated(core, tmp_path)
     if current_closed:
-        from tests.test_model_carry_lifecycle import current_unknown
+        from tests.support.model_carry_lifecycle import current_unknown
 
         current_unknown(core)
     request, policy, witness = renewal(core, case)
@@ -342,12 +288,12 @@ def test_renewal_fsync_replay_requires_the_exact_reviewed_request(
 
 
 def test_new_journal_closed_unknown_no_longer_pauses_life(core, tmp_path):
-    from tests.test_model_carry_lifecycle import current_unknown
+    from tests.support.model_carry_lifecycle import current_unknown
 
     migrated(core, tmp_path)
     assert not _uncertain(core.store, core.settings)
     request_id = current_unknown(core)
-    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                           (request_id,))["state"] == "UNKNOWN"
     # Owner decision 2026-11-01: closed liability counts as settled for Life too.
     assert not _uncertain(core.store, core.settings)
@@ -357,7 +303,7 @@ def test_new_journal_closed_unknown_no_longer_pauses_life(core, tmp_path):
 def test_renewal_retains_new_closed_unknown_and_uses_existing_input_handoff(
     core, tmp_path, prior_renewal,
 ):
-    from tests.test_model_carry_lifecycle import current_unknown
+    from tests.support.model_carry_lifecycle import current_unknown
 
     case = migrated(core, tmp_path, expires_at=core.clock.now + timedelta(hours=2),
                     rates_valid_until=core.clock.now + timedelta(days=4))
@@ -382,7 +328,7 @@ def test_renewal_retains_new_closed_unknown_and_uses_existing_input_handoff(
         row["billed_micro_usd"] for row in before if row["request_id"] == current
     )
     capture = OwnerCapture.model_validate(json.loads(core.store.one(
-        "SELECT value FROM runtime_meta WHERE key=?",
+        'SELECT value FROM runtime_meta WHERE key=%s',
         ("owner_input:" + proof["inputs"][0]["event_id"],),
     )["value"])["capture"])
     state = owner_input_state.read(core.store, core.settings, capture)
@@ -411,12 +357,12 @@ def test_renewal_retains_new_closed_unknown_and_uses_existing_input_handoff(
     activate(core, policy, revision=active["authority"]["revision"] + 1,
              operation="same-approval-after-renewal")
     for row in before:
-        assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+        assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                (row["request_id"],)) == row
 
 
 def test_renewal_rejects_current_unknown_without_local_close(core, tmp_path, monkeypatch):
-    from tests.test_model_carry_lifecycle import current_unknown
+    from tests.support.model_carry_lifecycle import current_unknown
 
     case = migrated(core, tmp_path)
     monkeypatch.setattr(model_carry, "close_owned", lambda *args: None)
@@ -435,7 +381,7 @@ def test_renewal_rejects_current_unknown_without_local_close(core, tmp_path, mon
 def test_renewal_keeps_closed_unknown_from_an_earlier_same_approval_revision(
     core, tmp_path, handoffs, with_current, prior_renewal, erased,
 ):
-    from tests.test_model_carry_lifecycle import current_unknown
+    from tests.support.model_carry_lifecycle import current_unknown
 
     case = migrated(core, tmp_path, expires_at=core.clock.now + timedelta(hours=2),
                     rates_valid_until=core.clock.now + timedelta(days=4))
@@ -447,8 +393,10 @@ def test_renewal_keeps_closed_unknown_from_an_earlier_same_approval_revision(
         core.authorized_model_test_capture = active, case.key
         core.authorized_model_test_jobs = {}
     historical = current_unknown(core)
-    source = core.store.one("SELECT j.event_id FROM jobs j JOIN model_usage m USING(job_id) "
-                            "WHERE m.request_id=?", (historical,))["event_id"]
+    source = core.store.one((
+        'SELECT j.event_id FROM jobs j JOIN model_usage m USING(job_id) WHERE'
+        ' m.request_id=%s'
+    ), (historical,))["event_id"]
     for number in range(handoffs):
         authority = case.successor["authority"]
         owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
@@ -468,7 +416,7 @@ def test_renewal_keeps_closed_unknown_from_an_earlier_same_approval_revision(
     request, policy, witness = renewal(core, case, number=2 if prior_renewal else 1,
                                        concurrency=10)
     assert request["authority"]["revision"] > json.loads(core.store.one(
-        "SELECT authority_json FROM model_admissions WHERE request_id=?",
+        'SELECT authority_json FROM model_admissions WHERE request_id=%s',
         (historical,),
     )["authority_json"])["revision"]
     receipt = model_carry.prepare(core.store, core.settings, request, witness, core.clock())
@@ -493,17 +441,17 @@ def test_renewal_keeps_closed_unknown_from_an_earlier_same_approval_revision(
     assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == before
     assert not core.store.rows("SELECT * FROM outbox")
     if erased:
-        assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+        assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                (source,))["redacted"]
 
 
 def test_life_does_not_trust_unproved_unknown_or_recovering_journal(core, tmp_path):
     case = migrated(core, tmp_path)
     assert not _uncertain(core.store, core.settings)
-    core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'model_control:%'")
+    core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'model_control:%%'")
     assert _uncertain(core.store, core.settings)
     assert (
-        core.store.one("SELECT state FROM model_usage WHERE request_id=?", (case.request_id,))[
+        core.store.one('SELECT state FROM model_usage WHERE request_id=%s', (case.request_id,))[
             "state"
         ]
         == "UNKNOWN"

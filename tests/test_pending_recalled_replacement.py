@@ -58,8 +58,14 @@ def test_recalled_buffered_replacement_cannot_resume_old_reply(core, tmp_path, c
             assert entry.runtime.row()["state"] == "ACTIVE"
             assert len(sends) == prefix_count
             old_deliveries = core.store.rows(
-                "SELECT message_id,state,attempt_count,provider_message_id FROM outbox "
-                "WHERE origin_event_id=? ORDER BY rowid", (old_event,))
+                (
+                    (
+                        'SELECT '
+                        'message_id,state,attempt_count,provider_message_id '
+                        'FROM outbox WHERE origin_event_id=%s ORDER BY '
+                        'record_sequence'
+                    )
+                ), (old_event,))
             assert [row["state"] for row in old_deliveries] == {
                 "plain": ["CANCELLED"],
                 "segmented_first": ["CANCELLED", "CANCELLED", "CANCELLED"],
@@ -70,7 +76,7 @@ def test_recalled_buffered_replacement_cannot_resume_old_reply(core, tmp_path, c
             }[case]
             cancelled = next(row for row in old_deliveries
                              if row["state"] == "CANCELLED" and row["attempt_count"] == 1)
-            proof = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            proof = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                    ("input_cancel_before_send:" + cancelled["message_id"],))
             assert json.loads(proof["value"])["cause"] == "OWNER_INPUT_PENDING"
 
@@ -84,11 +90,11 @@ def test_recalled_buffered_replacement_cannot_resume_old_reply(core, tmp_path, c
                 assert value["terminal"] and not value["unsettled_model"]
                 assert not value["unsettled_delivery"]
             assert core.store.one("SELECT reply_revision FROM conversations")["reply_revision"] == 1
-            assert core.store.one("SELECT state FROM jobs WHERE event_id=?", (old_event,))[
+            assert core.store.one('SELECT state FROM jobs WHERE event_id=%s', (old_event,))[
                 "state"] == "SUCCEEDED"
-            assert not core.store.one("SELECT 1 FROM events WHERE event_id=?",
+            assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s',
                                        (replacement["event_id"],))
-            assert not core.store.one("SELECT 1 FROM jobs WHERE event_id=?",
+            assert not core.store.one('SELECT 1 FROM jobs WHERE event_id=%s',
                                        (replacement["event_id"],))
             assert core.store.one("SELECT * FROM model_usage") == old_usage
             assert core.store.one("SELECT * FROM model_admissions") == old_admission
@@ -110,14 +116,20 @@ def test_recalled_buffered_replacement_cannot_resume_old_reply(core, tmp_path, c
                 old_parts[:prefix_count] + ["新的独立回复"])
             assert core.store.one("SELECT reply_revision FROM conversations")["reply_revision"] == 2
             assert core.store.rows(
-                "SELECT message_id,state,attempt_count,provider_message_id FROM outbox "
-                "WHERE origin_event_id=? ORDER BY rowid", (old_event,)) == old_deliveries
-            usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+                (
+                    (
+                        'SELECT '
+                        'message_id,state,attempt_count,provider_message_id '
+                        'FROM outbox WHERE origin_event_id=%s ORDER BY '
+                        'record_sequence'
+                    )
+                ), (old_event,)) == old_deliveries
+            usages = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert len(calls) == len(usages) == 2 and usages[0] == old_usage
             assert all(row["state"] == "SETTLED" for row in usages)
             assert budget.total_monthly(core.store, "2000-01-01") == sum(
                 row["billed_micro_usd"] for row in usages)
-            assert core.store.one("SELECT * FROM model_admissions WHERE request_id=?",
+            assert core.store.one('SELECT * FROM model_admissions WHERE request_id=%s',
                                   (old_usage["request_id"],)) == old_admission
             assert replacement_text not in json.dumps(calls[-1], ensure_ascii=False)
             entry.runtime.verify(active=False)

@@ -4,7 +4,7 @@ from companion import memory_references as refs
 from companion import turn_recall
 from companion.dialogue_history import turn_messages
 from companion.privacy import memory_sensitive, sensitive
-from tests.test_memory_references import TEXT, prepared
+from tests.support.memory_references import TEXT, prepared
 
 
 def test_history_replays_read_media_and_erasure_removes_it(core):
@@ -175,8 +175,8 @@ def test_owner_update_ends_older_value_across_origins(core):
     old_id = _owner_fact(core, "入场日期原定十二月一日")
     new_id = core.memory.add(item.model_copy(update={
         "update": "replaces_previous", "speaker": "owner"}), core.clock())
-    old = core.store.one("SELECT * FROM memories WHERE memory_id=?", (old_id,))
-    new = core.store.one("SELECT * FROM memories WHERE memory_id=?", (new_id,))
+    old = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (old_id,))
+    new = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (new_id,))
     assert old["valid_to"] and old["status"] == "HYPOTHESIS" and not new["needs_review"]
     contents = [row["content"] for row in core.memory.search("入场日期", now=core.clock())]
     assert not any("十二月一日" in text for text in contents)
@@ -190,7 +190,7 @@ def test_relayed_third_party_update_keeps_both_and_links_them(core):
     new_id = core.memory.add(item.model_copy(update={
         "update": "replaces_previous", "relayed_by_owner": True, "speaker": "document"}),
         core.clock())
-    assert not core.store.one("SELECT valid_to FROM memories WHERE memory_id=?",
+    assert not core.store.one('SELECT valid_to FROM memories WHERE memory_id=%s',
                               (old_id,))["valid_to"]
     assert core.store.one("SELECT 1 FROM audit_log WHERE action='memory.relayed_update'")
     old_row = next(row for row in core.memory.search("原定十二月一日", now=core.clock())
@@ -200,7 +200,7 @@ def test_relayed_third_party_update_keeps_both_and_links_them(core):
     assert "十二月九日" in relations[old_id]["later_relayed_update"]
     assert "十二月一日" in relations[new_id]["relayed_update_of"]
     # A forgotten newer side never re-enters through the link.
-    core.store.execute("UPDATE memories SET status='FORGOTTEN' WHERE memory_id=?", (new_id,))
+    core.store.execute("UPDATE memories SET status='FORGOTTEN' WHERE memory_id=%s", (new_id,))
     rows, relations = core.memory.with_relayed_updates([old_row], core.clock())
     assert [row["memory_id"] for row in rows] == [old_id] and not relations
 
@@ -210,7 +210,7 @@ def test_update_without_owner_basis_or_flag_changes_nothing(core):
     old_id = _owner_fact(core, "入场日期原定十二月一日")
     core.memory.add(item.model_copy(update={"update": "replaces_previous",
                                             "speaker": "third_party"}), core.clock())
-    assert not core.store.one("SELECT valid_to FROM memories WHERE memory_id=?",
+    assert not core.store.one('SELECT valid_to FROM memories WHERE memory_id=%s',
                               (old_id,))["valid_to"]
 
 
@@ -219,7 +219,7 @@ def test_update_never_ends_an_owner_confirmed_value(core):
     old_id = _owner_fact(core, "入场日期原定十二月一日", confirmed=True)
     core.memory.add(item.model_copy(update={"update": "replaces_previous",
                                             "relayed_by_owner": True}), core.clock())
-    assert not core.store.one("SELECT valid_to FROM memories WHERE memory_id=?",
+    assert not core.store.one('SELECT valid_to FROM memories WHERE memory_id=%s',
                               (old_id,))["valid_to"]
 
 

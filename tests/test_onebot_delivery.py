@@ -9,21 +9,8 @@ from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.support.onebot import provider
+from tests.support.onebot_delivery import core_client
 from tests.support.onebot_events import config, normalized
-
-
-def core_client(core, transport=None, *, bridge_config=None):
-    if bridge_config is not None:
-        from pydantic import SecretStr
-
-        core.settings.bridge_token = SecretStr(bridge_config.bridge_token)
-    app = create_app(core.settings)
-    app.state.core = core
-    return httpx.AsyncClient(
-        base_url=bridge_config.core_url if bridge_config else "http://core",
-        transport=transport or httpx.ASGITransport(app=app),
-        headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
-    )
 
 
 @pytest.mark.parametrize(
@@ -227,7 +214,7 @@ def test_unsafe_delivery_cannot_start_external_send(core, tmp_path, mutation):
                     core.settings.quiet_start, core.settings.quiet_end = 0, 0
                     core.store.execute("UPDATE outbox SET action_type='qq.private.proactive'")
                 if mutation == "content":
-                    core.store.execute("UPDATE outbox SET content_json=?", ('{"image":"bad"}',))
+                    core.store.execute('UPDATE outbox SET content_json=%s', ('{"image":"bad"}',))
                 if mutation != "disabled":
                     with pytest.raises(ValueError):
                         await deliver_tick(http, OneBotClient(cfg, protocol), spool)

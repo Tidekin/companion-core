@@ -15,11 +15,11 @@ from companion import api_store, console_api
 from companion.backup import backup, restore
 from companion.source_grants import grant_tombstone
 from companion.store import Store
+from tests.support.console_reset_isolation import configure as console_configure
+from tests.support.console_reset_isolation import login
 from tests.support.core_http import real_core_http
-from tests.test_console_reset_isolation import configure as console_configure
-from tests.test_console_reset_isolation import login
-from tests.test_exploration import configure
-from tests.test_source_grants import accepted, authorization, derived_records, lease, prepare
+from tests.support.exploration import configure
+from tests.support.source_grants import accepted, authorization, derived_records, lease, prepare
 
 
 @pytest.mark.parametrize("channel,action", [
@@ -47,16 +47,20 @@ def test_source_grant_write_wait_keeps_health_and_original_semantics(
         def __init__(self, path):
             super().__init__(path)
             opened.append((self, threading.get_ident()))
-            entered.set()
+            self.db.set_trace_callback(
+                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
+            )
 
         def close(self):
             closed.append((self, threading.get_ident()))
             super().close()
 
     async def scenario():
-        async with real_core_http(core) as port, httpx.AsyncClient(
-            base_url=f"http://127.0.0.1:{port}", trust_env=False,
-        ) as client:
+        async with (
+            real_core_http(core) as port,
+            httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False) as client,
+            httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe,
+        ):
             if channel == "console":
                 headers = {**await login(client), "Idempotency-Key": "source-grant-action"}
                 path, body = "/v1/console/source-grants/" + grant.grant_id, {"action": action}
@@ -79,10 +83,11 @@ def test_source_grant_write_wait_keeps_health_and_original_semantics(
                 rejected = await client.post(path, json=body, headers={"Authorization": "Bearer "
                     + core.settings.bridge_token.get_secret_value()})
                 assert rejected.status_code == 401 and not opened
+                assert (await probe.get("/internal/v1/health/live")).status_code == 200
                 task = asyncio.create_task(client.post(path, json=body, headers=headers))
                 assert await asyncio.to_thread(entered.wait, 3)
                 before = perf_counter()
-                health = await asyncio.wait_for(client.get("/internal/v1/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 0.75)
                 elapsed = perf_counter() - before
                 record_property("health_during_grant_write_wait_ms", round(elapsed * 1000, 3))
                 assert health.status_code == 200 and elapsed < 0.75 and not task.done()
@@ -115,11 +120,11 @@ def test_source_grant_write_wait_keeps_health_and_original_semantics(
     assert all(store is not core.store and thread != threading.get_ident()
                for store, thread in opened)
     if pending:
-        row = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?",
+        row = core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s',
                              (pending["request_id"],))
         assert row["state"] == "CANCELLED" and row["lease_token"] is None
         assert row["reserved_requests"] == pending["max_requests"] and row["used_requests"] is None
-        state = core.store.one("SELECT redacted FROM events WHERE event_id=?", (root,))
+        state = core.store.one('SELECT redacted FROM events WHERE event_id=%s', (root,))
         assert state["redacted"] == (1 if action == "forget" else 0)
     if action == "forget":
         assert core.store.one("SELECT status FROM memories WHERE memory_id='mem_grant_fixture'")[
@@ -200,5 +205,5 @@ def test_console_grant_action_rechecks_logout_before_native_effect(core, monkeyp
 
     asyncio.run(scenario())
     assert core.store.one("SELECT * FROM source_grants") == before
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (root,))["redacted"] == 0
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (root,))["redacted"] == 0
     assert core.ledger.path.read_bytes() == ledger

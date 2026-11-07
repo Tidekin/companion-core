@@ -7,8 +7,8 @@ from companion_onebot_bridge.app import receive, upload
 from companion_onebot_bridge.metrics import Metrics
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.onebot_delivery import core_client
 from tests.support.onebot_events import config, raw_event
-from tests.test_onebot_delivery import core_client
 
 
 def test_real_websocket_reconnect_and_real_core_http_keep_one_reply(core, tmp_path):

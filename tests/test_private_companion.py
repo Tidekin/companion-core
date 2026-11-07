@@ -11,7 +11,7 @@ import pytest
 from cryptography.fernet import Fernet
 from PIL import Image
 
-from companion import budget, owner_authority, private_life
+from companion import budget, owner_authority
 from companion.autonomous_selector import native_selector
 from companion.backup import backup, restore
 from companion.contracts import CoreError
@@ -27,49 +27,7 @@ from tests.native_continuous_support import until
 from tests.sdk_reader_fixture import answer as tool_answer
 from tests.sdk_reader_fixture import call as tool_call
 from tests.support.native_companion import companion_host, ingress, raw_event
-
-
-def companion_options(core):
-    return {
-        "automatic_reply": True,
-        "companion_scope": "owner_private_v1",
-        "companion_approval_sha256": "a" * 64,
-        "history_scope": "owner_private",
-        "history_approval_sha256": "b" * 64,
-        "max_history_turns": 15,
-        "max_history_utf8_bytes": 16000,
-        "memory_scope": "owner_private",
-        "memory_approval_sha256": "c" * 64,
-        "max_model_attempts": 100,
-        "window_options": {
-            "ends_at": (core.clock.now + timedelta(hours=24))
-            .astimezone(ZoneInfo("Asia/Shanghai"))
-            .isoformat()
-        },
-        "paid_options": {
-            "per_request_calls": 3,
-            "window_calls": 100,
-            "unlimited_period_spend": True,
-            "daily_micro_usd": None,
-            "monthly_micro_usd": None,
-            "window_micro_usd": None,
-            "expires_at": (core.clock.now + timedelta(days=2)).isoformat(),
-            "rates_valid_until": (core.clock.now + timedelta(days=2)).isoformat(),
-        },
-        "core_options": {
-            **{name + "_enabled": True for name in private_life.FEATURES},
-            "max_recent_messages": 30,
-            "extraction_min_events": 1,
-            "extraction_idle_seconds": 0,
-            "quiet_start": 0,
-            "quiet_end": 0,
-            "diary_min_source_events": 1,
-            "reflection_min_sources": 1,
-            "reflection_daily_micro_usd": 50000,
-            "reflection_monthly_micro_usd": 100000,
-            "context_soft_tokens": 16000,
-        },
-    }
+from tests.support.private_companion import companion_options
 
 
 def test_independent_life_worker_finishes_nightly_memory_diary_reflection_goals(
@@ -203,7 +161,7 @@ def test_independent_life_worker_finishes_nightly_memory_diary_reflection_goals(
                 assert core.store.one("SELECT COUNT(*) n FROM memories")["n"] == 1
                 assert (
                     core.store.one(
-                        "SELECT state FROM diary_runs WHERE local_date=?", (day.isoformat(),)
+                        'SELECT state FROM diary_runs WHERE local_date=%s', (day.isoformat(),)
                     )["state"]
                     == "COMMITTED"
                 )
@@ -328,9 +286,9 @@ def test_continuous_history_memory_restart_and_followup(core, tmp_path, monkeypa
 def test_five_images_with_memory_and_history_deliver_five_fragments(
     core, tmp_path, background_inflight
 ):
-    from tests.test_live_image_input import options as image_options
-    from tests.test_live_image_input import png
-    from tests.test_onebot_images import image_segment
+    from tests.support.live_image_input import options as image_options
+    from tests.support.live_image_input import png
+    from tests.support.onebot_images import image_segment
 
     calls, downloads, number = [], [], 0
     started, release = asyncio.Event(), asyncio.Event()
@@ -682,7 +640,7 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
 ):
     from companion.config import ObservationAdapterConfig
     from companion.exploration import ReadItem, ReadResult
-    from tests.test_exploration import URL, discover, read_goal
+    from tests.support.exploration import URL, discover, read_goal
 
     async def source(ws):
         await ws.send(json.dumps(raw_event(1, text="一起聊聊手绘游戏")))
@@ -719,8 +677,10 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
             def provider(request):
                 messages = json.loads(request.content)["messages"]
                 if change_during_dispatch and '"kind":"share"' in messages[-1]["content"]:
-                    core.store.execute("UPDATE observations SET source_sha256=? WHERE "
-                                       "result_status='FETCHED'", ("0" * 64,))
+                    core.store.execute((
+                        'UPDATE observations SET source_sha256=%s WHERE '
+                        "result_status='FETCHED'"
+                    ), ("0" * 64,))
                 return httpx.Response(200, json={
                     "choices": [{"message": {"content": "一起看看吧。"}}],
                     "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
@@ -785,7 +745,7 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
                     == "SENT"
                 )
                 observed = core.store.one(
-                    "SELECT * FROM observations WHERE event_id=?", (result["event_ids"][0],)
+                    'SELECT * FROM observations WHERE event_id=%s', (result["event_ids"][0],)
                 )
                 assert observed["result_status"] == "FETCHED"
                 with core.store.transaction():
@@ -798,13 +758,13 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
                 assert stopped["state"] == "STOPPED"
                 assert (
                     core.store.one(
-                        "SELECT state FROM exploration_requests WHERE request_id=?", (running,)
+                        'SELECT state FROM exploration_requests WHERE request_id=%s', (running,)
                     )["state"]
                     == "UNKNOWN"
                 )
                 assert (
                     core.store.one(
-                        "SELECT state FROM exploration_requests WHERE request_id=?", (queued,)
+                        'SELECT state FROM exploration_requests WHERE request_id=%s', (queued,)
                     )["state"]
                     == "CANCELLED"
                 )
@@ -846,22 +806,24 @@ def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path,
                 if drift == "content":
                     value = {"text": "替换的合成正文。"}
                     core.store.execute(
-                        "UPDATE outbox SET content_json=?,content_sha256=?",
+                        'UPDATE outbox SET content_json=%s,content_sha256=%s',
                         (encode(value), digest(value)),
                     )
                 elif drift == "source":
                     core.store.execute(
-                        "UPDATE events SET body_json=? WHERE source='qq.onebot'",
+                        "UPDATE events SET body_json=%s WHERE source='qq.onebot'",
                         (encode({"text": "替换的输入"}),),
                     )
                 elif drift == "usage":
-                    core.store.execute("UPDATE model_admissions SET payload_sha256=?", ("0" * 64,))
+                    core.store.execute('UPDATE model_admissions SET payload_sha256=%s', ("0" * 64,))
                 elif drift == "unknown":
                     core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
                 else:
                     with core.store.transaction():
                         advance_epoch(core.store)
-                original_usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+                original_usage = core.store.rows(
+                    'SELECT * FROM model_usage ORDER BY record_sequence'
+                )
                 if drift in {"content", "source", "privacy"}:
                     await window.pump()
                     assert core.store.one("SELECT state FROM outbox")["state"] == "CANCELLED"
@@ -870,7 +832,9 @@ def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path,
                         await window.pump()
                 assert not sends
                 assert not core.store.one("SELECT 1 FROM outbox WHERE state='SENT'")
-                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == original_usage
+                assert core.store.rows(
+                    'SELECT * FROM model_usage ORDER BY record_sequence'
+                ) == original_usage
 
     run(scenario())
 
@@ -906,7 +870,7 @@ def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(co
                     await ingress(window)
                     assert await core.run_once()
                     row = core.store.one(
-                        "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC"
+                        'SELECT state,last_error_code FROM jobs ORDER BY record_sequence DESC'
                     )
                     assert row["state"] == "SUCCEEDED", row
                     await window.pump()

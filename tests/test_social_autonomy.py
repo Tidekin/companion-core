@@ -14,8 +14,6 @@ from pydantic import ValidationError
 
 from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
-from companion.model import ModelResponse
-from companion.reading_protocol import ReadObservation
 from companion.social_autonomy import (
     SocialAutonomy,
     erase_social_autonomy,
@@ -26,44 +24,23 @@ from companion.social_autonomy_protocol import (
     ActionReceipt,
     OwnerAudience,
     ProfileBaseline,
-    ReviewedAvatar,
     SocialAutonomyConfig,
     proposal_adapter,
 )
 from companion.store import Store, after, encode, migrate, uid
-from tests.conftest import ingest, run
+from tests.conftest import run
 from tests.social_profile_support import confirmed_profile_material
-from tests.test_reading_protocol import envelope
-from tests.test_reading_service import queued
-
-
-def service(core, **changes):
-    config = SocialAutonomyConfig(**{
-        "enabled": True, "scope": "qq_social_v1", "authorization_sha256": "a" * 64,
-        "qzone_enabled": True, **changes,
-    })
-    object.__setattr__(core.settings, "social_autonomy", config)
-    return SocialAutonomy(core.store, core.settings, core.model, core.clock)
-
-
-def read_public(core, source="web"):
-    adapter, item, body = queued(core, source)
-    result = core.reading.complete(adapter, item["request_id"],
-                                  ReadObservation.model_validate(body))
-    return result["event_ids"][0]
-
-
-def avatar(core, **changes):
-    return ReviewedAvatar(**{
-        "asset_id": "avatar_reviewed_one", "asset_sha256": "b" * 64,
-        "description": "公开授权的星空插画", "source_page": "https://art.example.test/license",
-        "source_url": "https://art.example.test/star.png", "license_label": "CC0-1.0",
-        "usage_conditions": "允许作为账号头像使用", "license_sha256": "c" * 64,
-        "review_receipt_sha256": "d" * 64, "review_policy_sha256": "e" * 64,
-        "purpose": "profile_avatar", "origin": "public_download", "mime_type": "image/png",
-        "size_bytes": 1024, "width": 128, "height": 128,
-        "reviewed_at": core.clock(), "expires_at": after(core.clock(), 3600), **changes,
-    })
+from tests.support.social_autonomy import (
+    avatar,
+    background,
+    dispatch,
+    extra_public,
+    outcome,
+    planned,
+    queue,
+    read_public,
+    service,
+)
 
 
 @pytest.mark.parametrize("proposal", [
@@ -149,7 +126,7 @@ def test_readonly_context_is_blocked_after_restore_even_if_config_is_reenabled(c
 def test_public_reader_evidence_is_reused_without_copying_private_trigger_text(core, source):
     event_id = read_public(core, source)
     private = "私聊中的独立内容 " + core.settings.bridge_token.get_secret_value()
-    core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_1'",
+    core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_1'",
                        (encode({"text": private}),))
     module = service(core)
     before = core.store.db.total_changes
@@ -173,22 +150,25 @@ def test_nonpublic_or_unverifiable_material_cannot_become_a_publish_source(core,
     if mutation == "private_chat":
         event_id = "evt_test_1"
     elif mutation == "private_file":
-        core.store.execute("UPDATE events SET source='observation.qq_file' WHERE event_id=?",
+        core.store.execute("UPDATE events SET source='observation.qq_file' WHERE event_id=%s",
                            (event_id,))
     elif mutation == "unknown":
-        core.store.execute("UPDATE observations SET result_status='UNKNOWN' WHERE event_id=?",
+        core.store.execute("UPDATE observations SET result_status='UNKNOWN' WHERE event_id=%s",
                            (event_id,))
     elif mutation == "redacted":
         core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
     elif mutation == "changed_text":
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                            (encode({"title": "原题", "text": "被私聊摘要替换"}), event_id))
     elif mutation == "account_read":
-        core.store.execute("UPDATE observations SET evidence_json=json_set(evidence_json,"
-                           "'$.read_observation.evidence.method','account_api') WHERE event_id=?",
+        core.store.execute((
+            "UPDATE observations SET evidence_json=json_set(evidence_json,'$."
+            "read_observation.evidence.method','account_api') WHERE "
+            'event_id=%s'
+        ),
                            (event_id,))
     elif mutation == "missing_proof":
-        core.store.execute("UPDATE observations SET evidence_json='{}' WHERE event_id=?",
+        core.store.execute("UPDATE observations SET evidence_json='{}' WHERE event_id=%s",
                            (event_id,))
     else:
         core.clock.advance((core.settings.raw_event_retention_days + 1) * 86400)
@@ -201,10 +181,11 @@ def test_web_access_query_cannot_be_exported_as_a_public_source(core):
     ref = read_public(core, "web")
     service(core)
     url = "https://articles.example/story?access_token=private-access"
-    core.store.execute("UPDATE observations SET canonical_url=?,evidence_json=json_set("
-                       "evidence_json,'$.read_observation.url',?,"
-                       "'$.read_observation.original_url',?) "
-                       "WHERE event_id=?", (url, url, url, ref))
+    core.store.execute((
+        'UPDATE observations SET canonical_url=%s,evidence_json=json_set(evid'
+        "ence_json,'$.read_observation.url',%s,'$.read_observation.original_u"
+        "rl',%s) WHERE event_id=%s"
+    ), (url, url, url, ref))
     with pytest.raises(CoreError, match="SOCIAL_PUBLIC_SOURCE_REQUIRED"):
         public_source(core.store, core.settings, ref, core.clock())
     assert core.model.calls == []
@@ -314,102 +295,11 @@ def test_0029_preserves_populated_outbox_and_refuses_to_drop_new_evidence(tmp_pa
         command.downgrade(cfg, "0028_private_files")
 
 
-class MockPlanner:
-    """External model substitute; native budget admission and settlement are unchanged."""
-
-    def __init__(self):
-        self.calls = []
-        self.proposal = None
-        self.text = "公开资料让我对恒星的颜色更好奇了。"
-        self.callback = None
-        self.error = None
-
-    async def complete(self, messages, scenario):
-        assert scenario == "social_autonomy"
-        data = json.loads(messages[-1]["content"])
-        self.calls.append(data)
-        if self.callback:
-            self.callback()
-        if self.error:
-            raise self.error
-        proposal = self.proposal or {"kind": "qzone_publish", "text": self.text,
-                                     "source_refs": [data["sources"][0]["ref"]]}
-        return ModelResponse(encode(proposal), 100, 20)
-
-
-def background(core, **changes):
-    ref = read_public(core, "bilibili")
-    accepted = ingest(core, 99, "合成账号绑定", origin="onebot-direct:FriendMessage:10001")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    module = service(core, **{"decision_interval_seconds": 0, "qzone_cooldown_seconds": 0,
-                              "profile_cooldown_seconds": 0, **changes})
-    module.model = MockPlanner()
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
-                                  (accepted["event_id"],))["conversation_id"]
-    return module, ref, conversation
-
-
-def extra_public(core, number=2):
-    body = envelope("bilibili")
-    with core.store.transaction():
-        request = core.exploration.create("bili", "read", f"social-extra-{number}",
-                                          body["observations"][0]["url"])
-    item = core.reading.lease("bili")
-    assert item["request_id"] == request
-    body["lease_token"] = item["lease_token"]
-    body["observations"][0]["provenance"] = item["context"]
-    body["observations"][0]["fetched_at"] = core.clock()
-    body["observations"][0]["evidence"]["fetched_at"] = core.clock()
-    result = core.reading.complete("bili", request, ReadObservation.model_validate(body))
-    return result["event_ids"][0]
-
-
-def planned(module, ref, key="social-plan-one", **kwargs):
-    return run(module.plan(key, source_ids=[ref], **kwargs))
-
-
-def queue(module, result, conversation):
-    with module.store.transaction():
-        return module.reserve(result["plan_id"], conversation)
-
-
-def dispatch(module, frozen):
-    """Exercise module transaction hooks against native Outbox states, with no protocol I/O."""
-    token = uid("lease")
-    with module.store.transaction():
-        module.store.execute("UPDATE outbox SET state='LEASED',lease_token=?,lease_until=? "
-                             "WHERE message_id=?",
-                             (token, after(module.clock(), 60), frozen.message_id))
-        module.validate_delivery(frozen.message_id, token)
-        module.store.execute("UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1 "
-                             "WHERE message_id=?", (frozen.message_id,))
-        module.mark_dispatched(frozen.message_id, token)
-    return token
-
-
-def outcome(module, frozen, token, result):
-    native = {"SUCCEEDED": "SENT", "REJECTED": "FAILED", "UNKNOWN": "DELIVERY_UNCERTAIN"}[result]
-    resource = "synthetic-real-tid" if result == "SUCCEEDED" and frozen.action_type == (
-        "qzone.publish"
-    ) else None
-    native_code = {"SUCCEEDED": 0, "REJECTED": 1400, "UNKNOWN": None}[result]
-    response_sha = "9" * 64 if result != "UNKNOWN" else None
-    receipt = ActionReceipt(message_id=frozen.message_id, lease_token=token,
-                            payload_sha256=frozen.payload_sha256, action_type=frozen.action_type,
-                            result=result, native_receipt_sha256=response_sha,
-                            native_retcode=native_code,
-                            resource_id=resource)
-    with module.store.transaction():
-        module.store.execute("UPDATE outbox SET state=?,provider_message_id=NULL "
-                             "WHERE message_id=?", (native, frozen.message_id))
-        return module.record_result(receipt)
-
-
 def test_native_model_charge_and_server_plan_are_idempotent_and_bind_only_direct_owner(core):
     module, ref, conversation = background(core)
     result = planned(module, ref)
     assert result["state"] == "READY" and planned(module, ref) == result
-    usage = core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+    usage = core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                            (result["model_request_id"],))
     assert usage["state"] == "SETTLED" and usage["scenario"] == "social_autonomy"
     assert usage["billed_micro_usd"] > 0 and len(module.model.calls) == 1
@@ -587,7 +477,7 @@ def test_unstarted_erasure_releases_only_action_slot_and_never_refunds_model_cos
         queue(module, second, conversation)
     with core.store.transaction():
         erase_social_autonomy(core.store, [ref])
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (first.message_id,)) == {
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (first.message_id,)) == {
         "state": "CANCELLED",
     }
     assert queue(module, second, conversation).plan_id == second["plan_id"]
@@ -642,7 +532,7 @@ def test_forged_native_outbox_fields_cannot_pass_final_dispatch(core, column, va
     frozen = queue(module, planned(module, ref), conversation)
     token = uid("lease")
     with core.store.transaction():
-        core.store.execute("UPDATE outbox SET state='LEASED',lease_token=?,lease_until=?",
+        core.store.execute("UPDATE outbox SET state='LEASED',lease_token=%s,lease_until=%s",
                            (token, after(core.clock(), 60)))
         core.store.execute("UPDATE outbox SET " + column + "=?", (value,))
     with pytest.raises(CoreError, match="SOCIAL_DELIVERY_CHANGED"):
@@ -690,11 +580,11 @@ def test_restore_preserves_completed_receipts_cancels_pending_and_blocks_new_act
     second = queue(module, planned(module, second_ref, "social-plan-two"), conversation)
     with core.store.transaction():
         restore_social_autonomy(core.store, core.clock())
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (first.message_id,)) == {
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (first.message_id,)) == {
         "state": "SENT",
     }
     assert module.get(first.plan_id)["state"] == "READY"
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (second.message_id,)) == {
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (second.message_id,)) == {
         "state": "CANCELLED",
     }
     with pytest.raises(CoreError, match="SOCIAL_RESTORE_RECONCILIATION_REQUIRED"):

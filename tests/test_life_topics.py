@@ -15,43 +15,7 @@ from companion.life_protocol import LifeLoopConfig
 from companion.store import encode
 from companion.transport import enqueue
 from tests.conftest import ingest, run
-
-
-def configure(core, mode="SHADOW"):
-    core.settings.life_loop = LifeLoopConfig(mode=mode, autonomy_enabled=True)
-    core.settings.wake_enabled = True
-    core.settings.quiet_start = core.settings.quiet_end = 0
-
-
-def bug(core):
-    configure(core)
-    ingest(core, 1, "导出时还有一个没有解决的Bug，今天先到这里")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    core.life_topics.synchronize()
-    return core.store.one("SELECT * FROM life_topics")
-
-
-def proposal(core, action="FOLLOW_UP", destination="PRIVATE_MESSAGE_DRAFT", **extra):
-    core.model.activity = encode(
-        {
-            "action": action,
-            "destination": destination,
-            "source_event_ids": ["evt_test_1"],
-            "reason": "昨日未结束的话题",
-            "text": "昨天那个导出问题有新线索了吗？有空再聊就好。",
-            **extra,
-        }
-    )
-
-
-def due(core):
-    core.clock.advance(86400)
-    return core.life_topics.schedule()
-
-
-def assert_no_delivery(core):
-    assert core.store.rows("SELECT * FROM outbox") == []
-    assert core.store.rows("SELECT * FROM social_autonomy_plans") == []
+from tests.support.life_topics import assert_no_delivery, bug, configure, due, proposal
 
 
 def test_off_and_empty_short_circuit_before_model(core):
@@ -135,7 +99,7 @@ def test_inflight_change_rejects_stale_shadow_without_refunding_usage(core, chan
         reconsider = core.life_topics.schedule()
         assert reconsider and reconsider != job
         assert run(core.run_once(job_id=reconsider))
-        assert core.store.one("SELECT state FROM life_activity_results WHERE job_id=?",
+        assert core.store.one('SELECT state FROM life_activity_results WHERE job_id=%s',
                               (reconsider,))["state"] == "SHADOW"
 
 
@@ -149,7 +113,7 @@ def test_destination_scope_keeps_private_sources_out_of_qzone(core, destination)
     if destination == "QZONE_DRAFT":
         assert not result["text"]
         assert (
-            core.store.one("SELECT last_error_code FROM jobs WHERE job_id=?", (job,))[
+            core.store.one('SELECT last_error_code FROM jobs WHERE job_id=%s', (job,))[
                 "last_error_code"
             ]
             == "LIFE_PROPOSAL_SCOPE_REQUIRED"
@@ -289,7 +253,7 @@ def test_expired_running_lease_is_failed_without_paid_replay(core):
     assert core.claim_job("crashed-worker", job_id=job)
     core.clock.advance(core.settings.lease_seconds + 1)
     assert not run(core.run_once(job_id=job))
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job,))["state"] == "FAILED"
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job,))["state"] == "FAILED"
     assert not core.model.calls
 
 
@@ -301,7 +265,7 @@ def test_source_changed_after_generation_hides_text_and_erasure_replays_old_back
     key, archive, destination = Fernet.generate_key(), tmp_path / "life.enc", tmp_path / "old.db"
     backup(core.settings.database, archive, key)
     core.store.execute(
-        "UPDATE events SET body_json=? WHERE event_id='evt_test_1'",
+        "UPDATE events SET body_json=%s WHERE event_id='evt_test_1'",
         (encode({"text": "来源已改写"}),),
     )
     assert not core.life_topics.preview(core.settings.owner_qq_id)["items"][0]["results"]
@@ -320,7 +284,7 @@ def test_uncertain_delivery_blocks_new_decision_without_mutating_original_send(c
     topic = bug(core)
     message = enqueue(core.store, "evt_test_1", topic["conversation_id"], "原投递", core.clock())
     core.store.execute(
-        "UPDATE outbox SET state='DELIVERY_UNCERTAIN',attempt_count=1 WHERE message_id=?",
+        "UPDATE outbox SET state='DELIVERY_UNCERTAIN',attempt_count=1 WHERE message_id=%s",
         (message,),
     )
     original = core.store.one("SELECT * FROM outbox")
@@ -333,7 +297,7 @@ def test_uncertain_delivery_blocks_new_decision_without_mutating_original_send(c
 @pytest.mark.parametrize("mode", ["PREVIEW", "SHADOW"])
 def test_new_pipeline_does_not_run_legacy_generic_proactive_in_parallel(core, mode):
     from companion.autonomous_selector import native_selector
-    from tests.test_autonomous_selector import drain
+    from tests.support.autonomous_selector import drain
 
     configure(core, mode)
     core.settings.proactive_enabled = core.settings.social_enabled = True
@@ -365,7 +329,7 @@ def test_ineligible_inputs_never_enter_topic_context(core, bad):
                 "control_command": True,
             }
         )
-        core.store.execute("UPDATE events SET body_json=?", (encode(body),))
+        core.store.execute('UPDATE events SET body_json=%s', (encode(body),))
     assert due(core) is None
     assert not core.store.rows("SELECT * FROM life_topics")
     assert not core.model.calls
@@ -393,7 +357,7 @@ def test_long_owner_source_keeps_its_ending_and_decision_sees_current_time(core)
     assert len(clock) == 1 and "本次生活判断的时间" in clock[0]
     # The moving decision time is prompt context only, never part of the frozen material.
     frozen = json.loads(core.store.one(
-        "SELECT body_json FROM events e JOIN jobs j USING(event_id) WHERE j.job_id=?",
+        'SELECT body_json FROM events e JOIN jobs j USING(event_id) WHERE j.job_id=%s',
         (job,))["body_json"])["life_material"]
     assert frozen["sources"][0]["occurred_at"] == core.store.one(
         "SELECT occurred_at FROM events WHERE event_id='evt_test_1'")["occurred_at"]
@@ -408,8 +372,11 @@ def test_unavailable_due_candidates_cannot_hide_a_later_one(core, monkeypatch):
     # Twenty earlier synthetic candidates whose material is unavailable this round.
     for index in range(20):
         core.store.execute(
-            "INSERT INTO life_topics SELECT ?,conversation_id,?,'reading','DUE',?,expires_at,"
-            "reason_code,revision,0,NULL,created_at,updated_at FROM life_topics WHERE topic_id=?",
+            (
+                "INSERT INTO life_topics SELECT %s,conversation_id,%s,'readin"
+                "g','DUE',%s,expires_at,reason_code,revision,0,NULL,created_a"
+                't,updated_at FROM life_topics WHERE topic_id=%s'
+            ),
             (f"blocked_{index:02d}", f"blocked:{index}", f"2000-01-01T00:00:{index:02d}+00:00",
              topic["topic_id"]))
     monkeypatch.setattr(core.life_topics, "synchronize", lambda: None)
@@ -427,5 +394,5 @@ def test_unavailable_due_candidates_cannot_hide_a_later_one(core, monkeypatch):
     assert len(checked) == 20 and all(item.startswith("blocked_") for item in checked)
     job = core.life_topics.schedule()
     assert job and checked[-1] == topic["topic_id"]
-    assert core.store.one("SELECT topic_id FROM life_activity_results WHERE job_id=?",
+    assert core.store.one('SELECT topic_id FROM life_activity_results WHERE job_id=%s',
                           (job,))["topic_id"] == topic["topic_id"]

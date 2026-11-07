@@ -81,7 +81,7 @@ uv run python -m companion life-worker
 - [停止窗口的交接恢复](docs/qq-beta/handoff-recovery.md)
 - [VPS / Bridge 部署](docs/deployment.md)
 - [主人控制台、配置版本与统一云预算](docs/owner-console.md)
-- [模块边界与设计取舍](docs/architecture.md)
+- [当前运行拓扑、存储归属与模块边界](docs/architecture.md)
 - [验收结果与限制](docs/validation.md)、[回放数据](docs/replay-report.json)
 - [原始设计合同](docs/design-v0.3/implementation-m0-m1.md)、[接口合同](contracts/openapi.v1.yaml)
 - [日记实施合同](docs/design-v0.4/diary-m1.5.md)、[协议切换与回滚](docs/design-v0.4/qq-protocols.md)、[语音视觉接口规划](docs/design-v0.4/multimodal.md)

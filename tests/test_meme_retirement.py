@@ -20,11 +20,11 @@ from companion_onebot_bridge import meme_retirement
 from companion_onebot_bridge.instance_lock import acquire
 from companion_onebot_bridge.meme_runtime import MemeRuntime
 from companion_onebot_bridge.meme_semantic import SemanticLibrary
+from tests.support.meme_asset_migration import config_file
 from tests.support.native_meme import NativeCase
-from tests.test_meme_asset_migration import config_file
-from tests.test_next_memes_catalog import metadata, png
-from tests.test_next_memes_semantic import EMBEDDING, IDENTITY
-from tests.test_owner_delivery_reconciliation import pending
+from tests.support.next_memes_catalog import metadata, png
+from tests.support.next_memes_semantic import EMBEDDING, IDENTITY
+from tests.support.owner_delivery_reconciliation import pending
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 64

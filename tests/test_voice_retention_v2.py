@@ -21,8 +21,8 @@ from companion.voice_protocol import (
     VoiceStopRequest,
 )
 from tests.conftest import run
-from tests.test_voice_jobs import TOKEN, create_asr, create_tts, prepared
-from tests.test_voice_node_api import app_for
+from tests.support.voice_jobs import TOKEN, create_asr, create_tts, prepared
+from tests.support.voice_node_api import app_for
 
 
 def request(jobs, sequence=None):
@@ -40,7 +40,11 @@ def test_ten_thousand_idle_claims_keep_one_slot_and_reject_consumed_sequences(co
         assert jobs.claim("local", current).lease is None
     assert core.store.one("SELECT COUNT(*) n FROM voice_node_state")["n"] == 1
     assert core.store.one("SELECT last_claim_seq FROM voice_node_state")["last_claim_seq"] == 10_000
-    assert not core.store.one("SELECT 1 FROM sqlite_master WHERE name='voice_claims'")
+    assert not core.store.one(
+        'SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relkind IN ('r','p')"
+        " AND relname='voice_claims'"
+    )
     assert jobs.claim("local", current).lease is None
     with pytest.raises(CoreError, match="VOICE_CLAIM_RETIRED"):
         jobs.claim("local", first)
@@ -127,7 +131,7 @@ def test_forget_scrubs_voice_content_but_random_stop_capability_only_closes_cust
         assert row[field] is None
     assert row["state"] == "UNKNOWN" and row["cleanup_state"] == "PENDING"
     assert lease.input_sha256 not in str(core.store.rows(
-        "SELECT safe_detail_json FROM audit_log WHERE action LIKE 'voice.%'"))
+        "SELECT safe_detail_json FROM audit_log WHERE action LIKE 'voice.%%'"))
     with pytest.raises(CoreError, match="VOICE_LEASE_RETIRED"):
         jobs.input("local", ref)
     with pytest.raises(CoreError, match="VOICE_CLAIM_RETIRED"):

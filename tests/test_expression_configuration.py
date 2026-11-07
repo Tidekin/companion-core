@@ -15,8 +15,8 @@ from companion.core import Core
 from companion.model import ModelResponse
 from companion.store import encode
 from tests.conftest import ingest
-from tests.test_runtime_configuration import hot as hot
-from tests.test_runtime_configuration import save, task
+from tests.support.runtime_configuration import hot as hot
+from tests.support.runtime_configuration import save, task
 
 TEXT = "请接住一个具体细节，用自己的话回应；需要解决问题时认真帮助。"
 
@@ -117,7 +117,10 @@ def test_invalid_text_and_corrupt_snapshot_cannot_partially_apply(hot):
     assert runtime_config.boundary(hot.store, hot.settings, hot.clock) == good
     job = task(hot)
     key = runtime_config.identity(hot.settings, good)
-    hot.store.execute("UPDATE operator_runtime_snapshots SET expression_json=? WHERE snapshot_id=?",
+    hot.store.execute((
+        'UPDATE operator_runtime_snapshots SET expression_json=%s WHERE '
+        'snapshot_id=%s'
+    ),
         (encode({"format_version": 2, "conversation_policy": {"mode": "OFF"},
                  "style_live_enabled": False, "encrypted_guidance": None}), key))
     with pytest.raises(CoreError, match="CONFIGURATION_SNAPSHOT_INVALID"):
@@ -127,7 +130,7 @@ def test_invalid_text_and_corrupt_snapshot_cannot_partially_apply(hot):
 def test_expression_values_keep_contracts_and_still_obey_real_input_limit(hot, tmp_path):
     from companion import owner_authority, paid_budget
     from tests.owner_model_fixtures import authorized_job
-    from tests.test_paid_model_gate import approved_live
+    from tests.support.paid_model import approved_live
 
     approved_live(hot, tmp_path, max_input_tokens=1000)
     contract, capabilities = paid_budget.snapshot(hot.settings), (
@@ -138,8 +141,10 @@ def test_expression_values_keep_contracts_and_still_obey_real_input_limit(hot, t
     assert paid_budget.snapshot(candidate) == contract
     assert owner_authority.capability_hashes(candidate) == capabilities
     job_id = authorized_job(hot)
-    job = hot.store.one("SELECT j.*,e.body_json,e.conversation_id FROM jobs j "
-                       "JOIN events e USING(event_id) WHERE job_id=?", (job_id,))
+    job = hot.store.one((
+        'SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events e '
+        'USING(event_id) WHERE job_id=%s'
+    ), (job_id,))
     messages = hot.context(job)
     assert "表" * 2000 in messages[0]["content"]
     with pytest.raises(CoreError, match="MODEL_INPUT_LIMIT"):
@@ -169,8 +174,10 @@ def legacy_binding(core, job):
         base_sha256=original["base_sha256"], chat_time_labels=int(original["chat_time_labels"]),
         created_at=core.clock())
     task_key = "job:" + job["job_id"]
-    core.store.execute("UPDATE operator_task_configuration SET snapshot_id=?,binding_sha256=? "
-        "WHERE task_key=?", (key, sign([task_key, key]), task_key))
+    core.store.execute((
+        'UPDATE operator_task_configuration SET '
+        'snapshot_id=%s,binding_sha256=%s WHERE task_key=%s'
+    ), (key, sign([task_key, key]), task_key))
     return key
 
 
@@ -190,7 +197,7 @@ def test_legacy_task_and_model_identity_survive_upgrade_save_and_restart(hot, ve
              conversation_guidance=TEXT, style_live={"enabled": True},
              turn_taking={"silence_enabled": True}, input_debounce={"quiet_seconds": 5})
         runtime_config.boundary(old.store, settings, old.clock)
-        old.store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL WHERE job_id=?",
+        old.store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL WHERE job_id=%s",
                           (job["job_id"],))
     reloaded = operator_config.load(hot.settings)
     with Core(reloaded, hot.model, hot.clock) as resumed:

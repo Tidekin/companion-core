@@ -12,7 +12,7 @@ from companion import paid_budget
 from companion.contracts import CoreError
 from companion.postgres import BUDGET_LEDGER
 from companion.store import Store
-from tests.test_postgres_schema import isolated_native
+from tests.postgres_fixture import isolated_native
 
 
 @pytest.fixture

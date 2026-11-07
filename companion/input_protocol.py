@@ -439,6 +439,19 @@ def input_state(store, settings, event_id):
     }
 
 
+def prior_cancellation(store, message_id, material):
+    """Accept an exact replay; a different witness cannot replace a recorded cancellation."""
+    prior = live_text._meta(store, "input_cancel_before_send:" + message_id)
+    if prior is not None and prior != material:
+        raise CoreError("INPUT_CANCEL_RECEIPT_CONFLICT", 409)
+    return prior is not None
+
+
+def record_cancellation(store, message_id, material):
+    store.insert("runtime_meta", key="input_cancel_before_send:" + message_id,
+                 value=encode(material))
+
+
 def cancel_before_send(store, settings, clock, body):
     """Consume the Bridge's narrow pre-delegate non-dispatch attestation."""
     with store.transaction():
@@ -449,35 +462,28 @@ def cancel_before_send(store, settings, clock, body):
             approval = owner_authority.evidence(store, settings, body.authority)
         else:
             approval = approval_for_receipt(store, settings, body.window_sha256)
-        key = "input_cancel_before_send:" + body.message_id
-        prior = live_text._meta(store, key)
         material = body.model_dump(mode="json")
-        if prior:
-            if prior != material:
-                raise CoreError("INPUT_CANCEL_RECEIPT_CONFLICT", 409)
-        else:
-            row = store.one(
-                "SELECT o.message_id AS message_id, o.origin_event_id AS "
-                "origin_event_id, o.conversation_id AS conversation_id, o.action_type AS "
-                "action_type, o.content_json AS content_json, o.content_sha256 AS content_sha256, "
-                "o.approval_id AS approval_id, o.state AS state, o.delivery_key AS delivery_key, "
-                "o.lease_owner AS lease_owner, o.lease_until AS lease_until, o.attempt_count AS "
-                "attempt_count, o.provider_message_id AS provider_message_id, o.last_error_code AS "
-                "last_error_code, o.created_at AS created_at, o.updated_at AS updated_at, "
-                "o.sent_at AS sent_at, o.lease_token AS lease_token, o.next_attempt_at AS "
-                "next_attempt_at, o.reply_group_id AS reply_group_id, o.segment_index AS "
-                "segment_index, o.segment_count AS segment_count, o.reply_group_sha256 AS "
-                "reply_group_sha256, o.segment_interval_ms AS segment_interval_ms, o.delivery_lane "
-                "AS delivery_lane, o.native_ack_json AS native_ack_json, o.authority_json AS "
-                "authority_json, e.reply_revision AS reply_revision FROM outbox AS o JOIN events "
-                "AS e ON e.event_id = o.origin_event_id WHERE o.message_id = %s",
-                (body.message_id,),
-            )
-            if (
-                not row
-                or row["lease_token"] != body.lease_token
-                or row["state"] not in {"LEASED", "SENDING", "DELIVERY_UNCERTAIN", "CANCELLED"}
-            ):
+        if not prior_cancellation(store, body.message_id, material):
+            row = store.one((
+                (
+                    'SELECT o.message_id, o.origin_event_id, '
+                    'o.conversation_id, o.action_type, o.content_json, '
+                    'o.content_sha256, o.approval_id, o.state, '
+                    'o.delivery_key, o.lease_owner, o.lease_until, '
+                    'o.attempt_count, o.provider_message_id, '
+                    'o.last_error_code, o.created_at, o.updated_at, '
+                    'o.sent_at, o.lease_token, o.next_attempt_at, '
+                    'o.reply_group_id, o.segment_index, o.segment_count, '
+                    'o.reply_group_sha256, o.segment_interval_ms, '
+                    'o.delivery_lane, o.native_ack_json, '
+                    'o.authority_json,e.reply_revision FROM outbox o JOIN '
+                    'events e ON e.event_id=o.origin_event_id WHERE '
+                    'o.message_id=%s'
+                )
+            ),
+                            (body.message_id,))
+            if (not row or row["lease_token"] != body.lease_token
+                or row["state"] not in {"LEASED", "SENDING", "DELIVERY_UNCERTAIN", "CANCELLED"}):
                 raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
             pending = (
                 body.cause == "OWNER_INPUT_PENDING"
@@ -648,31 +654,19 @@ def cancel_before_send(store, settings, clock, body):
                         raise
                 else:
                     raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
+            from companion.transport import cancel_origin_replies, mark_not_dispatched
+
             # The authenticated Bridge may already have a new signed owner frame
             # queued while this HTTP check is in flight. Its explicit pre-delegate
             # attestation cancels delivery only; inbox admission still owns revision.
             # FAILED closes the quota operation but does not refund its reservation.
             cumulative.send_result(store, body.message_id, "FAILED", clock())
-            store.execute(
-                "UPDATE outbox SET state = 'CANCELLED', updated_at = %s, attempt_count = "
-                "GREATEST(attempt_count, 1), last_error_code = 'REPLY_NOT_DISPATCHED' WHERE "
-                "message_id = %s",
-                (clock(), body.message_id),
-            )
+            mark_not_dispatched(store, body.message_id, clock(),
+                                attempt_count=max(row["attempt_count"], 1))
             if row["action_type"] == "qq.private.reply":
                 # The queued replacement may itself be recalled before ingestion.
                 # Once interrupted, no unsent tail of this reply may resume.
-                store.execute(
-                    "UPDATE outbox SET state = 'CANCELLED', updated_at = %s, "
-                    "last_error_code = 'REPLY_SUPERSEDED' WHERE origin_event_id = %s AND "
-                    "action_type = 'qq.private.reply' AND state IN ('PENDING', 'LEASED', "
-                    "'RETRY_WAIT')",
-                    (clock(), row["origin_event_id"]),
-                )
-            live_text._put(store, key, material)
-        return {
-            "cancelled": True,
-            "message_id": body.message_id,
-            "state": "CANCELLED",
-            "send_attempt_retained": True,
-        }
+                cancel_origin_replies(store, row["origin_event_id"], clock())
+            record_cancellation(store, body.message_id, material)
+        return {"cancelled": True, "message_id": body.message_id,
+                "state": "CANCELLED", "send_attempt_retained": True}

@@ -14,18 +14,19 @@ from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
 from tests.model_carry_support import migrated
 from tests.support.core_http import real_core_http
+from tests.support.evaluation_authority_revision import revise, revised_policy, stop
+from tests.support.model_accounting import prepared
+from tests.support.model_carry_lifecycle import current_unknown
+from tests.support.model_renewal import renewal
+from tests.support.model_renewal_native import life_case, source_and_renewal
 from tests.support.owner_authority import activate
-from tests.test_evaluation_authority_revision import revise, revised_policy, stop
-from tests.test_model_accounting import prepared
-from tests.test_model_carry_lifecycle import current_unknown
-from tests.test_model_renewal import renewal
-from tests.test_model_renewal_native import life_case, source_and_renewal
 
 
 def test_discovered_link_and_revision_share_native_terminal_contract(core, tmp_path):
     from companion import reply_revision
-    from tests.test_carried_capabilities import reader_carry
-    from tests.test_reading_followup import URL, admit
+    from tests.support.carried_capabilities import reader_carry
+    from tests.support.exploration import URL
+    from tests.support.reading_followup import admit
 
     case = reader_carry(core, tmp_path)
     core.settings.control_token = SecretStr("synthetic-discovery-revision-control")
@@ -42,11 +43,11 @@ def test_discovered_link_and_revision_share_native_terminal_contract(core, tmp_p
         ) as client:
             event, _ = await admit(client, core, config, plan, 2, "看看 " + URL)
             _, accepted = await admit(client, core, config, plan, 3, "先不读了")
-            job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (accepted["job_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (accepted["job_id"],))
             reply_revision.remember_sources(core.store, job, [event["event_id"]])
-            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                (accepted["job_id"],))
-            item = core.store.one("SELECT * FROM content_items WHERE owner_event_id=?",
+            item = core.store.one('SELECT * FROM content_items WHERE owner_event_id=%s',
                                   (event["event_id"],))
             assert item["state"] == "WAITING" and item["read_request_id"] is None
             original = core.store.rows("SELECT * FROM model_usage")
@@ -64,7 +65,7 @@ def test_discovered_link_and_revision_share_native_terminal_contract(core, tmp_p
                 "preview_sha256": preview.json()["preview_sha256"]}, headers=control)
             assert active.status_code == 200, active.text
             assert core.store.rows("SELECT * FROM model_usage") == original
-            assert core.store.one("SELECT * FROM content_items WHERE item_id=?",
+            assert core.store.one('SELECT * FROM content_items WHERE item_id=%s',
                                   (item["item_id"],)) == item
             assert not core.store.one("SELECT 1 FROM exploration_requests")
 
@@ -180,7 +181,7 @@ def test_native_source_erasure_keeps_revision_finance_and_blocks_new_authority(
     before = core.store.rows("SELECT * FROM model_usage")
     with core.store.transaction():
         core.ledger.expire_events(core.store, [source], core.clock())
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (source,)) == {
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (source,)) == {
         "redacted": 1}
     assert len(owner_authority.custody(
         core.store, core.settings, settlement=True)["model_carries"]) == 3

@@ -85,7 +85,7 @@ def test_tcp_input_independent_worker_process_and_source_fence(core, tmp_path, w
                     child.kill()
                     await child.communicate()
             job = core.store.one(
-                "SELECT state,last_error_code FROM jobs WHERE event_id=?", (question["event_id"],),
+                'SELECT state,last_error_code FROM jobs WHERE event_id=%s', (question["event_id"],),
             )
             if withdraw:
                 assert result["calls"] == []

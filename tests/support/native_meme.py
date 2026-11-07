@@ -20,7 +20,7 @@ from companion_onebot_bridge.spool import Spool
 from tests.support.core_http import real_core_http
 from tests.support.onebot_events import raw_event
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 CASES = WeakKeyDictionary()
 
@@ -116,7 +116,7 @@ def recall(runtime, number=42):
 
 
 def native_item(runtime, event, candidate, *, key=None):
-    from tests.test_meme_runtime import item
+    from tests.support.meme_runtime import item
 
     value = item(event, candidate, key=key)
     value["origin_event_id"] = value.pop("window_origin_event_id")

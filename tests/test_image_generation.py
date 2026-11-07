@@ -1,13 +1,11 @@
 """Model-requested pictures: one priced tool call, Outbox attachment and leased Bridge read."""
 
 import base64
-import io
 import json
 from contextlib import closing
 
 import httpx
 import pytest
-from PIL import Image
 from pydantic import SecretStr, ValidationError
 
 from companion import image_generation
@@ -18,33 +16,9 @@ from companion.store import Store
 from companion_onebot_bridge.generated_image_http import read_image
 from companion_onebot_bridge.outbound import validate_item
 from tests.conftest import run
-from tests.sdk_reader_fixture import Provider, answer, call, worker_for
-from tests.test_native_image_pipeline import admit_image
-from tests.test_prepare_owner_input import native_spool, window
-
-URL = "https://images.example.test/v1/images/generations"
-
-
-def png(color="orange", size=(16, 12)):
-    stream = io.BytesIO()
-    Image.new("RGB", size, color).save(stream, format="PNG")
-    return stream.getvalue()
-
-
-def config(**changes):
-    values = {
-        "enabled": True,
-        "endpoint": MediaEndpoint(url=URL, key=SecretStr("synthetic-image-provider-key"),
-                                  model="gpt-image-1", max_request_micro_usd=40000),
-        "daily_micro_usd": 200000,
-        **changes,
-    }
-    return ImageGenerationConfig(**values)
-
-
-def image_reply(data):
-    return httpx.Response(200, json={"created": 1, "data": [
-        {"b64_json": base64.b64encode(data).decode()}]})
+from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.image_generation import URL, config, draw, image_reply, owner_text, png
+from tests.support.prepare_owner_input import native_spool, window
 
 
 def test_maintenance_preserves_bytes_between_dispatch_and_result_commit(
@@ -84,16 +58,6 @@ def test_maintenance_preserves_bytes_between_dispatch_and_result_commit(
 
     monkeypatch.setattr(image_generation, "_write", write)
     run(scenario())
-
-
-def draw(prompt="一只在窗边晒太阳的橘猫", size="1024x1024", call_id="draw-1"):
-    return answer(calls=[call(call_id, "generate_image", {"prompt": prompt, "size": size})])
-
-
-async def owner_text(core, client, config_, plan, tmp_path, text, number=42):
-    event, _ = await admit_image(core, client, config_, plan, tmp_path, number=number,
-                                 message=[{"type": "text", "data": {"text": text}}])
-    return event
 
 
 def test_config_requires_priced_https_provider():
@@ -171,7 +135,7 @@ def test_generated_image_reaches_reply_lease_bridge_and_erasure(core, tmp_path):
             assert images == [{"model": "gpt-image-1", "prompt": "一只在窗边晒太阳的橘猫",
                                "n": 1, "size": "1024x1024"}]
             assert [(row["scenario"], row["state"]) for row in core.store.rows(
-                "SELECT scenario,state FROM model_usage ORDER BY rowid")] == [
+                'SELECT scenario,state FROM model_usage ORDER BY record_sequence')] == [
                 ("chat", "SETTLED"), ("image_generation", "SETTLED"), ("chat", "SETTLED")]
             generated = core.store.one("SELECT * FROM generated_images")
             assert generated["state"] == "SUCCEEDED" and generated["event_id"] == event["event_id"]
@@ -234,7 +198,10 @@ def test_unknown_image_outcome_keeps_charge_sends_text_and_never_repeats(core, t
                 worker.image_transport = httpx.MockTransport(respond)
                 assert await worker.run_once("generated-image-unknown")
             assert len(images) == 1
-            usage = core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid")
+            usage = core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            )
             assert ("image_generation", "UNKNOWN") in [(r["scenario"], r["state"]) for r in usage]
             assert core.store.one("SELECT state FROM generated_images")["state"] == "UNKNOWN"
             tool = core.store.one("SELECT * FROM agent_tool_calls")
@@ -266,9 +233,9 @@ def test_generated_image_native_delivery_and_uncertainty(core, tmp_path, outcome
             async with worker_for(core, model) as worker:
                 worker.image_transport = httpx.MockTransport(lambda request: image_reply(data))
                 assert await worker.run_once("generated-image-native-send")
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             if outcome == "expired":
-                core.store.execute("UPDATE generated_images SET expires_at=?", (core.clock(),))
+                core.store.execute('UPDATE generated_images SET expires_at=%s', (core.clock(),))
 
             spool, runtime = native_spool(core, tmp_path, config_, plan)
             sends = []
@@ -296,7 +263,9 @@ def test_generated_image_native_delivery_and_uncertainty(core, tmp_path, outcome
                 outbox = core.store.one("SELECT state,attempt_count FROM outbox")
                 assert outbox == {"state": "DELIVERY_UNCERTAIN" if outcome == "lost_ack"
                                   else "SENT", "attempt_count": 1}
-                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+                assert core.store.rows(
+                    'SELECT * FROM model_usage ORDER BY record_sequence'
+                ) == usage
                 if outcome == "lost_ack":
                     assert runtime.row()["state"] == "STOPPED"
             finally:
@@ -329,7 +298,7 @@ def test_refusals_never_reach_the_provider(core, tmp_path, case):
                 assert await worker.run_once("generated-image-refusal")
             assert len(images) == (1 if case == "twice" else 0)
             results = [row["result_json"] for row in core.store.rows(
-                "SELECT result_json FROM agent_tool_calls ORDER BY rowid")]
+                'SELECT result_json FROM agent_tool_calls ORDER BY record_sequence')]
             if case == "size":
                 # The tool schema lists configured sizes only; the SDK rejects the call.
                 assert not results and "1024x1024" in json.dumps(provider.requests[0]["tools"])

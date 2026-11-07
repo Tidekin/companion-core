@@ -28,7 +28,7 @@ from source_reader.heybox import HeyboxReader
 from source_reader.heybox_source import NativeHeyboxSource
 from source_reader.worker import read_result
 from tests.conftest import FakeModel, event
-from tests.test_exploration import configure
+from tests.support.exploration import configure
 
 ROOT = Path(__file__).resolve().parents[1]
 

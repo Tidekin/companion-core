@@ -12,7 +12,7 @@ from typing import Literal
 import httpx
 from pydantic import Field, model_validator
 
-from companion import input_recall, owner_authority, paid_budget, reply_revision
+from companion import input_recall, job_queue, owner_authority, paid_budget, reply_revision
 from companion.contracts import CoreError, StrictModel
 from companion.evaluation_measurement import (
     measurement_profile as _measurement_profile,
@@ -31,6 +31,7 @@ CAPABILITY = "model.evaluate"
 DEVICE = "core.evaluation"
 CALLS = 6
 COST = 50000
+ATTEMPT_MICRO_USD = 5000
 SHA = r"^[a-f0-9]{64}$"
 # A pilot replays owner turns; a synthetic plan carries only prepared SYNTHETIC cases.
 LIMITS = {
@@ -161,7 +162,7 @@ def _plan(settings, manifest):
                 if measured["budget_input_tokens"] is None or any(
                     row.get(key) != value for key, value in measured.items()
                 ) or measured["budget_input_tokens"] > limits["input"] or measured[
-                    "estimated_reservation_micro_usd"] > 5000:
+                    "estimated_reservation_micro_usd"] > ATTEMPT_MICRO_USD:
                     raise ValueError("unsupported, changed or over-limit measurement")
                 measured_costs.append(measured["estimated_reservation_micro_usd"])
             shared.setdefault(row["case"], set()).add(digest)
@@ -275,9 +276,8 @@ def submit(core, request):
                      event_type="evaluation.requested", occurred_at=now, ingested_at=now,
                      privacy_scope="private", body_json=encode({"evaluation_id": evaluation_id}),
                      trace_id=evaluation_id, memory_processed=1)
-        job_id = core.new_job(event_id, "evaluation", evaluation_id, now)
+        job_id = core.new_job(event_id, "evaluation", evaluation_id, now, max_attempts=1)
         owner_authority.bind_job(store, settings, clock, job_id, purpose="evaluation")
-        store.execute('UPDATE jobs SET max_attempts = 1 WHERE job_id = %s', (job_id,))
         for source_id in sources:
             store.insert("event_dependencies", event_id=event_id, source_event_id=source_id)
             store.insert("job_sources", job_id=job_id, event_id=source_id)
@@ -330,7 +330,7 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
     if (len(prior) >= min(limits["calls"], len(manifest["plan"]["requests"]))
         or any(row["state"] != "SETTLED" for row in prior)
         or sum(row["billed_micro_usd"] for row in prior) + estimate > limits["cost"]
-        or estimate > 5000 or estimated_input > limits["input"]):
+        or estimate > ATTEMPT_MICRO_USD or estimated_input > limits["input"]):
         raise CoreError("EVALUATION_SUBLIMIT_EXHAUSTED", 429)
     ordinal = len(prior)
     if (rid != request_id(run["manifest_sha256"], ordinal)
@@ -341,6 +341,16 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
         or paid_budget.sha(model_payload(settings, messages, "evaluation")) != (
             manifest["plan"]["requests"][ordinal]["payload_sha256"])):
         raise CoreError("EVALUATION_SEQUENCE_OR_PAYLOAD_CHANGED", 409)
+
+
+def actual_limits(store, usage, actual):
+    total = store.one((
+        'SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage WHERE '
+        'job_id=%s'
+    ), (usage["job_id"],))["n"]
+    if actual > ATTEMPT_MICRO_USD or total + actual - usage["billed_micro_usd"] > COST:
+        return ["EVALUATION_AMOUNT"]
+    return []
 
 
 def check_request(store, settings, clock, rid):
@@ -385,9 +395,8 @@ def check_request(store, settings, clock, rid):
 def recover(store, now):
     # Core's original cancellation drain settles expired reservations through the
     # original budget journal. Never set usage states directly or repeat a call.
-    store.execute("UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, updated_at = %s, "
-        "last_error_code = 'EVALUATION_INTERRUPTED' WHERE kind = 'evaluation' AND state = "
-        "'RUNNING' AND lease_until <= %s", (now, now))
+    job_queue.cancel_active(store, "kind='evaluation' AND state='RUNNING' AND lease_until<=%s",
+                            (now,), "EVALUATION_INTERRUPTED", now)
 
 
 async def run(core, job):
@@ -417,10 +426,7 @@ async def run(core, job):
                           current_request=current_request)
             with store.transaction():
                 source_check()
-                store.execute('UPDATE jobs SET lease_until = %s WHERE job_id = %s AND lease_token '
-                    '= %s',
-                              (after(clock(), settings.lease_seconds), job["job_id"],
-                               job["lease_token"]))
+                job_queue.renew(store, job, after(clock(), settings.lease_seconds))
             messages = item["payload"]["messages"]
             budget.reserve(store, settings, job["job_id"], "evaluation", messages, clock(),
                            request_id=rid, logical_request_id=rid, clock=clock)
@@ -444,22 +450,19 @@ async def run(core, job):
             source_check()
             if stop < len(requests):
                 # Yield the worker; the next claim resumes after any waiting chat.
-                store.execute("UPDATE jobs SET state = 'QUEUED', lease_token = NULL, lease_until = "
-                    'NULL, attempts = GREATEST(0, attempts - 1), updated_at = %s WHERE job_id = %s '
-                    'AND lease_token = %s', (clock(), job["job_id"], job["lease_token"]))
+                job_queue.requeue(store, job["job_id"], clock(), token=job["lease_token"])
             else:
-                store.execute("UPDATE jobs SET state = 'SUCCEEDED', lease_token = NULL, updated_at "
-                    '= %s WHERE job_id = %s AND lease_token = %s', (clock(), job["job_id"],
-                                                                   job["lease_token"]))
+                job_queue.release(
+                    store, job["job_id"], "SUCCEEDED", clock(), token=job["lease_token"]
+                )
     except CoreError as exc:
         error = exc.code
     except Exception:
         error = "EVALUATION_INTERNAL_ERROR"
     if error:
         with store.transaction():
-            store.execute("UPDATE jobs SET state = 'FAILED', lease_token = NULL, last_error_code = "
-                "%s, updated_at = %s WHERE job_id = %s AND state = 'RUNNING' AND lease_token = %s",
-                          (error, clock(), job["job_id"], job["lease_token"]))
+            job_queue.release(store, job["job_id"], "FAILED", clock(), reason=error,
+                              token=job["lease_token"])
             store.audit("evaluation.failed", job["job_id"], job["trace_id"], clock(), code=error)
     return True
 
@@ -535,9 +538,7 @@ def erase(store, event_ids):
                           (row["evaluation_id"],))
             store.execute('DELETE FROM evaluation_results WHERE evaluation_id = %s',
                           (row["evaluation_id"],))
-            store.execute("UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, "
-                "last_error_code = 'EVALUATION_SOURCE_ERASED' WHERE job_id = %s",
-                          (row["job_id"],))
+            job_queue.release(store, row["job_id"], "CANCELLED", reason="EVALUATION_SOURCE_ERASED")
 
 
 def revoke_jobs(store, consent_id, now):
@@ -545,10 +546,11 @@ def revoke_jobs(store, consent_id, now):
         "relnamespace=current_schema()::regnamespace AND relname='evaluation_runs' AND relkind IN "
         "('r','p')"):
         return  # Revocation remains available before this projection's migration.
-    store.execute("UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, updated_at = %s, "
-        "last_error_code = 'EVALUATION_CONSENT_REVOKED' WHERE kind = 'evaluation' AND state IN "
-        "('QUEUED', 'RUNNING', 'RETRY_WAIT') AND job_id IN (SELECT job_id FROM evaluation_runs "
-        'WHERE consent_id = %s)', (now, consent_id))
+    job_queue.cancel_active(store, (
+        "kind='evaluation' AND job_id IN (SELECT job_id FROM evaluation_runs WHERE "
+        'consent_id=%s)'
+    ),
+                            (consent_id,), "EVALUATION_CONSENT_REVOKED", now)
 
 
 def stop_window(store, window_sha256, now):
@@ -556,14 +558,9 @@ def stop_window(store, window_sha256, now):
         "relnamespace=current_schema()::regnamespace AND relname='evaluation_runs' AND relkind IN "
         "('r','p')"):
         return
-    store.execute((
-        (
-            "UPDATE jobs SET state='CANCELLED',lease_token=NULL,"
-            "updated_at=%s,last_error_code='LIVE_WINDOW_STOPPED' "
-            "WHERE kind='evaluation' AND state IN ('QUEUED',"
-            "'RUNNING','RETRY_WAIT') AND job_id IN (SELECT job_id "
-            'FROM evaluation_runs WHERE (CASE WHEN binding_json IS '
-            "JSON THEN (binding_json::json#>>'{window_sha256}') "
-            'END)=%s)'
-        )
-    ), (now, window_sha256))
+    job_queue.cancel_active(store, (
+        "kind='evaluation' AND job_id IN (SELECT job_id FROM evaluation_runs WHERE "
+        '(CASE WHEN binding_json IS JSON THEN binding_json::json #>> '
+        "'{window_sha256}' END)=%s)"
+    ),
+                            (window_sha256,), "LIVE_WINDOW_STOPPED", now)

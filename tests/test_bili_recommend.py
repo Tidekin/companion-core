@@ -23,13 +23,13 @@ from source_reader.network import PublicHTTP, ReadBudget, ReadFailure
 from source_reader.protocol import decode_lease
 from source_reader.reading import ReadingContext, read_observation
 from tests.conftest import run
+from tests.support.bili_media import NAV as MEDIA_NAV
 from tests.support.core_http import real_core_http
-from tests.test_bili_media import NAV as MEDIA_NAV
-from tests.test_exploration import configure
-from tests.test_heybox_reader import mock_pool
-from tests.test_next_reading_worker import lease
-from tests.test_plugin_readonly import SECRET, grant, registered_grant
-from tests.test_source_reader import NOW, response
+from tests.support.exploration import configure
+from tests.support.heybox_reader import mock_pool
+from tests.support.next_reading_worker import lease
+from tests.support.plugin_readonly import SECRET, grant, registered_grant
+from tests.support.source_reader import NOW, response
 
 NOW_DT = datetime.fromisoformat(NOW)
 NAV = {"code": 0, "data": {**MEDIA_NAV["data"], "isLogin": True}}
@@ -128,7 +128,7 @@ def configure_recommend(core):
 def test_request_freezes_source_and_cannot_lease_via_legacy_or_without_grant(core, tmp_path):
     configure_recommend(core)
     request = core.exploration.create("bili", "discover", "recommend")
-    row = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?", (request,))
+    row = core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s', (request,))
     assert row["discovery_mode"] == "recommend"
     with pytest.raises(CoreError, match="SOURCE_GRANT_REQUIRED"):
         core.reading.lease("bili")
@@ -139,14 +139,14 @@ def test_request_freezes_source_and_cannot_lease_via_legacy_or_without_grant(cor
         core.exploration.lease("bili", snapshot)
     core.settings.observation_adapters["bili"].bilibili_discovery = "popular"
     assert core.reading.lease("bili", snapshot) is None
-    assert core.store.one("SELECT state FROM exploration_requests WHERE request_id=?",
+    assert core.store.one('SELECT state FROM exploration_requests WHERE request_id=%s',
                            (request,))["state"] == "CANCELLED"
 
 
 def test_query_still_uses_search_in_recommendation_configuration(core):
     configure_recommend(core)
     request = core.exploration.create("bili", "discover", "interest", query="恒星光谱")
-    assert core.store.one("SELECT discovery_mode FROM exploration_requests WHERE request_id=?",
+    assert core.store.one('SELECT discovery_mode FROM exploration_requests WHERE request_id=%s',
                            (request,))["discovery_mode"] == "default"
 
 
@@ -209,7 +209,7 @@ def test_real_http_and_independent_cli_commit_recommendations_once(core, tmp_pat
                 headers={"Authorization": "Bearer " + "bili-reader-token-" * 3},
                 json={"source_grant": snapshot})
             assert denied.status_code == 403 and "SOURCE_GRANT_REVOKED" in denied.text
-        row = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?", (request,))
+        row = core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s', (request,))
         assert row["state"] == "DONE" and row["used_requests"] == 2, (
             row["state"], row["last_error_code"], row["used_requests"])
         observed = core.store.rows("SELECT * FROM observations")
@@ -272,7 +272,7 @@ def test_core_binds_discovery_evidence_to_original_request_and_rejects_late_conf
     core.settings.observation_adapters["bili"].bilibili_discovery = "popular"
     outcome = core.reading.complete("bili", request, result)
     assert outcome["state"] == "CANCELLED" and not outcome["event_ids"]
-    assert core.store.one("SELECT used_requests FROM exploration_requests WHERE request_id=?",
+    assert core.store.one('SELECT used_requests FROM exploration_requests WHERE request_id=%s',
                            (request,))["used_requests"] == 2
 
 

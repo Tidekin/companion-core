@@ -13,53 +13,20 @@ from companion.contracts import CoreError
 from companion.executive import erase_executive
 from companion.executor_gateway import receipt
 from companion.model import ModelResponse
-from companion.store import Store, after, uid
+from companion.store import Store, after
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
 from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.cloud_budget import MESSAGES, change, charge, native, options
+from tests.support.cumulative_budget import policy as cumulative_policy
+from tests.support.executive import FakeExecutor, configured, proposal
+from tests.support.media import chunk, process, service, start
 from tests.support.native_consumer_entry import environment
-from tests.test_cumulative_budget import policy as cumulative_policy
-from tests.test_executive import FakeExecutor, configured, proposal
-from tests.test_media import chunk, process, service, start
-from tests.test_paid_model_gate import approved_live
-from tests.test_video_accounting import core as historical_video_core
-from tests.test_video_accounting import correct, failed_video
+from tests.support.paid_model import approved_live
+from tests.support.video_accounting import core as historical_video_core
+from tests.support.video_accounting import correct, failed_video
 
 __all__ = ["failed_video", "historical_video_core"]
-
-MESSAGES = [{"role": "user", "content": "synthetic budget request"}]
-
-
-def options(core, **changes):
-    config = CloudBudgetConfig(**changes)
-    object.__setattr__(core.settings, "cloud_budget", config)
-    return config
-
-
-def native(store, reference_id, amount, now, *, state="RESERVED", scenario="chat"):
-    store.insert("model_usage", usage_id=uid("usage"), request_id=reference_id,
-                 scenario=scenario, provider="synthetic", model="synthetic",
-                 billed_micro_usd=amount, state=state, pricing_known=1, occurred_at=now)
-
-
-def charge(core, reference_id, amount, *, store=None, now=None, task_kind=None, task_id=None):
-    store, now = store or core.store, now or core.clock()
-    with store.transaction():
-        result = cloud_budget.reserve(
-            store, core.settings, reference_type="model", reference_id=reference_id,
-            estimated_micro_usd=amount, now=now, task_kind=task_kind, task_id=task_id,
-        )
-        native(store, reference_id, amount, now)
-    return result
-
-
-def change(core, key="cloud-change-1", **values):
-    current = cloud_budget.policy(core.store, core.settings, core.clock())
-    return cloud_budget.configure(
-        core.store, core.settings, {"expected_version": current["version"], "changes": values},
-        idempotency_key=key, now=core.clock(),
-    )
-
 
 def test_defaults_and_versioned_patch_are_idempotent_without_resetting_usage(core):
     original = cloud_budget.policy(core.store, core.settings, core.clock())
@@ -149,8 +116,10 @@ def test_legacy_models_and_dispatched_tools_are_included_before_fx_changes(core)
     native(core.store, "old-model", 60_000, core.clock(), state="SETTLED")
     executive = configured(core)
     task = executive.submit(proposal())
-    core.store.execute("UPDATE tool_tasks SET state='RUNNING',reserved_micro_usd=50000,"
-                       "billed_micro_usd=50000,dispatched_at=? WHERE task_id=?",
+    core.store.execute((
+        "UPDATE tool_tasks SET state='RUNNING',reserved_micro_usd=50000,bille"
+        'd_micro_usd=50000,dispatched_at=%s WHERE task_id=%s'
+    ),
                        (core.clock(), task["task_id"]))
     first = cloud_budget.summary(core.store, core.settings, core.clock())
     assert first["used_micro_cny"] == 880_000 and first["charge_count"] == 2
@@ -183,12 +152,14 @@ def test_legacy_native_reservation_is_not_lost_when_billed_projection_lags(core,
         executive = configured(core)
         reference = executive.submit(proposal())["task_id"]
         held = 100
-        core.store.execute("UPDATE tool_tasks SET state='RUNNING',reserved_micro_usd=?,"
-                           "billed_micro_usd=0,dispatched_at=? WHERE task_id=?",
+        core.store.execute((
+            "UPDATE tool_tasks SET state='RUNNING',reserved_micro_usd=%s,bill"
+            'ed_micro_usd=0,dispatched_at=%s WHERE task_id=%s'
+        ),
                            (held, core.clock(), reference))
     view = cloud_budget.summary(core.store, core.settings, core.clock())
     assert held > 0 and view["reserved_micro_cny"] == held * 8
-    row = core.store.one("SELECT * FROM cloud_cost_snapshots WHERE reference_id=?", (reference,))
+    row = core.store.one('SELECT * FROM cloud_cost_snapshots WHERE reference_id=%s', (reference,))
     assert row["accounted_micro_usd"] == row["reserved_micro_usd"] == held
 
 
@@ -245,12 +216,12 @@ def test_cloud_rejection_does_not_partially_reserve_cumulative_model_budget(core
     job_id = authorized_job(core)
     path = Path(core.settings.paid_model.journal_path)
     before = path.read_bytes()
-    projection = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    projection = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                 (cumulative.PROJECTION,))
     with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
         budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     assert path.read_bytes() == before
-    assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                           (cumulative.PROJECTION,)) == projection
     assert not core.store.rows("SELECT * FROM model_usage")
     change(core, daily_micro_cny=20_000_000)
@@ -367,7 +338,7 @@ class TestHistoricalCorrection:
     @pytest.fixture
     def core(self, historical_video_core):
         # Relocate the fixture's journal file without changing its signed accounting bytes.
-        historical_video_core.store.execute("UPDATE model_admissions SET journal_path=?",
+        historical_video_core.store.execute('UPDATE model_admissions SET journal_path=%s',
             (historical_video_core.settings.paid_model.journal_path,))
         return historical_video_core
 
@@ -376,12 +347,12 @@ class TestHistoricalCorrection:
     ):
         request, _, _ = failed_video
         cloud_budget.summary(core.store, core.settings, core.clock())
-        before = core.store.one("SELECT * FROM cloud_cost_snapshots WHERE reference_id=?",
+        before = core.store.one('SELECT * FROM cloud_cost_snapshots WHERE reference_id=%s',
                                 (request["request_id"],))
         assert before["state"] == "UNKNOWN"
         receipt = correct(core, request)
         cloud_budget.summary(core.store, core.settings, core.clock())
-        after_row = core.store.one("SELECT * FROM cloud_cost_snapshots WHERE reference_id=?",
+        after_row = core.store.one('SELECT * FROM cloud_cost_snapshots WHERE reference_id=%s',
                                    (request["request_id"],))
         assert after_row["state"] == "SETTLED"
         assert after_row["amount_micro_cny"] == before["amount_micro_cny"]
@@ -407,7 +378,7 @@ def test_authenticated_http_and_independent_model_worker_share_the_live_cloud_ca
             second = await entry.admit(2, "第二条不得越过云总额")
             assert await worker.run_once("independent-cloud-worker")
             job_id = entry.accepted[second["event_id"]]["job_id"]
-            assert core.store.one("SELECT last_error_code FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT last_error_code FROM jobs WHERE job_id=%s',
                                   (job_id,))["last_error_code"] == "CLOUD_DAILY_BUDGET_EXHAUSTED"
             assert len(provider.requests) == 1
             assert core.store.rows("SELECT * FROM model_usage") == [first_usage]
@@ -456,7 +427,7 @@ def test_erasing_a_dispatched_tool_keeps_unknown_cost_across_midnight(core):
     task = executive.submit(proposal())
     fake.callback = lambda: erase_executive(core.store, ["evt_test_1"])
     assert run(executive.run_one())
-    native_row = core.store.one("SELECT * FROM tool_tasks WHERE task_id=?", (task["task_id"],))
+    native_row = core.store.one('SELECT * FROM tool_tasks WHERE task_id=%s', (task["task_id"],))
     assert native_row["state"] == "CANCELLED" and native_row["billed_micro_usd"] == 1000
     assert len(fake.calls) == 1
     core.clock.advance(86400)

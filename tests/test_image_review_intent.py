@@ -4,13 +4,13 @@ import json
 
 import pytest
 
-from companion import image_review, memory_references
+from companion import image_review, memory_references, reply_quote
 from companion.contracts import CoreError
 from tests.conftest import run
+from tests.support.image_review import OBSERVATION, reply
 from tests.support.native_image_memory import native_image_memory
-from tests.test_image_review import OBSERVATION, reply
-from tests.test_onebot_reference_reader import reply as quote_segment
-from tests.test_onebot_reference_reader import text as text_segment
+from tests.support.onebot_reference_reader import reply as quote_segment
+from tests.support.onebot_reference_reader import text as text_segment
 
 
 @pytest.mark.parametrize("text,linked,immediate,wanted,objection", [
@@ -72,7 +72,7 @@ def test_other_meanings_of_wrong_do_not_quarantine_image_evidence(core, tmp_path
         async with fixture as context:
             assert await context.worker.run_once()
             await context.entry.send(context.entry.client, context.entry.protocol)
-            source = core.store.one("SELECT * FROM events WHERE event_id=?",
+            source = core.store.one('SELECT * FROM events WHERE event_id=%s',
                                     (context.job["event_id"],))
             reference = next(value for value in memory_references.inputs(core, source)
                              if value["kind"] == "image")
@@ -116,7 +116,7 @@ def test_native_quote_links_target_without_granting_objection(
         async with fixture as context:
             assert await context.worker.run_once()
             await context.entry.send(context.entry.client, context.entry.protocol)
-            source = core.store.one("SELECT * FROM events WHERE event_id=?",
+            source = core.store.one('SELECT * FROM events WHERE event_id=%s',
                                     (context.job["event_id"],))
             reference = next(value for value in memory_references.inputs(core, source)
                              if value["kind"] == "image")
@@ -125,11 +125,14 @@ def test_native_quote_links_target_without_granting_objection(
                     old_reply if valid_quote else "与本地已发记录不符的引用")]),
                 text_segment(text),
             ])
-            job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j "
-                "JOIN events e USING(event_id) WHERE j.event_id=?", (posted["event_id"],))
-            body = json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+            job = core.store.one((
+                'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+                'USING(event_id) WHERE j.event_id=%s'
+            ), (posted["event_id"],))
+            body = json.loads(core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                               (posted["event_id"],))["body_json"])
-            assert bool(core._self_quote_indices(job, body)) == valid_quote
+            quotes = reply_quote.self_quote_indices(core.store, core.settings, job, body)
+            assert bool(quotes) == valid_quote
             calls = []
             await reply(core, context.entry, "对照具体来源核对理解。", calls)
             reviews = memory_references.image_reviews(core.store, source["event_id"])

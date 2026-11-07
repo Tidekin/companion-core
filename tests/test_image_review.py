@@ -6,32 +6,16 @@ measurement of semantic model quality.
 
 import json
 
-import httpx
 import pytest
 
 from companion import image_spool, memory_references, retrieval_work
-from companion.config import ObservationAdapterConfig
 from companion.contracts import Candidate, CoreError
 from companion.memory_context import MemoryContext
 from tests.conftest import run
-from tests.sdk_reader_fixture import answer, worker_for
+from tests.support.image_review import OBSERVATION, reply
+from tests.support.native_history_delivery import sdk_step
+from tests.support.native_image_bursts import model_images
 from tests.support.native_image_memory import native_image_memory
-from tests.test_native_history_delivery import sdk_step
-from tests.test_native_image_bursts import model_images
-
-OBSERVATION = {"observation_adapters": {"content_image": ObservationAdapterConfig(
-    source="qq_image", token="synthetic-image-reference-token-12345", media_analysis=True)}}
-
-
-async def reply(core, entry, text, calls):
-    def provider(request):
-        calls.append(json.loads(request.content))
-        return httpx.Response(200, json=answer(text))
-
-    async with worker_for(core, provider) as worker:
-        assert await worker.run_once()
-    delivered = await entry.send(entry.client, entry.protocol)
-    assert delivered["attempt_states"].get("ACK")
 
 
 def test_image_derived_fact_survives_native_checkpoint_and_delivery(core, tmp_path):
@@ -40,7 +24,7 @@ def test_image_derived_fact_survives_native_checkpoint_and_delivery(core, tmp_pa
                                        core_options=OBSERVATION) as context:
             assert await context.worker.run_once()
             await context.entry.send(context.entry.client, context.entry.protocol)
-            source = core.store.one("SELECT * FROM events WHERE event_id=?",
+            source = core.store.one('SELECT * FROM events WHERE event_id=%s',
                                     (context.job["event_id"],))
             reference = next(value for value in memory_references.inputs(core, source)
                              if value["kind"] == "image")
@@ -52,17 +36,19 @@ def test_image_derived_fact_survives_native_checkpoint_and_delivery(core, tmp_pa
             _, request = await sdk_step(core, tmp_path, current["event_id"], 2)
             delivered = await context.entry.send(context.entry.client, context.entry.protocol)
             assert delivered["attempt_states"].get("ACK")
-            job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (current["event_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (current["event_id"],))
             assert job["state"] == "SUCCEEDED", job["last_error_code"]
             assert "青栎资料卡" in json.dumps(request, ensure_ascii=False)
-            saved = core.store.one("SELECT phase,snapshots_json FROM agent_conversations "
-                                   "WHERE job_id=?", (job["job_id"],))
+            saved = core.store.one((
+                'SELECT phase,snapshots_json FROM agent_conversations WHERE '
+                'job_id=%s'
+            ), (job["job_id"],))
             assert saved["phase"] == "COMPLETE"
             assert any(memory_id == row["memory_id"]
                        for snapshot in json.loads(saved["snapshots_json"])
                        if snapshot["kind"] == "memory"
                        for row in snapshot["proof"]["rows"])
-            assert core.store.one("SELECT state FROM model_usage WHERE job_id=?",
+            assert core.store.one('SELECT state FROM model_usage WHERE job_id=%s',
                                   (job["job_id"],))["state"] == "SETTLED"
     run(scenario())
 
@@ -77,12 +63,14 @@ def test_review_replays_objection_and_actual_reply_without_overwriting_receipts(
         async with fixture as context:
             assert await context.worker.run_once()
             await context.entry.send(context.entry.client, context.entry.protocol)
-            original = core.store.one("SELECT * FROM content_items WHERE owner_event_id=? "
-                                       "AND slot=0", (context.job["event_id"],))
-            receipt = core.store.one("SELECT * FROM events WHERE event_id=?",
+            original = core.store.one((
+                'SELECT * FROM content_items WHERE owner_event_id=%s AND '
+                'slot=0'
+            ), (context.job["event_id"],))
+            receipt = core.store.one('SELECT * FROM events WHERE event_id=%s',
                                       (original["output_event_id"],))
             assert receipt is not None
-            source = core.store.one("SELECT * FROM events WHERE event_id=?",
+            source = core.store.one('SELECT * FROM events WHERE event_id=%s',
                                     (context.job["event_id"],))
             references = memory_references.inputs(core, source)
             image_reference = next(value for value in references if value["kind"] == "image")
@@ -130,9 +118,9 @@ def test_review_replays_objection_and_actual_reply_without_overwriting_receipts(
                     memory_references.read(core.memory, image_reference["reference_id"],
                                            core.clock(), work=work)
                 assert work.receipt()["counts"]["attachment_rows"] == 1
-            assert core.store.one("SELECT * FROM events WHERE event_id=?",
+            assert core.store.one('SELECT * FROM events WHERE event_id=%s',
                                   (receipt["event_id"],)) == receipt
-            assert core.store.one("SELECT output_event_id FROM content_items WHERE item_id=?",
+            assert core.store.one('SELECT output_event_id FROM content_items WHERE item_id=%s',
                 (original["item_id"],))["output_event_id"] == receipt["event_id"]
             await context.entry.admit(3, "再聊聊刚才图片的意思")
             await reply(core, context.entry, "沿着相同台词与处境的关系继续讨论。", calls)
@@ -163,9 +151,11 @@ def test_bounded_target_selection_prioritizes_old_group_or_marks_ambiguity(
             text = "你看错了。" + (context.job["event_id"] if explicit else "")
             correction = await context.entry.admit(3, text)
             await reply(core, context.entry, "我来核对具体分歧。", calls)
-            selected = core.store.rows("SELECT c.owner_event_id FROM agent_image_inputs a "
-                "JOIN content_items c USING(item_id) WHERE a.job_id=(SELECT job_id FROM jobs "
-                "WHERE event_id=?) ORDER BY a.position", (correction["event_id"],))
+            selected = core.store.rows((
+                'SELECT c.owner_event_id FROM agent_image_inputs a JOIN '
+                'content_items c USING(item_id) WHERE a.job_id=(SELECT job_id'
+                ' FROM jobs WHERE event_id=%s) ORDER BY a.position'
+            ), (correction["event_id"],))
             assert {row["owner_event_id"] for row in selected} == {
                 context.job["event_id"] if explicit else newer["event_id"]}
             payload = json.dumps(calls[-1], ensure_ascii=False)

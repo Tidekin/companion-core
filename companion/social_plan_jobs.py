@@ -3,7 +3,7 @@
 import json
 from contextlib import nullcontext
 
-from companion import budget, owner_authority, paid_budget, reply_revision
+from companion import budget, job_queue, owner_authority, paid_budget, reply_revision
 from companion.contracts import CoreError
 from companion.store import after, encode, uid, utcnow
 
@@ -56,10 +56,8 @@ def queue(module, plan_id):
                  privacy_scope="private",
                  body_json=encode({"plan_id": plan_id, "authority": authority}),
                  trace_id=plan_id, memory_processed=1)
-        s.insert("jobs", job_id=job_id, event_id=event_id, kind=KIND, state="QUEUED",
-                 idempotency_key="social-retry:" + plan_id, max_attempts=1, context_tracked=1,
-                 next_attempt_at=after(now, RETRY_SECONDS), last_error_code=row["last_error_code"],
-                 created_at=now, updated_at=now)
+        job_queue.create(s, job_id, event_id, KIND, "social-retry:" + plan_id, now,
+                         next_attempt_at=after(now, RETRY_SECONDS), reason=row["last_error_code"])
         if owner_authority.required(s, module.settings):
             owner_authority.current(s, module.settings, module.clock,
                                     purpose="social", authority=authority)
@@ -139,22 +137,19 @@ def claim(module, worker_id):
             if not module.retryable_unadmitted(plan):
                 raise CoreError("SOCIAL_RETRY_ALREADY_ADMITTED", 409)
         except CoreError as error:
-            s.execute("UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, last_error_code = "
-                '%s, updated_at = %s WHERE job_id = %s', (error.code, now, row["job_id"]))
+            job_queue.release(s, row["job_id"], "CANCELLED", now, reason=error.code)
             return None
         token = uid("lease")
         until = min(plan["expires_at"], after(now, module.settings.lease_seconds))
-        s.execute("UPDATE jobs SET state = 'RUNNING', lease_owner = %s, lease_token = %s, "
-            'lease_until = %s, attempts = attempts + 1, updated_at = %s WHERE job_id = %s',
-                  (worker_id, token, until, now, row["job_id"]))
-        return s.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, '
-            'jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS '
-            'attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, '
-            'jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, '
-            'jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, '
-            'jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked '
-            'AS context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs WHERE '
-            'jobs.job_id = %s', (row["job_id"],))
+        job_queue.claim(s, row["job_id"], worker_id, token, until, now)
+        return s.one((
+            'SELECT jobs.job_id, jobs.event_id, jobs.kind, jobs.state, '
+            'jobs.idempotency_key, jobs.attempts, jobs.max_attempts, '
+            'jobs.lease_owner, jobs.lease_until, jobs.next_attempt_at, '
+            'jobs.last_error_code, jobs.created_at, jobs.updated_at, '
+            'jobs.lease_token, jobs.context_tracked, jobs.authority_json FROM'
+            ' jobs WHERE job_id=%s'
+        ), (row["job_id"],))
 
 
 def fail(module, job, code):
@@ -175,13 +170,9 @@ def fail(module, job, code):
         '%s', (job["job_id"],))
     retry = code in UNADMITTED_RETRY_ERRORS and module.retryable_unadmitted(row)
     state = "RETRY_WAIT" if retry else "FAILED"
-    changed = s.execute(
-        'UPDATE jobs SET state = %s, lease_token = NULL, next_attempt_at = %s, last_error_code = '
-        '%s, attempts = CASE WHEN %s THEN GREATEST(0, attempts - 1) ELSE attempts END, updated_at '
-        "= %s WHERE job_id = %s AND state = 'RUNNING' AND lease_token = %s",
-        (state, after(now, RETRY_SECONDS) if retry else None, code, bool(retry), now,
-         job["job_id"], job["lease_token"]),
-    )
+    changed = job_queue.retry_outcome(s, job["job_id"], state, now,
+                                      after(now, RETRY_SECONDS) if retry else None,
+                                      reason=code, token=job["lease_token"], refund=retry)
     if changed:
         s.audit("social.retry_deferred" if retry else "social.retry_failed", job["job_id"],
                 row["plan_id"], now, error_code=code)
@@ -224,11 +215,9 @@ def recover(store, now):
                  and row["plan_state"] == "REJECTED"
                  and row["plan_error"] in UNADMITTED_RETRY_ERRORS)
         state = "RETRY_WAIT" if retry else "CANCELLED"
-        store.execute('UPDATE jobs SET state = %s, lease_token = NULL, next_attempt_at = %s, '
-            'attempts = CASE WHEN %s THEN GREATEST(0, attempts - 1) ELSE attempts END, '
-            "last_error_code = 'SOCIAL_RETRY_LEASE_EXPIRED', updated_at = %s WHERE job_id = %s",
-                      (state, after(now, RETRY_SECONDS) if retry else None, bool(retry), now,
-                       row["job_id"]))
+        job_queue.retry_outcome(store, row["job_id"], state, now,
+                                after(now, RETRY_SECONDS) if retry else None,
+                                reason="SOCIAL_RETRY_LEASE_EXPIRED", refund=retry)
         store.audit("social.retry_recovered", row["job_id"], row["plan_id"], now, state=state)
         changed = True
     return changed
@@ -236,8 +225,8 @@ def recover(store, now):
 
 def cancel_plans(store, plan_ids, reason, now):
     if available(store):
-        store.execute("UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, last_error_code = "
-            "%s, updated_at = %s WHERE state IN ('QUEUED', 'RUNNING', 'RETRY_WAIT') AND job_id IN "
-            '(SELECT job_id FROM social_autonomy_jobs WHERE plan_id IN (SELECT value COLLATE "C" '
-            'FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
-            'parsed(value)))', (reason, now, encode(list(plan_ids))))
+        job_queue.cancel_active(store, (
+            'job_id IN (SELECT job_id FROM social_autonomy_jobs WHERE plan_id IN '
+            '(SELECT value FROM json_array_elements_text(%s::json) AS ids(value)))'
+        ),
+                                (encode(list(plan_ids)),), reason, now)

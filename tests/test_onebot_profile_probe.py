@@ -24,11 +24,11 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import bridge_code_sha256, digest
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.native_account_host import configure_host
+from tests.support.onebot_account_actions import fixture
 from tests.support.onebot_events import raw_event
-from tests.test_native_account_host import configure_host
-from tests.test_onebot_account_actions import fixture
-from tests.test_onebot_pokes import silent
-from tests.test_social_owner_authority import authorize, close_provider_clients  # noqa: F401
+from tests.support.onebot_pokes import silent
+from tests.support.social_owner_authority import authorize, close_provider_clients  # noqa: F401
 
 
 @asynccontextmanager
@@ -37,7 +37,7 @@ async def source_window(core, tmp_path, source, *, live, approved, scope_options
     from dataclasses import replace
 
     from companion.api import create_app
-    from tests.test_onebot_capture import provider
+    from tests.support.onebot import provider
 
     core.settings.social_autonomy = scope_options["core_options"]["social_autonomy"]
     policy, _ = authorize(core, tmp_path, account=account_scope)
@@ -473,14 +473,16 @@ def test_continuous_probe_real_core_http_independent_worker_and_native_profile_a
                 async def execute():
                     await ready.wait()
                     from companion.social_autonomy import SocialAutonomy
-                    from tests.test_social_autonomy import queue
+                    from tests.support.social_autonomy import queue
 
                     module = SocialAutonomy(worker.store, worker.settings,
                         model=worker.model, clock=worker.clock)
                     planned = await module.plan("native-profile-worker",
                         profile_fields=["nickname"], profile_memory_ids=[memory])
-                    conversation = worker.store.one("SELECT conversation_id FROM conversations "
-                        "WHERE platform_session_key=?", (window.config.origin,))
+                    conversation = worker.store.one((
+                        'SELECT conversation_id FROM conversations WHERE '
+                        'platform_session_key=%s'
+                    ), (window.config.origin,))
                     queue(module, planned, conversation["conversation_id"])
 
                 async with asyncio.timeout(20):

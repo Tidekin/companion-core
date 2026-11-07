@@ -20,14 +20,15 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP, ReadBudget, ReadFailure, redirect_video_url
 from source_reader.worker_v1 import tick
 from tests.conftest import run
+from tests.support.exploration import URL
+from tests.support.heybox_reader import mock_pool
+from tests.support.live_card_content import options
 from tests.support.native_consumer import source_window
 from tests.support.onebot_events import raw_event
-from tests.test_heybox_reader import mock_pool
-from tests.test_live_card_content import options
-from tests.test_plugin_readonly import NOW_DT, SECRET, grant
-from tests.test_qq_rich_input import rich_event
-from tests.test_reading_followup import select_read
-from tests.test_source_reader import ITEM, META, PLAYER, SUBTITLE, URL, read, response
+from tests.support.plugin_readonly import NOW_DT, SECRET, grant
+from tests.support.qq_rich_input import rich_event
+from tests.support.reading_followup import select_read
+from tests.support.source_reader import ITEM, META, PLAYER, SUBTITLE, read, response
 
 SHORT = "https://b23.tv/Synthetic7"
 LOCATION = URL + "?share_source=qq&tracking=private-tracking-value"

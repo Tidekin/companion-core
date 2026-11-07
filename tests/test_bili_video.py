@@ -1,22 +1,18 @@
 """Bili media keeps original Reader authority, immutable phases and native costs."""
 
-import hashlib
-import io
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, closing
+from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
 
-import av
 import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
-from PIL import Image
 
 from companion import budget
 from companion.bili_video import (
@@ -26,65 +22,28 @@ from companion.bili_video import (
     model_binding,
     restore_bili_video,
 )
-from companion.bili_video_config import BiliVideoConfig
 from companion.bili_video_protocol import (
     CAPABILITY,
-    assets_to_wire,
     json_sha256,
-    selection_from_wire,
-    target_from_wire,
 )
 from companion.cloud_budget import CloudBudgetConfig
-from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
-from companion.media_config import ContentConfig
-from companion.model import ModelClient
-from companion.reading_protocol import ReadObservation
 from companion.source_grants import SourceGrantSnapshot
 from companion.store import Store, encode
-from companion.video_media_contract import AssetManifest, MediaAsset
 from tests.conftest import run
-from tests.support.native_consumer import admit, select_tools, source_window
-from tests.support.onebot_events import raw_event
-from tests.test_reading_protocol import envelope
-from tests.test_reading_service import queued
-from tests.test_test_fixtures import historical_database
-from tests.test_video_understanding import scope_options
-
-
-def metadata(core, *, deadline=None, duration=60, enabled=True, grant=None):
-    core.settings.bili_video = BiliVideoConfig(enabled=enabled)
-    adapter, item, body = queued(core, "bilibili", grant=grant)
-    core.settings.exploration_daily_bytes = 200_000_000
-    core.settings.exploration_daily_requests = 100
-    core.settings.exploration_monthly_requests = 1000
-    core.settings.exploration_daily_deep_reads = 20
-    content = core.store.one(
-        "SELECT * FROM content_items WHERE read_request_id=?", (item["request_id"],)
-    )
-    assert content is not None
-    if deadline is not None:
-        core.store.execute(
-            "UPDATE content_items SET deadline=? WHERE item_id=?", (deadline, content["item_id"])
-        )
-    evidence = body["observations"][0]["evidence"]
-    evidence.update(
-        video={"bvid": "BV1xx411c7mD", "cid": 123, "part": 1, "duration_seconds": duration},
-        duration_source="view_first_part",
-        subtitles=[
-            {
-                "start_seconds": 0,
-                "end_seconds": 2.5,
-                "text": "恒星的颜色与温度有关",
-                "partial": False,
-            }
-        ],
-    )
-    result = core.reading.complete(
-        adapter, item["request_id"], ReadObservation.model_validate(body)
-    )
-    module = BiliVideoService(core.store, core.settings, core.reading, core.model, core.clock)
-    return module, content["item_id"], result["event_ids"][0]
+from tests.support.bili_video import (
+    final_result,
+    metadata,
+    model_response,
+    paid_media,
+    phase_costs,
+    phase_usage,
+    preparation,
+    receipt,
+    upload_body,
+)
+from tests.support.historical_schema import historical_database
+from tests.support.native_consumer import admit, select_tools
 
 
 def leased(core, **changes):
@@ -95,137 +54,11 @@ def leased(core, **changes):
     return module, item
 
 
-def binding(item):
-    body = {
-        "schema_version": 1,
-        "lease_token": item["lease_token"],
-        "lease_sha256": json_sha256(item),
-    }
-    if item.get("source_grant") is not None:
-        body["source_grant"] = item["source_grant"]
-    return body
-
-
-def preparation(item, *, duration=None):
-    media = item["media"]
-    duration = duration if duration is not None else media["metadata_duration_seconds"] + 0.04
-    return {
-        **binding(item),
-        "identity": {key: media[key] for key in ("bvid", "cid", "part")}
-        | {"duration_seconds": duration},
-        "proof": {
-            "resolver": "bilibili_wbi_playurl_v1",
-            "view_response_sha256": "a" * 64,
-            "nav_response_sha256": "b" * 64,
-            "playinfo_response_sha256": "c" * 64,
-            "representation_sha256": "d" * 64,
-            "locator_sha256": "e" * 64,
-            "mime_type": "video/mp4",
-            "codec": "avc1.640028",
-            "width": 640,
-            "height": 360,
-            "declared_bytes": None,
-            "duration_milliseconds": round(duration * 1000),
-        },
-    }
-
-
 def prepared(core, **changes):
     module, item = leased(core, **changes)
     body = preparation(item)
     result = module.prepare("bili", item["request_id"], body)
     return module, item, body, result
-
-
-def receipt(item, phase, body):
-    return {**binding(item), "phase": phase, "request_sha256": json_sha256(body)}
-
-
-def media_bytes(kind, duration=0):
-    picture = Image.new("RGB", (16, 16), "blue")
-    output = io.BytesIO()
-    if kind == "frame":
-        picture.save(output, format="PNG")
-        return output.getvalue(), 1
-    count = round(duration * 25)
-    with av.open(output, mode="w", format="mp4") as container:
-        stream = container.add_stream("libx264", rate=25)
-        stream.width = stream.height = 16
-        stream.pix_fmt = "yuv420p"
-        for index in range(count):
-            frame = av.VideoFrame.from_image(picture)
-            frame.pts = index
-            for packet in stream.encode(frame):
-                container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
-    return output.getvalue(), count
-
-
-def upload_body(item, prepared, selected=None):
-    target = target_from_wire(prepared["target"])
-    selection = selection_from_wire(selected or prepared["selection"])
-    kind = "frame" if selection.kind == "preview" else "clip"
-    ranges = (
-        [(at, at) for at in selection.frame_times]
-        if kind == "frame"
-        else [(clip.start_seconds, clip.end_seconds) for clip in selection.clips]
-    )
-    assets = []
-    for index, (start, end) in enumerate(ranges):
-        data, count = media_bytes(kind, end - start)
-        stamps = tuple(start + position / 25 for position in range(count))
-        manifest = AssetManifest(
-            asset_id=f"{kind}-{index}",
-            kind=kind,
-            target_sha256=target.sha256,
-            selection_sha256=selection.sha256,
-            input_sha256="f" * 64,
-            requested_start_seconds=start,
-            requested_end_seconds=end,
-            actual_start_seconds=stamps[0],
-            actual_end_seconds=stamps[-1],
-            source_pts_seconds=stamps,
-            output_duration_seconds=0 if kind == "frame" else count / 25,
-            mime_type="image/png" if kind == "frame" else "video/mp4",
-            codec="png" if kind == "frame" else "h264",
-            width=16,
-            height=16,
-            frame_count=count,
-            byte_length=len(data),
-            sha256=hashlib.sha256(data).hexdigest(),
-        )
-        assets.append(MediaAsset(manifest, data))
-    body = {
-        **binding(item),
-        "prepare_sha256": prepared["prepare_sha256"],
-        "stage": selection.kind,
-        "selection_sha256": selection.sha256,
-        "download": {
-            "input_sha256": "f" * 64,
-            "input_bytes": 1000,
-            "mime_type": "video/mp4",
-            "source_range": {"start_seconds": 0, "end_seconds": target.duration_seconds},
-        },
-        "assets": assets_to_wire(tuple(assets)),
-    }
-    return json.loads(json.dumps(body))
-
-
-def final_result(
-    item, prepared=None, phases=(), *, status="FAILED", used_requests=4, used_bytes=1500
-):
-    return {
-        **binding(item),
-        "status": status,
-        "used_requests": used_requests if status != "UNKNOWN" else None,
-        "used_bytes": used_bytes if status != "UNKNOWN" else None,
-        "observed_requests": used_requests,
-        "observed_bytes": used_bytes,
-        "prepare_sha256": prepared["prepare_sha256"] if prepared else None,
-        "phase_receipt_sha256": [phase["receipt_sha256"] for phase in phases],
-        "error_code": None if status == "SUCCESS" else "SYNTHETIC_READER_FAILURE",
-    }
 
 
 def test_unbound_model_request_does_not_claim_legacy_media(core):
@@ -370,7 +203,9 @@ def test_disabled_video_requires_explicit_configuration_without_changing_metadat
     module, item_id, source = metadata(core, enabled=False)
     with pytest.raises(CoreError, match="BILI_VIDEO_DISABLED"):
         module.schedule(item_id, source)
-    assert core.store.one("SELECT result_status FROM observations WHERE event_id=?", (source,)) == {
+    assert core.store.one((
+        'SELECT result_status FROM observations WHERE event_id=%s'
+    ), (source,)) == {
         "result_status": "FETCHED"
     }
     assert not core.store.rows("SELECT * FROM bili_video_items")
@@ -379,7 +214,7 @@ def test_disabled_video_requires_explicit_configuration_without_changing_metadat
 def test_native_child_requires_capability_and_preserves_original_reading_item(core):
     module, item_id, source = metadata(core)
     original = core.store.one(
-        "SELECT read_request_id FROM content_items WHERE item_id=?", (item_id,)
+        'SELECT read_request_id FROM content_items WHERE item_id=%s', (item_id,)
     )
     child = module.schedule(item_id, source)
     assert module.schedule(item_id, source) == child
@@ -389,12 +224,12 @@ def test_native_child_requires_capability_and_preserves_original_reading_item(co
     assert item["request_id"] == child
     assert item["max_bytes"] == 32 * 1024 * 1024 + 1024 * 1024
     assert item["max_requests"] == 8 and item["max_items"] == 1
-    native = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?", (child,))
+    native = core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s', (child,))
     assert native["reserved_bytes"] == item["max_bytes"]
     assert native["reserved_requests"] == item["max_requests"]
     assert native["lease_until"] == item["media"]["deadline"]
     assert (
-        core.store.one("SELECT read_request_id FROM content_items WHERE item_id=?", (item_id,))
+        core.store.one('SELECT read_request_id FROM content_items WHERE item_id=%s', (item_id,))
         == original
     )
     assert not core.store.rows("SELECT * FROM model_usage")
@@ -525,7 +360,7 @@ def test_late_erased_reader_receipt_settles_only_original_metering(core):
     body = final_result(item, result)
     assert module.result("bili", item["request_id"], body) == {"accepted": True}
     attempt = core.store.one(
-        "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
     )
     assert attempt["state"] == "CANCELLED" and attempt["observed_bytes"] == 1500
     assert attempt["context_json"] == "{}" and attempt["result_event_ids_json"] == "[]"
@@ -542,10 +377,10 @@ def test_overrun_receipt_retains_observed_usage_and_unknown_reservation(core):
     over = item["max_bytes"] + 1
     module.result("bili", item["request_id"], final_result(item, result, used_bytes=over))
     native = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (item["request_id"],)
     )
     attempt = core.store.one(
-        "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
     )
     assert native["state"] == "UNKNOWN" and native["used_bytes"] is None
     assert native["reserved_bytes"] == item["max_bytes"]
@@ -555,12 +390,12 @@ def test_overrun_receipt_retains_observed_usage_and_unknown_reservation(core):
 def test_restore_fences_pending_native_work_without_clearing_its_reservations(core):
     module, item, _, _ = prepared(core)
     native = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (item["request_id"],)
     )
     with core.store.transaction():
         restore_bili_video(core.store, core.clock())
     row = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (item["request_id"],)
     )
     assert row["state"] == "UNKNOWN" and row["reserved_bytes"] == native["reserved_bytes"]
     with pytest.raises(CoreError, match="BILI_VIDEO_RECONCILIATION_REQUIRED"):
@@ -582,154 +417,8 @@ def test_migration_preserves_existing_data_and_refuses_downgrade_with_media_hist
         command.downgrade(config, "0031_voice_nodes")
     with closing(Store(database)) as store:
         assert store.rows("SELECT * FROM reading_attempts") == before
-        historical = BiliVideoService(store, core.settings, module.reading, clock=core.clock)
+        historical = BiliVideoService(store, core.settings, module.exploration, clock=core.clock)
         assert historical.context(item["media"]["content_item_id"])["state"] == "PREPARED"
-
-
-def paid_options(core, *, cloud=None, short_window=False, call_limit=4):
-    config = BiliVideoConfig(enabled=True)
-    options = scope_options(core, model="synthetic-bili-video")
-    options.pop("image_scope")
-    options.pop("image_approval_sha256")
-    options.update(
-        link_scope="owner_links_v1",
-        bili_video_scope=CAPABILITY,
-        bili_video_policy_sha256=json_sha256(config.model_dump(mode="json")),
-    )
-    options["core_options"].update(
-        bili_video=config,
-        cloud_budget=cloud or CloudBudgetConfig(),
-        content=ContentConfig(use_chat_model_for_vision=True, image_daily_micro_usd=1_000_000),
-        observation_adapters={
-            "bili": ObservationAdapterConfig(
-                source="bilibili",
-                media_analysis=True,
-                reader_max_requests=8,
-                token="synthetic-bili-reader-token-123456",
-            )
-        },
-        exploration_daily_bytes=200_000_000,
-        exploration_daily_requests=100,
-        exploration_monthly_requests=1000,
-        exploration_daily_deep_reads=20,
-        exploration_max_response_bytes=1_000_000,
-    )
-    options["paid_options"]["image_input"] = options["paid_options"]["image_input"].model_copy(
-        update={
-            "max_images_per_request": 4,
-            "max_pixels_per_image": 512 * 512,
-            "max_bytes_per_image": 4_000_000,
-        }
-    )
-    options["paid_options"]["per_request_calls"] = call_limit
-    if short_window:
-        options["window_options"]["ends_at"] = (
-            (core.clock.now + timedelta(seconds=45))
-            .astimezone(timezone(timedelta(hours=8)))
-            .isoformat()
-        )
-    return options
-
-
-@asynccontextmanager
-async def paid_media(
-    core,
-    tmp_path,
-    provider,
-    *,
-    controls=None,
-    followup_before_metadata=False,
-    two_links=False,
-    **options,
-):
-    async def source(ws):
-        text = "请看看这个视频 https://www.bilibili.com/video/BV1xx411c7mD"
-        if two_links:
-            text += " https://www.bilibili.com/video/BV1yy411c7mE"
-        await ws.send(json.dumps(raw_event(time=int(core.clock.now.timestamp()), text=text)))
-        await ws.wait_closed()
-
-    async with (
-        source_window(core, tmp_path, source,
-            scope_options=paid_options(core, **{"call_limit": 5,
-                **{k: v for k, v in options.items() if k != "cloud"}}),
-        ) as (window, client, protocol, _, sends),
-        httpx.AsyncClient(transport=httpx.MockTransport(provider)) as provider_http,
-    ):
-        core.content.options = core.settings.content
-        core.model = ModelClient(core.settings, provider_http)
-        core.bili_video.model = core.model
-        await window.capture_once(client, protocol)
-        assert await window.runtime.flush_one(client)
-        urls = [row["target_url"] for row in core.store.rows(
-            "SELECT target_url FROM content_items")]
-        await select_tools(core, "read_content", urls)
-        for index in range(2 if two_links else 1):
-            item = core.reading.lease("bili")
-            assert item is not None and "media" not in item
-            body = envelope("bilibili")
-            observed = body["observations"][0]
-            body["lease_token"] = item["lease_token"]
-            observed["provenance"] = item["context"]
-            observed["url"] = observed["original_url"] = item["url"]
-            observed["fetched_at"] = observed["evidence"]["fetched_at"] = core.clock()
-            observed["evidence"].update(
-                video={
-                    "bvid": item["url"].rpartition("/")[2],
-                    "cid": 123 + index,
-                    "part": 1,
-                    "duration_seconds": 60,
-                },
-                duration_source="view_first_part",
-                subtitles=[
-                    {
-                        "start_seconds": 0,
-                        "end_seconds": 2.5,
-                        "text": "恒星的颜色与温度有关",
-                        "partial": False,
-                    }
-                ],
-            )
-            if followup_before_metadata and index == 0:
-                await admit(client, core, window, 2, "继续读一下")
-            core.reading.complete("bili", item["request_id"], ReadObservation.model_validate(body))
-        await select_tools(core, "analyze_shared_video", urls)
-        if options.get("cloud") is not None:
-            from tests.test_cloud_budget import change
-
-            change(core, **options["cloud"].model_dump())
-        child = core.reading.lease("bili", capabilities=[CAPABILITY])
-        assert child is not None and "media" in child
-        module = core.bili_video
-        prepare = module.prepare("bili", child["request_id"], preparation(child))
-        if controls is not None:
-            controls.update(window=window, client=client, url=urls[0])
-        selectors = core.store.rows("SELECT * FROM model_usage WHERE scenario='chat'")
-        assert len(selectors) == 2 and all(row["state"] == "SETTLED" for row in selectors)
-        yield module, child, prepare
-        for row in selectors:
-            assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
-                                  (row["request_id"],)) == row
-        assert sends == []
-
-
-def model_response(content, *, tokens=100):
-    return httpx.Response(
-        200,
-        json={
-            "choices": [{"message": {"content": json.dumps(content, ensure_ascii=False)}}],
-            "usage": {"prompt_tokens": tokens, "completion_tokens": 20},
-        },
-    )
-
-
-def phase_usage(core):
-    return core.store.rows("SELECT * FROM model_usage WHERE scenario LIKE 'content_video%' "
-                           "ORDER BY rowid")
-
-
-def phase_costs(core):
-    return core.store.rows("SELECT * FROM cloud_cost_snapshots WHERE task_kind='video'")
 
 
 @pytest.mark.parametrize("need_clips", [False, True])
@@ -752,7 +441,7 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
     async def scenario():
         async with paid_media(core, tmp_path, provider) as (module, item, prepared):
             root = core.store.one(
-                "SELECT * FROM events WHERE event_id=?", (item["media"]["source_event_id"],)
+                'SELECT * FROM events WHERE event_id=%s', (item["media"]["source_event_id"],)
             )
             preview_body = upload_body(item, prepared)
             preview = await module.upload("bili", item["request_id"], preview_body)
@@ -776,10 +465,12 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
             assert result["evidence"]["visual_observed"] is True
             assert len(result["evidence"]["phases"]) == len(phases)
             assert (
-                core.store.one("SELECT * FROM events WHERE event_id=?", (root["event_id"],)) == root
+                core.store.one((
+                    'SELECT * FROM events WHERE event_id=%s'
+                ), (root["event_id"],)) == root
             )
             output = core.store.one(
-                "SELECT * FROM observations WHERE event_id=?", (result["event_id"],)
+                'SELECT * FROM observations WHERE event_id=%s', (result["event_id"],)
             )
             assert output["source_kind"] == "text" and output["result_status"] == "FETCHED"
             usage = phase_usage(core)
@@ -892,7 +583,7 @@ def test_lost_model_response_retains_unknown_cost_and_forbids_upload_repayment(c
                 final_result(item, prepared, status="UNKNOWN", used_requests=0, used_bytes=0),
             )
             meter = core.store.one(
-                "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+                'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
             )
             assert meter["state"] == "UNKNOWN"
             assert meter["observed_requests"] == 4 and meter["observed_bytes"] == 1000
@@ -1015,7 +706,7 @@ def test_prepare_receipt_cannot_be_followed_by_a_smaller_settled_request_count(c
     with pytest.raises(CoreError, match="BILI_VIDEO_RESULT_INVALID"):
         module.result("bili", item["request_id"], body)
     meter = core.store.one(
-        "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
     )
     assert meter["state"] == "RUNNING" and meter["observed_requests"] == 3
     assert meter["result_sha256"] is None
@@ -1030,7 +721,7 @@ def test_known_receipt_cannot_reduce_the_already_received_download_meter(core, t
         ) as (module, item, prepared):
             preview = await module.upload("bili", item["request_id"], upload_body(item, prepared))
             meter = core.store.one(
-                "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+                'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
             )
             assert meter["observed_requests"] == 4 and meter["observed_bytes"] == 1000
             for counts in ({"used_requests": 3}, {"used_bytes": 999}):
@@ -1039,7 +730,7 @@ def test_known_receipt_cannot_reduce_the_already_received_download_meter(core, t
                     module.result("bili", item["request_id"], body)
                 assert (
                     core.store.one(
-                        "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+                        'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
                     )
                     == meter
                 )
@@ -1071,7 +762,7 @@ def test_exact_followup_binds_only_new_phases_to_current_consumer(core, tmp_path
         ) as (module, item, prepared):
             root = core.store.one("SELECT * FROM bili_video_items")
             original_job = core.store.one(
-                "SELECT job_id FROM jobs WHERE event_id=?", (root["owner_event_id"],)
+                'SELECT job_id FROM jobs WHERE event_id=%s', (root["owner_event_id"],)
             )["job_id"]
 
             async def followup(text="继续读一下"):
@@ -1125,7 +816,7 @@ def test_exact_followup_binds_only_new_phases_to_current_consumer(core, tmp_path
             sources = {
                 row["source_event_id"]
                 for row in core.store.rows(
-                    "SELECT source_event_id FROM event_dependencies WHERE event_id=?",
+                    'SELECT source_event_id FROM event_dependencies WHERE event_id=%s',
                     (result["event_id"],),
                 )
             }
@@ -1141,7 +832,7 @@ def test_exact_followup_binds_only_new_phases_to_current_consumer(core, tmp_path
                 core.ledger.expire_events(core.store, [consumer["event_id"]], core.clock())
             assert module.context(root["item_id"]) is None
             assert core.store.one(
-                "SELECT redacted FROM events WHERE event_id=?", (result["event_id"],)
+                'SELECT redacted FROM events WHERE event_id=%s', (result["event_id"],)
             ) == {"redacted": 1}
             assert phase_usage(core) == usage
 
@@ -1160,7 +851,7 @@ def test_followup_arriving_during_model_cannot_move_or_repay_started_phase(core,
         with Core(core.settings, clock=core.clock) as independent:
             assert independent.store is not core.store
             assert independent.claim_job("wait-for-original-preview") is None
-            assert independent.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert independent.store.one('SELECT state FROM jobs WHERE job_id=%s',
                 (admitted["job_id"],)) == {"state": "QUEUED"}
         return model_response({"analysis": "旧阶段返回的局部结果", "need_clips": False})
 
@@ -1240,7 +931,7 @@ def test_erasing_new_consumer_during_await_scrubs_its_phase_without_erasing_orig
             prepared,
         ):
             source = core.store.one(
-                "SELECT * FROM events WHERE event_id=?", (item["media"]["source_event_id"],)
+                'SELECT * FROM events WHERE event_id=%s', (item["media"]["source_event_id"],)
             )
             window = controls["window"]
             consumer, _ = await admit(
@@ -1261,7 +952,7 @@ def test_erasing_new_consumer_during_await_scrubs_its_phase_without_erasing_orig
                 "output_event_id": None,
             }
             retained = core.store.one(
-                "SELECT * FROM events WHERE event_id=?", (source["event_id"],)
+                'SELECT * FROM events WHERE event_id=%s', (source["event_id"],)
             )
             assert retained["redacted"] == 0 and retained["body_json"] == source["body_json"]
 
@@ -1347,7 +1038,7 @@ def test_two_video_inputs_keep_foreground_call_room_and_still_produce_a_reply(
             assert len({row["task_id"] for row in costs}) == (1 if call_limit <= 5 else 2)
             assert await core.run_once()
             assert (
-                core.store.one("SELECT state FROM jobs WHERE job_id=?", (original_job,))["state"]
+                core.store.one('SELECT state FROM jobs WHERE job_id=%s', (original_job,))["state"]
                 == "SUCCEEDED"
             )
             assert (
@@ -1359,7 +1050,7 @@ def test_two_video_inputs_keep_foreground_call_room_and_still_produce_a_reply(
             assert reply["state"] == "PENDING" and "两份原始字幕" in reply["content_json"]
             assert (
                 core.store.one(
-                    "SELECT COUNT(*) n FROM model_admissions WHERE logical_request_id=?",
+                    'SELECT COUNT(*) n FROM model_admissions WHERE logical_request_id=%s',
                     (original_job,),
                 )["n"]
                 <= call_limit

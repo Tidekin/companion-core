@@ -6,62 +6,29 @@ import os
 import sqlite3
 import subprocess
 import sys
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
 import pytest
 
 from astrbot_plugin_companion_bridge.bridge import Spool as LegacySpool
-from astrbot_plugin_companion_bridge.bridge import normalize as legacy_normalize
 from companion.contracts import InboundEvent
 from companion_onebot_bridge import migrate_astrbot
 from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
-from tests.support.core_http import real_core_http
-from tests.support.onebot_events import config, raw_event
-from tests.test_content_bridge import (
+from tests.support.astrbot_media_retirement import BOUNDARY, native_file, old_spool
+from tests.support.content_bridge import (
     bridge_module,  # noqa: F401
     event,
 )
-from tests.test_content_bridge import config as plugin_config
+from tests.support.content_bridge import config as plugin_config
+from tests.support.core_http import real_core_http
+from tests.support.onebot_events import config, raw_event
 
 ROOT = Path(__file__).resolve().parents[1]
-BOUNDARY = 1792382399
-
-
-def private_json(path, value):
-    path.write_text(json.dumps(value), encoding="utf-8")
-    path.chmod(0o600)
-    return path
-
-
-def native_file(path, cfg):
-    path.write_text("\n".join(f"{key} = {json.dumps(value)}" for key, value in asdict(cfg).items()
-                              if value is not None) + "\n", encoding="utf-8")
-    path.chmod(0o600)
-    return path
-
-
-def old_spool(tmp_path, cfg, *, pending=False):
-    path = tmp_path / "inbox.sqlite3"
-    spool = LegacySpool(str(path))
-    spool.bind_backend("napcat", "old-generation")
-    key, payload = legacy_normalize(event([], text="previous text"), cfg.owner_qq_id,
-                                    cfg.bot_qq_id, protocol_epoch="old-generation")
-    payload["payload"]["shared_content"] = [{"kind": "image", "slot": 0}]
-    if pending:
-        spool.put(key, payload)
-    else:
-        spool.bind_origin(payload)
-    spool.close()
-    plugin = plugin_config(bridge_token=cfg.bridge_token, core_url=cfg.core_url,
-                           protocol_epoch="old-generation", content_enabled=True)
-    return path, private_json(tmp_path / "old.json", plugin), key, payload
-
-
 def bundle(tmp_path, *, pending=False, cfg=None):
     cfg = cfg or config(data_dir=str(tmp_path / "native"), delivery_enabled=True)
     path, plugin, key, payload = old_spool(tmp_path, cfg, pending=pending)
@@ -174,7 +141,7 @@ def test_real_http_independent_migration_cli_reconciles_without_image_or_deliver
 ):
     vision = None
     if mode == "waiting_image":
-        from tests.test_content import enable
+        from tests.support.content import enable
 
         _, vision = enable(core)
 

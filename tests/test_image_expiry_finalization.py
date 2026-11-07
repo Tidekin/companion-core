@@ -15,9 +15,9 @@ from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.native_image_pipeline import admit_image, claim, pixels, upload_headers
 from tests.support.onebot import provider
-from tests.test_native_image_pipeline import admit_image, claim, pixels, upload_headers
-from tests.test_prepare_owner_input import native_spool, window
+from tests.support.prepare_owner_input import native_spool, window
 
 
 @pytest.mark.parametrize("boundary", [
@@ -55,7 +55,7 @@ def test_text_reply_finishes_when_historical_image_expires(core, tmp_path, monke
                     proof = json.loads(core.store.one("SELECT proof_json FROM captured_images")[
                         "proof_json"])
                     proof["signature"] = "0" * 128
-                    core.store.execute("UPDATE captured_images SET proof_json=?",
+                    core.store.execute('UPDATE captured_images SET proof_json=%s',
                                        (json.dumps(proof),))
                 return response
 
@@ -84,7 +84,7 @@ def test_text_reply_finishes_when_historical_image_expires(core, tmp_path, monke
                 core.clock.advance(core.settings.lease_seconds + 1)
                 async with worker_for(core, model) as worker:
                     assert await worker.run_once("resume-frozen-image-reply")
-            job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (latest["event_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (latest["event_id"],))
             if boundary in {"changed_proof", "next_request"}:
                 assert job["state"] == "FAILED", job["last_error_code"]
                 assert len(model.requests) == 1
@@ -93,14 +93,14 @@ def test_text_reply_finishes_when_historical_image_expires(core, tmp_path, monke
                     assert job["last_error_code"] == "LIVE_IMAGE_ORIGINAL_UNAVAILABLE"
                 return
             assert job["state"] == "SUCCEEDED", job["last_error_code"]
-            rows = core.store.rows("SELECT content_json FROM outbox WHERE origin_event_id=?",
+            rows = core.store.rows('SELECT content_json FROM outbox WHERE origin_event_id=%s',
                                    (latest["event_id"],))
             assert len(rows) == 1 and "完整回答" in rows[0]["content_json"]
             assert len(model.requests) == 1
-            usage = core.store.rows("SELECT state FROM model_usage WHERE job_id=?",
+            usage = core.store.rows('SELECT state FROM model_usage WHERE job_id=%s',
                                     (job["job_id"],))
             assert usage == [{"state": "SETTLED"}]
-            saved = core.store.one("SELECT * FROM agent_conversations WHERE job_id=?",
+            saved = core.store.one('SELECT * FROM agent_conversations WHERE job_id=%s',
                                    (job["job_id"],))
             assert saved["phase"] == "COMPLETE"
             assert "companion-image:" in saved["conversation_json"]
@@ -114,7 +114,7 @@ def test_text_reply_finishes_when_historical_image_expires(core, tmp_path, monke
                     guard = OwnerSendGuard(runtime, client)
                     await deliver_tick(client, OwnerOneBot(guard, protocol), spool, guard=guard)
                 assert len(sends) == 1
-                assert core.store.one("SELECT state FROM outbox WHERE origin_event_id=?",
+                assert core.store.one('SELECT state FROM outbox WHERE origin_event_id=%s',
                                       (latest["event_id"],)) == {"state": "SENT"}
             finally:
                 spool.close()

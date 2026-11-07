@@ -5,7 +5,7 @@ import json
 from companion.contracts import Candidate
 from companion.model import MEMORY_HEADING, RELATIONSHIP_HEADING
 from tests.conftest import run
-from tests.test_dialogue_context import current_job, sent_history
+from tests.support.dialogue_context import current_job, sent_history
 
 
 def test_chat_memory_preserves_episode_kind_and_confirmed_fact(core):
@@ -22,10 +22,10 @@ def test_chat_memory_preserves_episode_kind_and_confirmed_fact(core):
             content=owner, evidence_event_id=f'evt_test_{number}', evidence_quote=owner,
             speaker='owner')
         key = core.memory.add(candidate, core.clock(), confirmed=confirmed)
-        row = core.store.one('SELECT * FROM memories WHERE memory_id=?', (key,))
+        row = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (key,))
         row['evidence_ids'] = [f'evt_test_{number}']
         memories.append(row)
-    before = core.store.rows('SELECT * FROM memories ORDER BY rowid')
+    before = core.store.rows('SELECT * FROM memories ORDER BY record_sequence')
     snapshots = []
     job = current_job(core, text='雪狐和猫侍卫都是长期称呼吗？')
     messages = core.context(job,
@@ -48,7 +48,7 @@ def test_chat_memory_preserves_episode_kind_and_confirmed_fact(core):
         assert {'role': 'user', 'content': owner} in messages
         assert {'role': 'assistant', 'content': reply} in messages
         assert {'role': 'user', 'content': reply} not in messages
-    assert core.store.rows('SELECT * FROM memories ORDER BY rowid') == before
+    assert core.store.rows('SELECT * FROM memories ORDER BY record_sequence') == before
     assert any(proof['kind'] == 'memory' for proof in snapshots)
     assert not core.model.calls
     run(core.recall_for_reply(job))

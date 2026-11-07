@@ -10,13 +10,13 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from companion import budget, capabilities, life_topics, owner_authority, paid_budget
+from companion import budget, capabilities, life_topics, model_scope, owner_authority, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelClient
 from companion.store import Store
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
-from tests.test_watch_ledger import ready
+from tests.support.paid_model import approved_live
+from tests.support.watch_ledger import ready
 
 MESSAGES = [{"role": "user", "content": "synthetic capacity check"}]
 
@@ -25,7 +25,9 @@ MESSAGES = [{"role": "user", "content": "synthetic capacity check"}]
 @pytest.mark.parametrize("boundary", ["admission", "before_io"])
 def test_background_capacity_waits_do_not_spend_domain_retries(core, tmp_path, monkeypatch, lane,
                                                               boundary):
-    from tests import test_jargon, test_style_distill, test_watch_ledger
+    from tests.support import jargon as test_jargon
+    from tests.support import style_distill as test_style_distill
+    from tests.support import watch_ledger as test_watch_ledger
 
     if lane == "jargon":
         for index, text in enumerate(["今天好累", "摸鱼王上线了", "开会", "下班了"], 1):
@@ -49,7 +51,10 @@ def test_background_capacity_waits_do_not_spend_domain_retries(core, tmp_path, m
                         else "BACKGROUND_YIELD_TO_CHAT", 429)
 
     with monkeypatch.context() as patch:
-        patch.setattr(budget, "reserve" if boundary == "admission" else "_model_scope", full)
+        if boundary == "admission":
+            patch.setattr(budget, "reserve", full)
+        else:
+            patch.setattr(model_scope, "check", full)
         for _ in range(5 if boundary == "admission" else 1):
             assert step(core)
             row = core.store.one(f"SELECT state,attempts FROM {table}")
@@ -106,7 +111,7 @@ def test_background_leaves_a_slot_for_chat(core, tmp_path):
         update={"enabled": True, "daily_micro_usd": 100000})
     job = approved(core, tmp_path)
     # Use the current native policy with its independently granted exploration scope.
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job,))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (job,))
     view = owner_authority.current(core.store, core.settings, core.clock)
     from tests.support.owner_authority import activate
 
@@ -156,11 +161,13 @@ def test_background_yield_proves_zero_dispatch_without_an_unknown_slot_leak(
 
     asyncio.run(scenario())
     assert not provider.calls
-    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state,billed_micro_usd FROM model_usage WHERE request_id=%s',
                            (request_id,)) == {"state": "SETTLED", "billed_micro_usd": 0}
     assert budget.execution_counts(core.store)["total"] == 0
-    assert core.store.one("SELECT 1 FROM audit_log WHERE action='model.not_dispatched' "
-                          "AND entity_id=?", (request_id,))
+    assert core.store.one((
+        "SELECT 1 FROM audit_log WHERE action='model.not_dispatched' AND "
+        'entity_id=%s'
+    ), (request_id,))
 
 
 @pytest.mark.parametrize("transport_unwound", [False, True])
@@ -170,7 +177,7 @@ def test_unknown_retains_money_and_blocks_its_input_without_stopping_unrelated_w
     job = approved(core, tmp_path)
     request_id = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock(),
                                 clock=core.clock, logical_request_id="uncertain-original")
-    before = core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=?",
+    before = core.store.one('SELECT billed_micro_usd FROM model_usage WHERE request_id=%s',
                             (request_id,))
     if transport_unwound:
         async def scenario():
@@ -185,7 +192,7 @@ def test_unknown_retains_money_and_blocks_its_input_without_stopping_unrelated_w
         asyncio.run(scenario())
     else:
         budget.settle(core.store, core.settings, request_id)
-    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state,billed_micro_usd FROM model_usage WHERE request_id=%s',
         (request_id,)) == {"state": "UNKNOWN", **before}
     with core.store.transaction():
         view = paid_budget.journal(core.store, core.settings.paid_model)
@@ -206,7 +213,7 @@ def test_unknown_retains_money_and_blocks_its_input_without_stopping_unrelated_w
 def test_tool_roundtrip_waits_for_capacity_then_reuses_saved_response_and_tool(core, tmp_path,
                                                                             monkeypatch):
     job_id = approved(core, tmp_path)
-    core.store.execute("UPDATE jobs SET state='QUEUED',lease_token=NULL,attempts=0 WHERE job_id=?",
+    core.store.execute("UPDATE jobs SET state='QUEUED',lease_token=NULL,attempts=0 WHERE job_id=%s",
                        (job_id,))
     original = budget.reserve
     refused = []
@@ -233,7 +240,7 @@ def test_tool_roundtrip_waits_for_capacity_then_reuses_saved_response_and_tool(c
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
             core.model = ModelClient(core.settings, client)
             assert await core.run_once("capacity-first", job_id=job_id)
-            row = core.store.one("SELECT state,attempts,last_error_code FROM jobs WHERE job_id=?",
+            row = core.store.one('SELECT state,attempts,last_error_code FROM jobs WHERE job_id=%s',
                                   (job_id,))
             assert row == {"state": "RETRY_WAIT", "attempts": 0,
                            "last_error_code": "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"}
@@ -250,8 +257,10 @@ def test_tool_roundtrip_waits_for_capacity_then_reuses_saved_response_and_tool(c
     assert any(item["role"] == "tool" and item["tool_call_id"] == "capacity-clock"
                for item in calls[-1]["messages"])
     assert len(core.store.rows("SELECT * FROM model_usage WHERE state='SETTLED'")) == 2
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                           (job_id,))["state"] == "SUCCEEDED"
-    assert len(core.store.rows("SELECT * FROM outbox WHERE origin_event_id=("
-                              "SELECT event_id FROM jobs WHERE job_id=?)", (job_id,))) == 1
+    assert len(core.store.rows((
+        'SELECT * FROM outbox WHERE origin_event_id=(SELECT event_id FROM '
+        'jobs WHERE job_id=%s)'
+    ), (job_id,))) == 1
     assert Path(core.settings.paid_model.journal_path).exists()

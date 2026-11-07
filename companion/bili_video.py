@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from companion import (
     budget,
+    job_queue,
     live_text,
     owner_authority,
     owner_input,
@@ -359,11 +360,51 @@ def _model_room(store, settings, job_id, request_id=None):
         raise CoreError(CHAT_HEADROOM, 429)
 
 
+def _input_binding(store, settings, clock, request_id, job_id, scenario, logical_id):
+    binding = model_binding(store, settings, clock, request_id, job_id=job_id,
+                            scenario=scenario, logical_request_id=logical_id)
+    if scenario == "content_video_preview" and binding is None:
+        raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
+    return binding
+
+
+def recheck_input_binding(store, settings, clock, request_id, job_id, scenario, logical_id, saved):
+    if model_binding(store, settings, clock, request_id, job_id=job_id,
+                     scenario=scenario, logical_request_id=logical_id) != saved:
+        raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
+
+
+def reserve_model_input(store, settings, clock, request_id, job_id, scenario, logical_id,
+                        wire, messages, tools, cloud_kind, cloud_id):
+    from companion import paid_budget, video_input
+    from companion.model import model_payload
+
+    binding = _input_binding(store, settings, clock, request_id, job_id, scenario, logical_id)
+    video_input.contract(settings, job_id, logical_id)
+    if binding is not None and (
+        binding["payload_sha256"] != paid_budget.sha(
+            model_payload(wire, messages, scenario, tools=tools))
+        or cloud_kind not in {None, "video"} or cloud_id not in {None, binding["task_id"]}
+    ):
+        raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
+    return binding
+
+
+def validate_model_input(store, settings, clock, request_id, scenario, job_id, logical_id):
+    from companion import image_input, video_input
+
+    binding = _input_binding(store, settings, clock, request_id, job_id, scenario, logical_id)
+    if binding is None:
+        image_input.contract(settings, job_id, logical_id)
+    if scenario in video_input.SCENARIOS:
+        video_input.contract(settings, job_id, logical_id)
+
+
 def model_binding(
     store, settings, clock, request_id, *, job_id=None, scenario=None, logical_request_id=None
 ):
     """Only a durable pending phase authorizes this input's additional media call."""
-    if not store.one(
+    if not request_id or not store.one(
         "SELECT 1 FROM pg_catalog.pg_class WHERE "
         "relnamespace=current_schema()::regnamespace AND relname='bili_video_phases' AND relkind "
         "IN ('r','p')"
@@ -544,8 +585,8 @@ def validate_model(store, settings, clock, request_id):
 
 
 class BiliVideoService:
-    def __init__(self, store, settings, reading, model=None, clock=utcnow):
-        self.store, self.settings, self.reading = store, settings, reading
+    def __init__(self, store, settings, exploration, model=None, clock=utcnow):
+        self.store, self.settings, self.exploration = store, settings, exploration
         self.model, self.clock = model, clock
 
     def schedule(self, item_id, source_event_id, *, job_id=None):
@@ -649,7 +690,7 @@ class BiliVideoService:
             deadline = min(deadlines).isoformat(timespec="microseconds")
             if instant(deadline) <= instant(now):
                 raise CoreError("BILI_VIDEO_DEADLINE_EXPIRED", 409)
-            request = self.reading.exploration.create(
+            request = self.exploration.create(
                 source["adapter_id"],
                 "read",
                 "bili-video:" + item_id,
@@ -900,22 +941,16 @@ class BiliVideoService:
             lease = json.loads(row["lease_json"])
             if not lease or json_sha256(lease) != row["lease_sha256"]:
                 raise CoreError("BILI_VIDEO_LEASE_CHANGED", 403)
-            _current(
-                self.store,
-                self.settings,
-                self.clock,
-                row,
-                current_request,
-                allow_terminal=allow_terminal,
-            )
-            attempt = self.reading._attempt(adapter_id, request_id, body["lease_token"])
+            _current(self.store, self.settings, self.clock, row, current_request,
+                     allow_terminal=allow_terminal)
+            from companion.reading import reading_attempt, validate_attempt
+
+            attempt = reading_attempt(self.store, adapter_id, request_id, body["lease_token"])
             validation = ReaderReadValidation(
                 lease_token=body["lease_token"], source_grant=body.get("source_grant")
             )
-            if current_request is None:
-                self.reading._validate(attempt, validation)
-            else:
-                self.reading._validate(attempt, validation, current_request=current_request)
+            validate_attempt(self.store, self.settings, self.clock, self.exploration,
+                             attempt, validation, current_request=current_request)
         return row
 
     def _duplicate(self, request_id, phase, fingerprint):
@@ -1547,7 +1582,7 @@ class BiliVideoService:
                 processor_id=model,
             ),
         )
-        result = self.reading.exploration.observations.append(
+        result = self.exploration.observations.append(
             row["adapter_id"], event, reading=True
         )
         proof = {
@@ -1813,13 +1848,7 @@ class BiliVideoService:
                 observed_bytes=body["observed_bytes"],
                 observed_requests=body["observed_requests"],
             )
-            s.execute(
-                "UPDATE jobs SET next_attempt_at = %s, updated_at = %s WHERE state = "
-                "'RETRY_WAIT' AND job_id IN (SELECT a.job_id FROM agent_tool_calls AS a JOIN "
-                "agent_conversations AS c USING (job_id) WHERE a.request_id = %s AND a.state = "
-                "'DEFERRED' AND c.phase = 'WAITING')",
-                (self.clock(), self.clock(), request_id),
-            )
+            job_queue.reader_ready(s, request_id, self.clock())
             return {"accepted": True}
 
     def check_result(self, request_id, event_ids):

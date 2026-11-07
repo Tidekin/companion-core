@@ -10,9 +10,9 @@ from pydantic import SecretStr
 from companion.api import create_app
 from companion.store import after
 from tests.conftest import ingest, run
-from tests.test_diary import DAY, generate, seed_day
-from tests.test_exploration import URL, configure
-from tests.test_reading_protocol import envelope
+from tests.support.diary import DAY, generate, seed_day
+from tests.support.exploration import URL, configure
+from tests.support.reading_protocol import envelope
 
 
 def credentials(core):

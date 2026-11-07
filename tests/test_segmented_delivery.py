@@ -24,38 +24,8 @@ from companion.transport import (
     reply_group,
 )
 from tests.conftest import ingest, run
-from tests.test_test_fixtures import historical_database
-
-PARTS = ["今天先把手头的事情做好。", "然后我们再慢慢聊你的计划。", "剩下的事情可以明天继续。"]
-
-
-def freeze(core, parts=PARTS, gap=1500):
-    ingest(core, text="一起聊一聊接下来的计划")
-    job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id)")
-    ids = enqueue_reply_parts(core.store, job, parts, gap, core.clock())
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job["job_id"],))
-    return job, ids
-
-
-def lease(core, worker="segmented-test"):
-    return lease_deliveries(
-        core.store, core.settings, LeaseRequest(worker_id=worker, limit=5), core.clock()
-    )["items"]
-
-
-def acknowledge(core, item, result="SENT"):
-    begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
-    delivery_result(
-        core.store,
-        core.settings,
-        item["message_id"],
-        DeliveryResult(
-            lease_token=item["lease_token"],
-            result=result,
-            provider_message_id="100" if result == "SENT" else None,
-        ),
-        core.clock(),
-    )
+from tests.support.historical_schema import historical_database
+from tests.support.segmented_delivery import PARTS, acknowledge, freeze, lease
 
 
 def test_group_is_atomic_idempotent_and_content_is_not_duplicated(core, monkeypatch):
@@ -148,7 +118,9 @@ def test_two_workers_cannot_lease_later_parts_and_ack_starts_the_gap(core):
     acknowledge(core, third)
     assert lease(core) == []
     assert reply_group(core.store, ids[0], require_sent=True)["text"] == "".join(PARTS)
-    assert [r["attempt_count"] for r in core.store.rows("SELECT * FROM outbox ORDER BY rowid")] == [
+    assert [r["attempt_count"] for r in core.store.rows(
+        'SELECT * FROM outbox ORDER BY record_sequence'
+    )] == [
         1,
         1,
         1,
@@ -171,7 +143,7 @@ def test_partial_failure_cancels_remaining_parts_and_late_ack_cannot_resume(core
             recover_deliveries(core.store, core.clock())
     else:
         acknowledge(core, second, failure)
-    states = [r["state"] for r in core.store.rows("SELECT * FROM outbox ORDER BY rowid")]
+    states = [r["state"] for r in core.store.rows('SELECT * FROM outbox ORDER BY record_sequence')]
     assert states == [
         "SENT",
         "FAILED" if failure == "PERMANENT_FAILURE" else "DELIVERY_UNCERTAIN",
@@ -183,9 +155,42 @@ def test_partial_failure_cancels_remaining_parts_and_late_ack_cannot_resume(core
         reconcile_delivery(core.store, ids[1], "SENT", core.clock())
         assert lease(core) == []
         assert (
-            core.store.one("SELECT state FROM outbox WHERE message_id=?", (ids[2],))["state"]
+            core.store.one('SELECT state FROM outbox WHERE message_id=%s', (ids[2],))["state"]
             == "CANCELLED"
         )
+
+
+def test_uncertain_result_cancels_its_own_suffix_and_recovery_repairs_other_groups(core):
+    job, ids = freeze(core)
+    item, = lease(core)
+    begin_send(core.store, ids[0], item["lease_token"], core.clock(), core.settings)
+    other = ingest(core, 2, origin=f"other:FriendMessage:{core.settings.owner_qq_id}")
+    other_job = core.store.one(
+        'SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) WHERE job_id=%s',
+        (other["job_id"],),
+    )
+    other_ids = enqueue_reply_parts(core.store, other_job, PARTS, 1500, core.clock())
+    # An older group already needs recovery. Reporting this message must only change its group.
+    core.store.execute("UPDATE outbox SET state='FAILED' WHERE message_id=%s", (other_ids[0],))
+    delivery_result(core.store, core.settings, ids[0], DeliveryResult(
+        lease_token=item["lease_token"], result="DELIVERY_UNCERTAIN",
+    ), core.clock())
+
+    def rows(job_id):
+        return core.store.rows((
+            'SELECT state,last_error_code,updated_at FROM outbox WHERE '
+            'reply_group_id=%s ORDER BY segment_index'
+        ), (job_id,))
+
+    original = rows(job["job_id"])
+    assert [row["state"] for row in original] == ["DELIVERY_UNCERTAIN", "CANCELLED", "CANCELLED"]
+    assert [row["state"] for row in rows(other_job["job_id"])] == ["FAILED", "PENDING", "PENDING"]
+    core.clock.advance(1)
+    with core.store.transaction():
+        recover_deliveries(core.store, core.clock())
+    assert rows(job["job_id"]) == original
+    assert [row["state"] for row in rows(other_job["job_id"])] == [
+        "FAILED", "CANCELLED", "CANCELLED"]
 
 
 def test_new_accepted_owner_input_cancels_the_unsent_tail_but_duplicate_does_not(core):
@@ -194,13 +199,15 @@ def test_new_accepted_owner_input_cancels_the_unsent_tail_but_duplicate_does_not
     acknowledge(core, first)
     ingest(core, text="一起聊一聊接下来的计划")
     assert (
-        core.store.one("SELECT state FROM outbox WHERE message_id=?", (ids[1],))["state"]
+        core.store.one('SELECT state FROM outbox WHERE message_id=%s', (ids[1],))["state"]
         == "PENDING"
     )
     ingest(core, 2, "先等一下，我想换个话题")
     core.clock.advance(10)
     assert lease(core) == []
-    assert [r["state"] for r in core.store.rows("SELECT * FROM outbox ORDER BY rowid")] == [
+    assert [r["state"] for r in core.store.rows(
+        'SELECT * FROM outbox ORDER BY record_sequence'
+    )] == [
         "SENT",
         "CANCELLED",
         "CANCELLED",
@@ -217,7 +224,9 @@ def test_late_ack_before_recovery_records_delivery_without_resuming_expired_chai
     ), core.clock())
     core.clock.advance(2)
     assert lease(core) == []
-    assert [row["state"] for row in core.store.rows("SELECT * FROM outbox ORDER BY rowid")] == [
+    assert [row["state"] for row in core.store.rows(
+        'SELECT * FROM outbox ORDER BY record_sequence'
+    )] == [
         "SENT", "CANCELLED", "CANCELLED",
     ]
     assert reply_group(core.store, ids[0], require_sent=True) is None
@@ -227,7 +236,7 @@ def test_late_ack_before_recovery_records_delivery_without_resuming_expired_chai
 def test_corrupt_group_cannot_be_leased_or_sent(core, mutation):
     _, ids = freeze(core)
     if mutation == "missing":
-        core.store.execute("DELETE FROM outbox WHERE message_id=?", (ids[-1],))
+        core.store.execute('DELETE FROM outbox WHERE message_id=%s', (ids[-1],))
     else:
         field, value = {
             "text": ("content_json", json.dumps({"text": "changed"})),
@@ -247,7 +256,7 @@ def test_core_splits_one_model_reply_but_preserves_default_single_reply(core):
     core.settings.segmented_reply = SegmentedReplyConfig(min_chars=4)
     ingest(core, text="".join(PARTS))
     assert run(core.run_once())
-    rows = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
+    rows = core.store.rows('SELECT * FROM outbox ORDER BY record_sequence')
     assert len(rows) == 3 and len(core.model.calls) == 1
     assert "".join(json.loads(row["content_json"])["text"] for row in rows) == "回复：" + "".join(
         PARTS

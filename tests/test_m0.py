@@ -17,19 +17,14 @@ from companion import owner_input
 from companion.api import create_app
 from companion.backup import backup, restore
 from companion.config import Settings
-from companion.contracts import CoreError, DeliveryResult, LeaseRequest
+from companion.contracts import CoreError, DeliveryResult
 from companion.core import Core
 from companion.model import ModelClient
 from companion.store import Store, migrate
-from companion.transport import begin_send, delivery_result, enqueue, lease_deliveries
+from companion.transport import begin_send, delivery_result, enqueue
 from tests.conftest import event, ingest, run
 from tests.support.astrbot_delivery import StreamingAPI, deliver_one
-
-
-def lease(core):
-    return lease_deliveries(
-        core.store, core.settings, LeaseRequest(worker_id="test"), core.clock()
-    )["items"]
+from tests.support.basic_chat import lease
 
 
 def test_m0_01_duplicate_event_and_content_conflict(core):
@@ -116,7 +111,7 @@ def test_m0_03_bridge_normalizes_without_llm_and_sends_once(core, tmp_path):
 
 @pytest.mark.parametrize("failure", [429, 503, "timeout"])
 def test_m0_04_uncertain_provider_usage_blocks_paid_retry(core, failure, tmp_path):
-    from tests.test_owner_input import captured, inbound
+    from tests.support.owner_input import captured, inbound
 
     capture, _ = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
@@ -175,7 +170,7 @@ def test_m0_06_fifo_even_with_two_workers(core):
     other.store.close()
     for _ in range(5):
         run(core.run_once())
-    rows = core.store.rows("SELECT content_json FROM outbox ORDER BY rowid")
+    rows = core.store.rows('SELECT content_json FROM outbox ORDER BY record_sequence')
     assert [json.loads(r["content_json"])["text"] for r in rows] == [
         f"回复：message-{i}" for i in range(5)
     ]
@@ -257,7 +252,7 @@ def test_m0_11_encrypted_backup_restore(core, tmp_path):
 
 def test_m0_12_proactive_quota_does_not_block_chat(core):
     from companion.social import proactive_counts
-    from tests.test_source_definitions import accepted_text
+    from tests.support.source_definitions import accepted_text
 
     core.settings.social_enabled = core.settings.proactive_enabled = True
     core.settings.proactive_daily_limit = 1
@@ -283,13 +278,13 @@ def test_m0_12_proactive_quota_does_not_block_chat(core):
     })
     core.observations.append("reader", observed)
     candidate = core.social.consider(observed.event_id)
-    assert core.store.one("SELECT state FROM social_candidates WHERE candidate_id=?",
+    assert core.store.one('SELECT state FROM social_candidates WHERE candidate_id=%s',
                           (candidate,))["state"] == "CANDIDATE"
     assert proactive_counts(core.store, core.settings, core.clock()) == (1, False)
     assert not core.social.flush()
     accepted = ingest(core, 2, "普通回复继续")
     assert run(core.run_once())
-    assert core.store.one("SELECT COUNT(*) AS n FROM outbox WHERE origin_event_id=?",
+    assert core.store.one('SELECT COUNT(*) AS n FROM outbox WHERE origin_event_id=%s',
                           (accepted["event_id"],))["n"] == 1
     assert proactive_counts(core.store, core.settings, core.clock())[0] == 1
 

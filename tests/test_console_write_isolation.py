@@ -15,16 +15,16 @@ from companion import api_store, console_api
 from companion.store import Store, after
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.support.cognition_goal_steps import retained_plan
+from tests.support.console_reset_isolation import configure, login
+from tests.support.consolidation import enable_nightly
 from tests.support.core_http import real_core_http
-from tests.test_cognition_goal_steps import retained_plan
-from tests.test_console_reset_isolation import configure, login
-from tests.test_consolidation import enable_nightly
-from tests.test_delegation import delegate, submit
-from tests.test_diary import DAY, generate, seed_day
-from tests.test_executive import configured, proposal
-from tests.test_goals import setup_goal
-from tests.test_life_topics import bug
-from tests.test_owner_console import stored_memory
+from tests.support.delegation import delegate, submit
+from tests.support.diary import DAY, generate, seed_day
+from tests.support.executive import configured, proposal
+from tests.support.goals import setup_goal
+from tests.support.life_topics import bug
+from tests.support.owner_console import stored_memory
 
 CASES = ["memory-confirm", "memory-correct", "memory-forget", "diary-correct", "diary-forget",
          "mode-diary", "mode-life", "mode-proactive", "goal-accept", "goal-cancel",
@@ -79,11 +79,11 @@ def operation(core, case):
         path, body = f"autonomy/adjustments/{row['override_id']}/decision", {"decision": "approve"}
     else:
         event = ingest(core, 1, "合成投递")
-        conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+        conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                       (event["event_id"],))["conversation_id"]
         message = enqueue(core.store, event["event_id"], conversation,
                           "合成回复", core.clock(), key="synthetic-reconcile")
-        core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=?",
+        core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=%s",
                            (message,))
         path, body = f"deliveries/{message}/reconcile", {"outcome": "SENT"}
     configure(core)
@@ -101,16 +101,20 @@ def test_native_write_wait_keeps_http_responsive_and_retry_idempotent(
         def __init__(self, path):
             super().__init__(path)
             opened.append((self, threading.get_ident()))
-            entered.set()
+            self.db.set_trace_callback(
+                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
+            )
 
         def close(self):
             closed.append((self, threading.get_ident()))
             super().close()
 
     async def scenario():
-        async with real_core_http(core) as port, httpx.AsyncClient(
-            base_url=f"http://127.0.0.1:{port}", trust_env=False,
-        ) as client:
+        async with (
+            real_core_http(core) as port,
+            httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False) as client,
+            httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe,
+        ):
             headers = await login(client)
             monkeypatch.setattr(api_store, "Store", ObservedStore)
             process = await asyncio.create_subprocess_exec(
@@ -120,10 +124,11 @@ def test_native_write_wait_keeps_http_responsive_and_retry_idempotent(
             task = None
             try:
                 assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
+                assert (await probe.get("/internal/v1/health/live")).status_code == 200
                 task = asyncio.create_task(client.request(method, path, json=body, headers=headers))
                 assert await asyncio.to_thread(entered.wait, 3)
                 started = perf_counter()
-                health = await asyncio.wait_for(client.get("/internal/v1/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 0.75)
                 elapsed = perf_counter() - started
                 record_property("health_during_native_write_wait_ms", round(elapsed * 1000, 3))
                 assert health.status_code == 200 and elapsed < 0.75 and not task.done()

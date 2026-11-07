@@ -8,7 +8,7 @@ from companion import owner_input, paid_budget
 from companion.owner_authority_protocol import OwnerCapture
 from companion.qq_rich import input_digest
 from companion_delivery_protocol.authority import capture_signing_payload
-from tests.test_cumulative_budget import enable, view
+from tests.support.cumulative_budget import enable, view
 
 
 class Crash(BaseException):
@@ -53,7 +53,7 @@ def test_crash_after_cumulative_journal_append_replays_the_same_input_once(
         owner_input.approve(core.store, core.settings, core.clock, item)
     monkeypatch.setattr(type(core.store), "insert", original)
     # The external journal kept the admitted input while SQLite rolled back its receipt.
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                               (owner_input.INPUT + item.event_id,))
     assert inputs(core) == before + 1
 

@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import httpx
 import pytest
@@ -17,7 +17,7 @@ from companion.exploration import ReadResult
 from companion.source_grants import SourceGrantRegistration
 from companion.store import Store
 from companion.transport import begin_send, delivery_result, lease_deliveries
-from source_reader.accounts import BILIBILI_COMMIT, HEYBOX_COMMIT, account_grant
+from source_reader.accounts import account_grant
 from source_reader.bili_tools import TOOLS, BilibiliAccountHTTP, BilibiliToolReader, BilibiliTools
 from source_reader.bilibili import BilibiliReader
 from source_reader.heybox import HeyboxReader
@@ -26,13 +26,11 @@ from source_reader.heybox_source import NativeHeyboxSource
 from source_reader.network import PublicHTTP, ReadBudget, ReadFailure, permitted_url
 from source_reader.worker import read_result, tick
 from tests.conftest import ingest, run
-from tests.test_exploration import configure
-from tests.test_heybox_reader import IMAGE, ITEM, POST, URL, mock_pool
-from tests.test_source_reader import ITEM as BILI_ITEM
-from tests.test_source_reader import META, NOW, PLAYER, SUBTITLE, response
-
-NOW_DT = datetime.fromisoformat(NOW)
-SECRET = "fixture-only-isolated-account-cookie"
+from tests.support.exploration import configure
+from tests.support.heybox_reader import IMAGE, ITEM, POST, URL, mock_pool
+from tests.support.plugin_readonly import NOW_DT, SECRET, grant, native_post
+from tests.support.source_reader import ITEM as BILI_ITEM
+from tests.support.source_reader import META, NOW, PLAYER, SUBTITLE, response
 
 
 def test_native_bili_account_cli_accepts_explicit_grant_and_fails_before_io_if_missing(tmp_path):
@@ -60,56 +58,6 @@ def test_native_bili_account_reader_keeps_popular_discovery(tmp_path):
         assert SECRET.encode() in backend.requests[0]
 
     run(scenario())
-
-
-def grant(tmp_path, source="heybox", now=NOW_DT, **updates):
-    data = {
-        "enabled": True,
-        "expires_at": (now + timedelta(hours=1)).isoformat(),
-        "cookies": {"pkey" if source == "heybox" else "SESSDATA": SECRET},
-        "upstream_commit": HEYBOX_COMMIT if source == "heybox" else BILIBILI_COMMIT,
-    }
-    if source == "heybox":
-        data.update(account_id="123", device_id="a" * 32)
-    data.update(updates)
-    path = tmp_path / (source + ".json")
-    path.write_text(json.dumps(data), encoding="utf-8")
-    path.chmod(0o600)
-    return path
-
-
-def registered_grant(core, tmp_path, source="heybox"):
-    adapter = "bili" if source == "bilibili" else "heybox"
-    grant_id = "grant_" + ("1" if adapter == "heybox" else "2") * 32
-    previous = core.store.one(
-        "SELECT MAX(epoch) n FROM source_grant_revisions WHERE grant_id=?", (grant_id,)
-    )
-    revision = (previous["n"] or 0) + 1
-    authority = {
-        "grant_id": grant_id,
-        "epoch": revision,
-        "fingerprint": hashlib.sha256(f"fixture-{adapter}-{revision}".encode()).hexdigest(),
-    }
-    path = grant(
-        tmp_path, source, now=datetime.fromisoformat(core.clock()), authorization=authority
-    )
-    core.observations.grants.register(
-        SourceGrantRegistration(
-            adapter_id=adapter,
-            expires_at=json.loads(path.read_text("utf-8"))["expires_at"],
-            **authority,
-        )
-    )
-    return path
-
-
-def native_post():
-    post = copy.deepcopy(POST)
-    row = post["result"].pop("link")
-    row["content"] = row.pop("text")
-    row["link_id"] = row.pop("linkid")
-    post["result"]["post"] = row
-    return post
 
 
 async def native_read(path, payload=POST, item=ITEM):

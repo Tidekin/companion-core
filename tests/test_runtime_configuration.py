@@ -4,7 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 from companion import operator_config, owner_authority, paid_budget, runtime_config
 from companion.config import Settings
@@ -14,29 +14,10 @@ from companion.model import ModelResponse
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import Store
 from tests.conftest import ingest
-from tests.test_owner_console import PASSWORD, client, login  # noqa: F401
-from tests.test_owner_input import captured
-
-
-@pytest.fixture
-def hot(core):
-    core.settings.operator_hot_reload = True
-    core.settings.control_token = SecretStr(PASSWORD)
-    core.store.configuration_worker = "worker"
-    return core
-
-
-def save(core, **changes):
-    row = operator_config.latest(core.store)
-    version = row["version"] if row else 0
-    return operator_config.update(core.store, core.settings,
-        operator_config.ConfigurationChange(expected_version=version, changes=changes),
-        f"configuration-{version + 1}", core.clock())
-
-
-def task(core, number=1):
-    accepted = ingest(core, number=number)
-    return core.claim_job("configuration-worker", job_id=accepted["job_id"])
+from tests.support.owner_console import PASSWORD, client, login  # noqa: F401
+from tests.support.owner_input import captured
+from tests.support.runtime_configuration import hot as hot
+from tests.support.runtime_configuration import save, task
 
 
 def labels(messages):
@@ -93,7 +74,7 @@ def test_running_request_and_next_task_use_distinct_fixed_versions(hot):
 
 
 def test_mood_provenance_remains_live_across_configuration_switch(hot):
-    from tests.test_mood import erase, feedback
+    from tests.support.mood import erase, feedback
 
     source = feedback(hot)
     job = task(hot, number=10)
@@ -115,7 +96,7 @@ def test_mood_provenance_remains_live_across_configuration_switch(hot):
 def test_retry_after_restart_retains_original_configuration(hot):
     job = task(hot)
     save(hot, chat_time_labels=True)
-    hot.store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL WHERE job_id=?",
+    hot.store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL WHERE job_id=%s",
                       (job["job_id"],))
     reloaded = operator_config.load(hot.settings)
     assert reloaded._operator_config_version == 1 and reloaded.chat_time_labels
@@ -216,7 +197,7 @@ def test_conflicting_version_payload_cannot_replace_an_effective_snapshot(hot):
     good = runtime_config.boundary(hot.store, hot.settings, hot.clock)
     encrypted = operator_config._cipher(hot.settings).encrypt(
         b'{"chat_time_labels":false}').decode()
-    hot.store.execute("UPDATE operator_configuration SET encrypted_overrides=?", (encrypted,))
+    hot.store.execute('UPDATE operator_configuration SET encrypted_overrides=%s', (encrypted,))
     assert runtime_config.boundary(hot.store, hot.settings, hot.clock) == good
     assert operator_config.view(hot.store, hot.settings)["error"] == (
         "CONFIGURATION_VERSION_CONFLICT")

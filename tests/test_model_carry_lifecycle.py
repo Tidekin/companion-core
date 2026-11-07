@@ -4,19 +4,16 @@ import copy
 import hashlib
 import json
 
-import httpx
 import pytest
 
-from companion import budget, model_carry, owner_authority, owner_input, owner_input_state
+from companion import model_carry, owner_authority, owner_input, owner_input_state
 from companion.contracts import CoreError
-from companion.model import ModelClient
 from companion.owner_authority_protocol import AuthorityStop, OwnerCapture
 from companion_delivery_protocol import digest
 from companion_delivery_protocol import model_carry as wire
 from companion_delivery_protocol.authority import capture_signing_payload
-from tests.conftest import run
-from tests.model_carry_support import MESSAGES, migrated
-from tests.owner_model_fixtures import authorized_job
+from tests.model_carry_support import migrated
+from tests.support.model_carry_lifecycle import current_unknown, stop_current
 from tests.support.owner_authority import activate
 
 
@@ -86,12 +83,12 @@ def test_authority_chain_rechecks_current_rows_and_redaction(core, tmp_path, cha
     if change == "missing":
         core.store.execute("DELETE FROM owner_authority_revisions WHERE revision=4")
     elif change == "record":
-        core.store.execute("UPDATE owner_authority_revisions SET record_sha256=? WHERE revision=4",
+        core.store.execute('UPDATE owner_authority_revisions SET record_sha256=%s WHERE revision=4',
                            ("0" * 64,))
     elif change == "policy":
         value = json.loads(revisions[1]["policy_json"])
         value["unknown_carry_sha256"] = "0" * 64
-        core.store.execute("UPDATE owner_authority_revisions SET policy_json=? WHERE revision=4",
+        core.store.execute('UPDATE owner_authority_revisions SET policy_json=%s WHERE revision=4',
                            (json.dumps(value),))
     else:
         core.store.execute("UPDATE owner_authority_revisions SET policy_redacted=1 "
@@ -105,39 +102,6 @@ def test_authority_chain_rechecks_current_rows_and_redaction(core, tmp_path, cha
         else:
             with pytest.raises(ValueError):
                 model_carry.authority_chain(core.store, saved, revisions)
-
-
-def current_unknown(core, *, number=2):
-    job = authorized_job(core, number=number)
-    request_id = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
-
-    def provider(request):
-        raise httpx.ReadTimeout("native transport returned", request=request)
-
-    async def complete():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
-            with pytest.raises(CoreError, match="MODEL_RETRYABLE"):
-                await budget.complete(
-                    ModelClient(core.settings, client),
-                    core.store,
-                    core.settings,
-                    request_id,
-                    MESSAGES,
-                    "chat",
-                    core.clock,
-                )
-
-    run(complete())
-    return request_id
-
-
-def stop_current(core, case):
-    return owner_authority.stop(
-        core.store,
-        core.settings,
-        core.clock,
-        AuthorityStop(operation_id="second-normal-stop", authority=case.successor["authority"]),
-    )
 
 
 def local_receipt(core, case):
@@ -164,7 +128,7 @@ def test_current_unknown_uses_true_local_close_and_same_approval(core, tmp_path)
     assert proof["carry_sha256"] == case.receipt["carry_sha256"]
     capture = json.loads(
         core.store.one(
-            "SELECT value FROM runtime_meta WHERE key=?",
+            'SELECT value FROM runtime_meta WHERE key=%s',
             ("owner_input:" + proof["inputs"][0]["event_id"],),
         )["value"]
     )["capture"]
@@ -202,8 +166,12 @@ def test_current_proof_stays_stable_with_approved_unadmitted_input(core, tmp_pat
     current_unknown(core)
     saved = json.loads(
         core.store.one(
-            "SELECT value FROM runtime_meta WHERE key LIKE 'owner_input:%' "
-            "AND json_extract(value,'$.capture.authority.revision')=3"
+
+                'SELECT value FROM runtime_meta WHERE key LIKE '
+                "'owner_input:%%' AND (CASE WHEN value IS JSON THEN "
+                "value::jsonb #> '{capture,authority,revision}' "
+                "END)='3'::jsonb"
+
         )["value"]
     )["capture"]
     value = {key: item for key, item in saved.items() if key != "signature"}

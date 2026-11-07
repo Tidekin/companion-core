@@ -5,56 +5,24 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from companion import account_actions, notices, owner_authority, paid_budget, social_plan_jobs
+from companion import account_actions, notices, owner_authority, social_plan_jobs
 from companion.affect import AffectEngine
 from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
 from companion.life_protocol import LifeShadowApproval
-from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy, OwnerRuntimeConfig
+from companion.owner_authority_protocol import OwnerRuntimeConfig
 from companion.store import after, uid
 from tests.conftest import ingest, run
-from tests.social_model_transport import NativeTestModel
+from tests.support.life_topics import bug, due, proposal
 from tests.support.owner_authority import activate
-from tests.test_life_topics import bug, due, proposal
-from tests.test_paid_model_gate import approved_live
-from tests.test_social_autonomy import background, planned, queue
-
-
-@pytest.fixture(autouse=True)
-def close_provider_clients(core):
-    core.authority_test_clients = []
-    yield
-    for client in core.authority_test_clients:
-        run(client.aclose())
-
-
-def authorize(core, tmp_path, *, life=None, account=True, module=None, additional_purposes=()):
-    approved_live(core, tmp_path, max_output_tokens=4096, per_attempt_micro_usd=100000,
-                  per_request_micro_usd=200000)
-    core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
-    purposes = (["life"] if life else ["social"]) + list(additional_purposes)
-    capability = {}
-    if account and not life:
-        purposes.append("account_actions")
-    if "account_actions" in purposes:
-        capability["account_actions"] = core.settings.social_autonomy.authorization_sha256
-    if "qzone_publication" in purposes:
-        capability["qzone_publication"] = owner_authority.capability_hashes(core.settings)[
-            "qzone_publication"]
-    policy = OwnerGrantPolicy(
-        owner_qq_id=core.settings.owner_qq_id, purposes=purposes,
-        authorization_sha256="d" * 64,
-        paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
-        capability_policies=capability, life_shadow=life,
-        memory_scope="owner_private" if "memory" in purposes else "none",
-    )
-    result, _ = activate(core, policy)
-    target = module if module is not None else core
-    if (life is not None or module is not None) and not isinstance(target.model, NativeTestModel):
-        target.model = NativeTestModel(core.settings, target.model,
-                                       "social_autonomy" if module else "activity")
-        core.authority_test_clients.append(target.model.client)
-    return policy, result["authority"]
+from tests.support.social_autonomy import background, planned, queue
+from tests.support.social_owner_authority import (
+    authorize,
+    stop,
+)
+from tests.support.social_owner_authority import (
+    close_provider_clients as close_provider_clients,
+)
 
 
 def life_authorized(core, tmp_path):
@@ -68,23 +36,17 @@ def life_authorized(core, tmp_path):
     return authorize(core, tmp_path, life=scope)
 
 
-def stop(core, ref):
-    return owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
-        operation_id="stop-native-social", authority=ref,
-    ))
-
-
 def test_life_job_pins_original_owner_revision_and_never_rebinds(core, tmp_path):
     policy, ref = life_authorized(core, tmp_path)
     job_id = due(core)
     assert job_id
-    saved = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+    saved = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job_id,))
     assert json.loads(saved["authority_json"]) == ref
     stop(core, ref)
     activate(core, policy, revision=2, operation="replace-life-policy")
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_REVISION_CHANGED"):
         notices.validate(core.store, core.settings, saved, core.clock())
-    assert core.store.one("SELECT authority_json FROM jobs WHERE job_id=?", (job_id,)) == {
+    assert core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s', (job_id,)) == {
         "authority_json": saved["authority_json"],
     }
     assert core.model.calls == []
@@ -168,7 +130,7 @@ def test_social_native_retry_keeps_authority_and_is_cancelled_after_revision(cor
     stop(core, ref)
     activate(core, policy, revision=2, operation="revision-before-social-retry")
     assert social_plan_jobs.claim(module, "retry-worker") is None
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],)) == {
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],)) == {
         "state": "CANCELLED",
     }
     assert module.model.calls == []
@@ -181,7 +143,7 @@ def test_native_outbox_pins_authority_and_stop_preserves_no_io_receipt(core, tmp
     token = uid("lease")
     # Native hook test. Shared transport/API migration has its own integration receipt.
     with core.store.transaction():
-        core.store.execute("UPDATE outbox SET state='LEASED',lease_token=?,lease_until=?",
+        core.store.execute("UPDATE outbox SET state='LEASED',lease_token=%s,lease_until=%s",
                            (token, after(core.clock(), 60)))
         view = account_actions.scope(core.store, core.settings, core.clock, ref,
                                      frozen.authorization_sha256, message_id=frozen.message_id)
@@ -249,7 +211,7 @@ def test_social_and_life_do_not_read_feedback_without_affect_purpose(
 ):
     from companion.life_topics import _paused
     from companion.social import proactive_allowed
-    from tests.test_social_autonomy import service
+    from tests.support.social_autonomy import service
 
     core.settings.affect_enabled = core.settings.proactive_enabled = True
     core.settings.quiet_start = core.settings.quiet_end = 0

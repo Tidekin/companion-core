@@ -15,12 +15,12 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.conftest import run
+from tests.support.native_image_bursts import model_images
+from tests.support.native_image_pipeline import pixels
+from tests.support.native_media_queue import captured, row
 from tests.support.onebot import provider
-from tests.test_native_image_bursts import model_images
-from tests.test_native_image_pipeline import pixels
-from tests.test_native_media_queue import captured, row
-from tests.test_owner_image_recovery import run_worker
-from tests.test_prepare_owner_input import native_spool, window
+from tests.support.owner_image_recovery import run_worker
+from tests.support.prepare_owner_input import native_spool, window
 
 
 def test_image_two_point_six_second_core_roundtrips_reach_sdk_and_ack(core, tmp_path):

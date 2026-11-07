@@ -22,7 +22,7 @@ def test_image_receipt_reaches_independent_extractor_and_final_request(core, tmp
         async with native_image_memory(core, tmp_path, record_visible=True,
                                        core_options=options) as value:
             assert await value.worker.run_once("record-native-image", job_id=value.job["job_id"])
-            job = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+            job = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                  (value.job["job_id"],))
             assert job["state"] == "SUCCEEDED", job
             observed = core.store.one("SELECT * FROM observations "
@@ -30,7 +30,7 @@ def test_image_receipt_reaches_independent_extractor_and_final_request(core, tmp
             assert observed and observed["result_status"] == "FETCHED", encode(value.calls[-1])
             assert all(row["state"] == "SETTLED" for row in core.store.rows(
                 "SELECT state FROM model_usage"))
-            core.store.execute("UPDATE events SET memory_processed=1 WHERE event_id<>?",
+            core.store.execute('UPDATE events SET memory_processed=1 WHERE event_id<>%s',
                                (value.job["event_id"],))
             config = core.settings.model_dump(mode="json")
             for key in ("model_key", "bridge_token", "control_token"):
@@ -60,7 +60,7 @@ def test_image_receipt_reaches_independent_extractor_and_final_request(core, tmp
             # Fresh question, so its original model request has no current images.
             event = await value.entry.admit(2, "青栎资料卡上是什么日期和座位？")
             assert await value.worker.run_once("recall-image-reference", job_id=core.store.one(
-                "SELECT job_id FROM jobs WHERE event_id=?", (event["event_id"],))["job_id"])
+                'SELECT job_id FROM jobs WHERE event_id=%s', (event["event_id"],))["job_id"])
             assert "十二月九日" in encode(value.calls[-1]["messages"])
             assert "event_observed" in encode(value.calls[-1]["messages"])
             assert not value.sends

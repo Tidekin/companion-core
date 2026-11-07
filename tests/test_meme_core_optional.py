@@ -13,7 +13,7 @@ from companion.privacy import advance_epoch
 from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
-from tests.test_meme_core_runtime import runtime_case as runtime_case
+from tests.support.meme_core_runtime import runtime_case as runtime_case
 
 
 @pytest.mark.parametrize(
@@ -33,7 +33,7 @@ def test_current_native_chat_without_optional_capability_stays_text(runtime_case
     monkeypatch.setattr(MemeRetrieval, "_resolve", forbidden)
     # Release only the test setup's unused native lease; no model/transport started.
     c.core.store.execute(
-        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=?", (c.job["job_id"],)
+        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=%s", (c.job["job_id"],)
     )
 
     async def scenario():
@@ -45,9 +45,9 @@ def test_current_native_chat_without_optional_capability_stays_text(runtime_case
         row = c.core.store.one("SELECT * FROM outbox")
         assert row and json.loads(row["content_json"]) == {"text": "在这里陪着你。"}
         assert not c.core.store.one(
-            "SELECT 1 FROM runtime_meta WHERE key=?", ("meme_offer:" + c.job["event_id"],)
+            'SELECT 1 FROM runtime_meta WHERE key=%s', ("meme_offer:" + c.job["event_id"],)
         )
-        usage = c.core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+        usage = c.core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
         assert len(usage) == len(before) + 1 and usage[0] == before[0]
         assert c.core.store.rows("SELECT * FROM meme_captions") == captions
         assert c.core.store.rows("SELECT * FROM meme_assets") == assets

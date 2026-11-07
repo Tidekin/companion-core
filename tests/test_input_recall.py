@@ -8,9 +8,8 @@ from cryptography.fernet import Fernet
 import companion.affect as affect
 from companion import budget
 from companion.backup import backup, restore
-from companion.contracts import Candidate, CoreError, InboundEvent
+from companion.contracts import Candidate, CoreError
 from companion.input_recall import (
-    canonical_source,
     is_recalled,
     marker_key,
     recall_input,
@@ -20,28 +19,8 @@ from companion.memory import Memory
 from companion.privacy import epoch
 from companion.store import Store, after, encode
 from companion.transport import enqueue
-from tests.support.onebot_events import config, normalized, raw_event
-
-
-def source(number=42, **changes):
-    return canonical_source(
-        **{
-            "owner_qq_id": "10001",
-            "bot_qq_id": "10002",
-            "protocol_epoch": config().protocol_epoch,
-            "provider_message_id": str(number),
-            **changes,
-        }
-    )
-
-
-def incoming(core, number=42, text="我喜欢绿茶", *, event_id=None):
-    value = normalized(raw_event(number, text))
-    if event_id is not None:
-        value["event_id"] = event_id
-    event = InboundEvent.model_validate(value)
-    core.ingest(event, event.event_id)
-    return event.event_id
+from tests.support.input_recall import incoming, recall, source
+from tests.support.onebot_events import normalized
 
 
 def remember(core, event_id, text="我喜欢绿茶"):
@@ -59,19 +38,6 @@ def remember(core, event_id, text="我喜欢绿茶"):
             core.clock(),
             confirmed=True,
         )
-
-
-def recall(core, number=42, *, verified=True):
-    return recall_input(
-        core.store,
-        core.ledger,
-        source(number),
-        core.clock(),
-        retention_cutoff=after(core.clock(), -86400 * 30),
-        verified=verified,
-        occurred_at=core.clock(),
-        event_id=normalized(raw_event(number))["event_id"] if verified else None,
-    )
 
 
 def test_before_input_marker_is_idempotent_scoped_and_replayed_from_pre_notice_backup(
@@ -143,7 +109,9 @@ def test_unknown_recall_never_erases_unrelated_event_with_the_expected_event_has
     canonical_id = normalized()["event_id"]
     other = incoming(core, 43, event_id=canonical_id)
     assert recall(core, verified=False)["event_ids"] == []
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (other,))["redacted"] == 0
+    assert core.store.one((
+        'SELECT redacted FROM events WHERE event_id=%s'
+    ), (other,))["redacted"] == 0
 
 
 def test_pending_notice_does_not_assume_existing_private_message_direction(core):
@@ -152,7 +120,9 @@ def test_pending_notice_does_not_assume_existing_private_message_direction(core)
     result = recall(core, verified=False)
     assert result["state"] == "PENDING_TARGET" and not result["event_ids"]
     assert (
-        core.store.one("SELECT redacted FROM events WHERE event_id=?", (event_id,))["redacted"] == 0
+        core.store.one((
+            'SELECT redacted FROM events WHERE event_id=%s'
+        ), (event_id,))["redacted"] == 0
     )
     assert epoch(core.store) == previous
 
@@ -162,12 +132,12 @@ def test_confirmed_recall_requires_hash_bound_input_and_matching_source(core):
     result = recall(core)
     assert result["event_ids"] == [event_id]
     assert core.store.one(
-        "SELECT body_json,redacted FROM events WHERE event_id=?", (event_id,)
+        'SELECT body_json,redacted FROM events WHERE event_id=%s', (event_id,)
     ) == {
         "body_json": "{}",
         "redacted": 1,
     }
-    assert core.store.one("SELECT state,lease_token FROM jobs WHERE event_id=?", (event_id,)) == {
+    assert core.store.one('SELECT state,lease_token FROM jobs WHERE event_id=%s', (event_id,)) == {
         "state": "CANCELLED",
         "lease_token": None,
     }
@@ -183,7 +153,9 @@ def test_source_only_or_wrong_event_id_cannot_confirm_recall(core):
             core.store, core.ledger, source(), core.clock(), verified=True, event_id=event_id
         )
     assert (
-        core.store.one("SELECT redacted FROM events WHERE event_id=?", (event_id,))["redacted"] == 0
+        core.store.one((
+            'SELECT redacted FROM events WHERE event_id=%s'
+        ), (event_id,))["redacted"] == 0
     )
 
 
@@ -254,21 +226,21 @@ def test_nonindependent_or_ineligible_evidence_does_not_keep_recalled_fact(core,
     memory_id = remember(core, first)
     assert remember(core, second) == memory_id
     if invalid == "negative":
-        core.store.execute("UPDATE memory_evidence SET polarity=-1 WHERE event_id=?", (second,))
+        core.store.execute('UPDATE memory_evidence SET polarity=-1 WHERE event_id=%s', (second,))
     elif invalid == "derived":
         core.store.insert("event_dependencies", event_id=second, source_event_id=first)
     elif invalid == "expired":
         core.store.execute(
-            "UPDATE events SET ingested_at=? WHERE event_id=?",
+            'UPDATE events SET ingested_at=%s WHERE event_id=%s',
             (after(core.clock(), -86400 * 31), second),
         )
     else:
         core.store.execute(
-            "INSERT INTO runtime_meta VALUES (?,?)", ("erased_event:" + second, "old")
+            'INSERT INTO runtime_meta VALUES (%s,%s)', ("erased_event:" + second, "old")
         )
     recall(core)
     assert core.store.one(
-        "SELECT content,status FROM memories WHERE memory_id=?", (memory_id,)
+        'SELECT content,status FROM memories WHERE memory_id=%s', (memory_id,)
     ) == {
         "content": "",
         "status": "FORGOTTEN",
@@ -287,17 +259,19 @@ def test_recall_correction_erases_its_derived_copy_without_forgetting_original_f
     if legacy:
         core.store.execute("DELETE FROM event_dependencies")
     recall(core, 43)
-    assert core.store.one("SELECT content,status FROM memories WHERE memory_id=?", (revised,)) == {
+    assert core.store.one('SELECT content,status FROM memories WHERE memory_id=%s', (revised,)) == {
         "content": "",
         "status": "FORGOTTEN",
     }
     assert core.store.one(
-        "SELECT content,status FROM memories WHERE memory_id=?", (memory_id,)
+        'SELECT content,status FROM memories WHERE memory_id=%s', (memory_id,)
     ) == {
         "content": "我喜欢绿茶",
         "status": "SUPERSEDED",
     }
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (first,))["redacted"] == 0
+    assert core.store.one((
+        'SELECT redacted FROM events WHERE event_id=%s'
+    ), (first,))["redacted"] == 0
     assert not core.store.rows("SELECT * FROM events WHERE source='owner.decision' AND redacted=0")
 
 
@@ -309,7 +283,7 @@ def test_recall_keeps_independent_correction_and_explicit_forget_remains_strict(
         memory_id, "correct", core.clock(), "我喜欢红茶", evidence_event_id=correction
     )["memory_id"]
     recall(core)
-    assert core.store.one("SELECT content,status FROM memories WHERE memory_id=?", (revised,)) == {
+    assert core.store.one('SELECT content,status FROM memories WHERE memory_id=%s', (revised,)) == {
         "content": "我喜欢红茶",
         "status": "CONFIRMED",
     }
@@ -344,20 +318,23 @@ def test_fsynced_recall_retries_same_record_after_cleanup_rollback(core, monkeyp
 def test_complete_marker_repair_retains_new_unrelated_reply_and_accounting(core):
     first = incoming(core)
     old_conversation = core.store.one(
-        "SELECT conversation_id FROM events WHERE event_id=?", (first,)
+        'SELECT conversation_id FROM events WHERE event_id=%s', (first,)
     )["conversation_id"]
     old_reply = enqueue(core.store, first, old_conversation, "旧回复", core.clock())
     core.store.execute(
-        "UPDATE outbox SET state='SENDING',lease_token='send-proof',"
-        "attempt_count=1 WHERE message_id=?",
+        (
+            'UPDATE outbox SET '
+            "state='SENDING',lease_token='send-proof',attempt_count=1 WHERE "
+            'message_id=%s'
+        ),
         (old_reply,),
     )
     usage = budget.reserve(core.store, core.settings, None, "chat", [], core.clock())
     budget.settle(core.store, core.settings, usage)
-    usage_before = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (usage,))
+    usage_before = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (usage,))
     recall(core)
     old = core.store.one(
-        "SELECT state,lease_token,attempt_count,content_json FROM outbox WHERE message_id=?",
+        'SELECT state,lease_token,attempt_count,content_json FROM outbox WHERE message_id=%s',
         (old_reply,),
     )
     assert old == {
@@ -366,20 +343,20 @@ def test_complete_marker_repair_retains_new_unrelated_reply_and_accounting(core)
         "attempt_count": 1,
         "content_json": "{}",
     }
-    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?", (usage,)) == usage_before
+    assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (usage,)) == usage_before
     second = incoming(core, 43, "独立新问题")
     reply = enqueue(core.store, second, old_conversation, "独立新回复", core.clock())
-    expected = core.store.one("SELECT * FROM outbox WHERE message_id=?", (reply,))
+    expected = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (reply,))
     core.store.execute(
-        "DELETE FROM runtime_meta WHERE key=?", (marker_key(source()["source_event_id"]),)
+        'DELETE FROM runtime_meta WHERE key=%s', (marker_key(source()["source_event_id"]),)
     )
     core.ledger.replay(core.store)
     assert is_recalled(core.store, source()["source_event_id"])
-    assert core.store.one("SELECT * FROM outbox WHERE message_id=?", (reply,)) == expected
-    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?", (usage,)) == usage_before
+    assert core.store.one('SELECT * FROM outbox WHERE message_id=%s', (reply,)) == expected
+    assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (usage,)) == usage_before
     core.store.execute("DELETE FROM runtime_meta WHERE key='derived_erasure_contract'")
     core.ledger.replay(core.store)
-    assert core.store.one("SELECT * FROM outbox WHERE message_id=?", (reply,)) == expected
+    assert core.store.one('SELECT * FROM outbox WHERE message_id=%s', (reply,)) == expected
 
 
 def test_tracked_reply_sources_are_invalidated_without_erasing_independent_owner_input(core):
@@ -392,31 +369,36 @@ def test_tracked_reply_sources_are_invalidated_without_erasing_independent_owner
         (fourth, second), (fourth, fourth),
     ):
         core.store.execute(
-            "INSERT OR IGNORE INTO job_sources VALUES (?,?)", (jobs[origin], dependency)
+            (
+                'INSERT INTO job_sources (job_id,event_id) VALUES (%s,%s) ON '
+                'CONFLICT DO NOTHING'
+            ), (jobs[origin], dependency)
         )
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?", (first,))[
+    conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s', (first,))[
         "conversation_id"
     ]
     dependent = enqueue(core.store, second, conversation, "引用了第一条输入", core.clock())
     independent = enqueue(core.store, third, conversation, "仅基于第三条输入", core.clock())
     transitive = enqueue(core.store, fourth, conversation, "引用了第二条回复", core.clock())
-    expected = core.store.one("SELECT * FROM outbox WHERE message_id=?", (independent,))
+    expected = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (independent,))
     recall(core)
     assert core.store.one(
-        "SELECT content_json,state FROM outbox WHERE message_id=?", (dependent,)
+        'SELECT content_json,state FROM outbox WHERE message_id=%s', (dependent,)
     ) == {
         "content_json": "{}",
         "state": "CANCELLED",
     }
-    assert core.store.one("SELECT * FROM outbox WHERE message_id=?", (independent,)) == expected
-    assert core.store.one("SELECT content_json FROM outbox WHERE message_id=?", (transitive,)) == {
+    assert core.store.one('SELECT * FROM outbox WHERE message_id=%s', (independent,)) == expected
+    assert core.store.one('SELECT content_json FROM outbox WHERE message_id=%s', (transitive,)) == {
         "content_json": "{}",
     }
     assert (
-        core.store.one("SELECT redacted FROM events WHERE event_id=?", (second,))["redacted"] == 0
+        core.store.one('SELECT redacted FROM events WHERE event_id=%s', (second,))["redacted"] == 0
     )
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (third,))["redacted"] == 0
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (fourth,)) == {
+    assert core.store.one((
+        'SELECT redacted FROM events WHERE event_id=%s'
+    ), (third,))["redacted"] == 0
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (fourth,)) == {
         "redacted": 0,
     }
 

@@ -4,36 +4,23 @@ import json
 import os
 import subprocess
 import sys
-from contextlib import asynccontextmanager
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
-from companion import cumulative
 from companion.trial_limits import TrialLimits
 from companion_onebot_bridge.window import WindowPlan
 from scripts.trial_limits import load_limits
 from tests.conftest import run
+from tests.support.cumulative_budget import view
 from tests.support.failure_notice import assert_failure_notice
-from tests.test_cumulative_budget import policy as quota_policy
-from tests.test_cumulative_budget import view
-from tests.test_live_continuity import native_continuity
-from tests.test_live_text_window import live_fixture
-from tests.test_onebot_window import plan_fixture
-from tests.test_paid_model_gate import approved_live
+from tests.support.live_text_window import live_fixture
+from tests.support.onebot_window import plan_fixture
+from tests.support.trial_limits import limits, native_trial
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def limits(**changes):
-    return TrialLimits.model_validate({
-        "max_inputs": 16, "max_model_attempts": 21, "max_send_attempts": 20,
-        "max_visible_replies": 18, **changes,
-    })
 
 
 def configured(core, tmp_path, value, *, paid_options=None):
@@ -42,39 +29,6 @@ def configured(core, tmp_path, value, *, paid_options=None):
                         paid_options={**projected["paid_model"], **(paid_options or {})},
                         **projected["live_text_window"])
 
-
-
-def native_quota(core, tmp_path, *, account=None, window=None, paid=None):
-    # Real existing cumulative policy/journal; there is no fixture-side counter.
-    values = {"max_output_tokens": 4096, "per_attempt_micro_usd": 100000,
-        "per_request_micro_usd": 200000, "daily_calls": 100, "window_calls": 100, **(paid or {})}
-    approved_live(core, tmp_path, **values)
-    scope = quota_policy(core, **({"account": account} if account is not None else {}),
-                         **({"window": window} if window is not None else {}))
-    with core.store.transaction():
-        cumulative.activate(core.store, core.settings, core.clock())
-    return {**values, "cumulative": scope}
-
-
-@asynccontextmanager
-async def native_trial(core, tmp_path, value, *, paid=None, texts=None, respond=None, turns=0):
-    # TrialLimits' two numeric delivery ceilings become the single approved send dimension.
-    # Native authority has independent input, model and actual-send accounting.
-    paid_options = native_quota(core, tmp_path, paid=paid, account={
-        "owner_inputs": value.max_inputs, "model_attempts": value.max_model_attempts,
-        "send_attempts": min(value.max_send_attempts, value.max_visible_replies)})
-    async with native_continuity(core, tmp_path, turns=turns,
-        texts=texts or [f"第{n}个合成输入" for n in range(1, value.max_inputs + 2)],
-        respond=respond, paid_options=paid_options,
-        grant_options={"max_input_chars": value.max_input_chars,
-                       "max_reply_chars": value.max_reply_chars},
-    ) as result:
-        # Signed receipts and cumulative accounting share this quota fixture clock.
-        receipt_clock = SimpleNamespace(now=lambda _: core.clock.now)
-        with patch("companion_onebot_bridge.app.datetime", receipt_clock), patch(
-            "tests.native_continuous_support.datetime", receipt_clock,
-        ):
-            yield result
 
 
 def test_profile_projects_independent_limits_without_creating_authority(tmp_path):

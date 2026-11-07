@@ -107,7 +107,7 @@ def test_unknown_reservation_is_retained_and_blocks_next_model_attempt(core, fai
             core.store, core.settings, job["job_id"], "chat", core.context(job), core.clock()
         )
         initial = core.store.one(
-            "SELECT billed_micro_usd FROM model_usage WHERE request_id=?", (request_id,)
+            'SELECT billed_micro_usd FROM model_usage WHERE request_id=%s', (request_id,)
         )["billed_micro_usd"]
         core.clock.advance(core.settings.lease_seconds + 1)
         expected_calls = 0
@@ -136,7 +136,7 @@ def test_unknown_reservation_is_retained_and_blocks_next_model_attempt(core, fai
 def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(
     core, missing_usage, tmp_path
 ):
-    from tests.test_paid_model_gate import approved_live
+    from tests.support.paid_model import approved_live
 
     approved_live(core, tmp_path, provider="deepseek", model=core.settings.model_name)
     requests = []
@@ -203,7 +203,7 @@ def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(
     ],
 )
 def test_model_adapter_errors_do_not_retry_or_expose_provider_body(core, response, code, tmp_path):
-    from tests.test_paid_model_gate import approved_live
+    from tests.support.paid_model import approved_live
 
     approved_live(core, tmp_path, endpoint="https://synthetic.invalid")
     calls = []

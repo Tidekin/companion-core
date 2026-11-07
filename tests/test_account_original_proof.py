@@ -10,8 +10,8 @@ from companion import owner_authority
 from companion.account_original_proof import validate_original_account_send_check
 from companion.api import create_app
 from companion.social_autonomy import erase_social_autonomy
-from tests.test_account_owner_transport import prepared
-from tests.test_social_owner_authority import (
+from tests.support.account_owner_transport import prepared
+from tests.support.social_owner_authority import (
     close_provider_clients,  # noqa: F401 - shared native planner fixture
     stop,
 )
@@ -32,8 +32,8 @@ def records(core, tmp_path):
         assert response.json()["items"][0]["message_id"] == frozen.message_id
     finally:
         client.close()
-    row = core.store.one("SELECT * FROM outbox WHERE message_id=?", (frozen.message_id,))
-    receipt = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    row = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (frozen.message_id,))
+    receipt = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
         ("account_action_delivery:" + frozen.message_id,))["value"])
     check = {key: receipt[key] for key in (
         "authority", "message_id", "lease_token", "content_sha256", "payload_sha256")}
@@ -46,9 +46,9 @@ def records(core, tmp_path):
     stop(core, authority)
     policy = owner_authority.evidence(core.store, core.settings, authority).policy
     return dict(proof=proof, outbox=row, receipt=receipt,
-        plan=core.store.one("SELECT * FROM social_autonomy_plans WHERE plan_id=?",
+        plan=core.store.one('SELECT * FROM social_autonomy_plans WHERE plan_id=%s',
                             (frozen.plan_id,)),
-        reservation=core.store.one("SELECT * FROM social_autonomy_reservations WHERE message_id=?",
+        reservation=core.store.one('SELECT * FROM social_autonomy_reservations WHERE message_id=%s',
                                     (frozen.message_id,)),
         original_authority=authority, original_policy=policy), check
 
@@ -84,13 +84,13 @@ def test_original_account_check_rejects_changed_binding(core, tmp_path, change):
 def test_original_account_check_uses_retained_hashes_after_source_erasure(core, tmp_path):
     values, expected = records(core, tmp_path)
     sources = [row["event_id"] for row in core.store.rows(
-        "SELECT event_id FROM social_autonomy_sources WHERE plan_id=?",
+        'SELECT event_id FROM social_autonomy_sources WHERE plan_id=%s',
         (values["plan"]["plan_id"],))]
     with core.store.transaction():
         erase_social_autonomy(core.store, sources)
-    values["outbox"] = core.store.one("SELECT * FROM outbox WHERE message_id=?",
+    values["outbox"] = core.store.one('SELECT * FROM outbox WHERE message_id=%s',
                                        (expected["message_id"],))
-    values["plan"] = core.store.one("SELECT * FROM social_autonomy_plans WHERE plan_id=?",
+    values["plan"] = core.store.one('SELECT * FROM social_autonomy_plans WHERE plan_id=%s',
                                      (values["plan"]["plan_id"],))
     assert values["plan"]["redacted"] == 1
     before = "\n".join(core.store.db.iterdump())

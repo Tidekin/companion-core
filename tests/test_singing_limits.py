@@ -8,9 +8,9 @@ from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import VoiceLeaseRef
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
-from tests.test_reading_followup import admit
-from tests.test_singing_integration import queue_song, singing_window
-from tests.test_voice_jobs import claim, control
+from tests.support.reading_followup import admit
+from tests.support.singing_integration import queue_song, singing_window
+from tests.support.voice_jobs import claim, control
 
 
 def test_model_bilibili_song_query_uses_original_reader_queue(core, tmp_path, monkeypatch):
@@ -53,7 +53,7 @@ def test_source_reservation_release_and_unknown_liability(core, tmp_path, monkey
             assert core.exploration.budget_available() is (not started)
             with core.store.transaction(), pytest.raises(CoreError,
                 match="SINGING_ORIGINAL_ATTEMPT_EXISTS"):
-                original = core.store.one("SELECT * FROM jobs WHERE job_id=?",
+                original = core.store.one('SELECT * FROM jobs WHERE job_id=%s',
                                            (admitted["job_id"],))
                 jobs.create_sing(original, job["event_id"], 1, "another-tool-call")
             assert len(core.store.rows("SELECT * FROM voice_jobs")) == 1

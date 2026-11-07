@@ -22,7 +22,7 @@ async def scenario():
     async with worker_for(SimpleNamespace(settings=settings, clock=clock, store=None),
                           provider) as worker:
         assert await worker.run_once("independent-reader-sdk", job_id=job_id)
-        row = worker.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job_id,))
+        row = worker.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s', (job_id,))
         assert row["state"] == expected, row
         assert not provider.responses
 

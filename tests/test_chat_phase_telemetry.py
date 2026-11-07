@@ -9,7 +9,7 @@ import pytest
 
 from companion import agent_runtime, model, telemetry
 from scripts.benchmark_qq_beta import FIELDS, summarize
-from tests.test_owner_runtime import chat
+from tests.support.owner_runtime import chat
 
 TRACE = "trace_" + "a" * 32
 

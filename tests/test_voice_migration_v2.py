@@ -17,9 +17,9 @@ from companion.contracts import CoreError
 from companion.store import Store, encode, migrate
 from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import VoiceLeaseRef
-from tests.test_delivery_reconciliation import decide, prepare, put, signed
-from tests.test_delivery_reconciliation import native as current_fixture
-from tests.test_voice_jobs import claim, create_tts, prepared
+from tests.support.delivery_reconciliation import decide, prepare, put, signed
+from tests.support.delivery_reconciliation import native as current_fixture
+from tests.support.voice_jobs import claim, create_tts, prepared
 
 OLD = "0033_model_usage_job_index"
 NEW = "0044_voice_owner_authority"
@@ -213,7 +213,7 @@ def test_v1_closed_resolution_keeps_original_financial_record(core, tmp_path, mo
         old_runtime.setattr(reconciliation, "_voice_binding", historical_migration()._voice_binding)
         prepare(env)
         original_receipt = decide(env, "CANCELLED")
-    assert core.store.one("SELECT lease_token FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT lease_token FROM outbox WHERE message_id=%s',
                           (env.message_id,))["lease_token"] is None
     path = old_database(core, tmp_path)
     migrate(path, NEW)

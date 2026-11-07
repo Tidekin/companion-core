@@ -8,8 +8,8 @@ import httpx
 from pydantic import SecretStr
 
 from tests.support.core_http import real_core_http
-from tests.test_evaluation_process import process_config
-from tests.test_owner_input import captured, inbound
+from tests.support.evaluation_process import process_config
+from tests.support.owner_input import captured, inbound
 
 PATH = "/internal/v2/cognition/activity"
 
@@ -37,7 +37,7 @@ def test_signed_tcp_entry_independent_core_and_stop_leave_inspection_read_only(c
                 json=event.model_dump(mode="json"),
                 headers={**bridge, "X-Idempotency-Key": "activity-native-input"})
             assert accepted.status_code == 202, accepted.text
-            cid = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+            cid = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                  (event.event_id,))["conversation_id"]
             child = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
                 "tests.owner_runtime_process", "--config", str(config), "--now", core.clock(),
@@ -77,8 +77,10 @@ def test_signed_tcp_entry_independent_core_and_stop_leave_inspection_read_only(c
 def test_signed_read_and_isolated_reader_receipts_are_observed_without_more_io(
     core, tmp_path, monkeypatch,
 ):
-    from tests import test_bili_video_entrypoint as reader_fixture
-    from tests.test_reading_followup import TOKEN, URL, admit, select_read, window
+    from tests.support import bili_video_entrypoint as reader_fixture
+    from tests.support.exploration import URL
+    from tests.support.reading_followup import admit, select_read, window
+    from tests.support.reading_service import TOKEN
 
     # The existing isolated Reader accepts only mocked upstream bytes and cannot
     # import Core or its database. Its Core HTTP calls use the original Reader token.
@@ -91,7 +93,7 @@ def test_signed_read_and_isolated_reader_receipts_are_observed_without_more_io(
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
             event, _ = await admit(client, core, config, plan, 1, card=URL)
             selected = await select_read(core, URL)
-            cid = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+            cid = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                  (event["event_id"],))["conversation_id"]
             owner = {"Authorization": "Bearer " + core.settings.control_token.get_secret_value()}
             pending = await client.post(PATH, json={"conversation_id": cid}, headers=owner)

@@ -49,7 +49,7 @@ def test_inbox_waiting_for_writer_keeps_health_live_and_deduplicates(core, monke
             assert [r.status_code for r in responses] == [202, 202]
             first, second = sorted((r.json() for r in responses), key=lambda v: v["duplicate"])
             assert first["duplicate"] is False and second == {**first, "duplicate": True}
-            job = core.store.one("SELECT created_at FROM jobs WHERE job_id=?", (first["job_id"],))
+            job = core.store.one('SELECT created_at FROM jobs WHERE job_id=%s', (first["job_id"],))
             assert job["created_at"] == core.clock()
 
     asyncio.run(scenario())
@@ -61,10 +61,10 @@ def test_recall_waiting_for_writer_keeps_http_live_and_commits_once(
 ):
     from time import perf_counter
 
-    from tests.test_handoff_recall_recovery import approve_only
-    from tests.test_input_protocol import environment, notice
-    from tests.test_owner_input import captured, inbound
-    from tests.test_owner_recall import receipt
+    from tests.support.handoff_recall_recovery import approve_only
+    from tests.support.input_protocol import environment, notice
+    from tests.support.owner_input import captured, inbound
+    from tests.support.owner_recall import receipt
 
     entered = threading.Event()
 

@@ -15,7 +15,9 @@ def test_unrelated_recall_preserves_exact_input_approval_replay(core, tmp_path, 
             event, second = await admit(client, config, plan, now, 2)
             assert second.status_code == 202, second.text
             key = owner_input.INPUT + event["event_id"]
-            approved = core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))["value"]
+            approved = core.store.one((
+                'SELECT value FROM runtime_meta WHERE key=%s'
+            ), (key,))["value"]
             replay = json.loads(approved)["capture"]
 
             recalled = await client.post(
@@ -23,13 +25,13 @@ def test_unrelated_recall_preserves_exact_input_approval_replay(core, tmp_path, 
             )
             assert recalled.status_code == 200, recalled.text
             assert recalled.json()["state"] == "RECALLED"
-            assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+            assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                   (event["event_id"],))["redacted"] == 0
 
             repeated = await client.post("/internal/v1/owner-authority/inputs/approve", json=replay)
             assert repeated.status_code == 200, repeated.text
             assert repeated.json() == {"approved": True, "duplicate": True}
             assert core.store.one(
-                "SELECT value FROM runtime_meta WHERE key=?", (key,))["value"] == approved
+                'SELECT value FROM runtime_meta WHERE key=%s', (key,))["value"] == approved
 
     run(scenario())

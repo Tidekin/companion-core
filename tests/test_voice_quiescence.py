@@ -2,44 +2,16 @@
 
 import pytest
 
-from companion import owner_input, owner_input_state, transport
-from companion.contracts import CoreError, DeliveryResult
-from companion.voice_jobs import VoiceJobs
-from companion.voice_protocol import VoiceCleanup, VoiceStopRef, VoiceStopRequest
-from tests.test_owner_input import captured, inbound
-from tests.test_voice_flow import leased
-from tests.test_voice_jobs import TEXT, start
-from tests.voice_owner_fixtures import native_reply
-
-
-def stopped_unknown(core):
-    """Actual node input release, token-bound stop/cleanup and original text ACK."""
-    message = native_reply(core, TEXT)
-    jobs = VoiceJobs(core.store, core.settings, core.clock)
-    job, _, claimed, ref = start(core, jobs, message)
-    row = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job["job_id"],))
-    stopped = jobs.stop("local", VoiceStopRequest(
-        ref=VoiceStopRef.from_lease(claimed.lease), resource_state="READY", outcome="UNKNOWN",
-        cleanup_epoch=row["cleanup_epoch"], cleanup=VoiceCleanup(
-            cache_removed=True, journal_removed=True, temp_removed=True)))
-    assert stopped.custody_closed and stopped.cleanup_confirmed
-    item = leased(core, message)
-    transport.begin_send(core.store, message, item["lease_token"], core.clock(),
-                         core.settings, clock=core.clock)
-    transport.delivery_result(core.store, core.settings, message, DeliveryResult(
-        lease_token=item["lease_token"], result="SENT", provider_message_id="synthetic-stop-ack"),
-        core.clock())
-    with pytest.raises(CoreError, match="VOICE_LEASE_RETIRED"):
-        jobs.input("local", ref)
-    return core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job["job_id"],))
+from companion import owner_input, owner_input_state
+from tests.support.owner_input import captured, inbound
 
 
 def receipt_fixture(core, tmp_path):
     capture, _ = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
     accepted = core.ingest(inbound(core, capture), "closed-voice-source")
-    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?", (accepted["job_id"],))
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
+    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=%s", (accepted["job_id"],))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (capture.event_id,))
     now = core.clock()
     core.store.insert("voice_jobs", job_id="voice-stopped", operation="asr",
         event_id=capture.event_id, native_source_event_id=event["source_event_id"],
@@ -75,7 +47,7 @@ def test_only_proven_stopped_unknown_is_quiescent_without_rewriting_it(core, tmp
     elif missing == "node":
         core.store.execute("DELETE FROM voice_node_state")
     elif missing in {"QUEUED", "LEASED", "RUNNING"}:
-        core.store.execute("UPDATE voice_jobs SET state=?", (missing,))
+        core.store.execute('UPDATE voice_jobs SET state=%s', (missing,))
     before = list(core.store.db.iterdump())
     result = owner_input_state.read(core.store, core.settings, capture)
     assert result["unsettled_work"] is bool(missing)
@@ -85,7 +57,11 @@ def test_only_proven_stopped_unknown_is_quiescent_without_rewriting_it(core, tmp
 
 def test_pending_restore_requires_existing_native_node_recovery_evidence(core, tmp_path):
     capture = receipt_fixture(core, tmp_path)
-    core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('voice_restore_required','1')")
+    core.store.execute(
+        'INSERT INTO runtime_meta (key,value) VALUES '
+        "('voice_restore_required','1') ON CONFLICT(key) DO UPDATE SET "
+        'value=excluded.value,record_sequence=DEFAULT'
+    )
     assert owner_input_state.read(core.store, core.settings, capture)["unsettled_work"]
     # Same proof as VoiceJobs.session: the current incarnation must be recovered.
     core.store.execute("UPDATE voice_node_state SET recovered_incarnation=(SELECT value "

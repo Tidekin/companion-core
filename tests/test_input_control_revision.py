@@ -11,8 +11,8 @@ from companion.core import Core
 from companion.model import REVIEW_RULES, ModelClient
 from tests.conftest import FakeModel, run
 from tests.native_input_protocol_fixture import notice
+from tests.support.confirmed_memory import remember
 from tests.support.native_control_input import admit, environment
-from tests.test_m1 import remember
 
 
 def seed_memory(core):
@@ -45,13 +45,13 @@ def test_superseded_forget_executes_once_without_old_reply(core, tmp_path, monke
                     monkeypatch.setattr(worker, "command_reply", continue_before_action)
                 else:
                     latest, _ = await admit(client, config, plan, core.clock.now, 2, "/发送状态")
-                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                           (admitted["job_id"],))["state"] == "QUEUED"
                 assert await worker.run_once("control-action")
                 monkeypatch.setattr(worker, "command_reply", original)
-                assert core.store.one("SELECT content,status FROM memories WHERE memory_id=?",
+                assert core.store.one('SELECT content,status FROM memories WHERE memory_id=%s',
                                       (target,)) == {"content": "", "status": "FORGOTTEN"}
-                assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                       (admitted["job_id"],))["state"] == "SUCCEEDED"
                 assert core.store.rows("SELECT * FROM outbox") == []
                 ledger = core.ledger.path.read_bytes()
@@ -91,9 +91,9 @@ def test_recalled_control_source_cancels_action_even_after_new_input(core, tmp_p
             with Core(core.settings, FakeModel(), core.clock) as worker:
                 assert await worker.run_once("latest-after-recall")
                 assert not await worker.run_once("cancelled-control")
-            assert core.store.one("SELECT status FROM memories WHERE memory_id=?",
+            assert core.store.one('SELECT status FROM memories WHERE memory_id=%s',
                                   (target,))["status"] == "CONFIRMED"
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                   (admitted["job_id"],))["state"] == "CANCELLED"
             assert core.store.rows("SELECT origin_event_id FROM outbox") == [
                 {"origin_event_id": latest["event_id"]},
@@ -141,7 +141,7 @@ def test_running_control_review_settles_before_action_or_source_cancellation(
             first, admitted = await admit(
                 client, config, plan, core.clock.now, 1, "/记住这个 " + content)
             with Core(core.settings, ModelClient(core.settings, transport), core.clock) as worker:
-                existing = worker.store.one("SELECT * FROM memories WHERE memory_id=?", (target,))
+                existing = worker.store.one('SELECT * FROM memories WHERE memory_id=%s', (target,))
                 existing["evidence_ids"] = ["evt_test_99"]
                 # Force the semantic-review branch; provider I/O and accounting remain real.
                 async def existing_matches(*_, source_check, **__):
@@ -165,9 +165,9 @@ def test_running_control_review_settles_before_action_or_source_cancellation(
                 finally:
                     release.set()
                     await task
-            saved = core.store.one("SELECT status FROM memories WHERE content=?", (content,))
+            saved = core.store.one('SELECT status FROM memories WHERE content=%s', (content,))
             assert saved == (None if recall else {"status": "CONFIRMED"})
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (admitted["job_id"],))[
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (admitted["job_id"],))[
                 "state"] == ("CANCELLED" if recall else "SUCCEEDED")
             assert core.store.rows("SELECT origin_event_id FROM outbox") == [
                 {"origin_event_id": latest["event_id"]},
@@ -176,7 +176,7 @@ def test_running_control_review_settles_before_action_or_source_cancellation(
             assert len(calls) == len(usage) == 1
             assert usage[0]["scenario"] == "memory_review" and usage[0]["state"] == "SETTLED"
             assert usage[0]["billed_micro_usd"] > 0
-            assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+            assert not core.store.one('SELECT 1 FROM outbox WHERE origin_event_id=%s',
                                       (first["event_id"],))
             assert owner_authority.status(
                 core.store, core.settings, core.clock)["state"] == "ACTIVE"
@@ -203,7 +203,7 @@ def test_queued_diary_pause_resume_controls_keep_order_before_latest_reply(
                     "value"] == "0"
                 assert await worker.run_once("status")
             for event in (paused, resumed):
-                assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
+                assert core.store.one('SELECT state FROM jobs WHERE event_id=%s',
                                       (event["event_id"],))["state"] == "SUCCEEDED"
             assert core.store.rows("SELECT origin_event_id FROM outbox") == [
                 {"origin_event_id": latest["event_id"]},
@@ -222,7 +222,7 @@ def test_unknown_slash_input_keeps_ordinary_reply_supersession(core, tmp_path, m
             with Core(core.settings, FakeModel(), core.clock) as worker:
                 assert await worker.run_once("only-latest")
                 assert not await worker.run_once("no-old-chat")
-            assert core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+            assert core.store.one('SELECT state,last_error_code FROM jobs WHERE event_id=%s',
                                   (first["event_id"],)) == {
                 "state": "CANCELLED", "last_error_code": "REPLY_SUPERSEDED",
             }

@@ -4,6 +4,8 @@ import json
 from datetime import datetime
 
 from companion import capabilities, worker_loop
+from companion.cognition_read import CognitionRead
+from companion.contracts import CoreError
 from companion.memory_context import MemorySources, check_version, read_version
 from companion.privacy import redact
 from companion.store import encode
@@ -240,21 +242,23 @@ def overview(core):
             "'UNKNOWN'")["n"],
         "review_memories": _review_count(core),
         "companion_proposals": s.one(
-            "SELECT COUNT(*) AS n FROM capability_overrides WHERE state = 'PROPOSED'")["n"]
-        if s.one('SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespa'
-            "ce AND relname='capability_overrides' AND relkind IN ('r','p')") else 0,
-        "pending_goals": s.one("SELECT COUNT(*) AS n FROM goals WHERE state = 'PENDING'")["n"]
-        if s.one('SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespa'
-            "ce AND relname='goals' AND relkind IN ('r','p')") else 0,
+            "SELECT COUNT(*) n FROM capability_overrides WHERE state='PROPOSED'")["n"]
+        if s.has_table("capability_overrides") else 0,
+        "pending_goals": s.one("SELECT COUNT(*) n FROM goals WHERE state='PENDING'")["n"]
+        if s.has_table("goals") else 0,
         "pending_reflections": s.one(
-            "SELECT COUNT(*) AS n FROM reflection_suggestions WHERE state = 'PENDING'")["n"]
-        if s.one('SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespa'
-            "ce AND relname='reflection_suggestions' AND relkind IN ('r','p')") else 0,
+            "SELECT COUNT(*) n FROM reflection_suggestions WHERE state='PENDING'")["n"]
+        if s.has_table("reflection_suggestions") else 0,
     }
     worker = worker_loop.snapshot(s, datetime.fromisoformat(now))
     budget = budget_view(core)
-    blocked = s.one("SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked', "
-        "'model_budget_restore_required')")
+    try:
+        model = core.store.read_or_write(lambda: CognitionRead(core).daily_model_usage(
+            budget["local_day"], budget["timezone"], now))
+    except CoreError:
+        model = None
+    blocked = s.one("SELECT 1 FROM runtime_meta WHERE key IN "
+                    "('model_budget_blocked','model_budget_restore_required')")
     paused = {row["key"]: row["value"] == "1" for row in s.rows(
         "SELECT key, value FROM runtime_meta WHERE key IN ('proactive_paused', 'life_paused', "
         "'diary_paused')")}
@@ -271,7 +275,7 @@ def overview(core):
                         "state": "ATTENTION" if blocked or counts["unknown_calls"]
                         or budget["admission_blocked"] or worker["state"] != "RECORDED"
                         else "READY"},
-            "counts": counts, "budget": budget,
+            "counts": counts, "budget": budget, "model": model,
             "capabilities": capabilities.snapshot(s, core.settings, core.clock)}
 
 
@@ -328,12 +332,6 @@ def diagnostics(core):
     return collection(core, items)
 
 
-def _table_exists(store, name):
-    return bool(store.one("SELECT 1 FROM pg_catalog.pg_class "
-        "WHERE relnamespace=current_schema()::regnamespace "
-        "AND relname=%s AND relkind IN ('r','p')", (name,)))
-
-
 def decisions(core, limit=40):
     """Recorded decisions with their trigger, options, outcome and the bounded facts they used.
 
@@ -363,7 +361,7 @@ def decisions(core, limit=40):
         items.append(entry(row["candidate_id"], "share", "主动分享候选", row["state"],
                            row["created_at"], row["reason_code"] or "",
                            options=["SHARE", "SKIP"], delivery_state=row["sent"]))
-    if _table_exists(s, "social_autonomy_plans"):
+    if s.has_table("social_autonomy_plans"):
         for row in s.rows(
             'SELECT plan_id, state, last_error_code, created_at FROM social_autonomy_plans WHERE '
             'redacted = 0 ORDER BY created_at DESC NULLS LAST LIMIT %s', (limit,),
@@ -379,9 +377,11 @@ def decisions(core, limit=40):
         '%s', (limit,),
     ):
         adjustments = s.one(
-            'SELECT COUNT(*) AS n FROM capability_overrides AS c JOIN reflection_suggestions AS x '
-            'USING (suggestion_id) WHERE x.run_id = %s', (row["run_id"],),
-        )["n"] if _table_exists(s, "capability_overrides") else 0
+            (
+                'SELECT COUNT(*) n FROM capability_overrides c JOIN '
+                'reflection_suggestions x USING(suggestion_id) WHERE x.run_id=%s'
+            ), (row["run_id"],),
+        )["n"] if s.has_table("capability_overrides") else 0
         items.append(entry(row["run_id"], "reflection", "每日反思", row["state"],
                            row["created_at"], row["last_error_code"] or "",
                            options=["SUGGEST", "SKIP"], local_date=row["local_date"],

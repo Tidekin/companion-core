@@ -10,9 +10,9 @@ import venv
 import pytest
 
 from companion_voice_node.state import NodeState
-from tests.test_voice_node_retention_v2 import scope
-from tests.test_voice_node_worker import node as node  # noqa: F401 -- shared fixture
-from tests.test_voice_node_worker import write_config
+from tests.support.voice_node_retention_v2 import scope
+from tests.support.voice_node_worker import node as node  # noqa: F401 -- shared fixture
+from tests.support.voice_node_worker import write_config
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows runtime launcher")

@@ -64,7 +64,10 @@ def test_native_chat_worker_carries_mood_through_neutral_chat_and_hours(
             assert positive[0]["state"]["arousal"] == arousal
             assert "causes" not in positive[0]
             snapshots = json.loads(core.store.one(
-                "SELECT snapshots_json FROM agent_conversations ORDER BY rowid DESC LIMIT 1"
+
+                    'SELECT snapshots_json FROM agent_conversations ORDER BY '
+                    'record_sequence DESC LIMIT 1'
+
             )["snapshots_json"])
             proof = next(item["proof"] for item in snapshots if item["kind"] == "mood")
             assert proof["signals"][0]["reason"] == reason

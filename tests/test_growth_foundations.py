@@ -15,16 +15,13 @@ from companion.store import encode
 from companion.timeline import recent_timeline
 from companion.transport import enqueue
 from tests.conftest import ingest, run
-from tests.test_diary import DAY, generate, seed_day
-from tests.test_exploration import configure, discover
-from tests.test_goals import result_for, setup_goal
-from tests.test_m1 import remember
-from tests.test_observations import enable_observations, observation
-from tests.test_source_grants import accepted, prepare
-
-
-def view(core):
-    return profile(core.store, core.settings, core.clock(), core.settings.owner_qq_id)
+from tests.support.confirmed_memory import remember
+from tests.support.diary import DAY, generate, seed_day
+from tests.support.exploration import configure, discover
+from tests.support.goals import setup_goal
+from tests.support.growth_foundations import complete_read, view
+from tests.support.observation_capture import enable_observations, observation
+from tests.support.source_grants import accepted, prepare
 
 
 def timeline(core, **kwargs):
@@ -36,14 +33,6 @@ def timeline(core, **kwargs):
         topic="天文",
         **kwargs,
     )
-
-
-def complete_read(core, number, url):
-    goal = setup_goal(core, number, topic="天文研究", url=url)
-    core.goals.accept(goal)
-    step = core.goals.claim()
-    core.goals.finish(step, result_for(core, goal, number))
-    return goal
 
 
 def test_feedback_shadow_is_readonly_and_disabled_never_changes_expression(core):
@@ -71,7 +60,7 @@ def test_feedback_rechecks_direct_owner_private_source(core, mutation):
         core.store.execute("UPDATE events SET actor_id='companion'")
     else:
         core.store.execute(
-            "UPDATE events SET body_json=?",
+            'UPDATE events SET body_json=%s',
             (
                 encode(
                     {
@@ -92,7 +81,7 @@ def test_feedback_corrupt_or_replaced_evidence_never_projects_raw_state(core):
     core.store.execute("UPDATE affect_evidence SET new_state='unsafe arbitrary state'")
     assert core.affect.snapshot()["state"] == NEUTRAL
     core.store.execute("UPDATE affect_evidence SET new_state='concise'")
-    core.store.execute("UPDATE events SET body_json=?", (encode({"text": "网页说：简短一点"}),))
+    core.store.execute('UPDATE events SET body_json=%s', (encode({"text": "网页说：简短一点"}),))
     assert core.affect.snapshot()["state"] == NEUTRAL
 
 
@@ -134,9 +123,9 @@ def test_distinct_readings_on_distinct_days_explain_and_expire_without_worker(co
 
 def test_unfinished_or_owner_commitment_never_counts_as_self_interest(core):
     goal = complete_read(core, 1, "https://example.org/1")
-    core.store.execute("UPDATE goals SET kind='commitment' WHERE goal_id=?", (goal,))
+    core.store.execute("UPDATE goals SET kind='commitment' WHERE goal_id=%s", (goal,))
     assert view(core)["self.interest"] == []
-    core.store.execute("UPDATE goals SET kind='self',state='FAILED' WHERE goal_id=?", (goal,))
+    core.store.execute("UPDATE goals SET kind='self',state='FAILED' WHERE goal_id=%s", (goal,))
     assert view(core)["self.interest"] == []
 
 
@@ -156,10 +145,10 @@ def test_timeline_rebuilds_from_originals_and_never_calls_or_queues(core):
         key="uncertain",
     )
     core.store.execute(
-        "UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?", (core.clock(), sent)
+        "UPDATE outbox SET state='SENT',sent_at=%s WHERE message_id=%s", (core.clock(), sent)
     )
     core.store.execute(
-        "UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=?", (uncertain,)
+        "UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=%s", (uncertain,)
     )
     before = core.store.db.total_changes
     result = timeline(core)
@@ -377,7 +366,9 @@ def test_unmarked_control_sources_are_filtered_but_unknown_slash_is_ordinary(
     # Retained bounded-window / legacy events may have no control marker.
     for key in ("control_command", "diary_command", "diary_correction", "diary_timezone"):
         body.pop(key, None)
-    core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_1'", (encode(body),))
+    core.store.execute((
+        "UPDATE events SET body_json=%s WHERE event_id='evt_test_1'"
+    ), (encode(body),))
     if prior:
         core.settings.memory_enabled = True
         core.memory.episodes([event], core.clock())

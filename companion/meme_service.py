@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import AwareDatetime, Field
 
-from companion import owner_authority, owner_input, private_life, reply_revision
+from companion import job_queue, owner_authority, owner_input, private_life, reply_revision
 from companion.contracts import CoreError, StrictModel
 from companion.expression import MemeIntent
 from companion.store import after, encode, uid
@@ -317,9 +317,7 @@ def _submit(store, settings, clock, body, approval):
             state=prior["state"], duplicate=True,
         ).model_dump()
     now, job_id = clock(), uid("job")
-    store.insert("jobs", job_id=job_id, event_id=body.event_id, kind="meme_discovery",
-                 state="QUEUED", idempotency_key=key, max_attempts=1, context_tracked=1,
-                 created_at=now, updated_at=now)
+    job_queue.create(store, job_id, body.event_id, "meme_discovery", key, now)
     owner_authority.bind_job(store, settings, clock, job_id, purpose="meme")
     store.insert("job_sources", job_id=job_id, event_id=body.event_id)
     _save(store, job_id, request)
@@ -364,13 +362,11 @@ def recover(store, settings, now):
                     store.execute("UPDATE meme_discovery_reservations SET state = 'UNKNOWN', "
                         'updated_at = %s WHERE job_id = %s', (now, job["job_id"]))
                 if job["state"] == "RUNNING":
-                    store.execute("UPDATE jobs SET state = 'FAILED', lease_token = NULL, "
-                        "updated_at = %s, last_error_code = 'MEME_DISCOVERY_UNKNOWN' WHERE job_id "
-                        '= %s',
-                                  (now, job["job_id"]))
+                    job_queue.release(
+                        store, job["job_id"], "FAILED", now, reason="MEME_DISCOVERY_UNKNOWN"
+                    )
             elif job["state"] == "RUNNING":
-                store.execute("UPDATE jobs SET state = 'QUEUED', lease_token = NULL, lease_until = "
-                    'NULL, attempts = 0, updated_at = %s WHERE job_id = %s', (now, job["job_id"]))
+                job_queue.requeue(store, job["job_id"], now, unadmitted=True)
 
 
 def _empty_lease_poll(store, settings, clock, scope):
@@ -418,14 +414,15 @@ def _lease(store, settings, clock, body, approval, *, providers):
             _source(store, settings, approval, value["event_id"], value["reply_revision"],
                     clock)
         except CoreError as error:
-            store.execute("UPDATE jobs SET state = 'CANCELLED', last_error_code = %s, updated_at = "
-                '%s WHERE job_id = %s', (error.code, clock(), job["job_id"]))
+            job_queue.finish_unclaimed(
+                store, job["job_id"], "CANCELLED", clock(), reason=error.code
+            )
             continue
         token, attempt, now = uid("lease"), uid("meme_attempt"), clock()
         until = after(now, settings.lease_seconds)
-        store.execute("UPDATE jobs SET state = 'RUNNING', lease_owner = %s, lease_token = %s, "
-            'lease_until = %s, attempts = 1, updated_at = %s WHERE job_id = %s',
-                      (body.worker_id, token, until, now, job["job_id"]))
+        job_queue.claim(
+            store, job["job_id"], body.worker_id, token, until, now, single_attempt=True
+        )
         _save(store, job["job_id"], {**value, "attempt_key": attempt, "lease_token": token,
                                    "lease_until": until})
         claim = DiscoveryClaim(job_id=job["job_id"], lease_token=token, attempt_key=attempt,
@@ -522,8 +519,7 @@ def _settle(store, settings, clock, job_id, body):
     if job["state"] == "RUNNING":
         active = reply_revision.current(store, value["event_id"], value["reply_revision"])
         final = ("SUCCEEDED" if state == "SETTLED" else "FAILED") if active else "CANCELLED"
-        store.execute('UPDATE jobs SET state = %s, lease_token = NULL, updated_at = %s, '
-            'last_error_code = %s WHERE job_id = %s', (final, now,
-                      None if state == "SETTLED" else "MEME_DISCOVERY_UNKNOWN", job_id))
+        job_queue.release(store, job_id, final, now,
+                          reason=None if state == "SETTLED" else "MEME_DISCOVERY_UNKNOWN")
     return DiscoverySettlement(job_id=job_id, attempt_key=body.attempt_key,
                                 state=state).model_dump()

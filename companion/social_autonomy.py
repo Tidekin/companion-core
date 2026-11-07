@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from companion import budget, owner_authority, social_profile_sources
+from companion import budget, job_queue, owner_authority, social_profile_sources, transport
 from companion.contracts import CoreError
 from companion.observation import ArticleEvidence, ReadingEvidence, expired_sources
 from companion.privacy import redact
@@ -810,10 +810,13 @@ class SocialAutonomy:
             raise CoreError("SOCIAL_RETRY_JOB_FENCED", 409)
         return event
 
-    def admit_model(self, request_id, logical_request_id, messages, *, job_id=None):
+    def admit_model(self, request_id, logical_request_id, messages, *, job_id=None,
+                    source_check=None):
         """Native reserve transaction owns retry claim, current sources and budget together."""
         from companion import social_plan_jobs
 
+        if job_id is not None and source_check is None:
+            raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
         _require_tx(self.store)
         row = self.store.one(
             "SELECT social_autonomy_plans.plan_id AS plan_id, "
@@ -1227,11 +1230,8 @@ class SocialAutonomy:
                     outcome="skip" if isinstance(frozen, Skip) else frozen.action_type,
                 )
                 if job:
-                    s.execute(
-                        "UPDATE jobs SET state = 'SUCCEEDED', lease_token = NULL, updated_at "
-                        "= %s WHERE job_id = %s AND state = 'RUNNING' AND lease_token = %s",
-                        (self.clock(), job["job_id"], job["lease_token"]),
-                    )
+                    job_queue.release(s, job["job_id"], "SUCCEEDED", self.clock(),
+                                      token=job["lease_token"])
         except BaseException as error:
             code = (
                 error.code
@@ -1667,39 +1667,14 @@ class SocialAutonomy:
             )
             authority = view.authority.as_dict()
         content = frozen.model_dump(mode="json")
-        s.insert(
-            "outbox",
-            message_id=frozen.message_id,
-            origin_event_id=sources[0]["ref"] if sources else None,
-            conversation_id=conversation_id,
-            action_type=frozen.action_type,
-            content_json=encode(content),
-            content_sha256=_sha(content),
-            state="PENDING",
-            delivery_key=frozen.delivery_key,
-            delivery_lane="qq_account",
-            created_at=now,
-            updated_at=now,
-            authority_json=encode(authority),
-        )
-        s.insert(
-            "social_autonomy_reservations",
-            plan_id=plan_id,
-            message_id=frozen.message_id,
-            action_type=frozen.action_type,
-            semantic_sha256=semantic,
-            reserved_day=_day(now, row["timezone"]),
-            reserved_at=now,
-        )
-        s.audit(
-            "social.action_reserved",
-            plan_id,
-            plan_id,
-            now,
-            action_type=frozen.action_type,
-            message_id=frozen.message_id,
-            payload_sha256=frozen.payload_sha256,
-        )
+        transport.queue_delivery(s, frozen.message_id, sources[0]["ref"] if sources else None,
+                                 conversation_id, frozen.action_type, content, frozen.delivery_key,
+                                 now, lane="qq_account", authority=authority)
+        s.insert("social_autonomy_reservations", plan_id=plan_id, message_id=frozen.message_id,
+                 action_type=frozen.action_type, semantic_sha256=semantic,
+                 reserved_day=_day(now, row["timezone"]), reserved_at=now)
+        s.audit("social.action_reserved", plan_id, plan_id, now, action_type=frozen.action_type,
+                message_id=frozen.message_id, payload_sha256=frozen.payload_sha256)
         return frozen
 
     def validate_delivery(self, message_id, lease_token):
@@ -1909,15 +1884,12 @@ def erase_social_autonomy(store, event_ids):
             "attempt_count = 0 AND state IN ('PENDING', 'LEASED', 'RETRY_WAIT'))",
             (utcnow(), plan_id),
         )
-        store.execute(
-            "UPDATE outbox SET content_json = '{}', content_sha256 = '', state = CASE WHEN state = "
-            "'SENDING' THEN 'DELIVERY_UNCERTAIN' WHEN state IN ('PENDING', 'LEASED', 'RETRY_WAIT') "
-            "THEN 'CANCELLED' ELSE state END, last_error_code = 'SOCIAL_SOURCE_ERASED' WHERE "
-            "message_id IN (SELECT message_id FROM social_autonomy_reservations WHERE plan_id = "
-            "%s)",
-            (plan_id,),
-        )
-        store.execute("DELETE FROM social_autonomy_sources WHERE plan_id = %s", (plan_id,))
+        transport.revoke_deliveries(store, (
+            'message_id IN (SELECT message_id FROM social_autonomy_reservations '
+            'WHERE plan_id=%s)'
+        ),
+                                    (plan_id,), erase_content=True, reason="SOCIAL_SOURCE_ERASED")
+        store.execute('DELETE FROM social_autonomy_sources WHERE plan_id=%s', (plan_id,))
 
 
 def restore_social_autonomy(store, now):
@@ -1952,10 +1924,8 @@ def restore_social_autonomy(store, now):
         "'FAILED'))",
         (now,),
     )
-    store.execute(
-        "UPDATE outbox SET state = CASE WHEN state = 'SENDING' THEN 'DELIVERY_UNCERTAIN' ELSE "
-        "'CANCELLED' END, last_error_code = 'SOCIAL_RESTORE_RECONCILIATION_REQUIRED', updated_at = "
-        "%s WHERE message_id IN (SELECT message_id FROM social_autonomy_reservations) AND state IN "
-        "('PENDING', 'LEASED', 'SENDING', 'RETRY_WAIT')",
-        (now,),
+    transport.revoke_deliveries(
+        store, "message_id IN (SELECT message_id FROM social_autonomy_reservations) "
+        "AND state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')",
+        reason="SOCIAL_RESTORE_RECONCILIATION_REQUIRED", now=now,
     )

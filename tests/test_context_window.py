@@ -21,10 +21,10 @@ from companion.video_input import VideoInputPolicy
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
 from tests.support.native_consumer_entry import environment
-from tests.test_paid_image_budget import image_approval, image_messages
-from tests.test_paid_model_gate import approved_live
-from tests.test_token_measurement import MESSAGES, configure
-from tests.test_video_understanding import video_policy
+from tests.support.paid_image_budget import image_approval, image_messages
+from tests.support.paid_model import approved_live
+from tests.support.token_measurement import MESSAGES, configure
+from tests.support.video_understanding import video_policy
 
 
 class LegacyVideo(VideoInputPolicy):
@@ -113,7 +113,7 @@ def test_joint_boundary_uses_the_actual_scenario_route(core, tmp_path, scenario)
 
 
 def test_joint_refusal_precedes_paid_reservation_and_preserves_tools(core, tmp_path):
-    from tests.test_token_tools import CONTINUATION, TOOLS
+    from tests.support.token_tools import CONTINUATION, TOOLS
 
     configure(core, tmp_path)
     measured = tm.measure_request(core.settings, CONTINUATION, tools=TOOLS)
@@ -185,7 +185,7 @@ def test_explicit_none_retains_the_original_journal_and_admission_contract(core,
     job_id = authorized_job(core)
     request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock(),
                                 clock=core.clock)
-    saved = core.store.one("SELECT snapshot_json FROM model_admissions WHERE request_id=?",
+    saved = core.store.one('SELECT snapshot_json FROM model_admissions WHERE request_id=%s',
                            (request_id,))["snapshot_json"]
     journal = Path(core.settings.paid_model.journal_path)
     original = journal.read_bytes()
@@ -203,7 +203,7 @@ def test_explicit_none_retains_the_original_journal_and_admission_contract(core,
                                   request_id, MESSAGES, "chat", core.clock)
 
     run(exercise())
-    assert core.store.one("SELECT snapshot_json FROM model_admissions WHERE request_id=?",
+    assert core.store.one('SELECT snapshot_json FROM model_admissions WHERE request_id=%s',
                           (request_id,))["snapshot_json"] == saved
     assert "max_context_tokens" not in saved
 
@@ -249,7 +249,9 @@ def test_signed_http_ingress_to_independent_worker_enforces_loaded_joint_window(
                 raise
             assert process.returncode == 0, stderr.decode("utf-8", errors="replace")
             assert json.loads(stdout) == {"mock_provider_requests": int(allowed)}
-            row = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job_id,))
+            row = core.store.one((
+                'SELECT state,last_error_code FROM jobs WHERE job_id=%s'
+            ), (job_id,))
             assert row["state"] == ("SUCCEEDED" if allowed else "FAILED"), row
             if not allowed:
                 assert row["last_error_code"] == "MODEL_CONTEXT_LIMIT"

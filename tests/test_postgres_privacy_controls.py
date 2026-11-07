@@ -3,7 +3,7 @@
 from companion.privacy import epoch
 from companion.store import after
 from tests.conftest import run
-from tests.test_diary import DAY, seed_day
+from tests.support.diary import DAY, seed_day
 
 
 def test_native_diary_generation_correction_and_forget(core):

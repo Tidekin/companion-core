@@ -10,10 +10,10 @@ from companion.store import encode
 from tests.conftest import ingest, run
 from tests.sdk_reader_fixture import answer, call
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.live_image_input import options as image_options
+from tests.support.memory_commands import fact
+from tests.support.memory_review_output import assert_settled_calls
 from tests.support.native_recall_entry import native_recall, returned
-from tests.test_live_image_input import options as image_options
-from tests.test_memory_commands import fact
-from tests.test_memory_review_output import assert_settled_calls
 
 
 def empty_semantic_search(core, monkeypatch):
@@ -78,16 +78,16 @@ def test_fallback_uses_existing_evidence_and_only_confirmed_project_facts(
 ):
     memory_id = fact(core, 1, "这个工程使用琥珀作为内部验收代号。")
     if ineligible == "hypothesis":
-        core.store.execute("UPDATE memories SET status='HYPOTHESIS' WHERE memory_id=?",
+        core.store.execute("UPDATE memories SET status='HYPOTHESIS' WHERE memory_id=%s",
                            (memory_id,))
     elif ineligible == "conflict":
-        core.store.execute("UPDATE memories SET needs_review=1 WHERE memory_id=?", (memory_id,))
+        core.store.execute('UPDATE memories SET needs_review=1 WHERE memory_id=%s', (memory_id,))
     elif ineligible == "missing_evidence":
-        core.store.execute("DELETE FROM memory_evidence WHERE memory_id=?", (memory_id,))
+        core.store.execute('DELETE FROM memory_evidence WHERE memory_id=%s', (memory_id,))
     elif ineligible == "redacted_evidence":
         core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
     else:
-        core.store.execute("UPDATE memories SET subject='user' WHERE memory_id=?", (memory_id,))
+        core.store.execute("UPDATE memories SET subject='user' WHERE memory_id=%s", (memory_id,))
     empty_semantic_search(core, monkeypatch)
     ingest(core, 2, "项目上你记得什么？")
     assert run(core.run_once())
@@ -141,13 +141,15 @@ def test_native_project_fallback_keeps_tool_proofs_and_same_answer_review(
             assert result["requires_relevance_review"]
             # The same SDK answer assesses relevance; every consumed tool source stays pinned.
             assert value.source["event_id"] in {row["event_id"] for row in core.store.rows(
-                "SELECT event_id FROM job_sources WHERE job_id=(SELECT job_id FROM jobs "
-                "WHERE event_id=?)", (source["event_id"],))}
-            outbox = core.store.one("SELECT content_json FROM outbox WHERE origin_event_id=?",
+                (
+                    'SELECT event_id FROM job_sources WHERE job_id=(SELECT '
+                    'job_id FROM jobs WHERE event_id=%s)'
+                ), (source["event_id"],))}
+            outbox = core.store.one('SELECT content_json FROM outbox WHERE origin_event_id=%s',
                                     (source["event_id"],))
             assert ("青竹七号" in outbox["content_json"]) is select
             assert_settled_calls(core, 2)
-            assert core.store.one("SELECT status,confidence FROM memories WHERE memory_id=?",
+            assert core.store.one('SELECT status,confidence FROM memories WHERE memory_id=%s',
                                   (value.outsider,)) == {"status": "CONFIRMED", "confidence": 1.0}
     run(scenario())
 
@@ -200,7 +202,7 @@ def test_selected_fact_reaches_chat_with_deployed_rich_content_configuration(
                 # The native tool catalog is part of the actual first request bound.
                 assert len(value.calls) <= 1 and not value.sends
                 assert_failure_notice(core)
-                assert core.store.one("SELECT last_error_code FROM jobs WHERE event_id=?",
+                assert core.store.one('SELECT last_error_code FROM jobs WHERE event_id=%s',
                     (source["event_id"],))["last_error_code"] == "MODEL_INPUT_LIMIT"
             for row in core.store.rows("SELECT input_bound FROM model_admissions"):
                 assert row["input_bound"] <= input_limit

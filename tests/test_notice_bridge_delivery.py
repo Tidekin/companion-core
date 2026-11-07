@@ -15,9 +15,9 @@ from companion.reply_segments import SegmentedReplyConfig
 from companion_onebot_bridge.outbound import validate_item
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
+from tests.support.exploration import URL
 from tests.support.onebot_events import config
-from tests.test_exploration import URL
-from tests.test_private_companion import companion_options
+from tests.support.private_companion import companion_options
 
 
 @pytest.mark.parametrize("outcome", ["FULFILLED", "EXPLAINED_FAILURE"])
@@ -114,7 +114,7 @@ def test_required_notice_native_reader_worker_bridge_and_complete_ack(core, tmp_
                 for index, item in enumerate(leased):
                     assert item["authority"] == window.runtime.authority
                     material = json.loads(core.store.one(
-                        "SELECT value FROM runtime_meta WHERE key=?",
+                        'SELECT value FROM runtime_meta WHERE key=%s',
                         (owner_delivery.DELIVERY + item["message_id"],))["value"])
                     assert notices.required(core.store, material["job_id"]) is (index > 0)
                 assert window.runtime.row()["state"] == "ACTIVE"

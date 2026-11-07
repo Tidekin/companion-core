@@ -7,34 +7,14 @@ import pytest
 
 from companion import budget
 from companion.contracts import DeliveryResult, LeaseRequest
-from companion.model import ModelResponse
 from companion.reply_segments import SegmentedReplyConfig
 from companion.social import proactive_counts
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from tests.conftest import run
 from tests.notice_owner_fixtures import run_notice
-from tests.test_goals import result_for, setup_goal
-from tests.test_source_definitions import BILI, accepted_text, enable_sharing
-
-
-class NoticeModel:
-    def __init__(self, text):
-        self.text, self.calls = text, []
-
-    async def complete(self, messages, scenario):
-        self.calls.append((messages, scenario))
-        assert scenario == "activity"
-        return ModelResponse(self.text, 100, 20)
-
-
-def ready_share(core, text):
-    enable_sharing(core)
-    event = accepted_text(core)
-    core.observations.append("reader", event)
-    core.social.consider(event.event_id)
-    core.model = NoticeModel(text)
-    assert core.social.flush()
-    return event
+from tests.support.goals import result_for, setup_goal
+from tests.support.notices import NoticeModel, ready_share
+from tests.support.source_definitions import BILI, accepted_text, enable_sharing
 
 
 @pytest.mark.parametrize(
@@ -45,7 +25,7 @@ def test_share_uses_generated_wording_then_a_link_only_bubble(core, wording):
     assert not core.store.rows("SELECT * FROM outbox")
     assert not core.social.flush()
     assert run(run_notice(core))
-    rows = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
+    rows = core.store.rows('SELECT * FROM outbox ORDER BY record_sequence')
     assert [json.loads(row["content_json"])["text"] for row in rows] == [wording, BILI]
     assert rows[0]["reply_group_id"] == rows[1]["reply_group_id"]
     assert len(core.model.calls) == 1
@@ -53,7 +33,7 @@ def test_share_uses_generated_wording_then_a_link_only_bubble(core, wording):
     assert prompt["text"] == event.payload.text and prompt["title"] == event.payload.title
     assert proactive_counts(core.store, core.settings, core.clock())[0] == 1
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
-    assert json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+    assert json.loads(core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                     (event.event_id,))["body_json"])["text"] == event.payload.text
     first = lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
                              core.clock())["items"]
@@ -78,7 +58,7 @@ def test_share_segments_prose_with_a_reserved_link_slot(core, limit, expected):
     wording = "看到了一个有趣的细节。\n\n镜头转向窗外。\n\n这个安排让我想起另一部片子。"
     ready_share(core, wording)
     assert run(run_notice(core))
-    rows = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
+    rows = core.store.rows('SELECT * FROM outbox ORDER BY record_sequence')
     texts = [json.loads(row["content_json"])["text"] for row in rows]
     assert len(texts) == expected and texts[-1] == BILI
     assert "".join(texts[:-1]) == wording
@@ -165,7 +145,9 @@ def test_first_bubble_uncertainty_prevents_the_link_from_being_sent(core):
                     core.clock())
     assert not lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
                                 core.clock())["items"]
-    assert [row["state"] for row in core.store.rows("SELECT state FROM outbox ORDER BY rowid")] == [
+    assert [row["state"] for row in core.store.rows(
+        'SELECT state FROM outbox ORDER BY record_sequence'
+    )] == [
         "DELIVERY_UNCERTAIN", "CANCELLED",
     ]
 

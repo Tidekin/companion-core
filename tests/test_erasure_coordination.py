@@ -12,7 +12,7 @@ from companion.privacy import epoch
 from companion.store import Store
 from companion.transport import enqueue
 from tests.conftest import ingest
-from tests.test_observations import enable_observations, observation
+from tests.support.observation_capture import enable_observations, observation
 
 
 def test_replay_contract_discovery_does_not_hold_database_write_lock(core, monkeypatch):
@@ -31,7 +31,7 @@ def test_replay_contract_discovery_does_not_hold_database_write_lock(core, monke
 
         monkeypatch.setattr(erasure, "contract_signature", discover)
         core.ledger.replay(core.store)
-    assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                           (erasure.CONTRACT_KEY,))["value"] == original()
     assert core.ledger.path.read_bytes() == ledger
 
@@ -52,10 +52,10 @@ def legacy_complete_with_stale_affect(core):
     message = enqueue(
         core.store, event["event_id"], event["conversation_id"], "独立的新回复", core.clock()
     )
-    core.store.execute("UPDATE outbox SET state='SENDING' WHERE message_id=?", (message,))
+    core.store.execute("UPDATE outbox SET state='SENDING' WHERE message_id=%s", (message,))
     usage = budget.reserve(core.store, core.settings, None, "chat", [], core.clock())
     budget.settle(core.store, core.settings, usage)
-    return message, core.store.one("SELECT * FROM model_usage WHERE request_id=?", (usage,))
+    return message, core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (usage,))
 
 
 def test_old_complete_backup_repairs_sourced_projection_without_reclearing_new_replies(
@@ -121,9 +121,9 @@ def test_old_complete_repairs_derived_ids_recorded_before_dependency_links_were_
     enable_observations(core)
     item = observation(core, source_event_ids=["evt_test_1"])
     core.observations.append("reader", item)
-    saved_event = core.store.one("SELECT * FROM events WHERE event_id=?", (item.event_id,))
+    saved_event = core.store.one('SELECT * FROM events WHERE event_id=%s', (item.event_id,))
     saved_projection = core.store.one(
-        "SELECT * FROM observations WHERE event_id=?", (item.event_id,)
+        'SELECT * FROM observations WHERE event_id=%s', (item.event_id,)
     )
     core.store.insert(
         "memories",
@@ -153,19 +153,22 @@ def test_old_complete_repairs_derived_ids_recorded_before_dependency_links_were_
     assert core.store.rows("SELECT * FROM event_dependencies") == []
     assert (
         core.store.one(
-            "SELECT value FROM runtime_meta WHERE key=?", ("erased_event:" + item.event_id,)
+            'SELECT value FROM runtime_meta WHERE key=%s', ("erased_event:" + item.event_id,)
         )["value"]
         == record["erasure_id"]
     )
     # Explicit attribution survived, even though an old completed snapshot kept
     # a derived module's body/projection and its dependency links are already gone.
     core.store.execute(
-        "UPDATE events SET body_json=?,redacted=0 WHERE event_id=?",
+        'UPDATE events SET body_json=%s,redacted=0 WHERE event_id=%s',
         (saved_event["body_json"], item.event_id),
     )
     core.store.execute(
-        "UPDATE observations SET source_sha256=?,canonical_url=?,"
-        "evidence_json=?,redacted=0 WHERE event_id=?",
+        (
+            'UPDATE observations SET '
+            'source_sha256=%s,canonical_url=%s,evidence_json=%s,redacted=0 '
+            'WHERE event_id=%s'
+        ),
         (
             saved_projection["source_sha256"],
             saved_projection["canonical_url"],

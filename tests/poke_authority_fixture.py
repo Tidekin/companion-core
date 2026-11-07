@@ -22,7 +22,7 @@ from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import run
 from tests.support.onebot_events import raw_event
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 def environment(core, tmp_path):
@@ -94,12 +94,12 @@ def owner_turn(env, number, text, *, delivered=True, approve_only=False):
     result = env.core.ingest(InboundEvent.model_validate(event), event["event_id"])
     if delivered:
         with env.store.transaction():
-            source = env.store.one("SELECT * FROM events WHERE event_id=?", (event["event_id"],))
+            source = env.store.one('SELECT * FROM events WHERE event_id=%s', (event["event_id"],))
             message = enqueue(env.store, event["event_id"], source["conversation_id"],
                               "收到：" + text, env.clock())
-            env.store.execute("UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+            env.store.execute("UPDATE outbox SET state='SENT',sent_at=%s WHERE message_id=%s",
                               (env.clock(), message))
-            env.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+            env.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                               (result["job_id"],))
     return result
 

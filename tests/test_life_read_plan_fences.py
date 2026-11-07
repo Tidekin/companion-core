@@ -9,9 +9,9 @@ from companion.reading_protocol import ReadObservation
 from companion.store import after, encode
 from tests.conftest import run
 from tests.life_plan_process import choice
-from tests.test_life_read_plan import prepare
-from tests.test_reading_protocol import envelope
-from tests.test_social_owner_authority import close_provider_clients as close_provider_clients
+from tests.support.life_read_plan import prepare
+from tests.support.reading_protocol import envelope
+from tests.support.social_owner_authority import close_provider_clients as close_provider_clients
 
 
 def turn(core, phase, mutate=None):
@@ -26,7 +26,7 @@ def turn(core, phase, mutate=None):
     job = core.life_topics.schedule()
     assert job
     assert run(core.run_once(job_id=job))
-    return core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (job,))
+    return core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (job,))
 
 
 def first_read(core, tmp_path, *, unknown=False):

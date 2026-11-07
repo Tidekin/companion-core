@@ -11,8 +11,8 @@ from companion.core import Core
 from companion.life_context import decision_context
 from companion.life_protocol import LifeDecision, LifeLoopConfig
 from companion.store import encode
-from tests.test_goals import result_for, setup_goal
-from tests.test_growth_foundations import complete_read
+from tests.support.goals import result_for, setup_goal
+from tests.support.growth_foundations import complete_read
 
 
 def context(core, ids):
@@ -51,7 +51,7 @@ def test_unfinished_or_invalid_receipts_never_supply_guidance(core, mutation):
     core.settings.memory_enabled = True
     goal = complete_read(core, 1, "https://example.org/scoped")
     if mutation in {"failed", "unknown"}:
-        core.store.execute("UPDATE goals SET state=? WHERE goal_id=?",
+        core.store.execute('UPDATE goals SET state=%s WHERE goal_id=%s',
                            ("FAILED" if mutation == "failed" else "WAITING_INPUT", goal))
     elif mutation == "withdrawn":
         with core.store.transaction():

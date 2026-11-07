@@ -9,60 +9,15 @@ from pathlib import Path
 
 import httpx
 import pytest
-from pydantic_ai.toolsets import FunctionToolset
 
 from companion import beta_observation, budget, paid_budget, token_measurement
-from companion.agent_runtime import run_conversation
 from companion.cognition_read import CognitionRead, measurement
 from companion.contracts import CoreError
 from companion.dialogue_history import fit_context
 from companion.model import ModelClient
 from companion.store import encode
-from tests.owner_model_fixtures import authorized_job
-from tests.test_token_measurement import configure
-
-
-def native_job(core):
-    job_id = authorized_job(core)
-    return core.store.one("SELECT j.*,e.conversation_id,e.body_json,e.trace_id FROM jobs j "
-                          "JOIN events e USING(event_id) WHERE job_id=?", (job_id,))
-
-
-async def recorded_attempts(core, tmp_path, *, unknown=False):
-    configure(core, tmp_path)
-    job = native_job(core)
-    requests = []
-
-    def first() -> str:
-        """Read a synthetic observation."""
-        return "SYNTHETIC_PRIVATE_TOOL_RESULT" * 10
-
-    def second() -> str:
-        """Read a different synthetic observation."""
-        return "SYNTHETIC_SECOND_RESULT"
-
-    def provider(request):
-        payload = json.loads(request.content)
-        requests.append(payload)
-        result = {"choices": [{"message": {"content": "synthetic reply"}}]}
-        if len(requests) == 1:
-            result["choices"][0]["message"] = {"content": None, "tool_calls": [
-                {"id": name + "-call", "type": "function", "function": {
-                    "name": name, "arguments": "{}"}} for name in ("first", "second")]}
-        if not unknown or len(requests) == 1:
-            result["usage"] = {"prompt_tokens": 100, "completion_tokens": 4}
-        return httpx.Response(200, json=result)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
-        core.model = ModelClient(core.settings, client)
-        try:
-            await run_conversation(core, job, core.context(job),
-                                   toolsets=[FunctionToolset([first, second])])
-        except CoreError as error:
-            assert unknown and error.code == "MODEL_OUTCOME_UNKNOWN"
-        else:
-            assert not unknown
-    return job, requests
+from tests.support.context_meter_inspector import native_job, recorded_attempts
+from tests.support.token_measurement import configure
 
 
 @pytest.mark.parametrize("unknown", [False, True])
@@ -74,7 +29,7 @@ def test_native_inspector_projects_each_complete_request_without_recounting(
     tool_results = [m for m in requests[1]["messages"] if m["role"] == "tool"]
     assert {m["tool_call_id"] for m in tool_results} == {"first-call", "second-call"}
     assert len(requests[0]["tools"]) == len(requests[1]["tools"]) == 2
-    admissions = core.store.rows("SELECT * FROM model_admissions ORDER BY rowid")
+    admissions = core.store.rows('SELECT * FROM model_admissions ORDER BY record_sequence')
     before = list(core.store.db.iterdump())
     ledger = Path(core.settings.paid_model.journal_path).read_bytes()
 
@@ -166,14 +121,16 @@ def test_known_unstarted_attempt_is_not_provider_observed_usage(core, tmp_path):
 
 
 def test_media_reservation_is_an_estimate_and_not_observed_usage(core, tmp_path):
-    from tests.test_paid_image_budget import image_approval, image_messages, reserve_image
+    from tests.support.paid_image_budget import image_approval, image_messages, reserve_image
 
     configure(core, tmp_path)
     image_approval(core, tmp_path, provider="deepseek", model="deepseek-flash",
                    endpoint="https://api.deepseek.com")
     job_id, request_id = reserve_image(core, image_messages())
-    trace = core.store.one("SELECT e.trace_id FROM events e JOIN jobs j USING(event_id) "
-                           "WHERE j.job_id=?", (job_id,))["trace_id"]
+    trace = core.store.one((
+        'SELECT e.trace_id FROM events e JOIN jobs j USING(event_id) WHERE '
+        'j.job_id=%s'
+    ), (job_id,))["trace_id"]
     call = beta_observation.inspect_context(core.settings, trace)["trace"]["jobs"][0][
         "model_calls"][0]
     assert call["state"] == "RESERVED" and call["prompt_tokens"] is None
@@ -277,7 +234,7 @@ def test_real_http_and_independent_worker_expose_both_sdk_attempts(core, tmp_pat
                 raise
             assert child.returncode == 0, stderr.decode("utf-8", errors="replace")
             assert json.loads(stdout) == {"mock_provider_requests": 2}
-            trace_id = core.store.one("SELECT trace_id FROM events WHERE event_id=?",
+            trace_id = core.store.one('SELECT trace_id FROM events WHERE event_id=%s',
                                       (source["event_id"],))["trace_id"]
             trace = beta_observation.inspect_context(core.settings, trace_id)["trace"]
             calls = trace["jobs"][0]["model_calls"]
@@ -287,15 +244,20 @@ def test_real_http_and_independent_worker_expose_both_sdk_attempts(core, tmp_pat
             assert context["state"] == "RECORDED"
             assert context["source_validity"] == "NOT_REVALIDATED"
             assert context["pending"] is None and len(context["requests"]) == 2
-            saved = core.store.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+            saved = core.store.one('SELECT snapshots_json FROM agent_conversations WHERE job_id=%s',
                                   (job_id,))
             plan = next(item["metadata"]["core_context"]
                         for item in json.loads(saved["snapshots_json"])
                         if item["kind"] == "context_plan")
             assert context["plan_sha256"] == paid_budget.sha(plan)
             admissions = core.store.rows(
-                "SELECT a.* FROM model_admissions a JOIN model_usage m USING(request_id) "
-                "WHERE m.job_id=? ORDER BY m.rowid", (job_id,))
+                (
+                    (
+                        'SELECT a.* FROM model_admissions a JOIN model_usage '
+                        'm USING(request_id) WHERE m.job_id=%s ORDER BY '
+                        'm.record_sequence'
+                    )
+                ), (job_id,))
             assert len(admissions) == 2
             for record, call, admission in zip(context["requests"], calls, admissions, strict=True):
                 assert record["state"] == "ADMITTED"

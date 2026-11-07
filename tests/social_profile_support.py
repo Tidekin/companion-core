@@ -14,11 +14,11 @@ def confirmed_profile_material(core, *, number=800, text="我偏爱星空与简�
             subject=subject, kind=kind, fact_key="profile-preference-" + str(number), content=text,
             evidence_event_id=source["event_id"], evidence_quote=text,
         ), core.clock(), confirmed=False)
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (source["job_id"],))
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (source["job_id"],))
     if confirm:
         decision = ingest(core, number + 1, "/确认这一条 " + memory_id, origin=origin)
         core.memory.decide(memory_id, "confirm", core.clock(),
                            evidence_event_id=decision["event_id"])
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                            (decision["job_id"],))
     return memory_id

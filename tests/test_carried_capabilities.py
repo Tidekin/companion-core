@@ -8,34 +8,21 @@ import pytest
 
 from companion import budget, owner_authority
 from companion.capabilities import open_unknown, public_source_readiness, snapshot
-from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.retrieval import SemanticIndex
 from companion.store import encode
 from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
-from tests.model_carry_support import MESSAGES, migrated
+from tests.model_carry_support import MESSAGES
 from tests.owner_model_fixtures import authorized_job
 from tests.sdk_reader_fixture import answer, call
+from tests.support.bili_video_entrypoint import URL, reader_files, reader_once, upstream
+from tests.support.carried_capabilities import reader_carry
 from tests.support.core_http import real_core_http
-from tests.test_bili_video_entrypoint import TOKEN, URL, reader_files, reader_once, upstream
-from tests.test_exploration import configure
-from tests.test_model_carry_lifecycle import current_unknown
-from tests.test_native_bili_video import sdk_step
-from tests.test_paid_model_gate import approved_live
-from tests.test_reading_followup import admit
-
-
-def reader_carry(core, tmp_path, **limits):
-    configure(core)
-    core.settings.content_enabled = True
-    core.settings.rich_input_scope = "references_v1"
-    core.settings.observation_adapters["bili"] = ObservationAdapterConfig(
-        source="bilibili", token=TOKEN, reader_max_requests=6)
-    approved_live(core, tmp_path, concurrency=1, **limits)
-    authorized_job(core, purposes=("chat", "content", "exploration"))
-    return migrated(core, tmp_path, **limits)
+from tests.support.model_carry_lifecycle import current_unknown
+from tests.support.native_bili_video import sdk_step
+from tests.support.reading_followup import admit
 
 
 @pytest.mark.parametrize("later_unknown", [False, True])
@@ -53,7 +40,7 @@ def test_carried_unknown_does_not_block_reader_or_model_readiness(
     assert next(row for row in rows if row["id"] == "reading.bili")["state"] == "READY"
     assert not any("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" in row["reason_codes"] for row in rows)
     assert (list(core.store.db.iterdump()), journal.read_bytes()) == before
-    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                           (case.request_id,))["state"] == "UNKNOWN"
     with pytest.raises(CoreError, match="REPLY_CANCELLED"):
         budget.reserve(core.store, core.settings, case.job_id, "chat", MESSAGES, core.clock())
@@ -96,12 +83,12 @@ def test_signed_link_after_carry_reaches_independent_reader_and_sdk_context(
     case = reader_carry(core, tmp_path)
     if accounted:
         from companion import model_accounting
-        from tests.test_model_accounting import prepared
+        from tests.support.model_accounting import prepared
 
         request, private = prepared(core, tmp_path, case.request_id)
         result = model_accounting.record(core.store, core.settings, request, private, core.clock)
         assert result["accounted_micro_usd"] > request["previous_accounted_micro_usd"]
-    financial = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (case.request_id,))
+    financial = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (case.request_id,))
     config = BridgeConfig(owner_qq_id=core.settings.owner_qq_id,
         bot_qq_id=core.settings.bot_qq_id,
         bridge_token=core.settings.bridge_token.get_secret_value(),
@@ -129,7 +116,7 @@ def test_signed_link_after_carry_reaches_independent_reader_and_sdk_context(
                 "requests"] == []
 
     run(scenario())
-    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?", (case.request_id,)) == (
+    assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (case.request_id,)) == (
         financial)
 
 
@@ -158,9 +145,9 @@ def test_owner_authority_chat_waits_out_a_provider_slot_race(core, tmp_path):
     # single provider slot before admission must wait, not fail silently.
     reader_carry(core, tmp_path)
     job_id = authorized_job(core, number=3)
-    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+    job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job_id,))
     attempts = job["attempts"]
     core.fail_job(job, "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED")
-    assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?", (job_id,)) == {
+    assert core.store.one('SELECT state,attempts FROM jobs WHERE job_id=%s', (job_id,)) == {
         "state": "RETRY_WAIT", "attempts": attempts - 1}
-    assert core.store.rows("SELECT * FROM model_usage WHERE job_id=?", (job_id,)) == []
+    assert core.store.rows('SELECT * FROM model_usage WHERE job_id=%s', (job_id,)) == []

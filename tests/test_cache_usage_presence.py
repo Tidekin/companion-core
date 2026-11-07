@@ -3,65 +3,38 @@
 import json
 from pathlib import Path
 
-import httpx
 import pytest
 
-from companion import beta_observation, budget, cognition_read
+from companion import beta_observation, cognition_read
 from companion.agent_messages import to_runtime_response
-from companion.contracts import CoreError
-from companion.model import ModelClient, ModelResponse, ModelResponseError
+from companion.model import ModelResponse, ModelResponseError
 from companion.store import encode
-from tests.conftest import run
-from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
-
-MESSAGES = [{"role": "user", "content": "synthetic cache observation"}]
-ABSENT = object()
+from tests.support.cache_usage_presence import ABSENT, attempt
+from tests.support.paid_model import approved_live
 
 
-def attempt(core, *, cache=ABSENT, usage=ABSENT, status=200, number=1, marker=ABSENT):
-    request_id = budget.reserve(core.store, core.settings, authorized_job(core, number=number),
-                                "chat", MESSAGES, core.clock())
-    body = {"choices": [{"message": {"content": "synthetic reply"}}]}
-    if usage is ABSENT:
-        usage = {"prompt_tokens": 80, "completion_tokens": 3}
-        if cache is not ABSENT:
-            usage["prompt_cache_hit_tokens"] = cache
-    if usage != "NO_USAGE":
-        body["usage"] = usage
-    calls = []
+def test_overview_counts_only_current_sources_and_original_usage(core, tmp_path):
+    from companion.console_read import overview
 
-    class Client(ModelClient):
-        async def complete(self, *args, **kwargs):
-            result = await super().complete(*args, **kwargs)
-            if marker is not ABSENT:
-                result.cache_usage_present = marker
-            return result
-
-    async def exercise():
-        def provider(request):
-            calls.append(json.loads(request.content))
-            return httpx.Response(status, json=body)
-
-        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
-            try:
-                return await budget.complete(Client(core.settings, client), core.store,
-                    core.settings, request_id, MESSAGES, "chat", core.clock)
-            except CoreError as error:
-                return error
-
-    response = run(exercise())
-    assert len(calls) == 1
-    row = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
-    record = core.store.one("SELECT * FROM audit_log WHERE action='model.usage_diagnostic' "
-                            "AND entity_id=?", (request_id,))
-    return response, row, record
+    approved_live(core, tmp_path)
+    _, row, _ = attempt(core, cache=40)
+    summary = overview(core)["model"]
+    assert summary == dict(calls=1, observed_calls=1, cache_calls=1, uncertain_calls=0,
+                           cached=40, fresh=40, unknown_input=0, output=3,
+                           billed_micro_usd=row["billed_micro_usd"], complete=True)
+    core.store.execute((
+        'UPDATE events SET redacted=1 WHERE event_id IN (SELECT event_id FROM'
+        ' job_sources WHERE job_id=%s)'
+    ), (row["job_id"],))
+    assert overview(core)["model"]["calls"] == 0
 
 
 def projections(core, row):
     item = cognition_read.CognitionRead(core).page("model", record_id=row["request_id"])["items"][0]
-    trace = core.store.one("SELECT e.trace_id FROM jobs j JOIN events e USING(event_id) "
-                           "WHERE j.job_id=?", (row["job_id"],))["trace_id"]
+    trace = core.store.one((
+        'SELECT e.trace_id FROM jobs j JOIN events e USING(event_id) WHERE '
+        'j.job_id=%s'
+    ), (row["job_id"],))["trace_id"]
     inspected = beta_observation.inspect_context(core.settings, trace)
     calls = inspected["trace"]["jobs"][0]["model_calls"]
     call = next(c for c in calls if c["request_ref_sha256"] == beta_observation._hash(
@@ -154,7 +127,7 @@ def test_ambiguous_original_diagnostic_only_hides_cache(core, tmp_path, damage):
     detail = json.loads(record["safe_detail_json"])
     raw = record["safe_detail_json"]
     if damage in {"missing", "wrong_request"}:
-        core.store.execute("DELETE FROM audit_log WHERE audit_id=?", (record["audit_id"],))
+        core.store.execute('DELETE FROM audit_log WHERE audit_id=%s', (record["audit_id"],))
         if damage == "wrong_request":
             core.store.audit("model.usage_diagnostic", "other-request", "budget", core.clock(),
                              **detail)
@@ -181,7 +154,7 @@ def test_ambiguous_original_diagnostic_only_hides_cache(core, tmp_path, damage):
         # Model storage corruption explicitly; normal writes reject invalid JSON.
         core.store.execute("PRAGMA ignore_check_constraints=ON")
         try:
-            core.store.execute("UPDATE audit_log SET safe_detail_json=? WHERE audit_id=?",
+            core.store.execute('UPDATE audit_log SET safe_detail_json=%s WHERE audit_id=%s',
                                (raw, record["audit_id"]))
         finally:
             core.store.execute("PRAGMA ignore_check_constraints=OFF")

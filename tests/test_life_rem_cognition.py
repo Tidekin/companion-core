@@ -5,7 +5,7 @@ import pytest
 
 from tests.conftest import run
 from tests.support.core_http import real_core_http
-from tests.test_life_rem_consumption import draft, prepared
+from tests.support.life_rem_consumption import draft, prepared
 
 
 @pytest.mark.parametrize("change", ["none", "source", "output", "recall", "queued"])
@@ -17,8 +17,10 @@ def test_produced_life_creation_has_read_only_owner_cognition(core, tmp_path, ch
                 assert core.life_topics.consume_due(diary=core.diary)
                 job = core.store.one("SELECT job_id FROM rem_records")
                 if change == "queued":
-                    core.store.execute("UPDATE life_activity_results SET text='changed' "
-                                       "WHERE job_id=?", (retained["job_id"],))
+                    core.store.execute((
+                        "UPDATE life_activity_results SET text='changed' "
+                        'WHERE job_id=%s'
+                    ), (retained["job_id"],))
                 assert await core.run_once(job_id=job["job_id"])
             record = core.store.one("SELECT * FROM rem_records")
             usage = core.store.rows("SELECT * FROM model_usage")

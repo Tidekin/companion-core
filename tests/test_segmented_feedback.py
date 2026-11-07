@@ -9,20 +9,20 @@ from companion.transport import enqueue_reply_parts
 from scripts.summarize_beta_feedback import summarize
 from scripts.validate_beta_feedback import validate_record
 from tests.conftest import ingest
-from tests.test_p12_beta_operations import bundle, feedback
-from tests.test_segmented_delivery import PARTS, freeze
+from tests.support.p12_beta_operations import bundle, feedback
+from tests.support.segmented_delivery import PARTS, freeze
 
 
 def sample(core, *, visible=3, states=("SENT", "SENT", "SENT")):
     job, ids = freeze(core)
     for message_id, state in zip(ids, states, strict=True):
-        core.store.execute("UPDATE outbox SET state=?,sent_at=? WHERE message_id=?",
+        core.store.execute('UPDATE outbox SET state=%s,sent_at=%s WHERE message_id=%s',
                            (state, core.clock() if state == "SENT" else None, message_id))
     report = inspect_context(core.settings, "trace_test_1")
     record = feedback()
     record["phone"].update(expected_reply_count=3,
         reply_group_sha256=core.store.one(
-            "SELECT reply_group_sha256 FROM outbox WHERE message_id=?", (ids[0],),
+            'SELECT reply_group_sha256 FROM outbox WHERE message_id=%s', (ids[0],),
         )["reply_group_sha256"], received=None if visible is None else visible > 0,
         visible_reply_count=visible, duplicate_check_evidence_sha256="d" * 64)
     record["trace_ref_sha256"] = report["trace_ref_sha256"]
@@ -137,7 +137,7 @@ def test_redacted_or_damaged_frozen_groups_are_not_available_as_feedback_proof(
         with core.store.transaction():
             core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     elif mutation == "missing":
-        core.store.execute("DELETE FROM outbox WHERE message_id=?", (ids[2],))
+        core.store.execute('DELETE FROM outbox WHERE message_id=%s', (ids[2],))
     else:
         field, value = {"text": ("content_json", '{"text":"changed"}'),
                         "count": ("segment_count", 2),

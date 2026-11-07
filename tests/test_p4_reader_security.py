@@ -12,10 +12,10 @@ from source_reader.heybox_source import NativeHeyboxSource
 from source_reader.network import ReadFailure
 from source_reader.worker import read_result
 from tests.conftest import run
-from tests.test_heybox_reader import ITEM as HEYBOX_ITEM
-from tests.test_heybox_reader import POST, mock_pool
-from tests.test_plugin_readonly import NOW_DT, grant
-from tests.test_source_reader import ITEM, META, SUBTITLE, read, response
+from tests.support.heybox_reader import ITEM as HEYBOX_ITEM
+from tests.support.heybox_reader import POST, mock_pool
+from tests.support.plugin_readonly import NOW_DT, grant
+from tests.support.source_reader import ITEM, META, SUBTITLE, read, response
 
 
 @pytest.mark.parametrize("changed", ["none", "bvid", "aid", "cid"])

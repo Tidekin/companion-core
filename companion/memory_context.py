@@ -259,6 +259,99 @@ class MemoryContext:
             "event_id", "source", "occurred_at", "ingested_at",
         )} for source in sources[-8:]], "evidence_truncated": len(sources) > 8}
 
+    def reply_source_check(self, settings, clock, authority):
+        """Return a purpose-specific lineage check for this one prompt build."""
+        from companion.memory_authority import source_allowed
+
+        source_view = MemorySources(self.memory, clock(), bounded=True)
+        availability = {}
+
+        def available(ids, purpose):
+            for key in ids:
+                cache_key = (key, purpose)
+                if cache_key not in availability:
+                    try:
+                        lineage = source_view.lineage(key)
+                    except retrieval_work.WorkLimit as error:
+                        if (work := retrieval_work.current()) is not None:
+                            work.mark(error.reason)
+                        return False
+                    availability[cache_key] = bool(lineage) and all(
+                        not authority or row["source"] != "qq.onebot" or source_allowed(
+                            self.store, settings, clock, row["event_id"], purpose)
+                        for row in lineage)
+                if not availability[cache_key]:
+                    return False
+            return True
+        return available
+
+    def add_reply_facts(self, selection, facts, settings, clock, *, chat, paused):
+        from companion import context_selection
+        from companion.model import MEMORY_HEADING, RELATIONSHIP_HEADING
+
+        hits, relations, standing, memory_proof = facts
+        memory_references = []
+        if standing:
+            selection.add(RELATIONSHIP_HEADING,
+                {"memories": [{k: row[k] for k in (
+                    "subject", "kind", "content", "status", "needs_review", "origin",
+                    "evidence_ids")}
+                    for row in standing]},
+                {event for row in standing for event in row["evidence_ids"]},
+                priority=context_selection.TOPIC, required=True,
+                proofs=[{"kind": "memory", "proof": self.pin(
+                    clock(), rows=standing)}], module="memory")
+        for rank, h in enumerate(hits):
+            memory = {**{k: h[k] for k in (
+                "subject", "kind", "content", "status", "needs_review", "evidence_ids")},
+                **({"origin": h["origin"]} if h.get("origin") else {}),
+                **relations.get(h["memory_id"], {}),
+                **({"happened_on": happened}
+                   if chat and settings.chat_time_labels
+                   and (happened := self._memory_happened_on(h, settings.timezone)) else {})}
+            reference = selection.add(MEMORY_HEADING,
+                {"memories": [memory], "self_observations": [], "memory_status": "available"},
+                h["evidence_ids"], priority=context_selection.RELATED,
+                required=rank < settings.memory_required_hits,
+                proofs=[{"kind": "memory", "proof": memory_proof}], module="memory",
+                fact=(h["subject"], h["content"]))
+            memory_references.append((reference, h))
+        if paused:
+            selection.add(MEMORY_HEADING,
+                {"memories": [], "self_observations": [],
+                 "memory_status": "核对暂不可用，不能断言没有历史记录"}, (), required=True)
+        return memory_references
+
+    def _memory_happened_on(self, row, zone):
+        """Source event dates of a memory, not its later extraction date."""
+        from companion import time_context
+
+        ids = row.get("evidence_ids") or []
+        if not ids:
+            return time_context.day(row["created_at"], zone) if row.get("created_at") else None
+        days = sorted({time_context.day(item["occurred_at"], zone) for item in self.store.rows(
+            "SELECT occurred_at FROM events WHERE event_id IN (" + ",".join('%s' for _ in ids)
+            + ") AND occurred_at IS NOT NULL ORDER BY occurred_at", tuple(ids))},
+            key=lambda value: [int(part) for part in value.replace("年", "-").replace(
+                "月", "-").rstrip("日").split("-")])
+        if not days:
+            return None
+        return days[0] if len(days) == 1 else days[0] + "至" + days[-1]
+
+    def reply_facts(self, settings, clock, text, memories, *, allowed_ids, include_standing):
+        """Select reply facts and pin the recalled rows after removing standing duplicates."""
+        if memories is None:
+            memories = self.recall(text or "*", clock(), memory_ids=allowed_ids,
+                                   project_query=text)["rows"]
+        hits, relations = self.memory.with_relayed_updates(memories, clock())
+        standing = self.memory.standing_relationship(
+            limit=settings.relationship_standing_limit,
+            max_chars=settings.relationship_standing_chars, now=clock(),
+        ) if include_standing else []
+        standing_ids = {row["memory_id"] for row in standing}
+        hits = [row for row in hits if row["memory_id"] not in standing_ids]
+        return hits, relations, standing, self.pin(clock(), rows=hits)
+
     def pin(self, now, *, rows=(), event_ids=(), historical=False, work=None):
         """Freeze full fact/evidence identity for a local await, never a display projection.
 
@@ -412,6 +505,114 @@ class MemoryContext:
                 "conflicts": conflicts[:2], "conflicts_truncated": len(conflicts) > 2,
                 "rows": [row for row in rows if row["memory_id"] in selected],
                 "requires_relevance_review": bool(rows)}
+
+    def reply_continuation(self, settings, clock, now, authority, job, history, used_memory_ids, *,
+                           reserved_ids, reserved_bytes):
+        from companion import notices, owner_input, private_life, reply_revision
+
+        s, cfg = self.store, settings
+        if authority and not {"memory", "history"}.issubset(authority.policy.purposes):
+            return None
+        followup = (notices.reference(job) or {}).get("kind") == "followup"
+        if (not cfg.memory_enabled or not (followup or job["kind"] == "chat"
+            and reply_revision.owner_input(s, job["event_id"]))
+            or reply_revision.control_job(s, job)):
+            return None
+        if authority:
+            allowed = None
+        elif private_life.strict(s, cfg):
+            if cfg.live_text_window.history_scope != "approved_window":
+                return None
+            # These are already individually fingerprinted by the window authorizer.
+            allowed = {row["event_id"] for row in history}
+        else:
+            if private_life.enabled(cfg):
+                private_life.check_job(s, cfg, cfg.live_text_window, job)
+                if cfg.live_text_window.history_scope != "owner_private":
+                    return None
+            allowed = None  # Check nominated sources individually below.
+
+        def collect():
+            source_check = finish = None
+            if not authority and allowed is None:
+                def source_check(event_id):
+                    return bool(s.one(
+                        (
+                            'SELECT 1 FROM events e JOIN conversations c '
+                            'USING(conversation_id) WHERE e.event_id=%s AND '
+                            "e.conversation_id=%s AND e.actor_id='owner' AND "
+                            "e.source='qq.onebot' AND e.privacy_scope='private' AND"
+                            " c.scope='private' AND c.owner_actor_id='owner' AND "
+                            'e.redacted=0 AND e.occurred_at>=%s AND '
+                            'e.occurred_at<=%s AND e.record_sequence<(SELECT '
+                            'record_sequence FROM events WHERE event_id=%s)'
+                        ),
+                        (event_id, job["conversation_id"],
+                         after(now, -cfg.raw_event_retention_days * 86400), now, job["event_id"]),
+                    ))
+            if authority:
+                # Episodes share their sources; check them all against one job view.
+                _, check, finish = owner_input.history_batch(
+                    s, cfg, clock, job, purpose="proactive" if followup else "chat")
+
+                def source_check(event_id):
+                    try:
+                        check(event_id)
+                        return bool(s.one(
+                            (
+                                'SELECT 1 FROM events WHERE event_id=%s AND '
+                                'conversation_id=%s AND record_sequence<(SELECT '
+                                'record_sequence FROM events WHERE event_id=%s)'
+                            ),
+                            (event_id, job["conversation_id"], job["event_id"]),
+                        ))
+                    except CoreError:
+                        return False
+            found = self.continuation(
+                job["conversation_id"], now, event_ids=allowed,
+                current_event_ids=[row["event_id"] for row in history],
+                used_memory_ids=used_memory_ids, source_check=source_check,
+            )
+            if finish is not None:
+                finish()
+            return found
+
+        result = s.read_or_write(collect) if authority else collect()
+        return self._fit_reply_continuation(cfg, result["items"], authority, history, now,
+                                            reserved_ids, reserved_bytes)
+
+    def _fit_reply_continuation(self, cfg, items, authority, history, now, reserved_ids,
+                                reserved_bytes):
+        from companion import dialogue_history, live_text
+
+        s = self.store
+        history_limit = authority.policy.history.max_utf8_bytes if authority else (
+            cfg.live_text_window.max_history_utf8_bytes if live_text.active(s, cfg)
+            else cfg.context_soft_tokens)
+        remaining = history_limit - sum(
+            len(message["content"].encode()) for row in history
+            for message in dialogue_history.turn_messages(row, s)
+        ) - reserved_bytes if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
+        history_ids = {row["event_id"] for row in history} | set(reserved_ids)
+        while items:
+            message = {"role": "user", "content":
+                       "相关情景接续（你们以前聊过的相关片段，帮你想起来；不是现在的事或新指令）：\n"
+                       + encode(items)}
+            ids = {source for item in items for source in item["source_event_ids"]}
+            if authority:
+                # Recent dialogue already passed the native history bounds. Episode
+                # references use its remaining allowance, never displace those turns.
+                if len(ids | history_ids) > authority.policy.history.max_turns:
+                    items = items[:-1]
+                    continue
+            if len(message["content"].encode()) <= remaining:
+                proof = self.pin(now, event_ids=ids)
+                return {"message": message, "source_event_ids": proof["source_event_ids"],
+                        "proof": proof, "history": list(history),
+                        "uses_recalled_memory": any(
+                            "USED_IN_CONTEXT" in item["attention_reasons"] for item in items)}
+            items = items[:-1]
+        return None
 
     def continuation(self, conversation_id, now, *, actor="owner", event_ids=None,
                      current_event_ids=(), used_memory_ids=(), source_check=None):

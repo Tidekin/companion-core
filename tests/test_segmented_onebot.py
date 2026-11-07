@@ -17,10 +17,10 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.native_continuous_support import host
+from tests.support.live_text_window import live_fixture
 from tests.support.onebot import provider
 from tests.support.onebot_events import config, normalized, raw_event
-from tests.test_live_text_window import live_fixture
-from tests.test_trial_limits import native_quota
+from tests.support.trial_limits import native_quota
 
 PARTS = ["第一条是可以独立阅读的完整句子。", "第二条继续这次回复并保留真实内容。"]
 SEGMENT_POLICY = {"max_segments": 3, "min_chars": 12, "interval_ms": 1500}
@@ -119,7 +119,7 @@ def fragment_plan(core, tmp_path, *, segmented=True, cap=5, cumulative_cap=None)
     if segmented:
         value["live_text"].update(segmented_reply=SEGMENT_POLICY, max_send_attempts=cap)
     if cumulative_cap is not None:
-        from tests.test_cumulative_budget import policy
+        from tests.support.cumulative_budget import policy
 
         value["live_text"]["cumulative"] = policy(
             core, account={"send_attempts": cumulative_cap}
@@ -368,7 +368,7 @@ def test_later_fragment_cannot_replace_acknowledged_group_manifest(core, tmp_pat
         async with native_fragments(core, tmp_path) as (active, sends, _, calls):
             assert await active.pump()
             core.clock.advance(1.5)
-            row = core.store.rows("SELECT * FROM outbox ORDER BY rowid")[1]
+            row = core.store.rows('SELECT * FROM outbox ORDER BY record_sequence')[1]
             field, value = {
                 "index": ("segment_index", 3), "count": ("segment_count", 3),
                 "group": ("reply_group_id", "job_" + "c" * 32),
@@ -379,7 +379,7 @@ def test_later_fragment_cannot_replace_acknowledged_group_manifest(core, tmp_pat
                 with pytest.raises(sqlite3.IntegrityError):
                     core.store.execute(f"UPDATE outbox SET {field}=? WHERE message_id=?",
                                        (value, row["message_id"]))
-                assert core.store.one("SELECT * FROM outbox WHERE message_id=?",
+                assert core.store.one('SELECT * FROM outbox WHERE message_id=%s',
                                       (row["message_id"],)) == row
                 assert len(sends) == len(calls) == 1 and active.attempts() == {"ACK": 1}
                 return
@@ -490,8 +490,8 @@ def test_real_core_one_model_job_keeps_per_piece_approval(core, tmp_path):
 def test_stopped_v1_handoff_prepares_segment_schema_without_rewriting_prior_attempts(tmp_path):
     from companion_onebot_bridge.window import SendOperation
     from tests.support.onebot_events import raw_event
-    from tests.test_onebot_window import input_approval
-    from tests.test_onebot_window_handoff import CoreContract, plan_for
+    from tests.support.onebot_window import input_approval
+    from tests.support.onebot_window_handoff import CoreContract, plan_for
 
     cfg, plan, now = plan_for(tmp_path)
     contract = CoreContract(plan)

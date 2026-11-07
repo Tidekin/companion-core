@@ -1,50 +1,19 @@
 """Known-caption private reads preserve original finance and erase custody."""
 
 import asyncio
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from companion import meme_responsibility, meme_service
-from companion.config import ImageInputPolicy
 from companion.store import after
 from companion_meme_protocol import digest
 from tests.conftest import run
 from tests.meme_authority_fixture import admit, notice, stop
-from tests.test_meme_core import body, caption_environment, worker
-from tests.test_meme_service import claim, discovery_environment, reservation, result, submit
-
-
-def snapshot(core):
-    return {
-        "database": tuple(core.store.db.iterdump()),
-        "journal": Path(core.settings.paid_model.journal_path).read_bytes(),
-        "ledger": core.ledger.path.read_bytes(),
-    }
-
-
-@asynccontextmanager
-async def liability_case(core, tmp_path, monkeypatch, *, cap=50000):
-    paid = {"max_output_tokens": 4096, "meme_input": ImageInputPolicy(
-        approval_sha256="e" * 64, estimated_tokens_per_image=100,
-        max_bytes_per_image=4000000, max_pixels_per_image=16000000,
-        max_images_per_request=5)}
-    async with discovery_environment(core, tmp_path, monkeypatch, paid=paid,
-        meme_semantics_enabled=True, meme_caption_daily_micro_usd=cap) as values:
-        event, _, (client, config, grant, now) = values
-        submit(core, event)
-        attempt = claim(core)
-        reservation(core, attempt)
-        result(core, attempt)
-        payload = body(core, event, attempt, now)
-        response = await client.post("/internal/v1/memes/captions", json=payload)
-        assert response.status_code == 200, response.text
-        job_id = response.json()["job_id"]
-        yield SimpleNamespace(client=client, job_id=job_id, event=event, config=config,
-            grant=grant, now=now, payload=payload, attempt=attempt,
-            path="/internal/v1/memes/captions/" + job_id + "/responsibility")
+from tests.support.meme_core import body, caption_environment, worker
+from tests.support.meme_responsibility import liability_case, snapshot
+from tests.support.meme_service import claim, reservation, result
 
 
 async def unchanged_read(core, c, *, status=200):
@@ -139,7 +108,7 @@ def test_real_budget_refusal_has_terminal_no_admission_despite_a_preallocated_ui
         async with liability_case(core, tmp_path, monkeypatch, cap=1) as c:
             calls = []
             assert await worker(core, calls) and not calls
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (c.job_id,)) == {
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (c.job_id,)) == {
                 "state": "FAILED"}
             assert core.store.one("SELECT usage_request_id FROM meme_captions")["usage_request_id"]
             assert not core.store.rows("SELECT * FROM model_usage")
@@ -158,7 +127,7 @@ def test_unfunded_nonterminal_or_success_state_cannot_claim_no_admission(
     async def scenario():
         async with liability_case(core, tmp_path, monkeypatch) as c:
             # QUEUED is real admission; the other projections model damaged historical state.
-            core.store.execute("UPDATE jobs SET state=? WHERE job_id=?", (state, c.job_id))
+            core.store.execute('UPDATE jobs SET state=%s WHERE job_id=%s', (state, c.job_id))
             assert not core.store.rows("SELECT * FROM model_usage")
             value = await unchanged_read(core, c, status=409)
             assert value["error"] == "MEME_RESPONSIBILITY_UNVERIFIED"
@@ -187,39 +156,39 @@ def test_original_fee_and_complete_reuse_ancestry_are_required(core, tmp_path, m
             child = await add_reuse(core, c)
             # Admission has really retained a null child UID before root's actual reservation.
             assert await worker(core, [])
-            assert core.store.one("SELECT reuse_job_id FROM meme_captions WHERE job_id=?",
+            assert core.store.one('SELECT reuse_job_id FROM meme_captions WHERE job_id=%s',
                                   (child,))["reuse_job_id"] == root
             c.job_id, c.path = child, c.path.replace(root, child)
             if damage == "root_pointer":
-                core.store.execute("UPDATE meme_captions SET usage_request_id=NULL WHERE job_id=?",
+                core.store.execute('UPDATE meme_captions SET usage_request_id=NULL WHERE job_id=%s',
                                    (root,))
             elif damage == "cycle":
-                core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
                                    (child, root))
             elif damage == "missing":
                 # Explicit damaged-snapshot setup; restore FK enforcement before the read.
                 core.store.execute("PRAGMA foreign_keys=OFF")
-                core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
                                    ("job_" + "f" * 32, root))
                 core.store.execute("PRAGMA foreign_keys=ON")
             elif damage == "empty_parent":
                 core.store.execute("PRAGMA foreign_keys=OFF")
-                core.store.execute("UPDATE meme_captions SET reuse_job_id='' WHERE job_id=?",
+                core.store.execute("UPDATE meme_captions SET reuse_job_id='' WHERE job_id=%s",
                                    (root,))
                 core.store.execute("PRAGMA foreign_keys=ON")
             elif damage == "identity":
-                core.store.execute("UPDATE meme_captions SET asset_sha256=? WHERE job_id=?",
+                core.store.execute('UPDATE meme_captions SET asset_sha256=%s WHERE job_id=%s',
                                    ("f" * 64, root))
             elif damage == "limit":
                 monkeypatch.setattr(meme_responsibility, "MAX_ROWS", 1)
             elif damage == "admission":
-                core.store.execute("UPDATE model_admissions SET logical_request_id=?", (child,))
+                core.store.execute('UPDATE model_admissions SET logical_request_id=%s', (child,))
             value = await unchanged_read(core, c, status=200 if damage == "none" else 409)
             if damage == "none":
                 assert value["liability_kind"] == "USAGE"
                 assert value["usage_owner_job_id"] == root
                 assert value["usage"]["state"] == "SETTLED"
-                assert core.store.one("SELECT usage_request_id FROM meme_captions WHERE job_id=?",
+                assert core.store.one('SELECT usage_request_id FROM meme_captions WHERE job_id=%s',
                                       (child,))["usage_request_id"] is None
 
     run(scenario())
@@ -230,8 +199,8 @@ def test_terminal_target_cannot_hide_a_nonterminal_no_fee_ancestor(core, tmp_pat
         async with liability_case(core, tmp_path, monkeypatch, cap=1) as c:
             child = await add_reuse(core, c)
             assert await worker(core, [])
-            core.store.execute("UPDATE jobs SET state='FAILED' WHERE job_id=?", (child,))
-            core.store.execute("UPDATE jobs SET state='RUNNING' WHERE job_id=?", (c.job_id,))
+            core.store.execute("UPDATE jobs SET state='FAILED' WHERE job_id=%s", (child,))
+            core.store.execute("UPDATE jobs SET state='RUNNING' WHERE job_id=%s", (c.job_id,))
             c.path = c.path.replace(c.job_id, child)
             value = await unchanged_read(core, c, status=409)
             assert value["error"] == "MEME_RESPONSIBILITY_UNVERIFIED"
@@ -257,7 +226,7 @@ def test_original_custody_never_initializes_or_substitutes_evidence(
             elif case == "missing_journal":
                 await asyncio.to_thread(original.rename, tmp_path / "retained-original.jsonl")
             elif case == "authority_ref":
-                core.store.execute("UPDATE jobs SET authority_json='{}' WHERE job_id=?",
+                core.store.execute("UPDATE jobs SET authority_json='{}' WHERE job_id=%s",
                                    (c.job_id,))
             elif case == "journal_identity":
                 core.store.execute("UPDATE runtime_meta SET value='unrelated-id' "
@@ -307,7 +276,9 @@ def test_stopped_expired_recalled_and_erased_fees_remain_original_read_only_meta
                 raise ValueError("Synthetic loss after original dispatch and interruption")
 
             assert await worker(core, calls, hook=interrupt) and len(calls) == 1
-            original = core.store.one("SELECT state FROM jobs WHERE job_id=?", (c.job_id,))["state"]
+            original = core.store.one((
+                'SELECT state FROM jobs WHERE job_id=%s'
+            ), (c.job_id,))["state"]
             value = await unchanged_read(core, c)
             assert value["liability_kind"] == "USAGE" and value["usage"]["state"] == "UNKNOWN"
             assert value["job_state"] == original
@@ -411,9 +382,9 @@ async def renewed_caption(core, c, policy):
                                  "authority": active["authority"], "policy": policy})
     event, response = await admit(c.client, c.config, c.grant, c.now, 2)
     assert response.status_code == 202, response.text
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                        (response.json()["job_id"],))
-    revision = core.store.one("SELECT reply_revision FROM events WHERE event_id=?",
+    revision = core.store.one('SELECT reply_revision FROM events WHERE event_id=%s',
                               (event["event_id"],))["reply_revision"]
     meme_service.submit(core.store, core.settings, core.clock, meme_service.DiscoveryRequest(
         event_id=event["event_id"], reply_revision=revision,
@@ -450,7 +421,7 @@ def test_legally_redacted_original_policy_is_accounting_evidence_without_reactiv
             original_event = c.event
             scope = LifeShadowApproval(scope="owner_private_life_shadow_v1",
                 authorization_sha256="b" * 64, conversation_id=core.store.one(
-                    "SELECT conversation_id FROM events WHERE event_id=?",
+                    'SELECT conversation_id FROM events WHERE event_id=%s',
                     (c.event["event_id"],))["conversation_id"],
                 source_event_ids=[c.event["event_id"]], purposes=["PRIVATE_DIARY"],
                 expires_at=after(core.clock(), 3600), max_items=2)
@@ -570,10 +541,14 @@ def test_two_actual_fee_owners_in_a_damaged_chain_never_collapse_to_no_admission
             assert await worker(core, [])
             assert len(core.store.rows("SELECT request_id FROM model_usage")) == 2
             # Both fees are original journaled admissions; only the reuse projection is damaged.
-            fields = core.store.one("SELECT asset_sha256,cache_key,identity_json FROM "
-                                    "meme_captions WHERE job_id=?", (c.job_id,))
-            core.store.execute("UPDATE meme_captions SET reuse_job_id=?,asset_sha256=?,"
-                "cache_key=?,identity_json=? WHERE job_id=?",
+            fields = core.store.one((
+                'SELECT asset_sha256,cache_key,identity_json FROM '
+                'meme_captions WHERE job_id=%s'
+            ), (c.job_id,))
+            core.store.execute((
+                'UPDATE meme_captions SET reuse_job_id=%s,asset_sha256=%s,cac'
+                'he_key=%s,identity_json=%s WHERE job_id=%s'
+            ),
                 (c.job_id, *fields.values(), other))
             c.path = c.path.replace(c.job_id, other)
             assert (await unchanged_read(core, c, status=409))["error"] == (
@@ -596,7 +571,7 @@ def test_bounded_three_node_reuse_preserves_the_original_fee_or_complete_no_admi
             c.payload = copy.deepcopy(c.payload)
             c.payload["source_evidence"]["usage_basis"] += "; third retained source"
             grandchild = await add_reuse(core, c)
-            core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
+            core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
                                (child, grandchild))
             calls = []
 
@@ -607,9 +582,9 @@ def test_bounded_three_node_reuse_preserves_the_original_fee_or_complete_no_admi
             if state == "NO_ADMISSION":
                 # The original worker may detach failed predispatch children for later takeover.
                 # Retain the complete historical failed chain as a synthetic projection.
-                core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
                                    (root, child))
-                core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
                                    (child, grandchild))
                 core.store.execute("UPDATE jobs SET state='FAILED' WHERE kind='meme_caption'")
             c.path = c.path.replace(root, grandchild)
@@ -661,10 +636,12 @@ def test_unused_preallocated_pointers_still_require_a_consistent_original_chain(
             assert not core.store.rows("SELECT request_id FROM model_usage")
             assert not core.store.rows("SELECT request_id FROM model_admissions")
             # Explicit damaged terminal projection, retaining the real root's preallocated UID.
-            core.store.execute("UPDATE meme_captions SET reuse_job_id=?,usage_request_id=? "
-                "WHERE job_id=?", (root, "invalid" if damage == "invalid" else "model_" + "f" * 32,
+            core.store.execute((
+                'UPDATE meme_captions SET reuse_job_id=%s,usage_request_id=%s'
+                ' WHERE job_id=%s'
+            ), (root, "invalid" if damage == "invalid" else "model_" + "f" * 32,
                                   child))
-            core.store.execute("UPDATE jobs SET state='FAILED' WHERE job_id=?", (child,))
+            core.store.execute("UPDATE jobs SET state='FAILED' WHERE job_id=%s", (child,))
             c.path = c.path.replace(root, child)
             assert (await unchanged_read(core, c, status=409))["error"] == (
                 "MEME_RESPONSIBILITY_UNVERIFIED")

@@ -11,7 +11,7 @@ import pytest
 from companion import agent_runtime, budget, model, paid_budget, token_measurement
 from companion.agent_tools import core_query_tools
 from companion.contracts import CoreError
-from tests.test_owner_runtime import chat
+from tests.support.owner_runtime import chat
 
 
 @pytest.fixture
@@ -189,9 +189,9 @@ def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_module
 
     from pydantic import SecretStr
 
-    from tests import test_owner_input
+    from tests.support import owner_input as test_owner_input
     from tests.support.core_http import real_core_http
-    from tests.test_owner_input import captured, inbound
+    from tests.support.owner_input import captured, inbound
 
     monkeypatch.setenv("COMPANION_TELEMETRY", "1")
     monkeypatch.setenv("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")

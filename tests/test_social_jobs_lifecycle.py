@@ -15,8 +15,8 @@ from companion.social_autonomy import restore_social_autonomy
 from companion.social_autonomy_runtime import _expire, run_once
 from companion.store import Store, migrate
 from tests.conftest import run
-from tests.test_release_migration import TIMES, seed_legacy
-from tests.test_social_autonomy import background, planned
+from tests.support.release_migration import TIMES, seed_legacy
+from tests.support.social_autonomy import background, planned
 
 
 def deferred(core):
@@ -41,7 +41,7 @@ def test_cancelled_native_retry_never_rearms(core, reason):
             core.ledger.expire_events(core.store, [ref], core.clock())
     core.clock.advance(60)
     run(run_once(core.store, core.settings, module.model, core.clock))
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],)) == {
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],)) == {
         "state": "CANCELLED"}
     assert not module.model.calls and not core.store.rows("SELECT * FROM model_usage")
     assert not core.store.rows("SELECT * FROM outbox")
@@ -61,7 +61,7 @@ def test_reclaimed_job_fences_original_worker_before_native_reservation(core):
         module.check_retry_job(stale)
     with core.store.transaction():
         social_plan_jobs.fail(module, stale, "CLOUD_DAILY_BUDGET_EXHAUSTED")
-    assert core.store.one("SELECT * FROM jobs WHERE job_id=?", (current["job_id"],)) == current
+    assert core.store.one('SELECT * FROM jobs WHERE job_id=%s', (current["job_id"],)) == current
     assert module.check_retry_job(current)
     assert not core.store.rows("SELECT * FROM model_usage")
 

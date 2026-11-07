@@ -18,7 +18,7 @@ from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from tests.conftest import run
 from tests.support.failure_notice import assert_failure_notice
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 RULE = {
     "repo": "synthetic/pack",
@@ -205,11 +205,11 @@ def test_invalid_environment_is_not_silently_coerced(core, tmp_path, monkeypatch
 
 
 def queued_native_chat(core, tmp_path):
-    from tests.test_owner_runtime import chat
+    from tests.support.owner_runtime import chat
 
     _, job = chat(core, tmp_path)
     core.store.execute(
-        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=?", (job["job_id"],)
+        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=%s", (job["job_id"],)
     )
     return job
 
@@ -220,7 +220,7 @@ def test_prepare_failure_fences_fresh_and_persisted_native_chat(core, tmp_path, 
 
     from companion.agent_messages import from_wire_messages
     from companion.agent_persistence import ConversationStore
-    from tests.test_owner_runtime import chat
+    from tests.support.owner_runtime import chat
 
     _, job = chat(core, tmp_path)
     if saved:
@@ -233,7 +233,7 @@ def test_prepare_failure_fences_fresh_and_persisted_native_chat(core, tmp_path, 
             "READY",
         )
     core.store.execute(
-        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=?", (job["job_id"],)
+        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=%s", (job["job_id"],)
     )
     called = []
 
@@ -244,7 +244,7 @@ def test_prepare_failure_fences_fresh_and_persisted_native_chat(core, tmp_path, 
     monkeypatch.setattr(core.memes, "prepare_offer", fail)
     assert run(core.run_once("prepare-hook-check", job_id=job["job_id"]))
     assert called == [job["job_id"]]
-    row = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job["job_id"],))
+    row = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s', (job["job_id"],))
     assert row == {"state": "FAILED", "last_error_code": "MEME_ASSET_SOURCE_CHANGED"}
     assert not core.store.rows("SELECT * FROM model_usage")
     assert_failure_notice(core)
@@ -279,7 +279,7 @@ def test_offer_revocation_after_http_hook_fences_final_provider_io(core, tmp_pat
     asyncio.run(scenario())
     assert not providers
     assert_failure_notice(core)
-    assert core.store.one("SELECT last_error_code FROM jobs WHERE job_id=?", (job["job_id"],)) == {
+    assert core.store.one('SELECT last_error_code FROM jobs WHERE job_id=%s', (job["job_id"],)) == {
         "last_error_code": "MEME_ASSET_SOURCE_CHANGED"
     }
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
@@ -307,10 +307,10 @@ def test_classified_controls_keep_original_reply_without_offer_preparation(
             _, response = await admit(client, config, grant, now, text=command)
             assert response.status_code == 202, response.text
             job_id = response.json()["job_id"]
-            job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+            job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job_id,))
             assert reply_revision.control_job(core.store, job)
             assert await core.run_once("control-hook-check", job_id=job_id)
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job_id,)) == {
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job_id,)) == {
                 "state": "SUCCEEDED"
             }
             assert (
@@ -321,7 +321,7 @@ def test_classified_controls_keep_original_reply_without_offer_preparation(
             assert len(core.store.rows("SELECT * FROM outbox")) == 1
             assert (
                 core.store.one(
-                    "SELECT 1 FROM runtime_meta WHERE key=?", ("meme_offer:" + job["event_id"],)
+                    'SELECT 1 FROM runtime_meta WHERE key=%s', ("meme_offer:" + job["event_id"],)
                 )
                 is None
             )

@@ -25,6 +25,35 @@ class ExpressionLearning:
     def __init__(self, store, settings, clock):
         self.store, self.settings, self.clock = store, settings, clock
 
+    def reply_reference(self, settings, job, affect):
+        from companion import private_life, reply_revision
+
+        cfg, s = settings, self.store
+        if (not getattr(cfg, "expression_learning_enabled", False) or not cfg.expression_enabled
+            or job["kind"] != "chat" or not reply_revision.owner_input(s, job["event_id"])
+            or reply_revision.control_job(s, job) or private_life.strict(s, cfg)):
+            return None
+        learned = self.snapshot(cfg.owner_qq_id)
+        if learned["truncated"]:
+            return None
+        transient = {row["dimension"] for row in affect["evidence"]}
+        items = [item for item in learned["items"] if item["status"] == "STABLE"
+                 and 0 < item["strength"] <= 0.5 and item["dimension"] not in transient]
+        sources = {e["event_id"] for item in items for e in item["evidence"]}
+        if not items or any(not reply_revision.source_active(s, source) for source in sources):
+            return None
+        selected = [{key: item[key] for key in ("dimension", "value", "strength", "version")}
+                    for item in items]
+        return {"message": {"role": "user", "content":
+                    "主人长期表达偏好参考（仅调整表达；短时反馈优先，不改变事实或权限）：\n"
+                    + encode(selected)}, "source_event_ids": sorted(sources),
+                "snapshot": selected}
+
+    def revalidate_reply(self, settings, job, affect, proof):
+        current = self.reply_reference(settings, job, affect)
+        if current is None or current["snapshot"] != proof:
+            raise CoreError("PRIVACY_CHANGED", 409)
+
     def snapshot(self, requester):
         if requester != self.settings.owner_qq_id:
             raise CoreError("OWNER_REQUIRED", 403)

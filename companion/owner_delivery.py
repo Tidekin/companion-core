@@ -3,7 +3,15 @@
 import json
 from datetime import datetime
 
-from companion import cumulative, notices, owner_authority, owner_input, paid_budget, reply_revision
+from companion import (
+    cumulative,
+    notices,
+    owner_authority,
+    owner_input,
+    paid_budget,
+    reply_revision,
+    transport,
+)
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.private_life import event_digest
@@ -45,11 +53,11 @@ def _snapshots(store, job):
         raise CoreError(reply_revision.CANCELLED, 409) from error
 
 
-def _history_proof(store, job):
+def _history_proof(store, job, snapshots):
     if job["kind"] != "chat" or reply_revision.control_job(store, job):
         return []
     try:
-        history = [item["proof"] for item in _snapshots(store, job) if item["kind"] == "history"]
+        history = [item["proof"] for item in snapshots if item["kind"] == "history"]
         if len(history) != 1:
             raise ValueError("original history snapshot required")
         return history[0]
@@ -57,27 +65,26 @@ def _history_proof(store, job):
         raise CoreError(reply_revision.CANCELLED, 409) from error
 
 
-def _images(store, settings, clock, job, *, executing):
+def _images(store, settings, clock, job, snapshots, *, executing):
     from companion import agent_images
 
     try:
-        saved = [item["item_ids"] for item in _snapshots(store, job) if item["kind"] == "images"]
+        saved = [item["item_ids"] for item in snapshots if item["kind"] == "images"]
         # A frozen text reply consumes the signed evidence, not original pixels.
-        actual = [row["item_id"] for row, _ in agent_images.input_sources(
-            store, settings, clock, job, executing=executing)]
+        actual = agent_images.context_item_ids(store, settings, clock, job, executing=executing)
         if saved != ([actual] if actual else []):
             raise ValueError("original image snapshots changed")
     except (ValueError, KeyError, TypeError, CoreError) as error:
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
 
 
-def _memories(store, settings, clock, job, view):
+def _memories(store, settings, clock, view, snapshots):
     from companion.memory import Memory
     from companion.memory_context import MemoryContext
     from companion.privacy import ErasureLedger
 
     try:
-        proofs = [item["proof"] for item in _snapshots(store, job) if item["kind"] == "memory"]
+        proofs = [item["proof"] for item in snapshots if item["kind"] == "memory"]
         if proofs:
             owner_authority.current(store, settings, clock, purpose="memory",
                                      authority=view.authority)
@@ -90,12 +97,11 @@ def _memories(store, settings, clock, job, view):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
 
 
-def _readings(store, settings, clock, job, *, executing):
+def _readings(store, settings, clock, job, snapshots, *, executing):
     from companion.agent_reading import revalidate_results
 
     try:
-        revalidate_results(store, settings, clock, job, _snapshots(store, job),
-                           executing=executing)
+        revalidate_results(store, settings, clock, job, snapshots, executing=executing)
     except (ValueError, KeyError, TypeError, CoreError) as error:
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
 
@@ -113,15 +119,18 @@ def _sources(store, settings, clock, job, *, executing=False):
     # Older prepared deliveries retain their original responsibility. New tasks
     # carry a signed configuration binding as well as their existing source proof.
     runtime_config.get(store, settings, "job:" + job["job_id"])
+    snapshots, history = [], []
     if job["kind"] == "chat":
         owner_input.source(store, settings, view, job["event_id"], clock(), allow_commands=True)
-        owner_input.check_history(store, settings, clock, job, _history_proof(store, job))
-        _images(store, settings, clock, job, executing=executing)
-        _memories(store, settings, clock, job, view)
-        _readings(store, settings, clock, job, executing=executing)
+        snapshots = _snapshots(store, job)
+        history = _history_proof(store, job, snapshots)
+        owner_input.check_history(store, settings, clock, job, history)
+        _images(store, settings, clock, job, snapshots, executing=executing)
+        _memories(store, settings, clock, view, snapshots)
+        _readings(store, settings, clock, job, snapshots, executing=executing)
         from companion.agent_singing import revalidate
 
-        revalidate(store, settings, clock, job, _snapshots(store, job))
+        revalidate(store, settings, clock, job, snapshots)
     elif job["kind"] == "activity":
         notices.validate(store, settings, job, clock())
     elif job["kind"] == "poke":
@@ -130,7 +139,12 @@ def _sources(store, settings, clock, job, *, executing=False):
         poke.check_job(store, settings, view, job, clock=clock)
     else:
         raise CoreError("OWNER_DELIVERY_JOB_REQUIRED", 403)
-    return view
+    return view, snapshots, _context_hashes(history, snapshots)
+
+
+def _context_hashes(history, snapshots):
+    return {"history_sha256": paid_budget.sha(history),
+            "context_sha256": paid_budget.sha(snapshots)}
 
 
 def _usage(store, job, view, snapshots, message_id, *, group=None):
@@ -175,7 +189,7 @@ def _preview_request(store, job, group, proof):
     return proof["request_id"]
 
 
-def _material(store, row, job, view, requests, snapshots, *, meme_binding=None):
+def _material(store, row, job, view, requests, context_hashes, *, meme_binding=None):
     from companion.agent_output import reply_format, song_choice
 
     event = store.one('SELECT events.event_id AS event_id, events.schema_version AS '
@@ -198,8 +212,7 @@ def _material(store, row, job, view, requests, snapshots, *, meme_binding=None):
             "message_id": row["message_id"], "event_id": row["origin_event_id"],
             "event_sha256": event_digest(event), "content_sha256": row["content_sha256"],
             "delivery_key": row["delivery_key"], "action_type": row["action_type"],
-            "history_sha256": paid_budget.sha(_history_proof(store, job)),
-            "context_sha256": paid_budget.sha(snapshots),
+            **context_hashes,
             "request_ids": requests,
             **({"reply_format": "voice"} if job["kind"] == "chat"
                and "voice" in view.policy.purposes
@@ -267,6 +280,12 @@ def _failure_material(store, row, job, view):
             "action_type": row["action_type"]}
 
 
+def bind_material(store, message_id, authority, material):
+    """Pin the checked owner grant and its original evidence to the same outbox item."""
+    transport.bind_authority(store, message_id, authority)
+    store.insert("runtime_meta", key=DELIVERY + message_id, value=encode(material))
+
+
 def record_failure_notice(store, settings, clock, job_id, message_id):
     """Bind Core's fixed failure wording to the failed job's own current owner grant.
 
@@ -295,9 +314,7 @@ def record_failure_notice(store, settings, clock, job_id, message_id):
     if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
         raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
     material = _failure_material(store, row, job, view)
-    store.execute('UPDATE outbox SET authority_json = %s WHERE message_id = %s',
-                  (encode(view.authority.as_dict()), message_id))
-    store.insert("runtime_meta", key=DELIVERY + message_id, value=encode(material))
+    bind_material(store, message_id, view.authority.as_dict(), material)
 
 
 def record_replies(store, settings, clock, job, message_ids):
@@ -332,11 +349,10 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
         raise RuntimeError("owner delivery recording requires the enqueue transaction")
     if not message_ids:
         return
-    view = _sources(store, settings, clock, job, executing=executing)
-    first = store.one('SELECT action_type FROM outbox WHERE message_id = %s', (message_ids[0],))
+    view, snapshots, context_hashes = _sources(store, settings, clock, job, executing=executing)
+    first = store.one('SELECT action_type FROM outbox WHERE message_id=%s', (message_ids[0],))
     group = None if first and first["action_type"] == "qq.private.poke" else reply_group(
         store, message_ids[0])
-    snapshots = _snapshots(store, job)
     requests = _usage(store, job, view, snapshots, message_ids[0], group=group)
     if group:
         envelopes = segment_envelopes(group)
@@ -386,18 +402,19 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
             '= %s', (message_id,))
         if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
             raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
-        material = _material(store, row, job, view, requests, snapshots,
+        material = _material(store, row, job, view, requests, context_hashes,
                               meme_binding=_meme_binding(store, settings, clock, job, row))
         if job["kind"] == "poke":
             from companion import poke
 
             poke.check_delivery(store, settings, view, message_id, clock=clock)
-        store.execute('UPDATE outbox SET authority_json = %s WHERE message_id = %s',
-                      (encode(view.authority.as_dict()), message_id))
-        store.insert("runtime_meta", key=DELIVERY + message_id, value=encode(material))
+        bind_material(store, message_id, view.authority.as_dict(), material)
 
 
 def check_delivery(store, settings, clock, message_id, *, check=None):
+    if not store.in_transaction:
+        return store.read_or_write(
+            lambda: check_delivery(store, settings, clock, message_id, check=check))
     from companion.social import proactive_allowed
     from companion.transport import check_segment_ready, reply_group
 
@@ -430,8 +447,7 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
                 or material != _failure_material(store, row, job, view)):
             raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     else:
-        view = _sources(store, settings, clock, job)
-        snapshots = _snapshots(store, job)
+        view, snapshots, context_hashes = _sources(store, settings, clock, job)
         # Reuse only inside this exact transaction/snapshot. Every later RPC
         # still re-reads current authorization, sources, lease and segment state.
         if row["reply_group_id"] and store.frozen_scope is not None:
@@ -440,7 +456,7 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
 
         if (job["state"] != "SUCCEEDED"
             or json.loads(row["authority_json"]) != view.authority.as_dict()
-            or material != _material(store, row, job, view, requests, snapshots,
+            or material != _material(store, row, job, view, requests, context_hashes,
                 meme_binding=_meme_binding(store, settings, clock, job, row))):
             raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     reply_revision.check_delivery(store, message_id)

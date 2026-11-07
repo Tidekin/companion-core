@@ -8,8 +8,8 @@ from companion import agent_images, image_spool, owner_authority
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from tests.conftest import run
-from tests.test_native_image_pipeline import admit_image, claim, pixels, upload_headers
-from tests.test_prepare_owner_input import window
+from tests.support.native_image_pipeline import admit_image, claim, pixels, upload_headers
+from tests.support.prepare_owner_input import window
 
 
 @pytest.mark.parametrize("state", ["FETCHING", "UNKNOWN"])
@@ -82,24 +82,27 @@ def test_download_expiry_does_not_reinterpret_unproven_or_staged_responsibility(
                 path.parent.mkdir(mode=0o700, exist_ok=True)
                 path.write_bytes(b"interrupted original write")
             elif evidence == "source_hash":
-                body = json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                body = json.loads(core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                                 (event["event_id"],))["body_json"])
                 body["rich"]["segments"][0]["source_sha256"] = "f" * 64
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                    (encode(body), event["event_id"]))
             elif evidence == "capture_signature":
-                saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                saved = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                                  (source_key,))["value"])
                 saved["capture"]["signature"] = "0" * 128
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                                    (encode(saved), source_key))
             elif evidence == "job_authority":
-                core.store.execute("UPDATE jobs SET authority_json='{}' WHERE event_id=?",
+                core.store.execute("UPDATE jobs SET authority_json='{}' WHERE event_id=%s",
                                    (event["event_id"],))
             elif evidence == "source_pointer":
-                core.store.execute("UPDATE content_items SET target_url='https://example.invalid/x'")
+                core.store.execute(
+                    'UPDATE content_items SET '
+                    "target_url='https://example.invalid/x'"
+                )
             elif evidence == "legacy":
-                core.store.execute("DELETE FROM runtime_meta WHERE key=?", (source_key,))
+                core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (source_key,))
             elif evidence == "staged":
                 core.store.insert("runtime_meta", key="live_text_image_upload:" + item["item_id"],
                                   value="{}")

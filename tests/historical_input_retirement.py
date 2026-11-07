@@ -1,6 +1,6 @@
 """Synthetic retained v1 custody for original revocation and read-only validators.
 
-This follows tests.test_legacy_owner_input.archived and the schema/record seeding in
+This follows tests.support.legacy_owner_input.archived and the schema/record seeding in
 tests.test_native_image_migration. These fixtures do not execute retired approvals
 or invoke a model/provider.
 The signed capture, terminal rows and fees below are explicit historical fixtures,
@@ -26,9 +26,9 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow
 from tests.support.core_http import real_core_http
+from tests.support.onebot_capture import pinned_plan
 from tests.support.onebot_events import raw_event
-from tests.test_onebot_capture import pinned_plan
-from tests.test_private_companion import companion_options
+from tests.support.private_companion import companion_options
 
 
 def settled_usage(core, approval, job, *, scenario):
@@ -36,7 +36,10 @@ def settled_usage(core, approval, job, *, scenario):
     request = uid("model")
     contract = paid_budget.sha(paid_budget.snapshot(core.settings))
     path = str(Path(core.settings.paid_model.journal_path).resolve())
-    core.store.execute("INSERT OR IGNORE INTO model_budget_windows VALUES (?,?)",
+    core.store.execute((
+        'INSERT INTO model_budget_windows (window_id,contract_sha256) VALUES '
+        '(%s,%s) ON CONFLICT DO NOTHING'
+    ),
                        (approval.window_id, contract))
     core.store.insert("model_usage", usage_id=uid("usage"), request_id=request,
         job_id=job["job_id"], scenario=scenario, provider=core.settings.provider,
@@ -67,15 +70,17 @@ def seed_input(core, window, *, failure, number=1, text="今天想聊聊茶", me
     event = normalize(frame, cfg, now=core.clock.now.timestamp(),
                       rich_input_scope="references_v1" if failure == "image" else "none",
                       image_scope="owner_image_v1" if failure == "image" else "none")
-    conversation = core.store.one("SELECT conversation_id FROM conversations WHERE platform='qq' "
-        "AND platform_session_key=?", (cfg.origin,))
+    conversation = core.store.one((
+        "SELECT conversation_id FROM conversations WHERE platform='qq' AND "
+        'platform_session_key=%s'
+    ), (cfg.origin,))
     conversation_id = conversation["conversation_id"] if conversation else uid("conversation")
     if not conversation:
         core.store.insert("conversations", conversation_id=conversation_id, platform="qq",
             platform_session_key=cfg.origin, scope="private", owner_actor_id="owner",
             created_at=now, reply_revision=number)
     else:
-        core.store.execute("UPDATE conversations SET reply_revision=? WHERE conversation_id=?",
+        core.store.execute('UPDATE conversations SET reply_revision=%s WHERE conversation_id=%s',
                            (number, conversation_id))
     core.store.insert("events", event_id=event["event_id"], schema_version=1, source="qq.onebot",
         source_event_id=event["source_event_id"], conversation_id=conversation_id, actor_id="owner",
@@ -89,8 +94,10 @@ def seed_input(core, window, *, failure, number=1, text="今天想聊聊茶", me
     core.store.insert("jobs", job_id=job_id, event_id=event["event_id"], kind="chat", state=state,
         idempotency_key=job_id, attempts=1, last_error_code=code, created_at=now, updated_at=now)
     core.store.insert("job_sources", job_id=job_id, event_id=event["event_id"])
-    job = core.store.one("SELECT j.*,e.conversation_id,e.trace_id FROM jobs j JOIN events e "
-                         "USING(event_id) WHERE job_id=?", (job_id,))
+    job = core.store.one((
+        'SELECT j.*,e.conversation_id,e.trace_id FROM jobs j JOIN events e '
+        'USING(event_id) WHERE job_id=%s'
+    ), (job_id,))
     approval = core.settings.live_text_window
     capture = dict(kind="authenticated_onebot_ws", window_sha256=plan.sha256,
         event_id=event["event_id"], source_event_id=event["source_event_id"],
@@ -203,10 +210,18 @@ async def historical_input(core, tmp_path, *, failure="budget", scope_options=No
                 for name, value in ((live_text.BINDING, binding),
                     (live_text.HISTORY + plan.sha256, {"state": state, "binding": binding,
                         "approval": approval.model_dump(mode="json")})):
-                    core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                    core.store.execute((
+                        'INSERT INTO runtime_meta (key,value) VALUES (%s,%s) '
+                        'ON CONFLICT(key) DO UPDATE SET '
+                        'value=excluded.value,record_sequence=DEFAULT'
+                    ),
                                        (name, encode(value) if isinstance(value, dict) else value))
                 if stopped:
-                    core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                    core.store.execute((
+                        'INSERT INTO runtime_meta (key,value) VALUES (%s,%s) '
+                        'ON CONFLICT(key) DO UPDATE SET '
+                        'value=excluded.value,record_sequence=DEFAULT'
+                    ),
                                        (live_text.STOP + plan.sha256, "OWNER_STOP"))
                     append_history(window, "STOP", {"reason": "OWNER_STOP"})
                     append_history(window, "CORE_STOP_CONFIRMED", {})

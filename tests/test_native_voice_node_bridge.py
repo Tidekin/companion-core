@@ -18,13 +18,13 @@ from companion_onebot_bridge.network import private_http_client
 from companion_voice_node.worker import local_manifest
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
-from tests.test_onebot_voice_media import URL, wav
-from tests.test_onebot_voice_pipeline import capture, media_row, pump, tick
-from tests.test_prepare_owner_input import native_spool, window
-from tests.test_voice_jobs import TEXT, voice_config
-from tests.test_voice_node_api import independent_node, tls_core
-from tests.test_voice_node_worker import child_receipts
-from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
+from tests.support.onebot_voice_media import URL, wav
+from tests.support.onebot_voice_pipeline import capture, media_row, pump, tick
+from tests.support.prepare_owner_input import native_spool, window
+from tests.support.voice_jobs import TEXT, voice_config
+from tests.support.voice_node_api import independent_node, tls_core
+from tests.support.voice_node_worker import child_receipts
+from tests.support.voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 
 
 @pytest.mark.parametrize("reply_mode", ["auto", "model", "mixed"])
@@ -70,14 +70,14 @@ def test_real_voice_nodes_feed_and_receive_native_bridge_custody(core, tmp_path,
                             transport=httpx.MockTransport(protocol)) as native:
                     client.event_hooks["request"].append(inspect)
                     event = await capture(runtime, client, native)
-                    original = core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                    original = core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                                (event["event_id"],))["body_json"]
                     await pump(runtime, client, native).execute(media_row(runtime))
                     worker_config = node_config.model_copy(update={"core_origin": origin})
                     await independent_node(worker_config, certificate, counter, tmp_path,
                                            core.clock.now.timestamp())
                     if reply_mode in {"model", "mixed"}:
-                        job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
+                        job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s',
                                              (event["event_id"],))
                         args, output = tmp_path / "sdk.pickle", tmp_path / "sdk-requests.json"
                         parts = [{"kind": "voice", "text": TEXT}]
@@ -126,11 +126,11 @@ def test_real_voice_nodes_feed_and_receive_native_bridge_custody(core, tmp_path,
                         {"state": "SENT", "attempt_count": 1}] * (
                             2 if reply_mode == "mixed" else 1)
                     assert core.store.rows(
-                        "SELECT operation,state FROM voice_jobs ORDER BY rowid") == [
+                        'SELECT operation,state FROM voice_jobs ORDER BY record_sequence') == [
                         {"operation": "asr", "state": "TRANSCRIBED"},
                         {"operation": "tts", "state": "READY"}]
                     assert len(child_receipts(counter)) == 2
-                    assert core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                    assert core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                         (event["event_id"],))["body_json"] == original
                     assert not core.store.rows("SELECT * FROM memories")
                     runtime.verify()

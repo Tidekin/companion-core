@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+from companion import job_queue
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode, uid
@@ -50,36 +51,19 @@ def _put(store, key, value):
     )
 
 
+# Keep the revision projection independent of physical record ordering columns.
+_REVISION_FIELDS = (
+    "r.grant_id, r.revision, r.operation_id, r.request_sha256, r.state, r.policy_json, "
+    "r.policy_sha256, r.policy_redacted, r.restore_generation, r.predecessor_sha256, "
+    "r.record_sha256, r.journal_id, r.journal_path, r.created_at"
+)
+
+
 def _latest(store):
-    pointer = _meta(store, CURRENT)
-    return (
-        store.one(
-            (
-                'SELECT owner_authority_revisions.grant_id AS grant_id, '
-                'owner_authority_revisions.revision AS revision, '
-                'owner_authority_revisions.operation_id AS operation_id,'
-                ' owner_authority_revisions.request_sha256 AS '
-                'request_sha256, owner_authority_revisions.state AS '
-                'state, owner_authority_revisions.policy_json AS '
-                'policy_json, owner_authority_revisions.policy_sha256 '
-                'AS policy_sha256, owner_authority_revisions.policy_reda'
-                'cted AS policy_redacted, '
-                'owner_authority_revisions.restore_generation AS '
-                'restore_generation, '
-                'owner_authority_revisions.predecessor_sha256 AS '
-                'predecessor_sha256, '
-                'owner_authority_revisions.record_sha256 AS '
-                'record_sha256, owner_authority_revisions.journal_id AS '
-                'journal_id, owner_authority_revisions.journal_path AS '
-                'journal_path, owner_authority_revisions.created_at AS '
-                'created_at FROM owner_authority_revisions AS '
-                'owner_authority_revisions WHERE '
-                'owner_authority_revisions.record_sha256 = %s'
-            ),
-            (pointer,),
-        )
-        if pointer
-        else None
+    return store.one(
+        f"SELECT {_REVISION_FIELDS} FROM runtime_meta pointer "
+        "JOIN owner_authority_revisions r ON r.record_sha256 = NULLIF(pointer.value, '') "
+        "WHERE pointer.key = %s", (CURRENT,),
     )
 
 
@@ -243,9 +227,12 @@ def validate_projection(store, records, journal_id, journal_path):
 
 
 def custody(store, settings, *, settlement=False):
+    return _journal_custody(store, settings, _latest(store), settlement=settlement)
+
+
+def _journal_custody(store, settings, row, *, settlement=False):
     from companion import paid_budget
 
-    row = _latest(store)
     approval = settings.paid_model
     if row:
         approval = SimpleNamespace(journal_path=row["journal_path"])
@@ -258,14 +245,22 @@ def current(store, settings, clock, *, purpose=None, authority=None):
     """Current policy plus original journal custody; never returns a synthetic window."""
     from companion.live_text import _ledger_custody
 
-    if settings.owner_runtime.mode != "ENABLED" or _meta(store, MODE) != "ENABLED":
+    if settings.owner_runtime.mode != "ENABLED":
         raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
-    row = _latest(store)
+    row = store.one(
+        f"SELECT {_REVISION_FIELDS}, mode.value AS runtime_mode, "
+        "generation.value AS runtime_generation FROM runtime_meta mode "
+        "LEFT JOIN runtime_meta pointer ON pointer.key = %s "
+        "LEFT JOIN owner_authority_revisions r ON r.record_sha256 = NULLIF(pointer.value, '') "
+        "LEFT JOIN runtime_meta generation ON generation.key = %s "
+        "WHERE mode.key = %s", (CURRENT, GENERATION, MODE),
+    )
+    if not row or row["runtime_mode"] != "ENABLED":
+        raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
     if (
-        not row
-        or row["state"] != "ACTIVE"
+        row["state"] != "ACTIVE"
         or row["policy_redacted"]
-        or row["restore_generation"] != _meta(store, GENERATION)
+        or row["restore_generation"] != row["runtime_generation"]
     ):
         raise CoreError("OWNER_AUTHORITY_REQUIRED", 403)
     ref = reference(row)
@@ -281,7 +276,11 @@ def current(store, settings, clock, *, purpose=None, authority=None):
         raise problem
     if purpose is not None and purpose not in policy.purposes:
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
-    custody(store, settings)
+    if store.in_read_snapshot:
+        # The revision and its path remain visible in this one native snapshot.
+        _journal_custody(store, settings, row)
+    else:
+        custody(store, settings)
     _ledger_custody(store, settings)
     if policy.expires_at is not None and datetime.fromisoformat(clock()) >= policy.expires_at:
         raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
@@ -333,10 +332,7 @@ def bind_job(store, settings, clock, job_id, *, purpose):
     saved = json.loads(row["authority_json"])
     if saved and saved != view.authority.as_dict():
         raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
-    store.execute(
-        "UPDATE jobs SET authority_json = %s WHERE job_id = %s",
-        (encode(view.authority.as_dict()), job_id),
-    )
+    job_queue.bind_authority(store, job_id, view.authority.as_dict())
     return view
 
 
@@ -881,7 +877,7 @@ def restore(store):
 
 def status(store, settings, clock):
     try:
-        view = current(store, settings, clock)
+        view = store.read_or_write(lambda: current(store, settings, clock))
         return {"state": "ACTIVE", "authority": view.authority.as_dict()}
     except CoreError as error:
         return {"state": "OFF", "code": error.code}

@@ -12,8 +12,8 @@ from companion.store import migrate
 from companion.transport import begin_send, reconcile_delivery
 from companion.worker_lock import single_worker
 from tests.conftest import ingest, run
-from tests.test_m0 import lease
-from tests.test_m1 import remember
+from tests.support.basic_chat import lease
+from tests.support.confirmed_memory import remember
 
 
 def test_retired_astrbot_handler_stops_without_new_spooling(core, tmp_path, monkeypatch):

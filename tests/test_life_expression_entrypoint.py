@@ -1,10 +1,6 @@
 """Real consume HTTP and independent native Life process preserve original wording."""
 
-import asyncio
 import json
-import os
-import subprocess
-import sys
 
 import httpx
 import pytest
@@ -13,8 +9,9 @@ from pydantic import SecretStr
 from companion.reply_segments import SegmentedReplyConfig
 from tests.conftest import run
 from tests.support.core_http import real_core_http
-from tests.test_life_expression_consumption import prepared, request
-from tests.test_social_owner_authority import stop
+from tests.support.life_expression_consumption import prepared, request
+from tests.support.life_expression_entrypoint import native_child
+from tests.support.social_owner_authority import stop
 
 
 @pytest.fixture(autouse=True)
@@ -23,24 +20,6 @@ def close_provider_clients(core):
     yield
     for client in core.authority_test_clients:
         run(client.aclose())
-
-
-async def native_child(core, tmp_path, source, destination, number, *, wording=None):
-    config = tmp_path / f"life-{number}.json"
-    result = tmp_path / f"life-{number}-result.json"
-    config.write_text(json.dumps({
-        "settings": core.settings.model_dump(mode="python"), "now": core.clock(),
-        "source_id": source, "destination": destination, "result_path": str(result),
-        "wording": wording,
-    }, default=lambda value: value.get_secret_value()
-       if isinstance(value, SecretStr) else str(value)), encoding="utf-8")
-    process = await asyncio.to_thread(subprocess.run,
-        [sys.executable, "-B", "-m", "tests.life_expression_process", str(config)],
-        capture_output=True, timeout=60)
-    assert process.returncode == 0, process.stderr.decode(errors="replace")
-    outcome = json.loads(result.read_text(encoding="utf-8"))
-    assert outcome["pid"] != os.getpid()
-    return outcome
 
 
 @pytest.mark.parametrize("outcome", ["SENT", "ERASE", "UNKNOWN"])

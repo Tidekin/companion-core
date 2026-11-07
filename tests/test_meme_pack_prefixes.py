@@ -10,12 +10,20 @@ import pytest
 from companion_meme_sources.community import CommunityPacks
 from companion_meme_sources.review import TrustedReviewer
 from companion_onebot_bridge.meme_discovery import run_discovery
-from tests.test_meme_pack_files import MANIFEST, REPO, REVISION, RULE, Upstream, blob_sha, discover
-from tests.test_meme_pack_files import catalog as catalog
-from tests.test_meme_runtime import RULE as LEGACY_RULE
-from tests.test_meme_runtime import public_transport
-from tests.test_next_memes_catalog import check, png
-from tests.test_next_memes_discovery import DurableBudget, async_check, resolver
+from tests.support.meme_pack_files import (
+    MANIFEST,
+    REPO,
+    REVISION,
+    RULE,
+    Upstream,
+    blob_sha,
+    discover,
+)
+from tests.support.meme_pack_files import catalog as catalog
+from tests.support.meme_runtime import RULE as LEGACY_RULE
+from tests.support.meme_runtime import public_transport
+from tests.support.next_memes_catalog import check, png
+from tests.support.next_memes_discovery import DurableBudget, async_check, resolver
 
 
 @pytest.mark.parametrize("root", ["", "packs/example/"])

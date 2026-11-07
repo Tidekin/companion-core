@@ -11,7 +11,7 @@ import pytest
 from astrbot_plugin_companion_bridge.bridge import Spool, normalize
 from companion_onebot_bridge.delivery_receipts import DeliveryReceipts
 from companion_onebot_bridge.spool import Spool as OneBotSpool
-from tests.test_content_bridge import event
+from tests.support.content_bridge import event
 
 
 def test_original_inbox_migration_preserves_identity_epoch_and_idempotency(tmp_path):

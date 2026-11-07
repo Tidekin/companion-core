@@ -9,9 +9,9 @@ from companion.contracts import InboundEvent
 from companion.core import Core
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import FakeModel, run
+from tests.support.onebot_delivery import core_client
 from tests.support.onebot_events import config, normalized, raw_event
-from tests.test_onebot_delivery import core_client
-from tests.test_protocol_backends import astrbot_event
+from tests.support.protocol_backends import astrbot_event
 
 
 @pytest.mark.parametrize("body", [
@@ -84,7 +84,7 @@ def test_complete_ledger_records_rebuild_missing_tombstones(core):
     with core.store.transaction():
         core.ledger.expire_events(core.store, [payload["event_id"]], core.clock())
     # Emulate a snapshot from the previous release with COMPLETE but no projection.
-    core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'erased_event:%'")
+    core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'erased_event:%%'")
     core.ledger.replay(core.store)
     import pytest
 

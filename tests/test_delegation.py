@@ -12,23 +12,12 @@ from companion.contracts import CoreError
 from companion.core import Core
 from companion.retrieval import SemanticIndex
 from tests.conftest import run
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
+from tests.support.consolidation import enable_nightly
+from tests.support.delegation import delegate, submit
+from tests.support.diary import DAY
 
 ORIGIN = "https://console.example.test"
 PASSWORD = "owner-delegation-test-password-" * 2
-
-
-def delegate(core, capability="wake", mode="self", allow_pause=True, ranges=None):
-    with core.store.transaction():
-        return delegation.set_delegation(core.store, core.settings, capability, mode, allow_pause,
-                                         ranges if ranges is not None else {}, core.clock())
-
-
-def submit(core, field, value, capability="wake"):
-    with core.store.transaction():
-        return delegation.submit(core.store, core.settings, capability, field, value, "理由",
-                                 core.clock())
 
 
 def test_owner_mode_and_ranges_bound_every_adjustment(core):
@@ -97,7 +86,7 @@ def test_wake_planner_uses_companion_pause(core):
     delegate(core, capability="wake", allow_pause=True)
     submit(core, "pause", True)
     core.wake.evaluate()
-    decision = core.store.one("SELECT * FROM wake_decisions ORDER BY rowid DESC LIMIT 1")
+    decision = core.store.one('SELECT * FROM wake_decisions ORDER BY record_sequence DESC LIMIT 1')
     assert decision["reason_code"] == "COMPANION_PAUSED"
 
 

@@ -11,7 +11,7 @@ from companion.core import Core
 from companion.privacy import epoch
 from companion.runtime import Runtime
 from tests.conftest import Clock, FakeModel, ingest
-from tests.test_postgres_schema import isolated_native
+from tests.postgres_fixture import isolated_native
 
 
 @pytest.fixture

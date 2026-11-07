@@ -1,9 +1,7 @@
 """Window-scoped continuity over actual loopback capture; no QQ or provider I/O."""
 
 import json
-from contextlib import asynccontextmanager
 
-import httpx
 import pytest
 from cryptography.fernet import Fernet
 
@@ -15,70 +13,10 @@ from companion.core import Core
 from companion.privacy import advance_epoch
 from companion.store import encode, uid
 from tests.conftest import run
-from tests.native_continuous_support import frame, host
+from tests.support.dialogue_context import sent_history
 from tests.support.failure_notice import assert_failure_notice
-from tests.test_dialogue_context import sent_history
-from tests.test_live_text_window import live_fixture
-
-
-@asynccontextmanager
-async def native_continuity(core, tmp_path, *, turns=4, byte_limit=16000, texts=None,
-                            soft_limit=3200, core_options=None, paid_options=None,
-                            grant_options=None, respond=None, purposes=None):
-    texts = texts or ["选了茉莉绿茶", "现在说的这个呢？", "刚才聊到哪了？", "还是那个吗？", "继续"]
-    number, captures = 0, 0
-    calls = []
-
-    async def source(ws):
-        nonlocal number
-        number += 1
-        # Wire event time and app.receive use the wall clock; the independently
-        # advancing Core clock belongs to business deadlines and history tests.
-        await ws.send(frame(number, text=texts[number - 1]))
-        await ws.wait_closed()
-
-    def provider_reply(request):
-        calls.append(json.loads(request.content))
-        if respond:
-            return respond(request)
-        return httpx.Response(200, json={"choices": [{"message": {
-            "content": f"合成回答{len(calls)}"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
-
-    from datetime import UTC, datetime, timedelta
-
-    selected = purposes or (["chat", "history"] if turns else ["chat"])
-    history = {"scope": "owner_private", "not_before": datetime.now(UTC) - timedelta(days=1),
-               "max_turns": turns, "max_utf8_bytes": byte_limit} if turns else {}
-    async with host(core, tmp_path, source, model_reply=provider_reply,
-        purposes=selected, core_options={"max_recent_messages": turns * 2,
-            "context_soft_tokens": soft_limit, **(core_options or {})},
-        paid_options={"daily_calls": 100, "window_calls": 100, **(paid_options or {})},
-        grant_options={"history": history, **(grant_options or {})},
-    ) as (active, _, sends, _):
-        async def capture_input():
-            nonlocal captures
-            captures += 1
-            await active.capture(captures)
-            # app.receive stamps received_at with the wall clock, and owner history
-            # rejects a source received after Core's now. The ticking Core clock may
-            # trail that wall clock (Windows CI measured about 0.9s), so never let
-            # it lag a receipt it is about to admit; a clock set ahead is kept.
-            core.clock.now = max(core.clock.now, datetime.now(UTC))
-            await active.flush()
-
-        async def finish():
-            assert await core.run_once("native-continuity")
-            return await active.pump()
-
-        yield active, active.client, calls, sends, capture_input, finish
-
-
-def history_snapshot(core):
-    row = core.store.one(
-        "SELECT snapshots_json FROM agent_conversations ORDER BY rowid DESC LIMIT 1")
-    return next(item["proof"] for item in json.loads(row["snapshots_json"])
-                if item["kind"] == "history")
+from tests.support.live_continuity import history_snapshot, native_continuity
+from tests.support.live_text_window import live_fixture
 
 
 @pytest.mark.parametrize("microsecond", [995999, 999792])
@@ -164,16 +102,16 @@ def test_scope_and_utf8_bound_drop_only_complete_turns(core, tmp_path, turns, by
 
 
 def mutate_source(core, kind):
-    source = core.store.one("SELECT * FROM events ORDER BY rowid LIMIT 1")
+    source = core.store.one('SELECT * FROM events ORDER BY record_sequence LIMIT 1')
     event_id = source["event_id"]
     if kind == "privacy":
         advance_epoch(core.store)
     elif kind in {"PENDING", "FAILED", "DELIVERY_UNCERTAIN"}:
-        core.store.execute("UPDATE outbox SET state=? WHERE origin_event_id=?", (kind, event_id))
+        core.store.execute('UPDATE outbox SET state=%s WHERE origin_event_id=%s', (kind, event_id))
     elif kind == "UNKNOWN":
         core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
     elif kind == "redacted":
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (event_id,))
+        core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (event_id,))
     elif kind in {"SUPERSEDED", "FORGOTTEN"}:
         text = json.loads(source["body_json"])["text"]
         memory_id = core.memory.add(Candidate(
@@ -181,31 +119,31 @@ def mutate_source(core, kind):
             evidence_event_id=event_id, evidence_quote=text,
         ), core.clock(), confirmed=True)
         assert memory_id is not None
-        core.store.execute("UPDATE memories SET status=? WHERE memory_id=?", (kind, memory_id))
+        core.store.execute('UPDATE memories SET status=%s WHERE memory_id=%s', (kind, memory_id))
     elif kind == "reply_text":
-        core.store.execute("UPDATE outbox SET content_json=?", (encode({"text": "被替换的回答"}),))
+        core.store.execute('UPDATE outbox SET content_json=%s', (encode({"text": "被替换的回答"}),))
     elif kind == "input_text":
         body = json.loads(source["body_json"])
         body["text"] = "被替换的输入"
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                            (encode(body), event_id))
     elif kind == "actor":
-        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=?", (event_id,))
+        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=%s", (event_id,))
     elif kind == "source":
-        core.store.execute("UPDATE events SET source_event_id='other-identity' WHERE event_id=?",
+        core.store.execute("UPDATE events SET source_event_id='other-identity' WHERE event_id=%s",
                            (event_id,))
     elif kind == "conversation":
         conversation = core.store.one("SELECT * FROM conversations LIMIT 1")
         conversation["conversation_id"] = uid("conv")
         conversation["platform_session_key"] = "synthetic-different-conversation"
         core.store.insert("conversations", **conversation)
-        core.store.execute("UPDATE events SET conversation_id=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET conversation_id=%s WHERE event_id=%s',
                            (conversation["conversation_id"], event_id))
     elif kind == "action":
         core.store.execute("UPDATE outbox SET action_type='qq.private.proactive'")
     else:
         key = owner_input.INPUT + event_id
-        receipt = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))[
+        receipt = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))[
             "value"
         ])
         if kind == "unsigned":
@@ -218,7 +156,7 @@ def mutate_source(core, kind):
             receipt["authority"]["policy_sha256"] = "a" * 64
         elif kind == "receipt_epoch":
             receipt["privacy_epoch"] += 1
-        core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(receipt), key))
+        core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s', (encode(receipt), key))
 
 
 @pytest.mark.parametrize("kind", [
@@ -259,7 +197,7 @@ async def selected_history_changed_in_final_preflight(core, tmp_path, kind, *, c
         assert changed == [kind]
         assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
         job = core.store.one(
-            "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1",
+            'SELECT state,last_error_code FROM jobs ORDER BY record_sequence DESC LIMIT 1',
         )
         assert job["state"] in {"CANCELLED", "FAILED"}, job
         assert len(history_snapshot(core)) == 1
@@ -302,7 +240,7 @@ def test_unrelated_privacy_epoch_keeps_original_history_source_and_scope(core, t
             assert all(row["state"] == "SETTLED" for row in core.store.rows(
                 "SELECT state FROM model_usage"))
             job = core.store.one(
-                "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1")
+                'SELECT state,last_error_code FROM jobs ORDER BY record_sequence DESC LIMIT 1')
             assert job == {"state": "RETRY_WAIT", "last_error_code": "PRIVACY_CHANGED"}
 
     run(scenario())
@@ -326,7 +264,7 @@ def test_ineligible_previous_source_is_absent_from_actual_prompt(core, tmp_path,
             assert len(calls) == 2 and len(sends) == 1
             assert len(calls[-1]["messages"]) == 2
             assert calls[-1]["messages"][-1] == {"role": "user", "content": "现在说的这个呢？"}
-            assert core.store.one("SELECT state FROM jobs ORDER BY rowid DESC LIMIT 1")[
+            assert core.store.one('SELECT state FROM jobs ORDER BY record_sequence DESC LIMIT 1')[
                 "state"
             ] == "SUCCEEDED"
 
@@ -422,7 +360,7 @@ def test_erasure_and_old_database_replay_clear_history_generated_replies(core, t
             await capture_input()
             await finish()
             assert len(calls[-1]["messages"]) == 4
-            source = core.store.one("SELECT event_id FROM events ORDER BY rowid LIMIT 1")[
+            source = core.store.one('SELECT event_id FROM events ORDER BY record_sequence LIMIT 1')[
                 "event_id"
             ]
             key = Fernet.generate_key()
@@ -441,7 +379,7 @@ def test_erasure_and_old_database_replay_clear_history_generated_replies(core, t
             restore(snapshot, restored, key, core.settings.erasure_ledger)
             with Core(core.settings.model_copy(update={"database": str(restored)}),
                       core.model, core.clock) as reopened:
-                assert reopened.store.one("SELECT redacted FROM events WHERE event_id=?",
+                assert reopened.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                           (source,))["redacted"] == 1
                 assert all(row["content_json"] == "{}" for row in reopened.store.rows(
                     "SELECT content_json FROM outbox"
@@ -467,8 +405,10 @@ def test_missing_context_after_model_receive_retains_cost_without_reply(
             await finish()
             await capture_input()
             async def receive_then_remove(response):
-                core.store.execute("DELETE FROM agent_conversations WHERE job_id=(SELECT job_id "
-                                   "FROM jobs ORDER BY rowid DESC LIMIT 1)")
+                core.store.execute(
+                    'DELETE FROM agent_conversations WHERE job_id=(SELECT '
+                    'job_id FROM jobs ORDER BY record_sequence DESC LIMIT 1)'
+                )
                 if change_reply:
                     mutate_source(core, "reply_text")
 
@@ -478,10 +418,13 @@ def test_missing_context_after_model_receive_retains_cost_without_reply(
             expected = 1 if change_reply else 2
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == expected
             if not change_reply:
-                failed = core.store.one("SELECT event_id FROM jobs ORDER BY rowid DESC LIMIT 1")
+                failed = core.store.one(
+                    'SELECT event_id FROM jobs ORDER BY record_sequence DESC '
+                    'LIMIT 1'
+                )
                 assert_failure_notice(core, failed["event_id"])
             result = core.store.one(
-                "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1"
+                'SELECT state,last_error_code FROM jobs ORDER BY record_sequence DESC LIMIT 1'
             )
             assert result == ({"state": "CANCELLED", "last_error_code": "REPLY_CANCELLED"}
                               if change_reply else {"state": "FAILED",
@@ -516,13 +459,15 @@ def test_send_check_refuses_missing_snapshot_after_completed_model(core, tmp_pat
                 "reply_revision": item["reply_revision"], "lease_token": item["lease_token"]}
             path = "/internal/v1/owner-authority/send-check"
             assert (await client.post(path, json=check)).json()["approved"] is True
-            core.store.execute("DELETE FROM agent_conversations WHERE job_id=(SELECT job_id "
-                               "FROM jobs WHERE event_id=?)", (item["origin_event_id"],))
+            core.store.execute((
+                'DELETE FROM agent_conversations WHERE job_id=(SELECT job_id '
+                'FROM jobs WHERE event_id=%s)'
+            ), (item["origin_event_id"],))
             response = await client.post(path, json=check)
             assert response.status_code == 409, response.text
             assert response.json()["error"] == "REPLY_CANCELLED"
             assert len(calls) == 2 and len(sends) == 1
-            assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+            assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                                   (item["message_id"],))["state"] == "SENDING"
 
     run(scenario())

@@ -17,8 +17,8 @@ from companion.contracts import CoreError
 from companion.social_autonomy_runtime import _expire, run_once
 from companion.store import Store
 from tests.conftest import ingest, run
-from tests.test_social_autonomy import MockPlanner, background, extra_public, planned
-from tests.test_social_owner_authority import authorize
+from tests.support.social_autonomy import MockPlanner, background, extra_public, planned
+from tests.support.social_owner_authority import authorize
 
 
 def crash(core, tmp_path, ref, mode):

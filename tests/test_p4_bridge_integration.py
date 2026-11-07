@@ -28,12 +28,12 @@ from source_reader.network import PublicHTTP, ReadFailure
 from source_reader.worker import tick
 from tests.conftest import FakeModel, run
 from tests.support.astrbot_delivery import deliver_expression
-from tests.test_content_bridge import event as bridge_event
-from tests.test_exploration import configure
-from tests.test_heybox_reader import URL, mock_pool
-from tests.test_plugin_readonly import SECRET, native_post, registered_grant
-from tests.test_source_reader import META, PLAYER, SUBTITLE, response
-from tests.test_source_reader import URL as BILI_URL
+from tests.support.content_bridge import event as bridge_event
+from tests.support.exploration import URL as BILI_URL
+from tests.support.exploration import configure
+from tests.support.heybox_reader import URL, mock_pool
+from tests.support.plugin_readonly import SECRET, native_post, registered_grant
+from tests.support.source_reader import META, PLAYER, SUBTITLE, response
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES = json.loads((ROOT / "docs/design-v0.6/heybox-live-p3.json").read_text("utf-8"))["samples"]
@@ -310,7 +310,7 @@ def test_p4_bilibili_source_scope_reaches_bridge_reply(rehearsal, subtitles):
 
 @pytest.mark.parametrize("slots", [1, 2])
 def test_p4_historical_image_manifests_remain_readable_in_core(rehearsal, slots):
-    from tests.test_content import enable, png
+    from tests.support.content import enable, png
 
     core, bridge, _ = rehearsal
     _, vision = enable(core)
@@ -360,7 +360,11 @@ def test_p4_timeout_stale_receipt_and_pause_leave_ordinary_fifo_usable(rehearsal
                     json={"lease_token": lease["lease_token"], "status": "SUCCESS", "items": []},
                 )
                 assert late.status_code == 409
-            core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused','1')")
+            core.store.execute(
+                'INSERT INTO runtime_meta (key,value) VALUES '
+                "('life_paused','1') ON CONFLICT(key) DO UPDATE SET "
+                'value=excluded.value,record_sequence=DEFAULT'
+            )
             assert await core.run_once()
             await receipt(http, [], spool=bridge.spool)
             await submit(bridge, http, "普通聊天", number=2)
@@ -391,7 +395,7 @@ def test_p4_delivery_unknown_never_resends_and_following_reply_proceeds(rehearsa
             assert len(sent) == 2
             assert (
                 core.store.one(
-                    "SELECT state FROM outbox WHERE message_id=?", (item["message_id"],)
+                    'SELECT state FROM outbox WHERE message_id=%s', (item["message_id"],)
                 )["state"]
                 == "DELIVERY_UNCERTAIN"
             )

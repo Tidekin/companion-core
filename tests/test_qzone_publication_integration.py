@@ -14,10 +14,10 @@ from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.qzone import review_source
 from companion.social_autonomy_protocol import SocialAutonomyConfig
 from tests.conftest import run
+from tests.support.life_worker_integration import process_worker
 from tests.support.native_consumer_entry import environment
 from tests.support.owner_authority import activate
-from tests.test_life_worker_integration import process_worker
-from tests.test_qzone_integration import options, reader_process, selected
+from tests.support.qzone_integration import options, reader_process, selected
 
 
 async def retained_space_draft(core, entry, tmp_path):
@@ -33,7 +33,7 @@ async def retained_space_draft(core, entry, tmp_path):
     entry.runtime.stop()
     core.settings.life_loop = LifeLoopConfig(mode="SHADOW")
     core.settings.wake_enabled = True
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+    conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                  (event["event_id"],))["conversation_id"]
     scope = LifeShadowApproval(scope="owner_private_life_shadow_v1", authorization_sha256="b" * 64,
         conversation_id=conversation, source_event_ids=[source["event_id"]], purposes=[],

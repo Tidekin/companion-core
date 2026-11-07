@@ -19,8 +19,9 @@ from scripts.ci_policy import (
     choose_profile,
     run_docs,
 )
+from tests.support.ci_policy import ROOT, commit, git, needs
+from tests.support.ci_policy import repository as repository
 
-ROOT = Path(__file__).resolve().parents[1]
 EVENT = {"repository": {"default_branch": "main"}}
 
 
@@ -77,12 +78,6 @@ def test_auth_consent_restore_paid_io_and_evidence_paths_always_require_full(nam
     assert choose_profile("push", "refs/heads/topic", EVENT, [name])[0] == "full"
 
 
-def needs(profile):
-    return {"preflight": {"result": "success"}, "quality": {"result": "success"}, **{
-        name: {"result": "success" if profile == "full" else "skipped"} for name in FULL_JOBS
-    }}
-
-
 @pytest.mark.parametrize("profile", ["full", "docs", "reuse"])
 def test_gate_accepts_only_the_expected_complete_result_set(profile):
     assert check_results(profile, needs(profile))
@@ -106,25 +101,6 @@ def test_docs_gate_cannot_hide_a_failed_attempted_job():
     results = needs(profile)
     del results["container"]
     assert not check_results(profile, results)
-
-
-def git(path, *args):
-    return subprocess.check_output(["git", "-C", str(path), *args], text=True).strip()
-
-
-@pytest.fixture
-def repository(tmp_path):
-    git(tmp_path, "init", "-q")
-    (tmp_path / "README.md").write_text("fixture\n", encoding="utf-8")
-    commit(tmp_path)
-    return tmp_path
-
-
-def commit(path):
-    git(path, "add", "--all")
-    git(path, "-c", "user.name=Synthetic CI", "-c", "user.email=ci@example.invalid",
-        "commit", "-qm", "fixture")
-    return git(path, "rev-parse", "HEAD")
 
 
 def test_actual_git_diff_retains_old_code_path_when_it_is_renamed_to_markdown(repository):

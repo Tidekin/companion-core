@@ -12,63 +12,17 @@ from pydantic import SecretStr
 from companion import budget, cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelClient, ModelResponse
-from companion.store import uid
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.cumulative_budget import enable, policy, view
+from tests.support.paid_model import approved_live
 
 MESSAGES = [{"role": "user", "content": "hello"}]
-
-
-def policy(core, **changes):
-    paid = core.settings.paid_model
-    custody = paid_budget.journal(core.store, paid, allow_settlement=True)
-    prior = custody["cumulative"]
-    caps = dict(micro_usd=10_000_000, model_attempts=100, input_tokens=1_000_000,
-                output_tokens=1_000_000, owner_inputs=100, send_attempts=100)
-    inventory = changes.get("legacy_window_inventory")
-    if inventory is not None:
-        inventory = cumulative.LegacyWindowInventory.model_validate(inventory)
-    values = dict(version=1, account_ref="b" * 64, policy_id=uid("quota"),
-        approval_sha256=cumulative.digest(uid("approval")), account_evidence_sha256="d" * 64,
-        credential_sha256=cumulative.credential(core.settings, "b" * 64),
-        key_ownership_sha256="e" * 64, provider=paid.provider, currency=paid.currency,
-        timezone=paid.timezone,
-        owner_identity_sha256=cumulative.digest([core.settings.owner_qq_id,
-                                                  core.settings.bot_qq_id]),
-        starts_at=paid.starts_at, expires_at=paid.expires_at,
-        expected_journal_head_sha256=custody["head_sha256"],
-        predecessor_policy_sha256=prior["policy_sha256"],
-        legacy_liabilities_sha256=cumulative.digest(cumulative.legacy_liabilities(
-            core.store, paid.provider, inventory)) if not prior["policy"] else None,
-        legacy_adoption_evidence_sha256="f" * 64,
-        request={k: v for k, v in caps.items() if k not in {"owner_inputs", "send_attempts"}},
-        window=caps, day=caps, month=caps, account=caps, concurrency=2)
-    for key, value in changes.items():
-        values[key] = ({**values[key], **value} if isinstance(value, dict)
-                       and isinstance(values.get(key), dict) else value)
-    scope = cumulative.CumulativeApproval.model_validate(values)
-    core.settings.paid_model = paid.model_copy(update={"cumulative": scope})
-    return scope
-
-
-def enable(core, tmp_path, *, lease_seconds=None, **changes):
-    approved_live(core, tmp_path)
-    scope = policy(core, **changes)
-    with core.store.transaction():
-        cumulative.activate(core.store, core.settings, core.clock())
-    authorized_job(core, lease_seconds=lease_seconds)
-    return scope
 
 
 def reserve(core, **kwargs):
     return budget.reserve(core.store, core.settings, authorized_job(core),
                           "chat", MESSAGES, core.clock(),
                           clock=core.clock, **kwargs)
-
-
-def view(core):
-    return paid_budget.journal(core.store, core.settings.paid_model,
-                               allow_settlement=True)["cumulative"]
 
 
 @pytest.mark.parametrize("period", ["request", "window", "day", "month", "account"])
@@ -105,7 +59,7 @@ def test_rotation_and_new_window_do_not_reset_prior_account_calls(core, tmp_path
     enable(core, tmp_path, account={"model_attempts": 1})
     first = reserve(core)
     budget.settle(core.store, core.settings, first, ModelResponse("ok", 30, 2))
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (authorized_job(core),))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (authorized_job(core),))
     cumulative.pause(core.store, core.settings.paid_model, core.clock())
     core.settings.model_key = SecretStr("synthetic-rotated-key")
     core.settings.paid_model = core.settings.paid_model.model_copy(update={"window_id": "second"})
@@ -178,7 +132,7 @@ def test_legacy_costs_require_exact_inventory_and_are_not_reset(core, tmp_path):
     approved_live(core, tmp_path)
     request = reserve(core)
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (authorized_job(core),))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (authorized_job(core),))
     core.settings.paid_model = core.settings.paid_model.model_copy(update={"window_id": "new"})
     policy(core, account={"model_attempts": 1})
     with core.store.transaction():
@@ -346,7 +300,7 @@ def test_disconnect_keeps_liability_and_cannot_trigger_a_second_paid_request(cor
 
 
 def test_vision_and_chat_consume_the_same_cumulative_model_attempts(core, tmp_path):
-    from tests.test_paid_image_budget import image_approval, reserve_image
+    from tests.support.paid_image_budget import image_approval, reserve_image
 
     image_approval(core, tmp_path)
     policy(core, account={"model_attempts": 1})
@@ -369,13 +323,13 @@ def test_automatic_pause_witness_survives_business_rollback_and_prefix_replay(
     with pytest.raises(CoreError, match="EXPIRED"):
         if outer_transaction:
             with core.store.transaction():
-                core.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+                core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                                    ("uncommitted_test", "business"))
                 cumulative.preflight(core.store, core.settings, core.clock)
         else:
             reserve(core)
     assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='uncommitted_test'")
-    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE 'model_budget_stop:%'")
+    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE 'model_budget_stop:%%'")
     assert view(core)["paused"]
     path.write_bytes(prefix)
     core.clock.now = datetime.fromisoformat("2026-10-20T04:00:00+00:00")
@@ -415,7 +369,7 @@ def test_pause_fsync_then_projection_failure_retains_only_the_stop_witness(
     monkeypatch.setattr(core.store, "execute", fail_projection)
     with pytest.raises(RuntimeError, match="after fsync"):
         with core.store.transaction():
-            core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", ("business", "rollback"))
+            core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)', ("business", "rollback"))
             cumulative.pause(core.store, core.settings.paid_model, core.clock())
     monkeypatch.setattr(core.store, "execute", execute)
     assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='business'")
@@ -430,7 +384,7 @@ def test_damaged_projection_status_remains_read_only_and_reports_unavailable(
     core, tmp_path, projection,
 ):
     enable(core, tmp_path)
-    core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+    core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                        (projection, cumulative.PROJECTION))
     before = list(core.store.db.iterdump())
     journal = Path(core.settings.paid_model.journal_path).read_bytes()

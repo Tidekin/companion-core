@@ -1,5 +1,4 @@
 """18 independent fictional lifecycle instances; separate from semantic answers."""
-
 from contextlib import closing
 
 import pytest
@@ -11,7 +10,7 @@ from companion.postgres import Database
 from companion.store import Store, encode
 from tests.conftest import ingest
 from tests.postgres_fixture import isolated_database
-from tests.test_memory_commands import fact
+from tests.support.memory_commands import fact
 
 PROFILES = [
     ("P01", "林澄"),

@@ -18,12 +18,12 @@ from companion.config import ImageInputPolicy
 from tests.conftest import run
 from tests.meme_authority_fixture import environment
 from tests.support import onebot
+from tests.support.evaluation_process import process_config
+from tests.support.meme_core_process import process, until
+from tests.support.meme_gallery import SELECTION, GalleryUpstream
+from tests.support.meme_pack_files import RULE, Upstream
 from tests.support.onebot import onebot_http
 from tests.support.onebot_events import raw_event
-from tests.test_evaluation_process import process_config
-from tests.test_meme_core_process import process, until
-from tests.test_meme_gallery import SELECTION, GalleryUpstream
-from tests.test_meme_pack_files import RULE, Upstream
 
 
 @pytest.mark.parametrize("gallery", [False, True])
@@ -128,20 +128,20 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         assert (await work("empty-chat"))["calls"] == ["chat"]
                         async with asyncio.timeout(10):
                             await ack_entered.wait()
-                        assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                        assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                             (first["job_id"],))["state"] == "SUCCEEDED"
                         delivery_before = core.store.rows("SELECT * FROM outbox")
                         assert delivery_before[0]["state"] == "SENDING"
                         discovery_before = core.store.one(
                             "SELECT * FROM jobs WHERE kind='meme_discovery'")
                         metadata_before = core.store.one(
-                            "SELECT value FROM runtime_meta WHERE key=?",
+                            'SELECT value FROM runtime_meta WHERE key=%s',
                             ("meme_discovery:" + discovery_before["job_id"],))
                         accounting_before = {table: core.store.rows("SELECT * FROM " + table)
                             for table in ("model_usage", "model_admissions")}
                         paused = await work("waiting", waiting=waiting)
                         assert paused["requests"] == 0 and paused["calls"] == []
-                        after_wait = core.store.one("SELECT * FROM jobs WHERE job_id=?",
+                        after_wait = core.store.one('SELECT * FROM jobs WHERE job_id=%s',
                             (discovery_before["job_id"],))
                         assert after_wait == discovery_before, {
                             "discovery": after_wait,
@@ -151,7 +151,7 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         }
                         assert not paused["worked"]
                         assert not core.store.rows("SELECT * FROM meme_discovery_reservations")
-                        assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                        assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                             ("meme_discovery:" + discovery_before["job_id"],)) == metadata_before
                         assert core.store.rows("SELECT * FROM outbox") == delivery_before
                         assert {table: core.store.rows("SELECT * FROM " + table)
@@ -159,7 +159,7 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         ack_release.set()
                         await until(lambda: core.store.one(
                             "SELECT 1 FROM outbox WHERE state='SENT'"))
-                        frozen = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                        frozen = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                             ("meme_offer:" + first["event_id"],))["value"]
                         assert json.loads(frozen)["offer"]["candidates"] == []
                         assert len(sent) == 1 and len(sent[0]["message"]) == 1
@@ -170,7 +170,7 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         assert reservation["job_id"] == discovery_before["job_id"]
                         assert len(core.store.rows(
                             "SELECT * FROM jobs WHERE kind='meme_discovery'")) == 1
-                        assert core.store.one("SELECT attempts FROM jobs WHERE job_id=?",
+                        assert core.store.one('SELECT attempts FROM jobs WHERE job_id=%s',
                             (discovery_before["job_id"],))["attempts"] == 1
                         asset = core.store.one("SELECT * FROM meme_assets")
                         assert reservation["state"] == "SETTLED"
@@ -180,14 +180,14 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         assert (await work("caption"))["calls"] == ["caption"]
                         caption = core.store.one("SELECT * FROM meme_captions")
                         assert caption["result_json"]
-                        assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                        assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                             ("meme_offer:" + first["event_id"],))["value"] == frozen
                         second.set()
                         last = await until(lambda: core.store.one(
                             "SELECT * FROM jobs WHERE kind='chat' AND state='QUEUED'"))
                         assert (await work("next-chat", asset["asset_sha256"]))["calls"] == ["chat"]
                         await until(lambda: core.store.one(
-                            "SELECT 1 FROM outbox WHERE origin_event_id=? AND state='SENT'",
+                            "SELECT 1 FROM outbox WHERE origin_event_id=%s AND state='SENT'",
                             (last["event_id"],)))
                         assert len(sent) == 2 and len(sent[1]["message"]) == 2
                         data = base64.b64decode(sent[1]["message"][1]["data"]["file"]
@@ -195,13 +195,18 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         assert data == asset["data"]
                         assert data == (GalleryUpstream().image if gallery else
                                         next(iter(Upstream(count=1).images.values())))
-                        delivery = core.store.one("SELECT message_id FROM outbox "
-                            "WHERE origin_event_id=?", (last["event_id"],))
-                        binding = json.loads(core.store.one("SELECT value FROM runtime_meta "
-                            "WHERE key=?", ("owner_delivery:" + delivery["message_id"],))["value"])
+                        delivery = core.store.one((
+                            'SELECT message_id FROM outbox WHERE '
+                            'origin_event_id=%s'
+                        ), (last["event_id"],))
+                        binding = json.loads(core.store.one((
+                            'SELECT value FROM runtime_meta WHERE key=%s'
+                        ), ("owner_delivery:" + delivery["message_id"],))["value"])
                         assert binding["meme_binding_version"] == 2
-                        assert core.store.one("SELECT 1 FROM job_sources "
-                            "WHERE job_id=? AND event_id=?",
+                        assert core.store.one((
+                            'SELECT 1 FROM job_sources WHERE job_id=%s AND '
+                            'event_id=%s'
+                        ),
                             (last["job_id"], first["event_id"]))
 
                         def acknowledged():
@@ -228,7 +233,10 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         if bridge.returncode is None:
                             bridge.kill()
                             await bridge.wait()
-            usage = core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid")
+            usage = core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            )
             assert len(usage) == 3 and all(u["state"] == "SETTLED" for u in usage)
             assert len([c for r in reports for c in r["calls"] if c == "caption"]) == 1
             assert sum(r["requests"] for r in reports) == (2 if gallery else 5)

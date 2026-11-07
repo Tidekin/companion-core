@@ -17,7 +17,7 @@ from companion.contracts import Candidate, CoreError
 from companion.core import Core
 from companion.transport import enqueue
 from tests.conftest import Clock, FakeModel, ingest
-from tests.test_postgres_schema import isolated_native
+from tests.postgres_fixture import isolated_native
 
 
 @contextmanager

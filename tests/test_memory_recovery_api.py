@@ -8,9 +8,9 @@ from pathlib import Path
 
 from companion.memory_work import checkpoint_state
 from tests.conftest import run
-from tests.test_console_cognition import ORIGIN, login
-from tests.test_console_cognition import client as client
-from tests.test_memory_failure_recovery import failed_batch
+from tests.support.console_cognition import ORIGIN, login
+from tests.support.console_cognition import client as client
+from tests.support.memory_failure_recovery import failed_batch
 
 
 def test_owner_http_recovery_and_separate_worker_save_once(client, core, tmp_path):
