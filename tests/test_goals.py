@@ -1,4 +1,6 @@
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import pytest
@@ -155,6 +157,40 @@ def test_lost_goal_lease_rejects_old_worker_output(core):
     with pytest.raises(CoreError, match="STALE_LEASE"):
         core.goals.finish(old, result)
     assert core.goals.finish(new, result)["state"] == "DONE"
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_expiry_skips_goal_while_the_worker_finishes_its_step(core, monkeypatch, success):
+    goal = setup_goal(core, commitment=True)
+    step = core.goals.claim()
+    result = result_for(core, goal)
+    written, release = threading.Event(), threading.Event()
+    execute = core.store.execute
+
+    def pause_after_step(statement, parameters=()):
+        count = execute(statement, parameters)
+        if "UPDATE goal_steps SET state" in str(statement) and not written.is_set():
+            written.set()
+            assert release.wait(15)
+        return count
+
+    def finish():
+        if success:
+            return core.goals.finish(step, result)
+        return core.goals.fail(step, "FETCH_TIMEOUT")
+
+    # The second worker observes the deadline crossing during the first transaction.
+    later = after(core.clock(), 86401)
+    with Core(core.settings, core.model, lambda: later) as other, ThreadPoolExecutor(2) as pool:
+        monkeypatch.setattr(core.store, "execute", pause_after_step)
+        first = pool.submit(finish)
+        try:
+            assert written.wait(10)
+            assert pool.submit(other.goals.claim).result(timeout=10) is None
+        finally:
+            release.set()
+        assert first.result(timeout=10)
+    assert core.goals.get(goal)["state"] == ("DONE" if success else "FAILED")
 
 
 def test_commitment_ignores_temporary_affect_and_autonomy_pause(core):

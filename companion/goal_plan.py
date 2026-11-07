@@ -88,7 +88,7 @@ def continue_plan(engine, goal_id, decision, *, autonomous=False):
         decision = GoalContinuationDecision.model_validate(decision)
     s, now = engine.store, engine.clock()
     with nullcontext() if s.in_transaction else s.transaction():
-        goal = engine.get(goal_id)
+        goal = engine.get(goal_id, for_update=True)
         engine.validate_authority(goal)
         if autonomous and s.one("SELECT 1 FROM runtime_meta WHERE key = 'life_paused' AND value = "
             "'1'"):

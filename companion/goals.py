@@ -39,7 +39,7 @@ def withdraw_reflection_goals(store, suggestion_id, now):
     """Cancel only attributed future intent; started reads retain uncertain accounting."""
     for goal in store.rows(
         "SELECT goal_id FROM goals WHERE kind = 'self' AND reflection_suggestion_id = %s AND NOT "
-        "state IN ('DONE', 'FAILED', 'CANCELLED')",
+        "state IN ('DONE', 'FAILED', 'CANCELLED') ORDER BY goal_id FOR UPDATE",
         (suggestion_id,),
     ):
         goal_id = goal["goal_id"]
@@ -287,15 +287,15 @@ class GoalEngine:
         """Close rejected future work, keeping prior Reader attempts and liability."""
         s, now = self.store, self.clock()
         s.execute(
+            "UPDATE goals SET state = 'FAILED', last_error_code = %s, version = version + 1, "
+            "updated_at = %s WHERE goal_id = %s",
+            (code, now, goal_id),
+        )
+        s.execute(
             "UPDATE goal_steps SET state = 'FAILED', lease_token = NULL, last_error_code = "
             "%s, updated_at = %s WHERE goal_id = %s AND (step_id = %s OR (CAST(%s AS TEXT) IS NULL "
             "AND state IN ('QUEUED', 'RETRY_WAIT', 'WAITING_RESOURCE')))",
             (code, now, goal_id, step_id, step_id),
-        )
-        s.execute(
-            "UPDATE goals SET state = 'FAILED', last_error_code = %s, version = version + 1, "
-            "updated_at = %s WHERE goal_id = %s",
-            (code, now, goal_id),
         )
         self.feedback(goal_id, "EXPLAINED_FAILURE", code, notify=False)
         s.audit("goal.authority_rejected", goal_id, step_id or "wake", now, error_code=code)
@@ -388,7 +388,7 @@ class GoalEngine:
             raise CoreError("GOALS_DISABLED", 403)
         s, now = self.store, self.clock()
         with nullcontext() if s.in_transaction else s.transaction():
-            goal = self.get(goal_id)
+            goal = self.get(goal_id, for_update=True)
             self.validate_authority(goal)
             if autonomous and goal["kind"] != "self":
                 raise CoreError("OWNER_REQUIRED", 403)
@@ -529,7 +529,7 @@ class GoalEngine:
                 (commitment_id,),
             )
 
-    def get(self, goal_id):
+    def get(self, goal_id, *, for_update=False):
         row = self.store.one(
             "SELECT goals.goal_id AS goal_id, goals.kind AS kind, goals.topic AS "
             "topic, goals.scope_json AS scope_json, goals.proposal_key AS proposal_key, "
@@ -539,7 +539,7 @@ class GoalEngine:
             "goals.updated_at AS updated_at, goals.redacted AS redacted, "
             "goals.reflection_suggestion_id AS reflection_suggestion_id, goals.authority_json AS "
             "authority_json FROM goals AS goals WHERE goals.goal_id = %s AND goals.redacted = "
-            "0",
+            "0" + (" FOR UPDATE" if for_update else ""),
             (goal_id,),
         )
         if not row:
@@ -644,20 +644,20 @@ class GoalEngine:
                         execution_uncertain=goal_plan.dispatched(self, step["step_id"]),
                     )
                 self.store.execute(
-                    "UPDATE goal_steps SET state = 'WAITING_RESOURCE', lease_token = NULL, "
-                    "last_error_code = 'AUTONOMY_PAUSED' WHERE goal_id IN (SELECT goal_id FROM "
-                    "goals WHERE kind = 'self') AND state IN ('QUEUED', 'RUNNING', 'RETRY_WAIT')"
-                )
-                self.store.execute(
                     "UPDATE goals SET state = 'WAITING_RESOURCE', last_error_code = "
                     "'AUTONOMY_PAUSED' WHERE kind = 'self' AND state IN ('QUEUED', 'RUNNING', "
                     "'RETRY_WAIT')"
+                )
+                self.store.execute(
+                    "UPDATE goal_steps SET state = 'WAITING_RESOURCE', lease_token = NULL, "
+                    "last_error_code = 'AUTONOMY_PAUSED' WHERE goal_id IN (SELECT goal_id FROM "
+                    "goals WHERE kind = 'self') AND state IN ('QUEUED', 'RUNNING', 'RETRY_WAIT')"
                 )
         return {"paused": paused}
 
     def cancel(self, goal_id):
         with nullcontext() if self.store.in_transaction else self.store.transaction():
-            goal = self.get(goal_id)
+            goal = self.get(goal_id, for_update=True)
             if goal["state"] in TERMINAL:
                 return goal
             self.store.execute(
@@ -766,10 +766,12 @@ class GoalEngine:
                 "captured_privacy_epoch, goal_steps.outcome_event_id AS outcome_event_id, "
                 "goal_steps.last_error_code AS last_error_code, goal_steps.created_at AS "
                 "created_at, goal_steps.updated_at AS updated_at FROM goal_steps AS goal_steps "
-                "JOIN goals ON goals.goal_id = goal_steps.goal_id "
+                "JOIN goals AS g ON g.goal_id = goal_steps.goal_id "
                 "WHERE goal_steps.state = 'RUNNING' AND goal_steps.lease_until <= %s "
-                "FOR UPDATE OF goals, goal_steps SKIP LOCKED",
-                (now,),
+                "AND NOT EXISTS (SELECT 1 FROM commitments c WHERE c.goal_id = g.goal_id "
+                "AND c.deadline <= %s AND c.state IN ('ACKNOWLEDGED', 'IN_PROGRESS')) "
+                "FOR UPDATE OF g, goal_steps SKIP LOCKED",
+                (now, now),
             ):
                 self.fail(
                     row,
@@ -792,11 +794,13 @@ class GoalEngine:
                     "WHERE st.state IN ('QUEUED', 'RETRY_WAIT', 'WAITING_RESOURCE') "
                     "AND g.state IN ('QUEUED', 'RETRY_WAIT', 'WAITING_RESOURCE') "
                     "AND g.next_due_at <= %s AND g.redacted = 0 AND (g.kind = 'commitment' OR %s) "
+                    "AND NOT EXISTS (SELECT 1 FROM commitments c WHERE c.goal_id = g.goal_id "
+                    "AND c.deadline <= %s AND c.state IN ('ACKNOWLEDGED', 'IN_PROGRESS')) "
                     "AND NOT EXISTS (SELECT 1 FROM goal_steps running "
                     "WHERE running.goal_id = g.goal_id AND running.state = 'RUNNING') "
                     "ORDER BY CASE g.kind WHEN 'commitment' THEN 0 ELSE 1 END, g.priority DESC, "
                     "g.created_at, g.goal_id, st.position LIMIT 1 FOR UPDATE OF g, st SKIP LOCKED",
-                    (now, not (paused and paused["value"] == "1")),
+                    (now, not (paused and paused["value"] == "1"), now),
                 )
                 if not row:
                     return None
@@ -845,8 +849,8 @@ class GoalEngine:
                 "captured_privacy_epoch": epoch(s),
             }
 
-    def validate_lease(self, step):
-        self.validate_authority(self.get(step["goal_id"]))
+    def validate_lease(self, step, *, lock_goal=False):
+        self.validate_authority(self.get(step["goal_id"], for_update=lock_goal))
         current = self.store.one(
             "SELECT goal_steps.step_id AS step_id, goal_steps.goal_id AS "
             "goal_id, goal_steps.position AS position, goal_steps.scope_json AS scope_json, "
@@ -882,7 +886,7 @@ class GoalEngine:
     def finish(self, step, result_event_id):
         s, now = self.store, self.clock()
         with nullcontext() if s.in_transaction else s.transaction():
-            self.validate_lease(step)
+            self.validate_lease(step, lock_goal=True)
             commitment = s.one(
                 "SELECT deadline FROM commitments WHERE goal_id = %s", (step["goal_id"],)
             )
@@ -980,6 +984,10 @@ class GoalEngine:
             code = "GOAL_FAILED"
         s, now = self.store, self.clock()
         with nullcontext() if s.in_transaction else s.transaction():
+            # Acquire the parent before its steps, as in cancellation and expiry.
+            if not s.one("SELECT goal_id FROM goals WHERE goal_id = %s FOR UPDATE",
+                         (step["goal_id"],)):
+                return False
             current = s.one(
                 "SELECT goal_steps.step_id AS step_id, goal_steps.goal_id AS goal_id, "
                 "goal_steps.position AS position, goal_steps.scope_json AS scope_json, "
@@ -994,6 +1002,7 @@ class GoalEngine:
             )
             if (
                 not current
+                or current["goal_id"] != step["goal_id"]
                 or current["state"] != "RUNNING"
                 or current["lease_token"] != step["lease_token"]
             ):

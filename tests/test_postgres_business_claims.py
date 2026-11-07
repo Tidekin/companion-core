@@ -3,13 +3,13 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
 from companion import budget
 from companion.core import Core
-from companion.goals import GoalProposal, GoalScope
+from companion.goals import CommitmentRequest, GoalProposal, GoalScope
 from companion.store import after
 from tests.conftest import ingest
 
@@ -74,7 +74,7 @@ def interleaved(core, monkeypatch, selected_query, operation):
     ("consolidation", "consolidation_runs.timezone = %s AND ("),
     ("goal", "FROM goal_steps AS st JOIN goals AS g"),
     ("reflection", "WHERE reflection_runs.local_date = %s AND "),
-])
+], ids=["diary", "consolidation", "goal", "reflection"])
 def test_independent_workers_claim_one_business_task(core, monkeypatch, kind, selected_query):
     prepare(core, kind)
     first_run, second_run = interleaved(
@@ -141,3 +141,23 @@ def test_expiry_takes_the_original_fee_before_the_run_and_rechecks_its_lease(cor
                           (other,))["state"] == "RESERVED"
     assert core.store.one(f"SELECT state FROM {table} WHERE run_id=%s",
                           (old["run_id"],))["state"] == "FAILED"
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_expired_commitment_pending_recovery_does_not_block_another_goal(core, running):
+    ready = prepare(core, "goal")
+    proposal = GoalProposal(topic="有截止时间的合成任务", source_event_ids=["evt_test_1"],
+                            scope=GoalScope(operation="read_content",
+                                            url="https://example.org/commitment"))
+    request = CommitmentRequest(proposal=proposal, accepted_event_id="evt_test_1",
+                                deadline=datetime.fromisoformat(after(core.clock(), 120)))
+    expired = core.goals.accept_commitment(request)["goal_id"]
+    if running:
+        assert core.goals.claim()["goal_id"] == expired
+    core.clock.advance(max(120, core.settings.lease_seconds) + 1)
+    with Core(core.settings, core.model, core.clock) as other, other.store.transaction():
+        other.store.one("SELECT goal_id FROM commitments WHERE goal_id=%s FOR UPDATE", (expired,))
+        assert core.goals.claim()["goal_id"] == ready
+        assert core.goals.get(expired)["state"] == ("RUNNING" if running else "QUEUED")
+    assert core.goals.claim() is None
+    assert core.goals.get(expired)["last_error_code"] == "DEADLINE_EXCEEDED"
