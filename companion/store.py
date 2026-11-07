@@ -355,9 +355,22 @@ class Store:
         content = self.one(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='content_items'"
         )
-        return columns_present and bool(
-            content and "slot<64" in "".join(content["sql"].split()).lower()
-        )
+        if not columns_present or not content or "slot<64" not in "".join(
+            content["sql"].split()
+        ).lower():
+            return False
+        # Life can schedule several conversation topics. Memory explicitly uses both
+        # named indexes via INDEXED BY, and an open-ended Bili grant stores NULL.
+        return bool(self.one(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM pragma_index_list('life_topics') "
+            "WHERE name='idx_life_active_conversation' AND [unique]=0) "
+            "AND EXISTS (SELECT 1 FROM pragma_index_list('memories') "
+            "WHERE name='idx_memories_relationship_standing') "
+            "AND EXISTS (SELECT 1 FROM pragma_index_list('runtime_meta') "
+            "WHERE name='idx_memory_image_review_target') "
+            "AND EXISTS (SELECT 1 FROM pragma_table_info('source_grant_revisions') "
+            "WHERE name='expires_at' AND [notnull]=0)"
+        ))
 
     def insert(self, table, **values):
         # Identifiers are application constants, never API input.
