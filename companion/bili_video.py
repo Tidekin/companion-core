@@ -296,11 +296,45 @@ def _model_room(store, settings, job_id, request_id=None):
         raise CoreError(CHAT_HEADROOM, 429)
 
 
+def reserve_model_input(store, settings, clock, request_id, job_id, scenario, logical_id,
+                        wire, messages, tools, cloud_kind, cloud_id):
+    from companion import paid_budget, video_input
+    from companion.model import model_payload
+
+    binding = model_binding(store, settings, clock, request_id, job_id=job_id,
+                            scenario=scenario, logical_request_id=logical_id)
+    if scenario == "content_video_preview" and binding is None:
+        raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
+    video_input.contract(settings, job_id, logical_id)
+    if binding is not None and (
+        binding["payload_sha256"] != paid_budget.sha(
+            model_payload(wire, messages, scenario, tools=tools))
+        or cloud_kind not in {None, "video"} or cloud_id not in {None, binding["task_id"]}
+    ):
+        raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
+    return binding
+
+
+def validate_model_input(store, settings, clock, request_id, scenario, job_id, logical_id):
+    from companion import image_input, video_input
+
+    binding = model_binding(store, settings, clock, request_id, job_id=job_id,
+                            scenario=scenario, logical_request_id=logical_id)
+    if scenario == "content_video_preview" and binding is None:
+        raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
+    if binding is None:
+        image_input.contract(settings, job_id, logical_id)
+    if scenario in video_input.SCENARIOS:
+        video_input.contract(settings, job_id, logical_id)
+
+
 def model_binding(
     store, settings, clock, request_id, *, job_id=None, scenario=None, logical_request_id=None
 ):
     """Only a durable pending phase authorizes this input's additional media call."""
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_phases'"):
+    if not request_id or not store.one(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bili_video_phases'"
+    ):
         return None
     phase = store.one("SELECT * FROM bili_video_phases WHERE model_request_id=?", (request_id,))
     if phase is None:

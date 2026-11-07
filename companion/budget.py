@@ -126,18 +126,6 @@ def close_expired_model_work(store, table, now):
     )
 
 
-def reader_video_binding(store, settings, clock, request_id, *, job_id=None, scenario=None,
-                         logical_request_id=None):
-    if not request_id or not store.one(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bili_video_phases'"
-    ):
-        return None
-    from companion.bili_video import model_binding
-
-    return model_binding(store, settings, clock, request_id, job_id=job_id, scenario=scenario,
-                         logical_request_id=logical_request_id)
-
-
 def check_request_limits(approval, measured, scenario):
     """Apply the approved local input/output and routed joint window to one measurement.
 
@@ -169,29 +157,21 @@ def reserve(
     native_image_chat = False
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
-    video_binding = (reader_video_binding(store, settings, clock or (lambda: now), request_id,
-        job_id=job_id, scenario=scenario, logical_request_id=logical_request_id or job_id)
-        if scenario in VIDEO_SCENARIOS else None)
-    if scenario == "content_video_preview" and video_binding is None:
-        raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
+    video_binding = None
     if scenario == "meme_caption":
         from companion import meme_input
 
         logical_request_id = logical_request_id or job_id
         meme_input.contract(settings, job_id, logical_request_id)
     elif scenario in VIDEO_SCENARIOS:
-        from companion.video_input import contract as video_contract
+        from companion.bili_video import reserve_model_input
 
         logical_request_id = logical_request_id or job_id
-        video_contract(settings, job_id, logical_request_id)
+        video_binding = reserve_model_input(
+            store, settings, clock or (lambda: now), request_id, job_id, scenario,
+            logical_request_id, wire, messages, tools, cloud_task_kind, cloud_task_id,
+        )
         if video_binding is not None:
-            from companion.model import model_payload
-
-            if (video_binding["payload_sha256"] != paid_budget.sha(
-                model_payload(wire, messages, scenario, tools=tools))
-                or cloud_task_kind not in {None, "video"}
-                or cloud_task_id not in {None, video_binding["task_id"]}):
-                raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
             cloud_task_kind, cloud_task_id = "video", video_binding["task_id"]
     elif scenario == "evaluation" and any(
         isinstance(message, dict) and isinstance(message.get("content"), list)
@@ -270,11 +250,14 @@ def reserve(
             day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
         if scenario == "meme_caption":
             meme_input.check_attempt(store, job_id)
-        if video_binding is not None and reader_video_binding(
-            store, settings, clock or (lambda: now), request_id, job_id=job_id,
-            scenario=scenario, logical_request_id=logical_request_id,
-        ) != video_binding:
-            raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
+        if video_binding is not None:
+            from companion.bili_video import model_binding
+
+            if model_binding(
+                store, settings, clock or (lambda: now), request_id, job_id=job_id,
+                scenario=scenario, logical_request_id=logical_request_id,
+            ) != video_binding:
+                raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
         owner_view = None
         if scenario == "gateway":
             from companion import gateway_admission
@@ -1050,6 +1033,19 @@ def _model_scope(store, settings, clock, request_id, scenario, *, yield_to_chat=
     return live_text.check_model(store, settings, clock, request_id)
 
 
+def _check_media_admission(store, settings, clock, request_id, scenario, row):
+    if scenario == "meme_caption":
+        from companion.meme_input import validate_admission
+
+        validate_admission(store, settings, request_id,
+                           row["usage_job_id"], row["logical_request_id"])
+    elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
+        from companion.bili_video import validate_model_input
+
+        validate_model_input(store, settings, clock, request_id, scenario,
+                             row["usage_job_id"], row["logical_request_id"])
+
+
 async def _dispatch(
     model, store, settings, request_id, messages, scenario, clock, *, dispatch=None,
     source_check=None, tools=(), trace_id=None, generation=None,
@@ -1115,24 +1111,7 @@ async def _dispatch(
             raise CoreError("MODEL_REQUEST_ALREADY_STARTED", 409)
         if row["usage_scenario"] != scenario:
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-        if scenario == "meme_caption":
-            from companion import meme_input
-
-            meme_input.contract(settings, row["usage_job_id"], row["logical_request_id"])
-            meme_input.check_attempt(store, row["usage_job_id"], request_id)
-        elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
-            from companion.image_input import contract as image_contract
-            from companion.video_input import contract as video_contract
-
-            reader_binding = reader_video_binding(store, settings, clock, request_id,
-                job_id=row["usage_job_id"], scenario=scenario,
-                logical_request_id=row["logical_request_id"])
-            if scenario == "content_video_preview" and reader_binding is None:
-                raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
-            if reader_binding is None:
-                image_contract(settings, row["usage_job_id"], row["logical_request_id"])
-            if scenario in VIDEO_SCENARIOS:
-                video_contract(settings, row["usage_job_id"], row["logical_request_id"])
+        _check_media_admission(store, settings, clock, request_id, scenario, row)
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
             raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
         snapshot = paid_budget.snapshot(settings)
@@ -1221,19 +1200,7 @@ async def _dispatch(
                              "('model_budget_blocked','model_budget_restore_required')"):
                     raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
             paid_budget.contract(settings, clock())
-            if scenario == "meme_caption":
-                meme_input.contract(settings, row["usage_job_id"], row["logical_request_id"])
-                meme_input.check_attempt(store, row["usage_job_id"], request_id)
-            elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
-                reader_binding = reader_video_binding(store, settings, clock, request_id,
-                    job_id=row["usage_job_id"], scenario=scenario,
-                    logical_request_id=row["logical_request_id"])
-                if scenario == "content_video_preview" and reader_binding is None:
-                    raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
-                if reader_binding is None:
-                    image_contract(settings, row["usage_job_id"], row["logical_request_id"])
-                if scenario in VIDEO_SCENARIOS:
-                    video_contract(settings, row["usage_job_id"], row["logical_request_id"])
+            _check_media_admission(store, settings, clock, request_id, scenario, row)
             with phase("transport_payload", trace_id):
                 if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
                     raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
