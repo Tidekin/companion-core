@@ -21,9 +21,9 @@ async def checked_post(guard, path, body):
     if not preflight.eligible(guard.current_item):
         return await bounded_post(guard.client, path, body)
     stage = path.rsplit("/", 1)[1]
-    busy = False
+    retrying = False
     while True:
-        if busy:
+        if retrying:
             if guard.runtime.clock() >= guard.lease_until:
                 raise Expired(stage)
             try:
@@ -34,8 +34,11 @@ async def checked_post(guard, path, body):
                 raise
         try:
             return await bounded_post(guard.client, path, body, preflight=True)
-        except PreflightBusy:
-            busy = True
+        except (PreflightBusy, httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+            # Connection/pool failures precede the Core POST. BUSY independently
+            # attests that no business transaction began. Both may retry the exact
+            # bound item, with fresh local checks and the original lease deadline.
+            retrying = True
             remaining = (guard.lease_until - guard.runtime.clock()).total_seconds()
             if remaining > 0:
                 await asyncio.sleep(min(0.1, remaining))
@@ -48,7 +51,7 @@ async def checked_post(guard, path, body):
                 await asyncio.sleep(remaining)
             raise Expired(stage) from None
         except httpx.HTTPStatusError as error:
-            if (busy and error.response.status_code == 409
+            if (retrying and error.response.status_code == 409
                 and guard.runtime.clock() >= guard.lease_until):
                 raise Expired(stage) from error
             raise

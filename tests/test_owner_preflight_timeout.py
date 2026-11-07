@@ -14,7 +14,9 @@ from tests.test_evaluation_process import process_config
 
 
 @pytest.mark.parametrize("stage", ["begin-send", "send-check"])
-@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
+@pytest.mark.parametrize("error_type", [
+    httpx.ReadTimeout, httpx.ReadError, httpx.WriteTimeout, httpx.RemoteProtocolError,
+])
 def test_lost_preflight_response_closes_without_provider_io_and_next_input_works(
     core, tmp_path, stage, error_type,
 ):
