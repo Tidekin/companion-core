@@ -106,16 +106,31 @@ class Session:
         self._connection = connection
         self._closed = False
 
+    @property
+    def in_transaction(self):
+        return not self._closed and (
+            self._connection.info.transaction_status != TransactionStatus.IDLE)
+
     def execute(self, statement, parameters=()):
         if self._closed:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
-        return self._connection.execute(statement, parameters)
+        with self._connection.cursor() as cursor:
+            cursor.execute(statement, parameters)
+            return cursor.rowcount
 
     def one(self, statement, parameters=()):
-        return self.execute(statement, parameters).fetchone()
+        if self._closed:
+            raise RuntimeError("POSTGRES_SESSION_CLOSED")
+        with self._connection.cursor() as cursor:
+            cursor.execute(statement, parameters)
+            return cursor.fetchone()
 
     def rows(self, statement, parameters=()):
-        return self.execute(statement, parameters).fetchall()
+        if self._closed:
+            raise RuntimeError("POSTGRES_SESSION_CLOSED")
+        with self._connection.cursor() as cursor:
+            cursor.execute(statement, parameters)
+            return cursor.fetchall()
 
     @contextmanager
     def transaction(self, *, readonly=False):
@@ -140,3 +155,13 @@ class Session:
         if self._connection.info.transaction_status != TransactionStatus.INTRANS:
             raise RuntimeError("POSTGRES_TRANSACTION_REQUIRED")
         self.execute("SELECT pg_notify(%s, %s)", (WAKE_CHANNEL, ""))
+
+    def ledger_lock(self, domain, *, shared=False):
+        """Native transaction lock, scoped to this schema and a fixed ledger domain."""
+        if self._connection.info.transaction_status != TransactionStatus.INTRANS:
+            raise RuntimeError("POSTGRES_TRANSACTION_REQUIRED")
+        if type(domain) is not int or not 1 <= domain <= 16:
+            raise ValueError("invalid ledger lock domain")
+        function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
+        self.execute(sql.SQL("SELECT {}(hashtext(current_schema()),%s)").format(
+            sql.Identifier(function)), (domain,))

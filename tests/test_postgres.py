@@ -134,3 +134,17 @@ def test_skip_locked_claims_distinct_rows_and_rollback_releases_claim(database):
 def test_database_requires_secret_connection_information():
     with pytest.raises(TypeError, match="SecretStr"):
         Database("synthetic-plain-connection-info")
+
+
+def test_only_materialized_results_outlive_their_session(database):
+    with database.session() as session:
+        one = session.one("SELECT id,value FROM items WHERE id=1")
+        rows = session.rows("SELECT id,value FROM items ORDER BY id")
+        changed = session.execute("UPDATE items SET value=4 WHERE id=1")
+    with database.session() as successor, successor.transaction():
+        successor.execute("UPDATE items SET value=5 WHERE id=1")
+        assert one == {"id": 1, "value": 0}
+        assert rows == [{"id": 1, "value": 0}, {"id": 2, "value": 0}]
+        assert type(changed) is int and changed == 1
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
+            session.execute("UPDATE items SET value=6 WHERE id=1")
