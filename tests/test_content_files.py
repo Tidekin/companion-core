@@ -18,6 +18,7 @@ from companion.file_evidence import PrivateFilesConfig
 from companion.privacy import advance_epoch
 from companion.store import Store, migrate
 from tests.conftest import run
+from tests.postgres_fixture import isolated_database
 from tests.support.input_reply_migration import config_for
 from tests.support.qq_files import IMAGE, prepared, signed_upload
 from tests.support.release_migration import (
@@ -61,9 +62,9 @@ def test_upload_only_stages_and_worker_commits_existing_observation_chain(core, 
     calls = []
 
     def parse(*args, **kwargs):
-        assert not core.store.db.in_transaction
+        assert not core.store.in_transaction
         assert kwargs["image"] == IMAGE
-        assert kwargs["workspace"] == Path(core.settings.database).parent
+        assert kwargs["workspace"] == Path(core.settings.state_directory)
         calls.append(args)
         return synthetic_parser(*args, **kwargs)
 
@@ -216,9 +217,10 @@ def test_late_parser_result_cannot_revive_changed_sources(core, monkeypatch, cha
         if change == "new_input":
             core.store.execute("UPDATE conversations SET reply_revision=reply_revision+1")
         elif change == "privacy":
-            advance_epoch(core.store)
+            with core.store.transaction(control_write=True):
+                advance_epoch(core.store)
         elif change == "erase":
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [event_id], core.clock())
         elif change == "stale_lease":
             core.store.execute("UPDATE content_items SET lease_token='content_lease_stale'")
@@ -312,22 +314,25 @@ def test_task_cancellation_fences_result_and_discards_original(core, monkeypatch
 def test_erasure_replay_removes_copied_file_spool_and_metadata(core, monkeypatch, tmp_path):
     _, _, _, event_id, _, _, _, _ = stage(core, monkeypatch)
     key, archive = Fernet.generate_key(), tmp_path / "files.enc"
-    destination = tmp_path / "restore.db"
+    state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    copied = destination.parent / (destination.name + ".owner-images")
+    copied = image_spool.directory(core.store, state_directory=state)
     shutil.copytree(image_spool.directory(core.store), copied)
-    with core.store.transaction():
+    assert list(copied.glob("*.raw"))
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    assert list(copied.glob("*.raw")) == []
-    with Core(core.settings.model_copy(update={"database": str(destination)}),
-              clock=core.clock) as recovered:
-        row = recovered.store.one("SELECT * FROM content_items")
-        assert row["state"] == "ERASED" and row["attachment_json"] == "{}"
-        assert not recovered.store.one('SELECT 1 FROM runtime_meta WHERE key LIKE %s',
-                                       (qq_files.STAGED + "%",))
-        assert not run(content_files.run_file_once(recovered.content,
-            parse=lambda *args, **kwargs: pytest.fail("erased file replayed")))
+    with isolated_database() as destination:
+        restore(archive, destination, key, core.settings.erasure_ledger, state_directory=state)
+        assert list(copied.glob("*.raw")) == []
+        settings = core.settings.model_copy(update={"database": destination,
+                                                    "state_directory": str(state)})
+        with Core(settings, clock=core.clock) as recovered:
+            row = recovered.store.one("SELECT * FROM content_items")
+            assert row["state"] == "ERASED" and row["attachment_json"] == "{}"
+            assert not recovered.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE %s",
+                                           (qq_files.STAGED + "%",))
+            assert not run(content_files.run_file_once(recovered.content,
+                parse=lambda *args, **kwargs: pytest.fail("erased file replayed")))
     assert list(copied.glob("*.raw")) == []
 
 
