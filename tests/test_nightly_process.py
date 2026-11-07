@@ -18,6 +18,7 @@ from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeCon
 from companion.store import encode
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import event, run
+from tests.postgres_fixture import logical_state
 from tests.support.core_http import real_core_http
 from tests.support.owner_authority import activate
 from tests.test_diary import DAY
@@ -95,7 +96,8 @@ def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_p
             core.clock.now = later
             queued_before = core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"]
             config = cfg.model_dump(mode="json")
-            config.update(model_key=cfg.model_key.get_secret_value(),
+            config.update(database=cfg.database.get_secret_value(),
+                          model_key=cfg.model_key.get_secret_value(),
                           bridge_token=cfg.bridge_token.get_secret_value())
             path = tmp_path / "nightly-settings.json"
             await asyncio.to_thread(path.write_text, encode(config), encoding="utf-8")
@@ -136,14 +138,14 @@ def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_p
                 {"status": "HYPOTHESIS", "importance": 0.8}]
             episode = core.store.one("SELECT * FROM episodes WHERE status='ACTIVE'")
             ids = [row["event_id"] for row in core.store.rows(
-                "SELECT event_id FROM episode_events WHERE episode_id=? ORDER BY event_id",
+                "SELECT event_id FROM episode_events WHERE episode_id=%s ORDER BY event_id",
                 (episode["episode_id"],))]
-            changes = core.store.db.total_changes
+            before = logical_state(core.store)
             summary = core.memory.episode_summary(episode["episode_id"], ids, core.clock())
             assert summary["kind"] == "model_summary" and summary["title"] == "项目安排"
             assert "仍是待办事项" in summary["text"] and summary["text"] == episode["summary"]
-            assert core.store.db.total_changes == changes
-            assert core.store.one("SELECT scenario,state FROM model_usage WHERE request_id=?",
+            assert logical_state(core.store) == before
+            assert core.store.one("SELECT scenario,state FROM model_usage WHERE request_id=%s",
                                    (summary["request_id"],)) == {
                 "scenario": "memory_extract", "state": "SETTLED"}
             checkpoint = core.store.one("SELECT value FROM runtime_meta "

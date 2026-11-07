@@ -592,29 +592,27 @@ class GoalEngine:
         return goals
 
     def expire_sources(self):
+        cutoff = after(self.clock(), -86400 * self.settings.raw_event_retention_days)
+        if not self.store.in_transaction:
+            with self.store.read_snapshot():
+                if not self._expired_sources(cutoff):
+                    return
         with nullcontext() if self.store.in_transaction else self.store.transaction(
             control_write=True
         ):
-            rows = self.store.rows(
-                "SELECT event_id FROM goal_evidence UNION SELECT outcome_event_id AS event_id FROM "
-                "goal_steps WHERE NOT outcome_event_id IS NULL UNION SELECT event_id FROM "
-                "goal_step_evidence"
-            )
-            expired = expired_sources(
-                self.store,
-                [row["event_id"] for row in rows],
-                after(self.clock(), -86400 * self.settings.raw_event_retention_days),
-            )
+            expired = self._expired_sources(cutoff)
             if expired:
                 self.ledger.expire_events(
-                    self.store,
-                    expired,
-                    self.clock(),
-                    retention_cutoff=after(
-                        self.clock(),
-                        -86400 * self.settings.raw_event_retention_days,
-                    ),
+                    self.store, expired, self.clock(), retention_cutoff=cutoff,
                 )
+
+    def _expired_sources(self, cutoff):
+        rows = self.store.rows(
+            "SELECT event_id FROM goal_evidence UNION SELECT outcome_event_id AS event_id FROM "
+            "goal_steps WHERE NOT outcome_event_id IS NULL UNION SELECT event_id FROM "
+            "goal_step_evidence"
+        )
+        return expired_sources(self.store, [row["event_id"] for row in rows], cutoff)
 
     def pause_autonomy(self, paused, *, owner_check=None):
         with self.store.transaction():
@@ -737,7 +735,7 @@ class GoalEngine:
         for row in self.store.rows(
             "SELECT c.goal_id FROM commitments AS c JOIN goals AS g USING (goal_id) WHERE "
             "c.deadline <= %s AND c.state IN ('ACKNOWLEDGED', 'IN_PROGRESS') AND NOT g.state IN "
-            "('DONE', 'FAILED', 'CANCELLED')",
+            "('DONE', 'FAILED', 'CANCELLED') FOR UPDATE OF g, c SKIP LOCKED",
             (self.clock(),),
         ):
             self.store.execute(
@@ -768,7 +766,9 @@ class GoalEngine:
                 "captured_privacy_epoch, goal_steps.outcome_event_id AS outcome_event_id, "
                 "goal_steps.last_error_code AS last_error_code, goal_steps.created_at AS "
                 "created_at, goal_steps.updated_at AS updated_at FROM goal_steps AS goal_steps "
-                "WHERE goal_steps.state = 'RUNNING' AND goal_steps.lease_until <= %s",
+                "JOIN goals ON goals.goal_id = goal_steps.goal_id "
+                "WHERE goal_steps.state = 'RUNNING' AND goal_steps.lease_until <= %s "
+                "FOR UPDATE OF goals, goal_steps SKIP LOCKED",
                 (now,),
             ):
                 self.fail(
@@ -782,48 +782,42 @@ class GoalEngine:
                     (now, row["goal_id"]),
                 )
             paused = s.one("SELECT value FROM runtime_meta WHERE key = 'life_paused'")
-            candidates = s.rows(
-                "SELECT st.step_id AS step_id, st.goal_id AS goal_id, st.position AS position, "
-                "st.scope_json AS scope_json, st.state AS state, st.attempts AS attempts, "
-                "st.max_attempts AS max_attempts, st.lease_token AS lease_token, st.lease_until AS "
-                "lease_until, st.captured_privacy_epoch AS captured_privacy_epoch, "
-                "st.outcome_event_id AS outcome_event_id, st.last_error_code AS last_error_code, "
-                "st.created_at AS created_at, st.updated_at AS updated_at, g.kind AS kind, g.topic "
-                "AS topic FROM goal_steps AS st JOIN goals AS g ON st.goal_id = g.goal_id WHERE "
-                "st.state IN ('QUEUED', 'RETRY_WAIT', 'WAITING_RESOURCE') AND g.state IN "
-                "('QUEUED', 'RETRY_WAIT', 'WAITING_RESOURCE') AND g.next_due_at <= %s AND "
-                "g.redacted = 0 AND (g.kind = 'commitment' OR %s = 0) ORDER BY CASE g.kind WHEN "
-                "'commitment' THEN 0 ELSE 1 END NULLS FIRST, g.priority DESC NULLS LAST, "
-                "g.created_at NULLS FIRST LIMIT 256",
-                (now, int(bool(paused and paused["value"] == "1"))),
-            )
-            row = None
-            for candidate in candidates:
-                if s.one(
-                    "SELECT 1 FROM goal_steps WHERE goal_id = %s AND state = 'RUNNING' AND "
-                    "step_id <> %s",
-                    (candidate["goal_id"], candidate["step_id"]),
-                ):
-                    continue
+            for _ in range(256):
+                row = s.one(
+                    "SELECT st.step_id, st.goal_id, st.position, st.scope_json, st.state, "
+                    "st.attempts, st.max_attempts, st.lease_token, st.lease_until, "
+                    "st.captured_privacy_epoch, st.outcome_event_id, st.last_error_code, "
+                    "st.created_at, st.updated_at, g.kind, g.topic "
+                    "FROM goal_steps AS st JOIN goals AS g ON st.goal_id = g.goal_id "
+                    "WHERE st.state IN ('QUEUED', 'RETRY_WAIT', 'WAITING_RESOURCE') "
+                    "AND g.state IN ('QUEUED', 'RETRY_WAIT', 'WAITING_RESOURCE') "
+                    "AND g.next_due_at <= %s AND g.redacted = 0 AND (g.kind = 'commitment' OR %s) "
+                    "AND NOT EXISTS (SELECT 1 FROM goal_steps running "
+                    "WHERE running.goal_id = g.goal_id AND running.state = 'RUNNING') "
+                    "ORDER BY CASE g.kind WHEN 'commitment' THEN 0 ELSE 1 END, g.priority DESC, "
+                    "g.created_at, g.goal_id, st.position LIMIT 1 FOR UPDATE OF g, st SKIP LOCKED",
+                    (now, not (paused and paused["value"] == "1")),
+                )
+                if not row:
+                    return None
                 try:
-                    self.validate_authority(self.get(candidate["goal_id"]))
+                    self.validate_authority(self.get(row["goal_id"]))
                 except CoreError as error:
                     if error.code not in AUTHORITY_REJECTIONS:
                         raise
                     self.reject_authority(
-                        candidate["goal_id"], error.code, step_id=candidate["step_id"]
+                        row["goal_id"], error.code, step_id=row["step_id"]
                     )
                     continue
-                if goal_plan.unknown(self, candidate["goal_id"]):
+                if goal_plan.unknown(self, row["goal_id"]):
                     s.execute(
                         "UPDATE goals SET state = 'WAITING_INPUT', version = version + 1, "
                         "last_error_code = 'GOAL_EXECUTION_UNCERTAIN' WHERE goal_id = %s",
-                        (candidate["goal_id"],),
+                        (row["goal_id"],),
                     )
                     continue
-                row = candidate
                 break
-            if row is None:
+            else:
                 return None
             self.validate_reflection(self.get(row["goal_id"])["reflection_suggestion_id"])
             self.validate_sources(self.step_source_ids(row["step_id"]))
@@ -941,11 +935,12 @@ class GoalEngine:
                 json.loads(result["evidence_json"]).get("requested_url", "").rstrip("/"),
             }:
                 raise CoreError("GOAL_RESULT_TARGET_MISMATCH", 409)
-            s.execute(
+            if not s.execute(
                 "UPDATE goal_steps SET state = 'DONE', lease_token = NULL, outcome_event_id = %s, "
-                "updated_at = %s WHERE step_id = %s",
-                (result_event_id, now, step["step_id"]),
-            )
+                "updated_at = %s WHERE step_id = %s AND state = 'RUNNING' AND lease_token = %s",
+                (result_event_id, now, step["step_id"], step["lease_token"]),
+            ):
+                raise CoreError("GOAL_STALE_LEASE", 409)
             remaining = s.one(
                 "SELECT 1 FROM goal_steps WHERE goal_id = %s AND state <> 'DONE'",
                 (step["goal_id"],),
@@ -1023,6 +1018,15 @@ class GoalEngine:
                     else "FAILED"
                 )
             )
+            delay = 3600 if resource else 60 * 2 ** max(0, current["attempts"] - 1)
+            if not s.execute(
+                "UPDATE goal_steps SET state = %s, lease_token = NULL, last_error_code = %s, "
+                "attempts = attempts - %s, updated_at = %s WHERE step_id = %s "
+                "AND state = 'RUNNING' AND lease_token = %s",
+                (state, code, int(resource and not sent), now,
+                 step["step_id"], step["lease_token"]),
+            ):
+                return False
             if not sent:
                 s.execute(
                     (
@@ -1035,12 +1039,6 @@ class GoalEngine:
                     ),
                     (step["step_id"],),
                 )
-            delay = 3600 if resource else 60 * 2 ** max(0, current["attempts"] - 1)
-            s.execute(
-                "UPDATE goal_steps SET state = %s, lease_token = NULL, last_error_code = %s, "
-                "attempts = attempts - %s, updated_at = %s WHERE step_id = %s",
-                (state, code, int(resource and not sent), now, step["step_id"]),
-            )
             s.execute(
                 "UPDATE goals SET state = %s, last_error_code = %s, next_due_at = %s, version = "
                 "version + 1, updated_at = %s WHERE goal_id = %s",

@@ -620,18 +620,20 @@ class DiaryRepository:
             if prior:
                 return prior["run_id"]
             run_id = uid("diary_run")
-            self.store.insert(
-                "diary_runs",
-                run_id=run_id,
-                identity_id="companion",
-                local_date=day.isoformat(),
-                timezone=self.settings.timezone,
-                state="PENDING",
-                max_attempts=self.settings.diary_max_attempts,
-                created_at=now,
-                updated_at=now,
+            inserted = self.store.execute(
+                "INSERT INTO diary_runs (run_id, identity_id, local_date, timezone, state, "
+                "max_attempts, created_at, updated_at) VALUES "
+                "(%s, 'companion', %s, %s, 'PENDING', %s, %s, %s) "
+                "ON CONFLICT (identity_id, local_date, timezone) DO NOTHING",
+                (run_id, day.isoformat(), self.settings.timezone,
+                 self.settings.diary_max_attempts, now, now),
             )
-            return run_id
+            if inserted:
+                return run_id
+            return self.store.one(
+                "SELECT run_id FROM diary_runs WHERE identity_id = 'companion' "
+                "AND local_date = %s AND timezone = %s", (day.isoformat(), self.settings.timezone),
+            )["run_id"]
 
     def claim(self, worker_id, *, run_id=None):
         s, now = self.store, self.clock()
@@ -640,20 +642,26 @@ class DiaryRepository:
                 self.cancel_pending()
                 return None
             expired = s.rows(
-                "SELECT diary_runs.run_id AS run_id, diary_runs.identity_id AS identity_id, "
-                "diary_runs.local_date AS local_date, diary_runs.timezone AS timezone, "
-                "diary_runs.state AS state, diary_runs.source_set_sha256 AS source_set_sha256, "
-                "diary_runs.captured_privacy_epoch AS captured_privacy_epoch, "
-                "diary_runs.lease_owner AS lease_owner, diary_runs.lease_token AS lease_token, "
-                "diary_runs.lease_until AS lease_until, diary_runs.next_attempt_at AS "
-                "next_attempt_at, diary_runs.attempts AS attempts, diary_runs.max_attempts AS "
-                "max_attempts, diary_runs.model_request_id AS model_request_id, "
-                "diary_runs.last_error_code AS last_error_code, diary_runs.created_at AS "
-                "created_at, diary_runs.updated_at AS updated_at FROM diary_runs AS diary_runs "
-                "WHERE diary_runs.state = 'RUNNING' AND diary_runs.lease_until <= %s",
+                "SELECT run_id, lease_token, model_request_id FROM diary_runs "
+                "WHERE state = 'RUNNING' AND lease_until <= %s ORDER BY run_id",
                 (now,),
             )
-            for row in expired:
+            request_ids = [r["model_request_id"] for r in expired if r["model_request_id"]]
+            if request_ids:
+                # Recovery takes the original fees before their runs, as in settlement.
+                s.rows("SELECT request_id FROM model_usage WHERE request_id = ANY(%s) "
+                       "ORDER BY request_id FOR UPDATE", (request_ids,))
+            for observed in expired:
+                row = s.one(
+                    "SELECT run_id, model_request_id, captured_privacy_epoch, attempts, "
+                    "max_attempts FROM diary_runs WHERE run_id = %s AND state = 'RUNNING' "
+                    "AND lease_until <= %s AND lease_token IS NOT DISTINCT FROM %s "
+                    "AND model_request_id IS NOT DISTINCT FROM %s FOR UPDATE SKIP LOCKED",
+                    (observed["run_id"], now, observed["lease_token"],
+                     observed["model_request_id"]),
+                )
+                if not row:
+                    continue
                 budget.mark_reservation_unknown(s, row["model_request_id"])
                 stale = row["captured_privacy_epoch"] != epoch(s)
                 unknown = s.one(
@@ -694,7 +702,7 @@ class DiaryRepository:
                 "(diary_runs.next_attempt_at IS NULL OR diary_runs.next_attempt_at <= %s) AND "
                 "diary_runs.timezone = %s AND (CAST(%s AS TEXT) IS NULL OR diary_runs.run_id = %s) "
                 "ORDER BY diary_runs.local_date NULLS FIRST, diary_runs.created_at NULLS FIRST "
-                "LIMIT 1",
+                "LIMIT 1 FOR UPDATE SKIP LOCKED",
                 (now, self.settings.timezone, run_id, run_id),
             )
             if not row:
@@ -1025,10 +1033,12 @@ class DiaryService:
             try:
                 with self.store.transaction():
                     self.repo.validate_run(run)
-                    self.store.execute(
-                        "UPDATE diary_runs SET model_request_id = %s WHERE run_id = %s",
-                        (request_id, run["run_id"]),
-                    )
+                    if not self.store.execute(
+                        "UPDATE diary_runs SET model_request_id = %s WHERE run_id = %s "
+                        "AND state = 'RUNNING' AND lease_token = %s",
+                        (request_id, run["run_id"], run["lease_token"]),
+                    ):
+                        raise CoreError("DIARY_STALE_LEASE", 409)
             except BaseException:
                 budget.settle(self.store, self.settings, request_id)
                 raise

@@ -88,7 +88,7 @@ def seed_day(core, texts=None, day=DAY):
 def generate(core):
     core.diary.schedule_day(DAY)
     assert run(core.diary.generate_once("diary-worker"))
-    return core.store.one("SELECT * FROM diary_runs WHERE local_date=?", (DAY.isoformat(),))
+    return core.store.one("SELECT * FROM diary_runs WHERE local_date=%s", (DAY.isoformat(),))
 
 
 def test_d01_disabled_means_no_jobs_or_model_calls(core):
@@ -253,12 +253,12 @@ def test_d10_only_unreserved_expired_lease_is_reclaimed_and_old_result_cannot_co
     old = core.diary.repo.claim("crashed")
     if reserved:
         request = budget.reserve(core.store, core.settings, None, "diary", [], core.clock())
-        core.store.execute("UPDATE diary_runs SET model_request_id=?", (request,))
+        core.store.execute("UPDATE diary_runs SET model_request_id=%s", (request,))
     core.clock.advance(core.settings.lease_seconds + 1)
     assert run(core.diary.generate_once("replacement")) is not reserved
     if reserved:
         assert core.store.one(
-            "SELECT state FROM model_usage WHERE request_id=?", (request,),
+            "SELECT state FROM model_usage WHERE request_id=%s", (request,),
         )["state"] == "UNKNOWN"
         assert core.store.one("SELECT state FROM diary_runs")["state"] == "FAILED"
     with pytest.raises(CoreError, match="DIARY_STALE_LEASE"):

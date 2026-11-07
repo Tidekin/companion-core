@@ -163,12 +163,28 @@ class ReflectionService:
             )
             if prior:
                 if prior["state"] == "RUNNING" and prior["lease_until"] <= now:
-                    budget.mark_reservation_unknown(s, prior["model_request_id"])
-                    s.execute(
+                    request_id = prior["model_request_id"]
+                    if request_id:
+                        # Take the original fee before fencing the expired run.
+                        s.one("SELECT request_id FROM model_usage WHERE request_id = %s "
+                              "FOR UPDATE", (request_id,))
+                    failed = s.execute(
                         "UPDATE reflection_runs SET state = 'FAILED', lease_token = NULL, "
-                        "last_error_code = 'REFLECTION_LEASE_EXPIRED' WHERE run_id = %s",
-                        (prior["run_id"],),
+                        "last_error_code = 'REFLECTION_LEASE_EXPIRED' WHERE run_id = %s "
+                        "AND state = 'RUNNING' AND lease_token IS NOT DISTINCT FROM %s "
+                        "AND lease_until <= %s AND model_request_id IS NOT DISTINCT FROM %s",
+                        (prior["run_id"], prior["lease_token"], now, request_id),
                     )
+                    if failed:
+                        budget.mark_reservation_unknown(s, request_id)
+                    return None
+                if not retryable_admission(prior, now):
+                    return None
+                prior = s.one(
+                    "SELECT run_id, state, model_request_id, last_error_code, next_attempt_at, "
+                    "source_set_sha256 FROM reflection_runs WHERE run_id = %s "
+                    "FOR UPDATE SKIP LOCKED", (prior["run_id"],),
+                )
                 if not retryable_admission(prior, now):
                     return None
                 sources = self.sources(day)
@@ -202,20 +218,16 @@ class ReflectionService:
                         "sources": sources}
             sources = self.sources(day)
             token, run_id = uid("reflection_lease"), uid("reflection")
-            s.insert(
-                "reflection_runs",
-                run_id=run_id,
-                identity_id="companion",
-                local_date=day.isoformat(),
-                timezone=self.settings.timezone,
-                state="RUNNING",
-                source_set_sha256=source_hash(sources),
-                captured_privacy_epoch=epoch(s),
-                lease_token=token,
-                lease_until=after(now, self.settings.lease_seconds),
-                created_at=now,
-                updated_at=now,
+            created = s.execute(
+                "INSERT INTO reflection_runs (run_id, identity_id, local_date, timezone, state, "
+                "source_set_sha256, captured_privacy_epoch, lease_token, lease_until, created_at, "
+                "updated_at) VALUES (%s, 'companion', %s, %s, 'RUNNING', %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (identity_id, local_date, timezone) DO NOTHING",
+                (run_id, day.isoformat(), self.settings.timezone, source_hash(sources), epoch(s),
+                 token, after(now, self.settings.lease_seconds), now, now),
             )
+            if not created:
+                return None
             for source in sources:
                 s.insert(
                     "reflection_evidence",
@@ -381,10 +393,12 @@ class ReflectionService:
             try:
                 with self.store.transaction():
                     self.validate_lease(run)
-                    self.store.execute(
-                        'UPDATE reflection_runs SET model_request_id = %s WHERE run_id = %s',
-                        (request_id, run["run_id"]),
-                    )
+                    if not self.store.execute(
+                        "UPDATE reflection_runs SET model_request_id = %s WHERE run_id = %s "
+                        "AND state = 'RUNNING' AND lease_token = %s",
+                        (request_id, run["run_id"], run["lease_token"]),
+                    ):
+                        raise CoreError("REFLECTION_STALE_LEASE", 409)
             except BaseException:
                 budget.settle(self.store, self.settings, request_id)
                 raise
