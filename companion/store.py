@@ -93,11 +93,16 @@ class Store:
 
     def change_token(self):
         """Native snapshot plus actual transaction writes, including triggers/CTEs."""
+        # A repeatable read-only transaction cannot write business tables. Backend
+        # statistics for prior writes can still differ between identical snapshots.
+        writes = "'0'::text" if self.in_read_snapshot else (
+            "COALESCE((SELECT sum(n_tup_ins+n_tup_upd+n_tup_del) "
+            "FROM pg_stat_xact_user_tables WHERE schemaname=current_schema()),0)::text"
+        )
         return self.one(
             "SELECT pg_current_snapshot()::text AS snapshot, "
-            "current_schema() AS schema,pg_postmaster_start_time()::text AS instance, "
-            "COALESCE((SELECT sum(n_tup_ins+n_tup_upd+n_tup_del) "
-            "FROM pg_stat_xact_user_tables WHERE schemaname=current_schema()),0)::text AS writes"
+            "current_schema() AS schema, pg_postmaster_start_time()::text AS instance, "
+            + writes + " AS writes"
         )
 
     def execute(self, statement, parameters=()):

@@ -319,13 +319,17 @@ def _live_record(row, digest, current, seen):
 
 
 IDENTITY = "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
-SUMMARY = ("SELECT (SELECT count(*) FROM runtime_meta) AS metadata_count,"
-           "(SELECT COALESCE(sum(length(key)+length(value)),0)::double precision "
-           "FROM runtime_meta) AS metadata_size,"
-           "(SELECT count(*) FROM model_admissions) AS admission_count,"
-           "(SELECT count(*) FROM model_usage) AS usage_count,"
-           "(SELECT COALESCE(sum(length(state)+billed_micro_usd),0)::double precision "
-           "FROM model_usage) AS usage_size")
+SUMMARY = (
+    "SELECT meta.metadata_count, meta.metadata_size, "
+    "(SELECT count(*) FROM model_admissions) AS admission_count, "
+    "usage.usage_count, usage.usage_size FROM "
+    "(SELECT count(*) AS metadata_count, "
+    "COALESCE(sum(length(key)+length(value)),0)::double precision AS metadata_size "
+    "FROM runtime_meta) AS meta CROSS JOIN "
+    "(SELECT count(*) AS usage_count, "
+    "COALESCE(sum(length(state)+billed_micro_usd),0)::double precision AS usage_size "
+    "FROM model_usage) AS usage"
+)
 # Views shared by every connection of this process, for callers such as the API that open
 # one connection per request. Keyed by the journal path.
 _SHARED, _SHARED_LOCK = {}, threading.RLock()
@@ -463,13 +467,15 @@ def _read_journal(store, approval, *, allow_settlement, initialize):
         if len(blob) > CACHE_MAX_BYTES:
             forget_views(store)
             return view
-        after = _view_key(store, path, raw)
-        entry = (after, blob, store.one(IDENTITY), marshal.loads(blob))
+        # READ COMMITTED may observe a concurrent commit while validating the journal.
+        # Publish only under the key that was checked before the fold.
+        if _view_key(store, path, raw) != key:
+            return view
+        entry = (key, blob, store.one(IDENTITY), marshal.loads(blob))
         store._journal_view = entry
-        shared = _shared_key(store, after)
         if shared is not None:
             with _SHARED_LOCK:
-                _SHARED[after[0]] = (shared, *entry[1:])
+                _SHARED[key[0]] = (shared, *entry[1:])
     return view
 
 
