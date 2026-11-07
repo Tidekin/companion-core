@@ -311,7 +311,14 @@ def register_console_routes(app, settings):
 
     @app.get(prefix + "/overview", dependencies=auth)
     async def overview():
-        return console_read.overview(app.state.core)
+        clock = app.state.core.clock
+
+        def read(store):
+            memory = Memory(store, settings, ErasureLedger(settings.erasure_ledger))
+            return console_read.overview(SimpleNamespace(store=store, settings=settings,
+                                                        memory=memory, clock=clock))
+
+        return await app.state.api_store.run(read)
 
     @app.get(prefix + "/activity", dependencies=auth)
     async def activity(before: int | None = None, limit: int = 30):

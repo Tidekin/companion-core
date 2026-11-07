@@ -477,39 +477,36 @@ def model_chart_clock(core, request):
     return core.clock.now
 
 
-def test_today_tokens_page_past_empty_pages_and_never_report_zero_when_unread(
-    core, tmp_path, model_chart_clock,
-):
-    today = synthetic_call(1, model_chart_clock)
-    yesterday = synthetic_call(2, model_chart_clock - timedelta(days=2))
+def test_today_tokens_use_overview_without_cognition_requests(core, tmp_path, model_chart_clock):
+    def record(key, when):
+        core.store.insert("model_usage", usage_id=key, request_id=key, scenario="chat",
+                          provider="demo", model="demo", occurred_at=when, state="UNKNOWN")
 
-    def filtered_first_page(query):
-        # The first page is empty after source filtering but still has a cursor.
-        if "before" not in query:
-            return {"items": [], "next_cursor": "c1", "truncated": True}
-        return {"items": [today, yesterday], "next_cursor": None, "truncated": False}
-
-    def never_ending(query):
-        return {"items": [], "next_cursor": "c" + query.get("before", "0"), "truncated": True}
+    now = model_chart_clock
+    record("today", now.astimezone(UTC).isoformat())
+    record("yesterday", (now - timedelta(days=1)).astimezone(UTC).isoformat())
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
-            await page.clock.set_fixed_time(model_chart_clock)
-            card = page.locator(".sheet.tok")
-            await serve_model_pages(page, filtered_first_page)
+            requests = []
+            page.on("request", lambda request: requests.append(request.url))
             await page.get_by_role("button", name="刷新当前页面").click()
-            await card.filter(has_text="模型调用").locator(".tok-stat b").first.filter(
-                has_text="1").wait_for()
-            text = await card.inner_text()
-            assert "今天还没有模型调用" not in text and "不完整" not in text
-            # Drain callbacks before replacing the paginated response source.
-            await page.unroute_all(behavior="wait")
-            await serve_model_pages(page, never_ending)
+            card = page.locator(".sheet.tok")
+            await card.filter(has_text="1 次结果不明").wait_for()
+            assert await card.locator(".tok-stat b").first.inner_text() == "1"
+
+            async def partial_overview(route):
+                response = await route.fetch()
+                value = await response.json()
+                value["model"]["complete"] = False
+                await route.fulfill(response=response, json=value)
+
+            await page.route("**/v1/console/overview", partial_overview)
             await page.get_by_role("button", name="刷新当前页面").click()
             await card.filter(has_text="没有全部读到").wait_for()
-            text = await card.inner_text()
-            assert "今天还没有模型调用" not in text and "¥0" not in text and "$0" not in text
-            assert "未读完" in text
+            assert await card.locator(".tok-stat b").first.inner_text() == "≥ 1"
+            assert any("/console/overview" in url for url in requests)
+            assert all("/console/cognition" not in url for url in requests)
 
     run(scenario())
 
