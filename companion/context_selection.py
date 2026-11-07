@@ -69,13 +69,19 @@ def current_share(reference, event_id):
 
 
 def share_history(sources, topic):
-    """Select complete source groups by owner content, retaining unanswered inputs.
+    """Select source groups by owner content, retaining the current unanswered tail.
 
     Assistant guesses cannot nominate the old owner turn as related. Original
     storage, relationships and permission/source checks are unchanged.
     """
-    return [source for source in sources if source.get("reply_complete") is False
-            or not source.get("reply_text")
+    completed = max((index for index, source in enumerate(sources)
+                     if source.get("reply_text") and source.get("reply_complete") is not False),
+                    default=-1)
+    # Cancelled/failed inputs from an earlier completed exchange are ordinary
+    # history. Keeping them pending forever would reopen unrelated old topics.
+    return [source for index, source in enumerate(sources)
+            if (index > completed and (source.get("reply_complete") is False
+                                       or not source.get("reply_text")))
             or _share_related(topic, source.get("user_text", ""))]
 
 

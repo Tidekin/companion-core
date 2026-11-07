@@ -30,6 +30,68 @@ def test_share_history_matches_owner_words_not_assistant_guesses_and_keeps_pendi
     assert len(sources) == 3
 
 
+def test_fresh_share_only_treats_the_unanswered_tail_as_current_pending_input():
+    sources = [
+        {"event_id": "old-pending", "user_text": "上次的采购问题", "reply_text": "",
+         "reply_complete": False},
+        {"event_id": "old-partial", "user_text": "另一项采购问题", "reply_text": "先等一下",
+         "reply_complete": False},
+        {"event_id": "complete", "user_text": "早餐吃过了", "reply_text": "吃过就好"},
+        {"event_id": "pending", "user_text": "还有一句补充", "reply_text": "",
+         "reply_complete": False},
+    ]
+    assert [s["event_id"] for s in selection.share_history(
+        sources, selection.terms("宇航服照片"))] == ["pending"]
+    assert [s["event_id"] for s in selection.share_history(
+        sources, selection.terms("上次的采购问题"))] == ["old-pending", "old-partial", "pending"]
+    assert len(sources) == 4 and sources[0]["reply_complete"] is False
+
+
+def test_partial_reply_does_not_close_the_current_unanswered_batch():
+    sources = [
+        {"event_id": "pending", "user_text": "还有一项计划", "reply_text": ""},
+        {"event_id": "partial", "user_text": "补充一下", "reply_text": "先说第一点",
+         "reply_complete": False},
+    ]
+    assert selection.share_history(sources, selection.terms("宇航服照片")) == sources
+
+
+@pytest.mark.parametrize("failed", [False, True])
+@pytest.mark.parametrize("question,keep_old", [("", False), ("接着上次的采购预算看这张", True)])
+def test_native_new_picture_does_not_reopen_an_unanswered_input_from_a_finished_batch(
+    core, tmp_path, monkeypatch, failed, question, keep_old,
+):
+    async def scenario():
+        async with image_fixture.native_image_memory(core, tmp_path, history=True) as context:
+            assert await context.worker.run_once()
+            await context.entry.send(context.entry.client, context.entry.protocol)
+            old = await context.entry.admit(2, "上次的采购预算还没谈完")
+            old_job = core.store.one("SELECT job_id FROM jobs WHERE event_id=? AND kind='chat'",
+                                      (old["event_id"],))["job_id"]
+            if failed:
+                core.store.execute("UPDATE jobs SET state=?,last_error_code=? WHERE job_id=?",
+                                   ("FAILED", "MODEL_RETRYABLE", old_job))
+            await context.entry.admit(3, "早餐已经吃过了")
+            await reply(core, context.entry, "吃过就好", [])
+            monkeypatch.setattr(image_fixture, "QUESTION", question)
+            await context.admit_image(4)
+            start = len(context.calls)
+            assert await context.worker.run_once()
+            calls = context.calls[start:]
+            assert calls and all(("上次的采购预算还没谈完" in encode(call["messages"])) is keep_old
+                                 for call in calls)
+            state = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                                   (old_job,))
+            assert state == ({"state": "FAILED", "last_error_code": "MODEL_RETRYABLE"} if failed
+                             else {"state": "CANCELLED", "last_error_code": "REPLY_SUPERSEDED"})
+            assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                                  (old["event_id"],))["redacted"] == 0
+            assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+                                      (old["event_id"],))
+
+    run(scenario())
+
+
 @pytest.mark.parametrize(("old", "current"), [
     ("我们一起研究采购预算", "我们一起看看这张"),
     ("我想学习钢琴", "我想喝杯咖啡"),
