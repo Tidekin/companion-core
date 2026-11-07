@@ -17,7 +17,9 @@ x-dev: &dev
     COMPANION_MONTHLY_LIMIT_MICRO_USD: "0"
     COMPANION_AUTONOMOUS_DAILY_MICRO_USD: "0"
     COMPANION_MEMORY_DAILY_MICRO_USD: "0"
-    COMPANION_DATABASE: /data/companion.sqlite3
+    COMPANION_DATABASE: host=dev-postgres dbname=companion user=dev_core
+    PGPASSWORD: ${COMPANION_DEV_CORE_PASSWORD:?set a dev database password}
+    COMPANION_STATE_DIRECTORY: /data
     COMPANION_ERASURE_LEDGER: /privacy/erasures.jsonl
     COMPANION_EMBEDDING_CACHE_DIR: /data/embedding-cache
     # The smoke probes follow one Outbox row per reply.
@@ -52,6 +54,30 @@ x-dev: &dev
   user: "10001:10001"
 
 services:
+  dev-postgres:
+    image: postgres:16.15-trixie@sha256:1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c
+    user: postgres
+    environment:
+      POSTGRES_PASSWORD: ${COMPANION_DEV_ADMIN_PASSWORD:?set a dev database admin password}
+      DEV_CORE_PASSWORD: ${COMPANION_DEV_CORE_PASSWORD:?set a dev database password}
+      DEV_ARCHIVE_PASSWORD: ${COMPANION_DEV_ARCHIVE_PASSWORD:?set a dev archive database password}
+    volumes:
+      - dev-postgres-data:/var/lib/postgresql/data
+      - type: bind
+        source: ./deploy/dev-postgres-init.sql
+        target: /docker-entrypoint-initdb.d/10-dev.sql
+        read_only: true
+        bind: {create_host_path: false}
+    read_only: true
+    tmpfs: [/tmp, "/var/run/postgresql:uid=999,gid=999,mode=3775"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [companion]
+    healthcheck:
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, postgres, -d, postgres]
+      interval: 2s
+      timeout: 3s
+      retries: 30
   migrate:
     <<: *dev
     profiles: [dev-maintenance]
@@ -74,7 +100,8 @@ services:
     restart: "no"
     environment: !override
       <<: *dev-environment
-      COMPANION_DATABASE: /source/companion.sqlite3
+      COMPANION_DATABASE: host=dev-postgres dbname=companion user=dev_archive
+      PGPASSWORD: ${COMPANION_DEV_ARCHIVE_PASSWORD:?set a dev archive database password}
       COMPANION_BACKUP_KEY: ${COMPANION_DEV_BACKUP_KEY:-}
     volumes: !override
       - type: bind
@@ -98,10 +125,6 @@ services:
         read_only: true
         bind: {create_host_path: false}
       - type: volume
-        source: core-data
-        target: /source
-        read_only: true
-      - type: volume
         source: erasure-ledger
         target: /privacy
         read_only: true
@@ -121,3 +144,4 @@ networks:
     internal: true
 volumes:
   dev-snapshots:
+  dev-postgres-data:

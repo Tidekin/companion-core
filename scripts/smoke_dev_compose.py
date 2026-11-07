@@ -23,7 +23,8 @@ WRITERS = ["companion-worker", "companion-life-worker", "companion-executive-wor
            "companion-content-worker", "companion-api"]
 
 HTTP_READY_PROBE = r'''
-import json, os, sqlite3, sys, time
+import json, os, sys, time
+import psycopg
 from datetime import UTC, datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, ProxyHandler
@@ -68,9 +69,10 @@ event = {
 first = request("inbox/events", event, key=f"dev-smoke-{number}")
 second = request("inbox/events", event, key=f"dev-smoke-{number}")
 assert first["job_id"] == second["job_id"] and second["duplicate"]
-with sqlite3.connect("file:/data/companion.sqlite3?mode=ro", uri=True) as db:
+with psycopg.connect(os.environ["COMPANION_DATABASE"], autocommit=True,
+                     options="-c default_transaction_read_only=on") as db:
     for attempt in range(100):
-        row = db.execute("SELECT state FROM jobs WHERE job_id=?", (first["job_id"],)).fetchone()
+        row = db.execute("SELECT state FROM jobs WHERE job_id=%s", (first["job_id"],)).fetchone()
         if row and row[0] == "SUCCEEDED":
             break
         time.sleep(0.2)
@@ -78,30 +80,31 @@ with sqlite3.connect("file:/data/companion.sqlite3?mode=ro", uri=True) as db:
         # Failure-only evidence; keep the polling budget and success contract unchanged.
         from types import SimpleNamespace
         from companion.worker_loop import snapshot
-        db.row_factory = sqlite3.Row
-        loop = snapshot(SimpleNamespace(one=lambda *args: db.execute(*args).fetchone()),
-                        datetime.now(UTC))
+        from psycopg.rows import dict_row
+        with db.cursor(row_factory=dict_row) as cursor:
+            loop = snapshot(SimpleNamespace(one=lambda *args: cursor.execute(*args).fetchone()),
+                            datetime.now(UTC))
         details = {
             "job_state": row[0] if row else None,
             "model_usage": dict(db.execute(
-                "SELECT state,count(*) FROM model_usage WHERE job_id=? GROUP BY state",
+                "SELECT state,count(*) FROM model_usage WHERE job_id=%s GROUP BY state",
                 (first["job_id"],)).fetchall()),
             "outbox": dict(db.execute(
-                "SELECT state,count(*) FROM outbox WHERE origin_event_id=? GROUP BY state",
+                "SELECT state,count(*) FROM outbox WHERE origin_event_id=%s GROUP BY state",
                 (event["event_id"],)).fetchall()),
             "worker_loop": {key: loop[key] for key in ("state", "stage", "sequence")
                             if key in loop},
         }
         raise RuntimeError("INDEPENDENT_WORKER_DID_NOT_COMPLETE " + json.dumps(details))
-    assert db.execute("SELECT count(*) FROM jobs WHERE event_id=?", (event["event_id"],)
+    assert db.execute("SELECT count(*) FROM jobs WHERE event_id=%s", (event["event_id"],)
                       ).fetchone()[0] == 1
-    assert db.execute("SELECT count(*) FROM model_usage WHERE job_id=?", (first["job_id"],)
+    assert db.execute("SELECT count(*) FROM model_usage WHERE job_id=%s", (first["job_id"],)
                       ).fetchone()[0] == 1
-    assert db.execute("SELECT count(*) FROM outbox WHERE origin_event_id=?", (event["event_id"],)
+    assert db.execute("SELECT count(*) FROM outbox WHERE origin_event_id=%s", (event["event_id"],)
                       ).fetchone()[0] == 1
-    assert db.execute("SELECT state FROM outbox WHERE origin_event_id=?", (event["event_id"],)
+    assert db.execute("SELECT state FROM outbox WHERE origin_event_id=%s", (event["event_id"],)
                       ).fetchone()[0] == "PENDING"
-    assert db.execute("SELECT count(*) FROM model_usage WHERE job_id=? AND "
+    assert db.execute("SELECT count(*) FROM model_usage WHERE job_id=%s AND "
                       "(state!='SETTLED' OR billed_micro_usd!=0)",
                       (first["job_id"],)).fetchone()[0] == 0
     if number <= 3:
@@ -138,7 +141,7 @@ from companion.privacy import ErasureLedger
 from companion.runtime import Runtime
 from companion.store import utcnow
 settings = Settings.load()
-with Runtime(settings) as runtime, runtime.store.transaction():
+with Runtime(settings) as runtime, runtime.store.transaction(control_write=True):
     ledger = ErasureLedger(settings.erasure_ledger)
     ledger.expire_events(runtime.store, ["evt_dev_smoke_3"], utcnow())
     assert len(ledger.read()) == 2
@@ -146,21 +149,22 @@ print("PASS")
 '''
 
 RESTORE_PROBE = r'''
-import hashlib, json, os, sqlite3, sys
+import hashlib, json, os, sys, tomllib
+import psycopg
+from cryptography.fernet import Fernet
 from pathlib import Path
 from companion.privacy import ErasureLedger
 archive = Path("/data/pre-init.enc").read_bytes()
-assert not archive.startswith(b"SQLite")
+assert Fernet(os.environ["COMPANION_BACKUP_KEY"].encode()).decrypt(archive).startswith(b"PGDMP")
 ledger = ErasureLedger("/privacy/erasures.jsonl").read()
 after_erasure = sys.argv[1] == "after"
 assert len(ledger) == (2 if after_erasure else 1)
-destination = ("/data/recovered.sqlite3" if after_erasure
-               else "/data/recovered-before-erasure.sqlite3")
-with sqlite3.connect(destination) as store:
+target = tomllib.loads(Path(sys.argv[2]).read_text("utf8"))
+with psycopg.connect(target["database"], options="-c default_transaction_read_only=on") as store:
     def one(sql):
         return store.execute(sql).fetchone()[0]
-    assert one("PRAGMA integrity_check") == "ok"
-    assert not store.execute("PRAGMA foreign_key_check").fetchall()
+    assert one("SELECT bool_and(convalidated) FROM pg_constraint "
+               "WHERE connamespace=current_schema()::regnamespace AND contype='f'")
     assert one("SELECT redacted FROM events WHERE event_id='evt_dev_smoke_3'") == int(after_erasure)
     assert one("SELECT state FROM outbox WHERE origin_event_id='evt_dev_smoke_1'") == "SENT"
     assert one("SELECT state FROM outbox WHERE origin_event_id='evt_dev_smoke_2'") == (
@@ -170,38 +174,33 @@ with sqlite3.connect(destination) as store:
     assert one("SELECT value FROM runtime_meta WHERE key='cloud_budget_restore_required'") == "1"
     assert one("SELECT count(*) FROM privacy_erasure_ledger") == int(after_erasure)
 # The controller keeps every writer stopped throughout both restore probes.
-source_path = Path("/source/companion.sqlite3")
-assert not any(os.path.lexists(str(source_path) + suffix)
-               for suffix in ("-wal", "-shm", "-journal")), "STOPPED_SOURCE_HAS_SIDECARS"
-with sqlite3.connect(source_path.as_uri() + "?mode=ro&immutable=1", uri=True) as source:
+with psycopg.connect(os.environ["COMPANION_DATABASE"],
+                     options="-c default_transaction_read_only=on") as source:
     row = source.execute("SELECT state FROM outbox WHERE origin_event_id='evt_dev_smoke_2'")
     assert row.fetchone()[0] == ("CANCELLED" if after_erasure else "PENDING")
     row = source.execute("SELECT count(*) FROM model_usage WHERE state='RESERVED'")
     assert row.fetchone()[0] == 1
 print(json.dumps({"encrypted_sha256": hashlib.sha256(archive).hexdigest(),
                   "latest_ledger_replay": "PASS" if after_erasure else "NOT_YET_APPENDED",
-                  "restore_new_path": "PASS", "sent_preserved_reservation_unknown": "PASS",
+                  "restored_empty_database": "PASS", "sent_preserved_reservation_unknown": "PASS",
                   "pending_state": "CANCELLED" if after_erasure else "DELIVERY_UNCERTAIN"}))
 '''
 
 
 _STDERR_LINES = {
     "BACKUP_DESTINATION_EXISTS": "BACKUP_DESTINATION_EXISTS",
-    "BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS": "BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS",
-    "RESTORE_REQUIRES_NEW_PATH": "RESTORE_REQUIRES_NEW_PATH",
+    "RESTORE_REQUIRES_EMPTY_DATABASE": "RESTORE_REQUIRES_EMPTY_DATABASE",
     "BACKUP_INTEGRITY_FAILED": "BACKUP_INTEGRITY_FAILED",
-    "BACKUP_FOREIGN_KEYS_FAILED": "BACKUP_FOREIGN_KEYS_FAILED",
+    "POSTGRES_BACKUP_TOOL_FAILED": "POSTGRES_BACKUP_TOOL_FAILED",
     "ERASURE_LEDGER_MISMATCH": "ERASURE_LEDGER_MISMATCH",
     "Required environment variable missing.": "CLI_REQUIRED_ENV_MISSING",
     "Command failed; no diagnostic details or private paths emitted.": "CLI_COMMAND_FAILED",
-    "sqlite3.OperationalError: attempt to write a readonly database": "SQLITE_READONLY_TEXT",
-    "sqlite3.OperationalError: unable to open database file": "SQLITE_CANTOPEN_TEXT",
-    "sqlite3.OperationalError: database is locked": "SQLITE_BUSY_TEXT",
 }
 _STDERR_PREFIXES = {
     "AssertionError": "PYTHON_ASSERTION",
-    "sqlite3.OperationalError": "PYTHON_SQLITE_OPERATIONAL",
-    "sqlite3.DatabaseError": "PYTHON_SQLITE_DATABASE",
+    "psycopg.OperationalError": "POSTGRES_OPERATIONAL",
+    "psycopg.errors.InsufficientPrivilege": "POSTGRES_PRIVILEGE",
+    "psycopg.errors.ReadOnlySqlTransaction": "POSTGRES_READ_ONLY",
     "PermissionError": "PYTHON_PERMISSION",
     "FileNotFoundError": "PYTHON_FILE_MISSING",
     "ValueError": "PYTHON_VALUE",
@@ -273,8 +272,10 @@ def smoke(context, *, image=None, root=ROOT, proof=None):
         env_file = Path(directory) / "compose.env"
         token = secrets.token_urlsafe(32)
         key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()
-        env_file.write_text(f"COMPANION_DEV_BRIDGE_TOKEN={token}\nCOMPANION_DEV_BACKUP_KEY={key}\n",
-                            encoding="utf-8")
+        with env_file.open("x", encoding="utf-8") as stream:
+            stream.write(f"COMPANION_DEV_BRIDGE_TOKEN={token}\nCOMPANION_DEV_BACKUP_KEY={key}\n")
+            for role in ("CORE", "ADMIN", "ARCHIVE"):
+                stream.write(f"COMPANION_DEV_{role}_PASSWORD={secrets.token_urlsafe(32)}\n")
         env_file.chmod(0o600)
         proof["phase"] = "compose_render"
         config = render(root, env_file, project, context=context)
@@ -334,6 +335,7 @@ def smoke(context, *, image=None, root=ROOT, proof=None):
                 "print('PASS')"
             )
             assert probe("migrate", permission, maintenance=True) == "PASS"
+            command("up", "-d", "--wait", "--no-build", "--pull", "never", "dev-postgres")
             command("run", *RUN_OPTIONS, "migrate", "init")
             command("up", "-d", "--no-deps", "--no-build", "--pull", "never",
                     "companion-api", "companion-worker")
@@ -357,44 +359,62 @@ def smoke(context, *, image=None, root=ROOT, proof=None):
             proof["checks"].append({"worker_lock": "PASS", "selective_restart": "PASS",
                                     "readonly_live_source": "PASS"})
             command("stop", *WRITERS)
-            assert not command("ps", "--status", "running", "-q")
+            assert not command("ps", "--status", "running", "-q", *WRITERS)
             proof["phase"] = "backup_latest_ledger_restore"
             proof["step"] = "seed_reservation"
             assert probe("migrate", SEED_RESERVATION, maintenance=True) == "PASS"
             backup_args = ("run", *RUN_OPTIONS,
                            "dev-backup")
+            # The source role can dump every business table but cannot change Core rows.
+            assert probe("dev-backup", "import os, psycopg; "
+                         "db=psycopg.connect(os.environ['COMPANION_DATABASE']); "
+                         "assert not db.execute(\"SELECT has_table_privilege('jobs','UPDATE')\")"
+                         ".fetchone()[0]; print('PASS')", maintenance=True) == "PASS"
+            target_files = {}
+            for stage in ("before", "after"):
+                name = "dev_restore_" + stage
+                path = f"/data/{name}.toml"
+                values = {"database": f"host=dev-postgres dbname={name} user=dev_archive",
+                          "state_directory": "/data/" + name,
+                          "erasure_ledger": "/privacy/erasures.jsonl",
+                          "owner_qq_id": "10001", "bot_qq_id": "10002", "bridge_token": token}
+                command("run", *RUN_OPTIONS, "-T", "--entrypoint", PYTHON, "dev-backup",
+                        "-c", "import os,sys; os.umask(0o077); "
+                        "open(sys.argv[1],'x').write(sys.stdin.read())", path,
+                        input_text="".join(f"{k}={json.dumps(v)}\n" for k, v in values.items()))
+                target_files[stage] = path
             proof["step"] = "backup_create"
-            command(*backup_args, "backup", "/data/pre-init.enc", "--immutable-source")
+            command(*backup_args, "backup", "/data/pre-init.enc")
             proof["step"] = "backup_reject_existing"
-            command(*backup_args, "backup", "/data/pre-init.enc", "--immutable-source", expected=2,
+            command(*backup_args, "backup", "/data/pre-init.enc", expected=2,
                     contains="BACKUP_DESTINATION_EXISTS")
             proof["step"] = "restore_before_ledger"
             command(*backup_args, "restore", "/data/pre-init.enc",
-                    "/data/recovered-before-erasure.sqlite3")
+                    target_files["before"])
             proof["step"] = "restore_probe_before_ledger"
-            proof["checks"].append(json.loads(probe("dev-backup", RESTORE_PROBE, "before",
-                                                    maintenance=True)))
+            proof["checks"].append(json.loads(probe(
+                "dev-backup", RESTORE_PROBE, "before", target_files["before"], maintenance=True)))
             proof.pop("step", None)
             assert probe("migrate", ERASE_AFTER_BACKUP, maintenance=True) == "PASS"
             ledger_code = ("import hashlib; from pathlib import Path; "
                            "print(hashlib.sha256(Path('/privacy/erasures.jsonl').read_bytes()).hexdigest())")
             ledger_hash = probe("dev-backup", ledger_code, maintenance=True)
-            command(*backup_args, "restore", "/data/pre-init.enc", "/data/recovered.sqlite3")
-            command(*backup_args, "restore", "/data/pre-init.enc", "/data/recovered.sqlite3",
-                    expected=2, contains="RESTORE_REQUIRES_NEW_PATH")
-            proof["checks"].append(json.loads(probe("dev-backup", RESTORE_PROBE, "after",
-                                                    maintenance=True)))
+            command(*backup_args, "restore", "/data/pre-init.enc", target_files["after"])
+            command(*backup_args, "restore", "/data/pre-init.enc", target_files["after"],
+                    expected=2, contains="RESTORE_REQUIRES_EMPTY_DATABASE")
+            proof["checks"].append(json.loads(probe(
+                "dev-backup", RESTORE_PROBE, "after", target_files["after"], maintenance=True)))
             assert probe("dev-backup", ledger_code, maintenance=True) == ledger_hash
             volumes = {}
-            for name in ("core-data", "erasure-ledger", "dev-snapshots"):
+            for name in ("core-data", "erasure-ledger", "dev-snapshots", "dev-postgres-data"):
                 document, = json.loads(run([*docker, "volume", "inspect", f"{project}_{name}"]))
                 assert document["Labels"]["com.docker.compose.project"] == project
                 volumes[name] = document["CreatedAt"]
             command("run", *RUN_OPTIONS, "migrate", "init")
             command("up", "-d", "--no-deps", "--no-build", "--pull", "never", "companion-api")
             assert state("companion-api")["image"] == image_id
-            assert probe("companion-api", "import sqlite3; "
-                         "db=sqlite3.connect('file:/data/companion.sqlite3?mode=ro',uri=True); "
+            assert probe("companion-api", "import os, psycopg; "
+                         "db=psycopg.connect(os.environ['COMPANION_DATABASE']); "
                          "assert db.execute('SELECT count(*) FROM events').fetchone()[0]==3; "
                          "print('PASS')") == "PASS"
             proof["phase"] = "post_migration_http_worker"
@@ -470,6 +490,7 @@ def main():
                                               "scripts/smoke_dev_compose.py",
                                               "tests/test_dev_compose.py",
                                               "docs/dev-environment.md", "Dockerfile", "uv.lock",
+                                              "deploy/dev-postgres-init.sql",
                                               "deploy/qq-beta-core.example.toml")}
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")

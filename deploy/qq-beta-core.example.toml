@@ -1,7 +1,7 @@
 # P5 isolated DEMO ONLY. No live model key; every autonomous capability is disabled.
 # Copy to config.toml; secrets and QQ IDs are environment variables.
 mode = "demo"
-database = "data/companion.sqlite3"
+database = "host=postgres dbname=companion user=companion"
 erasure_ledger = "privacy/erasures.jsonl"
 timezone = "Asia/Shanghai"
 provider = "deepseek"

@@ -57,6 +57,19 @@ COMPONENTS = {
                    "companion/console_static/icon.svg"},
     },
 }
+POSTGRES_IMAGE = ("postgres:16.15-trixie@sha256:"
+                  "1beaa3084eee2676f20a9cd9928f0bf2c5bf674f8e49f81017912183d377c61c")
+CORE_BASE = ("python:3.12-slim@sha256:"
+             "a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1")
+PG_CLIENT_COPIES = {
+    ("/usr/lib/postgresql/16/bin/pg_dump", "/usr/lib/postgresql/16/bin/pg_restore",
+     "/usr/local/bin/"),
+    (*("/usr/lib/x86_64-linux-gnu/lib" + lib + ".so.*" for lib in (
+        "pq", "zstd", "lz4", "gssapi_krb5", "ldap", "xxhash", "krb5", "k5crypto",
+        "com_err", "krb5support", "lber", "sasl2", "keyutils",
+    )), "/usr/local/lib/postgresql/"),
+    ("/usr/share/doc/", "/usr/local/share/doc/postgresql-clients/"),
+}
 SAFE_ENV = {
     "PATH", "LANG", "GPG_KEY", "PYTHON_VERSION", "PYTHON_SHA256", "PYTHON_PIP_VERSION",
     "PYTHON_SETUPTOOLS_VERSION", "PYTHON_GET_PIP_URL", "PYTHON_GET_PIP_SHA256",
@@ -136,15 +149,28 @@ def check_public_inputs(root=ROOT):
                                      "FROM " + spec["base"]]:
             raise ValueError("PUBLIC_IMAGE_UI_BASE_CHANGED")
         inputs = set()
+        client_copies = []
         for line in re.sub(r"\\\r?\n", " ", recipe).splitlines():
-            if not line.lstrip().upper().startswith("COPY "):
+            if line.upper().split(maxsplit=1)[:1] != ["COPY"]:
                 continue
             tokens = shlex.split(line.strip())[1:]
+            if spec is COMPONENTS["core"] and tokens[:1] == ["--from=postgres-client"]:
+                client_copies.append(tuple(tokens[1:]))
+                continue
             if len(tokens) < 2 or any(token.startswith("--") for token in tokens):
                 raise ValueError("PUBLIC_IMAGE_COPY_SHAPE_CHANGED")
             inputs.update(tokens[:-1])
         if inputs != spec["copies"]:
             raise ValueError("PUBLIC_IMAGE_COPY_INPUTS_CHANGED")
+        if spec is COMPONENTS["core"]:
+            instructions = [line.strip() for line in recipe.splitlines()
+                            if line.strip() and not line.lstrip().startswith("#")]
+            stages = [line for line in instructions if line.upper().split(maxsplit=1)[0] == "FROM"]
+            expected = [f"FROM {POSTGRES_IMAGE} AS postgres-client", f"FROM {CORE_BASE}"]
+            if stages != expected or instructions[:2] != expected:
+                raise ValueError("PUBLIC_IMAGE_PG_CLIENT_STAGE_CHANGED")
+            if sorted(client_copies) != sorted(PG_CLIENT_COPIES):
+                raise ValueError("PUBLIC_IMAGE_PG_CLIENT_COPIES_CHANGED")
         for name in inputs:
             target = root / name
             if not target.exists():
