@@ -12,6 +12,7 @@ from companion.model import ModelClient
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.rem_protocol import RemConfig
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.autonomous_selector import drain
 from tests.support.owner_authority import activate
 from tests.support.owner_input import captured, inbound
@@ -33,7 +34,7 @@ def prepare(core, tmp_path, *, cap=50000, purposes=("memory", "rem")):
         if "rem" in purposes else {},
     })
     activate(core, policy, revision=1, operation="rem-selector-grant")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         memory_id = core.memory.add(Candidate(
             subject="user", kind="preference", fact_key="synthetic-rem-source",
             content="synthetic owner input", evidence_event_id=capture.event_id,
@@ -47,9 +48,10 @@ def prepare(core, tmp_path, *, cap=50000, purposes=("memory", "rem")):
 def test_rem_requires_both_independent_purposes_before_native_work(core, tmp_path, purposes):
     prepare(core, tmp_path, purposes=purposes)
     lane = next(x for x in native_selector(core, "rem-selector").lanes if x.name == "rem")
-    before = core.store.db.total_changes
-    assert not run(lane.run()).progressed
-    assert core.store.db.total_changes == before
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        assert not run(lane.run()).progressed
+    assert logical_state(core.store) == before
     assert core.store.rows("SELECT * FROM rem_records") == []
 
 

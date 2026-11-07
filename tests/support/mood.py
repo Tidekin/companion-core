@@ -19,5 +19,5 @@ def feedback(core, number=1, text="这个回答很有帮助"):
 
 
 def erase(core, ids):
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ids, core.clock())

@@ -9,6 +9,7 @@ from companion.memory import Memory
 from companion.mood import MoodService
 from companion.store import Store, encode
 from tests.conftest import ingest
+from tests.postgres_fixture import logical_state
 from tests.support.mood import erase, feedback
 
 
@@ -26,17 +27,19 @@ from tests.support.mood import erase, feedback
 ])
 def test_explicit_daily_appraisals_have_small_source_bound_impulses(core, text, reason, delta):
     key = feedback(core, text=text)
-    changes = core.store.db.total_changes
-    view = core.mood.snapshot()
-    assert view["version"] == "mood-2" and view["confidence"] == "limited"
-    assert len(view["signals"]) == 1
-    signal = view["signals"][0]
-    assert signal["kind"] == "interaction" and signal["reason"] == reason
-    assert signal["event_id"] == key and signal["delta"] == delta
-    assert signal["source_event_ids"] == ["evt_test_2", key]
-    assert list(view["immediate"].values()) == delta
-    assert not any(view["undertone"].values())
-    assert core.store.db.total_changes == changes and core.model.calls == []
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        view = core.mood.snapshot()
+        assert view["version"] == "mood-2" and view["confidence"] == "limited"
+        assert len(view["signals"]) == 1
+        signal = view["signals"][0]
+        assert signal["kind"] == "interaction" and signal["reason"] == reason
+        assert signal["event_id"] == key and signal["delta"] == delta
+        assert signal["source_event_ids"] == ["evt_test_2", key]
+        assert list(view["immediate"].values()) == delta
+        assert not any(view["undertone"].values())
+    assert logical_state(core.store) == before
+    assert core.model.calls == []
 
 
 @pytest.mark.parametrize("text", [
@@ -137,19 +140,22 @@ def test_daily_sequence_conflicts_decays_and_rebuilds_without_model_or_writes(co
     feedback(core, 5, "这个回答让我有点失望")
     conflicting = core.mood.snapshot()
     assert conflicting["expression"]["pleasure"] < four["expression"]["pleasure"]
-    changes = core.store.db.total_changes
-    core.clock.advance(3 * 3600)
-    decayed = core.mood.snapshot()
-    for dimension in ("pleasure", "arousal", "dominance"):
-        assert decayed["immediate"][dimension] == pytest.approx(
-            conflicting["immediate"][dimension] / 2, abs=1e-6,
-        )
-    core.clock.advance(27 * 3600)
-    current = core.mood.snapshot()
-    with closing(Store(core.settings.database)) as reopened:
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        core.clock.advance(3 * 3600)
+        decayed = core.mood.snapshot()
+        for dimension in ("pleasure", "arousal", "dominance"):
+            assert decayed["immediate"][dimension] == pytest.approx(
+                conflicting["immediate"][dimension] / 2, abs=1e-6,
+            )
+        core.clock.advance(27 * 3600)
+        current = core.mood.snapshot()
+    with (closing(Store(core.database, core.settings.state_directory)) as reopened,
+          reopened.read_snapshot()):
         service = MoodService(Memory(reopened, core.settings, core.ledger), core.clock)
         assert service.snapshot() == current
-    assert core.store.db.total_changes == changes and core.model.calls == []
+    assert logical_state(core.store) == before
+    assert core.model.calls == []
 
 
 @pytest.mark.parametrize("source", ["evt_test_2", "evt_test_3"])
