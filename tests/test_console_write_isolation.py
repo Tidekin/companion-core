@@ -101,16 +101,20 @@ def test_native_write_wait_keeps_http_responsive_and_retry_idempotent(
         def __init__(self, path):
             super().__init__(path)
             opened.append((self, threading.get_ident()))
-            entered.set()
+            self.db.set_trace_callback(
+                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
+            )
 
         def close(self):
             closed.append((self, threading.get_ident()))
             super().close()
 
     async def scenario():
-        async with real_core_http(core) as port, httpx.AsyncClient(
-            base_url=f"http://127.0.0.1:{port}", trust_env=False,
-        ) as client:
+        async with (
+            real_core_http(core) as port,
+            httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False) as client,
+            httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe,
+        ):
             headers = await login(client)
             monkeypatch.setattr(api_store, "Store", ObservedStore)
             process = await asyncio.create_subprocess_exec(
@@ -120,10 +124,11 @@ def test_native_write_wait_keeps_http_responsive_and_retry_idempotent(
             task = None
             try:
                 assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
+                assert (await probe.get("/internal/v1/health/live")).status_code == 200
                 task = asyncio.create_task(client.request(method, path, json=body, headers=headers))
                 assert await asyncio.to_thread(entered.wait, 3)
                 started = perf_counter()
-                health = await asyncio.wait_for(client.get("/internal/v1/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 0.75)
                 elapsed = perf_counter() - started
                 record_property("health_during_native_write_wait_ms", round(elapsed * 1000, 3))
                 assert health.status_code == 200 and elapsed < 0.75 and not task.done()
