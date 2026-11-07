@@ -16,7 +16,6 @@ from companion import (
     owner_delivery,
     owner_input,
     reply_revision,
-    transport,
 )
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import epoch
@@ -347,10 +346,7 @@ def create(store, settings, clock, message_id, expected, operation, fingerprint)
         for index, new_id in enumerate(ids):
             row = store.one("SELECT * FROM outbox WHERE message_id=?", (new_id,))
             material = _material(store, row, record, index)
-            transport.bind_authority(store, new_id, current.authority.as_dict())
-            store.insert(
-                "runtime_meta", key=owner_delivery.DELIVERY + new_id, value=encode(material)
-            )
+            owner_delivery.bind_material(store, new_id, current.authority.as_dict(), material)
         store.audit(
             "delivery.recovery_created",
             job_id,

@@ -72,6 +72,7 @@ from companion.transport import (
     enqueue_reply_parts,
     reconcile_delivery,
     recover_deliveries,
+    set_proactive_paused,
 )
 from companion.voice_flow import VoiceFlow
 from companion.wake import WakePlanner
@@ -1149,12 +1150,7 @@ class Core(Runtime):
             return "已记录核对结果，不会重发该条消息。"
         if text in {"暂停主动分享", "恢复主动分享"}:
             with s.transaction():
-                s.execute(
-                    "INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
-                    ("1" if text.startswith("暂停") else "0",),
-                )
-                if text.startswith("暂停"):
-                    cancel_proactive_work(s, now)
+                set_proactive_paused(s, text.startswith("暂停"), now)
             return "已" + text + "。"
         if not self.settings.memory_enabled:
             return None

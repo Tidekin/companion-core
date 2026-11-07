@@ -55,6 +55,11 @@ QUERY = "meme_query:"
 OFFER = "meme_offer:"
 
 
+def freeze_offer(store, event_id, material):
+    """Insert the checked offer once, under the source event's current revision."""
+    store.insert("runtime_meta", key=OFFER + event_id, value=encode(material))
+
+
 def offer_possible(text):
     """Text without a meme intent gets a null offer at best, so chat need not wait."""
     return query_intent(text[-2000:]) is not None
@@ -1036,7 +1041,7 @@ class MemeCaptionService:
                             (job["job_id"], source["event_id"]),
                         )
             if not prior:
-                s.insert("runtime_meta", key=OFFER + body.event_id, value=encode(value))
+                freeze_offer(s, body.event_id, value)
             return {
                 "job_id": job["job_id"],
                 "event_id": body.event_id,

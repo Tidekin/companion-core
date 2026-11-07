@@ -258,6 +258,12 @@ def _failure_material(store, row, job, view):
             "action_type": row["action_type"]}
 
 
+def bind_material(store, message_id, authority, material):
+    """Pin the checked owner grant and its original evidence to the same outbox item."""
+    transport.bind_authority(store, message_id, authority)
+    store.insert("runtime_meta", key=DELIVERY + message_id, value=encode(material))
+
+
 def record_failure_notice(store, settings, clock, job_id, message_id):
     """Bind Core's fixed failure wording to the failed job's own current owner grant.
 
@@ -272,8 +278,7 @@ def record_failure_notice(store, settings, clock, job_id, message_id):
     if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
         raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
     material = _failure_material(store, row, job, view)
-    transport.bind_authority(store, message_id, view.authority.as_dict())
-    store.insert("runtime_meta", key=DELIVERY + message_id, value=encode(material))
+    bind_material(store, message_id, view.authority.as_dict(), material)
 
 
 def record_replies(store, settings, clock, job, message_ids):
@@ -353,8 +358,7 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
             from companion import poke
 
             poke.check_delivery(store, settings, view, message_id, clock=clock)
-        transport.bind_authority(store, message_id, view.authority.as_dict())
-        store.insert("runtime_meta", key=DELIVERY + message_id, value=encode(material))
+        bind_material(store, message_id, view.authority.as_dict(), material)
 
 
 def check_delivery(store, settings, clock, message_id, *, check=None):

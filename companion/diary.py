@@ -345,6 +345,12 @@ class DiaryRepository:
             and owner["value"] == self.settings.owner_qq_id
         )
 
+    def set_paused(self, paused):
+        self.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused',?)",
+                           ("1" if paused else "0",))
+        if paused:
+            self.cancel_pending("DIARY_PAUSED")
+
     def cancel_pending(self, code="DIARY_DISABLED"):
         self.store.execute(
             "UPDATE diary_runs SET state='CANCELLED',lease_token=NULL,last_error_code=?,"
@@ -1052,12 +1058,7 @@ class DiaryService:
         with self.store.transaction():
             if owner_check is not None:
                 owner_check()
-            self.store.execute(
-                "INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused',?)",
-                ("0" if enabled else "1",),
-            )
-            if not enabled:
-                self.repo.cancel_pending("DIARY_PAUSED")
+            self.repo.set_paused(not enabled)
         return self.status(requester)
 
     def correct(self, day, text, requester, *, owner_check=None):

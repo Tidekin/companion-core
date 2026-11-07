@@ -410,6 +410,18 @@ def recover_deliveries(store, now):
                    "('FAILED','CANCELLED','DELIVERY_UNCERTAIN'))", ())
 
 
+def set_proactive_paused(store, paused, now):
+    """Change the owner's pause setting and revoke eligible work in the same transaction."""
+    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
+                  ("1" if paused else "0",))
+    if paused:
+        cancel_proactive_work(store, now)
+
+
+def retire_preflight_lease(store, message_id):
+    store.execute("DELETE FROM runtime_meta WHERE key=?", ("owner_preflight_lease:" + message_id,))
+
+
 def cancel_proactive_work(store, now):
     # Caller holds the write transaction. A dispatched model still owns settlement;
     # logical cancellation must not turn its eventual observed usage into UNKNOWN.
@@ -770,8 +782,7 @@ def delivery_result(store, settings, message_id, result, now):
                 message_id,
             ),
         )
-        store.execute("DELETE FROM runtime_meta WHERE key=?",
-                      ("owner_preflight_lease:" + message_id,))
+        retire_preflight_lease(store, message_id)
         store.audit("delivery.result", message_id, "delivery", now, state=state)
         if account:
             from companion.social_autonomy import SocialAutonomy

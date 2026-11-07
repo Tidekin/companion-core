@@ -23,7 +23,12 @@ from companion.life import is_life_command
 from companion.privacy import redact
 from companion.reading import service_for_store
 from companion.store import encode, uid
-from companion.transport import cancel_interrupted_replies, cancel_proactive_work, digest
+from companion.transport import (
+    cancel_interrupted_replies,
+    cancel_proactive_work,
+    digest,
+    set_proactive_paused,
+)
 
 
 def receive(store, settings, clock, ledger, event, key, *, content_options):
@@ -131,11 +136,9 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 body["diary_correction"] = command == "修改日记"
                 body["diary_timezone"] = cfg.timezone
             if native_controls and command == "暂停写日记" and not arguments:
-                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
-                diary.cancel_pending("DIARY_PAUSED")
+                diary.set_paused(True)
             if native_controls and command == "暂停主动分享" and not arguments:
-                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused','1')")
-                cancel_proactive_work(s, now)
+                set_proactive_paused(s, True, now)
             # M0/M1 never fetch attachments; discard URL/ref content that may carry credentials.
             body["media"] = [{"kind": m["kind"], "sha256": m["sha256"]} for m in body["media"]]
             s.insert(
