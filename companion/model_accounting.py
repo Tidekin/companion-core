@@ -384,9 +384,12 @@ def record(store, settings, value, evidence_path, clock=utcnow):
             store.execute('INSERT INTO runtime_meta VALUES (%s, %s) ON CONFLICT DO NOTHING',
                           (PROJECTION + request.operation_id, saved["sha256"]))
             if request.budget_limit_codes:
-                store.execute('INSERT INTO runtime_meta (key, value) VALUES '
-                    "('model_budget_blocked', '1') ON CONFLICT(key) DO UPDATE SET value = "
-                    'excluded.value, record_sequence = DEFAULT')
+                store.execute(
+                    "INSERT INTO runtime_meta (key, value) VALUES ('model_budget_blocked', '1') "
+                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+                    "record_sequence = DEFAULT WHERE runtime_meta.value IS DISTINCT FROM "
+                    "excluded.value"
+                )
             store.execute('DELETE FROM runtime_meta WHERE key = %s',
                           (PENDING + request.operation_id,))
             if not store.one("SELECT 1 FROM audit_log WHERE action = 'model.accounting_recorded' "
