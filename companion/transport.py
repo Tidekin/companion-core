@@ -294,27 +294,49 @@ def check_segment_ready(store, message_id, now, *, group=None):
         raise CoreError("REPLY_SEGMENT_NOT_READY", 409)
 
 
+def _cancel_unsent(store, now, reason, condition, params, *, retain_lease=False):
+    """Caller owns the transaction. Scope predicates are internal SQL; values are bound."""
+    # A superseded lease still identifies the Bridge's pre-dispatch cancellation proof.
+    # Even when retiring its token, keep the lease deadline as evidence of a prior lease.
+    retire = "" if retain_lease else "lease_token=NULL,"
+    store.execute(
+        f"UPDATE outbox SET state='CANCELLED',{retire}updated_at=?,last_error_code=? "
+        "WHERE state IN ('PENDING','LEASED','RETRY_WAIT') AND " + condition,
+        (now, reason, *params),
+    )
+
+
 def cancel_interrupted_replies(store, conversation_id, now):
-    """Only an already authenticated, newly accepted owner input interrupts pending parts."""
-    # Historical databases can accept inputs while being prepared for migration.
-    if not store.one("SELECT 1 FROM pragma_table_info('outbox') WHERE name='reply_group_id'"):
-        return
-    store.execute(
-        "UPDATE outbox SET state='CANCELLED',updated_at=?,"
-        "last_error_code='REPLY_INTERRUPTED_BY_OWNER' WHERE conversation_id=? "
-        "AND reply_group_id IS NOT NULL AND state IN ('PENDING','LEASED','RETRY_WAIT')",
-        (now, conversation_id),
-    )
+    """An accepted legacy-mode input interrupts the conversation's unsent groups."""
+    if store.one("SELECT 1 FROM pragma_table_info('outbox') WHERE name='reply_group_id'"):
+        _cancel_unsent(store, now, "REPLY_INTERRUPTED_BY_OWNER",
+                       "conversation_id=? AND reply_group_id IS NOT NULL",
+                       (conversation_id,), retain_lease=True)
 
 
-def _cancel_segment_tails(store, now):
-    store.execute(
-        "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-        "last_error_code='REPLY_SEGMENT_CHAIN_STOPPED' WHERE reply_group_id IN "
-        "(SELECT reply_group_id FROM outbox WHERE reply_group_id IS NOT NULL "
-        "AND state IN ('FAILED','CANCELLED','DELIVERY_UNCERTAIN')) "
-        "AND state IN ('PENDING','LEASED','RETRY_WAIT')", (now,),
-    )
+def cancel_superseded_replies(store, conversation_id, event_id, now):
+    _cancel_unsent(store, now, reply_revision.SUPERSEDED,
+                   "conversation_id=? AND action_type='qq.private.reply' AND origin_event_id!=? "
+                   "AND origin_event_id IN (SELECT event_id FROM events WHERE "
+                   + reply_revision.OWNER_INPUT + ")",
+                   (conversation_id, event_id), retain_lease=True)
+
+
+def cancel_origin_replies(store, event_id, now):
+    _cancel_unsent(store, now, reply_revision.SUPERSEDED,
+                   "origin_event_id=? AND action_type='qq.private.reply'", (event_id,),
+                   retain_lease=True)
+
+
+def cancel_segment_tail(store, row, now, *, reason="REPLY_SEGMENT_CHAIN_STOPPED"):
+    if row["reply_group_id"] is not None:
+        _cancel_unsent(store, now, reason, "reply_group_id=? AND segment_index>?",
+                       (row["reply_group_id"], row["segment_index"]))
+
+
+def _cancel_blocked_delivery(store, row, now, reason):
+    _cancel_unsent(store, now, reason, "message_id=?", (row["message_id"],))
+    cancel_segment_tail(store, row, now)
 
 
 def recover_deliveries(store, now):
@@ -328,7 +350,11 @@ def recover_deliveries(store, now):
         "last_error_code='SEND_LEASE_EXPIRED' WHERE state='SENDING' AND lease_until<=?",
         (now, now),
     )
-    _cancel_segment_tails(store, now)
+    # Recovery must also find interrupted groups left by an earlier process.
+    _cancel_unsent(store, now, "REPLY_SEGMENT_CHAIN_STOPPED",
+                   "reply_group_id IN (SELECT reply_group_id FROM outbox "
+                   "WHERE reply_group_id IS NOT NULL AND state IN "
+                   "('FAILED','CANCELLED','DELIVERY_UNCERTAIN'))", ())
 
 
 def cancel_proactive_work(store, now):
@@ -342,12 +368,7 @@ def cancel_proactive_work(store, now):
         "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
         (now,),
     )
-    store.execute(
-        "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-        "last_error_code='AUTONOMY_PAUSED' WHERE action_type='qq.private.proactive' "
-        "AND state IN ('PENDING','LEASED','RETRY_WAIT')",
-        (now,),
-    )
+    _cancel_unsent(store, now, "AUTONOMY_PAUSED", "action_type='qq.private.proactive'", ())
 
 
 def _delivery_scope(store, settings, request, now):
@@ -438,20 +459,11 @@ def lease_deliveries(store, settings, request, now):
                                       "LIFE_DRAFT_EXPIRED", "LIFE_DRAFT_CHANGED",
                                       "LIFE_PRIVATE_DELIVERY_PAUSED"}:
                     raise
-                store.execute(
-                    "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                    "last_error_code=? WHERE message_id=?", (now, error.code, row["message_id"]),
-                )
-                _cancel_segment_tails(store, now)
+                _cancel_blocked_delivery(store, row, now, error.code)
                 continue
             problem = share_delivery_problem(store, settings, row["message_id"], now)
             if problem:
-                store.execute(
-                    "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                    "last_error_code=? WHERE message_id=?",
-                    (now, problem, row["message_id"]),
-                )
-                _cancel_segment_tails(store, now)
+                _cancel_blocked_delivery(store, row, now, problem)
                 continue
             if row.get("reply_group_id"):
                 try:
@@ -481,10 +493,7 @@ def lease_deliveries(store, settings, request, now):
                         or error.code not in {"SINGING_DELIVERY_FENCED",
                                               "VOICE_FLOW_RECEIPT_INVALID"}):
                         raise
-                    store.execute("UPDATE outbox SET state='CANCELLED',lease_token=NULL,"
-                        "updated_at=?,last_error_code=? WHERE message_id=?",
-                        (now, error.code, row["message_id"]))
-                    _cancel_segment_tails(store, now)
+                    _cancel_blocked_delivery(store, row, now, error.code)
                     continue
                 if decision.state == "WAITING":
                     continue
@@ -598,7 +607,8 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
             live_text.check_delivery(store, settings, clock, message_id)
             now = clock()
         pending = store.one(
-            "SELECT action_type,reply_group_id FROM outbox WHERE message_id=? AND state='LEASED' "
+            "SELECT message_id,action_type,reply_group_id,segment_index FROM outbox "
+            "WHERE message_id=? AND state='LEASED' "
             "AND lease_token=? AND lease_until>?",
             (message_id, token, now),
         )
@@ -613,11 +623,7 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
             ):
                 raise CoreError("PROACTIVE_SEND_PAUSED", 409)
         if problem:
-            store.execute(
-                "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                "last_error_code=? WHERE message_id=?", (now, problem, message_id)
-            )
-            _cancel_segment_tails(store, now)
+            _cancel_blocked_delivery(store, pending, now, problem)
         else:
             changed = store.execute(
                 "UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1,updated_at=? "
@@ -675,11 +681,7 @@ def delivery_result(store, settings, message_id, result, now):
         if (row.get("reply_group_id") and row["state"] == "SENDING"
             and datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now)):
             # A late ACK may establish this part's delivery, but cannot resume an expired chain.
-            store.execute(
-                "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                "last_error_code='REPLY_SEGMENT_ACK_LATE' WHERE reply_group_id=? "
-                "AND state IN ('PENDING','LEASED','RETRY_WAIT')", (now, row["reply_group_id"]),
-            )
+            cancel_segment_tail(store, row, now, reason="REPLY_SEGMENT_ACK_LATE")
         if result.result == "RETRYABLE_FAILURE":
             if row["state"] != "LEASED":
                 # Once I/O starts, a generic failure cannot establish non-delivery.
@@ -729,7 +731,8 @@ def delivery_result(store, settings, message_id, result, now):
                     (after(now, row["segment_interval_ms"] / 1000), row["reply_group_id"],
                      row["segment_index"] + 1),
                 )
-            _cancel_segment_tails(store, now)
+            elif state in {"FAILED", "DELIVERY_UNCERTAIN"}:
+                cancel_segment_tail(store, row, now)
         from companion.goals import acknowledge_commitment_delivery
 
         acknowledge_commitment_delivery(store, message_id, state, now)

@@ -11,6 +11,7 @@ import companion_delivery_protocol as wire
 from companion import cumulative, live_text, owner_authority
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityReference
+from companion.transport import cancel_segment_tail
 from companion_delivery_protocol import preflight
 
 
@@ -74,10 +75,7 @@ def settle(store, settings, clock, body):
             store.execute("UPDATE outbox SET state='CANCELLED',"
                           "last_error_code='REPLY_NOT_DISPATCHED',updated_at=? WHERE message_id=?",
                           (now, body.message_id))
-        store.execute("UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                      "last_error_code='REPLY_SEGMENT_CHAIN_STOPPED' WHERE reply_group_id=? "
-                      "AND segment_index>? AND state IN ('PENDING','RETRY_WAIT','LEASED')",
-                      (now, row["reply_group_id"], row["segment_index"]))
+        cancel_segment_tail(store, row, now)
         store.execute("DELETE FROM runtime_meta WHERE key=?",
                       ("owner_preflight_lease:" + body.message_id,))
         live_text._put(store, key, proof)
