@@ -12,7 +12,7 @@ from pydantic import SecretStr
 from companion import operator_config, runtime_config
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
-from tests.test_exploration import URL
+from tests.support.exploration import URL
 from tests.test_reading_followup import admit, finish, lease, window
 
 

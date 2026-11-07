@@ -18,7 +18,7 @@ from tests.support.core_http import real_core_http
 from tests.support.native_context import Capture
 from tests.support.onebot import onebot_http
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 @asynccontextmanager

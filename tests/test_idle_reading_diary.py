@@ -16,8 +16,8 @@ from source_reader.network import PublicHTTP
 from source_reader.worker_v1 import tick
 from tests.conftest import ingest, run
 from tests.support.core_http import real_core_http
+from tests.support.exploration import configure
 from tests.support.owner_authority import activate
-from tests.test_exploration import configure
 from tests.test_heybox_reader import mock_pool
 from tests.test_owner_authority import prepare
 from tests.test_source_reader import META, PLAYER, SUBTITLE, response

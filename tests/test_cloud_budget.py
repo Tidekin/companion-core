@@ -18,10 +18,10 @@ from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
 from tests.sdk_reader_fixture import Provider, answer, worker_for
 from tests.support.native_consumer_entry import environment
+from tests.support.paid_model import approved_live
 from tests.test_cumulative_budget import policy as cumulative_policy
 from tests.test_executive import FakeExecutor, configured, proposal
 from tests.test_media import chunk, process, service, start
-from tests.test_paid_model_gate import approved_live
 from tests.test_video_accounting import core as historical_video_core
 from tests.test_video_accounting import correct, failed_video
 

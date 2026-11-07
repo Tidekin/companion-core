@@ -18,7 +18,7 @@ from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from tests.conftest import run
 from tests.support.failure_notice import assert_failure_notice
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 RULE = {
     "repo": "synthetic/pack",

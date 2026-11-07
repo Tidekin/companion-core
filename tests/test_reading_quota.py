@@ -2,7 +2,7 @@
 
 from companion.config import Settings
 from companion.exploration import ReadResult
-from tests.test_exploration import URL, configure, discover
+from tests.support.exploration import URL, configure, discover
 
 
 def test_explicit_thirty_read_quota_keeps_unknown_reservations_and_stops_at_thirty(core):

@@ -15,7 +15,7 @@ from source_reader.heybox import HeyboxReader
 from source_reader.heybox_source import NativeHeyboxSource
 from source_reader.worker import tick
 from tests.conftest import run
-from tests.test_exploration import configure
+from tests.support.exploration import configure
 from tests.test_heybox_reader import URL, mock_pool
 from tests.test_plugin_readonly import native_post, registered_grant
 from tests.test_source_reader import META, PLAYER, SUBTITLE, response

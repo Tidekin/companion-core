@@ -22,7 +22,7 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP, ReadFailure, permitted_url
 from source_reader.worker import read_result, tick
 from tests.conftest import ingest, run
-from tests.test_exploration import configure
+from tests.support.exploration import configure
 from tests.test_heybox_reader import mock_pool
 from tests.test_source_reader import ITEM, META, NOW, PLAYER, SUBTITLE, response
 

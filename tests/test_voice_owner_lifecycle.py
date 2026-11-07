@@ -9,7 +9,7 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.voice_protocol import VoiceCleanup, VoiceLeaseRef, VoiceStopRef, VoiceStopRequest
 from tests.support.owner_authority import activate
-from tests.test_voice_jobs import claim, create_tts, prepared, result
+from tests.support.voice_jobs import claim, create_tts, prepared, result
 
 
 @pytest.mark.parametrize("boundary", ["stop", "replacement", "legacy"])

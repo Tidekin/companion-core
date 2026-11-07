@@ -33,11 +33,11 @@ from tests.support.failure_notice import assert_failure_notice
 from tests.support.onebot_events import config as bridge_config
 from tests.support.onebot_events import raw_event
 from tests.support.owner_authority import activate
+from tests.support.paid_model import approved_live
 from tests.test_live_image_input import options, png
 from tests.test_memory_control import grant
 from tests.test_onebot_capture import pinned_plan
 from tests.test_onebot_images import image_segment
-from tests.test_paid_model_gate import approved_live
 
 
 def image_settings(core, tmp_path, monkeypatch):

@@ -15,12 +15,12 @@ from companion.store import encode
 from companion.timeline import recent_timeline
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.support.exploration import configure, discover
+from tests.support.source_grants import accepted, prepare
 from tests.test_diary import DAY, generate, seed_day
-from tests.test_exploration import configure, discover
 from tests.test_goals import result_for, setup_goal
 from tests.test_m1 import remember
 from tests.test_observations import enable_observations, observation
-from tests.test_source_grants import accepted, prepare
 
 
 def view(core):

@@ -283,7 +283,7 @@ def test_watch_uses_settled_judgement_not_self_report_or_title(core, tmp_path):
     import httpx
 
     from companion.model import ModelClient
-    from tests.test_exploration import configure
+    from tests.support.exploration import configure
 
     configure(core)
     enable(core)

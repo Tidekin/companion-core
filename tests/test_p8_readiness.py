@@ -136,7 +136,7 @@ def test_unknown_reservation_is_retained_and_blocks_next_model_attempt(core, fai
 def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(
     core, missing_usage, tmp_path
 ):
-    from tests.test_paid_model_gate import approved_live
+    from tests.support.paid_model import approved_live
 
     approved_live(core, tmp_path, provider="deepseek", model=core.settings.model_name)
     requests = []
@@ -203,7 +203,7 @@ def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(
     ],
 )
 def test_model_adapter_errors_do_not_retry_or_expose_provider_body(core, response, code, tmp_path):
-    from tests.test_paid_model_gate import approved_live
+    from tests.support.paid_model import approved_live
 
     approved_live(core, tmp_path, endpoint="https://synthetic.invalid")
     calls = []

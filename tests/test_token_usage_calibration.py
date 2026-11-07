@@ -10,7 +10,7 @@ from companion import budget, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelResponse
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 MESSAGES = [{"role": "user", "content": "hello"}]
 

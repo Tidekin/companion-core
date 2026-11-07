@@ -19,7 +19,7 @@ from companion.dialogue_history import fit_context
 from companion.model import ModelClient, model_payload
 from companion.store import encode
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 MESSAGES = [{"role": "user", "content": "hello"}]
 

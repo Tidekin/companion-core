@@ -22,7 +22,7 @@ from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import run
 from tests.support.onebot_events import raw_event
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 def environment(core, tmp_path):

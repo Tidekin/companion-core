@@ -28,8 +28,8 @@ from source_reader.network import PublicHTTP, ReadFailure
 from source_reader.worker import tick
 from tests.conftest import FakeModel, run
 from tests.support.astrbot_delivery import deliver_expression
+from tests.support.exploration import configure
 from tests.test_content_bridge import event as bridge_event
-from tests.test_exploration import configure
 from tests.test_heybox_reader import URL, mock_pool
 from tests.test_plugin_readonly import SECRET, native_post, registered_grant
 from tests.test_source_reader import META, PLAYER, SUBTITLE, response

@@ -332,8 +332,8 @@ def test_corrected_memory_reuses_native_correction_lineage(core):
 
 @pytest.mark.parametrize("boundary", ["expiry", "read_revoke", "processing_withdrawal"])
 def test_future_read_permission_and_historical_processing_stay_separate(core, boundary):
+    from tests.support.source_grants import prepare
     from tests.test_heybox_reader import URL
-    from tests.test_source_grants import prepare
 
     key = setup_goal(core, url=URL)
     grant = prepare(core)

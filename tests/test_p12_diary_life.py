@@ -16,13 +16,13 @@ from companion.privacy import epoch
 from companion.store import encode
 from companion.transport import begin_send, delivery_result, enqueue, lease_deliveries
 from tests.conftest import ingest, run
+from tests.support.exploration import configure
+from tests.support.source_grants import prepare
 from tests.test_consolidation import enable_nightly
 from tests.test_diary import DAY
-from tests.test_exploration import configure
 from tests.test_goals import result_for, setup_goal
 from tests.test_heybox_reader import URL
 from tests.test_observations import observation
-from tests.test_source_grants import prepare
 
 
 def test_native_daily_pipeline_revision_next_day_and_latest_ledger_restore(core, tmp_path):

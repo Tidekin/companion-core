@@ -21,7 +21,7 @@ from companion.voice_protocol import (
     VoiceStopRequest,
 )
 from tests.conftest import run
-from tests.test_voice_jobs import TOKEN, create_asr, create_tts, prepared
+from tests.support.voice_jobs import TOKEN, create_asr, create_tts, prepared
 from tests.test_voice_node_api import app_for
 
 

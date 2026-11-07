@@ -23,9 +23,9 @@ from source_reader.web import WebHTTP
 from source_reader.worker_v1 import tick
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.exploration import URL, configure
 from tests.support.owner_authority import activate
 from tests.support.owner_memory import environment
-from tests.test_exploration import URL, configure
 from tests.test_heybox_reader import mock_pool
 from tests.test_life_topics import assert_no_delivery, bug, due, proposal
 from tests.test_life_worker_integration import native_worker

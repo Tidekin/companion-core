@@ -12,9 +12,9 @@ from companion.model import ModelClient, ModelResponse
 from companion.store import after
 from tests.conftest import ingest, run
 from tests.owner_model_fixtures import authorized_job
+from tests.support.paid_model import approved_live
 from tests.test_consolidation import enable_nightly
 from tests.test_diary import DAY, generate, seed_day
-from tests.test_paid_model_gate import approved_live
 
 MESSAGES = [{"role": "user", "content": "synthetic completion"}]
 

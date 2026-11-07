@@ -16,7 +16,7 @@ from companion.model import ModelClient, ModelResponseError, model_payload
 from companion.store import Store
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 def image_messages(size=(2, 2)):

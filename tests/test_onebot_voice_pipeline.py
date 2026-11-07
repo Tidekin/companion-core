@@ -30,10 +30,10 @@ from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.support.onebot_events import raw_event
+from tests.support.voice_jobs import claim, control, result, voice_config
 from tests.test_onebot_voice_media import URL, public, segment, wav
 from tests.test_prepare_owner_input import native_spool
 from tests.test_prepare_owner_input import window as owner_window
-from tests.test_voice_jobs import claim, control, result, voice_config
 
 
 async def capture(window, client, protocol, *, record=True, number=1, flush=True):

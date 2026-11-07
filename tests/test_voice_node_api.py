@@ -41,7 +41,7 @@ from companion.voice_protocol import (
 from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker
 from tests.conftest import run
 from tests.support.native_http import owned_http_protocol
-from tests.test_voice_jobs import TOKEN, create_tts, prepared, result
+from tests.support.voice_jobs import TOKEN, create_tts, prepared, result
 from tests.test_voice_node_worker import factory
 from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 

@@ -431,7 +431,7 @@ def test_real_core_restore_owner_recovery_missing_or_existing_unknown(core, node
     from companion.core import Core
     from companion.voice_jobs import VoiceJobs
     from companion.voice_protocol import VoiceLeaseRef
-    from tests.test_voice_jobs import TOKEN, claim, create_tts, prepared
+    from tests.support.voice_jobs import TOKEN, claim, create_tts, prepared
     from tests.test_voice_node_api import app_for
 
     jobs, message, _, _ = prepared(core, monkeypatch)

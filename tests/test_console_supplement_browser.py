@@ -11,6 +11,8 @@ from companion.console_cognition import tool_scope
 from companion.executive_protocol import ExecutorEndpoint, ToolArguments, ToolRequest
 from companion.source_grants import grant_tombstone
 from tests.conftest import run
+from tests.support.source_grants import accepted, derived_records
+from tests.support.source_grants import prepare as prepare_grant
 from tests.test_console_browser import console_page, navigate, submit_dialog
 from tests.test_executive import FakeExecutor
 from tests.test_executive import configured as configure_executive
@@ -20,8 +22,6 @@ from tests.test_life_topics import bug, due
 from tests.test_life_topics import proposal as life_proposal
 from tests.test_m1 import remember
 from tests.test_next_life_growth import feedback_days, snapshot
-from tests.test_source_grants import accepted, derived_records
-from tests.test_source_grants import prepare as prepare_grant
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("COMPANION_TEST_BROWSER") != "1", reason="Explicit isolated browser run"
@@ -183,9 +183,9 @@ def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(
 
 
 def test_console_shows_cache_three_states_from_the_backend_projection(core, tmp_path):
+    from tests.support.paid_model import approved_live
     from tests.test_cache_usage_presence import ABSENT
     from tests.test_cache_usage_presence import attempt as cache_attempt
-    from tests.test_paid_model_gate import approved_live
 
     approved_live(core, tmp_path)
     core.clock.now = datetime.now(UTC)

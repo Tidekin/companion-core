@@ -12,8 +12,8 @@ from pydantic import SecretStr
 from companion.contracts import CoreError
 from companion.store import after, encode
 from companion.voice_protocol import VoiceLeaseRef
+from tests.support.voice_jobs import claim, control, create_asr, create_tts, prepared, result
 from tests.test_voice_flow import flow_fixture, upload
-from tests.test_voice_jobs import claim, control, create_asr, create_tts, prepared, result
 
 
 def test_chat_claim_after_voice_expiry_uses_unavailable_fallback(core, monkeypatch):

@@ -10,7 +10,7 @@ from pydantic import SecretStr
 
 from companion.store import after, uid
 from companion.voice_protocol import VoiceLeaseRef
-from tests.test_voice_jobs import claim, control, create_asr, create_tts, prepared, result
+from tests.support.voice_jobs import claim, control, create_asr, create_tts, prepared, result
 
 
 def seeds(core, monkeypatch):
