@@ -59,6 +59,18 @@ Bridge consumer integration and its final combined verification.
 
 ## Binding and deadlines
 
+Voice-node HTTP operations use the existing `ApiStore.run` boundary: each finite
+service call opens and closes its own SQLite connection in a bounded worker
+thread. Authentication, bounded body parsing and path/idempotency checks precede
+submission. Native transaction checks, claim sequence and result receipts remain
+inside the service; cancellation joins an already submitted operation before its
+connection is released. No shared Core connection crosses into a worker thread.
+This follows [FastAPI's blocking I/O guidance](https://fastapi.tiangolo.com/async/):
+an `async def` endpoint does not make a synchronous database call nonblocking.
+The real-HTTP regression holds the writer in an independent process, verifies
+that health remains responsive, then releases the writer and checks the original
+claim and its idempotent replay.
+
 New voice jobs retain the exact original `AuthorityRef` in `authority_json`.
 Current policy must still approve `voice` and its exact existing VoiceConfig
 capability hash. ASR checks the original signed input and current reply revision;
