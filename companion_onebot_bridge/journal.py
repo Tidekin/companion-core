@@ -53,15 +53,20 @@ def read_count(path, *, maximum=32 * 1048576):
     return _read(path, maximum=maximum, count_only=True)
 
 
+def checked_bytes(path, *, maximum=32 * 1048576):
+    info = path.lstat()
+    if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_size > maximum
+            or (os.name != "nt" and info.st_mode & 0o077)):
+        raise ValueError("INVALID_WINDOW_JOURNAL")
+    raw = path.read_bytes()
+    if len(raw) > maximum:
+        raise ValueError("INVALID_WINDOW_JOURNAL")
+    return raw
+
+
 def _read(path, *, maximum, count_only):
     try:
-        info = path.lstat()
-        if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_size > maximum
-                or (os.name != "nt" and info.st_mode & 0o077)):
-            raise ValueError("INVALID_WINDOW_JOURNAL")
-        raw = path.read_bytes()
-        if len(raw) > maximum:
-            raise ValueError("INVALID_WINDOW_JOURNAL")
+        raw = checked_bytes(path, maximum=maximum)
         end = len(raw)
         if end > CACHE_MAX_BYTES:
             end = raw.rfind(b"\n", 0, CACHE_MAX_BYTES) + 1

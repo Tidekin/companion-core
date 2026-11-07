@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
-import stat
+from copy import deepcopy
 from datetime import UTC, datetime
 
 from companion_delivery_protocol.authority import validate_authority_ref
@@ -126,7 +126,7 @@ class OwnerRuntime:
             with self.db:
                 self.db.execute("INSERT INTO owner_runtime VALUES(1,?,'ACTIVE',?)",
                                 (encode(self.authority), head))
-        self.verify(active=False)
+        self.verify(active=False, include_records=False)
         from companion_delivery_protocol.preflight import KIND
 
         for message_id, attempt, body, state in self.db.execute(
@@ -152,7 +152,7 @@ class OwnerRuntime:
 
     @property
     def memes(self):
-        self.verify(active=False)
+        self.verify(active=False, include_records=False)
         if getattr(self, "_meme_retired", None) and self.config.meme_catalog_owner != "core":
             raise ValueError("MEME_CATALOG_RETIRED")
         if not hasattr(self, "_memes"):
@@ -175,11 +175,10 @@ class OwnerRuntime:
         the spool database changed.
         """
         try:
-            info = self.path.lstat()
-        except OSError:
-            return None
-        if self.path.is_symlink() or not stat.S_ISREG(info.st_mode):
-            return None
+            raw = journal.checked_bytes(self.path)
+        except (ValueError, OSError):
+            self._verified = None
+            raise
         try:
             versions = (self.db.execute("PRAGMA schema_version").fetchone()[0],
                         self.db.execute("PRAGMA data_version").fetchone()[0])
@@ -187,9 +186,9 @@ class OwnerRuntime:
             # A caller-installed authorizer (e.g. the meme accounting drain) may deny
             # these reads; such callers always get the original full verification.
             return None
-        return (self.path.read_bytes(), tuple(row.values()), self.db.total_changes, *versions)
+        return (raw, tuple(row.values()), self.db.total_changes, *versions)
 
-    def verify(self, *, active=True):
+    def verify(self, *, active=True, include_records=True):
         """Revalidate custody; an unchanged journal and database reuse the last full proof.
 
         The legacy cutover evidence reads other files and is always rechecked, as are
@@ -215,8 +214,9 @@ class OwnerRuntime:
         if active and (state != "ACTIVE" or self.spool.reconciliation_only
                        or self.stop_path.exists() or self.stop_path.is_symlink()):
             raise ValueError("OWNER_RUNTIME_STOPPED")
-        # A new list; decoded records are shared read-only values for identical bytes.
-        return list(records)
+        # Projection replay owns the decoded records. Only history readers need a copy.
+        if include_records:
+            return deepcopy(records)
 
     def _replay(self, row):
         cached, self._verified = getattr(self, "_verified", None), None
@@ -421,7 +421,7 @@ class OwnerRuntime:
         return inputs
 
     def append(self, kind, data):
-        self.verify(active=False)
+        self.verify(active=False, include_records=False)
         head = journal.append(self.path, kind, data, at=self.clock().isoformat(),
                               expected_head=self.row()["journal_head"])
         # The caller commits this head with its native inbox/attempt projection.
@@ -429,7 +429,7 @@ class OwnerRuntime:
         return head
 
     def stop(self):
-        self.verify(active=False)
+        self.verify(active=False, include_records=False)
         journal.stop_marker(self.stop_path)
         if self.row()["state"] != "STOPPED":
             with self.db:
@@ -441,13 +441,13 @@ class OwnerRuntime:
         pending_media.stop(self)
 
     async def check(self, core_client, *, purpose="chat"):
-        self.verify()
+        self.verify(include_records=False)
         result = await bounded_post(core_client, "/internal/v1/owner-authority/check",
                                     {"authority": self.authority, "purpose": purpose})
         check_receipt(self.config, self.authority, purpose, result, self.clock())
         if self.legacy and result["budget_journal_id"] != self.legacy["budget_journal_id"]:
             raise ValueError("OWNER_LEGACY_BUDGET_CUSTODY_CHANGED")
-        self.verify()
+        self.verify(include_records=False)
         return result
 
     async def probe(self, core_client, protocol):
@@ -472,7 +472,7 @@ class OwnerRuntime:
             seal_protocol_content(request, b"{}")
 
         result = await OneBotClient(self.config, checked_http_client(protocol, boundary)).probe()
-        self.verify()
+        self.verify(include_records=False)
         return result
 
     def persist_capture(self, event, frame, *, received_at, peer, media=None, backfill=False):
@@ -488,7 +488,7 @@ class OwnerRuntime:
         from .event_normalizer import decode, identifier, message_identity
         from .rich_input import input_digest
 
-        self.verify()
+        self.verify(include_records=False)
         raw = decode(frame, self.config.max_frame_bytes, max_depth=20)
         source, event_id = message_identity(self.config, raw["message_id"])
         if (raw.get("post_type") != "message" or raw.get("message_type") != "private"
@@ -530,7 +530,7 @@ class OwnerRuntime:
         if self.spool.pending_count >= self.config.max_pending:
             raise ValueError("SPOOL_QUEUE_CAPACITY")
         self.spool.capacity(len(body.encode()) * 3 + len(encode(receipt)))
-        self.verify()
+        self.verify(include_records=False)
         with self.db:
             self.append("CAPTURED", {"event_id": event["event_id"],
                                     "capture_sha256": journal.digest(receipt)})
@@ -550,7 +550,7 @@ class OwnerRuntime:
 
         while await owner_notices.flush_one(self, client):
             pass
-        self.verify()
+        self.verify(include_records=False)
         row = self.db.execute(
             "SELECT i.key,w.capture_json,i.body FROM inbox i JOIN window_inputs w "
             "ON w.event_id=i.key WHERE i.state='pending' AND w.plan_hash=? "
@@ -576,5 +576,5 @@ class OwnerRuntime:
         if (set(response) != {"approved", "duplicate"} or response["approved"] is not True
             or type(response["duplicate"]) is not bool):
             raise ValueError("OWNER_CAPTURE_APPROVAL_REJECTED")
-        self.verify()
+        self.verify(include_records=False)
         return await self.spool.flush_one(client)

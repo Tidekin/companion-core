@@ -763,9 +763,9 @@ def test_final_dispatch_fence_runs_after_core_send_check_and_last_journal_read(
             client.event_hooks["response"].append(response)
             original = owner.verify
             changed = False
-            def last_read(*, active=True):
+            def last_read(**options):
                 nonlocal changed
-                result = original(active=active)
+                result = original(**options)
                 if checked and not changed:
                     changed = True
                     if change == "deadline":
