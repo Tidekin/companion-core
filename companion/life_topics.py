@@ -1198,12 +1198,12 @@ class LifeTopics:
                 seen = {row["topic_id"] for row in candidates}
                 candidates += [row for row in s.rows(query, ("", "", SCAN_LIMIT - len(candidates)))
                                if row["topic_id"] not in seen]
+            last_unavailable = None
             for topic in candidates:
                 try:
                     material = self.material(topic["topic_id"])
                 except CoreError:
-                    s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
-                              (SCAN_CURSOR, encode([topic["due_at"], topic["topic_id"]])))
+                    last_unavailable = [topic["due_at"], topic["topic_id"]]
                     continue
                 s.execute("DELETE FROM runtime_meta WHERE key=?", (SCAN_CURSOR,))
                 from companion.notices import schedule
@@ -1228,6 +1228,11 @@ class LifeTopics:
                     (topic["topic_id"],),
                 )
                 return job_id
+            if last_unavailable is not None:
+                # Intermediate cursor writes were never visible outside this
+                # transaction, but invalidated its verified budget view each time.
+                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                          (SCAN_CURSOR, encode(last_unavailable)))
         return None
 
     def material(self, topic_id, *, mood_at=None):
