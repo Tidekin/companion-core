@@ -15,8 +15,8 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.file_evidence import PrivateFilesConfig
+from companion.legacy_import import migrate_sqlite
 from companion.privacy import advance_epoch
-from companion.store import Store, migrate
 from tests.conftest import run
 from tests.postgres_fixture import isolated_database
 from tests.support.input_reply_migration import config_for
@@ -24,6 +24,10 @@ from tests.support.qq_files import IMAGE, prepared, signed_upload
 from tests.support.release_migration import (
     TIMES,
     assert_old_columns_unchanged,
+    insert,
+    one,
+    open_historical,
+    rows,
     seed_legacy,
     table_snapshot,
 )
@@ -338,20 +342,20 @@ def test_erasure_replay_removes_copied_file_spool_and_metadata(core, monkeypatch
 
 def test_file_migration_preserves_old_content_and_refuses_lossy_downgrade(tmp_path):
     database, _, _ = seed_legacy(tmp_path, "0003_memory_index")
-    migrate(str(database), "0027_owner_console")
-    with closing(Store(str(database))) as store:
-        store.insert("content_items", item_id="content_" + "a" * 32, owner_event_id="evt_keep",
+    migrate_sqlite(str(database), "0027_owner_console")
+    with closing(open_historical(str(database))) as store:
+        insert(store, "content_items", item_id="content_" + "a" * 32, owner_event_id="evt_keep",
                      kind="qq_image", slot=0, state="UNKNOWN", captured_privacy_epoch=3,
                      reserved_bytes=1000, deadline=TIMES["keep"], created_at=TIMES["keep"],
                      updated_at=TIMES["keep"], media_sha256="b" * 64)
         old = table_snapshot(store, ("events", "content_items"))
-    migrate(str(database), "0028_private_files")
-    migrate(str(database), "0028_private_files")
-    with closing(Store(str(database))) as store:
-        row = store.one("SELECT * FROM content_items")
+    migrate_sqlite(str(database), "0028_private_files")
+    migrate_sqlite(str(database), "0028_private_files")
+    with closing(open_historical(str(database))) as store:
+        row = one(store, "SELECT * FROM content_items")
         assert row.pop("attachment_json") == "{}"
         assert_old_columns_unchanged(store, old)
-        assert store.rows("PRAGMA foreign_key_check") == []
+        assert rows(store, "PRAGMA foreign_key_check") == []
         store.execute("UPDATE content_items SET kind='qq_file'")
     with pytest.raises(RuntimeError, match="PRIVATE_FILES_DOWNGRADE_REQUIRES"):
         command.downgrade(config_for(database), "0027_owner_console")

@@ -1,9 +1,11 @@
 import hashlib
+import sqlite3
 import struct
 from contextlib import closing
 
+from companion.legacy_import import migrate_sqlite
 from companion.privacy import ErasureLedger
-from companion.store import Store, encode, migrate
+from companion.store import encode, uid
 from companion.transport import digest
 
 LEGACY_TABLES = (
@@ -34,12 +36,38 @@ TIMES = {"erase": "2026-10-17T04:00:00.000000+00:00", "keep": "2026-10-18T04:00:
 DELIVERY_STATES = ("SENT", "PENDING", "LEASED", "SENDING", "RETRY_WAIT", "DELIVERY_UNCERTAIN")
 
 
+def open_historical(path):
+    """Open a real offline SQLite fixture, never the running Core storage API."""
+    db = sqlite3.connect(path, isolation_level=None)
+    db.row_factory = lambda cursor, row: dict(
+        zip((item[0] for item in cursor.description), row, strict=True)
+    )
+    db.execute("PRAGMA foreign_keys=ON")
+    return db
+
+
+def rows(db, statement, parameters=()):
+    return db.execute(statement, parameters).fetchall()
+
+
+def one(db, statement, parameters=()):
+    return db.execute(statement, parameters).fetchone()
+
+
+def insert(db, table, **values):
+    columns = ",".join('"' + name + '"' for name in values)
+    db.execute(
+        f'INSERT INTO "{table}" ({columns}) VALUES ({",".join("?" for _ in values)})',
+        tuple(values.values()),
+    )
+
+
 def table_snapshot(store, tables):
     """Capture every existing column, including opaque vector bytes and provenance IDs."""
     return {
         table: {
-            "columns": [row["name"] for row in store.rows(f'PRAGMA table_info("{table}")')],
-            "rows": store.rows(f'SELECT * FROM "{table}" ORDER BY rowid'),
+            "columns": [row["name"] for row in rows(store, f'PRAGMA table_info("{table}")')],
+            "rows": rows(store, f'SELECT * FROM "{table}" ORDER BY rowid'),
         }
         for table in tables
     }
@@ -48,38 +76,74 @@ def table_snapshot(store, tables):
 def assert_old_columns_unchanged(store, snapshot):
     for table, before in snapshot.items():
         columns = ",".join('"' + column + '"' for column in before["columns"])
-        assert store.rows(f'SELECT {columns} FROM "{table}" ORDER BY rowid') == before["rows"], (
+        assert rows(store, f'SELECT {columns} FROM "{table}" ORDER BY rowid') == before["rows"], (
             table
         )
 
 
 def assert_indexes_and_integrity(store, surviving=("erase", "keep")):
-    assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
-    assert store.rows("PRAGMA foreign_key_check") == []
+    assert one(store, "PRAGMA integrity_check")["integrity_check"] == "ok"
+    assert rows(store, "PRAGMA foreign_key_check") == []
     for name, token in TOKENS.items():
         expected = [{"memory_id": "mem_" + name}] if name in surviving else []
         assert (
-            store.rows("SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ?", (token,))
+            rows(store, "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ?", (token,))
             == expected
         )
     assert {
-        row["name"] for row in store.rows("SELECT name FROM sqlite_master WHERE type='trigger'")
+        row["name"] for row in rows(store, "SELECT name FROM sqlite_master WHERE type='trigger'")
     } >= {"memory_fts_insert", "memory_fts_update", "memory_fts_delete", "memory_vector_invalidate"}
+
+
+def assert_native_indexes_and_integrity(store, surviving=("erase", "keep")):
+    assert store.schema_capabilities()
+    assert not store.one(
+        "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+        "AND NOT convalidated LIMIT 1"
+    )
+    for name, token in TOKENS.items():
+        expected = [{"memory_id": "mem_" + name}] if name in surviving else []
+        assert (
+            store.rows(
+                "SELECT memory_id FROM memories WHERE content ILIKE %s AND status='CONFIRMED'",
+                ("%" + token + "%",),
+            )
+            == expected
+        )
+
+
+def assert_native_old_columns_unchanged(store, snapshot):
+    for table, before in snapshot.items():
+        if table == "memories_fts":
+            continue  # Native text retrieval indexes the authoritative memories table.
+        columns = ",".join('"' + column + '"' for column in before["columns"])
+        actual = store.rows(f'SELECT {columns} FROM "{table}" ORDER BY record_sequence')
+        expected = before["rows"]
+        if table == "runtime_meta":
+            # Native restore replaces custody markers; their insertion positions change.
+            actual = sorted(actual, key=lambda row: row["key"])
+            expected = sorted(expected, key=lambda row: row["key"])
+        assert actual == expected, table
 
 
 def seed_legacy(tmp_path, revision):
     database, ledger_path = tmp_path / "historical.db", tmp_path / "erasure.jsonl"
-    migrate(str(database), revision)
-    with closing(Store(str(database))) as store:
-        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == revision
-        assert store.one("SELECT 1 FROM sqlite_master WHERE name='observations'") is None
-        ErasureLedger(ledger_path).initialize(store)
-        with store.transaction():
+    migrate_sqlite(database, revision)
+    with closing(open_historical(database)) as store:
+        assert one(store, "SELECT version_num FROM alembic_version")["version_num"] == revision
+        assert one(store, "SELECT 1 FROM sqlite_master WHERE name='observations'") is None
+        header = {"ledger_id": uid("ledger")}
+        ledger_path.write_text(encode(header) + "\n", encoding="utf-8")
+        store.execute("INSERT INTO runtime_meta VALUES ('ledger_id', ?)", (header["ledger_id"],))
+        assert ErasureLedger(ledger_path).read() == [header]
+        store.execute("BEGIN")
+        with store:
             for actor in ("owner", "companion", "system"):
-                store.insert("principals", actor_id=actor, kind=actor, created_at=TIMES["erase"])
+                insert(store, "principals", actor_id=actor, kind=actor, created_at=TIMES["erase"])
             store.execute("INSERT INTO runtime_meta VALUES ('owner_qq_id','10001')")
             store.execute("INSERT INTO runtime_meta VALUES ('privacy_epoch','3')")
-            store.insert(
+            insert(
+                store,
                 "conversations",
                 conversation_id="conv_legacy",
                 platform="qq.onebot",
@@ -91,7 +155,8 @@ def seed_legacy(tmp_path, revision):
             )
             for name, token in TOKENS.items():
                 now, text = TIMES[name], "我计划阅读" + token + "系列小说。"
-                store.insert(
+                insert(
+                    store,
                     "events",
                     event_id="evt_" + name,
                     schema_version=1,
@@ -109,7 +174,8 @@ def seed_legacy(tmp_path, revision):
                     fingerprint=digest({"text": text}),
                     memory_processed=1,
                 )
-                store.insert(
+                insert(
+                    store,
                     "jobs",
                     job_id="job_" + name,
                     event_id="evt_" + name,
@@ -121,7 +187,8 @@ def seed_legacy(tmp_path, revision):
                     created_at=now,
                     updated_at=now,
                 )
-                store.insert(
+                insert(
+                    store,
                     "memories",
                     memory_id="mem_" + name,
                     subject="user",
@@ -138,14 +205,16 @@ def seed_legacy(tmp_path, revision):
                     valid_from=now,
                     last_reviewed_at=now,
                 )
-                store.insert(
+                insert(
+                    store,
                     "memory_evidence",
                     memory_id="mem_" + name,
                     event_id="evt_" + name,
                     polarity=1,
                     created_at=now,
                 )
-                store.insert(
+                insert(
+                    store,
                     "memory_revisions",
                     revision_id="revision_" + name,
                     memory_id="mem_" + name,
@@ -155,7 +224,8 @@ def seed_legacy(tmp_path, revision):
                     changed_by="owner",
                     created_at=now,
                 )
-                store.insert(
+                insert(
+                    store,
                     "memory_vectors",
                     memory_id="mem_" + name,
                     model_version="synthetic-legacy-index-v1",
@@ -164,7 +234,8 @@ def seed_legacy(tmp_path, revision):
                 )
             for state in DELIVERY_STATES:
                 body = {"text": "历史投递记录 " + state}
-                store.insert(
+                insert(
+                    store,
                     "outbox",
                     message_id="msg_" + state,
                     origin_event_id="evt_keep",
@@ -184,7 +255,8 @@ def seed_legacy(tmp_path, revision):
                     sent_at=TIMES["keep"] if state == "SENT" else None,
                 )
             for index, state in enumerate(("SETTLED", "RESERVED", "UNKNOWN"), 1):
-                store.insert(
+                insert(
+                    store,
                     "model_usage",
                     usage_id="usage_" + state,
                     request_id="request_" + state,
@@ -213,7 +285,8 @@ def seed_legacy(tmp_path, revision):
 def seed_legacy_diaries(store):
     for name, token in TOKENS.items():
         now, day = TIMES[name], TIMES[name][:10]
-        store.insert(
+        insert(
+            store,
             "diary_runs",
             run_id="diary_run_" + name,
             identity_id="companion",
@@ -227,7 +300,8 @@ def seed_legacy_diaries(store):
             created_at=now,
             updated_at=now,
         )
-        store.insert(
+        insert(
+            store,
             "diary_entries",
             entry_id="diary_" + name,
             run_id="diary_run_" + name,
@@ -245,14 +319,16 @@ def seed_legacy_diaries(store):
             created_at=now,
             updated_at=now,
         )
-        store.insert(
+        insert(
+            store,
             "diary_evidence",
             entry_id="diary_" + name,
             source_id="event:evt_" + name,
             event_id="evt_" + name,
             excerpt_sha256=hashlib.sha256(token.encode()).hexdigest(),
         )
-        store.insert(
+        insert(
+            store,
             "diary_revisions",
             revision_id="diary_revision_" + name,
             entry_id="diary_" + name,

@@ -17,13 +17,16 @@ from pydantic import SecretStr
 from companion.api import create_app
 from companion.backup import backup, restore
 from companion.content import ContentService, validate_image
+from companion.legacy_import import migrate_sqlite
 from companion.media_provider import HTTPMediaProvider
-from companion.store import Store, migrate
+from companion.postgres import Database
+from companion.store import Store
 from source_reader.heybox import render_article
 from tests.conftest import run
+from tests.postgres_fixture import isolated_database
 from tests.support.article_vision import article
 from tests.support.content import CDN, enable, png
-from tests.support.release_migration import seed_legacy
+from tests.support.release_migration import insert, one, open_historical, rows, seed_legacy
 
 
 def image_transport():
@@ -38,8 +41,13 @@ def test_eight_images_reuse_chat_provider_in_two_image_batches_and_keep_article(
     core.settings.model_name = "deepseek-flash"
     core.settings.model_key = SecretStr("fixture-deepseek-key")
     service = ContentService(
-        core.store, core.settings, core.observations, core.exploration.create, core.clock,
-        options=service.options, image_transport=image_transport(),
+        core.store,
+        core.settings,
+        core.observations,
+        core.exploration.create,
+        core.clock,
+        options=service.options,
+        image_transport=image_transport(),
     )
     core.content = service
     core.exploration.register_link_images = service.register_link_images
@@ -94,21 +102,26 @@ def test_eight_images_reuse_chat_provider_in_two_image_batches_and_keep_article(
 
     key, archive = Fernet.generate_key(), tmp_path / "before.enc"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [source], core.clock())
-    restore(archive, tmp_path / "restored.db", key, core.settings.erasure_ledger)
-    with closing(Store(str(tmp_path / "restored.db"))) as restored:
-        assert all(
-            row["redacted"] and not row["target_url"]
-            for row in restored.rows("SELECT * FROM content_items WHERE kind='link_image'")
-        )
-        assert all(
-            row["redacted"]
-            for row in restored.rows(
-                "SELECT * FROM observations WHERE source_kind='image_analysis'"
+    with isolated_database() as destination:
+        state = tmp_path / "restored-state"
+        restore(archive, destination, key, core.settings.erasure_ledger, state_directory=state)
+        with Database(destination) as database, closing(Store(database, state)) as restored:
+            assert all(
+                row["redacted"] and not row["target_url"]
+                for row in restored.rows("SELECT * FROM content_items WHERE kind='link_image'")
             )
-        )
-        assert not restored.rows("PRAGMA foreign_key_check")
+            assert all(
+                row["redacted"]
+                for row in restored.rows(
+                    "SELECT * FROM observations WHERE source_kind='image_analysis'"
+                )
+            )
+            assert not restored.rows(
+                "SELECT 1 FROM pg_constraint WHERE "
+                "connamespace=current_schema()::regnamespace AND NOT convalidated"
+            )
 
 
 def test_article_budget_stops_before_download_and_resume_never_repeats_completed_images(core):
@@ -206,9 +219,10 @@ def test_static_webp_is_accepted_and_animated_webp_is_rejected():
 
 def test_populated_0014_upgrade_keeps_rows_constraints_and_refuses_lossy_downgrade(tmp_path):
     database, _, _ = seed_legacy(tmp_path, "0004_diary")
-    migrate(str(database), "0014_reader_budget")
-    with closing(Store(str(database))) as store:
-        store.insert(
+    migrate_sqlite(str(database), "0014_reader_budget")
+    with closing(open_historical(str(database))) as store:
+        insert(
+            store,
             "content_items",
             item_id="old-content",
             owner_event_id="evt_keep",
@@ -223,26 +237,27 @@ def test_populated_0014_upgrade_keeps_rows_constraints_and_refuses_lossy_downgra
             created_at="2026-10-18T04:00:00+00:00",
             updated_at="2026-10-18T04:00:00+00:00",
         )
-        before = store.rows("SELECT * FROM content_items ORDER BY item_id")
-    migrate(str(database), "0015_article_images")
-    with closing(Store(str(database))) as store:
-        assert store.rows("SELECT * FROM content_items ORDER BY item_id") == before
+        before = rows(store, "SELECT * FROM content_items ORDER BY item_id")
+    migrate_sqlite(str(database), "0015_article_images")
+    with closing(open_historical(str(database))) as store:
+        assert rows(store, "SELECT * FROM content_items ORDER BY item_id") == before
         row = {**before[0], "item_id": "fifth-image", "slot": 4}
-        store.insert("content_items", **row)
+        insert(store, "content_items", **row)
         for changes in ({"state": "INVALID"}, {"kind": "INVALID"}, {"slot": 64}):
             with pytest.raises(sqlite3.IntegrityError):
-                store.insert("content_items", **{**row, "item_id": "bad", **changes})
-        assert not store.rows("PRAGMA foreign_key_check")
+                insert(store, "content_items", **{**row, "item_id": "bad", **changes})
+        assert not rows(store, "PRAGMA foreign_key_check")
     config = Config()
     config.set_main_option("script_location", str(Path(__file__).parents[1] / "migrations"))
     config.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
     with pytest.raises(RuntimeError, match="ARTICLE_IMAGES_DOWNGRADE"):
         command.downgrade(config, "0014_reader_budget")
-    with closing(Store(str(database))) as store:
-        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == (
+    with closing(open_historical(str(database))) as store:
+        assert one(store, "SELECT version_num FROM alembic_version")["version_num"] == (
             "0015_article_images"
         )
-        assert store.rows("SELECT * FROM content_items ORDER BY item_id") == sorted(
-            [*before, row], key=lambda item: item["item_id"],
+        assert rows(store, "SELECT * FROM content_items ORDER BY item_id") == sorted(
+            [*before, row],
+            key=lambda item: item["item_id"],
         )
-        assert not store.rows("PRAGMA foreign_key_check")
+        assert not rows(store, "PRAGMA foreign_key_check")
