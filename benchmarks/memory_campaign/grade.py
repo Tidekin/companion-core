@@ -33,6 +33,7 @@ from scripts.memory_benchmark.budget import Budget, MeteredTransport  # noqa: E4
 from scripts.memory_benchmark.cli import validate_run  # noqa: E402
 from scripts.memory_benchmark.runtime import credential  # noqa: E402
 
+from integrity import check_grading_freeze, grading_identity, vote_settings  # noqa: E402
 from roundcfg import Round, read_rows, save, sha  # noqa: E402
 from rubrics import rubric  # noqa: E402
 
@@ -57,16 +58,23 @@ def append(path, value):
 
 def prepare():
     OUT.mkdir(exist_ok=True)
-    frozen = json.loads((ROOT / "all-answers-frozen.json").read_text("utf-8"))
-    for name, digest in frozen["files_sha256"].items():
-        assert sha(ROOT / name) == digest, name
+    votes = int(ARGS[ARGS.index("--votes") + 1]) if "--votes" in ARGS else None
+    identity = grading_identity(R, VERSION, RULES, votes)
+    freeze_path = OUT / "grading-freeze.json"
+    assert freeze_path.exists() == (OUT / "blind-mapping.json").exists(), \
+        "Grading freeze incomplete; preserve this archive and use a fresh --out directory"
+    if (OUT / "blind-mapping.json").exists():
+        check_grading_freeze(json.loads(freeze_path.read_text("utf-8")), identity)
+    else:
+        assert not any(OUT.iterdir()), "Grading freeze missing for existing evidence; use a fresh --out directory"
     configs = {a: validate_run(R.arm_dir(a)) for a in R.cfg["arms"]}
     questions = {q["id"]: q for q in R.questions}
-    seed = sha(ROOT / "all-answers-frozen.json")
+    seed = identity["answers_freeze_sha256"]
     cases, mapping, failed = [], [], []
     for arm in R.graded_arms:
         answers = R.arm_answers(arm)
         assert len(answers) == len({a["id"] for a in answers}) == R.total, arm
+        assert {a["id"] for a in answers} == set(questions), arm
         for a in answers:
             key = hashlib.sha256((seed + arm + a["id"]).encode()).hexdigest()[:24]
             mapping.append(dict(key=key, arm=arm, id=a["id"], answer_sha256=hashlib.sha256(
@@ -86,13 +94,10 @@ def prepare():
     else:
         save(OUT / "blind-mapping.json", mapping)
         save(OUT / "execution-failures.json", failed)
-        save(OUT / "grading-freeze.json", dict(
-            rubric=VERSION, rules_sha256=hashlib.sha256(RULES.encode()).hexdigest(),
-            answers_freeze_sha256=seed, criteria_sha256=sha(R.suite / "review-only/criteria.jsonl"),
-            total=R.answers_total, successful_candidates=len(cases), failures=len(failed),
+        save(freeze_path, dict(
+            **identity, successful_candidates=len(cases), failures=len(failed),
             arm_and_version_labels_sent_to_judge=False, not_independent_human=True,
-            anchors_sha256=sha(Path(G["anchors"])) if G["anchors"] else None,
-            at=datetime.now(UTC).isoformat(), **{k: v for k, v in G.items() if k != "rubric"}))
+            at=datetime.now(UTC).isoformat()))
     return next(iter(configs.values())), cases, failed
 
 
@@ -299,10 +304,7 @@ async def main():
     with FileLock(str(OUT.parent / f".{OUT.name}.lock"), timeout=0):
         config, cases, failures = prepare()
         lookup = {r["key"]: r for r in cases}
-        votes = int(ARGS[ARGS.index("--votes") + 1]) if "--votes" in ARGS else (
-            len(G["judges"]) if G["judges"] else G["votes"])
-        judges = list(G["judges"] or ["deepseek"] * votes)
-        assert len(judges) == votes and set(judges) <= set(R.cfg["judges"]), judges
+        votes, judges = vote_settings(R, int(ARGS[ARGS.index("--votes") + 1]) if "--votes" in ARGS else None)
         dirs = [OUT] if votes == 1 else [OUT / f"vote-{v}" for v in range(1, votes + 1)]
         if votes == 1:
             await judge(config, cases, failures, lookup, OUT, 0, judges[0])
@@ -323,6 +325,7 @@ async def main():
             anchor_failed_keys=sum(bool(r.get("anchor_failed")) for r in grades),
             split_decisions=sum(r.get("agreement", 1) < 1 for r in grades),
             total=R.answers_total, raw_grades_sha256=sha(OUT / "grades.jsonl"),
+            grading_freeze_sha256=sha(OUT / "grading-freeze.json"),
             at=datetime.now(UTC).isoformat()))
 
 
