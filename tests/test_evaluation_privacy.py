@@ -12,7 +12,7 @@ from companion.api import create_app
 from companion.policy import ConsentService
 from companion.retrieval import SemanticIndex
 from tests.support.evaluation import authorize, prepare, response, work
-from tests.test_evaluation_process import process_config
+from tests.support.evaluation_process import process_config
 
 
 @pytest.fixture(autouse=True)

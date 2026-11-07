@@ -695,7 +695,7 @@ async def paid_media(
             core.reading.complete("bili", item["request_id"], ReadObservation.model_validate(body))
         await select_tools(core, "analyze_shared_video", urls)
         if options.get("cloud") is not None:
-            from tests.test_cloud_budget import change
+            from tests.support.cloud_budget import change
 
             change(core, **options["cloud"].model_dump())
         child = core.reading.lease("bili", capabilities=[CAPABILITY])

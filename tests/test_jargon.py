@@ -148,7 +148,7 @@ def test_owner_forget_while_inference_is_in_flight(core, tmp_path):
     from pydantic import SecretStr
 
     from companion.api import create_app
-    from tests.test_console_cognition import ORIGIN, PASSWORD, login
+    from tests.support.console_cognition import ORIGIN, PASSWORD, login
 
     for number, text in enumerate(["今天好累", "摸鱼王又上线了", "开会", "下班了"], 1):
         say(core, number, text)
@@ -207,7 +207,7 @@ def test_console_lists_and_forgets_terms_with_a_receipt(core):
     from pydantic import SecretStr
 
     from companion.api import create_app
-    from tests.test_console_cognition import ORIGIN, PASSWORD, login
+    from tests.support.console_cognition import ORIGIN, PASSWORD, login
 
     say(core, 1, "摸鱼王又上线了")
     core.store.execute(

@@ -8,8 +8,8 @@ import httpx
 from pydantic import SecretStr
 
 from tests.support.core_http import real_core_http
+from tests.support.evaluation_process import process_config
 from tests.support.owner_input import captured, inbound
-from tests.test_evaluation_process import process_config
 
 
 def test_native_cognition_http_reads_worker_receipt_after_stop(core, tmp_path):

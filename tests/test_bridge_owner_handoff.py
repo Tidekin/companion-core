@@ -15,7 +15,7 @@ from tests.support.bridge_owner_notices import frame
 from tests.support.bridge_owner_resolution import reserve_uncertain
 from tests.support.bridge_owner_runtime import config as config
 from tests.support.onebot_events import raw_event
-from tests.test_reading_followup import window
+from tests.support.reading_followup import window
 
 
 def test_handoff_preserves_original_journal_and_fences_old_configuration(config):

@@ -9,8 +9,8 @@ from companion.transport import enqueue_reply_parts
 from scripts.summarize_beta_feedback import summarize
 from scripts.validate_beta_feedback import validate_record
 from tests.conftest import ingest
+from tests.support.p12_beta_operations import bundle, feedback
 from tests.support.segmented_delivery import PARTS, freeze
-from tests.test_p12_beta_operations import bundle, feedback
 
 
 def sample(core, *, visible=3, states=("SENT", "SENT", "SENT")):

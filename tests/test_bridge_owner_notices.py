@@ -10,7 +10,7 @@ from companion_onebot_bridge.spool import Spool, encode
 from tests.support.bridge_owner_notices import frame
 from tests.support.bridge_owner_runtime import config as config
 from tests.support.onebot_events import raw_event
-from tests.test_reading_followup import window
+from tests.support.reading_followup import window
 
 
 def test_notice_journal_detects_projection_change(config):

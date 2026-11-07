@@ -14,9 +14,9 @@ from companion import agent_chat, reply_revision
 from companion.agent_persistence import ConversationStore
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+from tests.support.reading_followup import READER_AUTH, admit, lease, window
 from tests.support.reading_protocol import envelope
 from tests.support.reply_revision import accept
-from tests.test_reading_followup import READER_AUTH, admit, lease, window
 
 
 def test_recorded_sources_revalidate_without_competing_for_the_writer(core):

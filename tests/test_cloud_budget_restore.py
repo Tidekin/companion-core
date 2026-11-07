@@ -11,8 +11,8 @@ from companion.executive import Executive
 from companion.executor_gateway import receipt
 from companion.model import ModelResponse
 from companion.store import Store
-from tests.test_cloud_budget import MESSAGES, change, options
-from tests.test_executive import FakeExecutor, configured, proposal
+from tests.support.cloud_budget import MESSAGES, change, options
+from tests.support.executive import FakeExecutor, configured, proposal
 from tests.test_media import chunk, process, service, start
 
 BLOCK = "CLOUD_BUDGET_RESTORE_RECONCILIATION_REQUIRED"

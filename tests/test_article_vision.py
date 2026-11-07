@@ -23,8 +23,8 @@ from companion.media_provider import HTTPMediaProvider
 from companion.store import Store, migrate
 from source_reader.heybox import render_article
 from tests.conftest import run
+from tests.support.release_migration import seed_legacy
 from tests.test_content import CDN, POST, enable, owner_share, png
-from tests.test_release_migration import seed_legacy
 
 
 def article(core, count=8):

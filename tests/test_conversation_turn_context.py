@@ -12,9 +12,9 @@ from companion.reply_segments import SEMANTIC_RULES, SegmentedReplyConfig
 from scripts.evaluate_r1_conversation import load_cases
 from tests.conftest import run
 from tests.support.native_consumer_entry import environment
+from tests.support.token_measurement import configure
 from tests.test_dialogue_context import current_job, sent_history
 from tests.test_native_history_delivery import sdk_step
-from tests.test_token_measurement import configure
 
 CASES = load_cases(Path(__file__).parent / "fixtures/conversation_turn_cases.json")
 

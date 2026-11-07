@@ -5,8 +5,8 @@ import pytest
 from companion import image_generation, operator_config, runtime_config
 from companion.contracts import CoreError
 from companion.store import encode
-from tests.test_runtime_configuration import hot as hot
-from tests.test_runtime_configuration import save, task
+from tests.support.runtime_configuration import hot as hot
+from tests.support.runtime_configuration import save, task
 
 FIRST, SECOND = "https://images.example.test/v1/images/generations", (
     "https://other-images.example.test/v1/images/generations")

@@ -8,7 +8,8 @@ from companion.store import encode
 from companion_delivery_protocol import digest
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
-from tests.test_reading_followup import URL, admit, finish, lease, select_read, window
+from tests.support.exploration import URL
+from tests.support.reading_followup import admit, finish, lease, select_read, window
 
 
 @pytest.mark.parametrize("drift,boundary", [

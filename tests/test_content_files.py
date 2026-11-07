@@ -19,13 +19,13 @@ from companion.privacy import advance_epoch
 from companion.store import Store, migrate
 from tests.conftest import run
 from tests.support.input_reply_migration import config_for
-from tests.test_qq_files import IMAGE, prepared, signed_upload
-from tests.test_release_migration import (
+from tests.support.release_migration import (
     TIMES,
     assert_old_columns_unchanged,
     seed_legacy,
     table_snapshot,
 )
+from tests.test_qq_files import IMAGE, prepared, signed_upload
 
 
 def stage(core, monkeypatch, *, data=b"first\n\nsecond", filename="notes.txt", mime="text/plain",

@@ -7,8 +7,8 @@ from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from tests.model_carry_support import MESSAGES, migrated
 from tests.owner_model_fixtures import authorized_job
+from tests.support.model_carry_lifecycle import current_unknown
 from tests.support.owner_authority import activate
-from tests.test_model_carry_lifecycle import current_unknown
 
 
 def unstarted_unknown(core):

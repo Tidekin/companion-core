@@ -22,8 +22,8 @@ from companion.model import ModelClient
 from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call
+from tests.support.console_cognition import ORIGIN, PASSWORD, login
 from tests.support.owner_memory import environment
-from tests.test_console_cognition import ORIGIN, PASSWORD, login
 from tests.test_memory_write_consistency import CORRECTION, candidate, failed_semantic_batch
 
 

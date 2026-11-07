@@ -17,7 +17,7 @@ from tests.support.live_image_input import options
 from tests.support.onebot_capture import source_window
 from tests.support.onebot_events import config, raw_event
 from tests.support.onebot_images import URL, image_segment
-from tests.test_paid_image_budget import image_approval, image_messages
+from tests.support.paid_image_budget import image_approval, image_messages
 from tests.test_qq_rich_input import card, rich_event
 
 

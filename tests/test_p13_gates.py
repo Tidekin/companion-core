@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
-from tests.test_p8c_public_materials import privacy_categories
+from tests.support.p8c_public_materials import privacy_categories
 
 ROOT = Path(__file__).resolve().parents[1]
 

@@ -15,14 +15,14 @@ from companion import api_store, console_api
 from companion.store import Store, after
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.support.console_reset_isolation import configure, login
 from tests.support.core_http import real_core_http
+from tests.support.delegation import delegate, submit
+from tests.support.executive import configured, proposal
 from tests.support.owner_console import stored_memory
 from tests.test_cognition_goal_steps import retained_plan
-from tests.test_console_reset_isolation import configure, login
 from tests.test_consolidation import enable_nightly
-from tests.test_delegation import delegate, submit
 from tests.test_diary import DAY, generate, seed_day
-from tests.test_executive import configured, proposal
 from tests.test_goals import setup_goal
 from tests.test_life_topics import bug
 

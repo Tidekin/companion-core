@@ -14,7 +14,7 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.support.bridge_owner_resolution import child
-from tests.test_evaluation_process import process_config
+from tests.support.evaluation_process import process_config
 
 
 @pytest.mark.parametrize("stage", ["begin-send", "send-check"])

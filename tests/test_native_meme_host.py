@@ -20,8 +20,8 @@ from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool, encode
 from tests.conftest import run
 from tests.meme_authority_fixture import environment
+from tests.support.evaluation_process import process_config
 from tests.support.onebot_events import raw_event
-from tests.test_evaluation_process import process_config
 from tests.test_next_memes_catalog import metadata, png
 
 

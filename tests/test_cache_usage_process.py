@@ -11,7 +11,7 @@ import httpx
 from companion import beta_observation, budget, paid_budget
 from companion.store import encode
 from tests.support.native_consumer_entry import environment
-from tests.test_token_measurement import configure
+from tests.support.token_measurement import configure
 from tests.test_voice_node_api import tls_core
 
 

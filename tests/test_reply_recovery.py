@@ -17,7 +17,7 @@ from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
 from tests.support.bridge_owner_resolution import child
-from tests.test_evaluation_process import process_config
+from tests.support.evaluation_process import process_config
 
 PARTS = ["synthetic first\n\n", "synthetic second\n\n", "synthetic third\n\n", "synthetic last"]
 ORIGIN = "https://console.example.test"

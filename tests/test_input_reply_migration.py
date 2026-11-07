@@ -7,7 +7,7 @@ from alembic import command
 
 from companion.store import Store, migrate
 from tests.support.input_reply_migration import config_for
-from tests.test_release_migration import (
+from tests.support.release_migration import (
     TIMES,
     assert_old_columns_unchanged,
     seed_legacy,

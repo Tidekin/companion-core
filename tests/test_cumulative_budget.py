@@ -300,7 +300,7 @@ def test_disconnect_keeps_liability_and_cannot_trigger_a_second_paid_request(cor
 
 
 def test_vision_and_chat_consume_the_same_cumulative_model_attempts(core, tmp_path):
-    from tests.test_paid_image_budget import image_approval, reserve_image
+    from tests.support.paid_image_budget import image_approval, reserve_image
 
     image_approval(core, tmp_path)
     policy(core, account={"model_attempts": 1})

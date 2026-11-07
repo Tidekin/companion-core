@@ -10,6 +10,7 @@ from companion.config import ObservationAdapterConfig
 from companion.source_grants import SourceGrantRegistration
 from tests.support.exploration import configure
 from tests.support.paid_model import approved_live
+from tests.support.runtime_capabilities import rows
 from tests.support.source_grants import GRANT_ID, authorization, prepare
 
 
@@ -23,11 +24,6 @@ def budget_projection(monkeypatch):
     from companion import capabilities
 
     monkeypatch.setattr(capabilities, "_owner_blocks", lambda *args, **kwargs: [])
-
-
-def rows(core, **kwargs):
-    return {row["id"]: row for row in snapshot(core.store, core.settings, core.clock, **kwargs)
-            ["capabilities"]}
 
 
 def observed(core, **facts):

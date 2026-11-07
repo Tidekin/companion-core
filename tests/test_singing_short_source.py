@@ -9,7 +9,8 @@ from companion.contracts import CoreError
 from companion.store import after, encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
-from tests.test_reading_followup import SHORT, URL, admit
+from tests.support.exploration import URL
+from tests.support.reading_followup import SHORT, admit
 from tests.test_singing_integration import queue_song, singing_window
 
 

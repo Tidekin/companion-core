@@ -13,53 +13,20 @@ from companion.contracts import CoreError
 from companion.executive import erase_executive
 from companion.executor_gateway import receipt
 from companion.model import ModelResponse
-from companion.store import Store, after, uid
+from companion.store import Store, after
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
 from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.cloud_budget import MESSAGES, change, charge, native, options
 from tests.support.cumulative_budget import policy as cumulative_policy
+from tests.support.executive import FakeExecutor, configured, proposal
 from tests.support.native_consumer_entry import environment
 from tests.support.paid_model import approved_live
-from tests.test_executive import FakeExecutor, configured, proposal
 from tests.test_media import chunk, process, service, start
 from tests.test_video_accounting import core as historical_video_core
 from tests.test_video_accounting import correct, failed_video
 
 __all__ = ["failed_video", "historical_video_core"]
-
-MESSAGES = [{"role": "user", "content": "synthetic budget request"}]
-
-
-def options(core, **changes):
-    config = CloudBudgetConfig(**changes)
-    object.__setattr__(core.settings, "cloud_budget", config)
-    return config
-
-
-def native(store, reference_id, amount, now, *, state="RESERVED", scenario="chat"):
-    store.insert("model_usage", usage_id=uid("usage"), request_id=reference_id,
-                 scenario=scenario, provider="synthetic", model="synthetic",
-                 billed_micro_usd=amount, state=state, pricing_known=1, occurred_at=now)
-
-
-def charge(core, reference_id, amount, *, store=None, now=None, task_kind=None, task_id=None):
-    store, now = store or core.store, now or core.clock()
-    with store.transaction():
-        result = cloud_budget.reserve(
-            store, core.settings, reference_type="model", reference_id=reference_id,
-            estimated_micro_usd=amount, now=now, task_kind=task_kind, task_id=task_id,
-        )
-        native(store, reference_id, amount, now)
-    return result
-
-
-def change(core, key="cloud-change-1", **values):
-    current = cloud_budget.policy(core.store, core.settings, core.clock())
-    return cloud_budget.configure(
-        core.store, core.settings, {"expected_version": current["version"], "changes": values},
-        idempotency_key=key, now=core.clock(),
-    )
-
 
 def test_defaults_and_versioned_patch_are_idempotent_without_resetting_usage(core):
     original = cloud_budget.policy(core.store, core.settings, core.clock())

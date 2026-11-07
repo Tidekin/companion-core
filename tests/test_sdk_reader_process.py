@@ -13,7 +13,7 @@ from companion import operator_config, runtime_config
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
 from tests.support.exploration import URL
-from tests.test_reading_followup import admit, finish, lease, window
+from tests.support.reading_followup import admit, finish, lease, window
 
 
 @pytest.mark.parametrize("hot_reload", [False, True])
@@ -78,7 +78,7 @@ def test_reader_result_resumes_one_job_without_repeating_provider_or_reader(
             receipt, body = await finish(client, core, item)
             assert receipt["state"] == "DONE"
             # The same authenticated result receipt is idempotent.
-            from tests.test_reading_followup import READER_AUTH
+            from tests.support.reading_followup import READER_AUTH
 
             duplicate = await client.post(
                 "/internal/v3/readers/bili/" + item["request_id"] + "/result",

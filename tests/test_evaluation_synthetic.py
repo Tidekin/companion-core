@@ -10,7 +10,7 @@ from companion.contracts import CoreError
 from companion.model import model_payload
 from scripts import evaluate_r1_conversation as experiment
 from tests.support.evaluation import authorize, prepare, response, result, work
-from tests.test_evaluation_measurement_v2 import rehash
+from tests.support.evaluation_measurement_v2 import rehash
 
 
 def synthetic(core, tmp_path, *, cases=2, repetitions=3, version=2):
