@@ -217,8 +217,8 @@ def test_a_reply_cleared_by_a_later_erasure_keeps_the_input_state_readable(core,
     # current input state then failed OWNER_DELIVERY_BINDING_REQUIRED, blocking handoff.
     import json
 
+    from companion import transport
     from companion.owner_authority_protocol import OwnerCapture
-    from companion.privacy import ErasureLedger
     from tests.support.owner_delivery_reconciliation import pending
 
     proof, _ = pending(core, tmp_path)
@@ -230,7 +230,7 @@ def test_a_reply_cleared_by_a_later_erasure_keeps_the_input_state_readable(core,
     if erasure:
         core.store.execute("INSERT INTO privacy_erasure_ledger VALUES (?,?,?,?,?,?)",
                            ("erase_test", "memory", "mem_test", core.clock(), 1, "COMPLETE"))
-    core.store.execute(ErasureLedger.clear_reply_sql())
+    transport.revoke_deliveries(core.store, "1", erase_content=True)
     if erasure:
         after = owner_input_state.read(core.store, core.settings, capture)
         assert after["terminal"] == before["terminal"]

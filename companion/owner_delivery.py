@@ -3,7 +3,15 @@
 import json
 from datetime import datetime
 
-from companion import cumulative, notices, owner_authority, owner_input, paid_budget, reply_revision
+from companion import (
+    cumulative,
+    notices,
+    owner_authority,
+    owner_input,
+    paid_budget,
+    reply_revision,
+    transport,
+)
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.private_life import event_digest
@@ -264,8 +272,7 @@ def record_failure_notice(store, settings, clock, job_id, message_id):
     if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
         raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
     material = _failure_material(store, row, job, view)
-    store.execute("UPDATE outbox SET authority_json=? WHERE message_id=?",
-                  (encode(view.authority.as_dict()), message_id))
+    transport.bind_authority(store, message_id, view.authority.as_dict())
     store.insert("runtime_meta", key=DELIVERY + message_id, value=encode(material))
 
 
@@ -346,8 +353,7 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
             from companion import poke
 
             poke.check_delivery(store, settings, view, message_id, clock=clock)
-        store.execute("UPDATE outbox SET authority_json=? WHERE message_id=?",
-                      (encode(view.authority.as_dict()), message_id))
+        transport.bind_authority(store, message_id, view.authority.as_dict())
         store.insert("runtime_meta", key=DELIVERY + message_id, value=encode(material))
 
 

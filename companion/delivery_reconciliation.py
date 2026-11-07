@@ -12,7 +12,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 import companion_delivery_protocol as wire
-from companion import cumulative, paid_budget
+from companion import cumulative, paid_budget, transport
 from companion.contracts import CoreError
 from companion.privacy import reply_content_erased_by_memory
 from companion.store import encode, utcnow
@@ -639,9 +639,7 @@ def _project(store, custody, view, row, now):
         or current["state"] != outcome or current["lease_token"] is not None):
         _repair_input_closure(store, view, row)
     store.retain_budget_stop(row["journal_id"], row["sha256"])
-    store.execute("UPDATE outbox SET state=?,updated_at=?,sent_at=?,lease_token=NULL "
-                  "WHERE message_id=?", (outcome, row["at"], row["at"] if outcome == "SENT"
-                                         else None, message_id))
+    transport.record_reconciled_outcome(store, message_id, outcome, row["at"])
     _put(store, PROJECTION + message_id, row["sha256"])
     if view["cumulative"]["policy"]:
         _put(store, cumulative.PROJECTION,
@@ -696,9 +694,7 @@ def _ordinary(store, message_id, outcome, now):
         raise CoreError("DELIVERY_QUIESCENCE_REQUIRED", 409)
     if row["state"] != "DELIVERY_UNCERTAIN":
         raise CoreError("NOT_UNCERTAIN", 409)
-    store.execute("UPDATE outbox SET state=?,updated_at=?,sent_at=?,lease_token=NULL "
-                  "WHERE message_id=?",
-                  (outcome, now, now if outcome == "SENT" else None, message_id))
+    transport.record_reconciled_outcome(store, message_id, outcome, now)
     store.audit("delivery.owner_reconciled", message_id, "owner", now, outcome=outcome)
     from companion.goals import acknowledge_commitment_delivery
 

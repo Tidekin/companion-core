@@ -16,6 +16,7 @@ from companion import (
     paid_budget,
     private_life,
     reply_revision,
+    transport,
 )
 from companion.contracts import CoreError
 from companion.poke_protocol import (
@@ -457,11 +458,8 @@ def finish(store, settings, approval, job, decision, now):
         elif decision.kind == "poke":
             message_id = uid("msg")
             content = {"kind": "poke", "target_user_id": settings.owner_qq_id}
-            store.insert("outbox", message_id=message_id, origin_event_id=job["event_id"],
-                         conversation_id=batch["conversation_id"], action_type=ACTION,
-                         content_json=encode(content), content_sha256=paid_budget.sha(content),
-                         state="PENDING", delivery_key="poke-response:" + job["job_id"],
-                         created_at=now, updated_at=now)
+            transport.queue_delivery(store, message_id, job["event_id"], batch["conversation_id"],
+                                     ACTION, content, "poke-response:" + job["job_id"], now)
         store.execute("UPDATE poke_batches SET decision_kind=?,decision_sha256=?,"
                       "response_message_id=? WHERE job_id=?",
                       (decision.kind, digest, message_id, job["job_id"]))
@@ -502,8 +500,6 @@ def check_delivery(store, settings, approval, message_id, *, clock=utcnow):
 
 def erase(store, event_ids):
     """Retain identity/rate liabilities while removing derived source fingerprints."""
-    from companion.privacy import ErasureLedger
-
     if not store.one("SELECT 1 FROM sqlite_master WHERE name='poke_batches' AND type='table'"):
         return
     for event_id in event_ids:
@@ -512,9 +508,9 @@ def erase(store, event_ids):
         store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,"
                       "last_error_code='REPLY_SOURCE_RECALLED' WHERE job_id IN (" + jobs + ") "
                       "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')", (event_id,))
-        store.execute(ErasureLedger.clear_reply_sql() + " WHERE message_id IN "
-                      "(SELECT response_message_id FROM poke_batches WHERE job_id IN ("
-                      + jobs + "))", (event_id,))
+        transport.revoke_deliveries(store, "message_id IN (SELECT response_message_id "
+                                    "FROM poke_batches WHERE job_id IN (" + jobs + "))",
+                                    (event_id,), erase_content=True)
         store.execute("UPDATE poke_batches SET context_json='[]',decision_sha256=NULL "
                       "WHERE job_id IN (SELECT job_id FROM job_sources WHERE event_id=?)",
                       (event_id,))
