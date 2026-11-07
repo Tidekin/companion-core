@@ -25,6 +25,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.contracts import CoreError
 from companion.store import encode
 from companion.voice_config import VoiceASRPolicy
@@ -69,6 +70,8 @@ def app_for(core, *, boundary_only=False):
         app = create_app(core.settings)
         assert ROUTE_PREFIX + "/claim" in app.openapi()["paths"]
     app.state.core = core
+    if boundary_only:
+        app.state.api_store = ApiStore(core.settings.database)
     return app
 
 

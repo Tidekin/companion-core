@@ -84,9 +84,10 @@ async def _body(request, model, limit=65536):
         raise CoreError("VOICE_REQUEST_INVALID", 400) from None
 
 
-def _service(request):
+async def _run(request, operation):
     core = request.app.state.core
-    return VoiceJobs(core.store, core.settings, core.clock)
+    return await request.app.state.api_store.run(
+        lambda store: operation(VoiceJobs(store, core.settings, core.clock)))
 
 
 def _json(value):
@@ -122,7 +123,8 @@ def register_voice_node_routes(app):
 
     @router.get(ROUTE_PREFIX + "/session")
     async def session(request: Request):
-        return _json(_service(request).session(_authenticate(request, terminal=True)))
+        node_id = _authenticate(request, terminal=True)
+        return _json(await _run(request, lambda service: service.session(node_id)))
 
     @router.get(ROUTE_PREFIX + "/nodes/{node_id}/cleanup")
     async def cleanup_status(node_id: str, request: Request):
@@ -131,14 +133,16 @@ def register_voice_node_routes(app):
             request.headers.get("authorization", "").encode(), ("Bearer " + token).encode()))
         if not owner and _authenticate(request, terminal=True) != node_id:
             raise CoreError("VOICE_NODE_SCOPE_REQUIRED", 403)
-        service = _service(request)
-        service.session(node_id)
-        rows = service.store.rows("SELECT job_id,generation,state,cleanup_state,cleanup_epoch "
-            "FROM voice_jobs WHERE node_id=? AND cleanup_state='PENDING' ORDER BY job_id LIMIT 64",
-            (node_id,))
-        count = service.store.one("SELECT COUNT(*) n FROM voice_jobs WHERE node_id=? "
-                                  "AND cleanup_state='PENDING'", (node_id,))["n"]
-        return JSONResponse({"pending_count": count, "jobs": rows},
+        def read(service):
+            service.session(node_id)
+            rows = service.store.rows("SELECT job_id,generation,state,cleanup_state,cleanup_epoch "
+                "FROM voice_jobs WHERE node_id=? AND cleanup_state='PENDING' "
+                "ORDER BY job_id LIMIT 64", (node_id,))
+            count = service.store.one("SELECT COUNT(*) n FROM voice_jobs WHERE node_id=? "
+                                      "AND cleanup_state='PENDING'", (node_id,))["n"]
+            return {"pending_count": count, "jobs": rows}
+
+        return JSONResponse(await _run(request, read),
                             headers={"Cache-Control": "no-store"})
 
     @router.post(ROUTE_PREFIX + "/nodes/{node_id}/recover")
@@ -148,14 +152,14 @@ def register_voice_node_routes(app):
                                                 ("Bearer " + token).encode()):
             raise CoreError("VOICE_OWNER_CONTROL_REQUIRED", 401)
         body = await _body(request, VoiceRecovery)
-        return _json(_service(request).recover_node(node_id, body))
+        return _json(await _run(request, lambda service: service.recover_node(node_id, body)))
 
     @router.post(ROUTE_PREFIX + "/jobs/{job_id}/stop")
     async def stop(job_id: str, request: Request):
         node_id = _authenticate(request, terminal=True)
         body = await _body(request, VoiceStopRequest)
         _path(job_id, body.ref)
-        return _json(_service(request).stop(node_id, body))
+        return _json(await _run(request, lambda service: service.stop(node_id, body)))
 
     @router.post(ROUTE_PREFIX + "/claim")
     async def claim(request: Request):
@@ -163,21 +167,21 @@ def register_voice_node_routes(app):
         body = await _body(request, VoiceClaimRequest)
         if request.headers.get("idempotency-key") != body.request_id:
             raise CoreError("VOICE_IDEMPOTENCY_KEY_REQUIRED", 400)
-        return _json(_service(request).claim(node_id, body))
+        return _json(await _run(request, lambda service: service.claim(node_id, body)))
 
     @router.post(ROUTE_PREFIX + "/jobs/{job_id}/control")
     async def control(job_id: str, request: Request):
         node_id = _authenticate(request)
         body = await _body(request, VoiceControlRequest)
         _path(job_id, body.ref)
-        return _json(_service(request).control(node_id, body))
+        return _json(await _run(request, lambda service: service.control(node_id, body)))
 
     @router.post(ROUTE_PREFIX + "/jobs/{job_id}/input")
     async def input_bytes(job_id: str, request: Request):
         node_id = _authenticate(request)
         body = await _body(request, VoiceLeaseRef)
         _path(job_id, body)
-        data, mime = _service(request).input(node_id, body)
+        data, mime = await _run(request, lambda service: service.input(node_id, body))
         return Response(data, media_type=mime, headers={"Cache-Control": "no-store"})
 
     @router.put(ROUTE_PREFIX + "/jobs/{job_id}/result")
@@ -193,6 +197,6 @@ def register_voice_node_routes(app):
             f"voice-result:{body.ref.job_id}:{body.ref.generation}"
         ):
             raise CoreError("VOICE_IDEMPOTENCY_KEY_REQUIRED", 400)
-        return _json(_service(request).submit(node_id, body))
+        return _json(await _run(request, lambda service: service.submit(node_id, body)))
 
     app.include_router(router)
