@@ -5,6 +5,7 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from companion import transport
 from companion.commands import command_parts
 from companion.contracts import CoreError
 from companion.store import encode, uid
@@ -658,7 +659,7 @@ class ErasureLedger:
             store.execute("UPDATE episodes SET title='',summary='',status='REDACTED'")
             store.execute("DELETE FROM trait_evidence")
             store.execute("DELETE FROM traits")
-            store.execute(self.clear_reply_sql())
+            transport.revoke_deliveries(store, "1", erase_content=True)
         advance_epoch(store)
         self.record_complete(store, record)
 
@@ -769,7 +770,7 @@ class ErasureLedger:
             if repair:
                 self.clear_event_replies(store, event_ids)
             else:
-                store.execute(self.clear_reply_sql())
+                transport.revoke_deliveries(store, "1", erase_content=True)
             return
         events = encode(sorted(event_ids))
         jobs = store.rows(
@@ -792,10 +793,11 @@ class ErasureLedger:
             "(SELECT value FROM json_each(?)) AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
             (at, job_ids),
         )
-        store.execute(self.clear_reply_sql() + " WHERE origin_event_id IN "
-                      "(SELECT value FROM json_each(?)) OR (? AND NOT EXISTS "
-                      "(SELECT 1 FROM jobs j WHERE j.event_id=outbox.origin_event_id))",
-                      (origins, int(not repair)))
+        transport.revoke_deliveries(
+            store, "origin_event_id IN (SELECT value FROM json_each(?)) OR (? AND NOT EXISTS "
+            "(SELECT 1 FROM jobs j WHERE j.event_id=outbox.origin_event_id))",
+            (origins, int(not repair)), erase_content=True,
+        )
 
     @staticmethod
     def retention_events(store, event_ids):
@@ -883,17 +885,9 @@ class ErasureLedger:
                 "WHERE event_id=? AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
                 (event_id,),
             )
-    @staticmethod
-    def clear_reply_sql():
-        return (
-            "UPDATE outbox SET content_json='{}',content_sha256='',"
-            "state=CASE WHEN state='SENDING' THEN 'DELIVERY_UNCERTAIN' "
-            "WHEN state IN ('PENDING','LEASED','RETRY_WAIT') THEN 'CANCELLED' ELSE state END"
-        )
-
     def clear_event_replies(self, store, event_ids):
         for event_id in event_ids:
-            store.execute(self.clear_reply_sql() + " WHERE origin_event_id=?", (event_id,))
+            transport.revoke_deliveries(store, "origin_event_id=?", (event_id,), erase_content=True)
 
     @staticmethod
     def record_complete(store, record):

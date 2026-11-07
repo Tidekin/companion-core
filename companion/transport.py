@@ -33,20 +33,32 @@ def enqueue(store, event_id, conversation_id, text, now, action="qq.private.repl
         if previous:
             return previous["message_id"]
         message_id = uid("msg")
-        store.insert(
-            "outbox",
-            message_id=message_id,
-            origin_event_id=event_id,
-            conversation_id=conversation_id,
-            action_type=action,
-            content_json=encode(content),
-            content_sha256=digest(content),
-            state="PENDING",
-            delivery_key=key,
-            created_at=now,
-            updated_at=now,
-        )
+        queue_delivery(store, message_id, event_id, conversation_id, action, content, key, now)
         return message_id
+
+
+def queue_delivery(store, message_id, event_id, conversation_id, action, content, key, now, *,
+                   lane=None, authority=None):
+    """Record an admitted delivery in its caller's transaction."""
+    routing = {}
+    if lane is not None:
+        routing["delivery_lane"] = lane
+    if authority is not None:
+        routing["authority_json"] = encode(authority)
+    store.insert("outbox", message_id=message_id, origin_event_id=event_id,
+                 conversation_id=conversation_id, action_type=action, content_json=encode(content),
+                 content_sha256=digest(content), state="PENDING", delivery_key=key,
+                 created_at=now, updated_at=now, **routing)
+
+
+def set_content(store, message_id, content):
+    store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+                  (encode(content), digest(content), message_id))
+
+
+def bind_authority(store, message_id, authority):
+    store.execute("UPDATE outbox SET authority_json=? WHERE message_id=?",
+                  (encode(authority), message_id))
 
 
 def _group_manifest(job_id, parts, interval_ms, *, contents=None, version=None):
@@ -170,9 +182,7 @@ def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, 
                                  key=f"reply:{job['event_id']}:v2:{index}", action=action,
                                  reply_to=reply_to if index == 0 else None)
             if version in (2, 3):
-                store.execute("UPDATE outbox SET content_json=?,content_sha256=? "
-                              "WHERE message_id=?",
-                              (encode(content), digest(content), message_id))
+                set_content(store, message_id, content)
             store.execute(
                 "UPDATE outbox SET reply_group_id=?,segment_index=?,segment_count=?,"
                 "reply_group_sha256=?,segment_interval_ms=? WHERE message_id=?",
@@ -328,12 +338,12 @@ def cancel_origin_replies(store, event_id, now):
                    retain_lease=True)
 
 
-def mark_not_dispatched(store, message_id, now, *, attempt_count):
+def mark_not_dispatched(store, message_id, now, *, attempt_count, reason="REPLY_NOT_DISPATCHED"):
     """Apply a verified Bridge non-dispatch receipt inside its settlement transaction."""
     store.execute(
         "UPDATE outbox SET state='CANCELLED',updated_at=?,attempt_count=?,"
-        "last_error_code='REPLY_NOT_DISPATCHED' WHERE message_id=?",
-        (now, attempt_count, message_id),
+        "last_error_code=? WHERE message_id=?",
+        (now, attempt_count, reason, message_id),
     )
 
 
@@ -346,6 +356,40 @@ def cancel_segment_tail(store, row, now, *, reason="REPLY_SEGMENT_CHAIN_STOPPED"
 def _cancel_blocked_delivery(store, row, now, reason):
     _cancel_unsent(store, now, reason, "message_id=?", (row["message_id"],))
     cancel_segment_tail(store, row, now)
+
+
+def revoke_deliveries(store, condition, params=(), *, erase_content=False, reason=None, now=None):
+    """Withdraw selected deliveries, retaining uncertainty once dispatch has begun.
+
+    The owning feature supplies its static scope predicate and bound values. Erasure may
+    also remove content from terminal rows while keeping their receipts, state and leases.
+    """
+    updates = ["state=CASE WHEN state='SENDING' THEN 'DELIVERY_UNCERTAIN' "
+               "WHEN state IN ('PENDING','LEASED','RETRY_WAIT') THEN 'CANCELLED' ELSE state END"]
+    values = []
+    if erase_content:
+        updates.extend(("content_json='{}'", "content_sha256=''"))
+    if reason is not None:
+        updates.append("last_error_code=?")
+        values.append(reason)
+    if now is not None:
+        updates.append("updated_at=?")
+        values.append(now)
+    store.execute(f"UPDATE outbox SET {','.join(updates)} WHERE {condition}", (*values, *params))
+
+
+def restore_deliveries(store):
+    # A restored snapshot cannot establish what subsequently reached the platform.
+    store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN',lease_token=NULL,"
+                  "last_error_code='RESTORED_DELIVERY_REQUIRES_RECONCILIATION' "
+                  "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')")
+
+
+def record_reconciled_outcome(store, message_id, outcome, at):
+    """The caller has verified the original uncertain row or a durable owner resolution."""
+    store.execute("UPDATE outbox SET state=?,updated_at=?,sent_at=?,lease_token=NULL "
+                  "WHERE message_id=?",
+                  (outcome, at, at if outcome == "SENT" else None, message_id))
 
 
 def recover_deliveries(store, now):

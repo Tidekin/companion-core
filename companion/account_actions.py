@@ -4,7 +4,7 @@ import json
 
 from pydantic import Field, field_validator
 
-from companion import cumulative, owner_authority, paid_budget
+from companion import cumulative, owner_authority, paid_budget, transport
 from companion.contracts import CoreError, StrictModel
 from companion.social_autonomy import SocialAutonomy
 from companion.social_autonomy_protocol import ProfileBaseline
@@ -159,8 +159,8 @@ def cancel_before_send(store, settings, clock, body):
                          (body.message_id,))):
             raise CoreError("SOCIAL_NOT_SENT_PROOF_REQUIRED", 409)
         cumulative.send_result(store, body.message_id, "FAILED", clock())
-        store.execute("UPDATE outbox SET state='CANCELLED',updated_at=?,last_error_code=? "
-                      "WHERE message_id=?", (clock(), body.reason, body.message_id))
+        transport.mark_not_dispatched(store, body.message_id, clock(),
+                                      attempt_count=row["attempt_count"], reason=body.reason)
         store.execute("UPDATE social_autonomy_reservations SET released_at=? WHERE message_id=?",
                       (clock(), body.message_id))
         result = {"state": "NOT_SENT", "message_id": body.message_id,
