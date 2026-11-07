@@ -548,7 +548,7 @@ def restore(store):
 
 def status(store, settings, clock):
     try:
-        view = current(store, settings, clock)
+        view = store.read_or_write(lambda: current(store, settings, clock))
         return {"state": "ACTIVE", "authority": view.authority.as_dict()}
     except CoreError as error:
         return {"state": "OFF", "code": error.code}

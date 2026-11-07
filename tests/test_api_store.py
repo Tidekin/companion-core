@@ -14,7 +14,6 @@ import pytest
 from pydantic import SecretStr
 
 from companion import api, api_store, owner_authority, owner_input
-from companion.owner_authority_protocol import AuthorityStop
 from companion.privacy import epoch
 from companion.store import Store
 from tests.support.core_http import real_core_http
@@ -42,10 +41,17 @@ async def child_done(process):
             await process.wait()
 
 
+@pytest.mark.parametrize("action", ["inputs/approve", "stop"])
 def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
-    core, tmp_path, monkeypatch, record_property,
+    core, tmp_path, monkeypatch, record_property, action,
 ):
     capture, _ = captured(core, tmp_path)
+    auth = headers(core)
+    body = capture.model_dump(mode="json")
+    if action == "stop":
+        core.settings.control_token = SecretStr("synthetic-owner-control-token")
+        auth = {"Authorization": "Bearer " + core.settings.control_token.get_secret_value()}
+        body = {"operation_id": "test-contended-stop", "authority": capture.authority}
     opened, closed, entered = [], [], threading.Event()
     owner_thread = threading.get_ident()
 
@@ -77,8 +83,7 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
             ) as client, httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe:
                 assert (await probe.get(PREFIX + "/health/live")).status_code == 200
                 requests = [asyncio.create_task(client.post(
-                    PREFIX + "/owner-authority/inputs/approve",
-                    json=capture.model_dump(mode="json"),
+                    PREFIX + "/owner-authority/" + action, json=body, headers=auth,
                 )) for _ in range(2)]
                 await event_wait(entered)
                 assert not any(request.done() for request in requests)
@@ -93,8 +98,12 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
                 await process.stdin.drain()
                 responses = await asyncio.wait_for(asyncio.gather(*requests), 8)
                 assert all(response.status_code == 200 for response in responses)
-                duplicates = sorted(response.json()["duplicate"] for response in responses)
-                assert duplicates == [False, True]
+                if action == "stop":
+                    assert responses[0].json() == responses[1].json()
+                    assert responses[0].json()["state"] == "STOPPED"
+                else:
+                    assert sorted(response.json()["duplicate"] for response in responses) == [
+                        False, True]
             await child_done(process)
         finally:
             if process.returncode is None:
@@ -110,8 +119,12 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
     for _, connection, _ in opened:
         with pytest.raises(sqlite3.ProgrammingError, match="closed"):
             connection.execute("SELECT 1")
-    assert core.store.one("SELECT COUNT(*) n FROM runtime_meta WHERE key=?",
-                          (owner_input.INPUT + capture.event_id,))["n"] == 1
+    if action == "inputs/approve":
+        assert core.store.one("SELECT COUNT(*) n FROM runtime_meta WHERE key=?",
+                              (owner_input.INPUT + capture.event_id,))["n"] == 1
+    else:
+        assert core.store.one("SELECT COUNT(*) n FROM owner_authority_revisions "
+                              "WHERE state='STOPPED'")["n"] == 1
 
 
 def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
@@ -409,6 +422,7 @@ def test_owner_check_waits_for_fsynced_uncommitted_authority(
 
 def test_real_http_and_independent_sdk_worker_keep_unknown_and_stop_receipts(core, tmp_path):
     capture, _ = captured(core, tmp_path)
+    core.settings.control_token = SecretStr("synthetic-owner-control-token")
 
     async def scenario():
         async with real_core_http(core) as port, httpx.AsyncClient(
@@ -452,8 +466,10 @@ def test_real_http_and_independent_sdk_worker_keep_unknown_and_stop_receipts(cor
             repeated = await client.post(PREFIX + "/deliveries/lease", json={
                 "worker_id": "thread-http-retry", "authority": capture.authority})
             assert repeated.json()["items"] == []
-            owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
-                operation_id="thread-http-stop", authority=capture.authority))
+            stop = await client.post(PREFIX + "/owner-authority/stop", headers={
+                "Authorization": "Bearer " + core.settings.control_token.get_secret_value(),
+            }, json={"operation_id": "thread-http-stop", "authority": capture.authority})
+            assert stop.status_code == 200 and stop.json()["state"] == "STOPPED"
             for suffix, body in [
                 ("/owner-authority/check", {"authority": capture.authority, "purpose": "chat"}),
                 ("/owner-authority/inputs/approve", capture.model_dump(mode="json")),
