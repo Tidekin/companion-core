@@ -6,6 +6,7 @@ parameters. This module neither translates SQLite SQL nor performs external work
 """
 
 from contextlib import contextmanager
+from pathlib import Path
 
 import psycopg
 from psycopg import sql
@@ -15,6 +16,35 @@ from psycopg_pool import ConnectionPool
 from pydantic import SecretStr
 
 WAKE_CHANNEL = "companion_wakeup"
+
+
+def migrate(conninfo: SecretStr, revision="head"):
+    """Apply native Alembic migrations without putting credentials in configuration logs."""
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+
+    if not isinstance(conninfo, SecretStr):
+        raise TypeError("database connection information must be SecretStr")
+    location = Path(__file__).resolve().parents[1] / "migrations" / "postgresql"
+    if not location.is_dir():
+        location = Path(__file__).resolve().parent / "migrations" / "postgresql"
+    configuration = Config()
+    configuration.set_main_option("script_location", str(location))
+    engine = create_engine(
+        "postgresql+psycopg://", poolclass=NullPool, hide_parameters=True,
+        creator=lambda: psycopg.connect(conninfo.get_secret_value(), connect_timeout=5),
+    )
+    try:
+        with engine.begin() as connection:
+            # Serialize schema/catalog changes only. The two-int lock namespace is
+            # separate from the runtime journal's bigint transaction locks.
+            connection.exec_driver_sql("SELECT pg_advisory_xact_lock(1129271877,1296648019)")
+            configuration.attributes["connection"] = connection
+            command.upgrade(configuration, revision)
+    finally:
+        engine.dispose()
 
 
 def _configure(connection):

@@ -1,6 +1,7 @@
 """Check release archives and initialize a database using only the extracted wheel."""
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import tempfile
 import textwrap
 import zipfile
 from pathlib import Path
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -150,6 +152,48 @@ def verify_meme_sources(destination, env=None):
                    env=env, check=True, timeout=30)
 
 
+def verify_postgres(destination):
+    """Run the extracted wheel's native migration in an independent process."""
+    configuration = os.environ.get("COMPANION_POSTGRES_TEST_CONFIG")
+    if not configuration:
+        return
+    import psycopg
+    from psycopg import sql
+
+    value = json.loads(Path(configuration).read_text("utf8"))
+    connection = {key: value[key] for key in ["host", "port", "dbname", "user", "password"]}
+    namespace = "package_" + uuid4().hex
+    script = textwrap.dedent("""
+        import json,sys
+        from pathlib import Path
+        sys.path.insert(0,sys.argv[1])
+        from psycopg.conninfo import make_conninfo
+        from pydantic import SecretStr
+        import companion.postgres as native
+        assert Path(native.__file__).resolve().is_relative_to(Path(sys.argv[1]).resolve())
+        value=json.loads(Path(sys.argv[2]).read_text('utf8'))
+        connection={key:value[key] for key in ['host','port','dbname','user','password']}
+        options='-c search_path='+sys.argv[3]+',pg_catalog'
+        info=SecretStr(make_conninfo(**connection,options=options))
+        native.migrate(info)
+        with native.Database(info) as database, database.session() as session:
+            assert session.one('SELECT version_num FROM alembic_version')=={
+                'version_num':'pg0001_core'}
+            assert session.one("SELECT count(*) AS n FROM information_schema.tables "
+                "WHERE table_schema=current_schema() AND table_type='BASE TABLE'")=={'n':104}
+        print('PASS: extracted wheel initializes native PostgreSQL migrations')
+    """)
+    with psycopg.connect(**connection, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(namespace)))
+    try:
+        subprocess.run([sys.executable, "-I", "-B", "-c", script, str(destination),
+                        str(Path(configuration).resolve()), namespace],
+                       cwd=destination, check=True, timeout=60)
+    finally:
+        with psycopg.connect(**connection, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(namespace)))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dist-dir", type=Path, default=ROOT / "dist")
@@ -198,6 +242,12 @@ def main():
             "companion_voice_node/supervisor.py",
             "companion_delivery_protocol/__init__.py",
             "companion/telemetry.py",
+            "companion/postgres.py",
+            "companion/legacy_import.py",
+            "companion/migrations/postgresql/env.py",
+            "companion/migrations/postgresql/schema.sql",
+            "companion/migrations/postgresql/constraints.sql",
+            "companion/migrations/postgresql/versions/pg0001_core.py",
         } <= set(archive.namelist())
         with tempfile.TemporaryDirectory(prefix="package-check-", dir=temporary) as folder:
             destination = Path(folder).resolve()
@@ -215,6 +265,7 @@ def main():
             )
             verify_meme_protocol(destination, env)
             verify_meme_sources(destination, env)
+            verify_postgres(destination)
             subprocess.run(
                 [sys.executable, "-m", "companion", "init"],
                 cwd=destination,
