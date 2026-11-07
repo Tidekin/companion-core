@@ -220,12 +220,14 @@ class CognitionRead:
                 raise CoreError("COGNITION_CURSOR_UNAVAILABLE", 409)
         rows = self.store.rows(
             (
-                'SELECT record_sequence AS position,* FROM '
-                f'{table}'
-                ' WHERE (%s IS NULL OR record_sequence<%s) AND (%s IS '
-                'NULL OR '
-                f'{key}'
-                '=%s) ORDER BY record_sequence DESC LIMIT %s'
+                (
+                    'SELECT record_sequence AS position,* FROM '
+                    f'{table}'
+                    ' WHERE (CAST(%s AS BIGINT) IS NULL OR '
+                    'record_sequence<%s) AND (CAST(%s AS TEXT) IS NULL OR '
+                    f'{key}'
+                    '=%s) ORDER BY record_sequence DESC LIMIT %s'
+                )
             ),
             (
                 cursor and cursor["position"],

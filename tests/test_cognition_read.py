@@ -14,24 +14,20 @@ from tests.test_goals import setup_goal
 
 @pytest.mark.parametrize("kind", KINDS)
 def test_empty_native_collections_do_not_execute(core, kind):
-    before = core.store.db.total_changes
-    assert CognitionRead(core).page(kind)["items"] == []
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        assert CognitionRead(core).page(kind)["items"] == []
     assert core.model.calls == []
 
 
 def test_goal_native_sources_and_independent_reader(core):
     goal = setup_goal(core)
-    reader = Core(core.settings, core.model, core.clock)
-    try:
+    with Core(core.settings, core.model, core.clock) as reader:
         result = CognitionRead(reader).page("goal")
         assert result["items"][0]["id"] == goal
         assert result["items"][0]["execution"]["state"] == "discussed"
         assert "天文" not in json.dumps(result, ensure_ascii=False)
         core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
         assert CognitionRead(reader).page("goal")["items"] == []
-    finally:
-        reader.store.db.close()
 
 
 def test_wake_native_choice_and_cursor(core):
@@ -92,7 +88,8 @@ def test_privacy_change_during_read_fails_closed(core, monkeypatch):
 
     def changed(*args):
         result = original(*args)
-        advance_epoch(core.store)
+        with core.store.transaction(control_write=True):
+            advance_epoch(core.store)
         return result
 
     monkeypatch.setattr(view, "_record", changed)
@@ -163,7 +160,7 @@ def test_native_model_measurement_and_unknown(core, tmp_path, response_usage):
 
     run(execute())
     item = CognitionRead(core).page("model", record_id=request)["items"][0]
-    saved = core.store.one("SELECT measurement_json FROM model_admissions WHERE request_id=?",
+    saved = core.store.one('SELECT measurement_json FROM model_admissions WHERE request_id=%s',
                            (request,))
     assert item["measurement"] == measurement(saved["measurement_json"])
     assert item["measurement"]["count_kind"] == "estimate"
