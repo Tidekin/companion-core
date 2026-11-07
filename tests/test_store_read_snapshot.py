@@ -86,17 +86,19 @@ def test_inside_an_open_transaction_runs_in_place(store):
     assert store.rows("SELECT a FROM t") == [{"a": 4}]
 
 
-def test_shared_journal_view_ignores_snapshots_older_than_the_files(store):
+def test_shared_journal_view_ignores_snapshots_older_than_the_files(core, tmp_path):
+    store = core.store
     with closing(sqlite3.connect(store.path, isolation_level=None)) as other:
         def key():
-            return paid_budget._shared_key(store, ("p", "h", 0, 0, ()))
+            local_key = paid_budget._view_key(store, tmp_path / "journal", b"{}\n")
+            return paid_budget._shared_key(store, local_key)
 
         assert store.read_or_write(key) is not None
         stale = []
 
         def commit_during_snapshot():
-            store.one("SELECT 1 FROM t")  # pins the snapshot
-            other.execute("INSERT INTO t VALUES (5)")
+            store.one("SELECT 1 FROM runtime_meta LIMIT 1")  # pins the snapshot
+            other.execute("INSERT INTO runtime_meta(key,value) VALUES ('snapshot_test','5')")
             stale.append(key())
             raise RuntimeError("retry")
 

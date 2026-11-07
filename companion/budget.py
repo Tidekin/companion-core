@@ -47,7 +47,7 @@ def total_monthly(store, month, before=None):
         + (" AND occurred_at<?" if before else ""),
         (month, before) if before else (month,),
     )["n"]
-    if store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_tasks'"):
+    if store.has_table("tool_tasks"):
         total += store.one(
             "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM tool_tasks WHERE dispatched_at>=?"
             + (" AND dispatched_at<?" if before else ""),

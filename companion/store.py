@@ -75,7 +75,45 @@ def _lock_report(site, started, locked, finished, outcome):
         pass  # Instrumentation must not replace the transaction's result or exception.
 
 
-class Store:
+class ReadView:
+    def __init__(self, db):
+        self.db = db
+
+    def rows(self, sql, params=()):
+        return [dict(row) for row in self.db.execute(sql, params)]
+
+    def one(self, sql, params=()):
+        row = self.db.execute(sql, params).fetchone()
+        return dict(row) if row else None
+
+    def has_table(self, name):
+        return bool(self.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)))
+
+    @property
+    def frozen_revision(self):
+        # An immutable snapshot or a writer with no intervening local writes.
+        scope = getattr(self, "frozen_scope", None)
+        return (scope, self.db.total_changes) if scope is not None else None
+
+    def change_token(self):
+        return self.db.total_changes, self.db.execute("PRAGMA data_version").fetchone()[0]
+
+    def shared_snapshot_identity(self):
+        # Diagnostics may have opened an independent read transaction without capturing
+        # file identity at BEGIN. Only a tracked transaction can share a cache entry.
+        if self.db.in_transaction and self.db.total_changes != getattr(self, "_txn_changes", None):
+            return None
+        path = getattr(self, "path", None)
+        if not isinstance(path, (str, os.PathLike)) or str(path).startswith((":memory:", "file:")):
+            return None
+        files = file_identity(path)
+        if files[0] is None or (getattr(self, "in_read_snapshot", False)
+                                and files != self._snapshot_files):
+            return None
+        return files
+
+
+class Store(ReadView):
     def __init__(self, path):
         self.path = path
         self._budget_stops = None
@@ -204,13 +242,6 @@ class Store:
 
     def execute(self, sql, params=()):
         return self.db.execute(sql, params)
-
-    def rows(self, sql, params=()):
-        return [dict(row) for row in self.db.execute(sql, params).fetchall()]
-
-    def one(self, sql, params=()):
-        row = self.db.execute(sql, params).fetchone()
-        return dict(row) if row else None
 
     def schema_capabilities(self):
         required = {

@@ -19,19 +19,7 @@ from alembic.util import CommandError
 from companion import __version__, budget, paid_budget
 from companion.contracts import CoreError
 from companion.privacy import ErasureLedger
-from companion.store import Store
-
-
-class _ReadView:
-    def __init__(self, db):
-        self.db = db
-
-    def rows(self, sql, params=()):
-        return [dict(row) for row in self.db.execute(sql, params)]
-
-    def one(self, sql, params=()):
-        row = self.db.execute(sql, params).fetchone()
-        return dict(row) if row else None
+from companion.store import ReadView, Store
 
 
 def _migration_scripts():
@@ -60,7 +48,7 @@ def _packaged_revisions(head):
 
 def schema_readiness(view):
     versions = []
-    if view.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alembic_version'"):
+    if view.has_table("alembic_version"):
         versions = view.rows("SELECT version_num FROM alembic_version LIMIT 2")
     version = versions[0]["version_num"] if len(versions) == 1 else None
     details = {"schema": version, "expected_schema": None}
@@ -226,7 +214,7 @@ def snapshot(settings, *, integrity=False):
 
             db.set_progress_handler(progress, 10_000)
             db.execute("BEGIN")
-            view = _ReadView(db)
+            view = ReadView(db)
             schema, blocker = schema_readiness(view)
             result["database"].update(schema)
             if blocker:
