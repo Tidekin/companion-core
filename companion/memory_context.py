@@ -245,6 +245,20 @@ class MemoryContext:
             "event_id", "source", "occurred_at", "ingested_at",
         )} for source in sources[-8:]], "evidence_truncated": len(sources) > 8}
 
+    def reply_facts(self, settings, clock, text, memories, *, allowed_ids, include_standing):
+        """Select reply facts and pin the recalled rows after removing standing duplicates."""
+        if memories is None:
+            memories = self.recall(text or "*", clock(), memory_ids=allowed_ids,
+                                   project_query=text)["rows"]
+        hits, relations = self.memory.with_relayed_updates(memories, clock())
+        standing = self.memory.standing_relationship(
+            limit=settings.relationship_standing_limit,
+            max_chars=settings.relationship_standing_chars, now=clock(),
+        ) if include_standing else []
+        standing_ids = {row["memory_id"] for row in standing}
+        hits = [row for row in hits if row["memory_id"] not in standing_ids]
+        return hits, relations, standing, self.pin(clock(), rows=hits)
+
     def pin(self, now, *, rows=(), event_ids=(), historical=False, work=None):
         """Freeze full fact/evidence identity for a local await, never a display projection.
 

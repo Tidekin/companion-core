@@ -275,6 +275,13 @@ def input_sources(store, settings, clock, job, *, executing=True):
             for row in rows]
 
 
+def context_item_ids(store, settings, clock, job, *, executing=True):
+    """Revalidate original image custody and return the ordered evidence identity."""
+    return [row["item_id"] for row, _ in input_sources(
+        store, settings, clock, job, executing=executing,
+    )]
+
+
 def _prepared(store, settings, clock, job, item_id, *, executing=True):
     row, image = _source(store, settings, clock, job, item_id, executing=executing)
     if row["expires_at"] <= clock():
