@@ -685,6 +685,29 @@ class ContentService(ContentIntake):
             kept.append(item)
         return kept
 
+    def reply_context(self, settings, event_id, messages, *, rich):
+        from companion import private_life
+        from companion.token_measurement import measure_request
+
+        available = settings.context_soft_tokens - measure_request(
+            settings, messages, "chat",
+        ).reserved_input_tokens
+        if private_life.enabled(settings) and self._consumer_rows(event_id):
+            # Required reading evidence shares the prompt with the capability inventory.
+            available = max(min(settings.context_soft_tokens, settings.content.max_context_chars),
+                            available)
+        elif rich:
+            available = max(2048, available)
+        return self.context_message(event_id, available - 24)
+
+    @staticmethod
+    def context_source_ids(reference):
+        """Use the final, possibly trimmed excerpt for the reply's original source list."""
+        for item in json.loads(reference)["shared_content"]:
+            yield item["event_id"]
+            if item.get("article_event_id"):
+                yield item["article_event_id"]
+
     def context_message(self, event_id, max_bytes):
         """Fit real excerpts in a UTF-8 budget, preserving their source labels."""
         if max_bytes < 64:

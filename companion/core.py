@@ -483,8 +483,8 @@ class Core(Runtime):
                 elif snapshot["kind"] == "images":
                     from companion import agent_images
 
-                    rows = agent_images.input_sources(self.store, self.settings, self.clock, job)
-                    if [row["item_id"] for row, _ in rows] != snapshot["item_ids"]:
+                    ids = agent_images.context_item_ids(self.store, self.settings, self.clock, job)
+                    if ids != snapshot["item_ids"]:
                         raise CoreError("PRIVACY_CHANGED", 409)
             except CoreError as error:
                 if error.code == "PRIVACY_CHANGED":
@@ -848,22 +848,9 @@ class Core(Runtime):
             and not body.get("diary_command")
             and not body.get("control_command")
         ):
-            from companion.token_measurement import measure_request
-
-            available = cfg.context_soft_tokens - measure_request(
-                cfg, [rules, current], job["kind"],
-            ).reserved_input_tokens
-            if private_life.enabled(cfg) and self.content._consumer_rows(job["event_id"]):
-                # Current reading evidence is required input. A capability inventory
-                # must not consume its entire excerpt allowance; paid admission still
-                # checks the complete payload, as for other required current input.
-                available = max(min(cfg.context_soft_tokens, cfg.content.max_context_chars),
-                                available)
-            elif body.get("rich"):
-                # Keep current evidence alongside rich metadata; paid admission
-                # still checks the complete request against its hard limits.
-                available = max(2048, available)
-            content_reference = self.content.context_message(job["event_id"], available - 24)
+            content_reference = self.content.reply_context(
+                cfg, job["event_id"], [rules, current], rich=bool(body.get("rich")),
+            )
         if authority:
             sources = owner_input.history_sources(s, cfg, self.clock, job,
                 purpose="proactive" if followup else "chat") if (
@@ -979,22 +966,10 @@ class Core(Runtime):
         standing = []
         if cfg.memory_enabled and permitted("memory"):
             allowed = live_text.memory_ids(s, cfg, self.clock, job) if bounded_text else None
-            hits = self.memory_context.recall(
-                text or "*", self.clock(), memory_ids=allowed, project_query=text,
-            )["rows"] if (
-                memories is None
-            ) else memories
-            hits, relations = self.memory.with_relayed_updates(hits, self.clock())
-            # A signed bounded window admits only its reviewed facts; leave it unchanged.
-            standing = self.memory.standing_relationship(
-                limit=cfg.relationship_standing_limit,
-                max_chars=cfg.relationship_standing_chars, now=self.clock(),
-            ) if (
-                job["kind"] == "chat" and not bounded_text
-            ) else []
-            standing_ids = {row["memory_id"] for row in standing}
-            hits = [row for row in hits if row["memory_id"] not in standing_ids]
-            memory_proof = self.memory_context.pin(self.clock(), rows=hits)
+            hits, relations, standing, memory_proof = self.memory_context.reply_facts(
+                cfg, self.clock, text, memories, allowed_ids=allowed,
+                include_standing=job["kind"] == "chat" and not bounded_text,
+            )
             from companion.interest import profile
 
             trait_rows = (
@@ -1313,10 +1288,7 @@ class Core(Runtime):
             if any(message is reference for message in messages):
                 actual_sources.update(evidence)
         if content_reference:
-            for item in json.loads(content_reference)["shared_content"]:
-                actual_sources.add(item["event_id"])
-                if item.get("article_event_id"):
-                    actual_sources.add(item["article_event_id"])
+            actual_sources.update(self.content.context_source_ids(content_reference))
         if style:
             actual_sources.update(style["source_event_ids"])
         reply_revision.remember_sources(s, job, actual_sources)
