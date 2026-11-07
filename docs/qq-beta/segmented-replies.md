@@ -52,6 +52,13 @@ Core 接受同一会话内新的、通过主人身份验证的输入时，取消
 
 任一片发送失败、投递不确定或发送租约过期后，其余片段停止。迟到的成功回执可以记入该片，但不会恢复已停止的后续片段。全部片段都为 `SENT` 才作为一个完整对话回合进入历史；`SENT` 表示投递回执，不等于手机已显示。
 
+普通主人文字回复的 `begin-send` / `send-check` 在连接建立失败、连接建立超时或等待连接池超时时，
+沿用原租约有限重试同一绑定请求；每次重试前重新检查 STOP、撤回、新输入和租约，不延长原有效期。
+该分类采用 [HTTPX 的连接重试约定](https://www.python-httpx.org/advanced/transports/)
+和[异常含义](https://www.python-httpx.org/exceptions/)。
+读取、写入或协议异常仍按可能已提交处理，保留既有等待、原始 RESERVED 签名证明和未派发收口，
+不重复未知结果的 POST，也不新增模型调用或发送尝试。
+
 ## 有界真实文本窗口
 
 已有单条审批保持原含义。启用分条的窗口还需在 Core 审批和 Bridge `live_text` scope 中显式包含相同的 `segmented_reply` 配置，并包含正整数 `max_send_attempts`。Bridge 要求它等于窗口 `max_attempts` 与 `max_visible_replies` 的较小值；这不会增加外层批准额度。次数使用[统一试用配置](../trial-limits.md)，与是否启用分条独立。
