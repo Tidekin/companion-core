@@ -1,4 +1,4 @@
-"""Run a finite synchronous operation with its own SQLite connection.
+"""Run a finite synchronous operation with its own PostgreSQL session.
 
 Only materialized values cross this boundary. Callers retain their original
 transactions, authority checks and idempotency; no Core bootstrap is performed.
@@ -12,13 +12,13 @@ from companion.store import Store
 
 
 class ApiStore:
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, database, state_directory):
+        self.database, self.state_directory = database, state_directory
         self.limiter = CapacityLimiter(4)
 
     async def run(self, operation):
         def execute():
-            store = Store(self.path)
+            store = Store(self.database, self.state_directory)
             try:
                 return operation(store)
             finally:

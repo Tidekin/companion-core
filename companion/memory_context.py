@@ -13,6 +13,16 @@ MEMORY_FIELDS = (
     "memory_id", "subject", "kind", "content", "status", "needs_review",
     "supersedes_memory_id", "valid_from", "valid_to", "created_at", "updated_at",
 )
+MEMORY_COLUMNS = (
+    "memory_id", "subject", "kind", "content", "status", "origin", "confidence",
+    "importance", "privacy_scope", "supersedes_memory_id", "created_at", "updated_at",
+    "valid_from", "valid_to", "last_reviewed_at", "fact_key", "needs_review",
+)
+EVENT_COLUMNS = (
+    "event_id", "schema_version", "source", "source_event_id", "conversation_id", "actor_id",
+    "event_type", "occurred_at", "ingested_at", "privacy_scope", "body_json", "trace_id",
+    "idempotency_key", "fingerprint", "redacted", "memory_processed", "reply_revision",
+)
 
 
 def read_version(memory):
@@ -55,15 +65,15 @@ class MemorySources:
             if isinstance(rows, retrieval_work.WorkLimit):
                 raise rows
             return rows
-        lineage = "SELECT value FROM json_each(?)"
-        if self.store.one("SELECT 1 FROM sqlite_master WHERE name='event_dependencies'"):
-            lineage += (" UNION SELECT d.source_event_id FROM event_dependencies d "
-                        "JOIN sources s ON d.event_id=s.event_id")
+        lineage = ('SELECT value COLLATE "C" FROM json_array_elements_text(%s::json) AS ids(value) '
+                   "UNION SELECT d.source_event_id FROM event_dependencies d "
+                   "JOIN sources s ON d.event_id=s.event_id")
         pending, found = {event_id}, {}
         while pending:
             rows = self.store.rows(
                 "WITH RECURSIVE sources(event_id) AS (" + lineage + ") "
-                "SELECT s.event_id AS source_id,e.*,c.scope,c.owner_actor_id,r.key AS erased "
+                "SELECT s.event_id AS source_id," + ",".join("e." + key for key in EVENT_COLUMNS)
+                + ",c.scope,c.owner_actor_id,r.key AS erased "
                 "FROM sources s LEFT JOIN events e USING(event_id) "
                 "LEFT JOIN conversations c USING(conversation_id) "
                 "LEFT JOIN runtime_meta r ON r.key='erased_event:'||s.event_id",
@@ -76,10 +86,10 @@ class MemorySources:
                 if row["source"] != "owner.decision" or row["event_type"] != "memory.corrected":
                     continue
                 candidates = self.store.rows(
-                    "SELECT DISTINCT e.event_id FROM memory_evidence copy "
-                    "JOIN memories m USING(memory_id) JOIN memory_evidence v USING(memory_id) "
-                    "JOIN events e ON e.event_id=v.event_id WHERE copy.event_id=? "
-                    "AND m.supersedes_memory_id IS NOT NULL AND e.source='qq.onebot'",
+                    'SELECT DISTINCT e.event_id FROM memory_evidence AS copy JOIN memories AS m '
+                    'USING (memory_id) JOIN memory_evidence AS v USING (memory_id) JOIN events AS '
+                    'e ON e.event_id = v.event_id WHERE copy.event_id = %s AND NOT '
+                    "m.supersedes_memory_id IS NULL AND e.source = 'qq.onebot'",
                     (row["event_id"],),
                 )
                 for candidate in candidates:
@@ -101,8 +111,6 @@ class MemorySources:
                 self.work.mark(reason)
             raise WorkLimit(reason)
 
-        dependencies = self.store.one(
-            "SELECT 1 FROM sqlite_master WHERE name='event_dependencies'")
         pending, found, loaded = [event_id], {}, {}
 
         def read(key):
@@ -113,8 +121,8 @@ class MemorySources:
                 refuse("source_nodes")
             if self.work and not self.work.take("source_nodes"):
                 refuse("source_nodes")
-            size = self.store.one("SELECT octet_length(body_json) AS size FROM events "
-                                  "WHERE event_id=?", (key,))
+            size = self.store.one('SELECT OCTET_LENGTH(body_json) AS size FROM events WHERE '
+                'event_id = %s', (key,))
             size = size["size"] if size else 0
             self._source_bytes += size
             if self._source_bytes > LIMITS["text_bytes"] or (
@@ -122,10 +130,17 @@ class MemorySources:
             ):
                 refuse("source_text_bytes")
             row = self.store.one(
-                "SELECT s.event_id AS source_id,e.*,c.scope,c.owner_actor_id,r.key AS erased "
-                "FROM (SELECT ? AS event_id) s LEFT JOIN events e USING(event_id) "
-                "LEFT JOIN conversations c USING(conversation_id) "
-                "LEFT JOIN runtime_meta r ON r.key='erased_event:'||s.event_id", (key,))
+                'SELECT s.event_id AS source_id, e.event_id AS event_id, e.schema_version AS '
+                'schema_version, e.source AS source, e.source_event_id AS source_event_id, '
+                'e.conversation_id AS conversation_id, e.actor_id AS actor_id, e.event_type AS '
+                'event_type, e.occurred_at AS occurred_at, e.ingested_at AS ingested_at, '
+                'e.privacy_scope AS privacy_scope, e.body_json AS body_json, e.trace_id AS '
+                'trace_id, e.idempotency_key AS idempotency_key, e.fingerprint AS fingerprint, '
+                'e.redacted AS redacted, e.memory_processed AS memory_processed, e.reply_revision '
+                'AS reply_revision, c.scope AS scope, c.owner_actor_id AS owner_actor_id, r.key AS '
+                'erased FROM (SELECT %s AS event_id) AS s LEFT JOIN events AS e ON s.event_id = '
+                'e.event_id LEFT JOIN conversations AS c ON e.conversation_id = c.conversation_id '
+                "LEFT JOIN runtime_meta AS r ON r.key = 'erased_event:' || s.event_id", (key,))
             loaded[key] = row
             return row
 
@@ -135,26 +150,24 @@ class MemorySources:
                 continue
             row = read(key)
             found[key] = row
-            if dependencies:
-                edges = self.store.rows("SELECT source_event_id FROM event_dependencies "
-                    "WHERE event_id=? LIMIT ?", (key, SOURCE_NODES + 1))
-                if len(edges) > SOURCE_NODES:
-                    refuse("source_nodes")
-                pending.extend(edge["source_event_id"] for edge in edges)
+            edges = self.store.rows('SELECT source_event_id FROM event_dependencies WHERE '
+                'event_id = %s LIMIT %s', (key, SOURCE_NODES + 1))
+            if len(edges) > SOURCE_NODES:
+                refuse("source_nodes")
+            pending.extend(edge["source_event_id"] for edge in edges)
             if row["source"] != "owner.decision" or row["event_type"] != "memory.corrected":
                 continue
             memories = self.store.rows(
-                "SELECT DISTINCT m.memory_id,m.supersedes_memory_id,m.content "
-                "FROM memory_evidence v JOIN memories m "
-                "USING(memory_id) WHERE v.event_id=? AND m.supersedes_memory_id IS NOT NULL "
-                "LIMIT ?", (key, EVIDENCE_ROOTS + 1))
+                'SELECT DISTINCT m.memory_id, m.supersedes_memory_id, m.content FROM '
+                'memory_evidence AS v JOIN memories AS m USING (memory_id) WHERE v.event_id = %s '
+                'AND NOT m.supersedes_memory_id IS NULL LIMIT %s', (key, EVIDENCE_ROOTS + 1))
             if len(memories) > EVIDENCE_ROOTS:
                 refuse("evidence_roots")
             for memory in memories:
                 candidates = self.store.rows(
-                    "SELECT DISTINCT e.event_id FROM memory_evidence v JOIN events e "
-                    "ON e.event_id=v.event_id WHERE v.memory_id=? AND e.source='qq.onebot' "
-                    "LIMIT ?", (memory["memory_id"], EVIDENCE_ROOTS + 1))
+                    'SELECT DISTINCT e.event_id FROM memory_evidence AS v JOIN events AS e ON '
+                    "e.event_id = v.event_id WHERE v.memory_id = %s AND e.source = 'qq.onebot' "
+                    'LIMIT %s', (memory["memory_id"], EVIDENCE_ROOTS + 1))
                 if len(candidates) > EVIDENCE_ROOTS:
                     refuse("evidence_roots")
                 for candidate in candidates:
@@ -197,10 +210,11 @@ class MemorySources:
     def evidence(self, memory_id):
         from companion.memory_references import MEMORY
 
-        reference = self.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (MEMORY + memory_id,))
+        reference = self.store.one('SELECT 1 FROM runtime_meta WHERE key = '
+            '%s', (MEMORY + memory_id,))
         rows = self.store.rows(
-            "SELECT event_id FROM memory_evidence WHERE memory_id=? AND polarity=1 "
-            "ORDER BY created_at,event_id" + (" LIMIT ?" if self.bounded else ""),
+            "SELECT event_id FROM memory_evidence WHERE memory_id=%s AND polarity=1 "
+            "ORDER BY created_at,event_id" + (" LIMIT %s" if self.bounded else ""),
             (memory_id, retrieval_work.EVIDENCE_ROOTS + 1) if self.bounded else (memory_id,),
         )
         if self.bounded and len(rows) > retrieval_work.EVIDENCE_ROOTS:
@@ -258,7 +272,15 @@ class MemoryContext:
         sources = MemorySources(self.memory, now, bounded=True, work=work)
         roots, memories = set(event_ids), []
         for expected in rows:
-            row = self.store.one("SELECT * FROM memories WHERE memory_id=?",
+            row = self.store.one('SELECT memories.memory_id AS memory_id, memories.subject AS '
+                'subject, memories.kind AS kind, memories.content AS content, memories.status AS '
+                'status, memories.origin AS origin, memories.confidence AS confidence, '
+                'memories.importance AS importance, memories.privacy_scope AS privacy_scope, '
+                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
+                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
+                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
+                'memories AS memories WHERE memories.memory_id = %s',
                                  (expected["memory_id"],))
             if (not row or row["privacy_scope"] != "private" or row["confidence"] <= 0
                 or row["status"] not in (
@@ -422,9 +444,18 @@ class MemoryContext:
         used = identifiers(used_memory_ids)
         recalled = set()
         for memory in self.store.rows(
-            "SELECT * FROM memories WHERE memory_id IN (SELECT value FROM json_each(?)) "
-            "AND status IN ('CONFIRMED','HYPOTHESIS') AND confidence>0 "
-            "AND privacy_scope='private'", (encode(used),),
+            'SELECT memories.memory_id AS memory_id, memories.subject AS subject, memories.kind AS '
+            'kind, memories.content AS content, memories.status AS status, memories.origin AS '
+            'origin, memories.confidence AS confidence, memories.importance AS importance, '
+            'memories.privacy_scope AS privacy_scope, memories.supersedes_memory_id AS '
+            'supersedes_memory_id, memories.created_at AS created_at, memories.updated_at AS '
+            'updated_at, memories.valid_from AS valid_from, memories.valid_to AS valid_to, '
+            'memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS fact_key, '
+            'memories.needs_review AS needs_review FROM memories AS memories WHERE '
+            'memories.memory_id IN (SELECT parsed.value COLLATE "C" AS _col_0 FROM '
+            'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) AND memories.status IN '
+            "('CONFIRMED', 'HYPOTHESIS') AND memories.confidence > 0 AND memories.privacy_scope = "
+            "'private'", (encode(used),),
         ):
             if sources.current(memory):
                 recalled.update(item["event_id"] for item in sources.evidence(memory["memory_id"]))
@@ -435,7 +466,8 @@ class MemoryContext:
         items = []
         for row in rows:
             ids = [link["event_id"] for link in self.store.rows(
-                "SELECT event_id FROM episode_events WHERE episode_id=? ORDER BY event_id LIMIT 21",
+                'SELECT event_id FROM episode_events WHERE episode_id = %s ORDER BY event_id NULLS '
+                'FIRST LIMIT 21',
                 (row["episode_id"],),
             )]
             if not 1 <= len(ids) <= 20 or (allowed is not None and not set(ids) <= allowed):
@@ -506,20 +538,21 @@ class MemoryContext:
                 return []
 
         rows = nominate(
-            "WITH RECURSIVE edges(older,newer) AS ("
+            "WITH RECURSIVE relations(older,newer) AS ("
             "SELECT supersedes_memory_id,memory_id FROM memories "
             "WHERE supersedes_memory_id IS NOT NULL UNION "
-            "SELECT a.entity_id,json_extract(a.safe_detail_json,'$.by') FROM audit_log a "
+            'SELECT a.entity_id,(a.safe_detail_json::json->>\'by\') COLLATE "C" FROM audit_log a '
             "JOIN memories old ON old.memory_id=a.entity_id "
-            "JOIN memories new ON new.memory_id=json_extract(a.safe_detail_json,'$.by') "
-            "WHERE a.action='memory.replaced' AND a.created_at<=? "
+            "JOIN memories new ON new.memory_id=(a.safe_detail_json::json->>'by') "
+            "WHERE a.action='memory.replaced' AND a.created_at<=%s "
             "AND old.subject=new.subject "
             "AND old.kind<>'episode' AND new.kind<>'episode'), "
-            "family(memory_id) AS (SELECT ? UNION "
-            "SELECT e.newer FROM edges e JOIN family f ON e.older=f.memory_id UNION "
-            "SELECT e.older FROM edges e JOIN family f ON e.newer=f.memory_id), "
+            "edges(source,target) AS (SELECT older,newer FROM relations UNION "
+            "SELECT newer,older FROM relations), "
+            'family(memory_id) AS (SELECT %s::text COLLATE "C" UNION '
+            "SELECT e.target FROM edges e JOIN family f ON e.source=f.memory_id), "
             "descendants(root,node) AS (SELECT memory_id,memory_id FROM family UNION "
-            "SELECT d.root,e.newer FROM descendants d JOIN edges e ON e.older=d.node) "
+            "SELECT d.root,e.newer FROM descendants d JOIN relations e ON e.older=d.node) "
             "SELECT m.memory_id,octet_length(m.content) AS text_bytes "
             "FROM memories m JOIN family f USING(memory_id) "
             "JOIN (SELECT root,COUNT(*) AS later_count FROM descendants GROUP BY root) rank "
@@ -535,10 +568,18 @@ class MemoryContext:
                 continue
             if not work.take("candidates") or not work.take("text_bytes", header["text_bytes"]):
                 break
-            row = self.store.one("SELECT * FROM memories WHERE memory_id=? "
-                                 "AND octet_length(content)=? AND privacy_scope='private' "
-                                 "AND confidence>0 AND status IN "
-                                 "('CONFIRMED','HYPOTHESIS','SUPERSEDED')",
+            row = self.store.one('SELECT memories.memory_id AS memory_id, memories.subject AS '
+                'subject, memories.kind AS kind, memories.content AS content, memories.status AS '
+                'status, memories.origin AS origin, memories.confidence AS confidence, '
+                'memories.importance AS importance, memories.privacy_scope AS privacy_scope, '
+                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
+                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
+                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
+                'memories AS memories WHERE memories.memory_id = %s AND '
+                "OCTET_LENGTH(memories.content) = %s AND memories.privacy_scope = 'private' AND "
+                "memories.confidence > 0 AND memories.status IN ('CONFIRMED', 'HYPOTHESIS', "
+                "'SUPERSEDED')",
                                  (header["memory_id"], header["text_bytes"]))
             try:
                 if row and (evidence := sources.evidence(row["memory_id"])):
@@ -567,9 +608,10 @@ class MemoryContext:
         affected = self.memory.ledger.retention_events(self.store, event_ids)
         sources = MemorySources(self.memory, now, excluded=affected)
         rows = self.store.rows(
-            "SELECT DISTINCT m.memory_id FROM memories m JOIN memory_evidence v USING(memory_id) "
-            "WHERE v.event_id IN (SELECT value FROM json_each(?)) "
-            "AND m.status IN ('CONFIRMED','HYPOTHESIS','SUPERSEDED')", (encode(sorted(affected)),),
+            'SELECT DISTINCT m.memory_id FROM memories AS m JOIN memory_evidence AS v USING '
+            '(memory_id) WHERE v.event_id IN (SELECT value COLLATE "C" FROM '
+            'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) AND m.status IN '
+            "('CONFIRMED', 'HYPOTHESIS', 'SUPERSEDED')", (encode(sorted(affected)),),
         )
         retained, withdrawn = [], []
         for row in rows:
@@ -579,8 +621,9 @@ class MemoryContext:
             else:
                 withdrawn.append(row["memory_id"])
         episodes = self.store.rows(
-            "SELECT DISTINCT episode_id FROM episode_events "
-            "WHERE event_id IN (SELECT value FROM json_each(?)) ORDER BY episode_id",
+            'SELECT DISTINCT episode_id FROM episode_events WHERE event_id IN (SELECT value '
+            'COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) ORDER '
+            'BY episode_id NULLS FIRST',
             (encode(sorted(affected)),),
         )
         check_version(self.memory, version)

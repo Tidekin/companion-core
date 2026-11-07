@@ -135,11 +135,11 @@ def register_voice_node_routes(app):
             raise CoreError("VOICE_NODE_SCOPE_REQUIRED", 403)
         def read(service):
             service.session(node_id)
-            rows = service.store.rows("SELECT job_id,generation,state,cleanup_state,cleanup_epoch "
-                "FROM voice_jobs WHERE node_id=? AND cleanup_state='PENDING' "
-                "ORDER BY job_id LIMIT 64", (node_id,))
-            count = service.store.one("SELECT COUNT(*) n FROM voice_jobs WHERE node_id=? "
-                                      "AND cleanup_state='PENDING'", (node_id,))["n"]
+            rows = service.store.rows('SELECT job_id, generation, state, cleanup_state, '
+                "cleanup_epoch FROM voice_jobs WHERE node_id = %s AND cleanup_state = 'PENDING' "
+                'ORDER BY job_id NULLS FIRST LIMIT 64', (node_id,))
+            count = service.store.one('SELECT COUNT(*) AS n FROM voice_jobs WHERE node_id = %s AND '
+                "cleanup_state = 'PENDING'", (node_id,))["n"]
             return {"pending_count": count, "jobs": rows}
 
         return JSONResponse(await _run(request, read),

@@ -310,13 +310,13 @@ class Mixed(Harness):
                 await content_files.run_file_once(core.content, parse=parse_remote)
                 row = s.one(
                     "SELECT state,output_event_id FROM content_items WHERE owner_event_id"
-                    "=? AND kind='qq_file'",
+                    "=%s AND kind='qq_file'",
                     (event_id,),
                 )
                 if row["state"] != "SUCCEEDED":
                     raise RuntimeError("FILE_WORKER_" + row["state"])
                 parsed = s.one(
-                    "SELECT body_json FROM events WHERE event_id=?", (row["output_event_id"],)
+                    "SELECT body_json FROM events WHERE event_id=%s", (row["output_event_id"],)
                 )
                 observed = encode(json.loads(parsed["body_json"]))
             elif mode in {"voice", "relative_voice"}:
@@ -374,7 +374,7 @@ class Mixed(Harness):
         usage_before = {r["request_id"] for r in s.rows("SELECT request_id FROM model_usage")}
         await run_with_retries(core, "mixed-media-import", admitted["job_id"])
         state = s.one(
-            "SELECT state,last_error_code FROM jobs WHERE job_id=?", (admitted["job_id"],)
+            "SELECT state,last_error_code FROM jobs WHERE job_id=%s", (admitted["job_id"],)
         )
         usages = [
             r for r in s.rows("SELECT * FROM model_usage") if r["request_id"] not in usage_before
@@ -412,11 +412,11 @@ class Mixed(Harness):
             raise RuntimeError(
                 "NATIVE_MEDIA_NONTERMINAL:" + state["state"] + ":" + str(state["last_error_code"])
             )
-        parts = s.rows("SELECT * FROM outbox WHERE origin_event_id=? ORDER BY rowid", (event_id,))
+        parts = s.rows("SELECT * FROM outbox WHERE origin_event_id=%s ORDER BY record_sequence", (event_id,))
         reply = "\n".join(json.loads(r["content_json"]).get("text", "") for r in parts)
         with s.transaction():
             s.execute(
-                "UPDATE outbox SET state='SENT',sent_at=?,updated_at=? WHERE origin_event_id=?",
+                "UPDATE outbox SET state='SENT',sent_at=%s,updated_at=%s WHERE origin_event_id=%s",
                 (core.clock(), core.clock(), event_id),
             )
         self.turn_ids.add(event_id)
@@ -600,8 +600,9 @@ async def run_profile(directory, persona, max_questions):
                     imported_turns=h.imported,
                     actual_finished_at=datetime.now(UTC).isoformat(),
                     usage=core.store.rows(
-                        "SELECT scenario,state,count(*) calls,sum(input_tokens) input_tokens,"
-                        "sum(output_tokens) output_tokens,sum(billed_micro_usd) billed_micro_usd "
+                        "SELECT scenario,state,count(*) calls,sum(input_tokens)::bigint input_tokens,"
+                        "sum(output_tokens)::bigint output_tokens,"
+                        "sum(billed_micro_usd)::bigint billed_micro_usd "
                         "FROM model_usage GROUP BY scenario,state"
                     ),
                 )

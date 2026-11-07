@@ -77,7 +77,7 @@ def _queue(view, table, active, now):
 def _ledger(view, settings, result, integrity):
     resource = _resource(settings.erasure_ledger)
     result["resources"]["erasure_ledger"] = resource
-    identity = view.one("SELECT value FROM runtime_meta WHERE key='ledger_id'")
+    identity = view.one("SELECT value FROM runtime_meta WHERE key = 'ledger_id'")
     if not identity:
         result["blockers"].append("ERASURE_IDENTITY_UNINITIALIZED")
         return
@@ -90,7 +90,7 @@ def _ledger(view, settings, result, integrity):
     except (OSError, ValueError, TypeError):
         result["blockers"].append("ERASURE_LEDGER_RECONCILIATION_REQUIRED")
         return
-    if view.one("SELECT COUNT(*) n FROM privacy_erasure_ledger WHERE state!='COMPLETE'")["n"]:
+    if view.one("SELECT COUNT(*) AS n FROM privacy_erasure_ledger WHERE state <> 'COMPLETE'")["n"]:
         result["blockers"].append("ERASURE_REPLAY_REQUIRED")
     if not integrity:
         return
@@ -102,7 +102,7 @@ def _ledger(view, settings, result, integrity):
         if records[0]["ledger_id"] != identity["value"]:
             raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
         applied = {r["erasure_id"]: r for r in view.rows(
-            "SELECT erasure_id,restore_min_replay_version,state FROM privacy_erasure_ledger"
+            'SELECT erasure_id, restore_min_replay_version, state FROM privacy_erasure_ledger'
         )}
         if len(applied) != len(records) - 1 or any(
             not (row := applied.get(record["erasure_id"])) or row["state"] != "COMPLETE"
@@ -117,9 +117,9 @@ def _ledger(view, settings, result, integrity):
 
 
 def _budget_journal(view, settings, result, integrity):
-    identity = view.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+    identity = view.one("SELECT value FROM runtime_meta WHERE key = 'model_budget_journal_id'")
     paths = {r["journal_path"] for r in view.rows(
-        "SELECT DISTINCT journal_path FROM model_admissions"
+        'SELECT DISTINCT journal_path FROM model_admissions'
     )}
     if settings.paid_model:
         paths.add(settings.paid_model.journal_path)
@@ -199,10 +199,12 @@ def snapshot(settings, *, integrity=False):
             db.set_progress_handler(progress, 10_000)
             db.execute("BEGIN")
             view = _ReadView(db)
-            if not view.one("SELECT 1 FROM sqlite_master WHERE name='alembic_version'"):
+            if not view.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+                "relnamespace=current_schema()::regnamespace AND relname='alembic_version' AND "
+                "relkind IN ('r','p')"):
                 result["blockers"].append("MIGRATION_REQUIRED")
                 return result
-            version = view.one("SELECT version_num FROM alembic_version")
+            version = view.one('SELECT version_num FROM alembic_version')
             result["database"]["schema"] = version["version_num"] if version else None
             result["database"]["expected_schema"] = None
             try:
@@ -225,7 +227,7 @@ def snapshot(settings, *, integrity=False):
                 result["database"]["integrity"] = "OK" if ok else "FAILED"
                 if not ok:
                     result["blockers"].append("DATABASE_INTEGRITY_FAILED")
-            owner = view.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+            owner = view.one("SELECT value FROM runtime_meta WHERE key = 'owner_qq_id'")
             if not owner or owner["value"] != settings.owner_qq_id:
                 result["blockers"].append("OWNER_IDENTITY_UNINITIALIZED_OR_MISMATCH")
             _ledger(view, settings, result, integrity)
@@ -250,7 +252,7 @@ def snapshot(settings, *, integrity=False):
             for key in (
                 "model_budget_blocked", "model_budget_restore_required",
             ):
-                if view.one("SELECT 1 FROM runtime_meta WHERE key=?", (key,)):
+                if view.one('SELECT 1 FROM runtime_meta WHERE key = %s', (key,)):
                     result["blockers"].append(key.upper())
             from companion.live_text import stopped
 
@@ -314,8 +316,8 @@ def runtime_snapshot(store, settings, clock):
             "android": settings.media.enabled and settings.android_enabled,
             "public_publish": False,
         },
-        "jobs": s.rows("SELECT state,COUNT(*) AS count FROM jobs GROUP BY state"),
-        "deliveries": s.rows("SELECT state,COUNT(*) AS count FROM outbox GROUP BY state"),
+        "jobs": s.rows('SELECT state, COUNT(*) AS count FROM jobs GROUP BY state'),
+        "deliveries": s.rows('SELECT state, COUNT(*) AS count FROM outbox GROUP BY state'),
         "tool_usage": s.rows(
             "SELECT capability,state,COUNT(*) AS calls,"
             "SUM(billed_micro_usd) AS estimated_micro_usd FROM tool_tasks "

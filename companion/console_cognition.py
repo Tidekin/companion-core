@@ -341,8 +341,10 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
         core = app.state.core
         version = read_version(core.memory)
         rows = core.store.rows(
-            "SELECT " + ",".join(TOOL_FIELDS) + ",scope_json,redacted FROM tool_tasks "
-            "WHERE redacted=0 ORDER BY rowid DESC LIMIT 30"
+            "SELECT " + ",".join(TOOL_FIELDS) + (
+                ',scope_json,redacted FROM tool_tasks WHERE redacted=0 '
+                'ORDER BY record_sequence DESC LIMIT 30'
+            )
         )
         items = []
         for row in rows:

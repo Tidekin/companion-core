@@ -33,9 +33,9 @@ def quote_digest(quote):
 def owner_text(store, event_id):
     """The retained private owner wording, or None for anything that is not a plain message."""
     event = store.one(
-        "SELECT body_json FROM events WHERE event_id=? AND redacted=0 AND actor_id='owner' "
-        "AND source='qq.onebot' AND privacy_scope='private' AND event_type='message.received' "
-        "AND length(body_json)<=16000",
+        "SELECT body_json FROM events WHERE event_id = %s AND redacted = 0 AND actor_id = 'owner' "
+        "AND source = 'qq.onebot' AND privacy_scope = 'private' AND event_type = "
+        "'message.received' AND LENGTH(body_json) <= 16000",
         (event_id,),
     )
     if not event:
@@ -66,14 +66,28 @@ def reply_target(store, event_id):
     """The one delivered message, sent within the hour before this owner message, that the
     hurt is about. A possibly delivered newer message makes the target ambiguous: no guess."""
     event = store.one(
-        "SELECT conversation_id,occurred_at FROM events WHERE event_id=?", (event_id,)
+        'SELECT conversation_id, occurred_at FROM events WHERE event_id = %s', (event_id,)
     )
     if not event:
         return None
     reply = store.one(
-        "SELECT * FROM outbox WHERE conversation_id=? AND state='SENT' "
-        "AND action_type IN ('qq.private.reply','qq.private.proactive') "
-        "AND sent_at<=? AND sent_at>? ORDER BY sent_at DESC,rowid DESC LIMIT 1",
+        'SELECT outbox.message_id AS message_id, outbox.origin_event_id AS origin_event_id, '
+        'outbox.conversation_id AS conversation_id, outbox.action_type AS action_type, '
+        'outbox.content_json AS content_json, outbox.content_sha256 AS content_sha256, '
+        'outbox.approval_id AS approval_id, outbox.state AS state, outbox.delivery_key AS '
+        'delivery_key, outbox.lease_owner AS lease_owner, outbox.lease_until AS lease_until, '
+        'outbox.attempt_count AS attempt_count, outbox.provider_message_id AS provider_message_id, '
+        'outbox.last_error_code AS last_error_code, outbox.created_at AS created_at, '
+        'outbox.updated_at AS updated_at, outbox.sent_at AS sent_at, outbox.lease_token AS '
+        'lease_token, outbox.next_attempt_at AS next_attempt_at, outbox.reply_group_id AS '
+        'reply_group_id, outbox.segment_index AS segment_index, outbox.segment_count AS '
+        'segment_count, outbox.reply_group_sha256 AS reply_group_sha256, '
+        'outbox.segment_interval_ms AS segment_interval_ms, outbox.delivery_lane AS delivery_lane, '
+        'outbox.native_ack_json AS native_ack_json, outbox.authority_json AS authority_json FROM '
+        "outbox AS outbox WHERE outbox.conversation_id = %s AND outbox.state = 'SENT' AND "
+        "outbox.action_type IN ('qq.private.reply', 'qq.private.proactive') AND outbox.sent_at <= "
+        '%s AND outbox.sent_at > %s ORDER BY outbox.sent_at DESC NULLS LAST, record_sequence DESC '
+        'NULLS LAST LIMIT 1',
         (
             event["conversation_id"],
             event["occurred_at"],
@@ -81,10 +95,9 @@ def reply_target(store, event_id):
         ),
     )
     if not reply or store.one(
-        "SELECT 1 FROM outbox WHERE conversation_id=? "
-        "AND action_type IN ('qq.private.reply','qq.private.proactive') "
-        "AND state IN ('SENDING','DELIVERY_UNCERTAIN') AND created_at>=? AND created_at<=? "
-        "LIMIT 1",
+        "SELECT 1 FROM outbox WHERE conversation_id = %s AND action_type IN ('qq.private.reply', "
+        "'qq.private.proactive') AND state IN ('SENDING', 'DELIVERY_UNCERTAIN') AND created_at >= "
+        '%s AND created_at <= %s LIMIT 1',
         (event["conversation_id"], reply["created_at"], event["occurred_at"]),
     ):
         return None
@@ -137,14 +150,14 @@ def validate(store, signals, event_ids, rejected=None):
 
 def record(store, settings, signals, request_id, now):
     """Commit the validated extraction result independently of the fact review."""
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("MOOD_APPRAISAL_REQUIRES_TRANSACTION")
     inserted = 0
     for item in signals if settings.mood_enabled else ():
         inserted += store.execute(
-            "INSERT OR IGNORE INTO mood_appraisals(event_id,reason,quote_start,quote_length,"
-            "quote_sha256,request_id,created_at,target_message_id,target_sha256) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            'INSERT INTO mood_appraisals (event_id, reason, quote_start, quote_length, '
+            'quote_sha256, request_id, created_at, target_message_id, target_sha256) VALUES (%s, '
+            '%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING',
             (
                 item["event_id"],
                 item["reason"],
@@ -156,7 +169,7 @@ def record(store, settings, signals, request_id, now):
                 item.get("target_message_id"),
                 item.get("target_sha256"),
             ),
-        ).rowcount
+        )
     if signals:
         store.audit("mood.appraisals_committed", request_id, "memory", now, inserted=inserted,
                     already_recorded=len(signals) - inserted if settings.mood_enabled else 0,
@@ -165,10 +178,13 @@ def record(store, settings, signals, request_id, now):
 
 def erase(store, event_ids):
     """Native erasure/replay cleanup: appraisals die with their source message."""
-    if not store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mood_appraisals'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='mood_appraisals' AND relkind IN "
+        "('r','p')"):
         return
     store.execute(
-        "DELETE FROM mood_appraisals WHERE event_id IN (SELECT value FROM json_each(?))",
+        'DELETE FROM mood_appraisals WHERE event_id IN (SELECT value COLLATE "C" FROM '
+        'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value))',
         (json.dumps(sorted(event_ids)),),
     )
 
@@ -177,7 +193,7 @@ def still_valid(store, row):
     """Re-check on every projection read; a later edit, redaction or unsettled call drops it."""
     text = owner_text(store, row["event_id"])
     usage = store.one(
-        "SELECT state,scenario FROM model_usage WHERE request_id=?", (row["request_id"],)
+        'SELECT state, scenario FROM model_usage WHERE request_id = %s', (row["request_id"],)
     )
     if (
         text is None

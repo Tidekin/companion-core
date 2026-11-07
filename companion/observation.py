@@ -55,8 +55,9 @@ class CommentEvidence(StrictModel):
             raise ValueError("Self-referencing source comment")
         if sum(len(item.text) for item in self.items) > 6000:
             raise ValueError("Comment excerpt exceeds budget")
-        if not self.partial and (self.reported_total != len(self.items)
-                                 or any(item.truncated for item in self.items)):
+        if not self.partial and (
+            self.reported_total != len(self.items) or any(item.truncated for item in self.items)
+        ):
             raise ValueError("Complete comments require matching count and uncut text")
         return self
 
@@ -150,31 +151,39 @@ class ReadingEvidence(StrictModel):
     truncated: bool = False
     comments: CommentEvidence | None = Field(default=None, exclude_if=lambda value: value is None)
     danmaku: DanmakuEvidence | None = Field(default=None, exclude_if=lambda value: value is None)
-    discussion_status: dict[Literal["comments", "danmaku"], Literal[
-        "available", "unavailable", "restricted", "budget_limited"
-    ]] = Field(default_factory=dict, exclude_if=lambda value: not value)
+    discussion_status: dict[
+        Literal["comments", "danmaku"],
+        Literal["available", "unavailable", "restricted", "budget_limited"],
+    ] = Field(default_factory=dict, exclude_if=lambda value: not value)
     resolution: ShortLinkResolution | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+        default=None,
+        exclude_if=lambda value: value is None,
     )
     video: VideoIdentity | None = Field(default=None, exclude_if=lambda value: value is None)
     duration_source: Literal["view_first_part"] | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+        default=None,
+        exclude_if=lambda value: value is None,
     )
-    subtitles: list[SubtitleText] = Field(default_factory=list, max_length=120,
-                                        exclude_if=lambda value: not value)
+    subtitles: list[SubtitleText] = Field(
+        default_factory=list, max_length=120, exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def consistent(self):
         available = self.subtitle_status == "available"
         if (self.video is None) != (self.duration_source is None):
             raise ValueError("Video identity requires its metadata duration source")
-        if self.subtitles and (not available
-                               or sum(len(row.text) for row in self.subtitles) > 6000):
+        if self.subtitles and (
+            not available or sum(len(row.text) for row in self.subtitles) > 6000
+        ):
             raise ValueError("Subtitle text requires bounded available subtitle evidence")
-        if self.subtitles and any(not any(
-            span.start_seconds <= row.start_seconds and row.end_seconds <= span.end_seconds
-            for span in self.spans
-        ) for row in self.subtitles):
+        if self.subtitles and any(
+            not any(
+                span.start_seconds <= row.start_seconds and row.end_seconds <= span.end_seconds
+                for span in self.spans
+            )
+            for row in self.subtitles
+        ):
             raise ValueError("Subtitle text must belong to the declared coverage")
         if (self.level == "L2") != available or bool(self.spans) != available:
             raise ValueError("Reading level requires matching subtitle evidence")
@@ -261,11 +270,15 @@ class ObservationEvent(StrictModel):
 def dependent_events(store, event_ids):
     """Complete transitive closure, also usable while restoring pre-v0.5 databases."""
     result = set(event_ids)
-    if store.one("SELECT 1 FROM sqlite_master WHERE name='event_dependencies' AND type='table'"):
+    if store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespa"
+        "ce AND relname='event_dependencies' AND relkind IN ('r','p')"
+    ):
         pending = list(result)
         while pending:
             for row in store.rows(
-                "SELECT event_id FROM event_dependencies WHERE source_event_id=?", (pending.pop(),)
+                "SELECT event_id FROM event_dependencies WHERE source_event_id = %s",
+                (pending.pop(),),
             ):
                 if row["event_id"] not in result:
                     result.add(row["event_id"])
@@ -277,8 +290,11 @@ def expired_sources(store, event_ids, cutoff):
     """Check upstream evidence even when the derived observation itself is recent."""
     if not event_ids:
         return []
-    lineage = "SELECT value FROM json_each(?)"
-    if store.one("SELECT 1 FROM sqlite_master WHERE name='event_dependencies' AND type='table'"):
+    lineage = 'SELECT value COLLATE "C" FROM json_array_elements_text(%s::json) AS ids(value)'
+    if store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespa"
+        "ce AND relname='event_dependencies' AND relkind IN ('r','p')"
+    ):
         lineage += (
             " UNION SELECT d.source_event_id FROM event_dependencies d "
             "JOIN sources s ON d.event_id=s.event_id"
@@ -286,25 +302,32 @@ def expired_sources(store, event_ids, cutoff):
     return [
         row["event_id"]
         for row in store.rows(
-            "WITH RECURSIVE sources(event_id) AS (" + lineage + ") "
-            "SELECT e.event_id FROM events e JOIN sources s USING(event_id) "
-            "WHERE e.redacted=1 OR e.ingested_at<?",
+            "WITH RECURSIVE sources(event_id) AS ("
+            + lineage
+            + (
+                ") SELECT e.event_id FROM events e JOIN sources s "
+                "USING(event_id) WHERE e.redacted=1 OR e.ingested_at<%s"
+            ),
             (encode(event_ids), cutoff),
         )
     ]
 
 
 def erase_observations(store, event_ids):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='observations' AND type='table'"):
+    if not store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE "
+        "relnamespace=current_schema()::regnamespace AND relname='observations' AND relkind IN "
+        "('r','p')"
+    ):
         return
     for event_id in event_ids:
         store.execute(
-            "UPDATE observations SET source_sha256='',canonical_url='',device_id=NULL,"
-            "session_id=NULL,evidence_json='{}',redacted=1 WHERE event_id=?",
+            "UPDATE observations SET source_sha256 = '', canonical_url = '', device_id = NULL, "
+            "session_id = NULL, evidence_json = '{}', redacted = 1 WHERE event_id = %s",
             (event_id,),
         )
         store.execute(
-            "DELETE FROM event_dependencies WHERE event_id=? OR source_event_id=?",
+            "DELETE FROM event_dependencies WHERE event_id = %s OR source_event_id = %s",
             (event_id, event_id),
         )
 
@@ -334,8 +357,11 @@ class ObservationService:
             source_texts.append(payload.document.filename)
         for evidence in (payload.reading, payload.article):
             if evidence is not None and evidence.comments is not None:
-                source_texts.extend(value for comment in evidence.comments.items
-                                    for value in (comment.text, comment.author))
+                source_texts.extend(
+                    value
+                    for comment in evidence.comments.items
+                    for value in (comment.text, comment.author)
+                )
         if payload.reading is not None and payload.reading.danmaku is not None:
             source_texts.extend(item.text for item in payload.reading.danmaku.items)
         if any(redact(value, self.settings) != value for value in source_texts):
@@ -352,8 +378,10 @@ class ObservationService:
             if observation.source in source_names("read"):
                 try:
                     source, _ = content_target(
-                        value, web_hosts=self.settings.web_reading_hosts
-                        if self.settings.web_reading_enabled else (),
+                        value,
+                        web_hosts=self.settings.web_reading_hosts
+                        if self.settings.web_reading_enabled
+                        else (),
                     )
                 except CoreError:
                     raise CoreError("INVALID_OBSERVATION_URL", 400) from None
@@ -372,13 +400,23 @@ class ObservationService:
                 payload.document.validate_text(payload.text)
             except ValueError:
                 raise CoreError("DOCUMENT_EVIDENCE_MISMATCH", 400) from None
-            no_text = (status == "UNKNOWN" and not payload.text and payload.document.partial
-                       and payload.error_code == "PRIVATE_FILE_TEXT_UNAVAILABLE")
-            if (observation.source != "qq_file" or (status != "FETCHED" and not no_text)
+            no_text = (
+                status == "UNKNOWN"
+                and not payload.text
+                and payload.document.partial
+                and payload.error_code == "PRIVATE_FILE_TEXT_UNAVAILABLE"
+            )
+            if (
+                observation.source != "qq_file"
+                or (status != "FETCHED" and not no_text)
                 or kind != "text"
-                or payload.url or payload.requested_url or payload.reading or payload.article
+                or payload.url
+                or payload.requested_url
+                or payload.reading
+                or payload.article
                 or payload.document.file_sha256 != payload.media_sha256
-                or payload.processor_id != payload.document.parser_version):
+                or payload.processor_id != payload.document.parser_version
+            ):
                 raise CoreError("DOCUMENT_EVIDENCE_MISMATCH", 400)
         elif observation.source == "qq_file":
             raise CoreError("DOCUMENT_EVIDENCE_REQUIRED", 400)
@@ -469,8 +507,8 @@ class ObservationService:
             if len(observation.source_event_ids) != 1:
                 raise CoreError("OWNER_SHARED_IMAGE_REQUIRED", 403)
             event = self.store.one(
-                "SELECT body_json FROM events WHERE event_id=? AND source='qq.onebot' "
-                "AND actor_id='owner' AND redacted=0",
+                "SELECT body_json FROM events WHERE event_id = %s AND source = 'qq.onebot' AND "
+                "actor_id = 'owner' AND redacted = 0",
                 (observation.source_event_ids[0],),
             )
             if not event or not any(
@@ -482,27 +520,35 @@ class ObservationService:
             if len(observation.source_event_ids) != 1:
                 raise CoreError("OWNER_SHARED_FILE_REQUIRED", 403)
             event = self.store.one(
-                "SELECT e.body_json FROM events e JOIN conversations c USING(conversation_id) "
-                "WHERE e.event_id=? AND e.source='qq.onebot' AND e.actor_id='owner' "
-                "AND e.redacted=0 AND c.scope='private' AND c.owner_actor_id='owner'",
+                "SELECT e.body_json FROM events AS e JOIN conversations AS c USING "
+                "(conversation_id) WHERE e.event_id = %s AND e.source = 'qq.onebot' AND e.actor_id "
+                "= 'owner' AND e.redacted = 0 AND c.scope = 'private' AND c.owner_actor_id = "
+                "'owner'",
                 (observation.source_event_ids[0],),
             )
             from companion.qq_files import manifest
 
             document = payload.document
             originals = manifest(json.loads(event["body_json"])) if event else []
-            matching = [item for item in originals
-                        if (item["file_id"], item["filename"], item["source_sha256"]) == (
-                            document.file_id, document.filename, document.source_sha256)]
+            matching = [
+                item
+                for item in originals
+                if (item["file_id"], item["filename"], item["source_sha256"])
+                == (document.file_id, document.filename, document.source_sha256)
+            ]
             if len(matching) != 1:
                 raise CoreError("OWNER_SHARED_FILE_REQUIRED", 403)
             row = self.store.one(
-                "SELECT media_sha256,state,captured_privacy_epoch FROM content_items "
-                "WHERE owner_event_id=? AND kind='qq_file' AND slot=? AND redacted=0",
+                "SELECT media_sha256, state, captured_privacy_epoch FROM content_items WHERE "
+                "owner_event_id = %s AND kind = 'qq_file' AND slot = %s AND redacted = 0",
                 (observation.source_event_ids[0], matching[0]["slot"]),
             )
-            if (not row or row["media_sha256"] != document.file_sha256
-                or row["state"] != "RUNNING" or row["captured_privacy_epoch"] != epoch(self.store)):
+            if (
+                not row
+                or row["media_sha256"] != document.file_sha256
+                or row["state"] != "RUNNING"
+                or row["captured_privacy_epoch"] != epoch(self.store)
+            ):
                 raise CoreError("PRIVATE_FILE_RESULT_FENCED", 409)
         # Tool receipts enter through the executor, added in the tool capability phase.
         if observation.source in {"dsh", "windows"}:
@@ -527,7 +573,7 @@ class ObservationService:
             "observation." + adapter.source,
             adapter_id + ":" + observation.provider_event_id,
         )
-        with nullcontext() if s.db.in_transaction else s.transaction():
+        with nullcontext() if s.in_transaction else s.transaction():
             if observation.privacy_epoch != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
             occurred = self.validate(observation, adapter)
@@ -537,7 +583,16 @@ class ObservationService:
             if observation.source_grant or adapter.source_grant_required or account_read:
                 self.grants.require(adapter_id, observation.source_grant)
             previous = s.one(
-                "SELECT * FROM events WHERE (source=? AND source_event_id=?) OR event_id=?",
+                "SELECT events.event_id AS event_id, events.schema_version AS schema_version, "
+                "events.source AS source, events.source_event_id AS source_event_id, "
+                "events.conversation_id AS conversation_id, events.actor_id AS actor_id, "
+                "events.event_type AS event_type, events.occurred_at AS occurred_at, "
+                "events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, "
+                "events.body_json AS body_json, events.trace_id AS trace_id, "
+                "events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, "
+                "events.redacted AS redacted, events.memory_processed AS memory_processed, "
+                "events.reply_revision AS reply_revision FROM events AS events WHERE "
+                "(events.source = %s AND events.source_event_id = %s) OR events.event_id = %s",
                 (source, external_id, observation.event_id),
             )
             if previous:
@@ -551,21 +606,35 @@ class ObservationService:
                     raise CoreError("SOURCE_ERASED", 410)
                 return {"event_id": previous["event_id"], "duplicate": True}
             for source_id in set(observation.source_event_ids):
-                event = s.one("SELECT * FROM events WHERE event_id=? AND redacted=0", (source_id,))
+                event = s.one(
+                    "SELECT events.event_id AS event_id, events.schema_version AS "
+                    "schema_version, events.source AS source, events.source_event_id AS "
+                    "source_event_id, events.conversation_id AS conversation_id, events.actor_id "
+                    "AS actor_id, events.event_type AS event_type, events.occurred_at AS "
+                    "occurred_at, events.ingested_at AS ingested_at, events.privacy_scope AS "
+                    "privacy_scope, events.body_json AS body_json, events.trace_id AS trace_id, "
+                    "events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, "
+                    "events.redacted AS redacted, events.memory_processed AS memory_processed, "
+                    "events.reply_revision AS reply_revision FROM events AS events WHERE "
+                    "events.event_id = %s AND events.redacted = 0",
+                    (source_id,),
+                )
                 if (
                     not event
                     or json.loads(event["body_json"]).get("diary_command")
                     or (
                         event["actor_id"] != "owner"
                         and not s.one(
-                            "SELECT 1 FROM observations WHERE event_id=? AND redacted=0",
+                            "SELECT 1 FROM observations WHERE event_id = %s AND redacted = 0",
                             (source_id,),
                         )
                     )
                 ):
                     raise CoreError("INVALID_OBSERVATION_PROVENANCE", 400)
             conversation_id = "conv_internal_observations"
-            if not s.one("SELECT 1 FROM conversations WHERE conversation_id=?", (conversation_id,)):
+            if not s.one(
+                "SELECT 1 FROM conversations WHERE conversation_id = %s", (conversation_id,)
+            ):
                 s.insert(
                     "conversations",
                     conversation_id=conversation_id,
@@ -620,9 +689,12 @@ class ObservationService:
                     "event_dependencies", event_id=observation.event_id, source_event_id=source_id
                 )
             if observation.source_grant:
-                s.insert("source_grant_events", event_id=observation.event_id,
-                         grant_id=observation.source_grant.grant_id,
-                         grant_epoch=observation.source_grant.epoch)
+                s.insert(
+                    "source_grant_events",
+                    event_id=observation.event_id,
+                    grant_id=observation.source_grant.grant_id,
+                    grant_epoch=observation.source_grant.epoch,
+                )
             s.audit(
                 "observation.accepted",
                 observation.event_id,
@@ -634,8 +706,8 @@ class ObservationService:
 
     def recent(self, limit=20):
         return self.store.rows(
-            "SELECT o.event_id,o.result_status,o.source_kind,o.canonical_url,e.source,e.body_json "
-            "FROM observations o JOIN events e USING(event_id) WHERE o.redacted=0 AND e.redacted=0 "
-            "ORDER BY e.rowid DESC LIMIT ?",
+            "SELECT o.event_id, o.result_status, o.source_kind, o.canonical_url, e.source, "
+            "e.body_json FROM observations AS o JOIN events AS e USING (event_id) WHERE o.redacted "
+            "= 0 AND e.redacted = 0 ORDER BY e.record_sequence DESC NULLS LAST LIMIT %s",
             (limit,),
         )

@@ -57,7 +57,7 @@ class ConversationSources(MemorySources):
 def _roots(store, table, key, identifier):
     # All identifiers here are module constants, never caller-supplied SQL.
     return [row["event_id"] for row in store.rows(
-        f"SELECT event_id FROM {table} WHERE {key}=? ORDER BY event_id LIMIT 101",
+        f"SELECT event_id FROM {table} WHERE {key}'=%s ORDER BY event_id LIMIT 101'",
         (identifier,),
     )]
 
@@ -71,9 +71,9 @@ def _result(reader, sources, key):
     if not key or not reader.projections._goal_source(key, sources):
         return None
     row = reader.store.one(
-        "SELECT o.event_id,o.result_status,o.source_sha256,e.occurred_at "
-        "FROM observations o JOIN events e USING(event_id) "
-        "WHERE o.event_id=? AND o.redacted=0 AND e.redacted=0", (key,),
+        'SELECT o.event_id, o.result_status, o.source_sha256, e.occurred_at FROM observations AS o '
+        'JOIN events AS e USING (event_id) WHERE o.event_id = %s AND o.redacted = 0 AND e.redacted '
+        '= 0', (key,),
     )
     if row:
         row["meaning"] = ("MEDIA_ANALYSIS_COVERAGE" if row["result_status"] == "WATCHED"
@@ -85,26 +85,26 @@ def _candidates(store, conversation_id, limit):
     # Ordering nominates records only. Original readers still validate every source
     # and completed step. One combined cap covers jobs, goals/commitments and reads.
     return store.rows(
-        "SELECT * FROM ("
-        "SELECT 'job' kind,j.job_id id,j.created_at recorded_at,"
-        "CASE WHEN j.state IN ('UNKNOWN','EXECUTION_UNCERTAIN') THEN 0 ELSE 2 END priority "
-        "FROM jobs j JOIN events e USING(event_id) WHERE e.conversation_id=? AND e.redacted=0 "
-        "UNION ALL SELECT 'goal',g.goal_id,g.created_at,CASE WHEN EXISTS "
-        "(SELECT 1 FROM goal_steps s WHERE s.goal_id=g.goal_id "
-        "AND s.state='EXECUTION_UNCERTAIN') THEN 0 WHEN g.kind='commitment' AND "
-        "EXISTS (SELECT 1 FROM commitments c LEFT JOIN outbox o "
-        "ON o.message_id=c.feedback_message_id WHERE c.goal_id=g.goal_id "
-        "AND c.state NOT IN ('ERASED','FULFILLED','EXPLAINED_FAILURE') "
-        "AND COALESCE(o.state,'')<>'SENT') THEN 1 ELSE 2 END "
-        "FROM goals g WHERE g.redacted=0 AND EXISTS (SELECT 1 FROM goal_evidence ge "
-        "JOIN events e USING(event_id) WHERE ge.goal_id=g.goal_id AND e.conversation_id=?) "
-        "UNION ALL SELECT 'read',r.request_id,r.created_at,"
-        "CASE WHEN r.state='UNKNOWN' OR a.state='UNKNOWN' THEN 0 ELSE 2 END "
-        "FROM exploration_requests r LEFT JOIN reading_attempts a USING(request_id) "
-        "WHERE r.redacted=0 AND r.operation='read' AND EXISTS "
-        "(SELECT 1 FROM exploration_evidence re JOIN events e USING(event_id) "
-        "WHERE re.request_id=r.request_id AND e.conversation_id=?)) "
-        "ORDER BY priority,recorded_at DESC,id LIMIT ?",
+        'SELECT _0.kind AS kind, _0.id AS id, _0.recorded_at AS recorded_at, _0.priority AS '
+        "priority FROM (SELECT 'job' AS kind, j.job_id AS id, j.created_at AS recorded_at, CASE "
+        "WHEN j.state IN ('UNKNOWN', 'EXECUTION_UNCERTAIN') THEN 0 ELSE 2 END AS priority FROM "
+        'jobs AS j JOIN events AS e ON j.event_id = e.event_id WHERE e.conversation_id = %s AND '
+        "e.redacted = 0 UNION ALL SELECT 'goal' AS goal, g.goal_id AS goal_id, g.created_at AS "
+        'created_at, CASE WHEN EXISTS(SELECT 1 AS "1" FROM goal_steps AS s WHERE s.goal_id = '
+        "g.goal_id AND s.state = 'EXECUTION_UNCERTAIN') THEN 0 WHEN g.kind = 'commitment' AND "
+        'EXISTS(SELECT 1 AS "1" FROM commitments AS c LEFT JOIN outbox AS o ON o.message_id = '
+        "c.feedback_message_id WHERE c.goal_id = g.goal_id AND NOT c.state IN ('ERASED', "
+        "'FULFILLED', 'EXPLAINED_FAILURE') AND COALESCE(o.state, '') <> 'SENT') THEN 1 ELSE 2 END "
+        'AS _col_3 FROM goals AS g WHERE g.redacted = 0 AND EXISTS(SELECT 1 AS "1" FROM '
+        'goal_evidence AS ge JOIN events AS e ON ge.event_id = e.event_id WHERE ge.goal_id = '
+        "g.goal_id AND e.conversation_id = %s) UNION ALL SELECT 'read' AS read, r.request_id AS "
+        "request_id, r.created_at AS created_at, CASE WHEN r.state = 'UNKNOWN' OR a.state = "
+        "'UNKNOWN' THEN 0 ELSE 2 END AS _col_3 FROM exploration_requests AS r LEFT JOIN "
+        'reading_attempts AS a ON r.request_id = a.request_id WHERE r.redacted = 0 AND r.operation '
+        '= \'read\' AND EXISTS(SELECT 1 AS "1" FROM exploration_evidence AS re JOIN events AS e ON '
+        're.event_id = e.event_id WHERE re.request_id = r.request_id AND e.conversation_id = %s)) '
+        'AS _0 ORDER BY _0.priority NULLS FIRST, _0.recorded_at DESC NULLS LAST, _0.id NULLS FIRST '
+        'LIMIT %s',
         (conversation_id, conversation_id, conversation_id, limit + 1),
     )
 
@@ -117,7 +117,14 @@ def _lease(row, now):
 
 
 def _bounded_steps(store, key):
-    steps = store.rows("SELECT * FROM goal_steps WHERE goal_id=? LIMIT 4", (key,))
+    steps = store.rows('SELECT goal_steps.step_id AS step_id, goal_steps.goal_id AS goal_id, '
+        'goal_steps.position AS position, goal_steps.scope_json AS scope_json, goal_steps.state AS '
+        'state, goal_steps.attempts AS attempts, goal_steps.max_attempts AS max_attempts, '
+        'goal_steps.lease_token AS lease_token, goal_steps.lease_until AS lease_until, '
+        'goal_steps.captured_privacy_epoch AS captured_privacy_epoch, goal_steps.outcome_event_id '
+        'AS outcome_event_id, goal_steps.last_error_code AS last_error_code, goal_steps.created_at '
+        'AS created_at, goal_steps.updated_at AS updated_at FROM goal_steps AS goal_steps WHERE '
+        'goal_steps.goal_id = %s LIMIT 4', (key,))
     return (steps, len(steps) <= 3 and all(
         len(_roots(store, "goal_step_evidence", "step_id", step["step_id"])) <= 100
         for step in steps))
@@ -128,7 +135,14 @@ def _work(reader, sources, candidate):
 
     store, kind, key = reader.store, candidate["kind"], candidate["id"]
     if kind == "goal":
-        row = store.one("SELECT * FROM goals WHERE goal_id=?", (key,))
+        row = store.one('SELECT goals.goal_id AS goal_id, goals.kind AS kind, goals.topic AS '
+            'topic, goals.scope_json AS scope_json, goals.proposal_key AS proposal_key, '
+            'goals.state AS state, goals.priority AS priority, goals.next_due_at AS next_due_at, '
+            'goals.last_error_code AS last_error_code, goals.version AS version, '
+            'goals.result_event_id AS result_event_id, goals.created_at AS created_at, '
+            'goals.updated_at AS updated_at, goals.redacted AS redacted, '
+            'goals.reflection_suggestion_id AS reflection_suggestion_id, goals.authority_json AS '
+            'authority_json FROM goals AS goals WHERE goals.goal_id = %s', (key,))
         # The original cognition reader allows 256 step roots; this view's approved
         # selection is narrower. Never shorten a required source set to fit it.
         raw_steps, bounded = _bounded_steps(store, key)
@@ -142,9 +156,10 @@ def _work(reader, sources, candidate):
         for step in item["steps"]:
             step["lease"] = leases[step["step_id"]]
         commitment = store.one(
-            "SELECT c.commitment_id,c.state,c.deadline,o.state delivery_state "
-            "FROM commitments c LEFT JOIN outbox o ON o.message_id=c.feedback_message_id "
-            "AND o.action_type='qq.private.reply' WHERE c.goal_id=? AND c.state<>'ERASED'", (key,),
+            'SELECT c.commitment_id, c.state, c.deadline, o.state AS delivery_state FROM '
+            'commitments AS c LEFT JOIN outbox AS o ON o.message_id = c.feedback_message_id AND '
+            "o.action_type = 'qq.private.reply' WHERE c.goal_id = %s AND c.state <> "
+            "'ERASED'", (key,),
         )
         if commitment:
             commitment["told"] = commitment["delivery_state"] == "SENT"
@@ -158,18 +173,51 @@ def _work(reader, sources, candidate):
                             if item["execution"]["state"] == "done" else None))
         return item
     if kind == "job":
-        row = store.one("SELECT * FROM jobs WHERE job_id=?", (key,))
+        row = store.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS '
+            'kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS '
+            'attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, '
+            'jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, '
+            'jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, '
+            'jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked '
+            'AS context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs WHERE '
+            'jobs.job_id = %s', (key,))
         roots = sorted(set([row["event_id"], *_roots(store, "job_sources", "job_id", key)]))
         if not _available(reader, sources, roots):
             return None
         return {"kind": "job", "id": key, "native_state": symbol(row["state"], STATES),
                 "source_event_ids": roots, "lease": _lease(row, sources.now),
                 "progress": "NOT_RECORDED"}
-    row = store.one("SELECT * FROM exploration_requests WHERE request_id=?", (key,))
+    row = store.one('SELECT exploration_requests.request_id AS request_id, '
+        'exploration_requests.request_key AS request_key, exploration_requests.adapter_id AS '
+        'adapter_id, exploration_requests.operation AS operation, exploration_requests.url AS url, '
+        'exploration_requests.goal_step_json AS goal_step_json, exploration_requests.state AS '
+        'state, exploration_requests.lease_token AS lease_token, exploration_requests.lease_until '
+        'AS lease_until, exploration_requests.captured_privacy_epoch AS captured_privacy_epoch, '
+        'exploration_requests.reserved_bytes AS reserved_bytes, exploration_requests.used_bytes AS '
+        'used_bytes, exploration_requests.result_sha256 AS result_sha256, '
+        'exploration_requests.last_error_code AS last_error_code, exploration_requests.created_at '
+        'AS created_at, exploration_requests.started_at AS started_at, '
+        'exploration_requests.updated_at AS updated_at, exploration_requests.redacted AS redacted, '
+        'exploration_requests.reserved_requests AS reserved_requests, '
+        'exploration_requests.used_requests AS used_requests, exploration_requests.source_grant_id '
+        'AS source_grant_id, exploration_requests.source_grant_epoch AS source_grant_epoch, '
+        'exploration_requests.authority_json AS authority_json, exploration_requests.query AS '
+        'query, exploration_requests.discovery_mode AS discovery_mode FROM exploration_requests AS '
+        'exploration_requests WHERE exploration_requests.request_id = %s', (key,))
     roots = _roots(store, "exploration_evidence", "request_id", key)
     if not _available(reader, sources, roots):
         return None
-    attempt = store.one("SELECT * FROM reading_attempts WHERE request_id=?", (key,))
+    attempt = store.one('SELECT reading_attempts.request_id AS request_id, '
+        'reading_attempts.adapter_id AS adapter_id, reading_attempts.lease_token AS lease_token, '
+        'reading_attempts.lease_until AS lease_until, reading_attempts.context_json AS '
+        'context_json, reading_attempts.allowed_hosts_json AS allowed_hosts_json, '
+        'reading_attempts.original_url_sha256 AS original_url_sha256, '
+        'reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state AS state, '
+        'reading_attempts.result_sha256 AS result_sha256, reading_attempts.result_event_ids_json '
+        'AS result_event_ids_json, reading_attempts.observed_requests AS observed_requests, '
+        'reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS '
+        'created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS '
+        'reading_attempts WHERE reading_attempts.request_id = %s', (key,))
     results = []
     if attempt:
         import json
@@ -197,15 +245,29 @@ def _attention(reader, sources, selection):
     for kind, keys in (("memory", selection.memory_ids), ("episode", selection.episode_ids)):
         for key in sorted(set(keys)):
             if kind == "memory":
-                row = store.one("SELECT * FROM memories WHERE memory_id=? "
-                                "AND privacy_scope='private' AND confidence>0 "
-                                "AND status IN ('CONFIRMED','HYPOTHESIS')", (key,))
+                row = store.one('SELECT memories.memory_id AS memory_id, memories.subject AS '
+                    'subject, memories.kind AS kind, memories.content AS content, memories.status '
+                    'AS status, memories.origin AS origin, memories.confidence AS confidence, '
+                    'memories.importance AS importance, memories.privacy_scope AS privacy_scope, '
+                    'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+                    'created_at, memories.updated_at AS updated_at, memories.valid_from AS '
+                    'valid_from, memories.valid_to AS valid_to, memories.last_reviewed_at AS '
+                    'last_reviewed_at, memories.fact_key AS fact_key, memories.needs_review AS '
+                    'needs_review FROM memories AS memories WHERE memories.memory_id = %s AND '
+                    "memories.privacy_scope = 'private' AND memories.confidence > 0 AND "
+                    "memories.status IN ('CONFIRMED', 'HYPOTHESIS')", (key,))
                 roots = [r["event_id"] for r in store.rows(
-                    "SELECT event_id FROM memory_evidence WHERE memory_id=? AND polarity=1 "
-                    "ORDER BY event_id LIMIT 101", (key,))]
+                    'SELECT event_id FROM memory_evidence WHERE memory_id = %s AND polarity = 1 '
+                    'ORDER BY event_id NULLS FIRST LIMIT 101', (key,))]
             else:
-                row = store.one("SELECT * FROM episodes WHERE episode_id=? AND conversation_id=? "
-                                "AND privacy_scope='private' AND status='ACTIVE'",
+                row = store.one('SELECT episodes.episode_id AS episode_id, episodes.title AS '
+                    'title, episodes.summary AS summary, episodes.conversation_id AS '
+                    'conversation_id, episodes.privacy_scope AS privacy_scope, episodes.started_at '
+                    'AS started_at, episodes.ended_at AS ended_at, episodes.status AS status, '
+                    'episodes.extractor_version AS extractor_version, episodes.created_at AS '
+                    'created_at FROM episodes AS episodes WHERE episodes.episode_id = %s AND '
+                    "episodes.conversation_id = %s AND episodes.privacy_scope = 'private' AND "
+                    "episodes.status = 'ACTIVE'",
                                 (key, selection.conversation_id))
                 roots = _roots(store, "episode_events", "episode_id", key)
             if (not row or kind == "episode" and len(roots) > 20
@@ -235,7 +297,7 @@ def _attention(reader, sources, selection):
 def snapshot(reader, selection):
     selection = ActivitySelection.model_validate(selection)
     core, store = reader.core, reader.store
-    if store.db.in_transaction:
+    if store.in_transaction:
         raise CoreError("ACTIVITY_SNAPSHOT_BUSY", 409)
     version = read_version(core.memory)
     now = core.clock()
@@ -243,8 +305,8 @@ def snapshot(reader, selection):
     # reservation. Recheck *after* ending it, on the latest epoch and Ledger.
     store.execute("BEGIN")
     try:
-        conversation = store.one("SELECT 1 FROM conversations WHERE conversation_id=? "
-                                 "AND scope='private' AND owner_actor_id='owner'",
+        conversation = store.one('SELECT 1 FROM conversations WHERE conversation_id = %s AND scope '
+            "= 'private' AND owner_actor_id = 'owner'",
                                  (selection.conversation_id,))
         if not conversation:
             raise CoreError("ACTIVITY_CONVERSATION_UNAVAILABLE", 404)

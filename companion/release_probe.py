@@ -43,7 +43,9 @@ def authority(settings):
     """State of the latest OwnerAuthority record and whether its policy still holds."""
     store = Store(settings.database)
     try:
-        if not store.one("SELECT 1 FROM sqlite_master WHERE name='owner_authority_revisions'"):
+        if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+            "relnamespace=current_schema()::regnamespace AND relname='owner_authority_revisions' "
+            "AND relkind IN ('r','p')"):
             return {"state": "ABSENT", "revision": None, "policy_problem": None}
         row = owner_authority._latest(store)
         if not row:

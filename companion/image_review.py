@@ -91,14 +91,14 @@ def target(core, job, body, sources):
     text = body.get("text", "")
     by_id = {source["event_id"]: source for source in sources}
     images = {key: core.store.rows(
-        "SELECT item_id,slot,output_event_id FROM content_items WHERE owner_event_id=? "
-        "AND kind='qq_image' AND redacted=0 ORDER BY slot", (key,)) for key in by_id}
+        'SELECT item_id, slot, output_event_id FROM content_items WHERE owner_event_id = %s AND '
+        "kind = 'qq_image' AND redacted = 0 ORDER BY slot NULLS FIRST", (key,)) for key in by_id}
     images = {key: value for key, value in images.items() if value}
     if not images:
         return None
     explicit = {item["event_id"] for item in core._self_quote_indices(job, body)
                 if item["event_id"] in images}
-    current = core.store.one("SELECT source_event_id FROM events WHERE event_id=?",
+    current = core.store.one('SELECT source_event_id FROM events WHERE event_id = %s',
                              (job["event_id"],))
     prefix = qq_quotes.namespace(current["source_event_id"])
     withdrawn = qq_quotes.withdrawn(core.store, job["event_id"], body)
@@ -140,7 +140,7 @@ def evidence(core, review, attached):
     for row in rows:
         if row["item_id"] in attached:
             continue
-        capture = core.store.one("SELECT expires_at FROM captured_images WHERE item_id=?",
+        capture = core.store.one('SELECT expires_at FROM captured_images WHERE item_id = %s',
                                   (row["item_id"],))
         unavailable.append({"item_id": row["item_id"], "reason": (
             "expired" if capture and capture["expires_at"] <= core.clock() else "not_selected")})
@@ -159,7 +159,7 @@ def capture(core, job, review, attached):
     source = review["source"]
     if not review["correction"] or not source.get("reply_text"):
         return
-    body = json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+    body = json.loads(core.store.one('SELECT body_json FROM events WHERE event_id = %s',
                                      (job["event_id"],))["body_json"])
     value = {"target_event_id": review["event_id"],
              "item_ids": [row["item_id"] for row in review["items"]],

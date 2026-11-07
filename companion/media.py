@@ -133,7 +133,8 @@ class MediaService:
         try:
             with self.store.transaction():
                 active = self.store.one(
-                    "SELECT COUNT(*) AS n FROM media_sessions WHERE state='OPEN' AND expires_at>?",
+                    "SELECT COUNT(*) AS n FROM media_sessions WHERE state = 'OPEN' AND expires_at "
+                    "> %s",
                     (now,),
                 )["n"]
                 if active >= self.options.max_active_sessions:
@@ -154,14 +155,25 @@ class MediaService:
         except BaseException:
             with self.store.transaction():
                 self.store.execute(
-                    "UPDATE consents SET revoked_at=? WHERE consent_id=?",
+                    "UPDATE consents SET revoked_at = %s WHERE consent_id = %s",
                     (self.clock(), consent["consent_id"]),
                 )
             raise
         return {**self.status(session_id, token), "session_token": token}
 
     def _row(self, session_id, token):
-        row = self.store.one("SELECT * FROM media_sessions WHERE session_id=?", (session_id,))
+        row = self.store.one(
+            "SELECT media_sessions.session_id AS session_id, "
+            "media_sessions.device_id AS device_id, media_sessions.consent_id AS consent_id, "
+            "media_sessions.token_hash AS token_hash, media_sessions.modalities_json AS "
+            "modalities_json, media_sessions.state AS state, media_sessions.captured_privacy_epoch "
+            "AS captured_privacy_epoch, media_sessions.expires_at AS expires_at, "
+            "media_sessions.bytes_reserved AS bytes_reserved, media_sessions.max_bytes AS "
+            "max_bytes, media_sessions.close_reason AS close_reason, media_sessions.created_at AS "
+            "created_at, media_sessions.closed_at AS closed_at FROM media_sessions AS "
+            "media_sessions WHERE media_sessions.session_id = %s",
+            (session_id,),
+        )
         if not row or not hmac.compare_digest(
             row["token_hash"],
             hashlib.sha256(token.encode()).hexdigest(),
@@ -213,7 +225,19 @@ class MediaService:
 
     def close(self, session_id, token=None, owner=False):
         row = (
-            self.store.one("SELECT * FROM media_sessions WHERE session_id=?", (session_id,))
+            self.store.one(
+                "SELECT media_sessions.session_id AS session_id, "
+                "media_sessions.device_id AS device_id, media_sessions.consent_id AS consent_id, "
+                "media_sessions.token_hash AS token_hash, media_sessions.modalities_json AS "
+                "modalities_json, media_sessions.state AS state, "
+                "media_sessions.captured_privacy_epoch AS captured_privacy_epoch, "
+                "media_sessions.expires_at AS expires_at, media_sessions.bytes_reserved AS "
+                "bytes_reserved, media_sessions.max_bytes AS max_bytes, "
+                "media_sessions.close_reason AS close_reason, media_sessions.created_at AS "
+                "created_at, media_sessions.closed_at AS closed_at FROM media_sessions AS "
+                "media_sessions WHERE media_sessions.session_id = %s",
+                (session_id,),
+            )
             if owner
             else self._row(session_id, token or "")
         )
@@ -221,14 +245,14 @@ class MediaService:
             raise CoreError("MEDIA_SESSION_NOT_FOUND", 404)
         with self.store.transaction():
             self.store.execute(
-                "UPDATE media_sessions SET state='CLOSED',closed_at=?,close_reason='OWNER_STOP' "
-                "WHERE session_id=?",
+                "UPDATE media_sessions SET state = 'CLOSED', closed_at = %s, close_reason = "
+                "'OWNER_STOP' WHERE session_id = %s",
                 (self.clock(), session_id),
             )
         # Closing one session does not revoke all other sessions via the global privacy epoch.
         with self.store.transaction():
             self.store.execute(
-                "UPDATE consents SET revoked_at=? WHERE consent_id=?",
+                "UPDATE consents SET revoked_at = %s WHERE consent_id = %s",
                 (self.clock(), row["consent_id"]),
             )
         for task in tuple(self.inflight.get(session_id, ())):
@@ -293,10 +317,29 @@ class MediaService:
             self.options.max_output_bytes if chunk.operation == "speech" else 0
         )
         with store.transaction():
-            row = store.one("SELECT * FROM media_sessions WHERE session_id=?", (row["session_id"],))
+            row = store.one(
+                "SELECT media_sessions.session_id AS session_id, "
+                "media_sessions.device_id AS device_id, media_sessions.consent_id AS consent_id, "
+                "media_sessions.token_hash AS token_hash, media_sessions.modalities_json AS "
+                "modalities_json, media_sessions.state AS state, "
+                "media_sessions.captured_privacy_epoch AS captured_privacy_epoch, "
+                "media_sessions.expires_at AS expires_at, media_sessions.bytes_reserved AS "
+                "bytes_reserved, media_sessions.max_bytes AS max_bytes, "
+                "media_sessions.close_reason AS close_reason, media_sessions.created_at AS "
+                "created_at, media_sessions.closed_at AS closed_at FROM media_sessions AS "
+                "media_sessions WHERE media_sessions.session_id = %s",
+                (row["session_id"],),
+            )
             self._require(row, OPERATIONS[chunk.operation])
             previous = store.one(
-                "SELECT * FROM media_requests WHERE session_id=? AND request_key=?",
+                "SELECT media_requests.request_id AS request_id, media_requests.session_id AS "
+                "session_id, media_requests.request_key AS request_key, media_requests.fingerprint "
+                "AS fingerprint, media_requests.operation AS operation, media_requests.state AS "
+                "state, media_requests.reserved_bytes AS reserved_bytes, "
+                "media_requests.usage_request_id AS usage_request_id, media_requests.event_id AS "
+                "event_id, media_requests.created_at AS created_at FROM media_requests AS "
+                "media_requests WHERE media_requests.session_id = %s AND "
+                "media_requests.request_key = %s",
                 (row["session_id"], chunk.request_key),
             )
             if previous:
@@ -305,8 +348,10 @@ class MediaService:
                 # Raw audio is never cached for replay. Ambiguous calls cannot be repeated for free.
                 raise CoreError("MEDIA_REQUEST_ALREADY_" + previous["state"], 409)
             daily_bytes = store.one(
-                "SELECT COALESCE(SUM(reserved_bytes),0) AS n FROM media_requests "
-                "WHERE created_at>=?",
+                (
+                    "SELECT COALESCE(SUM(reserved_bytes),0) AS n FROM "
+                    "media_requests WHERE created_at>=%s"
+                ),
                 (day,),
             )["n"]
             if (
@@ -320,8 +365,10 @@ class MediaService:
                     raise CoreError("MEDIA_PROVIDER_NOT_CONFIGURED", 503)
                 price = endpoint.max_request_micro_usd
                 daily = store.one(
-                    "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-                    "WHERE scenario='media' AND occurred_at>=?",
+                    (
+                        "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM "
+                        "model_usage WHERE scenario='media' AND occurred_at>=%s"
+                    ),
                     (day,),
                 )["n"]
                 monthly = total_monthly(store, month)
@@ -332,13 +379,22 @@ class MediaService:
                     raise CoreError("MEDIA_COST_BUDGET_EXHAUSTED", 429)
                 usage_id = uid("media_cost")
                 cloud_budget.reserve(
-                    store, self.settings, reference_type="model", reference_id=usage_id,
-                    estimated_micro_usd=price, now=now,
+                    store,
+                    self.settings,
+                    reference_type="model",
+                    reference_id=usage_id,
+                    estimated_micro_usd=price,
+                    now=now,
                     task_kind="asr" if chunk.operation == "audio" else "model",
-                    task_id="media-session:" + row["session_id"] if chunk.operation == "audio"
+                    task_id="media-session:" + row["session_id"]
+                    if chunk.operation == "audio"
                     else "media-request:" + row["session_id"] + ":" + chunk.request_key,
-                    pricing={"pricing_known": True, "provider": "media-http",
-                             "model": endpoint.model, "request_estimate_micro_usd": price},
+                    pricing={
+                        "pricing_known": True,
+                        "provider": "media-http",
+                        "model": endpoint.model,
+                        "request_estimate_micro_usd": price,
+                    },
                 )
                 store.insert(
                     "model_usage",
@@ -367,7 +423,8 @@ class MediaService:
                 created_at=now,
             )
             store.execute(
-                "UPDATE media_sessions SET bytes_reserved=bytes_reserved+? WHERE session_id=?",
+                "UPDATE media_sessions SET bytes_reserved = bytes_reserved + %s WHERE session_id = "
+                "%s",
                 (reserve_bytes, row["session_id"]),
             )
         return request_id, usage_id
@@ -405,7 +462,17 @@ class MediaService:
             # Erasure on a second connection can run before or after it, never in between.
             with self.store.transaction():
                 fresh = self.store.one(
-                    "SELECT * FROM media_sessions WHERE session_id=?", (session_id,)
+                    "SELECT media_sessions.session_id AS session_id, media_sessions.device_id AS "
+                    "device_id, media_sessions.consent_id AS consent_id, media_sessions.token_hash "
+                    "AS token_hash, media_sessions.modalities_json AS modalities_json, "
+                    "media_sessions.state AS state, media_sessions.captured_privacy_epoch AS "
+                    "captured_privacy_epoch, media_sessions.expires_at AS expires_at, "
+                    "media_sessions.bytes_reserved AS bytes_reserved, media_sessions.max_bytes AS "
+                    "max_bytes, media_sessions.close_reason AS close_reason, "
+                    "media_sessions.created_at AS created_at, media_sessions.closed_at AS "
+                    "closed_at FROM media_sessions AS media_sessions WHERE "
+                    "media_sessions.session_id = %s",
+                    (session_id,),
                 )
                 self._require(fresh, OPERATIONS[chunk.operation])
                 if chunk.operation == "speech":
@@ -470,23 +537,27 @@ class MediaService:
                         "raw_media_retention": "discard",
                     }
                 self.store.execute(
-                    "UPDATE media_requests SET state='SUCCEEDED',event_id=? WHERE request_id=?",
+                    "UPDATE media_requests SET state = 'SUCCEEDED', event_id = %s WHERE request_id "
+                    "= %s",
                     (event_id, request_id),
                 )
                 if usage_id:
                     self.store.execute(
-                        "UPDATE model_usage SET state='SETTLED' WHERE request_id=?", (usage_id,)
+                        "UPDATE model_usage SET state = 'SETTLED' WHERE request_id = %s",
+                        (usage_id,),
                     )
                     cloud_budget.sync_reference(self.store, "model", usage_id)
             return response
         except BaseException as error:
             with self.store.transaction():
                 self.store.execute(
-                    "UPDATE media_requests SET state='UNKNOWN' WHERE request_id=?", (request_id,)
+                    "UPDATE media_requests SET state = 'UNKNOWN' WHERE request_id = %s",
+                    (request_id,),
                 )
                 if usage_id:
                     self.store.execute(
-                        "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=?", (usage_id,)
+                        "UPDATE model_usage SET state = 'UNKNOWN' WHERE request_id = %s",
+                        (usage_id,),
                     )
                     cloud_budget.sync_reference(self.store, "model", usage_id)
             if isinstance(error, TimeoutError):
@@ -500,9 +571,14 @@ class MediaService:
 
 def erase_media_links(store, event_ids):
     """Drop derived media digests on erasure; accounting is retained without source content."""
-    if not store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_requests'"):
+    if not store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE "
+        "relnamespace=current_schema()::regnamespace AND relname='media_requests' AND relkind IN "
+        "('r','p')"
+    ):
         return
     for event_id in event_ids:
         store.execute(
-            "UPDATE media_requests SET event_id=NULL,fingerprint='' WHERE event_id=?", (event_id,)
+            "UPDATE media_requests SET event_id = NULL, fingerprint = '' WHERE event_id = %s",
+            (event_id,),
         )

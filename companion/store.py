@@ -1,58 +1,36 @@
+"""Core state over owned native PostgreSQL sessions; no runtime SQLite backend."""
+
 import json
 import os
-import sqlite3
 import sys
 import time
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
-from alembic import command
-from alembic.config import Config
+import psycopg
+from psycopg import sql
+
+from companion.contracts import CoreError
+from companion.postgres import BUDGET_LEDGER, Database
+from companion.postgres import migrate as migrate
 
 
 def uid(prefix):
     return f"{prefix}_{uuid.uuid4().hex}"
 
-
 def utcnow():
     return datetime.now(UTC).isoformat(timespec="microseconds")
-
 
 def after(now, seconds):
     return (datetime.fromisoformat(now) + timedelta(seconds=seconds)).isoformat(
         timespec="microseconds"
     )
 
-
 def encode(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-
-def migrate(path, revision="head"):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    migrations = Path(__file__).parent.parent / "migrations"
-    if not migrations.exists():
-        migrations = Path(__file__).parent / "migrations"
-    cfg = Config()
-    cfg.set_main_option("script_location", str(migrations))
-    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + Path(path).resolve().as_posix())
-    command.upgrade(cfg, revision)
-
-
-def file_identity(path):
-    """Device, inode, size and mtime of a database and its WAL; every commit changes one."""
-    files = []
-    for name in (path, str(path) + "-wal"):
-        try:
-            info = os.stat(name)
-        except OSError:
-            files.append(None)
-        else:
-            files.append((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
-    return tuple(files)
-
 
 def _lock_report(site, started, locked, finished, outcome):
     """Content-free timing of one write transaction, reported only when it is slow."""
@@ -72,145 +50,175 @@ def _lock_report(site, started, locked, finished, outcome):
             outcome=outcome,
         )
     except Exception:
-        pass  # Instrumentation must not replace the transaction's result or exception.
-
+        pass
 
 class Store:
-    def __init__(self, path):
-        self.path = path
+    def __init__(self, database: Database, state_directory):
+        if not isinstance(database, Database):
+            raise TypeError("Core Store requires a native PostgreSQL Database")
+        self.database = database
+        self.state_directory = Path(state_directory)
+        self._context = database.session()
+        self._session = self._context.__enter__()
         self._budget_stops = None
-        # File identity when the current read snapshot began; None outside one.
-        self._snapshot_files = None
-        # Counts write transactions and read snapshots; identifies the current one.
+        self._readonly = self._control_write = False
         self._scope = 0
-        self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
-        try:
-            self.db.row_factory = sqlite3.Row
-            for pragma in (
-                "foreign_keys=ON",
-                "busy_timeout=5000",
-                "journal_mode=WAL",
-                "synchronous=FULL",
-                "secure_delete=ON",
-            ):
-                self.db.execute("PRAGMA " + pragma)
-        except BaseException:
-            try:
-                self.db.close()
-            except Exception:
-                pass  # Initialization's original failure remains authoritative.
-            raise
+        self._closed = False
+
+    @property
+    def in_transaction(self):
+        return self._session.in_transaction
+
+    @property
+    def backend_pid(self):
+        return self._session.backend_pid
 
     @property
     def in_write_transaction(self):
-        """Whether this Store owns an active BEGIN IMMEDIATE scope."""
-        return self._budget_stops is not None and self.db.in_transaction
+        return self._budget_stops is not None and self.in_transaction
 
     @property
     def in_read_snapshot(self):
-        """Whether this Store is inside `read_or_write`'s query-only snapshot."""
-        return self._snapshot_files is not None and self.db.in_transaction
+        return self._readonly and self.in_transaction
+
+    @property
+    def control_write(self):
+        return self._control_write and self.in_write_transaction
 
     @property
     def frozen_scope(self):
-        """The current write transaction or read snapshot, in which no other writer's
-        commit is visible; None outside both."""
-        return self._scope if self.in_write_transaction or self.in_read_snapshot else None
+        # READ COMMITTED writes see other commits between statements. Only the
+        # repeatable read-only scope may reuse an unchanged snapshot's summary.
+        return self._scope if self.in_read_snapshot else None
+
+    def change_token(self):
+        """Native snapshot plus actual transaction writes, including triggers/CTEs."""
+        return self.one(
+            "SELECT pg_current_snapshot()::text AS snapshot, "
+            "current_schema() AS schema,pg_postmaster_start_time()::text AS instance, "
+            "COALESCE((SELECT sum(n_tup_ins+n_tup_upd+n_tup_del) "
+            "FROM pg_stat_xact_user_tables WHERE schemaname=current_schema()),0)::text AS writes"
+        )
+
+    def execute(self, statement, parameters=()):
+        return self._session.execute(statement, parameters)
+
+    def one(self, statement, parameters=()):
+        return self._session.one(statement, parameters)
+
+    def rows(self, statement, parameters=()):
+        return self._session.rows(statement, parameters)
+
+    def bounded_read(self, statement, parameters, *, limit, timeout_ms):
+        if self.in_transaction and not self.in_read_snapshot:
+            raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
+        return self._session.bounded_read(statement, parameters, limit=limit, timeout_ms=timeout_ms)
+
+    def bootstrap(self, owner_qq_id, now):
+        """Seed missing identity once; imports retain their original node incarnation."""
+        with self._session.transaction():
+            self.execute("SET LOCAL lock_timeout='5s'")
+            self.execute("INSERT INTO runtime_meta (key,value) VALUES ('privacy_epoch','0') "
+                         "ON CONFLICT (key) DO NOTHING")
+            self._control_lock(True)
+            for key, value in (("voice_incarnation", uuid4().hex),
+                               ("owner_authority_restore_generation", "initial"),
+                               ("owner_authority_mode", "OFF")):
+                self.execute("INSERT INTO runtime_meta (key,value) VALUES (%s,%s) "
+                             "ON CONFLICT (key) DO NOTHING", (key, value))
+            previous = self.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+            if previous and previous["value"] != owner_qq_id:
+                raise CoreError("OWNER_IDENTITY_MISMATCH", 503)
+            self.execute("INSERT INTO runtime_meta (key,value) VALUES ('owner_qq_id',%s) "
+                         "ON CONFLICT (key) DO NOTHING", (owner_qq_id,))
+            for actor, kind in (("owner", "owner"), ("companion", "companion"),
+                                ("system", "system")):
+                self.execute("INSERT INTO principals (actor_id,kind,created_at) VALUES (%s,%s,%s) "
+                             "ON CONFLICT (actor_id) DO NOTHING", (actor, kind, now))
+
+    def ledger_lock(self, domain, *, shared=False):
+        if self.in_read_snapshot and not shared:
+            raise RuntimeError("READ_SNAPSHOT_WRITE_REQUIRED")
+        self._session.ledger_lock(domain, shared=shared)
 
     def read_or_write(self, operation):
-        """Run a read-only operation on one WAL snapshot instead of the single writer lock.
-
-        WAL readers never block the writer, and the snapshot is a committed state from
-        within this call. query_only refuses every write statement, including a nested
-        BEGIN IMMEDIATE. A refused write, an external journal ahead of the snapshot, or
-        any other failure repeats the operation once under BEGIN IMMEDIATE; that
-        outcome, success or error, is the authoritative one.
-        """
-        if self.db.in_transaction:
+        if self.in_transaction:
             return operation()
         caller = sys._getframe(1)
         try:
-            self.db.execute("PRAGMA query_only=ON")
-            try:
-                self.db.execute("BEGIN")
-                # Taken before the first read pins the snapshot: equal identities later
-                # mean no commit has happened since the snapshot began.
-                self._snapshot_files = file_identity(self.path)
-                self._txn_changes = self.db.total_changes
+            with self._session.transaction(readonly=True):
+                self._readonly = True
                 self._scope += 1
-                return operation()
-            finally:
-                self._snapshot_files = None
-                if self.db.in_transaction:
-                    self.db.rollback()
-                self.db.execute("PRAGMA query_only=OFF")
+                try:
+                    return operation()
+                finally:
+                    self._readonly = False
         except Exception:
-            pass  # The locked attempt below decides the result.
+            pass  # The authoritative write attempt below decides the result.
         with self.transaction(site=(caller.f_code, caller.f_lineno)):
             return operation()
 
+    def _control_lock(self, exclusive):
+        row = self.one(
+            "SELECT value FROM runtime_meta WHERE key='privacy_epoch' "
+            + ("FOR UPDATE" if exclusive else "FOR SHARE")
+        )
+        if row is None:
+            raise RuntimeError("POSTGRES_RUNTIME_BOOTSTRAP_REQUIRED")
+
     @contextmanager
-    def transaction(self, *, site=None, delivery_preflight=False):
+    def transaction(self, *, site=None, delivery_preflight=False, control_write=False):
+        if self.in_transaction:
+            raise RuntimeError("POSTGRES_TRANSACTION_ALREADY_ACTIVE")
         if site is None:
-            caller = sys._getframe(2)  # 0: this generator, 1: contextlib, 2: the `with` site
+            caller = sys._getframe(2)
             site = (caller.f_code, caller.f_lineno)
-        started = time.perf_counter()
+        started = locked = time.perf_counter()
+        entered = False
+        outcome = "ROLLBACK"
+        self._budget_stops = set()
         try:
-            self.db.execute("BEGIN IMMEDIATE")
+            with self._session.transaction():
+                self.execute("SET LOCAL lock_timeout='5s'")
+                self._control_lock(control_write)
+                locked = time.perf_counter()
+                self._control_write = control_write
+                self._scope += 1
+                entered = True
+                yield self
+                # Native NOTIFY commits or rolls back with the business change.
+                # Hints carry no content, authority or delivery permission.
+                self._session.notify()
+            outcome = "COMMIT"
         except BaseException as error:
-            _lock_report(site, started, time.perf_counter(), None, "BUSY")
-            if (delivery_preflight and isinstance(error, sqlite3.OperationalError)
-                and getattr(error, "sqlite_errorcode", 0) & 0xff == sqlite3.SQLITE_BUSY
-                and not self.db.in_transaction):
-                from companion.contracts import CoreError
+            pending = self._budget_stops
+            if pending:
+                # Only fsynced stop witnesses survive a business rollback.
+                with self._session.transaction():
+                    self._control_lock(False)
+                    self._session.ledger_lock(BUDGET_LEDGER)
+                    for value in pending:
+                        self.execute("INSERT INTO runtime_meta (key,value) VALUES (%s,%s) "
+                                     "ON CONFLICT (key) DO NOTHING", value)
+            if (delivery_preflight and not entered
+                and isinstance(error, psycopg.errors.LockNotAvailable)):
                 from companion_delivery_protocol.preflight import BUSY
 
                 raise CoreError(BUSY, 503) from error
             raise
-        locked = time.perf_counter()
-        self._budget_stops = set()
-        self._scope += 1
-        # Lets shared caches tell whether this connection has uncommitted writes.
-        self._txn_changes = self.db.total_changes
-        outcome = "ROLLBACK"
-        try:
-            yield self
-            self.db.commit()
-            outcome = "COMMIT"
-        except BaseException:
-            self.db.rollback()
-            if self._budget_stops:
-                # A fsynced Budget pause must outlive an unrelated business
-                # rollback. Only append-only stop witnesses are replayed here.
-                self.db.execute("BEGIN IMMEDIATE")
-                try:
-                    self.db.executemany(
-                        "INSERT OR IGNORE INTO runtime_meta VALUES (?,?)", self._budget_stops
-                    )
-                    self.db.commit()
-                except BaseException:
-                    self.db.rollback()
-                    raise
-            raise
         finally:
             self._budget_stops = None
-            _lock_report(site, started, locked, time.perf_counter(), outcome)
+            self._control_write = False
+            finished = time.perf_counter()
+            _lock_report(site, started, locked if entered else finished,
+                         finished if entered else None, outcome)
 
     def retain_budget_stop(self, journal_id, head_sha256):
         value = ("model_budget_stop:" + head_sha256, journal_id)
         if self._budget_stops is not None:
             self._budget_stops.add(value)
-        self.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)", value)
-
-    def execute(self, sql, params=()):
-        return self.db.execute(sql, params)
-
-    def rows(self, sql, params=()):
-        return [dict(row) for row in self.db.execute(sql, params).fetchall()]
-
-    def one(self, sql, params=()):
-        row = self.db.execute(sql, params).fetchone()
-        return dict(row) if row else None
+        self.execute("INSERT INTO runtime_meta (key,value) VALUES (%s,%s) "
+                     "ON CONFLICT (key) DO NOTHING", value)
 
     def schema_capabilities(self):
         required = {
@@ -348,34 +356,35 @@ class Store:
             "media_requests": {"request_key", "fingerprint", "usage_request_id", "event_id"},
             "content_items": {"owner_event_id", "read_request_id", "usage_request_id", "deadline"},
         }
-        columns_present = all(
-            columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}
-            for table, columns in required.items()
+        present = {}
+        for row in self.rows(
+            "SELECT table_name,column_name FROM information_schema.columns "
+            "WHERE table_schema=current_schema()"
+        ):
+            present.setdefault(row["table_name"], set()).add(row["column_name"])
+        if not all(columns <= present.get(table, set()) for table, columns in required.items()):
+            return False
+        constraints = self.rows(
+            "SELECT pg_get_constraintdef(oid) AS definition FROM pg_constraint "
+            "WHERE connamespace=current_schema()::regnamespace AND contype='c' "
+            "AND conrelid='content_items'::regclass"
         )
-        content = self.one(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='content_items'"
-        )
-        return columns_present and bool(
-            content and "slot<64" in "".join(content["sql"].split()).lower()
-        )
+        return any("slot<64" in "".join(row["definition"].split()).replace('"', '')
+                   for row in constraints)
 
     def insert(self, table, **values):
-        # Identifiers are application constants, never API input.
-        names = ",".join(values)
-        marks = ",".join("?" for _ in values)
-        self.execute(f"INSERT INTO {table} ({names}) VALUES ({marks})", tuple(values.values()))
+        self.execute(sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+            sql.Identifier(table), sql.SQL(",").join(map(sql.Identifier, values)),
+            sql.SQL(",").join(sql.Placeholder() for _ in values)), tuple(values.values()))
 
     def audit(self, action, entity_id, trace_id, now, **safe_detail):
-        self.insert(
-            "audit_log",
-            action=action,
-            actor_id="system",
-            entity_type="core",
-            entity_id=entity_id,
-            trace_id=trace_id,
-            safe_detail_json=encode(safe_detail),
-            created_at=now,
-        )
+        self.insert("audit_log", action=action, actor_id="system", entity_type="core",
+                    entity_id=entity_id, trace_id=trace_id, safe_detail_json=encode(safe_detail),
+                    created_at=now)
 
     def close(self):
-        self.db.close()
+        if not self._closed:
+            if self.in_read_snapshot or self._budget_stops is not None:
+                raise RuntimeError("POSTGRES_STORE_SCOPE_ACTIVE")
+            self._closed = True
+            self._context.__exit__(None, None, None)

@@ -29,16 +29,15 @@ def recent_timeline(store, settings, now, requester, *, topic, days=7, limit=40)
     cutoff = after(now, -86400 * settings.raw_event_retention_days)
     query = topic.strip().casefold()
     rows = store.rows(
-        "SELECT e.event_id,e.actor_id,e.event_type,e.source,e.occurred_at,e.conversation_id,"
-        "e.body_json,o.result_status,o.source_kind FROM events e "
-        "JOIN conversations c USING(conversation_id) LEFT JOIN observations o USING(event_id) "
-        "WHERE e.redacted=0 AND e.privacy_scope='private' AND c.scope='private' "
-        "AND c.owner_actor_id='owner' AND e.occurred_at>=? AND e.occurred_at<=? "
-        "AND e.ingested_at>=? AND length(e.body_json)<=16000 AND ("
-        "(e.actor_id='owner' AND e.source='qq.onebot' AND e.event_type IN "
-        "('message.received','message.media_received')) OR "
-        "(e.event_type='content.observed' AND o.redacted=0)) "
-        "ORDER BY e.occurred_at DESC,e.event_id LIMIT 201",
+        'SELECT e.event_id, e.actor_id, e.event_type, e.source, e.occurred_at, e.conversation_id, '
+        'e.body_json, o.result_status, o.source_kind FROM events AS e JOIN conversations AS c '
+        'USING (conversation_id) LEFT JOIN observations AS o USING (event_id) WHERE e.redacted = 0 '
+        "AND e.privacy_scope = 'private' AND c.scope = 'private' AND c.owner_actor_id = 'owner' "
+        'AND e.occurred_at >= %s AND e.occurred_at <= %s AND e.ingested_at >= %s AND '
+        "LENGTH(e.body_json) <= 16000 AND ((e.actor_id = 'owner' AND e.source = 'qq.onebot' AND "
+        "e.event_type IN ('message.received', 'message.media_received')) OR (e.event_type = "
+        "'content.observed' AND o.redacted = 0)) ORDER BY e.occurred_at DESC NULLS LAST, "
+        'e.event_id NULLS FIRST LIMIT 201',
         (start, now, cutoff),
     )
     items = []
@@ -75,9 +74,9 @@ def recent_timeline(store, settings, now, requester, *, topic, days=7, limit=40)
             "episode_ids": [
                 r["episode_id"]
                 for r in store.rows(
-                    "SELECT ep.episode_id FROM episode_events ee "
-                    "JOIN episodes ep USING(episode_id) "
-                    "WHERE ee.event_id=? AND ep.status='ACTIVE' ORDER BY ep.episode_id LIMIT 5",
+                    'SELECT ep.episode_id FROM episode_events AS ee JOIN episodes AS ep USING '
+                    "(episode_id) WHERE ee.event_id = %s AND ep.status = 'ACTIVE' ORDER BY "
+                    'ep.episode_id NULLS FIRST LIMIT 5',
                     (row["event_id"],),
                 )
             ],
@@ -85,9 +84,10 @@ def recent_timeline(store, settings, now, requester, *, topic, days=7, limit=40)
         }
         if item["kind"] == "conversation":
             for reply in store.rows(
-                "SELECT message_id,state,sent_at,content_json FROM outbox WHERE origin_event_id=? "
-                "AND conversation_id=? AND action_type='qq.private.reply' "
-                "AND length(content_json)<=16000 ORDER BY created_at,message_id LIMIT 5",
+                'SELECT message_id, state, sent_at, content_json FROM outbox WHERE origin_event_id '
+                "= %s AND conversation_id = %s AND action_type = 'qq.private.reply' AND "
+                'LENGTH(content_json) <= 16000 ORDER BY created_at NULLS FIRST, message_id NULLS '
+                'FIRST LIMIT 5',
                 (row["event_id"], row["conversation_id"]),
             ):
                 fact = {key: reply[key] for key in ("message_id", "state", "sent_at")}
@@ -107,8 +107,8 @@ def recent_timeline(store, settings, now, requester, *, topic, days=7, limit=40)
         items.append(item)
     goals = []
     for goal in store.rows(
-        "SELECT goal_id,kind,topic,state,last_error_code,result_event_id,updated_at FROM goals "
-        "WHERE redacted=0 ORDER BY updated_at DESC,goal_id LIMIT 50"
+        'SELECT goal_id, kind, topic, state, last_error_code, result_event_id, updated_at FROM '
+        'goals WHERE redacted = 0 ORDER BY updated_at DESC NULLS LAST, goal_id NULLS FIRST LIMIT 50'
     ):
         if (
             query not in goal["topic"].casefold()
@@ -120,17 +120,18 @@ def recent_timeline(store, settings, now, requester, *, topic, days=7, limit=40)
         ids = [
             r["event_id"]
             for r in store.rows(
-                "SELECT event_id FROM goal_evidence WHERE goal_id=? ORDER BY event_id",
+                'SELECT event_id FROM goal_evidence WHERE goal_id = %s ORDER BY event_id NULLS '
+                'FIRST',
                 (goal["goal_id"],),
             )
         ]
         if not ids or expired_sources(store, ids, cutoff):
             continue
         available = store.one(
-            "SELECT COUNT(*) AS n FROM events e JOIN conversations c USING(conversation_id) "
-            "WHERE e.event_id IN (SELECT value FROM json_each(?)) AND e.redacted=0 "
-            "AND e.privacy_scope='private' AND c.scope='private' AND c.owner_actor_id='owner' "
-            "AND e.occurred_at<=?",
+            'SELECT COUNT(*) AS n FROM events AS e JOIN conversations AS c USING (conversation_id) '
+            'WHERE e.event_id IN (SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s '
+            "AS JSON)) AS parsed(value)) AND e.redacted = 0 AND e.privacy_scope = 'private' AND "
+            "c.scope = 'private' AND c.owner_actor_id = 'owner' AND e.occurred_at <= %s",
             (json.dumps(ids), now),
         )["n"]
         if available != len(ids):

@@ -177,9 +177,10 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @asynccontextmanager
     async def lifespan(app):
         if memory_control_grant is not None:
-            with stopped_workers(settings.database), Runtime(settings) as runtime:
+            with stopped_workers(settings.state_directory), Runtime(settings) as runtime:
                 runtime.store.configuration_worker = "api"
                 app.state.core = runtime
+                app.state.api_store = ApiStore(runtime.database, settings.state_directory)
                 yield
             return
         image_model = (
@@ -192,11 +193,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
             if image_model else nullcontext()
         ) as client:
             app.state.core = Core(settings, ModelClient(settings, client) if client else None)
+            app.state.api_store = ApiStore(app.state.core.database, settings.state_directory)
             app.state.core.store.configuration_worker = "api"
             try:
                 yield
             finally:
-                app.state.core.store.close()
+                app.state.core.close()
 
     app = FastAPI(
         title="Companion Core",
@@ -207,7 +209,6 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         openapi_url=None,
     )
     app.state.observation_instance = uuid4().hex
-    app.state.api_store = ApiStore(settings.database)
     app.add_middleware(
         BodyLimit,
         image_limit=settings.content.max_image_bytes if settings.content_enabled else 131072,
@@ -300,7 +301,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
         schema_head()
         core = app.state.core
-        version = core.store.one("SELECT version_num FROM alembic_version")
+        version = core.store.one('SELECT version_num FROM alembic_version')
         if not core.store.schema_capabilities():
             raise CoreError("MIGRATION_REQUIRED", 503)
         return {
@@ -371,7 +372,19 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def list_tools():
         return {
             "items": app.state.core.store.rows(
-                "SELECT * FROM tool_tasks WHERE redacted=0 ORDER BY rowid DESC LIMIT 30"
+                'SELECT tool_tasks.task_id AS task_id, tool_tasks.idempotency_key AS '
+                'idempotency_key, tool_tasks.request_sha256 AS request_sha256, '
+                'tool_tasks.scope_sha256 AS scope_sha256, tool_tasks.executor_id AS executor_id, '
+                'tool_tasks.capability AS capability, tool_tasks.scope_json AS scope_json, '
+                'tool_tasks.risk_level AS risk_level, tool_tasks.state AS state, '
+                'tool_tasks.captured_privacy_epoch AS captured_privacy_epoch, '
+                'tool_tasks.lease_token AS lease_token, tool_tasks.lease_until AS lease_until, '
+                'tool_tasks.reserved_micro_usd AS reserved_micro_usd, tool_tasks.billed_micro_usd '
+                'AS billed_micro_usd, tool_tasks.dispatched_at AS dispatched_at, '
+                'tool_tasks.result_event_id AS result_event_id, tool_tasks.last_error_code AS '
+                'last_error_code, tool_tasks.created_at AS created_at, tool_tasks.updated_at AS '
+                'updated_at, tool_tasks.redacted AS redacted FROM tool_tasks AS tool_tasks WHERE '
+                'tool_tasks.redacted = 0 ORDER BY record_sequence DESC NULLS LAST LIMIT 30'
             )
         }
 
@@ -633,9 +646,9 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post("/internal/v2/observations/{event_id}/forget", dependencies=control_auth)
     async def forget_observation(event_id: str):
         core = app.state.core
-        if not core.store.one("SELECT 1 FROM observations WHERE event_id=?", (event_id,)):
+        if not core.store.one('SELECT 1 FROM observations WHERE event_id = %s', (event_id,)):
             raise CoreError("OBSERVATION_NOT_FOUND", 404)
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [event_id], core.clock())
         return {"event_id": event_id, "status": "REDACTED"}
 
@@ -688,7 +701,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def diary_recompute(day: date):
         core = app.state.core
         run_id = core.diary.recompute_day(day, settings.owner_qq_id)
-        state = core.store.one("SELECT state FROM diary_runs WHERE run_id=?", (run_id,))[
+        state = core.store.one('SELECT state FROM diary_runs WHERE run_id = %s', (run_id,))[
             "state"
         ] if run_id else "NOT_SCHEDULED"
         return {"local_date": day.isoformat(), "run_id": run_id, "state": state}

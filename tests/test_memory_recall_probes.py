@@ -19,10 +19,10 @@ def test_frozen_entity_time_and_scope_probes(core, record_property):
     core.clock.advance(86400)
     ids["delivery_new"] = core.memory.decide(ids["delivery_old"], "correct", core.clock(),
         "项目资料现在放在西门值班室。原南门接待处已停用。")["memory_id"]
-    core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+    core.store.execute("UPDATE memories SET valid_to=%s WHERE memory_id=%s",
                        (after(core.clock(), -1), ids["expired"]))
     core.memory.decide(ids["erased"], "forget", core.clock())
-    core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=?",
+    core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=%s",
                        (ids["denied"],))
     expected_total = recalled = extra = negatives = negative_correct = 0
     cases = []

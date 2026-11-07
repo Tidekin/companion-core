@@ -72,7 +72,7 @@ class ClipAnalysis(BaseModel):
 
 
 def _tx(store):
-    return nullcontext() if store.db.in_transaction else store.transaction()
+    return nullcontext() if store.in_transaction else store.transaction()
 
 
 def _analysis_text(phases):
@@ -82,9 +82,15 @@ def _analysis_text(phases):
 
 
 def _phase_evidence(phases):
-    return [{"phase": phase["phase"], "model_request_id": phase["model_request_id"],
-             "payload_sha256": phase["payload_sha256"],
-             "materialized": json.loads(phase["evidence_json"])} for phase in phases]
+    return [
+        {
+            "phase": phase["phase"],
+            "model_request_id": phase["model_request_id"],
+            "payload_sha256": phase["payload_sha256"],
+            "materialized": json.loads(phase["evidence_json"]),
+        }
+        for phase in phases
+    ]
 
 
 def _policy(store, settings, clock, current_request=None):
@@ -92,7 +98,7 @@ def _policy(store, settings, clock, current_request=None):
     if not config.enabled or not settings.content_enabled:
         raise CoreError("BILI_VIDEO_DISABLED", 403)
     if store.one(
-        "SELECT 1 FROM runtime_meta WHERE key IN (?,?)",
+        "SELECT 1 FROM runtime_meta WHERE key IN (%s, %s)",
         (RESTORE_REQUIRED, "cloud_budget_restore_required"),
     ):
         raise CoreError("BILI_VIDEO_RECONCILIATION_REQUIRED", 503)
@@ -114,9 +120,14 @@ def _policy(store, settings, clock, current_request=None):
 
 def _source(store, settings, event_id, now):
     row = store.one(
-        "SELECT o.*,e.body_json,e.source,e.event_type,e.fingerprint,"
-        "e.redacted AS event_redacted FROM observations o JOIN events e USING(event_id) "
-        "WHERE o.event_id=?",
+        "SELECT o.event_id AS event_id, o.adapter_id AS adapter_id, o.source_kind AS source_kind, "
+        "o.result_status AS result_status, o.source_sha256 AS source_sha256, o.canonical_url AS "
+        "canonical_url, o.device_id AS device_id, o.session_id AS session_id, o.consent_id AS "
+        "consent_id, o.evidence_json AS evidence_json, o.captured_privacy_epoch AS "
+        "captured_privacy_epoch, o.redacted AS redacted, o.created_at AS created_at, e.body_json "
+        "AS body_json, e.source AS source, e.event_type AS event_type, e.fingerprint AS "
+        "fingerprint, e.redacted AS event_redacted FROM observations AS o JOIN events AS e ON "
+        "o.event_id = e.event_id WHERE o.event_id = %s",
         (event_id,),
     )
     if (
@@ -162,8 +173,14 @@ def _source(store, settings, event_id, now):
 
 def _owner(store, settings, item, clock, *, job_id=None, request_id=None):
     owner = store.one(
-        "SELECT e.*,c.scope,c.owner_actor_id FROM events e "
-        "JOIN conversations c USING(conversation_id) WHERE e.event_id=?",
+        "SELECT e.event_id AS event_id, e.schema_version AS schema_version, e.source AS source, "
+        "e.source_event_id AS source_event_id, e.conversation_id AS conversation_id, e.actor_id AS "
+        "actor_id, e.event_type AS event_type, e.occurred_at AS occurred_at, e.ingested_at AS "
+        "ingested_at, e.privacy_scope AS privacy_scope, e.body_json AS body_json, e.trace_id AS "
+        "trace_id, e.idempotency_key AS idempotency_key, e.fingerprint AS fingerprint, e.redacted "
+        "AS redacted, e.memory_processed AS memory_processed, e.reply_revision AS reply_revision, "
+        "c.scope AS scope, c.owner_actor_id AS owner_actor_id FROM events AS e JOIN conversations "
+        "AS c ON e.conversation_id = c.conversation_id WHERE e.event_id = %s",
         (item["owner_event_id"],),
     )
     if (
@@ -178,27 +195,45 @@ def _owner(store, settings, item, clock, *, job_id=None, request_id=None):
     if owner_authority.required(store, settings):
         if request_id is not None:
             selected = store.one(
-                "SELECT j.job_id FROM agent_tool_calls a JOIN jobs j USING(job_id) "
-                "JOIN agent_conversations ac USING(job_id) JOIN events e ON e.event_id=j.event_id "
-                "JOIN conversations c ON c.conversation_id=e.conversation_id "
-                "WHERE a.request_id=? AND a.tool_name='analyze_shared_video' "
-                "AND a.state IN ('DEFERRED','RETURNED') AND ac.phase<>'STOPPED' "
-                "AND e.conversation_id=? AND e.reply_revision=c.reply_revision "
-                "ORDER BY a.rowid DESC LIMIT 1", (request_id, owner["conversation_id"]),
+                "SELECT j.job_id FROM agent_tool_calls AS a JOIN jobs AS j USING (job_id) JOIN "
+                "agent_conversations AS ac USING (job_id) JOIN events AS e ON e.event_id = "
+                "j.event_id JOIN conversations AS c ON c.conversation_id = e.conversation_id WHERE "
+                "a.request_id = %s AND a.tool_name = 'analyze_shared_video' AND a.state IN "
+                "('DEFERRED', 'RETURNED') AND ac.phase <> 'STOPPED' AND e.conversation_id = %s AND "
+                "e.reply_revision = c.reply_revision ORDER BY a.record_sequence DESC NULLS LAST "
+                "LIMIT 1",
+                (request_id, owner["conversation_id"]),
             )
             job_id = selected["job_id"] if selected else None
-        job = store.one("SELECT * FROM jobs WHERE job_id=? AND kind='chat'", (job_id,))
+        job = store.one(
+            "SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS "
+            "kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS "
+            "attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, "
+            "jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, "
+            "jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, "
+            "jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked "
+            "AS context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs WHERE "
+            "jobs.job_id = %s AND jobs.kind = 'chat'",
+            (job_id,),
+        )
         if not job or job["state"] not in {"RUNNING", "RETRY_WAIT"}:
             raise CoreError("BILI_VIDEO_OWNER_SOURCE_REQUIRED", 403)
-        view = owner_authority.check_job(store, settings, clock, job, purpose="bili_video",
-                                         executing=job["state"] == "RUNNING")
-        source, _, _ = owner_input.source(store, settings, view, owner["event_id"], clock(),
-                                          history=owner["event_id"] != job["event_id"])
+        view = owner_authority.check_job(
+            store, settings, clock, job, purpose="bili_video", executing=job["state"] == "RUNNING"
+        )
+        source, _, _ = owner_input.source(
+            store,
+            settings,
+            view,
+            owner["event_id"],
+            clock(),
+            history=owner["event_id"] != job["event_id"],
+        )
         consumer, _, _ = owner_input.source(store, settings, view, job["event_id"], clock())
         if source["conversation_id"] != consumer["conversation_id"]:
             raise CoreError("BILI_VIDEO_OWNER_SOURCE_REQUIRED", 403)
         if job["state"] == "RETRY_WAIT" and not store.one(
-            "SELECT 1 FROM agent_conversations WHERE job_id=? AND phase='WAITING'",
+            "SELECT 1 FROM agent_conversations WHERE job_id = %s AND phase = 'WAITING'",
             (job["job_id"],),
         ):
             raise CoreError("BILI_VIDEO_OWNER_SOURCE_REQUIRED", 403)
@@ -211,17 +246,28 @@ def _owner(store, settings, item, clock, *, job_id=None, request_id=None):
         if not reply_revision.source_active(store, consumer_id):
             raise CoreError("REPLY_SOURCE_RECALLED", 409)
         current = store.one(
-            "SELECT e.event_id FROM events e JOIN conversations c USING(conversation_id) "
-            "WHERE e.conversation_id=? AND e.reply_revision=c.reply_revision AND e.redacted=0 "
-            "AND e.source='qq.onebot' AND e.actor_id='owner'",
+            "SELECT e.event_id FROM events AS e JOIN conversations AS c USING (conversation_id) "
+            "WHERE e.conversation_id = %s AND e.reply_revision = c.reply_revision AND e.redacted = "
+            "0 AND e.source = 'qq.onebot' AND e.actor_id = 'owner'",
             (owner["conversation_id"],),
         )
-        inherited = (followup_item(store, settings, current["event_id"], clock=clock)
-                     if current else None)
+        inherited = (
+            followup_item(store, settings, current["event_id"], clock=clock) if current else None
+        )
         if not inherited or inherited["item_id"] != item["item_id"]:
             reply_revision.require_current(store, consumer_id)
         consumer_id = current["event_id"]
-    job = store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (consumer_id,))
+    job = store.one(
+        "SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, "
+        "jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS attempts, "
+        "jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS "
+        "lease_until, jobs.next_attempt_at AS next_attempt_at, jobs.last_error_code AS "
+        "last_error_code, jobs.created_at AS created_at, jobs.updated_at AS updated_at, "
+        "jobs.lease_token AS lease_token, jobs.context_tracked AS context_tracked, "
+        "jobs.authority_json AS authority_json FROM jobs AS jobs WHERE jobs.event_id = %s AND "
+        "jobs.kind = 'chat'",
+        (consumer_id,),
+    )
     if not job or job["state"] not in {"QUEUED", "RUNNING"}:
         raise CoreError("BILI_VIDEO_OWNER_SOURCE_REQUIRED", 403)
     reply_revision.check_job(store, job)
@@ -234,15 +280,33 @@ def _owner(store, settings, item, clock, *, job_id=None, request_id=None):
     return job
 
 
-def _current(store, settings, clock, row, current_request=None, *, allow_terminal=False,
-             model_job_id=None):
+def _current(
+    store, settings, clock, row, current_request=None, *, allow_terminal=False, model_job_id=None
+):
     config, window, view = _policy(store, settings, clock, current_request)
-    item = store.one("SELECT * FROM content_items WHERE item_id=?", (row["item_id"],))
+    item = store.one(
+        "SELECT content_items.item_id AS item_id, content_items.owner_event_id AS "
+        "owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
+        "content_items.source_event_id AS source_event_id, content_items.target_url AS target_url, "
+        "content_items.read_request_id AS read_request_id, content_items.state AS state, "
+        "content_items.media_sha256 AS media_sha256, content_items.fingerprint AS fingerprint, "
+        "content_items.captured_privacy_epoch AS captured_privacy_epoch, "
+        "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
+        "usage_request_id, content_items.output_event_id AS output_event_id, "
+        "content_items.lease_token AS lease_token, content_items.lease_until AS lease_until, "
+        "content_items.deadline AS deadline, content_items.error_code AS error_code, "
+        "content_items.redacted AS redacted, content_items.created_at AS created_at, "
+        "content_items.started_at AS started_at, content_items.updated_at AS updated_at, "
+        "content_items.attachment_json AS attachment_json FROM content_items AS content_items "
+        "WHERE content_items.item_id = %s",
+        (row["item_id"],),
+    )
     if (
         not item
         or item["redacted"]
         or row["redacted"]
-        or row["state"] in _TERMINAL and not allow_terminal
+        or row["state"] in _TERMINAL
+        and not allow_terminal
         or item["kind"] != "link"
         or item["owner_event_id"] != row["owner_event_id"]
         or item["captured_privacy_epoch"] != epoch(store)
@@ -254,7 +318,7 @@ def _current(store, settings, clock, row, current_request=None, *, allow_termina
     ):
         raise CoreError("BILI_VIDEO_SOURCE_CHANGED", 409)
     if view is not None:
-        original = store.one("SELECT authority_json FROM jobs WHERE job_id=?", (row["job_id"],))
+        original = store.one("SELECT authority_json FROM jobs WHERE job_id = %s", (row["job_id"],))
         if not original or json.loads(original["authority_json"]) != view.authority.as_dict():
             raise CoreError("BILI_VIDEO_SOURCE_CHANGED", 409)
     job = _owner(store, settings, item, clock, request_id=row["request_id"])
@@ -282,10 +346,9 @@ def _model_room(store, settings, job_id, request_id=None):
     if settings.paid_model is None:
         raise CoreError("PAID_VIDEO_APPROVAL_REQUIRED", 503)
     used = store.rows(
-        "SELECT m.scenario,m.state FROM model_usage m WHERE m.request_id IN ("
-        "SELECT request_id FROM model_usage WHERE job_id=? UNION "
-        "SELECT request_id FROM model_admissions WHERE logical_request_id=?"
-        ") AND m.request_id<>?",
+        "SELECT m.scenario, m.state FROM model_usage AS m WHERE m.request_id IN (SELECT request_id "
+        "FROM model_usage WHERE job_id = %s UNION SELECT request_id FROM model_admissions WHERE "
+        "logical_request_id = %s) AND m.request_id <> %s",
         (job_id, job_id, request_id or ""),
     )
     finished = {row["scenario"] for row in used if row["state"] == "SETTLED"}
@@ -300,12 +363,50 @@ def model_binding(
     store, settings, clock, request_id, *, job_id=None, scenario=None, logical_request_id=None
 ):
     """Only a durable pending phase authorizes this input's additional media call."""
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_phases'"):
+    if not store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE "
+        "relnamespace=current_schema()::regnamespace AND relname='bili_video_phases' AND relkind "
+        "IN ('r','p')"
+    ):
         return None
-    phase = store.one("SELECT * FROM bili_video_phases WHERE model_request_id=?", (request_id,))
+    phase = store.one(
+        "SELECT bili_video_phases.request_id AS request_id, bili_video_phases.phase "
+        "AS phase, bili_video_phases.request_sha256 AS request_sha256, "
+        "bili_video_phases.model_request_id AS model_request_id, bili_video_phases.payload_sha256 "
+        "AS payload_sha256, bili_video_phases.model_job_id AS model_job_id, "
+        "bili_video_phases.state AS state, bili_video_phases.evidence_json AS evidence_json, "
+        "bili_video_phases.analysis_json AS analysis_json, bili_video_phases.response_json AS "
+        "response_json, bili_video_phases.received_bytes AS received_bytes, "
+        "bili_video_phases.last_error_code AS last_error_code, bili_video_phases.created_at AS "
+        "created_at, bili_video_phases.updated_at AS updated_at FROM bili_video_phases AS "
+        "bili_video_phases WHERE bili_video_phases.model_request_id = %s",
+        (request_id,),
+    )
     if phase is None:
         return None
-    row = store.one("SELECT * FROM bili_video_items WHERE request_id=?", (phase["request_id"],))
+    row = store.one(
+        "SELECT bili_video_items.item_id AS item_id, bili_video_items.request_id AS "
+        "request_id, bili_video_items.source_event_id AS source_event_id, "
+        "bili_video_items.owner_event_id AS owner_event_id, bili_video_items.job_id AS job_id, "
+        "bili_video_items.adapter_id AS adapter_id, bili_video_items.source_sha256 AS "
+        "source_sha256, bili_video_items.source_snapshot_sha256 AS source_snapshot_sha256, "
+        "bili_video_items.metadata_json AS metadata_json, bili_video_items.source_grant_json AS "
+        "source_grant_json, bili_video_items.source_grant_sha256 AS source_grant_sha256, "
+        "bili_video_items.policy_sha256 AS policy_sha256, bili_video_items.window_sha256 AS "
+        "window_sha256, bili_video_items.binding_sha256 AS binding_sha256, "
+        "bili_video_items.captured_privacy_epoch AS captured_privacy_epoch, "
+        "bili_video_items.deadline AS deadline, bili_video_items.state AS state, "
+        "bili_video_items.lease_sha256 AS lease_sha256, bili_video_items.lease_token_sha256 AS "
+        "lease_token_sha256, bili_video_items.lease_json AS lease_json, "
+        "bili_video_items.target_json AS target_json, bili_video_items.plan_json AS plan_json, "
+        "bili_video_items.download_json AS download_json, bili_video_items.output_event_id AS "
+        "output_event_id, bili_video_items.result_sha256 AS result_sha256, "
+        "bili_video_items.redacted AS redacted, bili_video_items.last_error_code AS "
+        "last_error_code, bili_video_items.created_at AS created_at, bili_video_items.updated_at "
+        "AS updated_at FROM bili_video_items AS bili_video_items WHERE bili_video_items.request_id "
+        "= %s",
+        (phase["request_id"],),
+    )
     _current(store, settings, clock, row, request_id, model_job_id=phase["model_job_id"])
     selected = SCENARIOS.get(phase["phase"])
     if (
@@ -320,9 +421,39 @@ def model_binding(
         and logical_request_id != phase["model_job_id"]
     ):
         raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
-    attempt = store.one("SELECT * FROM reading_attempts WHERE request_id=?", (row["request_id"],))
+    attempt = store.one(
+        "SELECT reading_attempts.request_id AS request_id, "
+        "reading_attempts.adapter_id AS adapter_id, reading_attempts.lease_token AS lease_token, "
+        "reading_attempts.lease_until AS lease_until, reading_attempts.context_json AS "
+        "context_json, reading_attempts.allowed_hosts_json AS allowed_hosts_json, "
+        "reading_attempts.original_url_sha256 AS original_url_sha256, "
+        "reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state AS state, "
+        "reading_attempts.result_sha256 AS result_sha256, reading_attempts.result_event_ids_json "
+        "AS result_event_ids_json, reading_attempts.observed_requests AS observed_requests, "
+        "reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS "
+        "created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS "
+        "reading_attempts WHERE reading_attempts.request_id = %s",
+        (row["request_id"],),
+    )
     native = store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (row["request_id"],)
+        "SELECT exploration_requests.request_id AS request_id, exploration_requests.request_key AS "
+        "request_key, exploration_requests.adapter_id AS adapter_id, "
+        "exploration_requests.operation AS operation, exploration_requests.url AS url, "
+        "exploration_requests.goal_step_json AS goal_step_json, exploration_requests.state AS "
+        "state, exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
+        "AS lease_until, exploration_requests.captured_privacy_epoch AS captured_privacy_epoch, "
+        "exploration_requests.reserved_bytes AS reserved_bytes, exploration_requests.used_bytes AS "
+        "used_bytes, exploration_requests.result_sha256 AS result_sha256, "
+        "exploration_requests.last_error_code AS last_error_code, exploration_requests.created_at "
+        "AS created_at, exploration_requests.started_at AS started_at, "
+        "exploration_requests.updated_at AS updated_at, exploration_requests.redacted AS redacted, "
+        "exploration_requests.reserved_requests AS reserved_requests, "
+        "exploration_requests.used_requests AS used_requests, exploration_requests.source_grant_id "
+        "AS source_grant_id, exploration_requests.source_grant_epoch AS source_grant_epoch, "
+        "exploration_requests.authority_json AS authority_json, exploration_requests.query AS "
+        "query, exploration_requests.discovery_mode AS discovery_mode FROM exploration_requests AS "
+        "exploration_requests WHERE exploration_requests.request_id = %s",
+        (row["request_id"],),
     )
     if (
         not attempt
@@ -348,7 +479,7 @@ def model_binding(
     ):
         raise CoreError("BILI_VIDEO_READER_CHANGED", 409)
     admission = store.one(
-        "SELECT payload_sha256,logical_request_id FROM model_admissions WHERE request_id=?",
+        "SELECT payload_sha256, logical_request_id FROM model_admissions WHERE request_id = %s",
         (request_id,),
     )
     if admission and (
@@ -358,7 +489,17 @@ def model_binding(
         raise CoreError("BILI_VIDEO_MODEL_PAYLOAD_CHANGED", 403)
     if phase["phase"] == "clips":
         preview = store.one(
-            "SELECT * FROM bili_video_phases WHERE request_id=? AND phase='preview'",
+            "SELECT bili_video_phases.request_id AS request_id, bili_video_phases.phase AS phase, "
+            "bili_video_phases.request_sha256 AS request_sha256, "
+            "bili_video_phases.model_request_id AS model_request_id, "
+            "bili_video_phases.payload_sha256 AS payload_sha256, bili_video_phases.model_job_id AS "
+            "model_job_id, bili_video_phases.state AS state, bili_video_phases.evidence_json AS "
+            "evidence_json, bili_video_phases.analysis_json AS analysis_json, "
+            "bili_video_phases.response_json AS response_json, bili_video_phases.received_bytes AS "
+            "received_bytes, bili_video_phases.last_error_code AS last_error_code, "
+            "bili_video_phases.created_at AS created_at, bili_video_phases.updated_at AS "
+            "updated_at FROM bili_video_phases AS bili_video_phases WHERE "
+            "bili_video_phases.request_id = %s AND bili_video_phases.phase = 'preview'",
             (row["request_id"],),
         )
         if (
@@ -380,7 +521,17 @@ def model_binding(
 
 def validate_model(store, settings, clock, request_id):
     binding = model_binding(store, settings, clock, request_id)
-    usage = store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+    usage = store.one(
+        "SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS "
+        "request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, "
+        "model_usage.provider AS provider, model_usage.model AS model, model_usage.input_tokens AS "
+        "input_tokens, model_usage.cached_input_tokens AS cached_input_tokens, "
+        "model_usage.output_tokens AS output_tokens, model_usage.billed_micro_usd AS "
+        "billed_micro_usd, model_usage.is_estimate AS is_estimate, model_usage.occurred_at AS "
+        "occurred_at, model_usage.state AS state, model_usage.pricing_known AS pricing_known FROM "
+        "model_usage AS model_usage WHERE model_usage.request_id = %s",
+        (request_id,),
+    )
     if (
         not binding
         or not usage
@@ -400,13 +551,54 @@ class BiliVideoService:
     def schedule(self, item_id, source_event_id, *, job_id=None):
         s, now = self.store, self.clock()
         with _tx(s):
-            previous = s.one("SELECT * FROM bili_video_items WHERE item_id=?", (item_id,))
+            previous = s.one(
+                "SELECT bili_video_items.item_id AS item_id, "
+                "bili_video_items.request_id AS request_id, bili_video_items.source_event_id AS "
+                "source_event_id, bili_video_items.owner_event_id AS owner_event_id, "
+                "bili_video_items.job_id AS job_id, bili_video_items.adapter_id AS adapter_id, "
+                "bili_video_items.source_sha256 AS source_sha256, "
+                "bili_video_items.source_snapshot_sha256 AS source_snapshot_sha256, "
+                "bili_video_items.metadata_json AS metadata_json, "
+                "bili_video_items.source_grant_json AS source_grant_json, "
+                "bili_video_items.source_grant_sha256 AS source_grant_sha256, "
+                "bili_video_items.policy_sha256 AS policy_sha256, bili_video_items.window_sha256 "
+                "AS window_sha256, bili_video_items.binding_sha256 AS binding_sha256, "
+                "bili_video_items.captured_privacy_epoch AS captured_privacy_epoch, "
+                "bili_video_items.deadline AS deadline, bili_video_items.state AS state, "
+                "bili_video_items.lease_sha256 AS lease_sha256, "
+                "bili_video_items.lease_token_sha256 AS lease_token_sha256, "
+                "bili_video_items.lease_json AS lease_json, bili_video_items.target_json AS "
+                "target_json, bili_video_items.plan_json AS plan_json, "
+                "bili_video_items.download_json AS download_json, bili_video_items.output_event_id "
+                "AS output_event_id, bili_video_items.result_sha256 AS result_sha256, "
+                "bili_video_items.redacted AS redacted, bili_video_items.last_error_code AS "
+                "last_error_code, bili_video_items.created_at AS created_at, "
+                "bili_video_items.updated_at AS updated_at FROM bili_video_items AS "
+                "bili_video_items WHERE bili_video_items.item_id = %s",
+                (item_id,),
+            )
             if previous:
                 if previous["source_event_id"] != source_event_id:
                     raise CoreError("IDEMPOTENCY_CONFLICT", 409)
                 return previous["request_id"]
             config, window, view = _policy(s, self.settings, self.clock)
-            item = s.one("SELECT * FROM content_items WHERE item_id=?", (item_id,))
+            item = s.one(
+                "SELECT content_items.item_id AS item_id, content_items.owner_event_id AS "
+                "owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
+                "content_items.source_event_id AS source_event_id, content_items.target_url AS "
+                "target_url, content_items.read_request_id AS read_request_id, content_items.state "
+                "AS state, content_items.media_sha256 AS media_sha256, content_items.fingerprint "
+                "AS fingerprint, content_items.captured_privacy_epoch AS captured_privacy_epoch, "
+                "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
+                "usage_request_id, content_items.output_event_id AS output_event_id, "
+                "content_items.lease_token AS lease_token, content_items.lease_until AS "
+                "lease_until, content_items.deadline AS deadline, content_items.error_code AS "
+                "error_code, content_items.redacted AS redacted, content_items.created_at AS "
+                "created_at, content_items.started_at AS started_at, content_items.updated_at AS "
+                "updated_at, content_items.attachment_json AS attachment_json FROM content_items "
+                "AS content_items WHERE content_items.item_id = %s",
+                (item_id,),
+            )
             if (
                 not item
                 or item["redacted"]
@@ -417,7 +609,20 @@ class BiliVideoService:
             job = _owner(s, self.settings, item, self.clock, job_id=job_id)
             source, observed = _source(s, self.settings, source_event_id, now)
             original = s.one(
-                "SELECT * FROM reading_attempts WHERE request_id=?", (item["read_request_id"],)
+                "SELECT reading_attempts.request_id AS request_id, reading_attempts.adapter_id AS "
+                "adapter_id, reading_attempts.lease_token AS lease_token, "
+                "reading_attempts.lease_until AS lease_until, reading_attempts.context_json AS "
+                "context_json, reading_attempts.allowed_hosts_json AS allowed_hosts_json, "
+                "reading_attempts.original_url_sha256 AS original_url_sha256, "
+                "reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state "
+                "AS state, reading_attempts.result_sha256 AS result_sha256, "
+                "reading_attempts.result_event_ids_json AS result_event_ids_json, "
+                "reading_attempts.observed_requests AS observed_requests, "
+                "reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS "
+                "created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS "
+                "reading_attempts WHERE reading_attempts.request_id = "
+                "%s",
+                (item["read_request_id"],),
             )
             if (
                 not original
@@ -477,7 +682,30 @@ class BiliVideoService:
             return request
 
     def lease_limits(self, request_id, source_grant=None):
-        row = self.store.one("SELECT * FROM bili_video_items WHERE request_id=?", (request_id,))
+        row = self.store.one(
+            "SELECT bili_video_items.item_id AS item_id, "
+            "bili_video_items.request_id AS request_id, bili_video_items.source_event_id AS "
+            "source_event_id, bili_video_items.owner_event_id AS owner_event_id, "
+            "bili_video_items.job_id AS job_id, bili_video_items.adapter_id AS adapter_id, "
+            "bili_video_items.source_sha256 AS source_sha256, "
+            "bili_video_items.source_snapshot_sha256 AS source_snapshot_sha256, "
+            "bili_video_items.metadata_json AS metadata_json, bili_video_items.source_grant_json "
+            "AS source_grant_json, bili_video_items.source_grant_sha256 AS source_grant_sha256, "
+            "bili_video_items.policy_sha256 AS policy_sha256, bili_video_items.window_sha256 AS "
+            "window_sha256, bili_video_items.binding_sha256 AS binding_sha256, "
+            "bili_video_items.captured_privacy_epoch AS captured_privacy_epoch, "
+            "bili_video_items.deadline AS deadline, bili_video_items.state AS state, "
+            "bili_video_items.lease_sha256 AS lease_sha256, bili_video_items.lease_token_sha256 AS "
+            "lease_token_sha256, bili_video_items.lease_json AS lease_json, "
+            "bili_video_items.target_json AS target_json, bili_video_items.plan_json AS plan_json, "
+            "bili_video_items.download_json AS download_json, bili_video_items.output_event_id AS "
+            "output_event_id, bili_video_items.result_sha256 AS result_sha256, "
+            "bili_video_items.redacted AS redacted, bili_video_items.last_error_code AS "
+            "last_error_code, bili_video_items.created_at AS created_at, "
+            "bili_video_items.updated_at AS updated_at FROM bili_video_items AS bili_video_items "
+            "WHERE bili_video_items.request_id = %s",
+            (request_id,),
+        )
         if not row:
             return None
         _current(self.store, self.settings, self.clock, row)
@@ -491,9 +719,8 @@ class BiliVideoService:
         if encode(grant) != row["source_grant_json"]:
             raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
         active = self.store.one(
-            "SELECT COUNT(*) n FROM bili_video_items b "
-            "JOIN exploration_requests r USING(request_id) "
-            "WHERE r.state='RUNNING' AND b.request_id<>?",
+            "SELECT COUNT(*) AS n FROM bili_video_items AS b JOIN exploration_requests AS r USING "
+            "(request_id) WHERE r.state = 'RUNNING' AND b.request_id <> %s",
             (request_id,),
         )["n"]
         if active >= self.settings.bili_video.max_concurrent:
@@ -507,15 +734,71 @@ class BiliVideoService:
     def bind_lease(self, item):
         s = self.store
         with _tx(s):
-            row = s.one("SELECT * FROM bili_video_items WHERE request_id=?", (item["request_id"],))
+            row = s.one(
+                "SELECT bili_video_items.item_id AS item_id, bili_video_items.request_id "
+                "AS request_id, bili_video_items.source_event_id AS source_event_id, "
+                "bili_video_items.owner_event_id AS owner_event_id, bili_video_items.job_id AS "
+                "job_id, bili_video_items.adapter_id AS adapter_id, bili_video_items.source_sha256 "
+                "AS source_sha256, bili_video_items.source_snapshot_sha256 AS "
+                "source_snapshot_sha256, bili_video_items.metadata_json AS metadata_json, "
+                "bili_video_items.source_grant_json AS source_grant_json, "
+                "bili_video_items.source_grant_sha256 AS source_grant_sha256, "
+                "bili_video_items.policy_sha256 AS policy_sha256, bili_video_items.window_sha256 "
+                "AS window_sha256, bili_video_items.binding_sha256 AS binding_sha256, "
+                "bili_video_items.captured_privacy_epoch AS captured_privacy_epoch, "
+                "bili_video_items.deadline AS deadline, bili_video_items.state AS state, "
+                "bili_video_items.lease_sha256 AS lease_sha256, "
+                "bili_video_items.lease_token_sha256 AS lease_token_sha256, "
+                "bili_video_items.lease_json AS lease_json, bili_video_items.target_json AS "
+                "target_json, bili_video_items.plan_json AS plan_json, "
+                "bili_video_items.download_json AS download_json, bili_video_items.output_event_id "
+                "AS output_event_id, bili_video_items.result_sha256 AS result_sha256, "
+                "bili_video_items.redacted AS redacted, bili_video_items.last_error_code AS "
+                "last_error_code, bili_video_items.created_at AS created_at, "
+                "bili_video_items.updated_at AS updated_at FROM bili_video_items AS "
+                "bili_video_items WHERE bili_video_items.request_id = %s",
+                (item["request_id"],),
+            )
             if not row:
                 return item
             limits = self.lease_limits(row["request_id"], item.get("source_grant"))
             native = s.one(
-                "SELECT * FROM exploration_requests WHERE request_id=?", (row["request_id"],)
+                "SELECT exploration_requests.request_id AS request_id, "
+                "exploration_requests.request_key AS request_key, exploration_requests.adapter_id "
+                "AS adapter_id, exploration_requests.operation AS operation, "
+                "exploration_requests.url AS url, exploration_requests.goal_step_json AS "
+                "goal_step_json, exploration_requests.state AS state, "
+                "exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
+                "AS lease_until, exploration_requests.captured_privacy_epoch AS "
+                "captured_privacy_epoch, exploration_requests.reserved_bytes AS reserved_bytes, "
+                "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 "
+                "AS result_sha256, exploration_requests.last_error_code AS last_error_code, "
+                "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
+                "started_at, exploration_requests.updated_at AS updated_at, "
+                "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests "
+                "AS reserved_requests, exploration_requests.used_requests AS used_requests, "
+                "exploration_requests.source_grant_id AS source_grant_id, "
+                "exploration_requests.source_grant_epoch AS source_grant_epoch, "
+                "exploration_requests.authority_json AS authority_json, exploration_requests.query "
+                "AS query, exploration_requests.discovery_mode AS discovery_mode FROM "
+                "exploration_requests AS exploration_requests WHERE "
+                "exploration_requests.request_id = %s",
+                (row["request_id"],),
             )
             attempt = s.one(
-                "SELECT * FROM reading_attempts WHERE request_id=?", (row["request_id"],)
+                "SELECT reading_attempts.request_id AS request_id, reading_attempts.adapter_id AS "
+                "adapter_id, reading_attempts.lease_token AS lease_token, "
+                "reading_attempts.lease_until AS lease_until, reading_attempts.context_json AS "
+                "context_json, reading_attempts.allowed_hosts_json AS allowed_hosts_json, "
+                "reading_attempts.original_url_sha256 AS original_url_sha256, "
+                "reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state "
+                "AS state, reading_attempts.result_sha256 AS result_sha256, "
+                "reading_attempts.result_event_ids_json AS result_event_ids_json, "
+                "reading_attempts.observed_requests AS observed_requests, "
+                "reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS "
+                "created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS "
+                "reading_attempts WHERE reading_attempts.request_id = %s",
+                (row["request_id"],),
             )
             if (
                 item["max_bytes"] != limits["max_bytes"]
@@ -552,9 +835,8 @@ class BiliVideoService:
             media_from_wire(media)
             frozen = json.loads(encode({**item, "media": media}))
             s.execute(
-                "UPDATE bili_video_items SET lease_json=?,lease_sha256=?,"
-                "lease_token_sha256=?,updated_at=? "
-                "WHERE request_id=?",
+                "UPDATE bili_video_items SET lease_json = %s, lease_sha256 = %s, "
+                "lease_token_sha256 = %s, updated_at = %s WHERE request_id = %s",
                 (
                     encode(frozen),
                     json_sha256(frozen),
@@ -565,9 +847,40 @@ class BiliVideoService:
             )
             return frozen
 
-    def _bound(self, adapter_id, request_id, body, *, current_request=None, readonly=False,
-               allow_terminal=False):
-        row = self.store.one("SELECT * FROM bili_video_items WHERE request_id=?", (request_id,))
+    def _bound(
+        self,
+        adapter_id,
+        request_id,
+        body,
+        *,
+        current_request=None,
+        readonly=False,
+        allow_terminal=False,
+    ):
+        row = self.store.one(
+            "SELECT bili_video_items.item_id AS item_id, "
+            "bili_video_items.request_id AS request_id, bili_video_items.source_event_id AS "
+            "source_event_id, bili_video_items.owner_event_id AS owner_event_id, "
+            "bili_video_items.job_id AS job_id, bili_video_items.adapter_id AS adapter_id, "
+            "bili_video_items.source_sha256 AS source_sha256, "
+            "bili_video_items.source_snapshot_sha256 AS source_snapshot_sha256, "
+            "bili_video_items.metadata_json AS metadata_json, bili_video_items.source_grant_json "
+            "AS source_grant_json, bili_video_items.source_grant_sha256 AS source_grant_sha256, "
+            "bili_video_items.policy_sha256 AS policy_sha256, bili_video_items.window_sha256 AS "
+            "window_sha256, bili_video_items.binding_sha256 AS binding_sha256, "
+            "bili_video_items.captured_privacy_epoch AS captured_privacy_epoch, "
+            "bili_video_items.deadline AS deadline, bili_video_items.state AS state, "
+            "bili_video_items.lease_sha256 AS lease_sha256, bili_video_items.lease_token_sha256 AS "
+            "lease_token_sha256, bili_video_items.lease_json AS lease_json, "
+            "bili_video_items.target_json AS target_json, bili_video_items.plan_json AS plan_json, "
+            "bili_video_items.download_json AS download_json, bili_video_items.output_event_id AS "
+            "output_event_id, bili_video_items.result_sha256 AS result_sha256, "
+            "bili_video_items.redacted AS redacted, bili_video_items.last_error_code AS "
+            "last_error_code, bili_video_items.created_at AS created_at, "
+            "bili_video_items.updated_at AS updated_at FROM bili_video_items AS bili_video_items "
+            "WHERE bili_video_items.request_id = %s",
+            (request_id,),
+        )
         if (
             not row
             or row["adapter_id"] != adapter_id
@@ -587,8 +900,14 @@ class BiliVideoService:
             lease = json.loads(row["lease_json"])
             if not lease or json_sha256(lease) != row["lease_sha256"]:
                 raise CoreError("BILI_VIDEO_LEASE_CHANGED", 403)
-            _current(self.store, self.settings, self.clock, row, current_request,
-                     allow_terminal=allow_terminal)
+            _current(
+                self.store,
+                self.settings,
+                self.clock,
+                row,
+                current_request,
+                allow_terminal=allow_terminal,
+            )
             attempt = self.reading._attempt(adapter_id, request_id, body["lease_token"])
             validation = ReaderReadValidation(
                 lease_token=body["lease_token"], source_grant=body.get("source_grant")
@@ -601,7 +920,19 @@ class BiliVideoService:
 
     def _duplicate(self, request_id, phase, fingerprint):
         row = self.store.one(
-            "SELECT * FROM bili_video_phases WHERE request_id=? AND phase=?", (request_id, phase)
+            "SELECT bili_video_phases.request_id AS request_id, bili_video_phases.phase AS phase, "
+            "bili_video_phases.request_sha256 AS request_sha256, "
+            "bili_video_phases.model_request_id AS model_request_id, "
+            "bili_video_phases.payload_sha256 AS payload_sha256, bili_video_phases.model_job_id AS "
+            "model_job_id, bili_video_phases.state AS state, bili_video_phases.evidence_json AS "
+            "evidence_json, bili_video_phases.analysis_json AS analysis_json, "
+            "bili_video_phases.response_json AS response_json, bili_video_phases.received_bytes AS "
+            "received_bytes, bili_video_phases.last_error_code AS last_error_code, "
+            "bili_video_phases.created_at AS created_at, bili_video_phases.updated_at AS "
+            "updated_at FROM bili_video_phases AS bili_video_phases WHERE "
+            "bili_video_phases.request_id = %s AND bili_video_phases.phase = "
+            "%s",
+            (request_id, phase),
         )
         if row:
             code = (
@@ -737,19 +1068,23 @@ class BiliVideoService:
                 updated_at=now,
             )
             s.execute(
-                "UPDATE bili_video_items SET state='PREPARED',target_json=?,plan_json=?,"
-                "updated_at=? WHERE request_id=?",
+                "UPDATE bili_video_items SET state = 'PREPARED', target_json = %s, plan_json = %s, "
+                "updated_at = %s WHERE request_id = %s",
                 (encode(asdict(target)), encode(asdict(plan)), now, request_id),
             )
             # The accepted resolver proof requires view, nav and playinfo reads.
-            s.execute("UPDATE reading_attempts SET observed_requests=MAX(observed_requests,3) "
-                      "WHERE request_id=?", (request_id,))
+            s.execute(
+                "UPDATE reading_attempts SET observed_requests = GREATEST(observed_requests, "
+                "3) WHERE request_id = %s",
+                (request_id,),
+            )
             return response
 
     def _selection(self, row, phase):
         previous = "prepare" if phase == "preview" else "preview"
         receipt = self.store.one(
-            "SELECT response_json,state FROM bili_video_phases WHERE request_id=? AND phase=?",
+            "SELECT response_json, state FROM bili_video_phases WHERE request_id = %s AND phase = "
+            "%s",
             (row["request_id"], previous),
         )
         if not receipt or receipt["state"] != "SETTLED":
@@ -796,8 +1131,20 @@ class BiliVideoService:
     def validate_model(self, request_id):
         binding = validate_model(self.store, self.settings, self.clock, request_id)
         row = self.store.one(
-            "SELECT b.* FROM bili_video_items b JOIN bili_video_phases p "
-            "USING(request_id) WHERE p.model_request_id=?",
+            "SELECT b.item_id AS item_id, b.request_id AS request_id, b.source_event_id AS "
+            "source_event_id, b.owner_event_id AS owner_event_id, b.job_id AS job_id, b.adapter_id "
+            "AS adapter_id, b.source_sha256 AS source_sha256, b.source_snapshot_sha256 AS "
+            "source_snapshot_sha256, b.metadata_json AS metadata_json, b.source_grant_json AS "
+            "source_grant_json, b.source_grant_sha256 AS source_grant_sha256, b.policy_sha256 AS "
+            "policy_sha256, b.window_sha256 AS window_sha256, b.binding_sha256 AS binding_sha256, "
+            "b.captured_privacy_epoch AS captured_privacy_epoch, b.deadline AS deadline, b.state "
+            "AS state, b.lease_sha256 AS lease_sha256, b.lease_token_sha256 AS lease_token_sha256, "
+            "b.lease_json AS lease_json, b.target_json AS target_json, b.plan_json AS plan_json, "
+            "b.download_json AS download_json, b.output_event_id AS output_event_id, "
+            "b.result_sha256 AS result_sha256, b.redacted AS redacted, b.last_error_code AS "
+            "last_error_code, b.created_at AS created_at, b.updated_at AS updated_at FROM "
+            "bili_video_items AS b JOIN bili_video_phases AS p ON b.request_id = p.request_id "
+            "WHERE p.model_request_id = %s",
             (request_id,),
         )
         lease = json.loads(row["lease_json"])
@@ -814,7 +1161,7 @@ class BiliVideoService:
     async def upload(self, adapter_id, request_id, body):
         """One admitted phase; retransmission cannot start another provider attempt."""
         s, now = self.store, self.clock()
-        if s.db.in_transaction:
+        if s.in_transaction:
             raise RuntimeError("BILI_VIDEO_NO_TRANSACTION_ACROSS_MODEL")
         with _tx(s):
             row = self._bound(adapter_id, request_id, body)
@@ -829,7 +1176,19 @@ class BiliVideoService:
                 if phase not in SCENARIOS:
                     raise ValueError("invalid phase")
                 prepared = s.one(
-                    "SELECT * FROM bili_video_phases WHERE request_id=? AND phase='prepare'",
+                    "SELECT bili_video_phases.request_id AS request_id, bili_video_phases.phase AS "
+                    "phase, bili_video_phases.request_sha256 AS request_sha256, "
+                    "bili_video_phases.model_request_id AS model_request_id, "
+                    "bili_video_phases.payload_sha256 AS payload_sha256, "
+                    "bili_video_phases.model_job_id AS model_job_id, bili_video_phases.state AS "
+                    "state, bili_video_phases.evidence_json AS evidence_json, "
+                    "bili_video_phases.analysis_json AS analysis_json, "
+                    "bili_video_phases.response_json AS response_json, "
+                    "bili_video_phases.received_bytes AS received_bytes, "
+                    "bili_video_phases.last_error_code AS last_error_code, "
+                    "bili_video_phases.created_at AS created_at, bili_video_phases.updated_at AS "
+                    "updated_at FROM bili_video_phases AS bili_video_phases WHERE "
+                    "bili_video_phases.request_id = %s AND bili_video_phases.phase = 'prepare'",
                     (request_id,),
                 )
                 if not prepared or body["prepare_sha256"] != prepared["request_sha256"]:
@@ -870,8 +1229,10 @@ class BiliVideoService:
                     expected_input_sha256=download["input_sha256"],
                 )
                 previous_bytes = s.one(
-                    "SELECT COALESCE(SUM(received_bytes),0) n "
-                    "FROM bili_video_phases WHERE request_id=?",
+                    (
+                        "SELECT COALESCE(SUM(received_bytes),0) n FROM "
+                        "bili_video_phases WHERE request_id=%s"
+                    ),
                     (request_id,),
                 )["n"]
                 if previous_bytes + materialized["byte_length"] > limits.max_total_output_bytes:
@@ -884,11 +1245,30 @@ class BiliVideoService:
             from companion.runtime_config import video_settings
 
             model_id = uid("model")
-            content_item = s.one("SELECT * FROM content_items WHERE item_id=?", (row["item_id"],))
-            model_job_id = _owner(s, self.settings, content_item, self.clock,
-                                   request_id=request_id)["job_id"]
-            wire = video_settings(s, self.settings, "job:" + model_job_id, SCENARIOS[phase],
-                                  clock=self.clock)
+            content_item = s.one(
+                "SELECT content_items.item_id AS item_id, "
+                "content_items.owner_event_id AS owner_event_id, content_items.kind AS kind, "
+                "content_items.slot AS slot, content_items.source_event_id AS source_event_id, "
+                "content_items.target_url AS target_url, content_items.read_request_id AS "
+                "read_request_id, content_items.state AS state, content_items.media_sha256 AS "
+                "media_sha256, content_items.fingerprint AS fingerprint, "
+                "content_items.captured_privacy_epoch AS captured_privacy_epoch, "
+                "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
+                "usage_request_id, content_items.output_event_id AS output_event_id, "
+                "content_items.lease_token AS lease_token, content_items.lease_until AS "
+                "lease_until, content_items.deadline AS deadline, content_items.error_code AS "
+                "error_code, content_items.redacted AS redacted, content_items.created_at AS "
+                "created_at, content_items.started_at AS started_at, content_items.updated_at AS "
+                "updated_at, content_items.attachment_json AS attachment_json FROM content_items "
+                "AS content_items WHERE content_items.item_id = %s",
+                (row["item_id"],),
+            )
+            model_job_id = _owner(
+                s, self.settings, content_item, self.clock, request_id=request_id
+            )["job_id"]
+            wire = video_settings(
+                s, self.settings, "job:" + model_job_id, SCENARIOS[phase], clock=self.clock
+            )
             payload_sha256 = json_sha256(model_payload(wire, messages, SCENARIOS[phase]))
             s.insert(
                 "bili_video_phases",
@@ -905,14 +1285,17 @@ class BiliVideoService:
                 updated_at=now,
             )
             s.execute(
-                "UPDATE bili_video_items SET download_json=?,updated_at=? WHERE request_id=?",
+                "UPDATE bili_video_items SET download_json = %s, updated_at = %s WHERE request_id "
+                "= %s",
                 (encode(download), now, request_id),
             )
             # Accepted media proves a download after prepare; retain the minimum
             # observed work in the original Reader meter even if its ACK is lost.
-            s.execute("UPDATE reading_attempts SET observed_requests=MAX(observed_requests,4),"
-                      "observed_bytes=MAX(observed_bytes,?) WHERE request_id=?",
-                      (download["input_bytes"], request_id))
+            s.execute(
+                "UPDATE reading_attempts SET observed_requests = GREATEST(observed_requests, "
+                "4), observed_bytes = GREATEST(observed_bytes, %s) WHERE request_id = %s",
+                (download["input_bytes"], request_id),
+            )
             s.audit(
                 "bili_video.phase_started",
                 request_id,
@@ -960,7 +1343,7 @@ class BiliVideoService:
                 raise CoreError("BILI_VIDEO_ANALYSIS_INVALID", 400)
             with _tx(s):
                 self.validate_model(model_id)
-                usage = s.one("SELECT state FROM model_usage WHERE request_id=?", (model_id,))
+                usage = s.one("SELECT state FROM model_usage WHERE request_id = %s", (model_id,))
                 if usage != {"state": "SETTLED"}:
                     raise CoreError("BILI_VIDEO_MODEL_RECONCILIATION_REQUIRED", 409)
                 following = None
@@ -971,8 +1354,14 @@ class BiliVideoService:
                     except CoreError as limit:
                         if limit.code != CHAT_HEADROOM:
                             raise
-                        s.audit("bili_video.clips_declined", request_id, request_id, self.clock(),
-                                error_code=limit.code, model_job_id=model_job_id)
+                        s.audit(
+                            "bili_video.clips_declined",
+                            request_id,
+                            request_id,
+                            self.clock(),
+                            error_code=limit.code,
+                            model_job_id=model_job_id,
+                        )
                     else:
                         following = MediaSelection(
                             target.sha256,
@@ -994,8 +1383,9 @@ class BiliVideoService:
                     )
                 )
                 s.execute(
-                    "UPDATE bili_video_phases SET state='SETTLED',analysis_json=?,response_json=?,"
-                    "updated_at=? WHERE request_id=? AND phase=? AND state='PENDING'",
+                    "UPDATE bili_video_phases SET state = 'SETTLED', analysis_json = %s, "
+                    "response_json = %s, updated_at = %s WHERE request_id = %s AND phase = %s AND "
+                    "state = 'PENDING'",
                     (analysis.model_dump_json(), encode(result), self.clock(), request_id, phase),
                 )
                 if following is None:
@@ -1012,23 +1402,53 @@ class BiliVideoService:
         except BaseException as error:
             code = error.code if isinstance(error, CoreError) else "BILI_VIDEO_MODEL_INTERRUPTED"
             with _tx(s):
-                usage = s.one("SELECT state FROM model_usage WHERE request_id=?", (model_id,))
+                usage = s.one("SELECT state FROM model_usage WHERE request_id = %s", (model_id,))
                 uncertain = usage and usage["state"] in {"RESERVED", "UNKNOWN"}
                 s.execute(
-                    "UPDATE bili_video_phases SET state=?,last_error_code=?,updated_at=? "
-                    "WHERE request_id=? AND phase=? AND state='PENDING'",
+                    "UPDATE bili_video_phases SET state = %s, last_error_code = %s, updated_at = "
+                    "%s WHERE request_id = %s AND phase = %s AND state = 'PENDING'",
                     ("UNKNOWN" if uncertain else "REJECTED", code, self.clock(), request_id, phase),
                 )
                 s.execute(
-                    "UPDATE bili_video_items SET state=?,last_error_code=?,updated_at=? "
-                    "WHERE request_id=? AND redacted=0 AND state NOT IN ('CANCELLED','COMPLETE')",
+                    "UPDATE bili_video_items SET state = %s, last_error_code = %s, updated_at = %s "
+                    "WHERE request_id = %s AND redacted = 0 AND NOT state IN ('CANCELLED', "
+                    "'COMPLETE')",
                     ("UNKNOWN" if uncertain else "FAILED", code, self.clock(), request_id),
                 )
-                if phase == "clips" and usage is None and (
-                    code == CHAT_HEADROOM or code.endswith("_BUDGET_EXHAUSTED")
+                if (
+                    phase == "clips"
+                    and usage is None
+                    and (code == CHAT_HEADROOM or code.endswith("_BUDGET_EXHAUSTED"))
                 ):
-                    current = s.one("SELECT * FROM bili_video_items WHERE request_id=?",
-                                    (request_id,))
+                    current = s.one(
+                        "SELECT bili_video_items.item_id AS item_id, "
+                        "bili_video_items.request_id AS request_id, "
+                        "bili_video_items.source_event_id AS source_event_id, "
+                        "bili_video_items.owner_event_id AS owner_event_id, "
+                        "bili_video_items.job_id AS job_id, bili_video_items.adapter_id AS "
+                        "adapter_id, bili_video_items.source_sha256 AS source_sha256, "
+                        "bili_video_items.source_snapshot_sha256 AS source_snapshot_sha256, "
+                        "bili_video_items.metadata_json AS metadata_json, "
+                        "bili_video_items.source_grant_json AS source_grant_json, "
+                        "bili_video_items.source_grant_sha256 AS source_grant_sha256, "
+                        "bili_video_items.policy_sha256 AS policy_sha256, "
+                        "bili_video_items.window_sha256 AS window_sha256, "
+                        "bili_video_items.binding_sha256 AS binding_sha256, "
+                        "bili_video_items.captured_privacy_epoch AS captured_privacy_epoch, "
+                        "bili_video_items.deadline AS deadline, bili_video_items.state AS state, "
+                        "bili_video_items.lease_sha256 AS lease_sha256, "
+                        "bili_video_items.lease_token_sha256 AS lease_token_sha256, "
+                        "bili_video_items.lease_json AS lease_json, bili_video_items.target_json "
+                        "AS target_json, bili_video_items.plan_json AS plan_json, "
+                        "bili_video_items.download_json AS download_json, "
+                        "bili_video_items.output_event_id AS output_event_id, "
+                        "bili_video_items.result_sha256 AS result_sha256, "
+                        "bili_video_items.redacted AS redacted, bili_video_items.last_error_code "
+                        "AS last_error_code, bili_video_items.created_at AS created_at, "
+                        "bili_video_items.updated_at AS updated_at FROM bili_video_items AS "
+                        "bili_video_items WHERE bili_video_items.request_id = %s",
+                        (request_id,),
+                    )
                     try:
                         _current(s, self.settings, self.clock, current, allow_terminal=True)
                     except CoreError:
@@ -1047,8 +1467,19 @@ class BiliVideoService:
 
     def _record_analysis(self, row):
         phases = self.store.rows(
-            "SELECT * FROM bili_video_phases WHERE request_id=? "
-            "AND phase<>'prepare' AND state='SETTLED' ORDER BY created_at,phase DESC",
+            "SELECT bili_video_phases.request_id AS request_id, bili_video_phases.phase AS phase, "
+            "bili_video_phases.request_sha256 AS request_sha256, "
+            "bili_video_phases.model_request_id AS model_request_id, "
+            "bili_video_phases.payload_sha256 AS payload_sha256, bili_video_phases.model_job_id AS "
+            "model_job_id, bili_video_phases.state AS state, bili_video_phases.evidence_json AS "
+            "evidence_json, bili_video_phases.analysis_json AS analysis_json, "
+            "bili_video_phases.response_json AS response_json, bili_video_phases.received_bytes AS "
+            "received_bytes, bili_video_phases.last_error_code AS last_error_code, "
+            "bili_video_phases.created_at AS created_at, bili_video_phases.updated_at AS "
+            "updated_at FROM bili_video_phases AS bili_video_phases WHERE "
+            "bili_video_phases.request_id = %s AND bili_video_phases.phase <> 'prepare' AND "
+            "bili_video_phases.state = 'SETTLED' ORDER BY bili_video_phases.created_at NULLS "
+            "FIRST, bili_video_phases.phase DESC NULLS LAST",
             (row["request_id"],),
         )
         if not phases or any(not phase["analysis_json"] for phase in phases):
@@ -1056,16 +1487,44 @@ class BiliVideoService:
         text = _analysis_text(phases)
         _, observed = _source(self.store, self.settings, row["source_event_id"], self.clock())
         current = self.store.one(
-            "SELECT * FROM bili_video_items WHERE request_id=?", (row["request_id"],)
+            "SELECT bili_video_items.item_id AS item_id, bili_video_items.request_id AS "
+            "request_id, bili_video_items.source_event_id AS source_event_id, "
+            "bili_video_items.owner_event_id AS owner_event_id, bili_video_items.job_id AS job_id, "
+            "bili_video_items.adapter_id AS adapter_id, bili_video_items.source_sha256 AS "
+            "source_sha256, bili_video_items.source_snapshot_sha256 AS source_snapshot_sha256, "
+            "bili_video_items.metadata_json AS metadata_json, bili_video_items.source_grant_json "
+            "AS source_grant_json, bili_video_items.source_grant_sha256 AS source_grant_sha256, "
+            "bili_video_items.policy_sha256 AS policy_sha256, bili_video_items.window_sha256 AS "
+            "window_sha256, bili_video_items.binding_sha256 AS binding_sha256, "
+            "bili_video_items.captured_privacy_epoch AS captured_privacy_epoch, "
+            "bili_video_items.deadline AS deadline, bili_video_items.state AS state, "
+            "bili_video_items.lease_sha256 AS lease_sha256, bili_video_items.lease_token_sha256 AS "
+            "lease_token_sha256, bili_video_items.lease_json AS lease_json, "
+            "bili_video_items.target_json AS target_json, bili_video_items.plan_json AS plan_json, "
+            "bili_video_items.download_json AS download_json, bili_video_items.output_event_id AS "
+            "output_event_id, bili_video_items.result_sha256 AS result_sha256, "
+            "bili_video_items.redacted AS redacted, bili_video_items.last_error_code AS "
+            "last_error_code, bili_video_items.created_at AS created_at, "
+            "bili_video_items.updated_at AS updated_at FROM bili_video_items AS bili_video_items "
+            "WHERE bili_video_items.request_id = %s",
+            (row["request_id"],),
         )
         download = json.loads(current["download_json"])
-        model = self.store.one("SELECT m.model FROM model_usage m JOIN bili_video_phases p "
-            "ON p.model_request_id=m.request_id WHERE p.request_id=? ORDER BY p.rowid DESC LIMIT 1",
-            (row["request_id"],))["model"]
+        model = self.store.one(
+            "SELECT m.model FROM model_usage AS m JOIN bili_video_phases AS p "
+            "ON p.model_request_id = m.request_id WHERE p.request_id = %s ORDER BY "
+            "p.record_sequence DESC NULLS LAST LIMIT 1",
+            (row["request_id"],),
+        )["model"]
         sources = {row["owner_event_id"], row["source_event_id"]}
-        sources.update(item["event_id"] for item in self.store.rows(
-            "SELECT j.event_id FROM jobs j JOIN bili_video_phases p ON p.model_job_id=j.job_id "
-            "WHERE p.request_id=?", (row["request_id"],)))
+        sources.update(
+            item["event_id"]
+            for item in self.store.rows(
+                "SELECT j.event_id FROM jobs AS j JOIN bili_video_phases AS p ON p.model_job_id = "
+                "j.job_id WHERE p.request_id = %s",
+                (row["request_id"],),
+            )
+        )
         event = ObservationEvent(
             schema_version=2,
             event_id=uid("observation"),
@@ -1102,18 +1561,18 @@ class BiliVideoService:
             "phases": _phase_evidence(phases),
         }
         stored = self.store.one(
-            "SELECT evidence_json FROM observations WHERE event_id=?", (result["event_id"],)
+            "SELECT evidence_json FROM observations WHERE event_id = %s", (result["event_id"],)
         )
         self.store.execute(
-            "UPDATE observations SET evidence_json=? WHERE event_id=?",
+            "UPDATE observations SET evidence_json = %s WHERE event_id = %s",
             (
                 encode({**json.loads(stored["evidence_json"]), "bili_video": proof}),
                 result["event_id"],
             ),
         )
         self.store.execute(
-            "UPDATE bili_video_items SET state='ANALYZED',output_event_id=?,updated_at=? "
-            "WHERE request_id=?",
+            "UPDATE bili_video_items SET state = 'ANALYZED', output_event_id = %s, updated_at = %s "
+            "WHERE request_id = %s",
             (result["event_id"], self.clock(), row["request_id"]),
         )
 
@@ -1134,7 +1593,17 @@ class BiliVideoService:
         except (ValueError, TypeError, KeyError) as error:
             raise CoreError("BILI_VIDEO_RECEIPT_INVALID", 400) from error
         phase = self.store.one(
-            "SELECT * FROM bili_video_phases WHERE request_id=? AND phase=?",
+            "SELECT bili_video_phases.request_id AS request_id, bili_video_phases.phase AS phase, "
+            "bili_video_phases.request_sha256 AS request_sha256, "
+            "bili_video_phases.model_request_id AS model_request_id, "
+            "bili_video_phases.payload_sha256 AS payload_sha256, bili_video_phases.model_job_id AS "
+            "model_job_id, bili_video_phases.state AS state, bili_video_phases.evidence_json AS "
+            "evidence_json, bili_video_phases.analysis_json AS analysis_json, "
+            "bili_video_phases.response_json AS response_json, bili_video_phases.received_bytes AS "
+            "received_bytes, bili_video_phases.last_error_code AS last_error_code, "
+            "bili_video_phases.created_at AS created_at, bili_video_phases.updated_at AS "
+            "updated_at FROM bili_video_phases AS bili_video_phases WHERE "
+            "bili_video_phases.request_id = %s AND bili_video_phases.phase = %s",
             (request_id, body["phase"]),
         )
         if not phase or phase["request_sha256"] != body["request_sha256"]:
@@ -1152,8 +1621,45 @@ class BiliVideoService:
         s = self.store
         with _tx(s):
             row = self._bound(adapter_id, request_id, body, readonly=True)
-            native = s.one("SELECT * FROM exploration_requests WHERE request_id=?", (request_id,))
-            attempt = s.one("SELECT * FROM reading_attempts WHERE request_id=?", (request_id,))
+            native = s.one(
+                "SELECT exploration_requests.request_id AS request_id, "
+                "exploration_requests.request_key AS request_key, exploration_requests.adapter_id "
+                "AS adapter_id, exploration_requests.operation AS operation, "
+                "exploration_requests.url AS url, exploration_requests.goal_step_json AS "
+                "goal_step_json, exploration_requests.state AS state, "
+                "exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
+                "AS lease_until, exploration_requests.captured_privacy_epoch AS "
+                "captured_privacy_epoch, exploration_requests.reserved_bytes AS reserved_bytes, "
+                "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 "
+                "AS result_sha256, exploration_requests.last_error_code AS last_error_code, "
+                "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
+                "started_at, exploration_requests.updated_at AS updated_at, "
+                "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests "
+                "AS reserved_requests, exploration_requests.used_requests AS used_requests, "
+                "exploration_requests.source_grant_id AS source_grant_id, "
+                "exploration_requests.source_grant_epoch AS source_grant_epoch, "
+                "exploration_requests.authority_json AS authority_json, exploration_requests.query "
+                "AS query, exploration_requests.discovery_mode AS discovery_mode FROM "
+                "exploration_requests AS exploration_requests WHERE "
+                "exploration_requests.request_id = %s",
+                (request_id,),
+            )
+            attempt = s.one(
+                "SELECT reading_attempts.request_id AS request_id, "
+                "reading_attempts.adapter_id AS adapter_id, reading_attempts.lease_token AS "
+                "lease_token, reading_attempts.lease_until AS lease_until, "
+                "reading_attempts.context_json AS context_json, "
+                "reading_attempts.allowed_hosts_json AS allowed_hosts_json, "
+                "reading_attempts.original_url_sha256 AS original_url_sha256, "
+                "reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state "
+                "AS state, reading_attempts.result_sha256 AS result_sha256, "
+                "reading_attempts.result_event_ids_json AS result_event_ids_json, "
+                "reading_attempts.observed_requests AS observed_requests, "
+                "reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS "
+                "created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS "
+                "reading_attempts WHERE reading_attempts.request_id = %s",
+                (request_id,),
+            )
             try:
                 exact(
                     body,
@@ -1201,12 +1707,14 @@ class BiliVideoService:
                     )
                 ):
                     raise ValueError("result disagrees with accounting")
-                if known and (body["used_requests"] < attempt["observed_requests"]
-                              or body["used_bytes"] < attempt["observed_bytes"]):
+                if known and (
+                    body["used_requests"] < attempt["observed_requests"]
+                    or body["used_bytes"] < attempt["observed_bytes"]
+                ):
                     raise ValueError("settled receipt cannot lower already observed usage")
                 prepared = s.one(
-                    "SELECT request_sha256 FROM bili_video_phases "
-                    "WHERE request_id=? AND phase='prepare'",
+                    "SELECT request_sha256 FROM bili_video_phases WHERE request_id = %s AND phase "
+                    "= 'prepare'",
                     (request_id,),
                 )
                 if body["prepare_sha256"] is not None and (
@@ -1219,8 +1727,8 @@ class BiliVideoService:
                 accepted = {
                     phase["request_sha256"]
                     for phase in s.rows(
-                        "SELECT request_sha256 FROM bili_video_phases WHERE request_id=? "
-                        "AND phase<>'prepare' AND state='SETTLED'",
+                        "SELECT request_sha256 FROM bili_video_phases WHERE request_id = %s AND "
+                        "phase <> 'prepare' AND state = 'SETTLED'",
                         (request_id,),
                     )
                 }
@@ -1251,21 +1759,30 @@ class BiliVideoService:
             )
             if over:
                 known, code = False, "BILI_VIDEO_READER_LIMIT_EXCEEDED"
-            state = ({"SUCCESS": "DONE", "FAILED": "FAILED", "UNKNOWN": "UNKNOWN",
-                      "CANCELLED": "CANCELLED"}[status] if valid else "CANCELLED")
+            state = (
+                {
+                    "SUCCESS": "DONE",
+                    "FAILED": "FAILED",
+                    "UNKNOWN": "UNKNOWN",
+                    "CANCELLED": "CANCELLED",
+                }[status]
+                if valid
+                else "CANCELLED"
+            )
             if not known:
                 state = "UNKNOWN"
             used_requests, used_bytes = (
                 (body["used_requests"], body["used_bytes"]) if known else (None, None)
             )
             s.execute(
-                "UPDATE exploration_requests SET state=?,used_requests=?,used_bytes=?,"
-                "result_sha256=?,last_error_code=?,updated_at=? WHERE request_id=?",
+                "UPDATE exploration_requests SET state = %s, used_requests = %s, used_bytes = %s, "
+                "result_sha256 = %s, last_error_code = %s, updated_at = %s WHERE request_id = %s",
                 (state, used_requests, used_bytes, fingerprint, code, self.clock(), request_id),
             )
             s.execute(
-                "UPDATE reading_attempts SET state=?,result_sha256=?,result_event_ids_json=?,"
-                "observed_requests=?,observed_bytes=?,updated_at=? WHERE request_id=?",
+                "UPDATE reading_attempts SET state = %s, result_sha256 = %s, result_event_ids_json "
+                "= %s, observed_requests = %s, observed_bytes = %s, updated_at = %s WHERE "
+                "request_id = %s",
                 (
                     state,
                     fingerprint,
@@ -1277,8 +1794,8 @@ class BiliVideoService:
                 ),
             )
             s.execute(
-                "UPDATE bili_video_items SET state=?,result_sha256=?,last_error_code=?,"
-                "updated_at=? WHERE request_id=?",
+                "UPDATE bili_video_items SET state = %s, result_sha256 = %s, last_error_code = %s, "
+                "updated_at = %s WHERE request_id = %s",
                 (
                     "COMPLETE" if state == "DONE" else state,
                     fingerprint,
@@ -1296,69 +1813,156 @@ class BiliVideoService:
                 observed_bytes=body["observed_bytes"],
                 observed_requests=body["observed_requests"],
             )
-            s.execute("UPDATE jobs SET next_attempt_at=?,updated_at=? WHERE state='RETRY_WAIT' "
-                      "AND job_id IN (SELECT a.job_id FROM agent_tool_calls a "
-                      "JOIN agent_conversations c USING(job_id) WHERE a.request_id=? "
-                      "AND a.state='DEFERRED' AND c.phase='WAITING')",
-                      (self.clock(), self.clock(), request_id))
+            s.execute(
+                "UPDATE jobs SET next_attempt_at = %s, updated_at = %s WHERE state = "
+                "'RETRY_WAIT' AND job_id IN (SELECT a.job_id FROM agent_tool_calls AS a JOIN "
+                "agent_conversations AS c USING (job_id) WHERE a.request_id = %s AND a.state = "
+                "'DEFERRED' AND c.phase = 'WAITING')",
+                (self.clock(), self.clock(), request_id),
+            )
             return {"accepted": True}
 
     def check_result(self, request_id, event_ids):
         """Validate the original completed visual evidence without creating media work."""
         s = self.store
-        row = s.one("SELECT * FROM bili_video_items WHERE request_id=?", (request_id,))
+        row = s.one(
+            "SELECT bili_video_items.item_id AS item_id, bili_video_items.request_id AS "
+            "request_id, bili_video_items.source_event_id AS source_event_id, "
+            "bili_video_items.owner_event_id AS owner_event_id, bili_video_items.job_id AS job_id, "
+            "bili_video_items.adapter_id AS adapter_id, bili_video_items.source_sha256 AS "
+            "source_sha256, bili_video_items.source_snapshot_sha256 AS source_snapshot_sha256, "
+            "bili_video_items.metadata_json AS metadata_json, bili_video_items.source_grant_json "
+            "AS source_grant_json, bili_video_items.source_grant_sha256 AS source_grant_sha256, "
+            "bili_video_items.policy_sha256 AS policy_sha256, bili_video_items.window_sha256 AS "
+            "window_sha256, bili_video_items.binding_sha256 AS binding_sha256, "
+            "bili_video_items.captured_privacy_epoch AS captured_privacy_epoch, "
+            "bili_video_items.deadline AS deadline, bili_video_items.state AS state, "
+            "bili_video_items.lease_sha256 AS lease_sha256, bili_video_items.lease_token_sha256 AS "
+            "lease_token_sha256, bili_video_items.lease_json AS lease_json, "
+            "bili_video_items.target_json AS target_json, bili_video_items.plan_json AS plan_json, "
+            "bili_video_items.download_json AS download_json, bili_video_items.output_event_id AS "
+            "output_event_id, bili_video_items.result_sha256 AS result_sha256, "
+            "bili_video_items.redacted AS redacted, bili_video_items.last_error_code AS "
+            "last_error_code, bili_video_items.created_at AS created_at, "
+            "bili_video_items.updated_at AS updated_at FROM bili_video_items AS bili_video_items "
+            "WHERE bili_video_items.request_id = %s",
+            (request_id,),
+        )
         if row is None:
             return
         _policy(s, self.settings, self.clock)
         source, _ = _source(s, self.settings, row["source_event_id"], self.clock())
         context = self.context(row["item_id"])
-        output = s.one("SELECT e.source,e.event_type,e.body_json,o.* FROM events e "
-                       "JOIN observations o USING(event_id) WHERE e.event_id=?",
-                       (row["output_event_id"],))
-        phases = s.rows("SELECT * FROM bili_video_phases WHERE request_id=? "
-                        "AND phase<>'prepare' AND state='SETTLED' ORDER BY created_at,phase DESC",
-                        (request_id,))
+        output = s.one(
+            "SELECT e.source AS source, e.event_type AS event_type, e.body_json AS "
+            "body_json, o.event_id AS event_id, o.adapter_id AS adapter_id, o.source_kind AS "
+            "source_kind, o.result_status AS result_status, o.source_sha256 AS source_sha256, "
+            "o.canonical_url AS canonical_url, o.device_id AS device_id, o.session_id AS "
+            "session_id, o.consent_id AS consent_id, o.evidence_json AS evidence_json, "
+            "o.captured_privacy_epoch AS captured_privacy_epoch, o.redacted AS redacted, "
+            "o.created_at AS created_at FROM events AS e JOIN observations AS o ON e.event_id = "
+            "o.event_id WHERE e.event_id = %s",
+            (row["output_event_id"],),
+        )
+        phases = s.rows(
+            "SELECT bili_video_phases.request_id AS request_id, "
+            "bili_video_phases.phase AS phase, bili_video_phases.request_sha256 AS request_sha256, "
+            "bili_video_phases.model_request_id AS model_request_id, "
+            "bili_video_phases.payload_sha256 AS payload_sha256, bili_video_phases.model_job_id AS "
+            "model_job_id, bili_video_phases.state AS state, bili_video_phases.evidence_json AS "
+            "evidence_json, bili_video_phases.analysis_json AS analysis_json, "
+            "bili_video_phases.response_json AS response_json, bili_video_phases.received_bytes AS "
+            "received_bytes, bili_video_phases.last_error_code AS last_error_code, "
+            "bili_video_phases.created_at AS created_at, bili_video_phases.updated_at AS "
+            "updated_at FROM bili_video_phases AS bili_video_phases WHERE "
+            "bili_video_phases.request_id = %s AND bili_video_phases.phase <> 'prepare' AND "
+            "bili_video_phases.state = 'SETTLED' ORDER BY bili_video_phases.created_at NULLS "
+            "FIRST, bili_video_phases.phase DESC NULLS LAST",
+            (request_id,),
+        )
         try:
-            if (row["redacted"] or row["state"] != "COMPLETE" or not context
+            if (
+                row["redacted"]
+                or row["state"] != "COMPLETE"
+                or not context
                 or context.get("event_id") != row["output_event_id"]
                 or event_ids != [row["output_event_id"]]
                 or json_sha256(source) != row["source_snapshot_sha256"]
                 or source["source_sha256"] != row["source_sha256"]
-                or not output or output["source"] != "observation.bilibili"
+                or not output
+                or output["source"] != "observation.bilibili"
                 or output["event_type"] != "content.observed"
                 or output["adapter_id"] != row["adapter_id"]
-                or output["result_status"] != "FETCHED" or not 1 <= len(phases) <= 2
-                or s.one("SELECT 1 FROM bili_video_phases WHERE request_id=? "
-                         "AND state IN ('PENDING','UNKNOWN')", (request_id,))):
+                or output["result_status"] != "FETCHED"
+                or not 1 <= len(phases) <= 2
+                or s.one(
+                    "SELECT 1 FROM bili_video_phases WHERE request_id = %s AND state IN "
+                    "('PENDING', 'UNKNOWN')",
+                    (request_id,),
+                )
+            ):
                 raise ValueError("visual result identity changed")
             proof = json.loads(output["evidence_json"])["bili_video"]
             text = json.loads(output["body_json"])["text"]
-            if (text != _analysis_text(phases)
+            if (
+                text != _analysis_text(phases)
                 or hashlib.sha256(text.encode()).hexdigest() != output["source_sha256"]
                 or proof["source_event_id"] != row["source_event_id"]
                 or proof["source_sha256"] != row["source_sha256"]
-                or proof["partial"] is not True or proof["visual_observed"] is not True
-                or proof["audio_analyzed"] is not False or proof["complete_video"] is not False
-                or proof["phases"] != _phase_evidence(phases)):
+                or proof["partial"] is not True
+                or proof["visual_observed"] is not True
+                or proof["audio_analyzed"] is not False
+                or proof["complete_video"] is not False
+                or proof["phases"] != _phase_evidence(phases)
+            ):
                 raise ValueError("visual result evidence changed")
             for phase in phases:
-                paid = s.one("SELECT m.state,m.job_id,m.scenario,a.payload_sha256,"
-                             "a.logical_request_id FROM model_usage m "
-                             "JOIN model_admissions a USING(request_id) WHERE m.request_id=?",
-                             (phase["model_request_id"],))
-                if (phase["state"] != "SETTLED" or not paid or paid["state"] != "SETTLED"
+                paid = s.one(
+                    "SELECT m.state, m.job_id, m.scenario, a.payload_sha256, "
+                    "a.logical_request_id FROM model_usage AS m JOIN model_admissions AS a USING "
+                    "(request_id) WHERE m.request_id = %s",
+                    (phase["model_request_id"],),
+                )
+                if (
+                    phase["state"] != "SETTLED"
+                    or not paid
+                    or paid["state"] != "SETTLED"
                     or paid["job_id"] != phase["model_job_id"]
                     or paid["logical_request_id"] != phase["model_job_id"]
                     or paid["scenario"] != SCENARIOS[phase["phase"]]
                     or paid["payload_sha256"] != phase["payload_sha256"]
                     or json.loads(phase["response_json"])["receipt_sha256"]
-                    != phase["request_sha256"]):
+                    != phase["request_sha256"]
+                ):
                     raise ValueError("visual paid receipt changed")
         except (KeyError, ValueError, TypeError):
             raise CoreError("BILI_VIDEO_RESULT_CHANGED", 409) from None
 
     def context(self, item_id):
-        row = self.store.one("SELECT * FROM bili_video_items WHERE item_id=?", (item_id,))
+        row = self.store.one(
+            "SELECT bili_video_items.item_id AS item_id, "
+            "bili_video_items.request_id AS request_id, bili_video_items.source_event_id AS "
+            "source_event_id, bili_video_items.owner_event_id AS owner_event_id, "
+            "bili_video_items.job_id AS job_id, bili_video_items.adapter_id AS adapter_id, "
+            "bili_video_items.source_sha256 AS source_sha256, "
+            "bili_video_items.source_snapshot_sha256 AS source_snapshot_sha256, "
+            "bili_video_items.metadata_json AS metadata_json, bili_video_items.source_grant_json "
+            "AS source_grant_json, bili_video_items.source_grant_sha256 AS source_grant_sha256, "
+            "bili_video_items.policy_sha256 AS policy_sha256, bili_video_items.window_sha256 AS "
+            "window_sha256, bili_video_items.binding_sha256 AS binding_sha256, "
+            "bili_video_items.captured_privacy_epoch AS captured_privacy_epoch, "
+            "bili_video_items.deadline AS deadline, bili_video_items.state AS state, "
+            "bili_video_items.lease_sha256 AS lease_sha256, bili_video_items.lease_token_sha256 AS "
+            "lease_token_sha256, bili_video_items.lease_json AS lease_json, "
+            "bili_video_items.target_json AS target_json, bili_video_items.plan_json AS plan_json, "
+            "bili_video_items.download_json AS download_json, bili_video_items.output_event_id AS "
+            "output_event_id, bili_video_items.result_sha256 AS result_sha256, "
+            "bili_video_items.redacted AS redacted, bili_video_items.last_error_code AS "
+            "last_error_code, bili_video_items.created_at AS created_at, "
+            "bili_video_items.updated_at AS updated_at FROM bili_video_items AS bili_video_items "
+            "WHERE bili_video_items.item_id = %s",
+            (item_id,),
+        )
         if not row or row["redacted"]:
             return None
         result = {
@@ -1371,9 +1975,8 @@ class BiliVideoService:
         }
         if row["output_event_id"]:
             source = self.store.one(
-                "SELECT e.body_json,o.evidence_json FROM events e "
-                "JOIN observations o USING(event_id) WHERE e.event_id=? "
-                "AND e.redacted=0 AND o.redacted=0",
+                "SELECT e.body_json, o.evidence_json FROM events AS e JOIN observations AS o USING "
+                "(event_id) WHERE e.event_id = %s AND e.redacted = 0 AND o.redacted = 0",
                 (row["output_event_id"],),
             )
             if source and not expired_sources(
@@ -1391,74 +1994,88 @@ class BiliVideoService:
 
 
 def erase_bili_video(store, event_ids):
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("BILI_VIDEO_TRANSACTION_REQUIRED")
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_items'"):
+    if not store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE "
+        "relnamespace=current_schema()::regnamespace AND relname='bili_video_items' AND relkind IN "
+        "('r','p')"
+    ):
         return
     roots = encode(sorted(event_ids))
     rows = store.rows(
-        "SELECT request_id FROM bili_video_items WHERE source_event_id IN "
-        "(SELECT value FROM json_each(?)) OR owner_event_id IN "
-        "(SELECT value FROM json_each(?)) OR output_event_id IN "
-        "(SELECT value FROM json_each(?)) OR job_id IN "
-        "(SELECT job_id FROM jobs WHERE event_id IN (SELECT value FROM json_each(?))) "
-        "OR EXISTS (SELECT 1 FROM bili_video_phases p JOIN jobs j ON j.job_id=p.model_job_id "
-        "WHERE p.request_id=bili_video_items.request_id "
-        "AND j.event_id IN (SELECT value FROM json_each(?)))",
+        "SELECT request_id FROM bili_video_items WHERE source_event_id IN (SELECT value COLLATE "
+        '"C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) OR owner_event_id '
+        'IN (SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+        'parsed(value)) OR output_event_id IN (SELECT value COLLATE "C" FROM '
+        "JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) OR job_id IN (SELECT job_id "
+        'FROM jobs WHERE event_id IN (SELECT value COLLATE "C" FROM '
+        "JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value))) OR EXISTS(SELECT 1 FROM "
+        "bili_video_phases AS p JOIN jobs AS j ON j.job_id = p.model_job_id WHERE p.request_id = "
+        'bili_video_items.request_id AND j.event_id IN (SELECT value COLLATE "C" FROM '
+        "JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)))",
         (roots, roots, roots, roots, roots),
     )
     for row in rows:
         request_id = row["request_id"]
         store.execute(
-            "UPDATE bili_video_items SET redacted=1,state='CANCELLED',metadata_json='{}',"
-            "source_grant_json='null',lease_json='{}',target_json='{}',plan_json='{}',"
-            "download_json='{}',last_error_code='BILI_VIDEO_SOURCE_ERASED' WHERE request_id=?",
+            "UPDATE bili_video_items SET redacted = 1, state = 'CANCELLED', metadata_json = '{}', "
+            "source_grant_json = 'null', lease_json = '{}', target_json = '{}', plan_json = '{}', "
+            "download_json = '{}', last_error_code = 'BILI_VIDEO_SOURCE_ERASED' WHERE request_id = "
+            "%s",
             (request_id,),
         )
         store.execute(
-            "UPDATE bili_video_phases SET evidence_json='{}',analysis_json='{}',"
-            "response_json='{}',state=CASE WHEN state='PENDING' THEN 'UNKNOWN' ELSE state END "
-            "WHERE request_id=?",
+            "UPDATE bili_video_phases SET evidence_json = '{}', analysis_json = '{}', "
+            "response_json = '{}', state = CASE WHEN state = 'PENDING' THEN 'UNKNOWN' ELSE state "
+            "END WHERE request_id = %s",
             (request_id,),
         )
         store.execute(
-            "UPDATE exploration_requests SET state=CASE WHEN state='RUNNING' THEN 'UNKNOWN' "
-            "WHEN state='QUEUED' THEN 'CANCELLED' ELSE state END,url='',redacted=1,"
-            "last_error_code='BILI_VIDEO_SOURCE_ERASED' WHERE request_id=?",
+            "UPDATE exploration_requests SET state = CASE WHEN state = 'RUNNING' THEN 'UNKNOWN' "
+            "WHEN state = 'QUEUED' THEN 'CANCELLED' ELSE state END, url = '', redacted = 1, "
+            "last_error_code = 'BILI_VIDEO_SOURCE_ERASED' WHERE request_id = %s",
             (request_id,),
         )
         store.execute(
-            "UPDATE reading_attempts SET state=CASE WHEN state='RUNNING' THEN 'UNKNOWN' "
-            "ELSE state END,context_json='{}',source_grant_json='null',"
-            "result_event_ids_json='[]' WHERE request_id=?",
+            "UPDATE reading_attempts SET state = CASE WHEN state = 'RUNNING' THEN 'UNKNOWN' ELSE "
+            "state END, context_json = '{}', source_grant_json = 'null', result_event_ids_json = "
+            "'[]' WHERE request_id = %s",
             (request_id,),
         )
 
 
 def restore_bili_video(store, now):
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("BILI_VIDEO_TRANSACTION_REQUIRED")
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (RESTORE_REQUIRED, "1"))
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_items'"):
+    store.execute(
+        "INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO "
+        "UPDATE SET value = excluded.value, record_sequence = DEFAULT",
+        (RESTORE_REQUIRED, "1"),
+    )
+    if not store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE "
+        "relnamespace=current_schema()::regnamespace AND relname='bili_video_items' AND relkind IN "
+        "('r','p')"
+    ):
         return
     store.execute(
-        "UPDATE bili_video_items SET state=CASE WHEN lease_sha256<>'' THEN 'UNKNOWN' "
-        "ELSE 'CANCELLED' END,last_error_code='BILI_VIDEO_RESTORE_REQUIRED',updated_at=? "
-        "WHERE state IN ('DECLARED','PREPARED','ANALYZED')",
+        "UPDATE bili_video_items SET state = CASE WHEN lease_sha256 <> '' THEN 'UNKNOWN' ELSE "
+        "'CANCELLED' END, last_error_code = 'BILI_VIDEO_RESTORE_REQUIRED', updated_at = %s WHERE "
+        "state IN ('DECLARED', 'PREPARED', 'ANALYZED')",
         (now,),
     )
     store.execute(
-        "UPDATE bili_video_phases SET state='UNKNOWN',"
-        "last_error_code='BILI_VIDEO_RESTORE_REQUIRED',updated_at=? WHERE state='PENDING'",
+        "UPDATE bili_video_phases SET state = 'UNKNOWN', last_error_code = "
+        "'BILI_VIDEO_RESTORE_REQUIRED', updated_at = %s WHERE state = 'PENDING'",
         (now,),
     )
     store.execute(
-        "UPDATE exploration_requests SET state=CASE WHEN state='RUNNING' THEN 'UNKNOWN' "
-        "ELSE 'CANCELLED' END,last_error_code='BILI_VIDEO_RESTORE_REQUIRED' "
-        "WHERE request_id IN (SELECT request_id FROM bili_video_items) "
-        "AND state IN ('QUEUED','RUNNING')"
+        "UPDATE exploration_requests SET state = CASE WHEN state = 'RUNNING' THEN 'UNKNOWN' ELSE "
+        "'CANCELLED' END, last_error_code = 'BILI_VIDEO_RESTORE_REQUIRED' WHERE request_id IN "
+        "(SELECT request_id FROM bili_video_items) AND state IN ('QUEUED', 'RUNNING')"
     )
     store.execute(
-        "UPDATE reading_attempts SET state='UNKNOWN' WHERE state='RUNNING' "
-        "AND request_id IN (SELECT request_id FROM bili_video_items)"
+        "UPDATE reading_attempts SET state = 'UNKNOWN' WHERE state = 'RUNNING' AND request_id IN "
+        "(SELECT request_id FROM bili_video_items)"
     )

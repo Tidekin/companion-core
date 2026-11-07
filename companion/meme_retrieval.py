@@ -26,10 +26,15 @@ SHA = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 OFFER = "meme_offer:"
 # One unconsumed inventory item can no longer back a new offer. The current chat's own
 # authority, source and revision are checked separately and still stop the turn.
-INVENTORY_UNAVAILABLE = frozenset({
-    "MEME_ASSET_UNAVAILABLE", "MEME_CAPTION_UNAVAILABLE", "MEME_SOURCE_POLICY_CHANGED",
-    "MEME_ASSET_SOURCE_CHANGED", "MEME_CAPTION_UNSETTLED",
-})
+INVENTORY_UNAVAILABLE = frozenset(
+    {
+        "MEME_ASSET_UNAVAILABLE",
+        "MEME_CAPTION_UNAVAILABLE",
+        "MEME_SOURCE_POLICY_CHANGED",
+        "MEME_ASSET_SOURCE_CHANGED",
+        "MEME_CAPTION_UNSETTLED",
+    }
+)
 
 
 def core_owned(settings):
@@ -85,12 +90,18 @@ def blocked(store, settings, sha, now, *, exclude=None):
     """Physical image identity, on the single authoritative SQLite transaction."""
     return bool(
         store.one(
-            "SELECT 1 FROM outbox o JOIN conversations c USING(conversation_id) "
-            "WHERE c.scope='private' AND c.owner_actor_id='owner' "
-            "AND json_extract(o.content_json,'$.image.candidate_id')=? "
-            "AND (? IS NULL OR o.message_id<>?) AND "
-            "(o.state IN ('PENDING','RETRY_WAIT','LEASED','SENDING','DELIVERY_UNCERTAIN') "
-            "OR (o.state='SENT' AND o.sent_at>=?)) LIMIT 1",
+            (
+                (
+                    'SELECT 1 FROM outbox o JOIN conversations c '
+                    "USING(conversation_id) WHERE c.scope='private' AND "
+                    "c.owner_actor_id='owner' AND (CASE WHEN o.content_json "
+                    "IS JSON THEN (o.content_json::json#>>'{image,"
+                    "candidate_id}') END)=%s AND (%s::text IS NULL OR "
+                    "o.message_id<>%s) AND (o.state IN ('PENDING',"
+                    "'RETRY_WAIT','LEASED','SENDING','DELIVERY_UNCERTAIN') "
+                    "OR (o.state='SENT' AND o.sent_at>=%s)) LIMIT 1"
+                )
+            ),
             (sha, exclude, exclude, after(now, -getattr(settings, "meme_cooldown_seconds", 1800))),
         )
     )
@@ -113,7 +124,7 @@ def diverse(ranked, categories):
     for sha in ranked:
         (rest if categories[sha] in seen else first).append(sha)
         seen.add(categories[sha])
-    chosen = set((first + rest)[:index.AMBIENT_LIMIT])
+    chosen = set((first + rest)[: index.AMBIENT_LIMIT])
     return [sha for sha in ranked if sha in chosen]
 
 
@@ -177,7 +188,7 @@ class MemeRetrieval:
         # Validate the original chat grant and all of its bound policies first.
         # A changed/expired grant or source is never an optional capability miss.
         view, _, _ = self._chat(job, executing=executing)
-        if self.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)):
+        if self.store.one("SELECT 1 FROM runtime_meta WHERE key = %s", (OFFER + job["event_id"],)):
             return False  # Even null/empty/corrupt frozen records retain their contract.
         return (
             not self.settings.meme_semantics_enabled
@@ -210,7 +221,7 @@ class MemeRetrieval:
     def _capture(self, event_id):
         """An inventory source whose original receipt is gone or invalid is unavailable."""
         saved = self.store.one(
-            "SELECT value FROM runtime_meta WHERE key=?", ("owner_input:" + event_id,)
+            "SELECT value FROM runtime_meta WHERE key = %s", ("owner_input:" + event_id,)
         )
         if not saved:
             raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
@@ -229,9 +240,20 @@ class MemeRetrieval:
         from companion import meme_service
 
         s = self.store
-        asset = s.one("SELECT * FROM meme_assets WHERE asset_id=?", (asset_id,))
-        if (not asset or asset["state"] != "STAGED"
-            or asset["asset_sha256"] in self.settings.meme_excluded_sha256):
+        asset = s.one(
+            "SELECT meme_assets.asset_id AS asset_id, meme_assets.custody_sha256 AS "
+            "custody_sha256, meme_assets.asset_sha256 AS asset_sha256, meme_assets.source_sha256 "
+            "AS source_sha256, meme_assets.record_sha256 AS record_sha256, meme_assets.state AS "
+            "state, meme_assets.mime AS mime, meme_assets.data AS data, meme_assets.metadata_json "
+            "AS metadata_json FROM meme_assets AS meme_assets WHERE meme_assets.asset_id = "
+            "%s",
+            (asset_id,),
+        )
+        if (
+            not asset
+            or asset["state"] != "STAGED"
+            or asset["asset_sha256"] in self.settings.meme_excluded_sha256
+        ):
             raise CoreError("MEME_ASSET_UNAVAILABLE", 409)
         meta = meme_assets.metadata(json.loads(asset["metadata_json"]))
         item = {
@@ -242,9 +264,12 @@ class MemeRetrieval:
         }
         image = media(self.settings, asset["data"]) if decode else None
         if (
-            decode and (image is None
-                        or image.sha256 != asset["asset_sha256"]
-                        or image.mime_type != asset["mime"])
+            decode
+            and (
+                image is None
+                or image.sha256 != asset["asset_sha256"]
+                or image.mime_type != asset["mime"]
+            )
             or meme_assets.source_digest(meta) != asset["source_sha256"]
             or digest(
                 {
@@ -256,7 +281,7 @@ class MemeRetrieval:
             != asset["record_sha256"]
         ):
             raise CoreError("MEME_ASSET_UNAVAILABLE", 409)
-        original_job = s.one("SELECT event_id FROM jobs WHERE job_id=?", (caption_job_id,))
+        original_job = s.one("SELECT event_id FROM jobs WHERE job_id = %s", (caption_job_id,))
         if original_job and not reply_revision.source_active(s, original_job["event_id"]):
             raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
         caption = self.service._usable(caption_job_id)
@@ -288,7 +313,13 @@ class MemeRetrieval:
             raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403) from error
         recorded = {
             (r["event_id"], r["caption_job_id"])
-            for r in s.rows("SELECT * FROM meme_asset_sources WHERE asset_id=?", (asset_id,))
+            for r in s.rows(
+                "SELECT meme_asset_sources.asset_id AS asset_id, "
+                "meme_asset_sources.event_id AS event_id, meme_asset_sources.caption_job_id AS "
+                "caption_job_id FROM meme_asset_sources AS meme_asset_sources WHERE "
+                "meme_asset_sources.asset_id = %s",
+                (asset_id,),
+            )
         }
         if withdrawn or not sources or not set(sources) <= recorded:
             raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
@@ -314,11 +345,36 @@ class MemeRetrieval:
             lineage.append(row)
             row = self.service._usable(row["reuse_job_id"]) if row["reuse_job_id"] else None
         root = lineage[-1]
-        usage = s.one("SELECT * FROM model_usage WHERE request_id=?", (root["usage_request_id"],))
-        admission = s.one(
-            "SELECT * FROM model_admissions WHERE request_id=?", (root["usage_request_id"],)
+        usage = s.one(
+            "SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS "
+            "request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, "
+            "model_usage.provider AS provider, model_usage.model AS model, "
+            "model_usage.input_tokens AS input_tokens, model_usage.cached_input_tokens AS "
+            "cached_input_tokens, model_usage.output_tokens AS output_tokens, "
+            "model_usage.billed_micro_usd AS billed_micro_usd, model_usage.is_estimate AS "
+            "is_estimate, model_usage.occurred_at AS occurred_at, model_usage.state AS state, "
+            "model_usage.pricing_known AS pricing_known FROM model_usage AS model_usage WHERE "
+            "model_usage.request_id = %s",
+            (root["usage_request_id"],),
         )
-        root_job = s.one("SELECT authority_json FROM jobs WHERE job_id=?", (root["job_id"],))
+        admission = s.one(
+            "SELECT model_admissions.request_id AS request_id, model_admissions.logical_request_id "
+            "AS logical_request_id, model_admissions.attempt_id AS attempt_id, "
+            "model_admissions.attempt_number AS attempt_number, model_admissions.window_id AS "
+            "window_id, model_admissions.contract_sha256 AS contract_sha256, "
+            "model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json AS "
+            "snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, "
+            "model_admissions.input_bound AS input_bound, model_admissions.output_bound AS "
+            "output_bound, model_admissions.lease_token AS lease_token, "
+            "model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS "
+            "io_started_at, model_admissions.journal_path AS journal_path, "
+            "model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS "
+            "measurement_json, model_admissions.authority_json AS authority_json FROM "
+            "model_admissions AS model_admissions WHERE model_admissions.request_id = "
+            "%s",
+            (root["usage_request_id"],),
+        )
+        root_job = s.one("SELECT authority_json FROM jobs WHERE job_id = %s", (root["job_id"],))
         if (
             not usage
             or usage["state"] != "SETTLED"
@@ -357,27 +413,31 @@ class MemeRetrieval:
 
         s, deadline = self.store, time.monotonic() + 2
         # Never suspend while holding the shared Core connection's transaction.
-        if s.db.in_transaction:
+        if s.in_transaction:
             raise CoreError("MEME_INDEX_TRANSACTION_ACTIVE", 500)
         facts, vectors, scanned, cache_hits = {}, {}, 0, 0
         fallback = None
         skipped = {"cooldown": 0, "unavailable": 0, "context": 0}
         with s.transaction():
             view, event, body = self._scope(job, executing=True)
-            if s.one("SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)):
+            if s.one("SELECT 1 FROM runtime_meta WHERE key = %s", (OFFER + job["event_id"],)):
                 self.check(job)
                 return
             query = self._query(job, body)
-            snapshot = (view.policy.capability_policies["meme"], epoch(s), event["reply_revision"],
-                        digest(query))
+            snapshot = (
+                view.policy.capability_policies["meme"],
+                epoch(s),
+                event["reply_revision"],
+                digest(query),
+            )
             ambient = query["intent"] == "ambient"
             seen = set()
             if query["intent"]:
                 rows = s.rows(
-                    "SELECT a.asset_id,a.asset_sha256,src.caption_job_id FROM meme_assets a "
-                    "JOIN meme_asset_sources src USING(asset_id) WHERE a.state='STAGED' "
-                    "GROUP BY a.asset_id,src.caption_job_id "
-                    "ORDER BY a.asset_id,src.caption_job_id LIMIT 4096"
+                    "SELECT a.asset_id, a.asset_sha256, src.caption_job_id FROM meme_assets AS a "
+                    "JOIN meme_asset_sources AS src USING (asset_id) WHERE a.state = 'STAGED' "
+                    "GROUP BY a.asset_id, src.caption_job_id ORDER BY a.asset_id NULLS FIRST, "
+                    "src.caption_job_id NULLS FIRST LIMIT 4096"
                 )
                 for row in rows:
                     if time.monotonic() >= deadline:
@@ -409,18 +469,24 @@ class MemeRetrieval:
                         continue
                     identity = index.CacheIdentity.source(binding)
                     vector = index.cached(s, identity)
-                    facts[sha] = (binding, caption_text(caption),
-                                  _candidate(sha, caption, meta),
-                                  meme_policy.lexical_score(caption, query), identity)
+                    facts[sha] = (
+                        binding,
+                        caption_text(caption),
+                        _candidate(sha, caption, meta),
+                        meme_policy.lexical_score(caption, query),
+                        identity,
+                    )
                     if vector is not None:
                         vectors[sha] = vector
                         cache_hits += 1
-        cold = [sha for sha in facts if sha not in vectors][:index.BATCH]
+        cold = [sha for sha in facts if sha not in vectors][: index.BATCH]
         query_vector, computed = None, ()
         if facts:
             query_vector, computed, inferred = await self.service.index.infer(
-                self.settings.embedding_cache_dir, query["text"],
-                tuple(facts[sha][1] for sha in cold), deadline
+                self.settings.embedding_cache_dir,
+                query["text"],
+                tuple(facts[sha][1] for sha in cold),
+                deadline,
             )
             fallback = None if query_vector is not None else fallback or inferred
             if query_vector is not None:
@@ -434,13 +500,19 @@ class MemeRetrieval:
                 continue
             proofs[sha] = index.RankedCandidate(
                 version=1,
-                asset_id=binding.asset_id, caption_job_id=binding.caption_job_id,
+                asset_id=binding.asset_id,
+                caption_job_id=binding.caption_job_id,
                 caption_sha256=binding.caption_sha256,
                 cache_key=identity.key if vector is not None else None,
                 basis="SEMANTIC" if vector is not None else "LEXICAL",
-                reason="VECTOR_AVAILABLE" if vector is not None else
-                       "BATCH_LIMIT" if query_vector is not None else fallback,
-                lexical_score=lexical, cosine=similarity, score=score,
+                reason="VECTOR_AVAILABLE"
+                if vector is not None
+                else "BATCH_LIMIT"
+                if query_vector is not None
+                else fallback,
+                lexical_score=lexical,
+                cosine=similarity,
+                score=score,
                 vector_sha256=index.vector_sha(vector) if vector is not None else None,
                 vector_base64=index.vector_text(vector) if vector is not None else None,
             )
@@ -450,20 +522,29 @@ class MemeRetrieval:
         ranked = ranked[:8]
         unindexed = len(facts) - len(vectors) if query_vector is not None else len(facts)
         header = index.RankingHeader(
-            profile=index.PROFILE, profile_sha256=digest(index.PROFILE),
+            profile=index.PROFILE,
+            profile_sha256=digest(index.PROFILE),
             query_sha256=digest(query),
             mode="LEXICAL" if query_vector is None else "HYBRID" if unindexed else "SEMANTIC",
             query_vector_sha256=index.vector_sha(query_vector) if query_vector else None,
-            query_fallback_reason=fallback, scanned=scanned, eligible=len(facts),
-            cache_hits=cache_hits, cold_batch=len(cold), unindexed=unindexed,
+            query_fallback_reason=fallback,
+            scanned=scanned,
+            eligible=len(facts),
+            cache_hits=cache_hits,
+            cold_batch=len(cold),
+            unindexed=unindexed,
         )
         with s.transaction():
             current, event, body = self._scope(job, executing=True)
-            if s.one("SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)):
+            if s.one("SELECT 1 FROM runtime_meta WHERE key = %s", (OFFER + job["event_id"],)):
                 self.check(job)
                 return  # A competing first offer is never overwritten.
-            if snapshot != (current.policy.capability_policies["meme"], epoch(s),
-                            event["reply_revision"], digest(self._query(job, body))):
+            if snapshot != (
+                current.policy.capability_policies["meme"],
+                epoch(s),
+                event["reply_revision"],
+                digest(self._query(job, body)),
+            ):
                 raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
             fresh = cold if computed else []
             resolved, dropped = {}, 0
@@ -478,9 +559,12 @@ class MemeRetrieval:
                     dropped += sha in ranked
                     continue
                 # Not offered yet: a changed or cooling item is left out, never substituted.
-                if (binding != facts[sha][0] or caption_text(caption) != facts[sha][1]
+                if (
+                    binding != facts[sha][0]
+                    or caption_text(caption) != facts[sha][1]
                     or _candidate(sha, caption, meta) != facts[sha][2]
-                    or blocked(s, self.settings, sha, self.clock())):
+                    or blocked(s, self.settings, sha, self.clock())
+                ):
                     dropped += sha in ranked
                     continue
                 if sha in fresh:
@@ -488,7 +572,8 @@ class MemeRetrieval:
                 resolved[sha] = binding, roots
             selected = [sha for sha in ranked if sha in resolved]
             ranking = index.Ranking(
-                version=1, header=header,
+                version=1,
+                header=header,
                 query_vector_base64=index.vector_text(query_vector) if query_vector else None,
                 selected={sha: proofs[sha] for sha in selected},
             ).model_dump(mode="json")
@@ -501,21 +586,34 @@ class MemeRetrieval:
                     ranking_sha256=index.ranking_sha(ranking["header"], ranking["selected"][sha]),
                 ).model_dump(mode="json")
                 for event_id, _ in roots:
-                    s.execute("INSERT OR IGNORE INTO job_sources(job_id,event_id) VALUES (?,?)",
-                              (job["job_id"], event_id))
+                    s.execute(
+                        "INSERT INTO job_sources (job_id, event_id) VALUES (%s, %s) ON "
+                        "CONFLICT DO NOTHING",
+                        (job["job_id"], event_id),
+                    )
             # Own chat root is also explicit, including empty/null offers.
-            s.execute("INSERT OR IGNORE INTO job_sources(job_id,event_id) VALUES (?,?)",
-                      (job["job_id"], job["event_id"]))
+            s.execute(
+                "INSERT INTO job_sources (job_id, event_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (job["job_id"], job["event_id"]),
+            )
             value = {
-                "job_id": job["job_id"], "event_id": job["event_id"],
-                "reply_revision": event["reply_revision"], "query_sha256": digest(query),
+                "job_id": job["job_id"],
+                "event_id": job["event_id"],
+                "reply_revision": event["reply_revision"],
+                "query_sha256": digest(query),
                 "offer": MemeOffer(
-                    offer_key="meme:" + job["event_id"], intent=query["intent"],
+                    offer_key="meme:" + job["event_id"],
+                    intent=query["intent"],
                     candidates=[facts[sha][2] for sha in selected],
-                ).model_dump(mode="json") if query["intent"] else None,
-                "catalog_owner": "core", "binding_version": 2,
-                "meme_policy_sha256": snapshot[0], "privacy_epoch": snapshot[1],
-                "catalog_bindings": bindings, "ranking": ranking,
+                ).model_dump(mode="json")
+                if query["intent"]
+                else None,
+                "catalog_owner": "core",
+                "binding_version": 2,
+                "meme_policy_sha256": snapshot[0],
+                "privacy_epoch": snapshot[1],
+                "catalog_bindings": bindings,
+                "ranking": ranking,
             }
             self._bounded(value)
             s.insert("runtime_meta", key=OFFER + job["event_id"], value=encode(value))
@@ -523,24 +621,46 @@ class MemeRetrieval:
             if not query["intent"] or selected or ambient:
                 return  # Optional ambient misses are routine, never a replenish signal.
             reason = empty_reason(seen, facts, proofs, skipped, fallback, dropped)
-            s.audit("meme.offer_empty", job["job_id"], event["trace_id"], self.clock(),
-                    reason=reason, scanned=scanned, eligible=len(facts), **skipped)
-            if (reason in REPLENISH
+            s.audit(
+                "meme.offer_empty",
+                job["job_id"],
+                event["trace_id"],
+                self.clock(),
+                reason=reason,
+                scanned=scanned,
+                eligible=len(facts),
+                **skipped,
+            )
+            if (
+                reason in REPLENISH
                 and self.settings.meme_discovery_enabled
                 and (self.settings.meme_trusted_sources or self.settings.meme_gallery_source)
-                and self.settings.paid_model and self.settings.paid_model.meme_input
-                and not s.one("SELECT 1 FROM jobs WHERE kind='meme_discovery' "
-                              "AND state IN ('QUEUED','RUNNING','RETRY_WAIT') LIMIT 1")):
-                meme_service.submit_native(s, self.settings, self.clock,
-                    meme_service.DiscoveryRequest(event_id=job["event_id"],
-                        reply_revision=event["reply_revision"], intent=query["intent"],
-                        provider=meme_service.acquisition_profile(self.settings)["provider"]),
-                    origin_job=job)
+                and self.settings.paid_model
+                and self.settings.paid_model.meme_input
+                and not s.one(
+                    "SELECT 1 FROM jobs WHERE kind = 'meme_discovery' AND state IN "
+                    "('QUEUED', 'RUNNING', 'RETRY_WAIT') LIMIT 1"
+                )
+            ):
+                meme_service.submit_native(
+                    s,
+                    self.settings,
+                    self.clock,
+                    meme_service.DiscoveryRequest(
+                        event_id=job["event_id"],
+                        reply_revision=event["reply_revision"],
+                        intent=query["intent"],
+                        provider=meme_service.acquisition_profile(self.settings)["provider"],
+                    ),
+                    origin_job=job,
+                )
 
     @staticmethod
     def _bounded(value):
-        if (len(encode(value).encode("utf-8")) > index.OFFER_BYTES
-            or len(encode(value.get("ranking")).encode("utf-8")) > index.RANKING_BYTES):
+        if (
+            len(encode(value).encode("utf-8")) > index.OFFER_BYTES
+            or len(encode(value.get("ranking")).encode("utf-8")) > index.RANKING_BYTES
+        ):
             raise CoreError("MEME_OFFER_BINDING_INVALID", 403)
 
     def check(self, job, *, executing=True):
@@ -548,13 +668,16 @@ class MemeRetrieval:
 
         _, _, body = self._scope(job, executing=executing)
         saved = self.store.one(
-            "SELECT value FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)
+            "SELECT value FROM runtime_meta WHERE key = %s", (OFFER + job["event_id"],)
         )
         try:
             raw = saved["value"] if saved else ""
             # Bound raw bytes before JSON decoding or constructing proof/vector objects.
-            if (type(raw) is not str or len(raw) > index.OFFER_BYTES
-                or len(raw.encode("utf-8")) > index.OFFER_BYTES):
+            if (
+                type(raw) is not str
+                or len(raw) > index.OFFER_BYTES
+                or len(raw.encode("utf-8")) > index.OFFER_BYTES
+            ):
                 raise ValueError("MEME_OFFER_BINDING_INVALID")
             value = strict_json(raw)
             if type(value) is not dict:
@@ -565,25 +688,38 @@ class MemeRetrieval:
             raise CoreError("MEME_OFFER_BINDING_INVALID", 403) from error
         query = self._query(job, body)
         offer, ranking = frozen.offer, frozen.ranking
-        if (frozen.job_id != job["job_id"] or frozen.event_id != job["event_id"]
+        if (
+            frozen.job_id != job["job_id"]
+            or frozen.event_id != job["event_id"]
             or frozen.privacy_epoch != epoch(self.store)
             or frozen.query_sha256 != digest(query)
             or frozen.meme_policy_sha256 != meme_service.policy_hash(self.settings)
-            or ranking.header.query_sha256 != frozen.query_sha256):
+            or ranking.header.query_sha256 != frozen.query_sha256
+        ):
             raise CoreError("MEME_OFFER_BINDING_INVALID", 403)
         reply_revision.require_current(self.store, job["event_id"], frozen.reply_revision)
         expected_ids = {c.candidate_id for c in offer.candidates} if offer else set()
-        if (set(frozen.catalog_bindings) != expected_ids or set(ranking.selected) != expected_ids
+        if (
+            set(frozen.catalog_bindings) != expected_ids
+            or set(ranking.selected) != expected_ids
             or len(expected_ids) > ranking.header.eligible
             or (offer is None) != (query["intent"] is None)
-            or (offer and (offer.offer_key != "meme:" + job["event_id"]
-                           or offer.intent != query["intent"]))):
+            or (
+                offer
+                and (
+                    offer.offer_key != "meme:" + job["event_id"] or offer.intent != query["intent"]
+                )
+            )
+        ):
             raise CoreError("MEME_OFFER_BINDING_INVALID", 403)
-        if (not query["intent"] and
-            (any(getattr(ranking.header, key) for key in
-                 ("scanned", "eligible", "cache_hits", "cold_batch", "unindexed"))
-             or ranking.query_vector_base64 is not None
-             or ranking.header.query_fallback_reason is not None)):
+        if not query["intent"] and (
+            any(
+                getattr(ranking.header, key)
+                for key in ("scanned", "eligible", "cache_hits", "cold_batch", "unindexed")
+            )
+            or ranking.query_vector_base64 is not None
+            or ranking.header.query_fallback_reason is not None
+        ):
             raise CoreError("MEME_OFFER_BINDING_INVALID", 403)
         if offer and [c.candidate_id for c in offer.candidates] != sorted(
             expected_ids, key=lambda sha: (-ranking.selected[sha].score, sha)
@@ -594,16 +730,22 @@ class MemeRetrieval:
                 binding.asset_id, binding.caption_job_id
             )
             candidate = next(c for c in offer.candidates if c.candidate_id == sha)
-            if (actual.model_dump() != binding.model_dump(exclude={"version", "ranking_sha256"})
+            if (
+                actual.model_dump() != binding.model_dump(exclude={"version", "ranking_sha256"})
                 or binding.asset_sha256 != sha
                 or candidate.model_dump(mode="json") != _candidate(sha, caption, meta)
                 or meta["category"] not in self.settings.expression_meme_categories
                 or not meme_policy.context_allows(caption, query)
-                or binding.ranking_sha256 != index.ranking_sha(
-                    value["ranking"]["header"], value["ranking"]["selected"][sha])
-                or any(not self.store.one(
-                    "SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
-                    (job["job_id"], source)) for source, _ in sources)):
+                or binding.ranking_sha256
+                != index.ranking_sha(value["ranking"]["header"], value["ranking"]["selected"][sha])
+                or any(
+                    not self.store.one(
+                        "SELECT 1 FROM job_sources WHERE job_id = %s AND event_id = %s",
+                        (job["job_id"], source),
+                    )
+                    for source, _ in sources
+                )
+            ):
                 raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
             try:
                 ranking.verify(sha, binding, meme_policy.lexical_score(caption, query))

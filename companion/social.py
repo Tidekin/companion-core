@@ -23,7 +23,8 @@ def quiet_hours(settings, now):
 
 def proactive_allowed(store, settings, now):
     if store.one(
-        "SELECT 1 FROM runtime_meta WHERE key IN ('proactive_paused','life_paused') AND value='1'"
+        "SELECT 1 FROM runtime_meta WHERE key IN ('proactive_paused', 'life_paused') AND value = "
+        "'1'"
     ):
         return False
     if settings is None:
@@ -61,25 +62,40 @@ def proactive_counts(store, settings, now):
     # Ordinary activity reserves before wording. Life SHADOW choices reserve no
     # send: count their actual native Outbox group once at its enqueue time.
     row = store.one(
-        "WITH reservations(created_at) AS ("
-        "SELECT j.created_at FROM jobs j JOIN events e USING(event_id) "
-        "WHERE j.kind='activity' AND COALESCE(json_extract(e.body_json,'$.notice.kind'),'') "
-        "NOT IN ('commitment','life','followup') AND NOT (j.state='SUCCEEDED' AND EXISTS "
-        "(SELECT 1 FROM social_candidates c WHERE c.candidate_id=json_extract(e.body_json,"
-        "'$.notice.ref') AND c.state='SKIPPED' AND c.reason_code='MODEL_SKIPPED') AND NOT EXISTS "
-        "(SELECT 1 FROM outbox o WHERE o.origin_event_id=j.event_id)) UNION ALL "
-        "SELECT updated_at FROM social_candidates WHERE message_id IS NOT NULL "
-        "AND NOT EXISTS (SELECT 1 FROM outbox o JOIN jobs j ON j.event_id=o.origin_event_id "
-        "WHERE o.message_id=social_candidates.message_id AND j.kind='activity') UNION ALL "
-        "SELECT MIN(o.created_at) FROM outbox o JOIN jobs j ON j.event_id=o.origin_event_id "
-        "JOIN events e ON e.event_id=j.event_id WHERE j.kind='activity' "
-        "AND json_extract(e.body_json,'$.notice.kind')='life' "
-        "AND o.action_type='qq.private.proactive' GROUP BY o.origin_event_id) "
-        "SELECT COALESCE(SUM(created_at>=?),0) n,MAX(created_at)>? recent "
-        "FROM reservations WHERE created_at>=?", (day, recent, min(day, recent)),
+        (
+            (
+                'WITH reservations(created_at) AS (SELECT j.created_at '
+                'FROM jobs j JOIN events e USING(event_id) WHERE '
+                "j.kind='activity' AND COALESCE((CASE WHEN e.body_json "
+                "IS JSON THEN (e.body_json::json#>>'{notice,kind}') "
+                "END),'') NOT IN ('commitment','life','followup') AND "
+                "NOT (j.state='SUCCEEDED' AND EXISTS (SELECT 1 FROM "
+                'social_candidates c WHERE c.candidate_id=(CASE WHEN '
+                "e.body_json IS JSON THEN (e.body_json::json#>>'{notice,"
+                "ref}') END) AND c.state='SKIPPED' AND "
+                "c.reason_code='MODEL_SKIPPED') AND NOT EXISTS (SELECT "
+                '1 FROM outbox o WHERE o.origin_event_id=j.event_id)) '
+                'UNION ALL SELECT updated_at FROM social_candidates '
+                'WHERE message_id IS NOT NULL AND NOT EXISTS (SELECT 1 '
+                'FROM outbox o JOIN jobs j ON '
+                'j.event_id=o.origin_event_id WHERE '
+                'o.message_id=social_candidates.message_id AND '
+                "j.kind='activity') UNION ALL SELECT MIN(o.created_at) "
+                'FROM outbox o JOIN jobs j ON '
+                'j.event_id=o.origin_event_id JOIN events e ON '
+                "e.event_id=j.event_id WHERE j.kind='activity' AND "
+                '(CASE WHEN e.body_json IS JSON THEN '
+                "(e.body_json::json#>>'{notice,kind}') END)='life' AND "
+                "o.action_type='qq.private.proactive' GROUP BY "
+                'o.origin_event_id) SELECT '
+                'COALESCE(SUM((created_at>=%s)::int),0) n,'
+                'MAX(created_at)>%s recent FROM reservations WHERE '
+                'created_at>=%s'
+            )
+        ),
+        (day, recent, min(day, recent)),
     )
     return row["n"], bool(row["recent"])
-
 
 
 def text_key(text):
@@ -160,7 +176,15 @@ def share_delivery_problem(store, settings, message_id, now):
     if job is not None:
         return notices.delivery_problem(store, settings, message_id, now, job=job)
     candidate = store.one(
-        "SELECT * FROM social_candidates WHERE message_id=?", (message_id,)
+        "SELECT social_candidates.candidate_id AS candidate_id, social_candidates.event_id AS "
+        "event_id, social_candidates.canonical_url AS canonical_url, "
+        "social_candidates.content_sha256 AS content_sha256, social_candidates.comparison_text AS "
+        "comparison_text, social_candidates.state AS state, social_candidates.message_id AS "
+        "message_id, social_candidates.reason_code AS reason_code, social_candidates.expires_at AS "
+        "expires_at, social_candidates.created_at AS created_at, social_candidates.updated_at AS "
+        "updated_at FROM social_candidates AS social_candidates WHERE social_candidates.message_id "
+        "= %s",
+        (message_id,),
     )
     if not candidate:
         return None  # Ordinary replies and other proactive work retain their own gates.
@@ -172,9 +196,15 @@ def share_delivery_problem(store, settings, message_id, now):
     if expired_sources(store, [candidate["event_id"]], cutoff):
         return "SOCIAL_SOURCE_EXPIRED"
     event = store.one(
-        "SELECT o.*,e.body_json,e.source FROM observations o JOIN events e USING(event_id) "
-        "WHERE o.event_id=? AND o.redacted=0 AND e.redacted=0 AND e.privacy_scope='private' "
-        "AND e.occurred_at<=?", (candidate["event_id"], now)
+        "SELECT o.event_id AS event_id, o.adapter_id AS adapter_id, o.source_kind AS source_kind, "
+        "o.result_status AS result_status, o.source_sha256 AS source_sha256, o.canonical_url AS "
+        "canonical_url, o.device_id AS device_id, o.session_id AS session_id, o.consent_id AS "
+        "consent_id, o.evidence_json AS evidence_json, o.captured_privacy_epoch AS "
+        "captured_privacy_epoch, o.redacted AS redacted, o.created_at AS created_at, e.body_json "
+        "AS body_json, e.source AS source FROM observations AS o JOIN events AS e ON o.event_id = "
+        "e.event_id WHERE o.event_id = %s AND o.redacted = 0 AND e.redacted = 0 AND "
+        "e.privacy_scope = 'private' AND e.occurred_at <= %s",
+        (candidate["event_id"], now),
     )
     resolved = share_source(event) if event else None
     if resolved is None:
@@ -183,19 +213,20 @@ def share_delivery_problem(store, settings, message_id, now):
     comparison = body["title"] + "\n" + body["text"][:1500]
     if (
         canonical != _share_url(candidate["canonical_url"], definition.name)
-        or hashlib.sha256(text_key(comparison).encode()).hexdigest()
-        != candidate["content_sha256"]
+        or hashlib.sha256(text_key(comparison).encode()).hexdigest() != candidate["content_sha256"]
     ):
         return "SOCIAL_SOURCE_CHANGED"
     delivery = store.one(
-        "SELECT o.content_json,o.action_type,o.origin_event_id,c.scope,c.owner_actor_id "
-        "FROM outbox o JOIN conversations c USING(conversation_id) WHERE o.message_id=?",
+        "SELECT o.content_json, o.action_type, o.origin_event_id, c.scope, c.owner_actor_id FROM "
+        "outbox AS o JOIN conversations AS c USING (conversation_id) WHERE o.message_id = %s",
         (message_id,),
     )
     if (
-        not delivery or delivery["action_type"] != "qq.private.proactive"
+        not delivery
+        or delivery["action_type"] != "qq.private.proactive"
         or delivery["origin_event_id"] != candidate["event_id"]
-        or delivery["scope"] != "private" or delivery["owner_actor_id"] != "owner"
+        or delivery["scope"] != "private"
+        or delivery["owner_actor_id"] != "owner"
     ):
         return "SOCIAL_DELIVERY_CHANGED"
     try:
@@ -217,10 +248,16 @@ class SocialPlanner:
         captured = epoch(s)
         cutoff = after(now, -86400 * self.settings.raw_event_retention_days)
         event = s.one(
-            "SELECT o.*,e.body_json,e.source,e.ingested_at FROM observations o "
-            "JOIN events e USING(event_id) WHERE o.event_id=? AND o.redacted=0 AND e.redacted=0 "
-            "AND e.privacy_scope='private' AND e.ingested_at>=? AND e.occurred_at<=? "
-            "AND length(e.body_json)<=16000",
+            "SELECT o.event_id AS event_id, o.adapter_id AS adapter_id, o.source_kind AS "
+            "source_kind, o.result_status AS result_status, o.source_sha256 AS source_sha256, "
+            "o.canonical_url AS canonical_url, o.device_id AS device_id, o.session_id AS "
+            "session_id, o.consent_id AS consent_id, o.evidence_json AS evidence_json, "
+            "o.captured_privacy_epoch AS captured_privacy_epoch, o.redacted AS redacted, "
+            "o.created_at AS created_at, e.body_json AS body_json, e.source AS source, "
+            "e.ingested_at AS ingested_at FROM observations AS o JOIN events AS e ON o.event_id = "
+            "e.event_id WHERE o.event_id = %s AND o.redacted = 0 AND e.redacted = 0 AND "
+            "e.privacy_scope = 'private' AND e.ingested_at >= %s AND e.occurred_at <= %s AND "
+            "LENGTH(e.body_json) <= 16000",
             (event_id, cutoff, now),
         )
         if not event or expired_sources(s, [event_id], cutoff):
@@ -236,8 +273,8 @@ class SocialPlanner:
         comparison = body["title"] + "\n" + body["text"][:1500]
         key = hashlib.sha256(text_key(comparison).encode()).hexdigest()
         duplicate = s.one(
-            "SELECT 1 FROM social_candidates WHERE state<>'ERASED' "
-            "AND (canonical_url=? OR content_sha256=?)",
+            "SELECT 1 FROM social_candidates WHERE state <> 'ERASED' AND (canonical_url = %s OR "
+            "content_sha256 = %s)",
             (canonical, key),
         )
         reason = "DUPLICATE_CONTENT" if duplicate else "SHADOW_ONLY"
@@ -274,10 +311,16 @@ class SocialPlanner:
         ):
             return None
         event = s.one(
-            "SELECT o.*,e.body_json,e.source FROM observations o JOIN events e USING(event_id) "
-            "WHERE o.event_id=? AND o.redacted=0 AND e.redacted=0 AND o.result_status='FETCHED' "
-            "AND e.source IN (SELECT value FROM json_each(?)) "
-            f"AND o.event_id NOT IN ({IDLE_READ_RESULTS})",
+            (
+                'SELECT o.*,e.body_json,e.source FROM observations o '
+                'JOIN events e USING(event_id) WHERE o.event_id=%s AND '
+                'o.redacted=0 AND e.redacted=0 AND '
+                "o.result_status='FETCHED' AND e.source IN (SELECT "
+                'value FROM json_array_elements_text(%s::json) AS '
+                'ids(value)) AND o.event_id NOT IN ('
+                f'{IDLE_READ_RESULTS}'
+                ')'
+            ),
             (event_id, json.dumps(observation_sources("share")), IDLE_READ),
         )
         if not event:
@@ -286,7 +329,9 @@ class SocialPlanner:
         if resolved is None:
             return None
         _, body, canonical = resolved
-        existing = s.one("SELECT candidate_id FROM social_candidates WHERE event_id=?", (event_id,))
+        existing = s.one(
+            "SELECT candidate_id FROM social_candidates WHERE event_id = %s", (event_id,)
+        )
         if existing:
             return existing["candidate_id"]
         comparison = body["title"] + "\n" + body["text"][:1500]
@@ -294,16 +339,26 @@ class SocialPlanner:
         key = hashlib.sha256(normalized.encode()).hexdigest()
         candidate_id = uid("share")
         for attempt in range(3):
-            generation = s.one("SELECT COALESCE(MAX(rowid),0) AS n FROM social_candidates")["n"]
+            generation = s.one(
+                "SELECT COALESCE(MAX(record_sequence), 0) AS n FROM social_candidates"
+            )["n"]
             recent = s.rows(
-                "SELECT * FROM social_candidates WHERE state<>'ERASED' AND created_at>=? "
-                "ORDER BY rowid DESC LIMIT 100",
+                "SELECT social_candidates.candidate_id AS candidate_id, social_candidates.event_id "
+                "AS event_id, social_candidates.canonical_url AS canonical_url, "
+                "social_candidates.content_sha256 AS content_sha256, "
+                "social_candidates.comparison_text AS comparison_text, social_candidates.state AS "
+                "state, social_candidates.message_id AS message_id, social_candidates.reason_code "
+                "AS reason_code, social_candidates.expires_at AS expires_at, "
+                "social_candidates.created_at AS created_at, social_candidates.updated_at AS "
+                "updated_at FROM social_candidates AS social_candidates WHERE "
+                "social_candidates.state <> 'ERASED' AND social_candidates.created_at >= %s ORDER "
+                "BY record_sequence DESC NULLS LAST LIMIT 100",
                 (after(now, -30 * 86400),),
             )
             reason = None
             if s.one(
-                "SELECT 1 FROM social_candidates WHERE state<>'ERASED' "
-                "AND (canonical_url=? OR content_sha256=?)",
+                "SELECT 1 FROM social_candidates WHERE state <> 'ERASED' AND (canonical_url = %s "
+                "OR content_sha256 = %s)",
                 (canonical, key),
             ):
                 reason = "DUPLICATE_CONTENT"
@@ -319,13 +374,16 @@ class SocialPlanner:
                 if captured != epoch(s):
                     return None
                 if expired_sources(
-                    s, [event_id],
+                    s,
+                    [event_id],
                     after(self.clock(), -86400 * self.settings.raw_event_retention_days),
                 ):
                     return None
-                if s.one("SELECT 1 FROM social_candidates WHERE event_id=?", (event_id,)):
+                if s.one("SELECT 1 FROM social_candidates WHERE event_id = %s", (event_id,)):
                     return None
-                latest = s.one("SELECT COALESCE(MAX(rowid),0) AS n FROM social_candidates")["n"]
+                latest = s.one(
+                    "SELECT COALESCE(MAX(record_sequence), 0) AS n FROM social_candidates"
+                )["n"]
                 if latest != generation:
                     # Recompute outside the write transaction against concurrently added content.
                     if attempt < 2:
@@ -354,45 +412,65 @@ class SocialPlanner:
             if not proactive_allowed(s, cfg, now):
                 return False
             s.execute(
-                "UPDATE social_candidates SET state='EXPIRED' WHERE state='CANDIDATE' "
-                "AND expires_at<=?",
+                "UPDATE social_candidates SET state = 'EXPIRED' WHERE state = 'CANDIDATE' AND "
+                "expires_at <= %s",
                 (now,),
             )
             conversation = s.one(
-                "SELECT * FROM conversations WHERE platform='qq.onebot' AND scope='private' "
-                "AND owner_actor_id='owner' ORDER BY last_event_at DESC LIMIT 1"
+                "SELECT conversations.conversation_id AS conversation_id, conversations.platform "
+                "AS platform, conversations.platform_session_key AS platform_session_key, "
+                "conversations.scope AS scope, conversations.owner_actor_id AS owner_actor_id, "
+                "conversations.last_event_at AS last_event_at, conversations.created_at AS "
+                "created_at, conversations.reply_revision AS reply_revision FROM conversations AS "
+                "conversations WHERE conversations.platform = 'qq.onebot' AND conversations.scope "
+                "= 'private' AND conversations.owner_actor_id = 'owner' ORDER BY "
+                "conversations.last_event_at DESC NULLS LAST LIMIT 1"
             )
             if not conversation or conversation["last_event_at"] > after(
                 now, -cfg.proactive_idle_seconds
             ):
                 return False
-            if s.one("SELECT 1 FROM jobs WHERE state IN ('QUEUED','RUNNING','RETRY_WAIT')"):
+            if s.one("SELECT 1 FROM jobs WHERE state IN ('QUEUED', 'RUNNING', 'RETRY_WAIT')"):
                 return False
             if s.one(
-                "SELECT 1 FROM outbox WHERE state IN "
-                "('PENDING','LEASED','SENDING','RETRY_WAIT','DELIVERY_UNCERTAIN')"
+                "SELECT 1 FROM outbox WHERE state IN ('PENDING', 'LEASED', 'SENDING', "
+                "'RETRY_WAIT', 'DELIVERY_UNCERTAIN')"
             ):
                 return False
             count, recent = proactive_counts(s, cfg, now)
             if recent or count >= cfg.proactive_daily_limit:
                 return False
             candidates = s.rows(
-                "SELECT c.*,e.body_json,e.source,o.source_kind,o.result_status,"
-                "o.source_sha256,o.evidence_json,o.canonical_url AS source_url "
-                "FROM social_candidates c JOIN events e USING(event_id) "
-                "JOIN observations o USING(event_id) WHERE c.state='CANDIDATE' "
-                "AND e.redacted=0 AND o.redacted=0 ORDER BY c.created_at,c.candidate_id LIMIT 32"
+                "SELECT c.candidate_id AS candidate_id, c.event_id AS event_id, c.canonical_url AS "
+                "canonical_url, c.content_sha256 AS content_sha256, c.comparison_text AS "
+                "comparison_text, c.state AS state, c.message_id AS message_id, c.reason_code AS "
+                "reason_code, c.expires_at AS expires_at, c.created_at AS created_at, c.updated_at "
+                "AS updated_at, e.body_json AS body_json, e.source AS source, o.source_kind AS "
+                "source_kind, o.result_status AS result_status, o.source_sha256 AS source_sha256, "
+                "o.evidence_json AS evidence_json, o.canonical_url AS source_url FROM "
+                "social_candidates AS c JOIN events AS e ON c.event_id = e.event_id JOIN "
+                "observations AS o ON c.event_id = o.event_id WHERE c.state = 'CANDIDATE' AND "
+                "e.redacted = 0 AND o.redacted = 0 ORDER BY c.created_at NULLS FIRST, "
+                "c.candidate_id NULLS FIRST LIMIT 32"
             )
-            candidate = next((item for item in candidates if not feedback_paused(
-                s, cfg, now, [item["event_id"]])), None)
+            candidate = next(
+                (
+                    item
+                    for item in candidates
+                    if not feedback_paused(s, cfg, now, [item["event_id"]])
+                ),
+                None,
+            )
             if not candidate:
                 return False
             if expired_sources(
                 s, [candidate["event_id"]], after(now, -86400 * cfg.raw_event_retention_days)
             ):
                 s.execute(
-                    "UPDATE social_candidates SET state='EXPIRED',reason_code='SOURCE_EXPIRED',"
-                    "updated_at=? WHERE candidate_id=?", (now, candidate["candidate_id"])
+                    "UPDATE social_candidates SET state = 'EXPIRED', reason_code = "
+                    "'SOURCE_EXPIRED', updated_at = %s WHERE candidate_id = "
+                    "%s",
+                    (now, candidate["candidate_id"]),
                 )
                 return False
             resolved = share_source({**candidate, "canonical_url": candidate["source_url"]})
@@ -400,18 +478,19 @@ class SocialPlanner:
                 candidate["canonical_url"], resolved[0].name
             ):
                 s.execute(
-                    "UPDATE social_candidates SET state='SKIPPED',reason_code='SOURCE_CHANGED',"
-                    "updated_at=? WHERE candidate_id=?",
+                    "UPDATE social_candidates SET state = 'SKIPPED', reason_code = "
+                    "'SOURCE_CHANGED', updated_at = %s WHERE candidate_id = %s",
                     (now, candidate["candidate_id"]),
                 )
                 return False
             from companion.notices import schedule
 
-            schedule(s, cfg, "share", candidate["candidate_id"],
-                     conversation["conversation_id"], now)
+            schedule(
+                s, cfg, "share", candidate["candidate_id"], conversation["conversation_id"], now
+            )
             s.execute(
-                "UPDATE social_candidates SET state='QUEUED',updated_at=? "
-                "WHERE candidate_id=?",
+                "UPDATE social_candidates SET state = 'QUEUED', updated_at = %s WHERE candidate_id "
+                "= %s",
                 (now, candidate["candidate_id"]),
             )
         return True

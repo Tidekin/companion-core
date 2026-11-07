@@ -17,7 +17,7 @@ def source_allowed(store, settings, clock, event_id, purpose, *, allow_commands=
     if not owner_authority.required(store, settings):
         return True  # Existing Demo/legacy callers retain their native source checks.
     view = owner_authority.current(store, settings, clock, purpose=purpose)
-    receipt = store.one("SELECT value FROM runtime_meta WHERE key=?",
+    receipt = store.one('SELECT value FROM runtime_meta WHERE key = %s',
                         (owner_input.INPUT + event_id,))
     try:
         if receipt is None and purpose == "memory":

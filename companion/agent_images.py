@@ -30,11 +30,13 @@ def enabled(settings):
 
 
 def erase_images(store, event_ids):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='captured_images'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='captured_images' AND relkind IN "
+        "('r','p')"):
         return
     for event_id in event_ids:
-        store.execute("DELETE FROM captured_images WHERE item_id IN "
-                      "(SELECT item_id FROM content_items WHERE owner_event_id=?)", (event_id,))
+        store.execute('DELETE FROM captured_images WHERE item_id IN (SELECT item_id FROM '
+            'content_items WHERE owner_event_id = %s)', (event_id,))
 
 
 def expire_downloads(service):
@@ -47,19 +49,27 @@ def expire_downloads(service):
     from companion.owner_input_state import _source
 
     store, now = service.store, service.clock()
-    with nullcontext() if store.db.in_transaction else store.transaction():
+    with nullcontext() if store.in_transaction else store.transaction():
         rows = store.rows(
-            "SELECT c.*,m.value AS input_receipt FROM content_items c JOIN runtime_meta m "
-            "ON m.key=? || c.owner_event_id WHERE c.kind='qq_image' AND c.redacted=0 "
-            "AND (c.state='FETCHING' OR (c.state='UNKNOWN' "
-            "AND c.error_code='CONTENT_PROCESSOR_LOST')) AND c.lease_until<=? "
-            "AND c.lease_token IS NOT NULL AND c.reserved_bytes>0 "
-            "AND c.usage_request_id IS NULL AND c.media_sha256='' AND c.fingerprint='' "
-            "AND c.target_url='' AND c.source_event_id IS NULL AND c.read_request_id IS NULL "
-            "AND c.output_event_id IS NULL AND NOT EXISTS "
-            "(SELECT 1 FROM captured_images p WHERE p.item_id=c.item_id) "
-            "AND NOT EXISTS (SELECT 1 FROM agent_image_inputs a WHERE a.item_id=c.item_id) "
-            "AND NOT EXISTS (SELECT 1 FROM runtime_meta p WHERE p.key=? || c.item_id)",
+            'SELECT c.item_id AS item_id, c.owner_event_id AS owner_event_id, c.kind AS kind, '
+            'c.slot AS slot, c.source_event_id AS source_event_id, c.target_url AS target_url, '
+            'c.read_request_id AS read_request_id, c.state AS state, c.media_sha256 AS '
+            'media_sha256, c.fingerprint AS fingerprint, c.captured_privacy_epoch AS '
+            'captured_privacy_epoch, c.reserved_bytes AS reserved_bytes, c.usage_request_id AS '
+            'usage_request_id, c.output_event_id AS output_event_id, c.lease_token AS lease_token, '
+            'c.lease_until AS lease_until, c.deadline AS deadline, c.error_code AS error_code, '
+            'c.redacted AS redacted, c.created_at AS created_at, c.started_at AS started_at, '
+            'c.updated_at AS updated_at, c.attachment_json AS attachment_json, m.value AS '
+            'input_receipt FROM content_items AS c JOIN runtime_meta AS m ON m.key = %s || '
+            "c.owner_event_id WHERE c.kind = 'qq_image' AND c.redacted = 0 AND (c.state = "
+            "'FETCHING' OR (c.state = 'UNKNOWN' AND c.error_code = 'CONTENT_PROCESSOR_LOST')) AND "
+            'c.lease_until <= %s AND NOT c.lease_token IS NULL AND c.reserved_bytes > 0 AND '
+            "c.usage_request_id IS NULL AND c.media_sha256 = '' AND c.fingerprint = '' AND "
+            "c.target_url = '' AND c.source_event_id IS NULL AND c.read_request_id IS NULL AND "
+            'c.output_event_id IS NULL AND NOT EXISTS(SELECT 1 AS "1" FROM captured_images AS p '
+            'WHERE p.item_id = c.item_id) AND NOT EXISTS(SELECT 1 AS "1" FROM agent_image_inputs '
+            'AS a WHERE a.item_id = c.item_id) AND NOT EXISTS(SELECT 1 AS "1" FROM runtime_meta AS '
+            'p WHERE p.key = %s || c.item_id)',
             (owner_input.INPUT, now, qq_images.STAGED),
         )
         for row in rows:
@@ -69,11 +79,11 @@ def expire_downloads(service):
                 saved = json.loads(row["input_receipt"])
                 capture, original = owner_input.verify(store, service.settings, saved["capture"])
                 _source(store, capture, saved, original.policy.owner_qq_id)
-                event = store.one("SELECT body_json FROM events WHERE event_id=?",
+                event = store.one('SELECT body_json FROM events WHERE event_id = %s',
                                   (row["owner_event_id"],))
                 images = qq_images.manifest(json.loads(event["body_json"]))
-                jobs = store.rows("SELECT authority_json FROM jobs WHERE event_id=? "
-                                   "AND kind='chat'", (row["owner_event_id"],))
+                jobs = store.rows('SELECT authority_json FROM jobs WHERE event_id = %s AND kind = '
+                    "'chat'", (row["owner_event_id"],))
                 if (capture.event_id != row["owner_event_id"]
                     or "image" not in original.policy.purposes
                     or not images or not 0 <= row["slot"] < len(images)
@@ -86,8 +96,8 @@ def expire_downloads(service):
             except (CoreError, ValueError, KeyError, TypeError):
                 continue
             store.execute(
-                "UPDATE content_items SET state='FAILED',"
-                "error_code='CONTENT_IMAGE_DOWNLOAD_EXPIRED',updated_at=? WHERE item_id=?",
+                "UPDATE content_items SET state = 'FAILED', error_code = "
+                "'CONTENT_IMAGE_DOWNLOAD_EXPIRED', updated_at = %s WHERE item_id = %s",
                 (now, row["item_id"]),
             )
 
@@ -107,8 +117,21 @@ def source(store, settings, clock, event_id):
 
 def lease(store, settings, clock, event_id, lease_token):
     view, _, images, _ = source(store, settings, clock, event_id)
-    row = store.one("SELECT * FROM content_items WHERE owner_event_id=? AND kind='qq_image' "
-                    "AND lease_token=? AND redacted=0", (event_id, lease_token))
+    row = store.one('SELECT content_items.item_id AS item_id, content_items.owner_event_id AS '
+        'owner_event_id, content_items.kind AS kind, content_items.slot AS slot, '
+        'content_items.source_event_id AS source_event_id, content_items.target_url AS target_url, '
+        'content_items.read_request_id AS read_request_id, content_items.state AS state, '
+        'content_items.media_sha256 AS media_sha256, content_items.fingerprint AS fingerprint, '
+        'content_items.captured_privacy_epoch AS captured_privacy_epoch, '
+        'content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS '
+        'usage_request_id, content_items.output_event_id AS output_event_id, '
+        'content_items.lease_token AS lease_token, content_items.lease_until AS lease_until, '
+        'content_items.deadline AS deadline, content_items.error_code AS error_code, '
+        'content_items.redacted AS redacted, content_items.created_at AS created_at, '
+        'content_items.started_at AS started_at, content_items.updated_at AS updated_at, '
+        'content_items.attachment_json AS attachment_json FROM content_items AS content_items '
+        "WHERE content_items.owner_event_id = %s AND content_items.kind = 'qq_image' AND "
+        'content_items.lease_token = %s AND content_items.redacted = 0', (event_id, lease_token))
     if (not row or row["state"] != "FETCHING" or not row["lease_until"]
         or row["lease_until"] <= clock() or row["deadline"] <= clock()
         or row["captured_privacy_epoch"] != epoch(store)
@@ -121,8 +144,21 @@ def _item(service, event_id, request_key):
     matched = re.fullmatch(r"image:(0|[1-9][0-9]{0,8})", request_key)
     if not matched:
         raise CoreError("CONTENT_IMAGE_SLOT_INVALID", 400)
-    row = service.store.one("SELECT * FROM content_items WHERE owner_event_id=? "
-                            "AND kind='qq_image' AND slot=? AND redacted=0",
+    row = service.store.one('SELECT content_items.item_id AS item_id, content_items.owner_event_id '
+        'AS owner_event_id, content_items.kind AS kind, content_items.slot AS slot, '
+        'content_items.source_event_id AS source_event_id, content_items.target_url AS target_url, '
+        'content_items.read_request_id AS read_request_id, content_items.state AS state, '
+        'content_items.media_sha256 AS media_sha256, content_items.fingerprint AS fingerprint, '
+        'content_items.captured_privacy_epoch AS captured_privacy_epoch, '
+        'content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS '
+        'usage_request_id, content_items.output_event_id AS output_event_id, '
+        'content_items.lease_token AS lease_token, content_items.lease_until AS lease_until, '
+        'content_items.deadline AS deadline, content_items.error_code AS error_code, '
+        'content_items.redacted AS redacted, content_items.created_at AS created_at, '
+        'content_items.started_at AS started_at, content_items.updated_at AS updated_at, '
+        'content_items.attachment_json AS attachment_json FROM content_items AS content_items '
+        "WHERE content_items.owner_event_id = %s AND content_items.kind = 'qq_image' AND "
+        'content_items.slot = %s AND content_items.redacted = 0',
                             (event_id, int(matched[1])))
     if row is None:
         raise CoreError("CONTENT_IMAGE_NOT_SHARED", 403)
@@ -144,8 +180,8 @@ def claim(service, event_id, request_key, source_sha256):
             or row["deadline"] <= clock()):
             raise CoreError("CONTENT_IMAGE_ALREADY_" + row["state"], 409)
         token, until = uid("content_lease"), min(row["deadline"], after(clock(), 60))
-        store.execute("UPDATE content_items SET state='FETCHING',lease_token=?,lease_until=?,"
-                      "updated_at=? WHERE item_id=?", (token, until, clock(), row["item_id"]))
+        store.execute("UPDATE content_items SET state = 'FETCHING', lease_token = %s, lease_until "
+            '= %s, updated_at = %s WHERE item_id = %s', (token, until, clock(), row["item_id"]))
         return {"state": "FETCHING", "lease_token": token, "lease_until": until,
                 "max_bytes": min(row["reserved_bytes"], service.options.max_image_bytes)}
 
@@ -171,7 +207,10 @@ def stage(service, event_id, request_key, data, mime, lease_token, proof):
         upload_proof(store, settings, view.authority.as_dict(), event_id, images[row["slot"]],
                      lease_token, hashlib.sha256(data).hexdigest(), mime, proof)
         if row["state"] == "SUCCEEDED":
-            saved = store.one("SELECT * FROM captured_images WHERE item_id=?", (row["item_id"],))
+            saved = store.one('SELECT captured_images.item_id AS item_id, '
+                'captured_images.proof_json AS proof_json, captured_images.mime AS mime, '
+                'captured_images.expires_at AS expires_at FROM captured_images AS captured_images '
+                'WHERE captured_images.item_id = %s', (row["item_id"],))
             if (not saved or saved["proof_json"] != encode(proof) or saved["mime"] != mime
                 or saved["expires_at"] <= clock()):
                 raise CoreError("OWNER_IMAGE_UPLOAD_INVALID", 403)
@@ -208,7 +247,7 @@ def upload_proof(store, settings, authority, event_id, image, lease_token, media
 def accept(service, original, data, mime, lease_token, proof):
     """Stage signed originals; only the ordinary chat SDK may request model inference."""
     store, settings, clock = service.store, service.settings, service.clock
-    with nullcontext() if store.db.in_transaction else store.transaction():
+    with nullcontext() if store.in_transaction else store.transaction():
         view, row, image = lease(store, settings, clock, original["owner_event_id"], lease_token)
         if row["item_id"] != original["item_id"]:
             raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
@@ -224,12 +263,12 @@ def accept(service, original, data, mime, lease_token, proof):
         image_spool.put(store, row, data, mime, expiry)
         store.insert("captured_images", item_id=row["item_id"], proof_json=encode(proof),
                      mime=mime, expires_at=expiry)
-        store.execute("UPDATE content_items SET state='SUCCEEDED',fingerprint=?,"
-                      "media_sha256=?,updated_at=? WHERE item_id=?",
+        store.execute("UPDATE content_items SET state = 'SUCCEEDED', fingerprint = %s, "
+            'media_sha256 = %s, updated_at = %s WHERE item_id = %s',
                       (hashlib.sha256(mime.encode() + b"\0" + data).hexdigest(),
                        media_hash, clock(), row["item_id"]))
-        pending = store.one("SELECT 1 FROM content_items WHERE owner_event_id=? "
-                            "AND kind='qq_image' AND state<>'SUCCEEDED' AND redacted=0",
+        pending = store.one('SELECT 1 FROM content_items WHERE owner_event_id = %s AND kind = '
+            "'qq_image' AND state <> 'SUCCEEDED' AND redacted = 0",
                             (row["owner_event_id"],))
         return {"state": "STAGED" if pending else "SUCCEEDED", "slot": row["slot"],
                 "duplicate": False, "input_ready": True}
@@ -238,8 +277,17 @@ def accept(service, original, data, mime, lease_token, proof):
 def _source(store, settings, clock, job, item_id, *, executing=True):
     if not enabled(settings):
         raise CoreError("PAID_IMAGE_APPROVAL_REQUIRED", 403)
-    row = store.one("SELECT c.*,p.proof_json,p.mime,p.expires_at FROM captured_images p "
-                    "JOIN content_items c USING(item_id) WHERE p.item_id=? AND c.redacted=0",
+    row = store.one('SELECT c.item_id AS item_id, c.owner_event_id AS owner_event_id, c.kind AS '
+        'kind, c.slot AS slot, c.source_event_id AS source_event_id, c.target_url AS target_url, '
+        'c.read_request_id AS read_request_id, c.state AS state, c.media_sha256 AS media_sha256, '
+        'c.fingerprint AS fingerprint, c.captured_privacy_epoch AS captured_privacy_epoch, '
+        'c.reserved_bytes AS reserved_bytes, c.usage_request_id AS usage_request_id, '
+        'c.output_event_id AS output_event_id, c.lease_token AS lease_token, c.lease_until AS '
+        'lease_until, c.deadline AS deadline, c.error_code AS error_code, c.redacted AS redacted, '
+        'c.created_at AS created_at, c.started_at AS started_at, c.updated_at AS updated_at, '
+        'c.attachment_json AS attachment_json, p.proof_json AS proof_json, p.mime AS mime, '
+        'p.expires_at AS expires_at FROM captured_images AS p JOIN content_items AS c ON p.item_id '
+        '= c.item_id WHERE p.item_id = %s AND c.redacted = 0',
                     (item_id,))
     if not row or row["state"] != "SUCCEEDED":
         raise CoreError("LIVE_IMAGE_ORIGINAL_UNAVAILABLE", 410)
@@ -247,11 +295,15 @@ def _source(store, settings, clock, job, item_id, *, executing=True):
                                      executing=executing)
     source, body, original_job = owner_input.source(store, settings, view,
         row["owner_event_id"], clock(), history=row["owner_event_id"] != job["event_id"])
-    consumer = store.one("SELECT conversation_id FROM events WHERE event_id=?", (job["event_id"],))
+    consumer = store.one('SELECT conversation_id FROM events WHERE event_id = '
+        '%s', (job["event_id"],))
     if (not reply_revision.source_active(store, source["event_id"])
         or not consumer or source["conversation_id"] != consumer["conversation_id"]
-        or not store.one("SELECT 1 FROM events WHERE event_id=? AND rowid<="
-                         "(SELECT rowid FROM events WHERE event_id=?)",
+        or not store.one((
+            'SELECT 1 FROM events WHERE event_id = %s AND '
+            'record_sequence <= (SELECT record_sequence AS rowid '
+            'FROM events WHERE event_id = %s)'
+        ),
                          (source["event_id"], job["event_id"]))):
         raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
     originals = qq_images.manifest(body)
@@ -269,7 +321,8 @@ def _source(store, settings, clock, job, item_id, *, executing=True):
 
 def input_sources(store, settings, clock, job, *, executing=True):
     """Revalidate signed provenance without reopening short-lived original bytes."""
-    rows = store.rows("SELECT item_id FROM agent_image_inputs WHERE job_id=? ORDER BY position",
+    rows = store.rows('SELECT item_id FROM agent_image_inputs WHERE job_id = %s ORDER BY position '
+        'NULLS FIRST',
                       (job["job_id"],))
     return [_source(store, settings, clock, job, row["item_id"], executing=executing)
             for row in rows]
@@ -296,7 +349,8 @@ def _prepared(store, settings, clock, job, item_id, *, executing=True):
 
 
 def inputs(store, settings, clock, job, *, executing=True):
-    rows = store.rows("SELECT item_id FROM agent_image_inputs WHERE job_id=? ORDER BY position",
+    rows = store.rows('SELECT item_id FROM agent_image_inputs WHERE job_id = %s ORDER BY position '
+        'NULLS FIRST',
                       (job["job_id"],))
     return [_prepared(store, settings, clock, job, row["item_id"], executing=executing)
             for row in rows]
@@ -314,9 +368,9 @@ def waiting(core, job):
     for event_id in sources:
         if not reply_revision.source_active(core.store, event_id):
             continue
-        if core.store.one("SELECT 1 FROM content_items WHERE owner_event_id=? AND kind='qq_image' "
-                          "AND redacted=0 AND state IN ('WAITING','FETCHING','QUEUED','RUNNING') "
-                          "AND deadline>?", (event_id, core.clock())):
+        if core.store.one('SELECT 1 FROM content_items WHERE owner_event_id = %s AND kind = '
+            "'qq_image' AND redacted = 0 AND state IN ('WAITING', 'FETCHING', 'QUEUED', 'RUNNING') "
+            'AND deadline > %s', (event_id, core.clock())):
             return True
     return False
 
@@ -335,8 +389,9 @@ def attach(core, job, messages, sources, turns, current, snapshots, *, priority_
         item[0] == job["event_id"], item[0] == priority_event_id, order[item[0]]), reverse=True)
     for event_id, message in preferred:
         candidates = core.store.rows(
-            "SELECT c.item_id FROM content_items c JOIN captured_images p USING(item_id) "
-            "WHERE c.owner_event_id=? AND c.redacted=0 AND p.expires_at>? ORDER BY c.slot",
+            'SELECT c.item_id FROM content_items AS c JOIN captured_images AS p USING (item_id) '
+            'WHERE c.owner_event_id = %s AND c.redacted = 0 AND p.expires_at > %s ORDER BY c.slot '
+            'NULLS FIRST',
             (event_id, core.clock()),
         )
         if maximum != "unlimited" and count + len(candidates) > maximum:
@@ -354,12 +409,13 @@ def attach(core, job, messages, sources, turns, current, snapshots, *, priority_
         return []
     with core.store.transaction():
         reply_revision.remember_sources(core.store, job, [event_id for event_id, _, _ in selected])
-        previous = core.store.rows("SELECT item_id FROM agent_image_inputs WHERE job_id=? "
-                                    "ORDER BY position", (job["job_id"],))
+        previous = core.store.rows('SELECT item_id FROM agent_image_inputs WHERE job_id = %s ORDER '
+            'BY position NULLS FIRST', (job["job_id"],))
         if previous and [row["item_id"] for row in previous] != ids:
             raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
         for position, item_id in enumerate(ids):
-            core.store.execute("INSERT OR IGNORE INTO agent_image_inputs VALUES (?,?,?)",
+            core.store.execute('INSERT INTO agent_image_inputs VALUES (%s, %s, %s) ON CONFLICT DO '
+                'NOTHING',
                                (job["job_id"], item_id, position))
     for event_id, message, group in selected:
         metadata = [{"item_id": row["item_id"], "source_event_id": event_id,

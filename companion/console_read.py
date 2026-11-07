@@ -20,8 +20,9 @@ def collection(core, items, next_cursor=None):
 
 def activity(core, before=None, limit=30):
     rows = core.store.rows(
-        "SELECT audit_id,action,entity_type,entity_id,trace_id,created_at FROM audit_log "
-        "WHERE (? IS NULL OR audit_id<?) ORDER BY audit_id DESC LIMIT ?",
+        'SELECT audit_id, action, entity_type, entity_id, trace_id, created_at FROM audit_log '
+        'WHERE (CAST(%s AS TEXT) IS NULL OR audit_id < %s) ORDER BY audit_id DESC NULLS LAST LIMIT '
+        '%s',
         (before, before, limit + 1),
     )
     items = [entry(row["audit_id"], row["entity_type"], row["action"], "RECORDED",
@@ -35,8 +36,17 @@ def _memory_page(core, now, ids):
     core.memory.require_owner("owner")
     sources = MemorySources(core.memory, now)
     for row in core.store.rows(
-        "SELECT * FROM memories WHERE memory_id IN (SELECT value FROM json_each(?)) "
-        "AND status IN ('CONFIRMED','HYPOTHESIS') AND privacy_scope='private' AND confidence>0",
+        'SELECT memories.memory_id AS memory_id, memories.subject AS subject, memories.kind AS '
+        'kind, memories.content AS content, memories.status AS status, memories.origin AS origin, '
+        'memories.confidence AS confidence, memories.importance AS importance, '
+        'memories.privacy_scope AS privacy_scope, memories.supersedes_memory_id AS '
+        'supersedes_memory_id, memories.created_at AS created_at, memories.updated_at AS '
+        'updated_at, memories.valid_from AS valid_from, memories.valid_to AS valid_to, '
+        'memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS fact_key, '
+        'memories.needs_review AS needs_review FROM memories AS memories WHERE memories.memory_id '
+        'IN (SELECT parsed.value COLLATE "C" AS _col_0 FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS '
+        "JSON)) AS parsed(value)) AND memories.status IN ('CONFIRMED', 'HYPOTHESIS') AND "
+        "memories.privacy_scope = 'private' AND memories.confidence > 0",
         (encode(ids),),
     ):
         if sources.current(row) and (evidence := sources.evidence(row["memory_id"])):
@@ -48,14 +58,14 @@ def _memory_rows(core, now, review=False):
     offset, batch_size = 0, 200
     while True:
         candidates = core.store.rows(
-            "SELECT m.memory_id FROM memories m WHERE m.status IN ('CONFIRMED','HYPOTHESIS') "
-            "AND m.privacy_scope='private' AND m.confidence>0 "
-            "AND (?=0 OR m.status='HYPOTHESIS' OR m.needs_review=1) "
-            "AND EXISTS (SELECT 1 FROM memory_evidence v JOIN events e ON e.event_id=v.event_id "
-            "WHERE v.memory_id=m.memory_id AND v.polarity=1 AND e.redacted=0 "
-            "AND e.actor_id='owner' AND e.privacy_scope='private') "
-            "ORDER BY m.needs_review,m.status='CONFIRMED' DESC,m.updated_at DESC,m.memory_id "
-            "LIMIT ? OFFSET ?", (int(review), batch_size, offset),
+            "SELECT m.memory_id FROM memories AS m WHERE m.status IN ('CONFIRMED', 'HYPOTHESIS') "
+            "AND m.privacy_scope = 'private' AND m.confidence > 0 AND (%s = 0 OR m.status = "
+            "'HYPOTHESIS' OR m.needs_review = 1) AND EXISTS(SELECT 1 FROM memory_evidence AS v "
+            'JOIN events AS e ON e.event_id = v.event_id WHERE v.memory_id = m.memory_id AND '
+            "v.polarity = 1 AND e.redacted = 0 AND e.actor_id = 'owner' AND e.privacy_scope = "
+            "'private') ORDER BY m.needs_review NULLS FIRST, m.status = 'CONFIRMED' DESC NULLS "
+            'LAST, m.updated_at DESC NULLS LAST, m.memory_id NULLS FIRST LIMIT %s OFFSET '
+            '%s', (int(review), batch_size, offset),
         )
         if not candidates:
             return
@@ -118,7 +128,7 @@ def _source_records(core, query, owner_field, related_fields=(), *, job_field=No
     sources, result, offset = MemorySources(core.memory, now), [], 0
     current = datetime.fromisoformat(now)
     while len(result) < 60:
-        rows = core.store.rows(query + " LIMIT 60 OFFSET ?", (offset,))
+        rows = core.store.rows(query + ' LIMIT 60 OFFSET %s', (offset,))
         if not rows:
             break
         for row in rows:
@@ -127,11 +137,11 @@ def _source_records(core, query, owner_field, related_fields=(), *, job_field=No
             related = {row[field] for field in related_fields if row[field]}
             if job_field:
                 related.update(item["event_id"] for item in core.store.rows(
-                    "SELECT event_id FROM job_sources WHERE job_id=?", (row[job_field],),
+                    'SELECT event_id FROM job_sources WHERE job_id = %s', (row[job_field],),
                 ))
             if row.get("read_request_id"):
                 related.update(item["event_id"] for item in core.store.rows(
-                    "SELECT event_id FROM exploration_evidence WHERE request_id=?",
+                    'SELECT event_id FROM exploration_evidence WHERE request_id = %s',
                     (row["read_request_id"],),
                 ))
             # Related observations can be companion-authored; every ancestor still
@@ -222,28 +232,32 @@ def _review_count(core):
 def overview(core):
     s, now = core.store, core.clock()
     counts = {
-        "pending_jobs": s.one("SELECT COUNT(*) n FROM jobs WHERE state IN "
-                              "('QUEUED','RUNNING','RETRY_WAIT')")["n"],
-        "pending_deliveries": s.one("SELECT COUNT(*) n FROM outbox WHERE state IN "
-                                    "('PENDING','LEASED','SENDING','RETRY_WAIT')")["n"],
-        "unknown_calls": s.one("SELECT COUNT(*) n FROM model_usage WHERE state='UNKNOWN'")["n"],
+        "pending_jobs": s.one("SELECT COUNT(*) AS n FROM jobs WHERE state IN ('QUEUED', 'RUNNING', "
+            "'RETRY_WAIT')")["n"],
+        "pending_deliveries": s.one("SELECT COUNT(*) AS n FROM outbox WHERE state IN ('PENDING', "
+            "'LEASED', 'SENDING', 'RETRY_WAIT')")["n"],
+        "unknown_calls": s.one('SELECT COUNT(*) AS n FROM model_usage WHERE state = '
+            "'UNKNOWN'")["n"],
         "review_memories": _review_count(core),
         "companion_proposals": s.one(
-            "SELECT COUNT(*) n FROM capability_overrides WHERE state='PROPOSED'")["n"]
-        if s.one("SELECT 1 FROM sqlite_master WHERE name='capability_overrides'") else 0,
-        "pending_goals": s.one("SELECT COUNT(*) n FROM goals WHERE state='PENDING'")["n"]
-        if s.one("SELECT 1 FROM sqlite_master WHERE name='goals'") else 0,
+            "SELECT COUNT(*) AS n FROM capability_overrides WHERE state = 'PROPOSED'")["n"]
+        if s.one('SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespa'
+            "ce AND relname='capability_overrides' AND relkind IN ('r','p')") else 0,
+        "pending_goals": s.one("SELECT COUNT(*) AS n FROM goals WHERE state = 'PENDING'")["n"]
+        if s.one('SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespa'
+            "ce AND relname='goals' AND relkind IN ('r','p')") else 0,
         "pending_reflections": s.one(
-            "SELECT COUNT(*) n FROM reflection_suggestions WHERE state='PENDING'")["n"]
-        if s.one("SELECT 1 FROM sqlite_master WHERE name='reflection_suggestions'") else 0,
+            "SELECT COUNT(*) AS n FROM reflection_suggestions WHERE state = 'PENDING'")["n"]
+        if s.one('SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespa'
+            "ce AND relname='reflection_suggestions' AND relkind IN ('r','p')") else 0,
     }
     worker = worker_loop.snapshot(s, datetime.fromisoformat(now))
     budget = budget_view(core)
-    blocked = s.one("SELECT 1 FROM runtime_meta WHERE key IN "
-                    "('model_budget_blocked','model_budget_restore_required')")
+    blocked = s.one("SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked', "
+        "'model_budget_restore_required')")
     paused = {row["key"]: row["value"] == "1" for row in s.rows(
-        "SELECT key,value FROM runtime_meta WHERE key IN "
-        "('proactive_paused','life_paused','diary_paused')")}
+        "SELECT key, value FROM runtime_meta WHERE key IN ('proactive_paused', 'life_paused', "
+        "'diary_paused')")}
     # 主人在“管理主动行为”里切换的三个开关；available=false 表示配置文件没有开启，不能在控制台恢复
     modes = {
         "proactive": {"paused": paused.get("proactive_paused", False),
@@ -279,8 +293,17 @@ def diagnostics(core):
         ("exploration_requests", "request_id", "'FAILED','UNKNOWN','CANCELLED'"),
     ):
         fields = ",action_type" if table == "outbox" else ""
-        for row in s.rows(f"SELECT {key} id,state,last_error_code,updated_at{fields} FROM {table} "
-                          f"WHERE state IN ({states}) ORDER BY rowid DESC LIMIT 20"):
+        for row in s.rows(
+            'SELECT '
+            f'{key}'
+            ' id,state,last_error_code,updated_at'
+            f'{fields}'
+            ' FROM '
+            f'{table}'
+            ' WHERE state IN ('
+            f'{states}'
+            ') ORDER BY record_sequence DESC LIMIT 20'
+        ):
             delivery = {}
             if table == "outbox":
                 from companion import delivery_reconciliation
@@ -306,7 +329,9 @@ def diagnostics(core):
 
 
 def _table_exists(store, name):
-    return bool(store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)))
+    return bool(store.one("SELECT 1 FROM pg_catalog.pg_class "
+        "WHERE relnamespace=current_schema()::regnamespace "
+        "AND relname=%s AND relkind IN ('r','p')", (name,)))
 
 
 def decisions(core, limit=40):
@@ -317,9 +342,11 @@ def decisions(core, limit=40):
     """
     s, items = core.store, []
     for row in s.rows(
-        "SELECT w.*,g.topic FROM wake_decisions w LEFT JOIN goals g "
-        "ON g.goal_id=w.goal_id AND g.redacted=0 "
-        "ORDER BY w.created_at DESC LIMIT ?", (limit,),
+        'SELECT w.decision_id AS decision_id, w.idempotency_key AS idempotency_key, '
+        'w.trigger_event_id AS trigger_event_id, w.goal_id AS goal_id, w.decision AS decision, '
+        'w.reason_code AS reason_code, w.budget_snapshot AS budget_snapshot, w.created_at AS '
+        'created_at, g.topic AS topic FROM wake_decisions AS w LEFT JOIN goals AS g ON g.goal_id = '
+        'w.goal_id AND g.redacted = 0 ORDER BY w.created_at DESC NULLS LAST LIMIT %s', (limit,),
     ):
         snapshot = json.loads(row["budget_snapshot"] or "{}")
         items.append(entry(row["decision_id"], "wake", "自主活动调度", row["decision"],
@@ -329,31 +356,31 @@ def decisions(core, limit=40):
                            daily_runs=snapshot.get("daily_runs"), limit=snapshot.get("limit"),
                            goal=row["topic"]))
     for row in s.rows(
-        "SELECT c.candidate_id,c.state,c.reason_code,c.created_at,c.message_id,o.state AS sent "
-        "FROM social_candidates c LEFT JOIN outbox o USING(message_id) "
-        "WHERE c.state<>'ERASED' ORDER BY c.created_at DESC LIMIT ?", (limit,),
+        'SELECT c.candidate_id, c.state, c.reason_code, c.created_at, c.message_id, o.state AS '
+        'sent FROM social_candidates AS c LEFT JOIN outbox AS o USING (message_id) WHERE c.state '
+        "<> 'ERASED' ORDER BY c.created_at DESC NULLS LAST LIMIT %s", (limit,),
     ):
         items.append(entry(row["candidate_id"], "share", "主动分享候选", row["state"],
                            row["created_at"], row["reason_code"] or "",
                            options=["SHARE", "SKIP"], delivery_state=row["sent"]))
     if _table_exists(s, "social_autonomy_plans"):
         for row in s.rows(
-            "SELECT plan_id,state,last_error_code,created_at FROM social_autonomy_plans "
-            "WHERE redacted=0 ORDER BY created_at DESC LIMIT ?", (limit,),
+            'SELECT plan_id, state, last_error_code, created_at FROM social_autonomy_plans WHERE '
+            'redacted = 0 ORDER BY created_at DESC NULLS LAST LIMIT %s', (limit,),
         ):
             items.append(entry(row["plan_id"], "account", "QQ 资料改动", row["state"],
                                row["created_at"], row["last_error_code"] or "",
                                options=["PLAN", "SKIP"]))
     for row in s.rows(
-        "SELECT r.run_id,r.state,r.last_error_code,r.local_date,r.created_at,"
-        "(SELECT COUNT(*) FROM reflection_suggestions x WHERE x.run_id=r.run_id "
-        "AND x.state<>'REDACTED') suggestions,"
-        "(SELECT COUNT(*) FROM reflection_evidence e WHERE e.run_id=r.run_id) sources "
-        "FROM reflection_runs r ORDER BY r.created_at DESC LIMIT ?", (limit,),
+        'SELECT r.run_id, r.state, r.last_error_code, r.local_date, r.created_at, (SELECT COUNT(*) '
+        "FROM reflection_suggestions AS x WHERE x.run_id = r.run_id AND x.state <> 'REDACTED') AS "
+        'suggestions, (SELECT COUNT(*) FROM reflection_evidence AS e WHERE e.run_id = r.run_id) AS '
+        'sources FROM reflection_runs AS r ORDER BY r.created_at DESC NULLS LAST LIMIT '
+        '%s', (limit,),
     ):
         adjustments = s.one(
-            "SELECT COUNT(*) n FROM capability_overrides c JOIN reflection_suggestions x "
-            "USING(suggestion_id) WHERE x.run_id=?", (row["run_id"],),
+            'SELECT COUNT(*) AS n FROM capability_overrides AS c JOIN reflection_suggestions AS x '
+            'USING (suggestion_id) WHERE x.run_id = %s', (row["run_id"],),
         )["n"] if _table_exists(s, "capability_overrides") else 0
         items.append(entry(row["run_id"], "reflection", "每日反思", row["state"],
                            row["created_at"], row["last_error_code"] or "",

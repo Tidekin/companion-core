@@ -9,10 +9,10 @@ import asyncio
 import hashlib
 import hmac
 import json
-import sqlite3
 from contextlib import nullcontext
 from typing import Literal
 
+import psycopg
 from cryptography.fernet import InvalidToken
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -202,11 +202,11 @@ def classify(before, after):
 
 def _persist(store, settings, snapshot, now):
     key = identity(settings, snapshot)
-    if store.one("SELECT 1 FROM operator_runtime_snapshots WHERE snapshot_id=?", (key,)):
+    if store.one('SELECT 1 FROM operator_runtime_snapshots WHERE snapshot_id = %s', (key,)):
         _read(store, settings, key)
         return key
-    conflict = store.one("SELECT snapshot_id FROM operator_runtime_snapshots WHERE version=? "
-                         "AND base_sha256=? AND snapshot_id<>?",
+    conflict = store.one('SELECT snapshot_id FROM operator_runtime_snapshots WHERE version = %s '
+        'AND base_sha256 = %s AND snapshot_id <> %s',
                          (snapshot.version, snapshot.base_sha256, key))
     if conflict:
         raise CoreError("CONFIGURATION_VERSION_CONFLICT", 409)
@@ -233,9 +233,20 @@ def _persist(store, settings, snapshot, now):
 
 
 def _read(store, settings, key):
-    row = store.one("SELECT * FROM operator_runtime_snapshots WHERE snapshot_id=?", (key,))
+    row = store.one('SELECT operator_runtime_snapshots.snapshot_id AS snapshot_id, '
+        'operator_runtime_snapshots.version AS version, operator_runtime_snapshots.base_sha256 AS '
+        'base_sha256, operator_runtime_snapshots.chat_time_labels AS chat_time_labels, '
+        'operator_runtime_snapshots.created_at AS created_at, '
+        'operator_runtime_snapshots.expression_json AS expression_json FROM '
+        'operator_runtime_snapshots AS operator_runtime_snapshots WHERE '
+        'operator_runtime_snapshots.snapshot_id = %s', (key,))
     return validate_record(settings, row, lookup=lambda version: store.one(
-        "SELECT * FROM operator_configuration WHERE version=?", (version,)))
+        'SELECT operator_configuration.version AS version, operator_configuration.request_id AS '
+        'request_id, operator_configuration.request_sha256 AS request_sha256, '
+        'operator_configuration.encrypted_overrides AS encrypted_overrides, '
+        'operator_configuration.fields_json AS fields_json, operator_configuration.created_at AS '
+        'created_at FROM operator_configuration AS operator_configuration WHERE '
+        'operator_configuration.version = %s', (version,)))
 
 
 def validate_record(settings, row, *, lookup=None):
@@ -319,7 +330,7 @@ def boundary(store, settings, clock, *, worker=None):
 
     def publish():
         now, current = clock(), _snapshot(settings)
-        prior = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+        prior = store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
         previous = {}
         if prior:
             try:
@@ -371,7 +382,9 @@ def boundary(store, settings, clock, *, worker=None):
         if {k: v for k, v in state.items() if k != "observed_at"} != {
             k: v for k, v in previous.items() if k != "observed_at"
         }:
-            store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(state)))
+            store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) '
+                'DO UPDATE SET value = excluded.value, record_sequence = '
+                'DEFAULT', (key, encode(state)))
         return current
 
     if store.in_write_transaction:
@@ -381,7 +394,7 @@ def boundary(store, settings, clock, *, worker=None):
 
 
 async def worker_boundary(store, settings, clock):
-    """Wait out SQLite writer contention before starting a native worker unit.
+    """Wait out PostgreSQL lock contention before starting a native worker unit.
 
     Only the configuration transaction is retried, after rollback. Business work,
     provider calls and their uncertainty remain outside this retry boundary.
@@ -390,9 +403,9 @@ async def worker_boundary(store, settings, clock):
         try:
             boundary(store, settings, clock)
             return True
-        except sqlite3.OperationalError as error:
-            if (getattr(error, "sqlite_errorcode", 0) & 0xFF != sqlite3.SQLITE_BUSY
-                or store.db.in_transaction):
+        except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected,
+                    psycopg.errors.SerializationFailure):
+            if store.in_transaction:
                 raise
             await asyncio.sleep(0.1)
     return False
@@ -400,7 +413,8 @@ async def worker_boundary(store, settings, clock):
 
 def workers(store, settings):
     result = []
-    for row in store.rows("SELECT value FROM runtime_meta WHERE key LIKE ? ORDER BY key",
+    for row in store.rows('SELECT value FROM runtime_meta WHERE key LIKE %s ORDER BY key NULLS '
+        'FIRST',
                           (PREFIX + "%",)):
         try:
             state = json.loads(row["value"])
@@ -415,7 +429,11 @@ def workers(store, settings):
 
 
 def get(store, settings, task_key):
-    row = store.one("SELECT * FROM operator_task_configuration WHERE task_key=?", (task_key,))
+    row = store.one('SELECT operator_task_configuration.task_key AS task_key, '
+        'operator_task_configuration.snapshot_id AS snapshot_id, '
+        'operator_task_configuration.binding_sha256 AS binding_sha256, '
+        'operator_task_configuration.created_at AS created_at FROM operator_task_configuration AS '
+        'operator_task_configuration WHERE operator_task_configuration.task_key = %s', (task_key,))
     if row is None:
         return None
     if not isinstance(row["binding_sha256"], str) or not hmac.compare_digest(
@@ -435,8 +453,8 @@ def bind(store, settings, clock, task_key, *, snapshot=None):
         if not settings.operator_hot_reload and snapshot is None:
             return None
         if task_key.startswith("job:") and store.one(
-            "SELECT 1 FROM model_usage WHERE job_id=? UNION ALL "
-            "SELECT 1 FROM agent_conversations WHERE job_id=? LIMIT 1",
+            'SELECT 1 FROM model_usage WHERE job_id = %s UNION ALL SELECT 1 FROM '
+            'agent_conversations WHERE job_id = %s LIMIT 1',
             (task_key[4:], task_key[4:]),
         ):
             raise CoreError("CONFIGURATION_TASK_BINDING_REQUIRED", 409)
@@ -489,7 +507,7 @@ def video_settings(store, settings, task_key, scenario, *, clock=None):
 
 
 def check_request(store, settings, request_id):
-    row = store.one("SELECT job_id FROM model_usage WHERE request_id=?", (request_id,))
+    row = store.one('SELECT job_id FROM model_usage WHERE request_id = %s', (request_id,))
     if row is None or row["job_id"] is None:
         return
     task = check(store, settings, "job:" + row["job_id"])

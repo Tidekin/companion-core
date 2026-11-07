@@ -18,9 +18,8 @@ from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 
 from companion.legacy_import import import_sqlite_backup
+from companion.legacy_import import migrate_sqlite as migrate_legacy
 from companion.postgres import Database, migrate
-from companion.store import Store
-from companion.store import migrate as migrate_legacy
 
 
 @contextmanager
@@ -215,35 +214,46 @@ def test_stale_repeatable_read_cannot_admit_a_fourth_goal_step(native):
 
 def legacy_backup(path):
     migrate_legacy(path, "0068_image_review_target")
-    store = Store(path)
+    connection = sqlite3.connect(path, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+
+    def insert(table, **values):
+        names = ",".join(values)
+        placeholders = ",".join("?" for _ in values)
+        connection.execute(f"INSERT INTO {table} ({names}) VALUES ({placeholders})",
+                           tuple(values.values()))
+
     try:
-        store.audit("synthetic", "entity", "trace", "now", value="原文")
-        high = store.one("SELECT * FROM audit_log")
+        insert("audit_log", action="synthetic", actor_id="system", entity_type="core",
+               entity_id="entity", trace_id="trace", safe_detail_json='{"value":"原文"}',
+               created_at="now")
+        high = dict(connection.execute("SELECT * FROM audit_log").fetchone())
         high["audit_id"] = 2**40
-        store.insert("audit_log", **high)
-        store.execute("DELETE FROM audit_log WHERE audit_id=?", (2**40,))
-        store.insert("model_usage", usage_id="usage", request_id="request", scenario="chat",
+        insert("audit_log", **high)
+        connection.execute("DELETE FROM audit_log WHERE audit_id=?", (2**40,))
+        insert("model_usage", usage_id="usage", request_id="request", scenario="chat",
                      provider="deepseek", model="deepseek-flash", occurred_at="now",
                      state="UNKNOWN", billed_micro_usd=2**40)
-        store.insert("memories", memory_id="memory", subject="user", kind="fact",
+        insert("memories", memory_id="memory", subject="user", kind="fact",
                      content="小鲸鱼喜欢吃白饭", status="CONFIRMED", origin="user_confirmed",
                      confidence=1, importance=1, privacy_scope="private",
                      created_at="now", updated_at="now")
-        store.insert("memory_vectors", memory_id="memory", model_version="synthetic",
+        insert("memory_vectors", memory_id="memory", model_version="synthetic",
                      content_hash="hash", vector=b"\x00\xff\x80")
-        store.insert("runtime_meta", key="synthetic_evidence", value='{ "x": 1, "x": 2 }')
-        store.insert("principals", actor_id="owner", kind="owner", created_at="now")
-        store.insert("conversations", conversation_id="conversation", platform="qq",
+        insert("runtime_meta", key="synthetic_evidence", value='{ "x": 1, "x": 2 }')
+        insert("principals", actor_id="owner", kind="owner", created_at="now")
+        insert("conversations", conversation_id="conversation", platform="qq",
                      platform_session_key="synthetic", scope="private", owner_actor_id="owner",
                      created_at="now")
         document = '{"text":"保留未明投递"}'
-        store.insert("outbox", message_id="message", conversation_id="conversation",
+        insert("outbox", message_id="message", conversation_id="conversation",
                      action_type="qq.private.reply", content_json=document,
                      content_sha256=hashlib.sha256(document.encode()).hexdigest(),
                      state="DELIVERY_UNCERTAIN", delivery_key="native-original-key",
                      attempt_count=1, created_at="now", updated_at="now")
     finally:
-        store.close()
+        connection.close()
 
 
 def test_offline_copy_preserves_values_order_and_unknown_fees(empty_native, tmp_path):

@@ -1,10 +1,11 @@
 """In-process scan/results boundary around the original native worker operations."""
 
-import sqlite3
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+
+import psycopg
 
 
 class ClaimBusy(Exception):
@@ -16,9 +17,9 @@ def claim_scope(store):
     """Classify BUSY only around an explicitly pre-I/O native claim/recovery scope."""
     try:
         yield
-    except sqlite3.OperationalError as error:
-        if (getattr(error, "sqlite_errorcode", 0) & 0xFF != sqlite3.SQLITE_BUSY
-            or store.db.in_transaction):
+    except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected,
+                    psycopg.errors.SerializationFailure) as error:
+        if store.in_transaction:
             raise
         raise ClaimBusy from error
 
@@ -26,7 +27,7 @@ def claim_scope(store):
 @dataclass(frozen=True)
 class ScanContext:
     started_at: datetime
-    data_version: int
+    notification_sequence: int
     monotonic_started: float
 
 

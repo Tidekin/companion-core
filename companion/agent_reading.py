@@ -49,11 +49,17 @@ def _owner_source(core, job, event_id):
 def catalog(core, job, snapshots):
     """Bounded declarations, not a second copy of fetched documents."""
     rows = core.store.rows(
-        "SELECT c.item_id,c.owner_event_id,c.target_url AS url,c.read_request_id,c.state,"
-        "e.occurred_at FROM content_items c JOIN events e ON e.event_id=c.owner_event_id "
-        "WHERE e.conversation_id=? AND c.kind='link' AND c.redacted=0 AND e.redacted=0 "
-        "AND e.rowid<=(SELECT rowid FROM events WHERE event_id=?) "
-        "ORDER BY e.rowid DESC,c.slot LIMIT ?",
+        (
+            'SELECT c.item_id, c.owner_event_id, c.target_url AS '
+            'url, c.read_request_id, c.state, e.occurred_at FROM '
+            'content_items AS c JOIN events AS e ON e.event_id = '
+            'c.owner_event_id WHERE e.conversation_id = %s AND '
+            "c.kind = 'link' AND c.redacted = 0 AND e.redacted = 0 "
+            'AND e.record_sequence <= (SELECT record_sequence AS '
+            'rowid FROM events WHERE event_id = %s) ORDER BY '
+            'e.record_sequence DESC NULLS LAST, c.slot NULLS FIRST '
+            'LIMIT %s'
+        ),
         (job["conversation_id"], job["event_id"], core.settings.content.max_links_per_event * 3),
     )
     valid = []
@@ -63,8 +69,8 @@ def catalog(core, job, snapshots):
         except CoreError:
             continue
         if row["read_request_id"]:
-            request = core.store.one("SELECT state FROM exploration_requests "
-                                     "WHERE request_id=? AND redacted=0",
+            request = core.store.one('SELECT state FROM exploration_requests WHERE request_id = %s '
+                'AND redacted = 0',
                                      (row["read_request_id"],))
             if request is None:
                 continue
@@ -86,12 +92,29 @@ def _reading_result(store, settings, clock, job, request_id, *, executing):
     goals = GoalEngine(store, settings, None, clock)
     observations = ObservationService(store, settings, clock)
     exploration = ExplorationService(store, settings, observations, goals, None, None, clock)
-    row = store.one("SELECT * FROM exploration_requests WHERE request_id=? AND redacted=0",
+    row = store.one('SELECT exploration_requests.request_id AS request_id, '
+        'exploration_requests.request_key AS request_key, exploration_requests.adapter_id AS '
+        'adapter_id, exploration_requests.operation AS operation, exploration_requests.url AS url, '
+        'exploration_requests.goal_step_json AS goal_step_json, exploration_requests.state AS '
+        'state, exploration_requests.lease_token AS lease_token, exploration_requests.lease_until '
+        'AS lease_until, exploration_requests.captured_privacy_epoch AS captured_privacy_epoch, '
+        'exploration_requests.reserved_bytes AS reserved_bytes, exploration_requests.used_bytes AS '
+        'used_bytes, exploration_requests.result_sha256 AS result_sha256, '
+        'exploration_requests.last_error_code AS last_error_code, exploration_requests.created_at '
+        'AS created_at, exploration_requests.started_at AS started_at, '
+        'exploration_requests.updated_at AS updated_at, exploration_requests.redacted AS redacted, '
+        'exploration_requests.reserved_requests AS reserved_requests, '
+        'exploration_requests.used_requests AS used_requests, exploration_requests.source_grant_id '
+        'AS source_grant_id, exploration_requests.source_grant_epoch AS source_grant_epoch, '
+        'exploration_requests.authority_json AS authority_json, exploration_requests.query AS '
+        'query, exploration_requests.discovery_mode AS discovery_mode FROM exploration_requests AS '
+        'exploration_requests WHERE exploration_requests.request_id = %s AND '
+        'exploration_requests.redacted = 0',
                          (request_id,))
     if not row or row["goal_step_json"] != "{}":
         raise CoreError("CONVERSATION_READER_SOURCE_REQUIRED", 403)
     sources = [item["event_id"] for item in store.rows(
-        "SELECT event_id FROM exploration_evidence WHERE request_id=?", (request_id,),
+        'SELECT event_id FROM exploration_evidence WHERE request_id = %s', (request_id,),
     )]
     owners = [event_id for event_id in sources if reply_revision.owner_input(store, event_id)]
     if not owners:
@@ -111,7 +134,18 @@ def _reading_result(store, settings, clock, job, request_id, *, executing):
             observations.grants.require(row["adapter_id"], None)
     items = []
     if row["state"] == "DONE":
-        attempt = store.one("SELECT * FROM reading_attempts WHERE request_id=?",
+        attempt = store.one('SELECT reading_attempts.request_id AS request_id, '
+            'reading_attempts.adapter_id AS adapter_id, reading_attempts.lease_token AS '
+            'lease_token, reading_attempts.lease_until AS lease_until, '
+            'reading_attempts.context_json AS context_json, reading_attempts.allowed_hosts_json AS '
+            'allowed_hosts_json, reading_attempts.original_url_sha256 AS original_url_sha256, '
+            'reading_attempts.source_grant_json AS source_grant_json, reading_attempts.state AS '
+            'state, reading_attempts.result_sha256 AS result_sha256, '
+            'reading_attempts.result_event_ids_json AS result_event_ids_json, '
+            'reading_attempts.observed_requests AS observed_requests, '
+            'reading_attempts.observed_bytes AS observed_bytes, reading_attempts.created_at AS '
+            'created_at, reading_attempts.updated_at AS updated_at FROM reading_attempts AS '
+            'reading_attempts WHERE reading_attempts.request_id = %s',
                                  (request_id,))
         if (not attempt or attempt["state"] != "DONE" or not attempt["result_sha256"]
             or attempt["result_sha256"] != row["result_sha256"]
@@ -129,10 +163,11 @@ def _reading_result(store, settings, clock, job, request_id, *, executing):
         BiliVideoService(store, settings, None, clock=clock).check_result(request_id, result_ids)
         sources = sorted(set(sources) | set(result_ids))
         for item in store.rows(
-            "SELECT e.event_id,e.body_json,e.occurred_at,o.result_status,o.evidence_json,"
-            "o.canonical_url FROM events e JOIN observations o USING(event_id) "
-            "WHERE e.event_id IN (SELECT value FROM json_each(?)) "
-            "AND e.redacted=0 AND o.redacted=0 ORDER BY e.rowid", (encode(result_ids),),
+            'SELECT e.event_id, e.body_json, e.occurred_at, o.result_status, o.evidence_json, '
+            'o.canonical_url FROM events AS e JOIN observations AS o USING (event_id) WHERE '
+            'e.event_id IN (SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS '
+            'JSON)) AS parsed(value)) AND e.redacted = 0 AND o.redacted = 0 ORDER BY '
+            'e.record_sequence NULLS FIRST', (encode(result_ids),),
         ):
             body = json.loads(item["body_json"])
             items.append({"event_id": item["event_id"], "observed_at": item["occurred_at"],
@@ -148,11 +183,11 @@ def _reading_result(store, settings, clock, job, request_id, *, executing):
 
 
 def _result_digest(store, result):
-    receipt = store.one("SELECT adapter_id,lease_token,context_json,source_grant_json,"
-                        "original_url_sha256,result_sha256,result_event_ids_json "
-                        "FROM reading_attempts WHERE request_id=?", (result["request_id"],))
-    bindings = store.rows("SELECT event_id FROM exploration_evidence WHERE request_id=? "
-                          "ORDER BY event_id", (result["request_id"],))
+    receipt = store.one('SELECT adapter_id, lease_token, context_json, source_grant_json, '
+        'original_url_sha256, result_sha256, result_event_ids_json FROM reading_attempts WHERE '
+        'request_id = %s', (result["request_id"],))
+    bindings = store.rows('SELECT event_id FROM exploration_evidence WHERE request_id = %s ORDER '
+        'BY event_id NULLS FIRST', (result["request_id"],))
     return digest({"result": {key: value for key, value in result.items() if key != "as_of"},
                    "receipt": receipt, "source_bindings": bindings})
 
@@ -195,9 +230,9 @@ def deferred_results(core, job, snapshots, conversation):
     check_conversation(core, job, snapshots, purpose="content")
     answers = {}
     for call in pending.calls:
-        binding = core.store.one("SELECT COALESCE(voice_job_id,request_id) AS request_id,tool_name "
-                                 "FROM agent_tool_calls "
-                                 "WHERE job_id=? AND tool_call_id=? AND state='DEFERRED'",
+        binding = core.store.one('SELECT COALESCE(voice_job_id, request_id) AS request_id, '
+            'tool_name FROM agent_tool_calls WHERE job_id = %s AND tool_call_id = %s AND state = '
+            "'DEFERRED'",
                                  (job["job_id"], call.tool_call_id))
         metadata = pending.metadata.get(call.tool_call_id, {})
         if not binding or not binding["request_id"] or binding["request_id"] != metadata.get(
@@ -212,7 +247,7 @@ def deferred_results(core, job, snapshots, conversation):
                 return False, None
             answers[call.tool_call_id] = answer
             continue
-        row = core.store.one("SELECT created_at FROM exploration_requests WHERE request_id=?",
+        row = core.store.one('SELECT created_at FROM exploration_requests WHERE request_id = %s',
                              (binding["request_id"],))
         expired_wait = row and after(row["created_at"], core.settings.content.wait_seconds) <= (
             core.clock())
@@ -269,7 +304,8 @@ def reader_tools(core, job, snapshots, persistence):
                     name, "read", item["item_id"], canonical,
                     source_event_ids=[item["owner_event_id"]],
                 )
-                core.store.execute("UPDATE content_items SET read_request_id=? WHERE item_id=?",
+                core.store.execute('UPDATE content_items SET read_request_id = %s WHERE item_id = '
+                    '%s',
                                    (request_id, item["item_id"]))
             result = reading_result(core, job, snapshots, request_id)
             metadata = persistence.bind_request(ctx.tool_call_id, request_id)
@@ -281,7 +317,7 @@ def reader_tools(core, job, snapshots, persistence):
         query: Annotated[str | None, Field(min_length=2, max_length=100)] = None) -> dict:
         """Discover real source titles; Bilibili accepts an optional song/title search query."""
         check("exploration")
-        paused = core.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
+        paused = core.store.one("SELECT value FROM runtime_meta WHERE key = 'life_paused'")
         if not core.settings.exploration_enabled or (paused and paused["value"] == "1"):
             return {"state": "UNAVAILABLE", "error_code": "AUTONOMY_PAUSED"}
         name = adapter(source, "discover")
@@ -336,9 +372,9 @@ def reader_tools(core, job, snapshots, persistence):
             result = reading_result(core, job, snapshots, request_id, include_pending=True)
             prior = result["state"]
             if prior in {"QUEUED", "RUNNING"}:
-                core.store.execute("UPDATE exploration_requests SET state='CANCELLED',"
-                                   "last_error_code='OWNER_READING_CANCELLED',updated_at=? "
-                                   "WHERE request_id=? AND state=?",
+                core.store.execute("UPDATE exploration_requests SET state = 'CANCELLED', "
+                    "last_error_code = 'OWNER_READING_CANCELLED', updated_at = %s WHERE request_id "
+                    '= %s AND state = %s',
                                    (core.clock(), request_id, prior))
             return {"request_id": request_id,
                     "state": "CANCELLED" if prior in {"QUEUED", "RUNNING"} else prior,

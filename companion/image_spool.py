@@ -23,15 +23,15 @@ FILE_MIMES = frozenset({
 })
 
 
-def directory(store, *, database=None):
-    database = Path(store.path if database is None else database).resolve()
-    return database.parent / (database.name + ".owner-images")
+def directory(store, *, state_directory=None):
+    root = store.state_directory if state_directory is None else state_directory
+    return Path(root).resolve() / "owner-images"
 
 
-def _path(store, item_id, *, database=None):
+def _path(store, item_id, *, state_directory=None):
     if not re.fullmatch(r"content_[a-f0-9]{32}", item_id):
         raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
-    root = directory(store, database=database)
+    root = directory(store, state_directory=state_directory)
     if root.is_symlink() or (root.exists() and (
         root.resolve() != root or not root.is_dir()
         or (os.name != "nt" and root.stat().st_mode & 0o077)
@@ -177,9 +177,9 @@ def deadline(store, row):
         raise CoreError("LIVE_IMAGE_ORIGINAL_UNAVAILABLE", 410) from None
 
 
-def discard(store, item_ids, *, database=None):
+def discard(store, item_ids, *, state_directory=None):
     for item_id in item_ids:
-        target = _path(store, item_id, database=database)
+        target = _path(store, item_id, state_directory=state_directory)
         target.unlink(missing_ok=True)
         if target.parent.exists():
             _sync_directory(target.parent)
@@ -187,13 +187,13 @@ def discard(store, item_ids, *, database=None):
 
 def discard_window(store, plan_sha256):
     for row in store.rows(
-        "SELECT c.item_id,c.kind,r.value FROM content_items c JOIN runtime_meta r "
-        "ON r.key='live_text_input:' || c.owner_event_id WHERE c.kind IN ('qq_image','qq_file')",
+        'SELECT c.item_id, c.kind, r.value FROM content_items AS c JOIN runtime_meta AS r ON r.key '
+        "= 'live_text_input:' || c.owner_event_id WHERE c.kind IN ('qq_image', 'qq_file')",
     ):
         if json.loads(row["value"]).get("window_sha256") == plan_sha256:
             discard(store, [row["item_id"]])
             store.execute(
-                "DELETE FROM runtime_meta WHERE key=?",
+                'DELETE FROM runtime_meta WHERE key = %s',
                 (("live_text_file_upload:" if row["kind"] == "qq_file"
                   else "live_text_image_upload:") + row["item_id"],),
             )
@@ -218,22 +218,31 @@ def cleanup(store, now, max_bytes=MAX_OWNER_IMAGE_BYTES, *, retain_completed=Fal
         path = Path(entry.path)
         if path.suffix != ".raw":
             continue
-        with nullcontext() if store.db.in_transaction else store.transaction():
+        with nullcontext() if store.in_transaction else store.transaction():
             item_id = path.stem
             if not re.fullmatch(r"content_[a-f0-9]{32}", item_id):
                 continue
             row = store.one(
-                "SELECT c.*,j.state AS job_state,e.redacted AS source_redacted "
-                "FROM content_items c JOIN events e ON e.event_id=c.owner_event_id "
-                "JOIN jobs j ON j.event_id=c.owner_event_id AND j.kind='chat' "
-                "WHERE c.item_id=?", (item_id,),
+                'SELECT c.item_id AS item_id, c.owner_event_id AS owner_event_id, c.kind AS kind, '
+                'c.slot AS slot, c.source_event_id AS source_event_id, c.target_url AS target_url, '
+                'c.read_request_id AS read_request_id, c.state AS state, c.media_sha256 AS '
+                'media_sha256, c.fingerprint AS fingerprint, c.captured_privacy_epoch AS '
+                'captured_privacy_epoch, c.reserved_bytes AS reserved_bytes, c.usage_request_id AS '
+                'usage_request_id, c.output_event_id AS output_event_id, c.lease_token AS '
+                'lease_token, c.lease_until AS lease_until, c.deadline AS deadline, c.error_code '
+                'AS error_code, c.redacted AS redacted, c.created_at AS created_at, c.started_at '
+                'AS started_at, c.updated_at AS updated_at, c.attachment_json AS attachment_json, '
+                'j.state AS job_state, e.redacted AS source_redacted FROM content_items AS c JOIN '
+                'events AS e ON e.event_id = c.owner_event_id JOIN jobs AS j ON j.event_id = '
+                "c.owner_event_id AND j.kind = 'chat' WHERE c.item_id = %s", (item_id,),
             )
             captured = bool(retain_completed and row and store.one(
-                "SELECT 1 FROM captured_images WHERE item_id=? AND expires_at>?", (item_id, now),
+                'SELECT 1 FROM captured_images WHERE item_id = %s AND expires_at > '
+                '%s', (item_id, now),
             ))
             pending_file = bool(row and row["kind"] == "qq_file"
                 and row["state"] in {"QUEUED", "RUNNING"} and row["deadline"] > now
-                and store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                and store.one('SELECT 1 FROM runtime_meta WHERE key = %s',
                               ("owner_input:" + row["owner_event_id"],)))
             expired = (
                 not row or row["redacted"] or row["source_redacted"]

@@ -23,7 +23,7 @@ def retain(core, record):
     if batch.get("phase") != "FAILED":
         return
     key = PREFIX + record["batch_id"]
-    old = core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+    old = core.store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
     # Repeated terminal persistence cannot overwrite the sole original payload.
     if old and json.loads(old["value"])["state"] != "QUEUED":
         return
@@ -32,7 +32,8 @@ def retain(core, record):
                  recoveries=batch.get("recoveries", 0))
     if old and "recovery_request_id" in json.loads(old["value"]):
         saved["recovery_request_id"] = json.loads(old["value"])["recovery_request_id"]
-    core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(saved)))
+    core.store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO '
+        'UPDATE SET value = excluded.value, record_sequence = DEFAULT', (key, encode(saved)))
 
 
 def failures(store):
@@ -40,8 +41,9 @@ def failures(store):
              "error": value["batch"].get("error"), "failed_at": value["failed_at"],
              "source_count": len(value["source_event_ids"]),
              "recovery_available": value["state"] == "FAILED" and value["recoveries"] == 0}
-            for row in store.rows("SELECT value FROM runtime_meta WHERE key GLOB ? ORDER BY key",
-                                  (PREFIX + "*",))
+            for row in store.rows(
+                "SELECT value FROM runtime_meta WHERE starts_with(key,%s) ORDER BY key",
+                                  (PREFIX,))
             for value in [json.loads(row["value"])]]
 
 
@@ -53,7 +55,7 @@ def retry(core, batch_id, request_id, *, owner_check=None):
     with s.transaction():
         if owner_check:
             owner_check()
-        row = s.one("SELECT value FROM runtime_meta WHERE key=?", (PREFIX + batch_id,))
+        row = s.one('SELECT value FROM runtime_meta WHERE key = %s', (PREFIX + batch_id,))
         if not row:
             raise CoreError("MEMORY_FAILURE_NOT_FOUND", 404)
         record = json.loads(row["value"])
@@ -61,7 +63,7 @@ def retry(core, batch_id, request_id, *, owner_check=None):
             return {"entry_id": batch_id, "state": record["state"]}
         if not request_id or record["recoveries"] or record["state"] != "FAILED":
             raise CoreError("MEMORY_RECOVERY_EXHAUSTED", 409)
-        checkpoint = s.one("SELECT value FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
+        checkpoint = s.one('SELECT value FROM runtime_meta WHERE key = %s', (CHECKPOINT_KEY,))
         if checkpoint and json.loads(checkpoint["value"])["batch"].get("phase") not in (
             TERMINAL_PHASES
         ):
@@ -75,7 +77,7 @@ def retry(core, batch_id, request_id, *, owner_check=None):
         if record["timezone"] != core.settings.timezone:
             raise CoreError("MEMORY_TIMEZONE_CHANGED", 409)
         for key in {batch.get("request_id"), batch.get("extraction_request_id")} - {None}:
-            usage = s.one("SELECT state FROM model_usage WHERE request_id=?", (key,))
+            usage = s.one('SELECT state FROM model_usage WHERE request_id = %s', (key,))
             # An unreserved preallocated intent proves no dispatch, exactly as native
             # crash recovery does. A retained extraction payload still needs its
             # original settled receipt; missing/unknown receipts cannot authorize it.
@@ -99,10 +101,11 @@ def retry(core, batch_id, request_id, *, owner_check=None):
         work.pop("error", None)
         record.update(state="QUEUED", recoveries=1, recovery_request_id=request_id)
         for key in work["event_ids"]:
-            s.execute("UPDATE events SET memory_processed=0 WHERE event_id=?", (key,))
-        s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+            s.execute('UPDATE events SET memory_processed = 0 WHERE event_id = %s', (key,))
+        s.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO '
+            'UPDATE SET value = excluded.value, record_sequence = DEFAULT',
                   (CHECKPOINT_KEY, encode(resumed)))
-        s.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+        s.execute('UPDATE runtime_meta SET value = %s WHERE key = %s',
                   (encode(record), PREFIX + batch_id))
         s.audit("memory.recovery_requested", batch_id, "console", now)
         return {"entry_id": batch_id, "state": "QUEUED"}
@@ -112,10 +115,10 @@ def finish(store, record):
     if record["batch"].get("phase") not in {"COMPLETE", "CANCELLED", "UNKNOWN"}:
         return
     key = PREFIX + record["batch_id"]
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+    row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
     if row and json.loads(row["value"])["state"] == "QUEUED":
         saved = json.loads(row["value"])
         saved["state"] = record["batch"]["phase"]
         # A completed or uncertain recovery must not retain a replayable payload.
         saved["batch"] = {"phase": saved["state"], "error": record["batch"].get("error")}
-        store.execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(saved), key))
+        store.execute('UPDATE runtime_meta SET value = %s WHERE key = %s', (encode(saved), key))

@@ -1,6 +1,6 @@
 """Read-only deadline projections for native domains; no claims or recovery writes."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, timedelta
 from zoneinfo import ZoneInfo
 
 from companion import owner_authority
@@ -39,17 +39,25 @@ LIFE = (
 def _next(store, settings, scan_started_at, boundaries, *, local_hours=()):
     # Use the scan horizon, not wait entry: deadlines crossed during native work
     # need one rescan. Older fenced rows must not produce an immediate busy loop.
-    parts = [f"SELECT julianday({field}) AS at FROM {table} WHERE {condition}"
-             for table, field, condition in boundaries]
-    parts.append("SELECT julianday(a.lease_until) AS at FROM model_admissions a "
-                 "JOIN model_usage m USING(request_id) WHERE m.state='RESERVED'")
-    row = store.one("SELECT MIN(at) AS at FROM (" + " UNION ALL ".join(parts)
-                    + ") WHERE at>=julianday(?)", (scan_started_at.isoformat(),))
-    dates = ([datetime.fromtimestamp((row["at"] - 2440587.5) * 86400 + 0.002, UTC)]
-             if row["at"] else [])
+    parts = [
+        f"SELECT {field}::timestamptz AS at FROM {table} WHERE {condition}"
+        for table, field, condition in boundaries
+    ]
+    parts.append(
+        "SELECT a.lease_until::timestamptz AS at FROM model_admissions a "
+        "JOIN model_usage m USING(request_id) WHERE m.state='RESERVED'"
+    )
+    row = store.one(
+        "SELECT MIN(at) AS at FROM (" + " UNION ALL ".join(parts) + ") WHERE at>=%s::timestamptz",
+        (scan_started_at.isoformat(),),
+    )
+    dates = [row["at"] + timedelta(milliseconds=2)] if row["at"] else []
     local = scan_started_at.astimezone(ZoneInfo(settings.timezone))
-    dates.append((local + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0).astimezone(UTC))
+    dates.append(
+        (local + timedelta(days=1))
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .astimezone(UTC)
+    )
     for local_hour in local_hours:
         due = local.replace(hour=local_hour, minute=0, second=0, microsecond=0)
         if due <= local:
@@ -58,7 +66,9 @@ def _next(store, settings, scan_started_at, boundaries, *, local_hours=()):
     if owner_authority.required(store, settings):
         try:
             end = owner_authority.current(
-                store, settings, lambda: scan_started_at.isoformat(),
+                store,
+                settings,
+                lambda: scan_started_at.isoformat(),
             ).policy.expires_at
         except CoreError:
             end = None
@@ -73,8 +83,14 @@ def chat(store, settings, scan_started_at):
     # nothing (meme offer, voice ASR, image/content pending). Rescan on the former
     # polling cadence while one is waiting, instead of the 60 s maintenance horizon.
     if store.one(
-        "SELECT 1 FROM jobs WHERE kind='chat' AND state='QUEUED' AND (next_attempt_at IS NULL "
-        "OR julianday(next_attempt_at)<=julianday(?)) LIMIT 1", (scan_started_at.isoformat(),),
+        (
+            (
+                "SELECT 1 FROM jobs WHERE kind='chat' AND "
+                "state='QUEUED' AND (next_attempt_at IS NULL OR "
+                'next_attempt_at::timestamptz<=%s::timestamptz) LIMIT 1'
+            )
+        ),
+        (scan_started_at.isoformat(),),
     ):
         deadline = min(deadline, scan_started_at + timedelta(seconds=CHAT_WAIT_RESCAN_SECONDS))
         # The meme-offer wait ends at a known time; rescan right after it instead of
@@ -82,12 +98,18 @@ def chat(store, settings, scan_started_at):
         from companion.meme_core import OFFER_WAIT_SECONDS
 
         row = store.one(
-            "SELECT MIN(julianday(created_at)) AS at FROM jobs WHERE kind='chat' "
-            "AND state='QUEUED' AND julianday(created_at)>julianday(?)-?/86400.0",
+            (
+                (
+                    'SELECT MIN(created_at::timestamptz) AS at FROM jobs '
+                    "WHERE kind='chat' AND state='QUEUED' AND "
+                    "created_at::timestamptz>%s::timestamptz-%s*INTERVAL '1 "
+                    "second'"
+                )
+            ),
             (scan_started_at.isoformat(), OFFER_WAIT_SECONDS),
         )
         if row["at"]:
-            ends = datetime.fromtimestamp((row["at"] - 2440587.5) * 86400 + 0.002, UTC)
+            ends = row["at"] + timedelta(milliseconds=2)
             deadline = min(deadline, ends + timedelta(seconds=OFFER_WAIT_SECONDS))
     return deadline
 
@@ -104,8 +126,7 @@ def life(store, settings, scan_started_at):
     hours = {settings.diary_generate_hour, settings.consolidation_local_hour}
     if settings.quiet_start != settings.quiet_end:
         hours.add(settings.quiet_end)
-    return _next(store, settings, scan_started_at, LIFE + DIARY + JOBS + SOCIAL,
-                 local_hours=hours)
+    return _next(store, settings, scan_started_at, LIFE + DIARY + JOBS + SOCIAL, local_hours=hours)
 
 
 PROVIDERS = {

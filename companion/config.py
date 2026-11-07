@@ -457,7 +457,8 @@ class Settings(BaseModel):
     owner_qq_id: str
     bot_qq_id: str
     bridge_token: SecretStr
-    database: str = "data/companion.sqlite3"
+    database: SecretStr
+    state_directory: str = "data"
     erasure_ledger: str = "privacy/erasures.jsonl"
     timezone: str = "Asia/Shanghai"
     mode: str = "demo"

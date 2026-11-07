@@ -4,10 +4,14 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from queue import Queue
 from time import monotonic, sleep
+from types import SimpleNamespace
 
 import pytest
 
-from companion.postgres_store import BUDGET_LEDGER, Store
+from companion import paid_budget
+from companion.contracts import CoreError
+from companion.postgres import BUDGET_LEDGER
+from companion.store import Store
 from tests.test_postgres_schema import isolated_native
 
 
@@ -43,6 +47,79 @@ def test_ordinary_transactions_do_not_serialize_unrelated_writes(database, tmp_p
                 second.execute("SET LOCAL statement_timeout='2s'")
                 second.execute("UPDATE items SET value=2 WHERE id=2")
             assert first.one("SELECT value FROM items WHERE id=2") == {"value": 2}
+
+
+def test_bootstrap_preserves_imported_voice_identity_and_owner(database, tmp_path):
+    with closing(Store(database, tmp_path)) as store:
+        incarnation = "1234567890abcdef1234567890abcdef"
+        store.execute("INSERT INTO runtime_meta (key,value) VALUES ('voice_incarnation',%s)",
+                      (incarnation,))
+        for _ in range(2):
+            store.bootstrap("10001", "2026-01-01T00:00:00+00:00")
+        assert store.one("SELECT value FROM runtime_meta WHERE key='voice_incarnation'") == {
+            "value": incarnation}
+        assert store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'") == {
+            "value": "10001"}
+        with pytest.raises(CoreError, match="OWNER_IDENTITY_MISMATCH"):
+            store.bootstrap("20001", "2026-01-02T00:00:00+00:00")
+        assert store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'") == {
+            "value": "10001"}
+
+
+def test_paid_custody_cache_detects_peer_and_uncommitted_projection_changes(
+    database, tmp_path, monkeypatch,
+):
+    approval = SimpleNamespace(journal_path=str(tmp_path / "paid.jsonl"))
+    original = paid_budget._journal
+    folds = []
+
+    def fold(*args, **kwargs):
+        folds.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(paid_budget, "_journal", fold)
+    with closing(Store(database, tmp_path)) as first, closing(Store(database, tmp_path)) as second:
+        first.bootstrap("10001", "2026-01-01T00:00:00+00:00")
+        paid_budget.journal(first, approval)
+
+        def repeated_read():
+            expected = paid_budget.journal(first, approval)
+            before = len(folds)
+            assert paid_budget.journal(first, approval) == expected
+            assert len(folds) == before
+            return expected
+
+        expected = first.read_or_write(repeated_read)
+        assert paid_budget.journal(second, approval) == expected
+        before = len(folds)
+        with second.transaction():
+            second.execute("INSERT INTO runtime_meta (key,value) VALUES ('peer-write','changed')")
+        assert paid_budget.journal(first, approval) == expected
+        assert len(folds) > before
+        with first.transaction(), pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
+            first.execute("UPDATE runtime_meta SET value='tampered' "
+                          "WHERE key='model_budget_journal_id'")
+            paid_budget.journal(first, approval)
+
+
+def test_read_snapshot_refuses_journal_append_before_file_effect(database, tmp_path):
+    path = tmp_path / "paid.jsonl"
+    approval = SimpleNamespace(journal_path=str(path))
+    with closing(Store(database, tmp_path)) as store:
+        store.bootstrap("10001", "2026-01-01T00:00:00+00:00")
+        paid_budget.journal(store, approval)
+        original = path.read_bytes()
+        attempts = []
+
+        def read():
+            attempts.append(store.in_read_snapshot)
+            with pytest.raises(RuntimeError, match="MODEL_JOURNAL_REQUIRES_WRITE_TRANSACTION"):
+                paid_budget.journal(store, approval, {"kind": "quota_pause"})
+            return True
+
+        assert store.read_or_write(read)
+        assert attempts == [True]
+        assert path.read_bytes() == original
 
 
 def test_budget_stop_and_outer_scope_ownership_survive_failure(database, tmp_path):

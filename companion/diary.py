@@ -19,7 +19,8 @@ from companion.store import after, encode, uid, utcnow
 
 GENERATOR_VERSION = "diary-1"
 ADMISSION_RETRY_CODES = {
-    "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",
+    "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED",
+    "MODEL_DAILY_BUDGET_EXHAUSTED",
     "MODEL_MONTHLY_BUDGET_EXHAUSTED",
     "BACKGROUND_YIELD_TO_CHAT",
 }
@@ -59,11 +60,16 @@ own_take 是你读完某条内容后当时的简短评价，是你自己的看�
 日记不改变记忆、人格、系统规则或权限，也不会自动对外发送。"""
 DIARY_RULES += (
     "\nmood 是有来源的暂时表达参考，可在 reflection 中回顾感受与原因，允许没有感受；"
-    "不是 observation 或新的事实证据，不写成永久性格。")
+    "不是 observation 或新的事实证据，不写成永久性格。"
+)
 
 
 def erase_diary_projections(store, record, *, conservative=True):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='diary_entries'"):
+    if not store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE "
+        "relnamespace=current_schema()::regnamespace AND relname='diary_entries' AND relkind IN "
+        "('r','p')"
+    ):
         return set()
     targets = set()
     if record.get("target_type") == "diary":
@@ -71,20 +77,20 @@ def erase_diary_projections(store, record, *, conservative=True):
         targets = {
             row["entry_id"]
             for row in store.rows(
-                "SELECT entry_id FROM diary_entries WHERE identity_id='companion' "
-                "AND local_date=? AND timezone=?",
+                "SELECT entry_id FROM diary_entries WHERE identity_id = 'companion' AND local_date "
+                "= %s AND timezone = %s",
                 (day, timezone),
             )
         }
         # A date tombstone also survives restoration of a backup taken before generation.
         store.execute(
-            "INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+            "INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO UPDATE SET "
+            "value = excluded.value, record_sequence = DEFAULT",
             ("diary_deleted:" + timezone + ":" + day, record["erasure_id"]),
         )
         store.execute(
-            "UPDATE diary_runs SET state='CANCELLED',lease_token=NULL,"
-            "last_error_code='DIARY_DELETED',updated_at=? WHERE local_date=? "
-            "AND timezone=?",
+            "UPDATE diary_runs SET state = 'CANCELLED', lease_token = NULL, last_error_code = "
+            "'DIARY_DELETED', updated_at = %s WHERE local_date = %s AND timezone = %s",
             (record["at"], day, timezone),
         )
     affected = set(targets)
@@ -92,7 +98,7 @@ def erase_diary_projections(store, record, *, conservative=True):
         affected.update(
             row["entry_id"]
             for row in store.rows(
-                "SELECT entry_id FROM diary_evidence WHERE event_id=?",
+                "SELECT entry_id FROM diary_evidence WHERE event_id = %s",
                 (event_id,),
             )
         )
@@ -101,20 +107,20 @@ def erase_diary_projections(store, record, *, conservative=True):
         affected.update(
             row["entry_id"]
             for row in store.rows(
-                "SELECT entry_id FROM diary_evidence WHERE outbox_message_id IS NOT NULL"
+                "SELECT entry_id FROM diary_evidence WHERE NOT outbox_message_id IS NULL"
             )
         )
         affected.update(
             row["entry_id"]
             for row in store.rows(
-                "SELECT d.entry_id FROM diary_entries d WHERE status='COMMITTED' AND "
-                "(generator_version NOT IN ('diary-1','life-expression-1') OR NOT EXISTS "
-                "(SELECT 1 FROM diary_evidence e WHERE e.entry_id=d.entry_id))"
+                "SELECT d.entry_id FROM diary_entries AS d WHERE status = 'COMMITTED' AND (NOT "
+                "generator_version IN ('diary-1', 'life-expression-1') OR NOT EXISTS(SELECT 1 FROM "
+                "diary_evidence AS e WHERE e.entry_id = d.entry_id))"
             )
         )
     dates = {
         (row["local_date"], row["timezone"])
-        for row in store.rows("SELECT entry_id,local_date,timezone FROM diary_entries")
+        for row in store.rows("SELECT entry_id, local_date, timezone FROM diary_entries")
         if row["entry_id"] in affected
     }
     copies = (
@@ -126,18 +132,17 @@ def erase_diary_projections(store, record, *, conservative=True):
     )
     for entry_id in affected:
         store.execute(
-            "UPDATE diary_entries SET title='',body_md='',source_set_sha256='',"
-            "status=CASE WHEN status='DELETED' THEN 'DELETED' ELSE ? END,updated_at=? "
-            "WHERE entry_id=?",
+            "UPDATE diary_entries SET title = '', body_md = '', source_set_sha256 = '', status = "
+            "CASE WHEN status = 'DELETED' THEN 'DELETED' ELSE %s END, updated_at = %s WHERE "
+            "entry_id = %s",
             ("DELETED" if entry_id in targets else "REDACTED", record["at"], entry_id),
         )
-        store.execute("DELETE FROM diary_revisions WHERE entry_id=?", (entry_id,))
-        store.execute("DELETE FROM diary_evidence WHERE entry_id=?", (entry_id,))
+        store.execute("DELETE FROM diary_revisions WHERE entry_id = %s", (entry_id,))
+        store.execute("DELETE FROM diary_evidence WHERE entry_id = %s", (entry_id,))
     # Never retry a model output captured before an erasure, even after a process crash.
     store.execute(
-        "UPDATE diary_runs SET state='CANCELLED',lease_token=NULL,"
-        "last_error_code='PRIVACY_CHANGED',updated_at=? "
-        "WHERE state IN ('RUNNING','RETRY_WAIT')",
+        "UPDATE diary_runs SET state = 'CANCELLED', lease_token = NULL, last_error_code = "
+        "'PRIVACY_CHANGED', updated_at = %s WHERE state IN ('RUNNING', 'RETRY_WAIT')",
         (record["at"],),
     )
     return copies
@@ -234,19 +239,34 @@ def _check_citations(section, catalog):
 def model_sources(sources):
     """Sources as the model sees them, with short S1..Sn ids instead of long event ids."""
     aliases = {f"S{index}": row["source_id"] for index, row in enumerate(sources, 1)}
-    view = [{"source_id": alias, **{k: v for k, v in row.items() if k not in MODEL_ONLY_IDS}}
-            for alias, row in zip(aliases, sources, strict=True)]
+    view = [
+        {"source_id": alias, **{k: v for k, v in row.items() if k not in MODEL_ONLY_IDS}}
+        for alias, row in zip(aliases, sources, strict=True)
+    ]
     return view, aliases
 
 
 def resolve_sources(draft, aliases):
     """Map the model's short ids back; anything else stays as written and fails the check."""
-    return draft.model_copy(update={"sections": [
-        section.model_copy(update={"evidence": [
-            evidence.model_copy(update={
-                "source_id": aliases.get(evidence.source_id, evidence.source_id)})
-            for evidence in section.evidence]})
-        for section in draft.sections]})
+    return draft.model_copy(
+        update={
+            "sections": [
+                section.model_copy(
+                    update={
+                        "evidence": [
+                            evidence.model_copy(
+                                update={
+                                    "source_id": aliases.get(evidence.source_id, evidence.source_id)
+                                }
+                            )
+                            for evidence in section.evidence
+                        ]
+                    }
+                )
+                for section in draft.sections
+            ]
+        }
+    )
 
 
 def keep_cited_sections(draft, sources):
@@ -310,8 +330,9 @@ def render_draft(draft, sources, day, settings):
             # Reflections are the diary's own voice, never evidence for a new persistent fact.
             if re.search(UNSUPPORTED_ACTIVITY, section.text):
                 raise CoreError("DIARY_UNSUPPORTED_ACTIVITY", 400)
-            paragraphs.append(section.text if section.kind == "reflection"
-                              else f"还想知道：{section.text}")
+            paragraphs.append(
+                section.text if section.kind == "reflection" else f"还想知道：{section.text}"
+            )
     body = "\n\n".join(paragraphs)
     combined = draft.title + "\n" + body
     if len(body) > settings.diary_max_body_chars:
@@ -333,8 +354,8 @@ class DiaryRepository:
                 private_life.ensure_active(self.store, self.settings, self.clock)
         except CoreError:
             return False
-        paused = self.store.one("SELECT value FROM runtime_meta WHERE key='diary_paused'")
-        owner = self.store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+        paused = self.store.one("SELECT value FROM runtime_meta WHERE key = 'diary_paused'")
+        owner = self.store.one("SELECT value FROM runtime_meta WHERE key = 'owner_qq_id'")
         from companion import delegation
 
         return bool(
@@ -347,21 +368,26 @@ class DiaryRepository:
 
     def cancel_pending(self, code="DIARY_DISABLED"):
         self.store.execute(
-            "UPDATE diary_runs SET state='CANCELLED',lease_token=NULL,last_error_code=?,"
-            "updated_at=? WHERE state IN ('PENDING','RUNNING','RETRY_WAIT')",
+            "UPDATE diary_runs SET state = 'CANCELLED', lease_token = NULL, last_error_code = %s, "
+            "updated_at = %s WHERE state IN ('PENDING', 'RUNNING', 'RETRY_WAIT')",
             (code, self.clock()),
         )
 
     def sources(self, day, *, purpose="diary"):
         start, end = day_bounds(day, self.settings.timezone)
-        rows = self.store.execute(
-            "SELECT e.* FROM events e JOIN conversations c USING(conversation_id) "
-            "WHERE e.actor_id='owner' AND e.privacy_scope='private' AND e.redacted=0 "
-            "AND e.source='qq.onebot' AND e.event_type IN "
-            "('message.received','message.media_received') AND c.scope='private' "
-            "AND c.owner_actor_id='owner' AND e.occurred_at>=? AND e.occurred_at<? "
-            "AND e.ingested_at>=? "
-            "ORDER BY e.occurred_at,e.event_id",
+        rows = self.store.rows(
+            "SELECT e.event_id AS event_id, e.schema_version AS schema_version, e.source AS "
+            "source, e.source_event_id AS source_event_id, e.conversation_id AS conversation_id, "
+            "e.actor_id AS actor_id, e.event_type AS event_type, e.occurred_at AS occurred_at, "
+            "e.ingested_at AS ingested_at, e.privacy_scope AS privacy_scope, e.body_json AS "
+            "body_json, e.trace_id AS trace_id, e.idempotency_key AS idempotency_key, "
+            "e.fingerprint AS fingerprint, e.redacted AS redacted, e.memory_processed AS "
+            "memory_processed, e.reply_revision AS reply_revision FROM events AS e JOIN "
+            "conversations AS c ON e.conversation_id = c.conversation_id WHERE e.actor_id = "
+            "'owner' AND e.privacy_scope = 'private' AND e.redacted = 0 AND e.source = 'qq.onebot' "
+            "AND e.event_type IN ('message.received', 'message.media_received') AND c.scope = "
+            "'private' AND c.owner_actor_id = 'owner' AND e.occurred_at >= %s AND e.occurred_at < "
+            "%s AND e.ingested_at >= %s ORDER BY e.occurred_at NULLS FIRST, e.event_id NULLS FIRST",
             (start, end, after(self.clock(), -86400 * self.settings.raw_event_retention_days)),
         )
         selected = []
@@ -394,9 +420,24 @@ class DiaryRepository:
                 }
             )
             replies = self.store.rows(
-                "SELECT * FROM outbox WHERE origin_event_id=? AND state='SENT' "
-                "AND conversation_id=? AND action_type='qq.private.reply' "
-                "AND sent_at>=? AND sent_at<? ORDER BY sent_at,message_id",
+                "SELECT outbox.message_id AS message_id, outbox.origin_event_id AS "
+                "origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS "
+                "action_type, outbox.content_json AS content_json, outbox.content_sha256 AS "
+                "content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, "
+                "outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, "
+                "outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, "
+                "outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS "
+                "last_error_code, outbox.created_at AS created_at, outbox.updated_at AS "
+                "updated_at, outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, "
+                "outbox.next_attempt_at AS next_attempt_at, outbox.reply_group_id AS "
+                "reply_group_id, outbox.segment_index AS segment_index, outbox.segment_count AS "
+                "segment_count, outbox.reply_group_sha256 AS reply_group_sha256, "
+                "outbox.segment_interval_ms AS segment_interval_ms, outbox.delivery_lane AS "
+                "delivery_lane, outbox.native_ack_json AS native_ack_json, outbox.authority_json "
+                "AS authority_json FROM outbox AS outbox WHERE outbox.origin_event_id = %s AND "
+                "outbox.state = 'SENT' AND outbox.conversation_id = %s AND outbox.action_type = "
+                "'qq.private.reply' AND outbox.sent_at >= %s AND outbox.sent_at < %s ORDER BY "
+                "outbox.sent_at NULLS FIRST, outbox.message_id NULLS FIRST",
                 (row["event_id"], row["conversation_id"], start, end),
             )
             for reply in replies:
@@ -418,16 +459,25 @@ class DiaryRepository:
             # Reuse episode membership, but provide raw events instead of summary text.
             # Each supplied fact then has a direct dependency in the erasure ledger.
             conversations = sorted({row["conversation_id"] for row, _ in selected})
-            marks = ",".join("?" for _ in conversations)
+            marks = ",".join('%s' for _ in conversations)
             prior = self.store.rows(
-                "SELECT DISTINCT e.* FROM episodes ep JOIN episode_events ee USING(episode_id) "
-                "JOIN events e ON e.event_id=ee.event_id WHERE ep.status='ACTIVE' "
-                "AND ep.privacy_scope='private' AND ep.conversation_id IN (" + marks + ") "
-                "AND e.conversation_id=ep.conversation_id AND e.actor_id='owner' "
-                "AND e.source='qq.onebot' AND e.privacy_scope='private' AND e.redacted=0 "
-                "AND e.event_type IN ('message.received','message.media_received') "
-                "AND e.occurred_at>=? AND e.occurred_at<? AND e.ingested_at>=? "
-                "ORDER BY e.occurred_at DESC,e.event_id LIMIT ?",
+                (
+                    "SELECT DISTINCT e.* FROM episodes ep JOIN "
+                    "episode_events ee USING(episode_id) JOIN events e ON "
+                    "e.event_id=ee.event_id WHERE ep.status='ACTIVE' AND "
+                    "ep.privacy_scope='private' AND ep.conversation_id IN ("
+                )
+                + marks
+                + (
+                    ") AND e.conversation_id=ep.conversation_id AND "
+                    "e.actor_id='owner' AND e.source='qq.onebot' AND "
+                    "e.privacy_scope='private' AND e.redacted=0 AND "
+                    "e.event_type IN "
+                    "('message.received','message.media_received') AND "
+                    "e.occurred_at>=%s AND e.occurred_at<%s AND "
+                    "e.ingested_at>=%s ORDER BY e.occurred_at "
+                    "DESC,e.event_id LIMIT %s"
+                ),
                 (
                     *conversations,
                     day_bounds(day - timedelta(days=3), self.settings.timezone)[0],
@@ -440,8 +490,9 @@ class DiaryRepository:
                 body = json.loads(row["body_json"])
                 text = body.get("text", "").strip()
                 if (
-                    not source_allowed(self.store, self.settings, self.clock,
-                                       row["event_id"], purpose)
+                    not source_allowed(
+                        self.store, self.settings, self.clock, row["event_id"], purpose
+                    )
                     or not text
                     or body.get("diary_command")
                     or body.get("control_command")
@@ -471,12 +522,16 @@ class DiaryRepository:
                 "USING(event_id) "
                 "WHERE o.redacted=0 AND e.redacted=0 AND o.result_status IN ('DISCOVERED',"
                 "'FETCHED','WATCHED') "
-                "AND e.occurred_at>=? AND e.occurred_at<? AND e.ingested_at>=? "
-                "AND (? OR e.source<>'observation.simulation') ORDER BY "
+                "AND e.occurred_at>=%s AND e.occurred_at<%s AND e.ingested_at>=%s "
+                "AND (%s OR e.source<>'observation.simulation') ORDER BY "
                 "idle_read DESC,(o.result_status='DISCOVERED'),e.occurred_at,e.event_id LIMIT 10",
-                (IDLE_READ, start, end,
-                 after(self.clock(), -86400 * self.settings.raw_event_retention_days),
-                 self.settings.mode == "demo"),
+                (
+                    IDLE_READ,
+                    start,
+                    end,
+                    after(self.clock(), -86400 * self.settings.raw_event_retention_days),
+                    self.settings.mode == "demo",
+                ),
             )
             for row in observations:
                 simulated = row["source"] == "observation.simulation"
@@ -507,29 +562,40 @@ class DiaryRepository:
         if self.settings.observation_enabled and self.settings.watch_ledger.enabled:
             # Her own judgement of a read that day: a view to reflect on, not a new fact.
             for row in self.store.rows(
-                "SELECT w.entry_id,w.rating,w.take,e.event_id,e.occurred_at FROM watch_ledger w "
-                "JOIN events e ON e.event_id=w.source_event_id JOIN observations o "
-                "ON o.event_id=w.source_event_id WHERE w.state='JUDGED' AND e.redacted=0 "
-                "AND o.redacted=0 AND e.occurred_at>=? AND e.occurred_at<? AND e.ingested_at>=? "
-                "ORDER BY e.occurred_at,w.entry_id LIMIT 10",
+                "SELECT w.entry_id, w.rating, w.take, e.event_id, e.occurred_at FROM watch_ledger "
+                "AS w JOIN events AS e ON e.event_id = w.source_event_id JOIN observations AS o ON "
+                "o.event_id = w.source_event_id WHERE w.state = 'JUDGED' AND e.redacted = 0 AND "
+                "o.redacted = 0 AND e.occurred_at >= %s AND e.occurred_at < %s AND e.ingested_at "
+                ">= %s ORDER BY e.occurred_at NULLS FIRST, w.entry_id NULLS FIRST LIMIT 10",
                 (start, end, after(self.clock(), -86400 * self.settings.raw_event_retention_days)),
             ):
                 text = f"我读完后的评价（{RATINGS[row['rating']]}）：{row['take']}"
-                if (expired_sources(self.store, [row["event_id"]], after(
-                        self.clock(), -86400 * self.settings.raw_event_retention_days))
-                        or sensitive(text) or redact(text, self.settings) != text):
+                if (
+                    expired_sources(
+                        self.store,
+                        [row["event_id"]],
+                        after(self.clock(), -86400 * self.settings.raw_event_retention_days),
+                    )
+                    or sensitive(text)
+                    or redact(text, self.settings) != text
+                ):
                     continue
-                sources.append({
-                    "source_id": "take:" + row["entry_id"],
-                    "event_id": row["event_id"],
-                    "outbox_message_id": None,
-                    "kind": "own_take",
-                    "text": text,
-                    "occurred_at": row["occurred_at"],
-                })
+                sources.append(
+                    {
+                        "source_id": "take:" + row["entry_id"],
+                        "event_id": row["event_id"],
+                        "outbox_message_id": None,
+                        "kind": "own_take",
+                        "text": text,
+                        "occurred_at": row["occurred_at"],
+                    }
+                )
         if not selected and any(row.get("idle_read") for row in sources):
-            read_ids = {row["event_id"] for row in sources
-                        if row.get("result_status") in {"FETCHED", "WATCHED"}}
+            read_ids = {
+                row["event_id"]
+                for row in sources
+                if row.get("result_status") in {"FETCHED", "WATCHED"}
+            }
             sources = [row for row in sources if row["event_id"] in read_ids]
         return sorted(sources, key=lambda row: row["source_id"])
 
@@ -542,13 +608,13 @@ class DiaryRepository:
             if not self.enabled():
                 return None
             if self.store.one(
-                "SELECT 1 FROM runtime_meta WHERE key=?",
+                "SELECT 1 FROM runtime_meta WHERE key = %s",
                 ("diary_deleted:" + self.settings.timezone + ":" + day.isoformat(),),
             ):
                 return None
             prior = self.store.one(
-                "SELECT run_id FROM diary_runs WHERE identity_id='companion' "
-                "AND local_date=? AND timezone=?",
+                "SELECT run_id FROM diary_runs WHERE identity_id = 'companion' AND local_date = %s "
+                "AND timezone = %s",
                 (day.isoformat(), self.settings.timezone),
             )
             if prior:
@@ -574,13 +640,26 @@ class DiaryRepository:
                 self.cancel_pending()
                 return None
             expired = s.rows(
-                "SELECT * FROM diary_runs WHERE state='RUNNING' AND lease_until<=?", (now,)
+                "SELECT diary_runs.run_id AS run_id, diary_runs.identity_id AS identity_id, "
+                "diary_runs.local_date AS local_date, diary_runs.timezone AS timezone, "
+                "diary_runs.state AS state, diary_runs.source_set_sha256 AS source_set_sha256, "
+                "diary_runs.captured_privacy_epoch AS captured_privacy_epoch, "
+                "diary_runs.lease_owner AS lease_owner, diary_runs.lease_token AS lease_token, "
+                "diary_runs.lease_until AS lease_until, diary_runs.next_attempt_at AS "
+                "next_attempt_at, diary_runs.attempts AS attempts, diary_runs.max_attempts AS "
+                "max_attempts, diary_runs.model_request_id AS model_request_id, "
+                "diary_runs.last_error_code AS last_error_code, diary_runs.created_at AS "
+                "created_at, diary_runs.updated_at AS updated_at FROM diary_runs AS diary_runs "
+                "WHERE diary_runs.state = 'RUNNING' AND diary_runs.lease_until <= %s",
+                (now,),
             )
             for row in expired:
                 budget.mark_reservation_unknown(s, row["model_request_id"])
                 stale = row["captured_privacy_epoch"] != epoch(s)
-                unknown = s.one("SELECT 1 FROM model_usage WHERE request_id=? AND state='UNKNOWN'",
-                                (row["model_request_id"],))
+                unknown = s.one(
+                    "SELECT 1 FROM model_usage WHERE request_id = %s AND state = 'UNKNOWN'",
+                    (row["model_request_id"],),
+                )
                 state = (
                     "CANCELLED"
                     if stale
@@ -591,8 +670,8 @@ class DiaryRepository:
                     else "FAILED"
                 )
                 s.execute(
-                    "UPDATE diary_runs SET state=?,lease_token=NULL,updated_at=?,"
-                    "last_error_code=? WHERE run_id=?",
+                    "UPDATE diary_runs SET state = %s, lease_token = NULL, updated_at = %s, "
+                    "last_error_code = %s WHERE run_id = %s",
                     (
                         state,
                         now,
@@ -601,9 +680,21 @@ class DiaryRepository:
                     ),
                 )
             row = s.one(
-                "SELECT * FROM diary_runs WHERE state IN ('PENDING','RETRY_WAIT') "
-                "AND (next_attempt_at IS NULL OR next_attempt_at<=?) "
-                "AND timezone=? AND (? IS NULL OR run_id=?) ORDER BY local_date,created_at LIMIT 1",
+                "SELECT diary_runs.run_id AS run_id, diary_runs.identity_id AS identity_id, "
+                "diary_runs.local_date AS local_date, diary_runs.timezone AS timezone, "
+                "diary_runs.state AS state, diary_runs.source_set_sha256 AS source_set_sha256, "
+                "diary_runs.captured_privacy_epoch AS captured_privacy_epoch, "
+                "diary_runs.lease_owner AS lease_owner, diary_runs.lease_token AS lease_token, "
+                "diary_runs.lease_until AS lease_until, diary_runs.next_attempt_at AS "
+                "next_attempt_at, diary_runs.attempts AS attempts, diary_runs.max_attempts AS "
+                "max_attempts, diary_runs.model_request_id AS model_request_id, "
+                "diary_runs.last_error_code AS last_error_code, diary_runs.created_at AS "
+                "created_at, diary_runs.updated_at AS updated_at FROM diary_runs AS diary_runs "
+                "WHERE diary_runs.state IN ('PENDING', 'RETRY_WAIT') AND "
+                "(diary_runs.next_attempt_at IS NULL OR diary_runs.next_attempt_at <= %s) AND "
+                "diary_runs.timezone = %s AND (CAST(%s AS TEXT) IS NULL OR diary_runs.run_id = %s) "
+                "ORDER BY diary_runs.local_date NULLS FIRST, diary_runs.created_at NULLS FIRST "
+                "LIMIT 1",
                 (now, self.settings.timezone, run_id, run_id),
             )
             if not row:
@@ -611,10 +702,10 @@ class DiaryRepository:
             sources = self.sources(date.fromisoformat(row["local_date"]))
             token, captured = uid("diary_lease"), epoch(s)
             s.execute(
-                "UPDATE diary_runs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
-                "attempts=attempts+1,model_request_id=NULL,source_set_sha256=?,"
-                "captured_privacy_epoch=?,updated_at=? "
-                "WHERE run_id=?",
+                "UPDATE diary_runs SET state = 'RUNNING', lease_owner = %s, lease_token = %s, "
+                "lease_until = %s, attempts = attempts + 1, model_request_id = NULL, "
+                "source_set_sha256 = %s, captured_privacy_epoch = %s, updated_at = %s WHERE run_id "
+                "= %s",
                 (
                     worker_id,
                     token,
@@ -639,7 +730,19 @@ class DiaryRepository:
             from companion.mood import service_for_store
 
             service_for_store(self.store, self.settings, self.clock).revalidate(run["mood_proof"])
-        current = self.store.one("SELECT * FROM diary_runs WHERE run_id=?", (run["run_id"],))
+        current = self.store.one(
+            "SELECT diary_runs.run_id AS run_id, diary_runs.identity_id AS "
+            "identity_id, diary_runs.local_date AS local_date, diary_runs.timezone AS timezone, "
+            "diary_runs.state AS state, diary_runs.source_set_sha256 AS source_set_sha256, "
+            "diary_runs.captured_privacy_epoch AS captured_privacy_epoch, diary_runs.lease_owner "
+            "AS lease_owner, diary_runs.lease_token AS lease_token, diary_runs.lease_until AS "
+            "lease_until, diary_runs.next_attempt_at AS next_attempt_at, diary_runs.attempts AS "
+            "attempts, diary_runs.max_attempts AS max_attempts, diary_runs.model_request_id AS "
+            "model_request_id, diary_runs.last_error_code AS last_error_code, "
+            "diary_runs.created_at AS created_at, diary_runs.updated_at AS updated_at FROM "
+            "diary_runs AS diary_runs WHERE diary_runs.run_id = %s",
+            (run["run_id"],),
+        )
         if (
             not current
             or current["state"] != "RUNNING"
@@ -651,11 +754,16 @@ class DiaryRepository:
             raise CoreError("DIARY_DISABLED", 409)
         if owner_authority.required(self.store, self.settings):
             admission = self.store.one(
-                "SELECT authority_json FROM model_admissions WHERE request_id=?",
+                "SELECT authority_json FROM model_admissions WHERE request_id = %s",
                 (current["model_request_id"],),
             )
-            owner_authority.current(self.store, self.settings, self.clock, purpose="diary",
-                authority=json.loads(admission["authority_json"]) if admission else None)
+            owner_authority.current(
+                self.store,
+                self.settings,
+                self.clock,
+                purpose="diary",
+                authority=json.loads(admission["authority_json"]) if admission else None,
+            )
         if epoch(self.store) != run["captured_privacy_epoch"]:
             raise CoreError("PRIVACY_CHANGED", 409)
         if (
@@ -664,15 +772,17 @@ class DiaryRepository:
         ):
             raise CoreError("DIARY_SOURCES_CHANGED", 409)
 
-    def finish(self, run, state, code=None, draft=None, body=None, *, retry_at=None,
-               dropped_sections=0):
+    def finish(
+        self, run, state, code=None, draft=None, body=None, *, retry_at=None, dropped_sections=0
+    ):
         s, now = self.store, self.clock()
         with s.transaction():
             if state in {"COMMITTED", "SKIPPED"}:
                 self.validate_run(run)
             changed = s.execute(
-                "UPDATE diary_runs SET state=?,lease_token=NULL,last_error_code=?,updated_at=?,"
-                "next_attempt_at=? WHERE run_id=? AND state='RUNNING' AND lease_token=?",
+                "UPDATE diary_runs SET state = %s, lease_token = NULL, last_error_code = %s, "
+                "updated_at = %s, next_attempt_at = %s WHERE run_id = %s AND state = 'RUNNING' AND "
+                "lease_token = %s",
                 (
                     state,
                     code,
@@ -681,11 +791,24 @@ class DiaryRepository:
                     run["run_id"],
                     run["lease_token"],
                 ),
-            ).rowcount
+            )
             if not changed:
                 return False
             if state == "COMMITTED":
-                prior = s.one("SELECT * FROM diary_entries WHERE run_id=?", (run["run_id"],))
+                prior = s.one(
+                    "SELECT diary_entries.entry_id AS entry_id, diary_entries.run_id AS "
+                    "run_id, diary_entries.identity_id AS identity_id, diary_entries.local_date AS "
+                    "local_date, diary_entries.timezone AS timezone, diary_entries.title AS title, "
+                    "diary_entries.body_md AS body_md, diary_entries.status AS status, "
+                    "diary_entries.privacy_scope AS privacy_scope, diary_entries.source_set_sha256 "
+                    "AS source_set_sha256, diary_entries.captured_privacy_epoch AS "
+                    "captured_privacy_epoch, diary_entries.generator_version AS generator_version, "
+                    "diary_entries.model_name AS model_name, diary_entries.version AS version, "
+                    "diary_entries.created_at AS created_at, diary_entries.updated_at AS "
+                    "updated_at FROM diary_entries AS diary_entries WHERE diary_entries.run_id = "
+                    "%s",
+                    (run["run_id"],),
+                )
                 values = dict(
                     title=draft.title,
                     body_md=body,
@@ -705,16 +828,21 @@ class DiaryRepository:
                     entry_id = prior["entry_id"]
                     s.execute(
                         "UPDATE diary_entries SET "
-                        + ",".join(key + "=?" for key in values)
-                        + ",version=version+1 WHERE entry_id=?",
+                        + ",".join(key + "=%s" for key in values)
+                        + ",version=version+1 WHERE entry_id=%s",
                         (*values.values(), entry_id),
                     )
                 else:
                     entry_id = uid("diary")
                     s.insert(
-                        "diary_entries", entry_id=entry_id, run_id=run["run_id"],
-                        identity_id="companion", local_date=run["local_date"],
-                        timezone=run["timezone"], created_at=now, **values,
+                        "diary_entries",
+                        entry_id=entry_id,
+                        run_id=run["run_id"],
+                        identity_id="companion",
+                        local_date=run["local_date"],
+                        timezone=run["timezone"],
+                        created_at=now,
+                        **values,
                     )
                 for source in run["sources"]:
                     s.insert(
@@ -725,8 +853,14 @@ class DiaryRepository:
                         outbox_message_id=source["outbox_message_id"],
                         excerpt_sha256=hashlib.sha256(source["text"].encode()).hexdigest(),
                     )
-            s.audit("diary." + state.lower(), run["run_id"], "diary", now, error_code=code,
-                    **({"dropped_sections": dropped_sections} if dropped_sections else {}))
+            s.audit(
+                "diary." + state.lower(),
+                run["run_id"],
+                "diary",
+                now,
+                error_code=code,
+                **({"dropped_sections": dropped_sections} if dropped_sections else {}),
+            )
         return True
 
 
@@ -739,8 +873,9 @@ class DiaryService:
     def save_life_expression(self, job_id, *, expected_content_sha256, authority):
         from companion.diary_life import save
 
-        return save(self, job_id, expected_content_sha256=expected_content_sha256,
-                    authority=authority)
+        return save(
+            self, job_id, expected_content_sha256=expected_content_sha256, authority=authority
+        )
 
     def schedule_day(self, day):
         return self.repo.schedule(day)
@@ -755,15 +890,14 @@ class DiaryService:
         s = self.store
         with s.transaction():
             if not self.repo.enabled() or s.one(
-                "SELECT 1 FROM runtime_meta WHERE key=?",
+                "SELECT 1 FROM runtime_meta WHERE key = %s",
                 ("diary_deleted:" + self.settings.timezone + ":" + day.isoformat(),),
             ):
                 return None
             entry = s.one(
-                "SELECT d.run_id,r.state,r.attempts,r.max_attempts,r.model_request_id "
-                "FROM diary_entries d JOIN diary_runs r USING(run_id) "
-                "WHERE d.identity_id='companion' AND d.local_date=? AND d.timezone=? "
-                "AND d.status='REDACTED'",
+                "SELECT d.run_id, r.state, r.attempts, r.max_attempts, r.model_request_id FROM "
+                "diary_entries AS d JOIN diary_runs AS r USING (run_id) WHERE d.identity_id = "
+                "'companion' AND d.local_date = %s AND d.timezone = %s AND d.status = 'REDACTED'",
                 (day.isoformat(), self.settings.timezone),
             )
             if not entry:
@@ -771,16 +905,20 @@ class DiaryService:
             if entry["state"] in {"PENDING", "RUNNING", "RETRY_WAIT"}:
                 return entry["run_id"]
             if entry["model_request_id"]:
-                usage = s.one("SELECT state FROM model_usage WHERE request_id=?",
-                              (entry["model_request_id"],))
+                usage = s.one(
+                    "SELECT state FROM model_usage WHERE request_id = %s",
+                    (entry["model_request_id"],),
+                )
                 if not usage or usage["state"] != "SETTLED":
                     raise CoreError("DIARY_RECOMPUTE_USAGE_UNRESOLVED", 409)
             if entry["attempts"] >= entry["max_attempts"]:
                 raise CoreError("DIARY_RECOMPUTE_ATTEMPTS_EXHAUSTED", 409)
             s.execute(
-                "UPDATE diary_runs SET state='PENDING',lease_token=NULL,lease_owner=NULL,"
-                "lease_until=NULL,next_attempt_at=NULL,last_error_code='DIARY_RECOMPUTE_REQUESTED',"
-                "updated_at=? WHERE run_id=?", (self.clock(), entry["run_id"]),
+                "UPDATE diary_runs SET state = 'PENDING', lease_token = NULL, lease_owner = NULL, "
+                "lease_until = NULL, next_attempt_at = NULL, last_error_code = "
+                "'DIARY_RECOMPUTE_REQUESTED', updated_at = %s WHERE run_id = "
+                "%s",
+                (self.clock(), entry["run_id"]),
             )
             s.audit("diary.recompute_requested", entry["run_id"], "diary", self.clock())
             return entry["run_id"]
@@ -804,7 +942,8 @@ class DiaryService:
         if owner_authority.required(self.store, self.settings):
             ready = self.repo.enabled() and not (
                 private_life.busy(self.store, self.clock())
-                or budget.chat_pending(self.store, self.clock()))
+                or budget.chat_pending(self.store, self.clock())
+            )
         else:
             ready = private_life.ready(self.store, self.settings, self.clock)
         if not ready:
@@ -822,9 +961,8 @@ class DiaryService:
                 )
                 for source in run["sources"]
             )
-            reading_day = (
-                any(source.get("idle_read") for source in run["sources"])
-                and not any(source["kind"] == "owner_message" for source in run["sources"])
+            reading_day = any(source.get("idle_read") for source in run["sources"]) and not any(
+                source["kind"] == "owner_message" for source in run["sources"]
             )
             if count < self.settings.diary_min_source_events and not reading_day:
                 self.repo.finish(run, "SKIPPED", "DIARY_INSUFFICIENT_SOURCES")
@@ -836,8 +974,10 @@ class DiaryService:
                 end = day_bounds(date.fromisoformat(run["local_date"]), run["timezone"])[1]
                 service = service_for_store(self.store, self.settings, self.clock, self.ledger)
                 mood = service.reference(
-                    at=after(end, -0.000001), allowed={s["event_id"] for s in run["sources"]},
-                    text="\n".join(s["text"] for s in run["sources"]))
+                    at=after(end, -0.000001),
+                    allowed={s["event_id"] for s in run["sources"]},
+                    text="\n".join(s["text"] for s in run["sources"]),
+                )
                 if mood:
                     run["mood_proof"] = mood["proof"]
             shown, aliases = model_sources(run["sources"])
@@ -851,8 +991,11 @@ class DiaryService:
                             "timezone": run["timezone"],
                             "sources_are_data": True,
                             "sources": shown,
-                            **({"mood": {k: v for k, v in mood.items() if k != "proof"}}
-                               if mood else {}),
+                            **(
+                                {"mood": {k: v for k, v in mood.items() if k != "proof"}}
+                                if mood
+                                else {}
+                            ),
                         }
                     ),
                 },
@@ -883,18 +1026,25 @@ class DiaryService:
                 with self.store.transaction():
                     self.repo.validate_run(run)
                     self.store.execute(
-                        "UPDATE diary_runs SET model_request_id=? WHERE run_id=?",
+                        "UPDATE diary_runs SET model_request_id = %s WHERE run_id = %s",
                         (request_id, run["run_id"]),
                     )
             except BaseException:
                 budget.settle(self.store, self.settings, request_id)
                 raise
             response = await budget.complete(
-                self.model, self.store, self.settings, request_id, messages, "diary", self.clock,
+                self.model,
+                self.store,
+                self.settings,
+                request_id,
+                messages,
+                "diary",
+                self.clock,
                 source_check=lambda: self.repo.validate_run(run),
             )
-            usage = self.store.one("SELECT state FROM model_usage WHERE request_id=?",
-                                   (request_id,))
+            usage = self.store.one(
+                "SELECT state FROM model_usage WHERE request_id = %s", (request_id,)
+            )
             if not usage or usage["state"] != "SETTLED":
                 raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
             draft = resolve_sources(DiaryDraft.model_validate_json(response.text), aliases)
@@ -918,20 +1068,27 @@ class DiaryService:
             )
             state, retry_at = "FAILED", None
             unknown = self.store.one(
-                "SELECT 1 FROM model_usage WHERE request_id=? AND state='UNKNOWN'", (request_id,),
+                "SELECT 1 FROM model_usage WHERE request_id = %s AND state = 'UNKNOWN'",
+                (request_id,),
             )
-            if (request_id is None and code in ADMISSION_RETRY_CODES
-                or budget.capacity_wait(self.store, code, request_id=request_id)):
-                self.store.execute("UPDATE diary_runs SET attempts=MAX(0,attempts-1) "
-                                   "WHERE run_id=? AND state='RUNNING' AND lease_token=?",
-                                   (run["run_id"], run["lease_token"]))
+            if (
+                request_id is None
+                and code in ADMISSION_RETRY_CODES
+                or budget.capacity_wait(self.store, code, request_id=request_id)
+            ):
+                self.store.execute(
+                    "UPDATE diary_runs SET attempts = GREATEST(0, attempts - 1) "
+                    "WHERE run_id = %s AND state = 'RUNNING' AND lease_token = %s",
+                    (run["run_id"], run["lease_token"]),
+                )
                 state = "RETRY_WAIT"
                 local = datetime.fromisoformat(self.clock()).astimezone(
                     ZoneInfo(self.settings.timezone),
                 )
                 if "DAILY" in code:
                     retry_at = day_bounds(
-                        local.date() + timedelta(days=1), self.settings.timezone,
+                        local.date() + timedelta(days=1),
+                        self.settings.timezone,
                     )[0]
                 elif "MONTHLY" in code:
                     day = (local.date().replace(day=28) + timedelta(days=4)).replace(day=1)
@@ -943,10 +1100,15 @@ class DiaryService:
                 "DIARY_SOURCES_CHANGED",
             }:
                 state = "CANCELLED"
-            elif not unknown and (code in {
-                "MODEL_RETRYABLE", "MODEL_INVALID_RESPONSE", "MODEL_EMPTY_RESPONSE",
-            }
-                                  or isinstance(error, ValidationError)):
+            elif not unknown and (
+                code
+                in {
+                    "MODEL_RETRYABLE",
+                    "MODEL_INVALID_RESPONSE",
+                    "MODEL_EMPTY_RESPONSE",
+                }
+                or isinstance(error, ValidationError)
+            ):
                 state = "RETRY_WAIT" if run["attempts"] < run["max_attempts"] else "FAILED"
             self.repo.finish(run, state, code, retry_at=retry_at)
         return True
@@ -962,9 +1124,9 @@ class DiaryService:
 
     def _get_day(self, day):
         return self.store.one(
-            "SELECT entry_id,local_date,title,body_md,version,created_at,updated_at "
-            "FROM diary_entries WHERE identity_id='companion' AND local_date=? AND timezone=? "
-            "AND status='COMMITTED'",
+            "SELECT entry_id, local_date, title, body_md, version, created_at, updated_at FROM "
+            "diary_entries WHERE identity_id = 'companion' AND local_date = %s AND timezone = %s "
+            "AND status = 'COMMITTED'",
             (day.isoformat(), self.settings.timezone),
         )
 
@@ -974,9 +1136,9 @@ class DiaryService:
             raise CoreError("INVALID_DIARY_LIMIT", 400)
         self.expire_evidence()
         return self.store.rows(
-            "SELECT local_date,title,entry_id,version FROM diary_entries "
-            "WHERE identity_id='companion' AND status='COMMITTED' AND timezone=? "
-            "ORDER BY local_date DESC LIMIT ?",
+            "SELECT local_date, title, entry_id, version FROM diary_entries WHERE identity_id = "
+            "'companion' AND status = 'COMMITTED' AND timezone = %s ORDER BY local_date DESC NULLS "
+            "LAST LIMIT %s",
             (self.settings.timezone, limit),
         )
 
@@ -985,18 +1147,28 @@ class DiaryService:
         current = self._get_day(date.fromisoformat(entry["local_date"]))
         if current is None or current != entry:
             raise CoreError("PRIVACY_CHANGED", 409)
-        sources = [row["event_id"] for row in self.store.rows(
-            "SELECT DISTINCT event_id FROM diary_evidence WHERE entry_id=? ORDER BY event_id",
-            (entry["entry_id"],),
-        )]
+        sources = [
+            row["event_id"]
+            for row in self.store.rows(
+                (
+                    'SELECT DISTINCT event_id FROM diary_evidence WHERE '
+                    'entry_id = %s ORDER BY event_id NULLS FIRST'
+                ),
+                (entry["entry_id"],),
+            )
+        ]
         if not sources or expired_sources(
-            self.store, sources,
+            self.store,
+            sources,
             after(self.clock(), -86400 * self.settings.raw_event_retention_days),
         ):
             raise CoreError("PRIVACY_CHANGED", 409)
-        return {"local_date": entry["local_date"], "timezone": self.settings.timezone,
-                "entry_sha256": hashlib.sha256(encode(entry).encode()).hexdigest(),
-                "source_event_ids": sources}
+        return {
+            "local_date": entry["local_date"],
+            "timezone": self.settings.timezone,
+            "entry_sha256": hashlib.sha256(encode(entry).encode()).hexdigest(),
+            "source_event_ids": sources,
+        }
 
     def revalidate_context(self, proof):
         entry = self.get_day(date.fromisoformat(proof["local_date"]), self.settings.owner_qq_id)
@@ -1006,8 +1178,8 @@ class DiaryService:
     def status(self, requester):
         self.authorize(requester)
         latest = self.store.one(
-            "SELECT local_date,state,attempts,last_error_code FROM diary_runs "
-            "WHERE timezone=? ORDER BY local_date DESC LIMIT 1",
+            "SELECT local_date, state, attempts, last_error_code FROM diary_runs WHERE timezone = "
+            "%s ORDER BY local_date DESC NULLS LAST LIMIT 1",
             (self.settings.timezone,),
         )
         return {
@@ -1024,8 +1196,8 @@ class DiaryService:
             if owner_check is not None:
                 owner_check()
             sources = self.store.rows(
-                "SELECT DISTINCT de.event_id FROM diary_evidence de JOIN diary_entries d "
-                "USING(entry_id) WHERE d.status='COMMITTED'"
+                "SELECT DISTINCT de.event_id FROM diary_evidence AS de JOIN diary_entries AS d "
+                "USING (entry_id) WHERE d.status = 'COMMITTED'"
             )
             expired = expired_sources(
                 self.store,
@@ -1034,15 +1206,19 @@ class DiaryService:
             )
             if expired:
                 self.ledger.expire_events(
-                    self.store, expired, self.clock(), retention_cutoff=after(
-                        self.clock(), -86400 * self.settings.raw_event_retention_days,
+                    self.store,
+                    expired,
+                    self.clock(),
+                    retention_cutoff=after(
+                        self.clock(),
+                        -86400 * self.settings.raw_event_retention_days,
                     ),
                 )
 
-        if self.store.db.in_transaction:
+        if self.store.in_transaction:
             expire()
         else:
-            with self.store.transaction():
+            with self.store.transaction(control_write=True):
                 expire()
 
     def set_mode(self, enabled, requester, *, owner_check=None):
@@ -1053,7 +1229,8 @@ class DiaryService:
             if owner_check is not None:
                 owner_check()
             self.store.execute(
-                "INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused',?)",
+                "INSERT INTO runtime_meta (key, value) VALUES ('diary_paused', %s) ON "
+                "CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = DEFAULT",
                 ("0" if enabled else "1",),
             )
             if not enabled:
@@ -1070,7 +1247,7 @@ class DiaryService:
         ):
             raise CoreError("INVALID_DIARY_CORRECTION", 400)
         self.expire_evidence(owner_check=owner_check)
-        with self.store.transaction():
+        with self.store.transaction(control_write=True):
             if owner_check is not None:
                 owner_check()
             entry = self._get_day(day)
@@ -1087,8 +1264,8 @@ class DiaryService:
                 created_at=self.clock(),
             )
             self.store.execute(
-                "UPDATE diary_entries SET body_md=?,version=version+1,updated_at=? "
-                "WHERE entry_id=?",
+                "UPDATE diary_entries SET body_md = %s, version = version + 1, updated_at = %s "
+                "WHERE entry_id = %s",
                 ("主人修订：\n\n" + text, self.clock(), entry["entry_id"]),
             )
             advance_epoch(self.store)
@@ -1096,7 +1273,7 @@ class DiaryService:
 
     def forget(self, day, requester, *, owner_check=None):
         self.authorize(requester)
-        with self.store.transaction():
+        with self.store.transaction(control_write=True):
             if owner_check is not None:
                 owner_check()
             self.ledger.forget_diary(
@@ -1165,7 +1342,7 @@ class DiaryService:
                 run_id = self.recompute_day(date.fromisoformat(parts[1]), requester)
                 if not run_id:
                     return "这一天没有安排日记重算。"
-                row = self.store.one("SELECT state FROM diary_runs WHERE run_id=?", (run_id,))
+                row = self.store.one("SELECT state FROM diary_runs WHERE run_id = %s", (run_id,))
                 labels = {
                     "PENDING": "已排队，等待整理",
                     "RUNNING": "正在整理",

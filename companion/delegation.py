@@ -83,12 +83,17 @@ RESUME_HOUR = 8
 
 def _table(store):
     return bool(store.one(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='capability_delegations'"
+        'SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespace AND '
+        "relname='capability_delegations' AND relkind IN ('r','p')"
     ))
 
 
 def delegation(store, capability):
-    row = store.one("SELECT * FROM capability_delegations WHERE capability=?", (capability,)) \
+    row = store.one('SELECT capability_delegations.capability AS capability, '
+        'capability_delegations.mode AS mode, capability_delegations.allow_pause AS allow_pause, '
+        'capability_delegations.ranges_json AS ranges_json, capability_delegations.updated_at AS '
+        'updated_at FROM capability_delegations AS capability_delegations WHERE '
+        'capability_delegations.capability = %s', (capability,)) \
         if _table(store) else None
     if not row:
         return {"capability": capability, "mode": "owner", "allow_pause": False, "ranges": {}}
@@ -143,14 +148,14 @@ def validate_ranges(settings, capability, ranges):
 
 
 def _close(store, capability, now, state, *, fields=None, current=CURRENT):
-    marks = ",".join("?" for _ in current)
-    query = (f"UPDATE capability_overrides SET state=?,decided_at=? WHERE capability=? "
+    marks = ",".join('%s' for _ in current)
+    query = (f"UPDATE capability_overrides SET state=%s,decided_at=%s WHERE capability=%s "
              f"AND state IN ({marks})")
     params = [state, now, capability, *current]
     if fields is not None:
-        query += " AND field IN (" + ",".join("?" for _ in fields) + ")"
+        query += " AND field IN (" + ",".join('%s' for _ in fields) + ")"
         params += list(fields)
-    return store.execute(query, params).rowcount
+    return store.execute(query, params)
 
 
 def set_delegation(store, settings, capability, mode, allow_pause, ranges, now):
@@ -159,9 +164,9 @@ def set_delegation(store, settings, capability, mode, allow_pause, ranges, now):
         raise CoreError("DELEGATION_INVALID", 400)
     clean = validate_ranges(settings, capability, ranges)
     store.execute(
-        "INSERT INTO capability_delegations VALUES (?,?,?,?,?) ON CONFLICT(capability) DO UPDATE "
-        "SET mode=excluded.mode,allow_pause=excluded.allow_pause,"
-        "ranges_json=excluded.ranges_json,updated_at=excluded.updated_at",
+        'INSERT INTO capability_delegations VALUES (%s, %s, %s, %s, %s) ON CONFLICT(capability) DO '
+        'UPDATE SET mode = excluded.mode, allow_pause = excluded.allow_pause, ranges_json = '
+        'excluded.ranges_json, updated_at = excluded.updated_at',
         (capability, mode, int(allow_pause), encode(clean), now),
     )
     if mode == "owner":
@@ -215,7 +220,8 @@ def submit(store, settings, capability, field, value, reason, now, *, suggestion
     local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
     day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
         ZoneInfo("UTC")).isoformat(timespec="microseconds")
-    if store.one("SELECT COUNT(*) n FROM capability_overrides WHERE capability=? AND created_at>=?",
+    if store.one('SELECT COUNT(*) AS n FROM capability_overrides WHERE capability = %s AND '
+        'created_at >= %s',
                  (capability, day))["n"] >= DAILY_COMPANION_CHANGES:
         raise CoreError("DELEGATION_DAILY_LIMIT", 429)
     state = "ACTIVE" if current["mode"] == "self" else "PROPOSED"
@@ -230,12 +236,24 @@ def submit(store, settings, capability, field, value, reason, now, *, suggestion
     )
     store.audit("delegation.adjusted" if state == "ACTIVE" else "delegation.proposed",
                 override_id, capability, now, field=field)
-    return store.one("SELECT * FROM capability_overrides WHERE override_id=?", (override_id,))
+    return store.one('SELECT capability_overrides.override_id AS override_id, '
+        'capability_overrides.capability AS capability, capability_overrides.field AS field, '
+        'capability_overrides.value_json AS value_json, capability_overrides.suggestion_id AS '
+        'suggestion_id, capability_overrides.reason AS reason, capability_overrides.state AS '
+        'state, capability_overrides.created_at AS created_at, capability_overrides.decided_at AS '
+        'decided_at, capability_overrides.expires_at AS expires_at FROM capability_overrides AS '
+        'capability_overrides WHERE capability_overrides.override_id = %s', (override_id,))
 
 
 def check_decision(store, settings, override_id, decision):
     """Validate an owner decision without writing; returns the row and the next state."""
-    row = store.one("SELECT * FROM capability_overrides WHERE override_id=?", (override_id,)) \
+    row = store.one('SELECT capability_overrides.override_id AS override_id, '
+        'capability_overrides.capability AS capability, capability_overrides.field AS field, '
+        'capability_overrides.value_json AS value_json, capability_overrides.suggestion_id AS '
+        'suggestion_id, capability_overrides.reason AS reason, capability_overrides.state AS '
+        'state, capability_overrides.created_at AS created_at, capability_overrides.decided_at AS '
+        'decided_at, capability_overrides.expires_at AS expires_at FROM capability_overrides AS '
+        'capability_overrides WHERE capability_overrides.override_id = %s', (override_id,)) \
         if _table(store) else None
     if not row:
         raise CoreError("DELEGATION_ADJUSTMENT_NOT_FOUND", 404)
@@ -259,10 +277,11 @@ def decide(store, settings, override_id, decision, now):
     if state == "ACTIVE":
         _close(store, row["capability"], now, "SUPERSEDED", fields=[row["field"]],
                current=("ACTIVE",))
-        store.execute("UPDATE capability_overrides SET expires_at=? WHERE override_id=?",
+        store.execute('UPDATE capability_overrides SET expires_at = %s WHERE override_id = %s',
                       (_resume_at(settings, now) if row["field"] == "pause" else None,
                        override_id))
-    store.execute("UPDATE capability_overrides SET state=?,decided_at=? WHERE override_id=?",
+    store.execute('UPDATE capability_overrides SET state = %s, decided_at = %s WHERE override_id = '
+        '%s',
                   (state, now, override_id))
     store.audit("delegation.decided", override_id, row["capability"], now, decision=decision)
     return {"state": state}
@@ -285,8 +304,15 @@ def _active(store, capability, field, now):
     if not _table(store):
         return None
     row = store.one(
-        "SELECT * FROM capability_overrides WHERE capability=? AND field=? AND state='ACTIVE' "
-        "ORDER BY created_at DESC LIMIT 1", (capability, field),
+        'SELECT capability_overrides.override_id AS override_id, capability_overrides.capability '
+        'AS capability, capability_overrides.field AS field, capability_overrides.value_json AS '
+        'value_json, capability_overrides.suggestion_id AS suggestion_id, '
+        'capability_overrides.reason AS reason, capability_overrides.state AS state, '
+        'capability_overrides.created_at AS created_at, capability_overrides.decided_at AS '
+        'decided_at, capability_overrides.expires_at AS expires_at FROM capability_overrides AS '
+        'capability_overrides WHERE capability_overrides.capability = %s AND '
+        "capability_overrides.field = %s AND capability_overrides.state = 'ACTIVE' ORDER BY "
+        'capability_overrides.created_at DESC NULLS LAST LIMIT 1', (capability, field),
     )
     if row and row["expires_at"] and row["expires_at"] <= now:
         return None
@@ -315,16 +341,16 @@ def paused(store, capability, now):
 
 def expire(store, now):
     if _table(store):
-        store.execute("UPDATE capability_overrides SET state='EXPIRED',decided_at=? "
-                      "WHERE state='ACTIVE' AND expires_at IS NOT NULL AND expires_at<=?",
+        store.execute("UPDATE capability_overrides SET state = 'EXPIRED', decided_at = %s WHERE "
+            "state = 'ACTIVE' AND NOT expires_at IS NULL AND expires_at <= %s",
                       (now, now))
 
 
 def discard_after_restore(store, now):
     """A restored backup cannot prove later adjustments; return to the owner's configuration."""
     if _table(store):
-        store.execute("UPDATE capability_overrides SET state='DISCARDED',decided_at=? "
-                      "WHERE state IN ('PROPOSED','ACTIVE')", (now,))
+        store.execute("UPDATE capability_overrides SET state = 'DISCARDED', decided_at = %s WHERE "
+            "state IN ('PROPOSED', 'ACTIVE')", (now,))
 
 
 def erase_suggestions(store, suggestion_ids, now):
@@ -333,9 +359,9 @@ def erase_suggestions(store, suggestion_ids, now):
         return
     for suggestion_id in suggestion_ids:
         store.execute(
-            "UPDATE capability_overrides SET reason='',state=CASE WHEN state='ACTIVE' THEN "
-            "'REVERTED' WHEN state='PROPOSED' THEN 'REJECTED' ELSE state END,"
-            "decided_at=COALESCE(decided_at,?) WHERE suggestion_id=?",
+            "UPDATE capability_overrides SET reason = '', state = CASE WHEN state = 'ACTIVE' THEN "
+            "'REVERTED' WHEN state = 'PROPOSED' THEN 'REJECTED' ELSE state END, decided_at = "
+            'COALESCE(decided_at, %s) WHERE suggestion_id = %s',
             (now, suggestion_id),
         )
 
@@ -363,8 +389,9 @@ def view(store, settings, now):
     rows = []
     if _table(store):
         rows = store.rows(
-            "SELECT override_id,capability,field,value_json,suggestion_id,reason,state,created_at,"
-            "decided_at,expires_at FROM capability_overrides ORDER BY created_at DESC LIMIT 40"
+            'SELECT override_id, capability, field, value_json, suggestion_id, reason, state, '
+            'created_at, decided_at, expires_at FROM capability_overrides ORDER BY created_at DESC '
+            'NULLS LAST LIMIT 40'
         )
     capabilities = []
     for capability, fields in DELEGABLE.items():

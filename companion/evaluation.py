@@ -180,16 +180,23 @@ def _plan(settings, manifest):
 def _sources(store, settings, ids, now):
     result, conversations = {}, set()
     for source_id in ids:
-        source = store.one("SELECT e.*,c.scope,c.owner_actor_id FROM events e JOIN conversations c "
-                           "USING(conversation_id) WHERE event_id=?", (source_id,))
+        source = store.one('SELECT e.event_id AS event_id, e.schema_version AS schema_version, '
+            'e.source AS source, e.source_event_id AS source_event_id, e.conversation_id AS '
+            'conversation_id, e.actor_id AS actor_id, e.event_type AS event_type, e.occurred_at AS '
+            'occurred_at, e.ingested_at AS ingested_at, e.privacy_scope AS privacy_scope, '
+            'e.body_json AS body_json, e.trace_id AS trace_id, e.idempotency_key AS '
+            'idempotency_key, e.fingerprint AS fingerprint, e.redacted AS redacted, '
+            'e.memory_processed AS memory_processed, e.reply_revision AS reply_revision, c.scope '
+            'AS scope, c.owner_actor_id AS owner_actor_id FROM events AS e JOIN conversations AS c '
+            'ON e.conversation_id = c.conversation_id WHERE e.event_id = %s', (source_id,))
         if (not source or not reply_revision.owner_input(store, source_id)
             or not reply_revision.source_active(store, source_id)
             or source["scope"] != "private" or source["owner_actor_id"] != "owner"):
             raise CoreError("EVALUATION_OWNER_SOURCE_REQUIRED", 403)
         input_recall.require_not_recalled(store, source["source_event_id"])
         conversations.add(source["conversation_id"])
-        sent = store.rows("SELECT message_id,content_sha256,sent_at FROM outbox "
-                          "WHERE origin_event_id=? AND state='SENT' ORDER BY message_id",
+        sent = store.rows('SELECT message_id, content_sha256, sent_at FROM outbox WHERE '
+            "origin_event_id = %s AND state = 'SENT' ORDER BY message_id NULLS FIRST",
                           (source_id,))
         result[source_id] = {"event_sha256": event_digest(source), "sent": sent}
     if len(conversations) != 1 or expired_sources(
@@ -209,19 +216,19 @@ def _authority(store, settings, clock, current_request=None):
 
 
 def _conversation_binding(store, conversation):
-    latest = store.one("SELECT event_id FROM events WHERE conversation_id=? AND "
-                       + reply_revision.OWNER_INPUT + " ORDER BY rowid DESC LIMIT 1",
+    latest = store.one('SELECT event_id FROM events WHERE conversation_id=%s AND '
+                       + reply_revision.OWNER_INPUT + ' ORDER BY record_sequence DESC LIMIT 1',
                        (conversation,))
     return {"conversation_revision": store.one(
-        "SELECT reply_revision FROM conversations WHERE conversation_id=?",
+        'SELECT reply_revision FROM conversations WHERE conversation_id = %s',
         (conversation,))["reply_revision"], "latest_owner_event": latest["event_id"]}
 
 
 def _inputs(store, settings, manifest, now):
     """Owner sources and conversation fences; a synthetic plan has neither."""
     if manifest.get("kind", "owner_pilot") == "synthetic":
-        row = store.one("SELECT conversation_id FROM conversations WHERE scope='private' "
-                        "AND owner_actor_id='owner' ORDER BY rowid LIMIT 1")
+        row = store.one("SELECT conversation_id FROM conversations WHERE scope = 'private' AND "
+            "owner_actor_id = 'owner' ORDER BY record_sequence NULLS FIRST LIMIT 1")
         if not row:
             raise CoreError("EVALUATION_OWNER_SOURCE_REQUIRED", 403)
         return {}, row["conversation_id"], {}
@@ -248,7 +255,13 @@ def submit(core, request):
         digest, now = prepared["manifest_sha256"], clock()
         consent = ConsentService(store, settings, clock).require(
             request.consent_id, CAPABILITY, DEVICE, digest)
-        previous = store.one("SELECT * FROM evaluation_runs WHERE manifest_sha256=?", (digest,))
+        previous = store.one('SELECT evaluation_runs.evaluation_id AS evaluation_id, '
+            'evaluation_runs.manifest_sha256 AS manifest_sha256, evaluation_runs.consent_id AS '
+            'consent_id, evaluation_runs.job_id AS job_id, evaluation_runs.manifest_json AS '
+            'manifest_json, evaluation_runs.sources_json AS sources_json, '
+            'evaluation_runs.binding_json AS binding_json, evaluation_runs.redacted AS redacted, '
+            'evaluation_runs.created_at AS created_at FROM evaluation_runs AS evaluation_runs '
+            'WHERE evaluation_runs.manifest_sha256 = %s', (digest,))
         if previous:
             return {"evaluation_id": previous["evaluation_id"], "job_id": previous["job_id"],
                     "manifest_sha256": digest, "reused": True}
@@ -264,7 +277,7 @@ def submit(core, request):
                      trace_id=evaluation_id, memory_processed=1)
         job_id = core.new_job(event_id, "evaluation", evaluation_id, now)
         owner_authority.bind_job(store, settings, clock, job_id, purpose="evaluation")
-        store.execute("UPDATE jobs SET max_attempts=1 WHERE job_id=?", (job_id,))
+        store.execute('UPDATE jobs SET max_attempts = 1 WHERE job_id = %s', (job_id,))
         for source_id in sources:
             store.insert("event_dependencies", event_id=event_id, source_event_id=source_id)
             store.insert("job_sources", job_id=job_id, event_id=source_id)
@@ -279,9 +292,14 @@ def submit(core, request):
 
 
 def check_job(store, settings, clock, job_id, *, lease_token=None, current_request=None):
-    run = store.one("SELECT r.*,j.state,j.lease_token,j.lease_until,j.event_id,e.conversation_id "
-                    "FROM evaluation_runs r JOIN jobs j USING(job_id) JOIN events e "
-                    "ON e.event_id=j.event_id WHERE r.job_id=? AND j.kind='evaluation'", (job_id,))
+    run = store.one('SELECT r.evaluation_id AS evaluation_id, r.manifest_sha256 AS '
+        'manifest_sha256, r.consent_id AS consent_id, r.job_id AS job_id, r.manifest_json AS '
+        'manifest_json, r.sources_json AS sources_json, r.binding_json AS binding_json, r.redacted '
+        'AS redacted, r.created_at AS created_at, j.state AS state, j.lease_token AS lease_token, '
+        'j.lease_until AS lease_until, j.event_id AS event_id, e.conversation_id AS '
+        'conversation_id FROM evaluation_runs AS r JOIN jobs AS j ON r.job_id = j.job_id JOIN '
+        'events AS e ON e.event_id = j.event_id WHERE r.job_id = %s AND j.kind = '
+        "'evaluation'", (job_id,))
     if not run or run["redacted"] or run["state"] != "RUNNING" or (
         not run["lease_until"] or run["lease_until"] <= clock()
     ) or lease_token is not None and lease_token != run["lease_token"]:
@@ -303,11 +321,11 @@ def check_job(store, settings, clock, job_id, *, lease_token=None, current_reque
 
 
 def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_input):
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("EVALUATION_ADMISSION_TRANSACTION_REQUIRED")
     run, manifest = check_job(store, settings, clock, job_id)
-    prior = store.rows("SELECT request_id,state,billed_micro_usd FROM model_usage "
-                       "WHERE job_id=? ORDER BY rowid", (job_id,))
+    prior = store.rows('SELECT request_id, state, billed_micro_usd FROM model_usage WHERE job_id = '
+        '%s ORDER BY record_sequence NULLS FIRST', (job_id,))
     limits = _limits(manifest)
     if (len(prior) >= min(limits["calls"], len(manifest["plan"]["requests"]))
         or any(row["state"] != "SETTLED" for row in prior)
@@ -318,7 +336,7 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
     if (rid != request_id(run["manifest_sha256"], ordinal)
         or any(row["request_id"] != request_id(run["manifest_sha256"], i)
                for i, row in enumerate(prior))
-        or len(store.rows("SELECT 1 FROM evaluation_results WHERE evaluation_id=?",
+        or len(store.rows('SELECT 1 FROM evaluation_results WHERE evaluation_id = %s',
                           (run["evaluation_id"],))) != ordinal
         or paid_budget.sha(model_payload(settings, messages, "evaluation")) != (
             manifest["plan"]["requests"][ordinal]["payload_sha256"])):
@@ -326,15 +344,23 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
 
 
 def check_request(store, settings, clock, rid):
-    usage = store.one("SELECT * FROM model_usage WHERE request_id=? AND scenario='evaluation'",
+    usage = store.one('SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS '
+        'request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
+        'model_usage.provider AS provider, model_usage.model AS model, model_usage.input_tokens AS '
+        'input_tokens, model_usage.cached_input_tokens AS cached_input_tokens, '
+        'model_usage.output_tokens AS output_tokens, model_usage.billed_micro_usd AS '
+        'billed_micro_usd, model_usage.is_estimate AS is_estimate, model_usage.occurred_at AS '
+        'occurred_at, model_usage.state AS state, model_usage.pricing_known AS pricing_known FROM '
+        'model_usage AS model_usage WHERE model_usage.request_id = %s AND model_usage.scenario = '
+        "'evaluation'",
                       (rid,))
     if not usage or usage["state"] != "RESERVED":
         raise CoreError("EVALUATION_REQUEST_FENCED", 409)
     run, manifest = check_job(store, settings, clock, usage["job_id"], current_request=rid)
     matching = [i for i in range(len(manifest["plan"]["requests"]))
                 if rid == request_id(run["manifest_sha256"], i)]
-    admission = store.one("SELECT payload_sha256,authority_json FROM model_admissions "
-                          "WHERE request_id=?", (rid,))
+    admission = store.one('SELECT payload_sha256, authority_json FROM model_admissions WHERE '
+        'request_id = %s', (rid,))
     if (len(matching) != 1 or not admission or admission["payload_sha256"] != (
         manifest["plan"]["requests"][matching[0]]["payload_sha256"]
     )):
@@ -346,7 +372,7 @@ def check_request(store, settings, clock, rid):
     view = owner_authority.current(store, settings, clock, purpose="evaluation",
                                    authority=json.loads(run["binding_json"])["authority"])
     retention = min(settings.raw_event_retention_days, view.policy.source_retention_days)
-    source_deadlines = [after(store.one("SELECT ingested_at FROM events WHERE event_id=?",
+    source_deadlines = [after(store.one('SELECT ingested_at FROM events WHERE event_id = %s',
                                        (event_id,))["ingested_at"],
                               86400 * retention)
                         for event_id in manifest["source_event_ids"]]
@@ -359,9 +385,9 @@ def check_request(store, settings, clock, rid):
 def recover(store, now):
     # Core's original cancellation drain settles expired reservations through the
     # original budget journal. Never set usage states directly or repeat a call.
-    store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                  "last_error_code='EVALUATION_INTERRUPTED' WHERE kind='evaluation' "
-                  "AND state='RUNNING' AND lease_until<=?", (now, now))
+    store.execute("UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, updated_at = %s, "
+        "last_error_code = 'EVALUATION_INTERRUPTED' WHERE kind = 'evaluation' AND state = "
+        "'RUNNING' AND lease_until <= %s", (now, now))
 
 
 async def run(core, job):
@@ -375,9 +401,9 @@ async def run(core, job):
         with store.transaction():
             row, manifest = check_job(store, settings, clock, job["job_id"],
                                       lease_token=job["lease_token"])
-            prior = store.rows("SELECT state FROM model_usage WHERE job_id=?", (job["job_id"],))
-            stored = store.one("SELECT COUNT(*) AS n FROM evaluation_results "
-                               "WHERE evaluation_id=?", (row["evaluation_id"],))["n"]
+            prior = store.rows('SELECT state FROM model_usage WHERE job_id = %s', (job["job_id"],))
+            stored = store.one('SELECT COUNT(*) AS n FROM evaluation_results WHERE evaluation_id = '
+                '%s', (row["evaluation_id"],))["n"]
             # Only a cleanly settled prefix with all results continues; never repeat a call.
             if any(usage["state"] != "SETTLED" for usage in prior) or stored != len(prior):
                 raise CoreError("EVALUATION_PREVIOUS_ATTEMPT_REVIEW_REQUIRED", 409)
@@ -391,7 +417,8 @@ async def run(core, job):
                           current_request=current_request)
             with store.transaction():
                 source_check()
-                store.execute("UPDATE jobs SET lease_until=? WHERE job_id=? AND lease_token=?",
+                store.execute('UPDATE jobs SET lease_until = %s WHERE job_id = %s AND lease_token '
+                    '= %s',
                               (after(clock(), settings.lease_seconds), job["job_id"],
                                job["lease_token"]))
             messages = item["payload"]["messages"]
@@ -401,7 +428,7 @@ async def run(core, job):
                                              "evaluation", clock, source_check=source_check)
             with store.transaction():
                 source_check()
-                usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (rid,))
+                usage = store.one('SELECT state FROM model_usage WHERE request_id = %s', (rid,))
                 if usage["state"] != "SETTLED":
                     raise CoreError("EVALUATION_USAGE_UNCERTAIN", 409)
                 safe_text = redact(response.text, settings)
@@ -417,12 +444,12 @@ async def run(core, job):
             source_check()
             if stop < len(requests):
                 # Yield the worker; the next claim resumes after any waiting chat.
-                store.execute("UPDATE jobs SET state='QUEUED',lease_token=NULL,lease_until=NULL,"
-                              "attempts=MAX(0,attempts-1),updated_at=? WHERE job_id=? "
-                              "AND lease_token=?", (clock(), job["job_id"], job["lease_token"]))
+                store.execute("UPDATE jobs SET state = 'QUEUED', lease_token = NULL, lease_until = "
+                    'NULL, attempts = GREATEST(0, attempts - 1), updated_at = %s WHERE job_id = %s '
+                    'AND lease_token = %s', (clock(), job["job_id"], job["lease_token"]))
             else:
-                store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
-                              "WHERE job_id=? AND lease_token=?", (clock(), job["job_id"],
+                store.execute("UPDATE jobs SET state = 'SUCCEEDED', lease_token = NULL, updated_at "
+                    '= %s WHERE job_id = %s AND lease_token = %s', (clock(), job["job_id"],
                                                                    job["lease_token"]))
     except CoreError as exc:
         error = exc.code
@@ -430,8 +457,8 @@ async def run(core, job):
         error = "EVALUATION_INTERNAL_ERROR"
     if error:
         with store.transaction():
-            store.execute("UPDATE jobs SET state='FAILED',lease_token=NULL,last_error_code=?,"
-                          "updated_at=? WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+            store.execute("UPDATE jobs SET state = 'FAILED', lease_token = NULL, last_error_code = "
+                "%s, updated_at = %s WHERE job_id = %s AND state = 'RUNNING' AND lease_token = %s",
                           (error, clock(), job["job_id"], job["lease_token"]))
             store.audit("evaluation.failed", job["job_id"], job["trace_id"], clock(), code=error)
     return True
@@ -440,8 +467,12 @@ async def run(core, job):
 def results(store, settings, clock, evaluation_id):
     _enabled(settings)
     captured_epoch = epoch(store)
-    row = store.one("SELECT r.*,j.state,j.last_error_code FROM evaluation_runs r JOIN jobs j "
-                    "USING(job_id) WHERE evaluation_id=?", (evaluation_id,))
+    row = store.one('SELECT r.evaluation_id AS evaluation_id, r.manifest_sha256 AS '
+        'manifest_sha256, r.consent_id AS consent_id, r.job_id AS job_id, r.manifest_json AS '
+        'manifest_json, r.sources_json AS sources_json, r.binding_json AS binding_json, r.redacted '
+        'AS redacted, r.created_at AS created_at, j.state AS state, j.last_error_code AS '
+        'last_error_code FROM evaluation_runs AS r JOIN jobs AS j ON r.job_id = j.job_id WHERE '
+        'r.evaluation_id = %s', (evaluation_id,))
     if not row:
         raise CoreError("EVALUATION_NOT_FOUND", 404)
     if row["redacted"]:
@@ -453,11 +484,10 @@ def results(store, settings, clock, evaluation_id):
     outcomes = []
     for ordinal, item in enumerate(manifest["plan"]["requests"]):
         rid = request_id(row["manifest_sha256"], ordinal)
-        usage = store.one("SELECT state,input_tokens,output_tokens,cached_input_tokens,"
-                          "billed_micro_usd FROM model_usage WHERE request_id=?", (rid,))
-        observed = store.one("SELECT text,text_redacted,finish_reason,evidence_type "
-                             "FROM evaluation_results "
-                             "WHERE request_id=?",
+        usage = store.one('SELECT state, input_tokens, output_tokens, cached_input_tokens, '
+            'billed_micro_usd FROM model_usage WHERE request_id = %s', (rid,))
+        observed = store.one('SELECT text, text_redacted, finish_reason, evidence_type FROM '
+            'evaluation_results WHERE request_id = %s',
                              (rid,))
         outcomes.append({"ordinal": ordinal, "request_id": rid,
                          **{k: item[k] for k in (
@@ -474,8 +504,8 @@ def results(store, settings, clock, evaluation_id):
                                                    and observed["finish_reason"] == "stop")})
     # As in other private views, fence the completed projection rather than
     # keeping an initial SQLite snapshot alive across an independent erasure.
-    current = store.one("SELECT redacted,manifest_sha256,sources_json FROM evaluation_runs "
-                        "WHERE evaluation_id=?", (evaluation_id,))
+    current = store.one('SELECT redacted, manifest_sha256, sources_json FROM evaluation_runs WHERE '
+        'evaluation_id = %s', (evaluation_id,))
     if not current or current["redacted"]:
         raise CoreError("EVALUATION_ERASED", 410)
     current_sources, _, _ = _inputs(store, settings, manifest, clock())
@@ -490,37 +520,50 @@ def results(store, settings, clock, evaluation_id):
 
 
 def erase(store, event_ids):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='evaluation_runs'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='evaluation_runs' AND relkind IN "
+        "('r','p')"):
         return
-    with nullcontext() if store.db.in_transaction else store.transaction():
-        affected = store.rows("SELECT DISTINCT r.evaluation_id,r.job_id FROM evaluation_runs r "
-                              "JOIN job_sources s USING(job_id) WHERE s.event_id IN "
-                              "(SELECT value FROM json_each(?))", (encode(sorted(event_ids)),))
+    with nullcontext() if store.in_transaction else store.transaction():
+        affected = store.rows('SELECT DISTINCT r.evaluation_id, r.job_id FROM evaluation_runs AS r '
+            'JOIN job_sources AS s USING (job_id) WHERE s.event_id IN (SELECT value COLLATE "C" '
+            'FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+            'parsed(value))', (encode(sorted(event_ids)),))
         for row in affected:
-            store.execute("UPDATE evaluation_runs SET manifest_json='{}',sources_json='{}',"
-                          "binding_json='{}',redacted=1 WHERE evaluation_id=?",
+            store.execute("UPDATE evaluation_runs SET manifest_json = '{}', sources_json = '{}', "
+                "binding_json = '{}', redacted = 1 WHERE evaluation_id = %s",
                           (row["evaluation_id"],))
-            store.execute("DELETE FROM evaluation_results WHERE evaluation_id=?",
+            store.execute('DELETE FROM evaluation_results WHERE evaluation_id = %s',
                           (row["evaluation_id"],))
-            store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,"
-                          "last_error_code='EVALUATION_SOURCE_ERASED' WHERE job_id=?",
+            store.execute("UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, "
+                "last_error_code = 'EVALUATION_SOURCE_ERASED' WHERE job_id = %s",
                           (row["job_id"],))
 
 
 def revoke_jobs(store, consent_id, now):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='evaluation_runs'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='evaluation_runs' AND relkind IN "
+        "('r','p')"):
         return  # Revocation remains available before this projection's migration.
-    store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                  "last_error_code='EVALUATION_CONSENT_REVOKED' WHERE kind='evaluation' "
-                  "AND state IN ('QUEUED','RUNNING','RETRY_WAIT') AND job_id IN "
-                  "(SELECT job_id FROM evaluation_runs WHERE consent_id=?)", (now, consent_id))
+    store.execute("UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, updated_at = %s, "
+        "last_error_code = 'EVALUATION_CONSENT_REVOKED' WHERE kind = 'evaluation' AND state IN "
+        "('QUEUED', 'RUNNING', 'RETRY_WAIT') AND job_id IN (SELECT job_id FROM evaluation_runs "
+        'WHERE consent_id = %s)', (now, consent_id))
 
 
 def stop_window(store, window_sha256, now):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='evaluation_runs'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='evaluation_runs' AND relkind IN "
+        "('r','p')"):
         return
-    store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                  "last_error_code='LIVE_WINDOW_STOPPED' WHERE kind='evaluation' "
-                  "AND state IN ('QUEUED','RUNNING','RETRY_WAIT') AND job_id IN "
-                  "(SELECT job_id FROM evaluation_runs WHERE "
-                  "json_extract(binding_json,'$.window_sha256')=?)", (now, window_sha256))
+    store.execute((
+        (
+            "UPDATE jobs SET state='CANCELLED',lease_token=NULL,"
+            "updated_at=%s,last_error_code='LIVE_WINDOW_STOPPED' "
+            "WHERE kind='evaluation' AND state IN ('QUEUED',"
+            "'RUNNING','RETRY_WAIT') AND job_id IN (SELECT job_id "
+            'FROM evaluation_runs WHERE (CASE WHEN binding_json IS '
+            "JSON THEN (binding_json::json#>>'{window_sha256}') "
+            'END)=%s)'
+        )
+    ), (now, window_sha256))

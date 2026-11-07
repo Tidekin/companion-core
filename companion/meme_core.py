@@ -301,10 +301,33 @@ def _proof(value, asset_sha, source_sha):
 
 def _parent(store, settings, clock, context):
     parent = store.one(
-        "SELECT * FROM jobs WHERE job_id=? AND kind='meme_discovery'", (context.discovery_job_id,)
+        'SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, jobs.state AS '
+        'state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS attempts, '
+        'jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS '
+        'lease_until, jobs.next_attempt_at AS next_attempt_at, jobs.last_error_code AS '
+        'last_error_code, jobs.created_at AS created_at, jobs.updated_at AS updated_at, '
+        'jobs.lease_token AS lease_token, jobs.context_tracked AS context_tracked, '
+        'jobs.authority_json AS authority_json FROM jobs AS jobs WHERE jobs.job_id = %s AND '
+        "jobs.kind = 'meme_discovery'", (context.discovery_job_id,)
     )
     reservation = store.one(
-        "SELECT * FROM meme_discovery_reservations WHERE job_id=?", (context.discovery_job_id,)
+        'SELECT meme_discovery_reservations.job_id AS job_id, '
+        'meme_discovery_reservations.attempt_key AS attempt_key, meme_discovery_reservations.day '
+        'AS day, meme_discovery_reservations.state AS state, '
+        'meme_discovery_reservations.reserved_queries AS reserved_queries, '
+        'meme_discovery_reservations.queries AS queries, '
+        'meme_discovery_reservations.reserved_requests AS reserved_requests, '
+        'meme_discovery_reservations.requests AS requests, '
+        'meme_discovery_reservations.reserved_download_bytes AS reserved_download_bytes, '
+        'meme_discovery_reservations.download_bytes AS download_bytes, '
+        'meme_discovery_reservations.reserved_storage_bytes AS reserved_storage_bytes, '
+        'meme_discovery_reservations.storage_bytes AS storage_bytes, '
+        'meme_discovery_reservations.reserved_model_cost AS reserved_model_cost, '
+        'meme_discovery_reservations.model_cost AS model_cost, '
+        'meme_discovery_reservations.created_at AS created_at, '
+        'meme_discovery_reservations.updated_at AS updated_at FROM meme_discovery_reservations AS '
+        'meme_discovery_reservations WHERE meme_discovery_reservations.job_id = '
+        '%s', (context.discovery_job_id,)
     )
     value = meme_service._metadata(store, context.discovery_job_id)
     if (
@@ -322,7 +345,16 @@ def _parent(store, settings, clock, context):
 
 def check_caption_job(store, settings, approval, job, *, clock=utcnow):
     owner_authority.check_job(store, settings, clock, job, purpose="meme")
-    row = store.one("SELECT * FROM meme_captions WHERE job_id=?", (job["job_id"],))
+    row = store.one('SELECT meme_captions.job_id AS job_id, meme_captions.cache_key AS cache_key, '
+        'meme_captions.request_sha256 AS request_sha256, meme_captions.asset_sha256 AS '
+        'asset_sha256, meme_captions.source_sha256 AS source_sha256, meme_captions.identity_json '
+        'AS identity_json, meme_captions.context_json AS context_json, meme_captions.source_json '
+        'AS source_json, meme_captions.request_json AS request_json, meme_captions.asset_data AS '
+        'asset_data, meme_captions.result_json AS result_json, meme_captions.usage_request_id AS '
+        'usage_request_id, meme_captions.reuse_job_id AS reuse_job_id, meme_captions.plan_sha256 '
+        'AS plan_sha256, meme_captions.privacy_epoch AS privacy_epoch, meme_captions.created_at AS '
+        'created_at, meme_captions.updated_at AS updated_at FROM meme_captions AS meme_captions '
+        'WHERE meme_captions.job_id = %s', (job["job_id"],))
     if (
         not row
         or job["kind"] != "meme_caption"
@@ -349,32 +381,33 @@ def erase_captions(store, event_ids):
     if not event_ids:
         return
     for job in store.rows(
-        "SELECT DISTINCT j.event_id FROM jobs j JOIN job_sources s USING(job_id) "
-        "WHERE s.event_id IN (SELECT value FROM json_each(?))",
+        'SELECT DISTINCT j.event_id FROM jobs AS j JOIN job_sources AS s USING (job_id) WHERE '
+        's.event_id IN (SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) '
+        'AS parsed(value))',
         (encode(sorted(event_ids)),),
     ):
-        store.execute("DELETE FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],))
+        store.execute('DELETE FROM runtime_meta WHERE key = %s', (OFFER + job["event_id"],))
     rows = store.rows(
-        "WITH RECURSIVE erased(job_id) AS (SELECT job_id FROM jobs WHERE event_id IN "
-        "(SELECT value FROM json_each(?)) UNION SELECT c.job_id FROM meme_captions c "
-        "JOIN erased e ON c.reuse_job_id=e.job_id) SELECT job_id FROM erased",
+        'WITH RECURSIVE erased(job_id) AS (SELECT job_id FROM jobs WHERE event_id IN (SELECT value '
+        'COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) UNION '
+        'SELECT c.job_id FROM meme_captions AS c JOIN erased AS e ON c.reuse_job_id = e.job_id) '
+        'SELECT job_id FROM erased',
         (encode(sorted(event_ids)),),
     )
     for row in rows:
         store.execute(
-            "UPDATE meme_captions SET asset_data=NULL,result_json=NULL,context_json='{}',"
-            "source_json='{}',request_json='{}' WHERE job_id=?",
+            "UPDATE meme_captions SET asset_data = NULL, result_json = NULL, context_json = '{}', "
+            "source_json = '{}', request_json = '{}' WHERE job_id = %s",
             (row["job_id"],),
         )
         store.execute(
-            "UPDATE jobs SET state='CANCELLED',lease_token=NULL,"
-            "last_error_code='MEME_CAPTION_SOURCE_ERASED' WHERE job_id=? "
-            "AND kind='meme_caption'",
+            "UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, last_error_code = "
+            "'MEME_CAPTION_SOURCE_ERASED' WHERE job_id = %s AND kind = 'meme_caption'",
             (row["job_id"],),
         )
     for event_id in event_ids:
         store.execute(
-            "DELETE FROM runtime_meta WHERE key IN (?,?)", (QUERY + event_id, OFFER + event_id)
+            'DELETE FROM runtime_meta WHERE key IN (%s, %s)', (QUERY + event_id, OFFER + event_id)
         )
 
 
@@ -438,7 +471,7 @@ class MemeCaptionService:
         from companion import meme_assets
         from companion.meme_retrieval import media
 
-        if not self.store.db.in_transaction:
+        if not self.store.in_transaction:
             raise RuntimeError("MEME_CAPTION_ENQUEUE_REQUIRES_TRANSACTION")
         approval = meme_service._native_scope(self.store, self.settings, self.clock)
         data, request = self._request(body)
@@ -450,7 +483,7 @@ class MemeCaptionService:
 
     def _enqueue(self, body, data, request, approval, *, custody=None):
         s, now = self.store, self.clock()
-        if not s.db.in_transaction:
+        if not s.in_transaction:
             raise RuntimeError("MEME_CAPTION_ENQUEUE_REQUIRES_TRANSACTION")
         current_source(
             s, self.settings, approval, body.context.event_id, body.context.reply_revision,
@@ -458,25 +491,27 @@ class MemeCaptionService:
         )
         _parent(s, self.settings, self.clock, body.context)
         prior = s.one(
-            "SELECT job_id FROM meme_captions WHERE request_sha256=?", (request.sha256,)
+            'SELECT job_id FROM meme_captions WHERE request_sha256 = %s', (request.sha256,)
         )
         if prior:
             if custody is not None:
                 self._reuse_compatible(prior["job_id"], custody)
             return self.outcome(prior["job_id"])
         used = s.one(
-            "SELECT COUNT(*) AS n,COALESCE(SUM(length(asset_data)),0) AS size "
-            "FROM meme_captions"
+            'SELECT COUNT(*) AS n, COALESCE(CAST(SUM(LENGTH(asset_data)) AS BIGINT), 0) AS size '
+            'FROM meme_captions'
         )
         if used["n"] >= MAX_ROWS or used["size"] + len(data) > MAX_BYTES:
             raise CoreError("MEME_CAPTION_STORAGE_LIMIT", 429)
         cached = s.rows(
-            "SELECT c.* FROM meme_captions c JOIN jobs j USING(job_id) "
-            "WHERE cache_key=? "
+            'SELECT c.* FROM meme_captions c JOIN jobs j USING(job_id) WHERE cache_key=%s '
             + ("AND c.asset_data IS NOT NULL " if custody is None else "")
-            + "AND (c.result_json IS NOT NULL OR j.state IN ('QUEUED','RUNNING') "
-            "OR EXISTS (SELECT 1 FROM model_usage u WHERE "
-            "u.request_id=c.usage_request_id OR u.job_id=c.job_id)) ORDER BY c.rowid",
+            + (
+                "AND (c.result_json IS NOT NULL OR j.state IN ('QUEUED',"
+                "'RUNNING') OR EXISTS (SELECT 1 FROM model_usage u "
+                'WHERE u.request_id=c.usage_request_id OR '
+                'u.job_id=c.job_id)) ORDER BY c.record_sequence'
+            ),
             (request.cache_key,),
         )
         if custody is not None:
@@ -485,7 +520,7 @@ class MemeCaptionService:
         prior = None
         for candidate in cached:
             if custody is None and not candidate["result_json"] and not s.one(
-                "SELECT 1 FROM model_usage WHERE request_id=? OR job_id=?",
+                'SELECT 1 FROM model_usage WHERE request_id = %s OR job_id = %s',
                 (candidate["usage_request_id"], candidate["job_id"]),
             ):
                 try:
@@ -493,7 +528,16 @@ class MemeCaptionService:
                         s,
                         self.settings,
                         approval,
-                        s.one("SELECT * FROM jobs WHERE job_id=?", (candidate["job_id"],)),
+                        s.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind '
+                            'AS kind, jobs.state AS state, jobs.idempotency_key AS '
+                            'idempotency_key, jobs.attempts AS attempts, jobs.max_attempts AS '
+                            'max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS '
+                            'lease_until, jobs.next_attempt_at AS next_attempt_at, '
+                            'jobs.last_error_code AS last_error_code, jobs.created_at AS '
+                            'created_at, jobs.updated_at AS updated_at, jobs.lease_token AS '
+                            'lease_token, jobs.context_tracked AS context_tracked, '
+                            'jobs.authority_json AS authority_json FROM jobs AS jobs WHERE '
+                            'jobs.job_id = %s', (candidate["job_id"],)),
                         clock=self.clock,
                     )
                 except CoreError:
@@ -538,7 +582,7 @@ class MemeCaptionService:
             updated_at=now,
         )
         if prior and prior["result_json"]:
-            s.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job_id,))
+            s.execute("UPDATE jobs SET state = 'SUCCEEDED' WHERE job_id = %s", (job_id,))
         return self.outcome(job_id)
 
     def _reuse_compatible(self, job_id, custody):
@@ -547,7 +591,18 @@ class MemeCaptionService:
 
         s = self.store
         try:
-            original = s.one("SELECT * FROM meme_captions WHERE job_id=?", (job_id,))
+            original = s.one('SELECT meme_captions.job_id AS job_id, meme_captions.cache_key AS '
+                'cache_key, meme_captions.request_sha256 AS request_sha256, '
+                'meme_captions.asset_sha256 AS asset_sha256, meme_captions.source_sha256 AS '
+                'source_sha256, meme_captions.identity_json AS identity_json, '
+                'meme_captions.context_json AS context_json, meme_captions.source_json AS '
+                'source_json, meme_captions.request_json AS request_json, meme_captions.asset_data '
+                'AS asset_data, meme_captions.result_json AS result_json, '
+                'meme_captions.usage_request_id AS usage_request_id, meme_captions.reuse_job_id AS '
+                'reuse_job_id, meme_captions.plan_sha256 AS plan_sha256, '
+                'meme_captions.privacy_epoch AS privacy_epoch, meme_captions.created_at AS '
+                'created_at, meme_captions.updated_at AS updated_at FROM meme_captions AS '
+                'meme_captions WHERE meme_captions.job_id = %s', (job_id,))
             proof = strict_json(original["source_json"])
             meta = {k: proof[k] for k in (
                 "source_page", "asset_url", "license", "usage_basis", "fetched_at", "revision"
@@ -564,8 +619,16 @@ class MemeCaptionService:
                 if current in seen or len(seen) >= MAX_ROWS:
                     raise ValueError("MEME_ASSET_LINEAGE_INVALID")
                 seen.add(current)
-                row = s.one("SELECT c.*,j.state,j.authority_json FROM meme_captions c "
-                            "JOIN jobs j USING(job_id) WHERE job_id=?", (current,))
+                row = s.one('SELECT c.job_id AS job_id, c.cache_key AS cache_key, c.request_sha256 '
+                    'AS request_sha256, c.asset_sha256 AS asset_sha256, c.source_sha256 AS '
+                    'source_sha256, c.identity_json AS identity_json, c.context_json AS '
+                    'context_json, c.source_json AS source_json, c.request_json AS request_json, '
+                    'c.asset_data AS asset_data, c.result_json AS result_json, c.usage_request_id '
+                    'AS usage_request_id, c.reuse_job_id AS reuse_job_id, c.plan_sha256 AS '
+                    'plan_sha256, c.privacy_epoch AS privacy_epoch, c.created_at AS created_at, '
+                    'c.updated_at AS updated_at, j.state AS state, j.authority_json AS '
+                    'authority_json FROM meme_captions AS c JOIN jobs AS j ON c.job_id = j.job_id '
+                    'WHERE COALESCE(c.job_id, j.job_id) = %s', (current,))
                 if (not row
                     or parse(CaptionIdentity, row["identity_json"]) != identity(self.settings)
                     or row["cache_key"] != original["cache_key"]):
@@ -573,13 +636,35 @@ class MemeCaptionService:
                 lineage.append(row)
                 current = row["reuse_job_id"]
             root = lineage[-1]
-            if any(s.one("SELECT 1 FROM model_usage WHERE job_id=?", (row["job_id"],))
+            if any(s.one('SELECT 1 FROM model_usage WHERE job_id = %s', (row["job_id"],))
                    for row in lineage[:-1]):
                 raise ValueError("MEME_CAPTION_LINEAGE_PAID_CONFLICT")
-            usage = s.rows("SELECT * FROM model_usage WHERE job_id=? OR request_id=?",
+            usage = s.rows('SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS '
+                'request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
+                'model_usage.provider AS provider, model_usage.model AS model, '
+                'model_usage.input_tokens AS input_tokens, model_usage.cached_input_tokens AS '
+                'cached_input_tokens, model_usage.output_tokens AS output_tokens, '
+                'model_usage.billed_micro_usd AS billed_micro_usd, model_usage.is_estimate AS '
+                'is_estimate, model_usage.occurred_at AS occurred_at, model_usage.state AS state, '
+                'model_usage.pricing_known AS pricing_known FROM model_usage AS model_usage WHERE '
+                'model_usage.job_id = %s OR model_usage.request_id = %s',
                            (root["job_id"], root["usage_request_id"]))
             if root["result_json"]:
-                admission = s.one("SELECT * FROM model_admissions WHERE request_id=?",
+                admission = s.one('SELECT model_admissions.request_id AS request_id, '
+                    'model_admissions.logical_request_id AS logical_request_id, '
+                    'model_admissions.attempt_id AS attempt_id, model_admissions.attempt_number AS '
+                    'attempt_number, model_admissions.window_id AS window_id, '
+                    'model_admissions.contract_sha256 AS contract_sha256, '
+                    'model_admissions.payload_sha256 AS payload_sha256, '
+                    'model_admissions.snapshot_json AS snapshot_json, '
+                    'model_admissions.reserved_micro_usd AS reserved_micro_usd, '
+                    'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
+                    'output_bound, model_admissions.lease_token AS lease_token, '
+                    'model_admissions.lease_until AS lease_until, model_admissions.io_started_at '
+                    'AS io_started_at, model_admissions.journal_path AS journal_path, '
+                    'model_admissions.journal_id AS journal_id, model_admissions.measurement_json '
+                    'AS measurement_json, model_admissions.authority_json AS authority_json FROM '
+                    'model_admissions AS model_admissions WHERE model_admissions.request_id = %s',
                                   (root["usage_request_id"],))
                 if (root["state"] != "SUCCEEDED" or len(usage) != 1
                     or usage[0]["state"] != "SETTLED" or usage[0]["job_id"] != root["job_id"]
@@ -603,7 +688,15 @@ class MemeCaptionService:
 
     def outcome(self, job_id):
         row = self.store.one(
-            "SELECT c.*,j.state FROM meme_captions c JOIN jobs j USING(job_id) WHERE job_id=?",
+            'SELECT c.job_id AS job_id, c.cache_key AS cache_key, c.request_sha256 AS '
+            'request_sha256, c.asset_sha256 AS asset_sha256, c.source_sha256 AS source_sha256, '
+            'c.identity_json AS identity_json, c.context_json AS context_json, c.source_json AS '
+            'source_json, c.request_json AS request_json, c.asset_data AS asset_data, '
+            'c.result_json AS result_json, c.usage_request_id AS usage_request_id, c.reuse_job_id '
+            'AS reuse_job_id, c.plan_sha256 AS plan_sha256, c.privacy_epoch AS privacy_epoch, '
+            'c.created_at AS created_at, c.updated_at AS updated_at, j.state AS state FROM '
+            'meme_captions AS c JOIN jobs AS j ON c.job_id = j.job_id WHERE COALESCE(c.job_id, '
+            'j.job_id) = %s',
             (job_id,),
         )
         if not row:
@@ -611,7 +704,15 @@ class MemeCaptionService:
         model_identity = parse(CaptionIdentity, row["identity_json"])
         usage = (
             self.store.one(
-                "SELECT * FROM model_usage WHERE request_id=?", (row["usage_request_id"],)
+                'SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS request_id, '
+                'model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
+                'model_usage.provider AS provider, model_usage.model AS model, '
+                'model_usage.input_tokens AS input_tokens, model_usage.cached_input_tokens AS '
+                'cached_input_tokens, model_usage.output_tokens AS output_tokens, '
+                'model_usage.billed_micro_usd AS billed_micro_usd, model_usage.is_estimate AS '
+                'is_estimate, model_usage.occurred_at AS occurred_at, model_usage.state AS state, '
+                'model_usage.pricing_known AS pricing_known FROM model_usage AS model_usage WHERE '
+                'model_usage.request_id = %s', (row["usage_request_id"],)
             )
             if row["usage_request_id"]
             else None
@@ -650,7 +751,14 @@ class MemeCaptionService:
     def _check(self, job, request_id=None):
         approval = scope(self.store, self.settings, self.clock, current_request=request_id)
         check_caption_job(self.store, self.settings, approval, job, clock=self.clock)
-        actual = self.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+        actual = self.store.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, '
+            'jobs.kind AS kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, '
+            'jobs.attempts AS attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS '
+            'lease_owner, jobs.lease_until AS lease_until, jobs.next_attempt_at AS '
+            'next_attempt_at, jobs.last_error_code AS last_error_code, jobs.created_at AS '
+            'created_at, jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, '
+            'jobs.context_tracked AS context_tracked, jobs.authority_json AS authority_json FROM '
+            'jobs AS jobs WHERE jobs.job_id = %s', (job["job_id"],))
         if (
             actual["state"] != "RUNNING"
             or actual["lease_token"] != job["lease_token"]
@@ -661,7 +769,17 @@ class MemeCaptionService:
     def _prior_chain(self, job, prior):
         """Validate the complete old graph before waiting, copying or detaching it."""
         s = self.store
-        selected = s.one("SELECT * FROM meme_captions WHERE job_id=?", (job["job_id"],))
+        selected = s.one('SELECT meme_captions.job_id AS job_id, meme_captions.cache_key AS '
+            'cache_key, meme_captions.request_sha256 AS request_sha256, meme_captions.asset_sha256 '
+            'AS asset_sha256, meme_captions.source_sha256 AS source_sha256, '
+            'meme_captions.identity_json AS identity_json, meme_captions.context_json AS '
+            'context_json, meme_captions.source_json AS source_json, meme_captions.request_json AS '
+            'request_json, meme_captions.asset_data AS asset_data, meme_captions.result_json AS '
+            'result_json, meme_captions.usage_request_id AS usage_request_id, '
+            'meme_captions.reuse_job_id AS reuse_job_id, meme_captions.plan_sha256 AS plan_sha256, '
+            'meme_captions.privacy_epoch AS privacy_epoch, meme_captions.created_at AS created_at, '
+            'meme_captions.updated_at AS updated_at FROM meme_captions AS meme_captions WHERE '
+            'meme_captions.job_id = %s', (job["job_id"],))
         if not prior or not selected:
             raise CoreError("MEME_CAPTION_SOURCE_CHANGED", 403)
         lineage, seen, current = [], set(), prior["job_id"]
@@ -670,8 +788,17 @@ class MemeCaptionService:
                 if current in seen or len(seen) >= MAX_ROWS:
                     raise ValueError("MEME_ASSET_LINEAGE_INVALID")
                 seen.add(current)
-                row = s.one("SELECT c.*,j.state,j.event_id,j.authority_json FROM meme_captions c "
-                            "JOIN jobs j USING(job_id) WHERE job_id=? AND j.kind='meme_caption'",
+                row = s.one('SELECT c.job_id AS job_id, c.cache_key AS cache_key, c.request_sha256 '
+                    'AS request_sha256, c.asset_sha256 AS asset_sha256, c.source_sha256 AS '
+                    'source_sha256, c.identity_json AS identity_json, c.context_json AS '
+                    'context_json, c.source_json AS source_json, c.request_json AS request_json, '
+                    'c.asset_data AS asset_data, c.result_json AS result_json, c.usage_request_id '
+                    'AS usage_request_id, c.reuse_job_id AS reuse_job_id, c.plan_sha256 AS '
+                    'plan_sha256, c.privacy_epoch AS privacy_epoch, c.created_at AS created_at, '
+                    'c.updated_at AS updated_at, j.state AS state, j.event_id AS event_id, '
+                    'j.authority_json AS authority_json FROM meme_captions AS c JOIN jobs AS j ON '
+                    'c.job_id = j.job_id WHERE COALESCE(c.job_id, j.job_id) = %s AND j.kind = '
+                    "'meme_caption'",
                             (current,))
                 if (not row or not row["asset_data"]
                     or row["asset_sha256"] != selected["asset_sha256"]
@@ -685,8 +812,9 @@ class MemeCaptionService:
                 current = row["reuse_job_id"]
             by_id = {row["job_id"]: row for row in lineage}
             for row in lineage:
-                own = s.rows("SELECT request_id FROM model_usage WHERE job_id=?", (row["job_id"],))
-                paid = s.one("SELECT job_id FROM model_usage WHERE request_id=?",
+                own = s.rows('SELECT request_id FROM model_usage WHERE job_id = '
+                    '%s', (row["job_id"],))
+                paid = s.one('SELECT job_id FROM model_usage WHERE request_id = %s',
                              (row["usage_request_id"],))
                 if (len(own) > 1 or own and own[0]["request_id"] != row["usage_request_id"]
                     or paid and paid["job_id"] not in seen
@@ -707,11 +835,11 @@ class MemeCaptionService:
         from companion.meme_assets import extend_reuse_provenance
 
         s = self.store
-        if not s.db.in_transaction:
+        if not s.in_transaction:
             raise RuntimeError("MEME_CAPTION_REPOINT_REQUIRES_TRANSACTION")
         lineage = self._prior_chain(job, prior)
         if any(row["result_json"] or s.one(
-            "SELECT 1 FROM model_usage WHERE job_id=? OR request_id=?",
+            'SELECT 1 FROM model_usage WHERE job_id = %s OR request_id = %s',
             (row["job_id"], row["usage_request_id"]),
         ) for row in lineage):
             raise CoreError("MEME_CAPTION_SOURCE_CHANGED", 403)
@@ -735,23 +863,24 @@ class MemeCaptionService:
             raise CoreError("MEME_CAPTION_SOURCE_CHANGED", 403) from error
         affected = {job["job_id"]}
         affected.update(r["job_id"] for r in s.rows(
-            "SELECT c.job_id FROM meme_captions c JOIN jobs j USING(job_id) "
-            "WHERE c.reuse_job_id=? AND j.state='QUEUED'", (prior["job_id"],),
+            'SELECT c.job_id FROM meme_captions AS c JOIN jobs AS j USING (job_id) WHERE '
+            "c.reuse_job_id = %s AND j.state = 'QUEUED'", (prior["job_id"],),
         ))
         frontier = set(affected)
         while frontier:
             children = {r["job_id"] for r in s.rows(
-                "SELECT job_id FROM meme_captions WHERE reuse_job_id IN "
-                "(SELECT value FROM json_each(?))", (encode(sorted(frontier)),),
+                'SELECT job_id FROM meme_captions WHERE reuse_job_id IN (SELECT value COLLATE "C" '
+                'FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+                'parsed(value))', (encode(sorted(frontier)),),
             )}
             if children & affected or len(affected) + len(children) > MAX_ROWS:
                 raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
             affected.update(children)
             frontier = children
-        s.execute("UPDATE meme_captions SET reuse_job_id=NULL,usage_request_id=NULL "
-                  "WHERE job_id=?", (job["job_id"],))
-        s.execute("UPDATE meme_captions SET reuse_job_id=? WHERE reuse_job_id=? "
-                  "AND job_id<>? AND job_id IN (SELECT job_id FROM jobs WHERE state='QUEUED')",
+        s.execute('UPDATE meme_captions SET reuse_job_id = NULL, usage_request_id = NULL WHERE '
+            'job_id = %s', (job["job_id"],))
+        s.execute('UPDATE meme_captions SET reuse_job_id = %s WHERE reuse_job_id = %s AND job_id '
+            "<> %s AND job_id IN (SELECT job_id FROM jobs WHERE state = 'QUEUED')",
                   (job["job_id"], prior["job_id"], job["job_id"]))
         extend_reuse_provenance(s, self.settings, affected)
 
@@ -763,21 +892,21 @@ class MemeCaptionService:
             and self.settings.meme_discovery_enabled and self.settings.expression_enabled
             and self.settings.paid_model and self.settings.paid_model.meme_input
             and (self.settings.meme_trusted_sources or self.settings.meme_gallery_source)
-            and not s.one("SELECT 1 FROM jobs j JOIN meme_captions c USING(job_id) "
-                          "WHERE j.state='QUEUED' LIMIT 1")):
+            and not s.one('SELECT 1 FROM jobs AS j JOIN meme_captions AS c USING (job_id) WHERE '
+                "j.state = 'QUEUED' LIMIT 1")):
             if await self.discovery.run_once(worker_id):
                 return True
         for row in s.rows(
-            "SELECT j.job_id,c.usage_request_id FROM jobs j JOIN meme_captions c "
-            "USING(job_id) WHERE j.state='RUNNING' AND j.lease_until<=?",
+            'SELECT j.job_id, c.usage_request_id FROM jobs AS j JOIN meme_captions AS c USING '
+            "(job_id) WHERE j.state = 'RUNNING' AND j.lease_until <= %s",
             (now,),
         ):
             if row["usage_request_id"]:
                 budget.settle(s, self.settings, row["usage_request_id"], None)
             with s.transaction():
                 s.execute(
-                    "UPDATE jobs SET state='FAILED',lease_token=NULL,"
-                    "last_error_code='MEME_CAPTION_UNKNOWN',updated_at=? WHERE job_id=?",
+                    "UPDATE jobs SET state = 'FAILED', lease_token = NULL, last_error_code = "
+                    "'MEME_CAPTION_UNKNOWN', updated_at = %s WHERE job_id = %s",
                     (now, row["job_id"]),
                 )
         job = None
@@ -786,15 +915,22 @@ class MemeCaptionService:
                 if (
                     private_life.busy(s, now)
                     or s.one(
-                        "SELECT 1 FROM outbox WHERE state IN ('PENDING','LEASED','SENDING') LIMIT 1"
+                        "SELECT 1 FROM outbox WHERE state IN ('PENDING', 'LEASED', 'SENDING') "
+                        'LIMIT 1'
                     )
                 ):
                     return False
                 job = s.one(
-                    "SELECT j.* FROM jobs j JOIN meme_captions c USING(job_id) "
-                    "WHERE j.state='QUEUED' "
-                    "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) "
-                    "ORDER BY j.rowid LIMIT 1", (now,),
+                    'SELECT j.job_id AS job_id, j.event_id AS event_id, j.kind AS kind, j.state AS '
+                    'state, j.idempotency_key AS idempotency_key, j.attempts AS attempts, '
+                    'j.max_attempts AS max_attempts, j.lease_owner AS lease_owner, j.lease_until '
+                    'AS lease_until, j.next_attempt_at AS next_attempt_at, j.last_error_code AS '
+                    'last_error_code, j.created_at AS created_at, j.updated_at AS updated_at, '
+                    'j.lease_token AS lease_token, j.context_tracked AS context_tracked, '
+                    'j.authority_json AS authority_json FROM jobs AS j JOIN meme_captions AS c ON '
+                    "j.job_id = c.job_id WHERE j.state = 'QUEUED' AND (j.next_attempt_at IS NULL "
+                    'OR j.next_attempt_at <= %s) ORDER BY j.record_sequence NULLS FIRST LIMIT '
+                    '1', (now,),
                 )
                 if not job:
                     return False
@@ -803,38 +939,57 @@ class MemeCaptionService:
                     check_caption_job(s, self.settings, approval, job, clock=self.clock)
                 except CoreError as error:
                     s.execute(
-                        "UPDATE jobs SET state='CANCELLED',last_error_code=?,updated_at=? "
-                        "WHERE job_id=?",
+                        "UPDATE jobs SET state = 'CANCELLED', last_error_code = %s, updated_at = "
+                        '%s WHERE job_id = %s',
                         (error.code, now, job["job_id"]),
                     )
                     return True
                 if private_life.owner_waiting(s, self.settings, now):
                     return False
-                row = s.one("SELECT * FROM meme_captions WHERE job_id=?", (job["job_id"],))
+                row = s.one('SELECT meme_captions.job_id AS job_id, meme_captions.cache_key AS '
+                    'cache_key, meme_captions.request_sha256 AS request_sha256, '
+                    'meme_captions.asset_sha256 AS asset_sha256, meme_captions.source_sha256 AS '
+                    'source_sha256, meme_captions.identity_json AS identity_json, '
+                    'meme_captions.context_json AS context_json, meme_captions.source_json AS '
+                    'source_json, meme_captions.request_json AS request_json, '
+                    'meme_captions.asset_data AS asset_data, meme_captions.result_json AS '
+                    'result_json, meme_captions.usage_request_id AS usage_request_id, '
+                    'meme_captions.reuse_job_id AS reuse_job_id, meme_captions.plan_sha256 AS '
+                    'plan_sha256, meme_captions.privacy_epoch AS privacy_epoch, '
+                    'meme_captions.created_at AS created_at, meme_captions.updated_at AS '
+                    'updated_at FROM meme_captions AS meme_captions WHERE meme_captions.job_id = '
+                    '%s', (job["job_id"],))
                 if row["reuse_job_id"]:
                     prior = s.one(
-                        "SELECT c.*,j.state FROM meme_captions c JOIN jobs j USING(job_id) "
-                        "WHERE job_id=?",
+                        'SELECT c.job_id AS job_id, c.cache_key AS cache_key, c.request_sha256 AS '
+                        'request_sha256, c.asset_sha256 AS asset_sha256, c.source_sha256 AS '
+                        'source_sha256, c.identity_json AS identity_json, c.context_json AS '
+                        'context_json, c.source_json AS source_json, c.request_json AS '
+                        'request_json, c.asset_data AS asset_data, c.result_json AS result_json, '
+                        'c.usage_request_id AS usage_request_id, c.reuse_job_id AS reuse_job_id, '
+                        'c.plan_sha256 AS plan_sha256, c.privacy_epoch AS privacy_epoch, '
+                        'c.created_at AS created_at, c.updated_at AS updated_at, j.state AS state '
+                        'FROM meme_captions AS c JOIN jobs AS j ON c.job_id = j.job_id WHERE '
+                        'COALESCE(c.job_id, j.job_id) = %s',
                         (row["reuse_job_id"],),
                     )
                     self._prior_chain(job, prior)
                     if prior["state"] in {"QUEUED", "RUNNING"}:
                         return False
                     paid = s.one(
-                        "SELECT request_id FROM model_usage WHERE job_id=? OR request_id=?",
+                        'SELECT request_id FROM model_usage WHERE job_id = %s OR request_id = %s',
                         (prior["job_id"], prior["usage_request_id"]),
                     )
                     if paid and paid["request_id"] != prior["usage_request_id"]:
                         raise CoreError("MEME_CAPTION_SOURCE_CHANGED", 403)
                     if prior["result_json"] or paid:
                         s.execute(
-                            "UPDATE meme_captions SET result_json=?,usage_request_id=?,"
-                            "updated_at=? "
-                            "WHERE job_id=?",
+                            'UPDATE meme_captions SET result_json = %s, usage_request_id = %s, '
+                            'updated_at = %s WHERE job_id = %s',
                             (prior["result_json"], prior["usage_request_id"], now, job["job_id"]),
                         )
                         s.execute(
-                            "UPDATE jobs SET state=?,updated_at=? WHERE job_id=?",
+                            'UPDATE jobs SET state = %s, updated_at = %s WHERE job_id = %s',
                             ("SUCCEEDED" if prior["result_json"] else "FAILED", now, job["job_id"]),
                         )
                         return True
@@ -843,8 +998,8 @@ class MemeCaptionService:
                     self._repoint(job, prior)
                 job["lease_token"] = uid("lease")
                 s.execute(
-                    "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
-                    "attempts=1,updated_at=? WHERE job_id=?",
+                    "UPDATE jobs SET state = 'RUNNING', lease_owner = %s, lease_token = %s, "
+                    'lease_until = %s, attempts = 1, updated_at = %s WHERE job_id = %s',
                     (
                         worker_id,
                         job["lease_token"],
@@ -860,9 +1015,9 @@ class MemeCaptionService:
             # this still-unconsumed request; retain all original bodies and obligations.
             with s.transaction():
                 s.execute(
-                    "UPDATE jobs SET state='CANCELLED',last_error_code=?,updated_at=? "
-                    "WHERE job_id=? AND state='QUEUED' AND NOT EXISTS "
-                    "(SELECT 1 FROM model_usage WHERE job_id=jobs.job_id)",
+                    "UPDATE jobs SET state = 'CANCELLED', last_error_code = %s, updated_at = %s "
+                    "WHERE job_id = %s AND state = 'QUEUED' AND NOT EXISTS(SELECT 1 FROM "
+                    'model_usage WHERE job_id = jobs.job_id)',
                     (error.code, now, job["job_id"]),
                 )
             return True
@@ -888,7 +1043,7 @@ class MemeCaptionService:
             # reserve and dispatch must still expose the original paid receipt.
             request_id = uid("model")
             s.execute(
-                "UPDATE meme_captions SET usage_request_id=? WHERE job_id=?",
+                'UPDATE meme_captions SET usage_request_id = %s WHERE job_id = %s',
                 (request_id, job["job_id"]),
             )
             budget.reserve(
@@ -920,12 +1075,12 @@ class MemeCaptionService:
             with s.transaction():
                 self._check(job)
                 s.execute(
-                    "UPDATE meme_captions SET result_json=?,updated_at=? WHERE job_id=?",
+                    'UPDATE meme_captions SET result_json = %s, updated_at = %s WHERE job_id = %s',
                     (result.model_dump_json(), self.clock(), job["job_id"]),
                 )
                 s.execute(
-                    "UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
-                    "WHERE job_id=?",
+                    "UPDATE jobs SET state = 'SUCCEEDED', lease_token = NULL, updated_at = %s "
+                    'WHERE job_id = %s',
                     (self.clock(), job["job_id"]),
                 )
         except Exception as error:
@@ -934,15 +1089,15 @@ class MemeCaptionService:
             code = error.code if isinstance(error, CoreError) else "MEME_CAPTION_INVALID"
             if budget.capacity_wait(s, code, request_id=request_id):
                 s.execute(
-                    "UPDATE jobs SET state='QUEUED',lease_token=NULL,attempts=0,"
-                    "next_attempt_at=?,last_error_code=?,updated_at=? "
-                    "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+                    "UPDATE jobs SET state = 'QUEUED', lease_token = NULL, attempts = 0, "
+                    'next_attempt_at = %s, last_error_code = %s, updated_at = %s WHERE job_id = %s '
+                    "AND state = 'RUNNING' AND lease_token = %s",
                     (after(self.clock(), 1), code, self.clock(), job["job_id"], job["lease_token"]),
                 )
                 return True
             s.execute(
-                "UPDATE jobs SET state='FAILED',lease_token=NULL,last_error_code=?,updated_at=? "
-                "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+                "UPDATE jobs SET state = 'FAILED', lease_token = NULL, last_error_code = %s, "
+                "updated_at = %s WHERE job_id = %s AND state = 'RUNNING' AND lease_token = %s",
                 (code, self.clock(), job["job_id"], job["lease_token"]),
             )
         return True
@@ -974,8 +1129,15 @@ class MemeCaptionService:
 
     def _usable(self, job_id):
         row = self.store.one(
-            "SELECT c.*,j.event_id,j.state FROM meme_captions c "
-            "JOIN jobs j USING(job_id) WHERE job_id=?",
+            'SELECT c.job_id AS job_id, c.cache_key AS cache_key, c.request_sha256 AS '
+            'request_sha256, c.asset_sha256 AS asset_sha256, c.source_sha256 AS source_sha256, '
+            'c.identity_json AS identity_json, c.context_json AS context_json, c.source_json AS '
+            'source_json, c.request_json AS request_json, c.asset_data AS asset_data, '
+            'c.result_json AS result_json, c.usage_request_id AS usage_request_id, c.reuse_job_id '
+            'AS reuse_job_id, c.plan_sha256 AS plan_sha256, c.privacy_epoch AS privacy_epoch, '
+            'c.created_at AS created_at, c.updated_at AS updated_at, j.event_id AS event_id, '
+            'j.state AS state FROM meme_captions AS c JOIN jobs AS j ON c.job_id = j.job_id WHERE '
+            'COALESCE(c.job_id, j.job_id) = %s',
             (job_id,),
         )
         if (
@@ -1000,7 +1162,7 @@ class MemeCaptionService:
         )
         if job["state"] not in {"QUEUED", "RETRY_WAIT"}:
             raise CoreError("MEME_OFFER_TOO_LATE", 409)
-        saved = s.one("SELECT value FROM runtime_meta WHERE key=?", (QUERY + body.event_id,))
+        saved = s.one('SELECT value FROM runtime_meta WHERE key = %s', (QUERY + body.event_id,))
         if saved:
             return json.loads(saved["value"])
         text = value["text"][-2000:]
@@ -1027,7 +1189,7 @@ class MemeCaptionService:
             )
             if current["state"] not in {"QUEUED", "RETRY_WAIT"}:
                 raise CoreError("MEME_OFFER_TOO_LATE", 409)
-            saved = s.one("SELECT value FROM runtime_meta WHERE key=?", (QUERY + body.event_id,))
+            saved = s.one('SELECT value FROM runtime_meta WHERE key = %s', (QUERY + body.event_id,))
             if saved:
                 return json.loads(saved["value"])
             s.insert("runtime_meta", key=QUERY + body.event_id, value=encode(result))
@@ -1041,7 +1203,7 @@ class MemeCaptionService:
             _, _, job = current_source(
                 s, self.settings, approval, body.event_id, body.reply_revision, self.clock
             )
-            saved = s.one("SELECT value FROM runtime_meta WHERE key=?", (QUERY + body.event_id,))
+            saved = s.one('SELECT value FROM runtime_meta WHERE key = %s', (QUERY + body.event_id,))
             query = json.loads(saved["value"]) if saved else {}
             if (
                 body.job_id != job["job_id"]
@@ -1050,7 +1212,7 @@ class MemeCaptionService:
             ):
                 raise CoreError("MEME_OFFER_TOO_LATE", 409)
             value = body.model_dump(mode="json")
-            prior = s.one("SELECT value FROM runtime_meta WHERE key=?", (OFFER + body.event_id,))
+            prior = s.one('SELECT value FROM runtime_meta WHERE key = %s', (OFFER + body.event_id,))
             if prior and json.loads(prior["value"]) != value:
                 raise CoreError("MEME_OFFER_CONFLICT", 409)
             if body.offer:
@@ -1061,22 +1223,23 @@ class MemeCaptionService:
                     raise CoreError("MEME_OFFER_BINDING_INVALID", 409)
                 for candidate in body.offer.candidates:
                     row = s.one(
-                        "SELECT job_id FROM meme_captions WHERE asset_sha256=? "
-                        "AND result_json IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+                        'SELECT job_id FROM meme_captions WHERE asset_sha256 = %s AND NOT '
+                        'result_json IS NULL ORDER BY record_sequence DESC NULLS LAST LIMIT 1',
                         (candidate.candidate_id,),
                     )
                     if not row:
                         raise CoreError("MEME_CAPTION_UNAVAILABLE", 409)
                     for ancestor in s.rows(
-                        "WITH RECURSIVE lineage(job_id,reuse_job_id) AS ("
-                        "SELECT job_id,reuse_job_id FROM meme_captions WHERE job_id=? UNION "
-                        "SELECT c.job_id,c.reuse_job_id FROM meme_captions c JOIN lineage l "
-                        "ON c.job_id=l.reuse_job_id) SELECT job_id FROM lineage",
+                        'WITH RECURSIVE lineage(job_id, reuse_job_id) AS (SELECT job_id, '
+                        'reuse_job_id FROM meme_captions WHERE job_id = %s UNION SELECT c.job_id, '
+                        'c.reuse_job_id FROM meme_captions AS c JOIN lineage AS l ON c.job_id = '
+                        'l.reuse_job_id) SELECT job_id FROM lineage',
                         (row["job_id"],),
                     ):
                         source = self._usable(ancestor["job_id"])
                         s.execute(
-                            "INSERT OR IGNORE INTO job_sources(job_id,event_id) VALUES (?,?)",
+                            'INSERT INTO job_sources (job_id, event_id) VALUES (%s, %s) ON '
+                            'CONFLICT DO NOTHING',
                             (job["job_id"], source["event_id"]),
                         )
             if not prior:
@@ -1106,7 +1269,7 @@ class MemeCaptionService:
         if not offer_possible(body["text"]):
             return False
         return now < after(job["created_at"], OFFER_WAIT_SECONDS) and not self.store.one(
-            "SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)
+            'SELECT 1 FROM runtime_meta WHERE key = %s', (OFFER + job["event_id"],)
         )
 
     def _bridge_catalog(self):

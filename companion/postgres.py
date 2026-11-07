@@ -5,6 +5,7 @@ operation has finished; materialized rows can outlive it. SQL uses Psycopg's nat
 parameters. This module neither translates SQLite SQL nor performs external work.
 """
 
+import hashlib
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from psycopg_pool import ConnectionPool
 from pydantic import SecretStr
 
 WAKE_CHANNEL = "companion_wakeup"
+BUDGET_LEDGER = 1
+ERASURE_LEDGER = 2
 
 
 def migrate(conninfo: SecretStr, revision="head"):
@@ -60,6 +63,7 @@ class Database:
         if not isinstance(conninfo, SecretStr):
             raise TypeError("database connection information must be SecretStr")
         self._conninfo = conninfo
+        self.cache_identity = hashlib.sha256(conninfo.get_secret_value().encode()).hexdigest()
         self._pool = ConnectionPool(
             conninfo.get_secret_value(), min_size=0, max_size=max_connections,
             max_waiting=16, timeout=timeout, open=False, configure=_configure,
@@ -107,6 +111,12 @@ class Session:
         self._closed = False
 
     @property
+    def backend_pid(self):
+        if self._closed:
+            raise RuntimeError("POSTGRES_SESSION_CLOSED")
+        return self._connection.info.backend_pid
+
+    @property
     def in_transaction(self):
         return not self._closed and (
             self._connection.info.transaction_status != TransactionStatus.IDLE)
@@ -131,6 +141,32 @@ class Session:
         with self._connection.cursor() as cursor:
             cursor.execute(statement, parameters)
             return cursor.fetchall()
+
+    def bounded_read(self, statement, parameters, *, limit, timeout_ms):
+        """Materialize a finite optional SELECT without aborting its caller's snapshot.
+
+        Psycopg creates a savepoint inside an existing transaction. Read-only mode
+        refuses data-changing CTEs; cancellation rolls back only this optional read.
+        """
+        if self._closed:
+            raise RuntimeError("POSTGRES_SESSION_CLOSED")
+        if type(limit) is not int or limit < 1 or type(timeout_ms) is not int or timeout_ms < 1:
+            raise ValueError("invalid bounded read limits")
+        active = self.in_transaction
+        with self._connection.transaction():
+            if not active:
+                self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            elif self.one("SHOW transaction_read_only")["transaction_read_only"] != "on":
+                raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
+            previous = self.one("SHOW statement_timeout")["statement_timeout"]
+            self.execute("SELECT set_config('statement_timeout',%s,true)", (f"{timeout_ms}ms",))
+            with self._connection.cursor() as cursor:
+                cursor.execute(sql.SQL("SELECT * FROM ({}) AS bounded_result LIMIT %s").format(
+                    statement if isinstance(statement, sql.Composable) else sql.SQL(statement)),
+                    (*parameters, limit))
+                result = cursor.fetchmany(limit)
+            self.execute("SELECT set_config('statement_timeout',%s,true)", (previous,))
+            return result
 
     @contextmanager
     def transaction(self, *, readonly=False):

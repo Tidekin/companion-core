@@ -6,6 +6,8 @@ import os
 import secrets
 from pathlib import Path
 
+from pydantic import SecretStr
+
 
 def context():
     path = os.environ.get("COMPANION_MEMORY_BENCHMARK_RUN")
@@ -28,6 +30,16 @@ def credential(config):
     if not value or any(c.isspace() for c in value):
         raise ValueError("Credential file must contain one key, or the named dotenv value")
     return value
+
+
+def database_info(config, persona):
+    """Operator-prepared private DSNs: one isolated native database per persona.
+
+    The connection map lives outside exported evidence. Neither settings nor
+    manifests contain its secrets; allocation occurs before inference starts.
+    """
+    path = Path(config["postgres"]["connections_file"])
+    return SecretStr(json.loads(path.read_text("utf8"))[persona])
 
 
 def native_settings(directory):
@@ -92,7 +104,8 @@ def native_settings(directory):
         bot_qq_id="10002",
         bridge_token=secrets.token_urlsafe(32),
         mode="live",
-        database=str(directory / "core.sqlite3"),
+        database=database_info(config, directory.name),
+        state_directory=str(directory / "state"),
         erasure_ledger=str(directory / "erasures.jsonl"),
         embedding_cache_dir=config["embedding_cache_dir"],
         owner_runtime=OwnerRuntimeConfig(mode="ENABLED"),

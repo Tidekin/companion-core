@@ -2,14 +2,20 @@ import asyncio
 import hashlib
 import json
 import re
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from companion import retrieval_work
 from companion.commands import command_parts
 from companion.contracts import CoreError
-from companion.memory_context import MemoryContext, MemorySources, check_version, read_version
+from companion.memory_context import (
+    MEMORY_COLUMNS,
+    MemoryContext,
+    MemorySources,
+    check_version,
+    read_version,
+)
 from companion.privacy import (
     advance_epoch,
     memory_sensitive,
@@ -23,6 +29,15 @@ RELAYED = "memory_relayed_update:"
 
 
 class Memory:
+    @contextmanager
+    def _write_scope(self):
+        with nullcontext() if self.store.in_transaction else self.store.transaction(
+            control_write=True
+        ):
+            if not self.store.control_write:
+                raise RuntimeError("ERASURE_CONTROL_WRITE_REQUIRED")
+            yield
+
     def __init__(self, store, settings, ledger):
         self.store, self.settings, self.ledger = store, settings, ledger
         self.index = SemanticIndex(store, settings)
@@ -46,8 +61,8 @@ class Memory:
                     "AND privacy_scope='private' AND confidence>0")
         args = ()
         if memory_ids is not None:
-            eligible += " AND memory_id IN (SELECT value FROM json_each(?))"
-            args = (encode(memory_ids),)
+            eligible += " AND memory_id = ANY(%s::text[])"
+            args = (list(memory_ids),)
         with retrieval_work.scope() as work:
             sources = MemorySources(self, now, bounded=True, work=work)
             ceiling = min(retrieval_work.FACT_CANDIDATES, work.remaining("candidates"))
@@ -59,8 +74,8 @@ class Memory:
             try:
                 headers = work.rows(self.store,
                     "SELECT memory_id,octet_length(content) AS text_bytes FROM memories "
-                    "INDEXED BY idx_memories_relationship_standing WHERE "
-                    + eligible + " ORDER BY importance DESC,updated_at DESC,memory_id LIMIT ?",
+                    "WHERE " + eligible
+                    + " ORDER BY importance DESC,updated_at DESC,memory_id LIMIT %s",
                     (*args, ceiling + 1), limit=ceiling + 1)
                 if len(headers) > ceiling:
                     work.mark("candidate_pool")
@@ -69,8 +84,9 @@ class Memory:
                         break
                     if not work.take("text_bytes", header["text_bytes"]):
                         continue
-                    row = self.store.one("SELECT * FROM memories WHERE " + eligible
-                        + " AND memory_id=? AND octet_length(content)=?",
+                    row = self.store.one("SELECT " + ",".join(MEMORY_COLUMNS)
+                        + " FROM memories WHERE " + eligible
+                        + " AND memory_id=%s AND octet_length(content)=%s",
                         (*args, header["memory_id"], header["text_bytes"]))
                     if (not row or used + len(row["content"]) > max_chars
                         or not sources.current(row)):
@@ -205,7 +221,16 @@ class Memory:
                 check_version(self, version)
                 context.revalidate(proof, clock() if clock else now)
                 for row in rows:
-                    if self.store.one("SELECT * FROM memories WHERE memory_id=?",
+                    if self.store.one('SELECT memories.memory_id AS memory_id, memories.subject AS '
+                        'subject, memories.kind AS kind, memories.content AS content, '
+                        'memories.status AS status, memories.origin AS origin, memories.confidence '
+                        'AS confidence, memories.importance AS importance, memories.privacy_scope '
+                        'AS privacy_scope, memories.supersedes_memory_id AS supersedes_memory_id, '
+                        'memories.created_at AS created_at, memories.updated_at AS updated_at, '
+                        'memories.valid_from AS valid_from, memories.valid_to AS valid_to, '
+                        'memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS '
+                        'fact_key, memories.needs_review AS needs_review FROM memories AS memories '
+                        'WHERE memories.memory_id = %s',
                                       (row["memory_id"],)) != row:
                         raise CoreError("PRIVACY_CHANGED", 409)
 
@@ -259,12 +284,12 @@ class Memory:
                 break
             # Repair only nominated stale rows, never sweep the full memory table.
             if not self.store.one(
-                "SELECT 1 FROM memory_evidence v JOIN events e ON e.event_id=v.event_id "
-                "WHERE v.memory_id=? AND e.redacted=0 LIMIT 1", (row["memory_id"],),
+                'SELECT 1 FROM memory_evidence AS v JOIN events AS e ON e.event_id = v.event_id '
+                'WHERE v.memory_id = %s AND e.redacted = 0 LIMIT 1', (row["memory_id"],),
             ):
                 self.store.execute(
-                    "UPDATE memories SET confidence=0,needs_review=1,status='HYPOTHESIS' "
-                    "WHERE memory_id=?", (row["memory_id"],))
+                    "UPDATE memories SET confidence = 0, needs_review = 1, status = 'HYPOTHESIS' "
+                    'WHERE memory_id = %s', (row["memory_id"],))
                 continue
             try:
                 if evidence and sources.current(row):
@@ -377,7 +402,15 @@ class Memory:
         current = []
         for row in rows:
             # Embedding may yield to a concurrent writer. Never publish its stale snapshot.
-            if s.one("SELECT * FROM memories WHERE memory_id=?", (row["memory_id"],)) != row:
+            if s.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
+                'memories.kind AS kind, memories.content AS content, memories.status AS status, '
+                'memories.origin AS origin, memories.confidence AS confidence, memories.importance '
+                'AS importance, memories.privacy_scope AS privacy_scope, '
+                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
+                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
+                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
+                'memories AS memories WHERE memories.memory_id = %s', (row["memory_id"],)) != row:
                 raise CoreError("PRIVACY_CHANGED", 409)
             try:
                 row["evidence_ids"] = [e["event_id"] for e in sources.evidence(row["memory_id"])]
@@ -420,11 +453,10 @@ class Memory:
         if not text.strip() or candidate.evidence_quote not in text:
             raise CoreError("UNSUPPORTED_MEMORY_EVIDENCE")
         if not confirmed and self.store.one(
-            "SELECT 1 FROM memories newer JOIN memories older "
-            "ON newer.supersedes_memory_id=older.memory_id "
-            "WHERE older.subject=? AND older.content=? AND newer.content<>? "
-            "AND newer.origin='user_confirmed' AND newer.status IN ('CONFIRMED','SUPERSEDED') "
-            "AND newer.created_at>=? LIMIT 1",
+            'SELECT 1 FROM memories AS newer JOIN memories AS older ON newer.supersedes_memory_id '
+            '= older.memory_id WHERE older.subject = %s AND older.content = %s AND newer.content '
+            "<> %s AND newer.origin = 'user_confirmed' AND newer.status IN ('CONFIRMED', "
+            "'SUPERSEDED') AND newer.created_at >= %s LIMIT 1",
             (candidate.subject, candidate.content, candidate.content, event["ingested_at"]),
         ):
             # A delayed extraction of an old value cannot undo the owner's later correction.
@@ -444,14 +476,22 @@ class Memory:
         return event, content
 
     def confirm(self, memory_id, now):
+        with self._write_scope():
+            self._confirm(memory_id, now)
+
+    def _confirm(self, memory_id, now):
         self.store.execute(
-            "UPDATE memories SET status='CONFIRMED',confidence=1,"
-            "origin='user_confirmed',updated_at=? WHERE memory_id=?",
+            "UPDATE memories SET status = 'CONFIRMED', confidence = 1, origin = 'user_confirmed', "
+            'updated_at = %s WHERE memory_id = %s',
             (now, memory_id),
         )
         advance_epoch(self.store)
 
     def add(self, candidate, now, confirmed=False, resolution=None):
+        with self._write_scope():
+            return self._add(candidate, now, confirmed, resolution)
+
+    def _add(self, candidate, now, confirmed=False, resolution=None):
         validated = self.validate_candidate(candidate, confirmed, now=now)
         if validated is None:
             return None
@@ -460,8 +500,16 @@ class Memory:
         reference = candidate.evidence_reference_id is not None
         sources = MemorySources(self, now)
         same = next((row for row in s.rows(
-            "SELECT * FROM memories WHERE content=? AND subject=? AND status IN "
-            "('HYPOTHESIS','CONFIRMED')",
+            'SELECT memories.memory_id AS memory_id, memories.subject AS subject, memories.kind AS '
+            'kind, memories.content AS content, memories.status AS status, memories.origin AS '
+            'origin, memories.confidence AS confidence, memories.importance AS importance, '
+            'memories.privacy_scope AS privacy_scope, memories.supersedes_memory_id AS '
+            'supersedes_memory_id, memories.created_at AS created_at, memories.updated_at AS '
+            'updated_at, memories.valid_from AS valid_from, memories.valid_to AS valid_to, '
+            'memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS fact_key, '
+            'memories.needs_review AS needs_review FROM memories AS memories WHERE '
+            "memories.content = %s AND memories.subject = %s AND memories.status IN ('HYPOTHESIS', "
+            "'CONFIRMED')",
             (content, candidate.subject),
         ) if sources.current(row) and (row["origin"] == "event_observed") == reference), None)
         conflicts = []
@@ -470,8 +518,17 @@ class Memory:
                 if memory_id is None:
                     continue
                 row = s.one(
-                    "SELECT * FROM memories WHERE memory_id=? AND subject=? "
-                    "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0",
+                    'SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
+                    'memories.kind AS kind, memories.content AS content, memories.status AS '
+                    'status, memories.origin AS origin, memories.confidence AS confidence, '
+                    'memories.importance AS importance, memories.privacy_scope AS privacy_scope, '
+                    'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+                    'created_at, memories.updated_at AS updated_at, memories.valid_from AS '
+                    'valid_from, memories.valid_to AS valid_to, memories.last_reviewed_at AS '
+                    'last_reviewed_at, memories.fact_key AS fact_key, memories.needs_review AS '
+                    'needs_review FROM memories AS memories WHERE memories.memory_id = %s AND '
+                    "memories.subject = %s AND memories.status IN ('HYPOTHESIS', 'CONFIRMED') AND "
+                    'memories.confidence > 0',
                     (memory_id, candidate.subject),
                 )
                 if not row or not sources.current(row):
@@ -485,8 +542,17 @@ class Memory:
         elif not same and candidate.kind != "episode":
             # An episode is one occurrence, not an attribute value: it never conflicts by key.
             conflicts = [row for row in s.rows(
-                "SELECT * FROM memories WHERE subject=? AND fact_key=? AND kind<>'episode' "
-                "AND status IN ('HYPOTHESIS','CONFIRMED') AND content<>?",
+                'SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
+                'memories.kind AS kind, memories.content AS content, memories.status AS status, '
+                'memories.origin AS origin, memories.confidence AS confidence, memories.importance '
+                'AS importance, memories.privacy_scope AS privacy_scope, '
+                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
+                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
+                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
+                'memories AS memories WHERE memories.subject = %s AND memories.fact_key = %s AND '
+                "memories.kind <> 'episode' AND memories.status IN ('HYPOTHESIS', 'CONFIRMED') AND "
+                'memories.content <> %s',
                 (candidate.subject, candidate.fact_key, content),
             ) if sources.current(row) and (row["origin"] == "event_observed") == reference]
         replaced, relayed = [], False
@@ -501,8 +567,17 @@ class Memory:
             # or differently spelled candidate key must not replace unrelated facts.
             targets = ([row for row in conflicts if row["memory_id"] in resolution["replaces"]]
                        if resolution is not None else s.rows(
-                "SELECT * FROM memories WHERE subject=? AND fact_key=? AND kind<>'episode' "
-                "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0 AND content<>?",
+                'SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
+                'memories.kind AS kind, memories.content AS content, memories.status AS status, '
+                'memories.origin AS origin, memories.confidence AS confidence, memories.importance '
+                'AS importance, memories.privacy_scope AS privacy_scope, '
+                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
+                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
+                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
+                'memories AS memories WHERE memories.subject = %s AND memories.fact_key = %s AND '
+                "memories.kind <> 'episode' AND memories.status IN ('HYPOTHESIS', 'CONFIRMED') AND "
+                'memories.confidence > 0 AND memories.content <> %s',
                 (candidate.subject, candidate.fact_key, content)))
             replaced = [row for row in targets if sources.current(row) and not (
                 row["origin"] == "user_confirmed" and row["status"] == "CONFIRMED")]
@@ -542,27 +617,29 @@ class Memory:
                     # Inference can raise a pending conflict; only the owner changes a correction.
                     continue
                 s.execute(
-                    "UPDATE memories SET needs_review=1 WHERE memory_id=?", (row["memory_id"],)
+                    'UPDATE memories SET needs_review = 1 WHERE memory_id = %s', (row["memory_id"],)
                 )
             s.audit("memory.conflict", memory_id, event["trace_id"], now)
         for row in replaced:
             if relayed:
-                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                s.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) '
+                    'DO UPDATE SET value = excluded.value, record_sequence = DEFAULT',
                           (RELAYED + row["memory_id"], encode({"newer": memory_id})))
                 s.audit("memory.relayed_update", row["memory_id"], event["trace_id"], now,
                         by=memory_id)
                 continue
-            s.execute("UPDATE memories SET valid_to=?,updated_at=? WHERE memory_id=? "
-                      "AND (valid_to IS NULL OR valid_to>?)",
+            s.execute('UPDATE memories SET valid_to = %s, updated_at = %s WHERE memory_id = %s AND '
+                '(valid_to IS NULL OR valid_to > %s)',
                       (event["occurred_at"], now, row["memory_id"], event["occurred_at"]))
             s.audit("memory.replaced", row["memory_id"], event["trace_id"], now,
                     by=memory_id)
         s.execute(
-            "INSERT OR IGNORE INTO memory_evidence VALUES (?,?,1,?)",
+            'INSERT INTO memory_evidence VALUES (%s, %s, 1, %s) ON CONFLICT DO NOTHING',
             (memory_id, event["event_id"], now),
         )
         if candidate.subject == "self":
-            key = s.one("SELECT fact_key FROM memories WHERE memory_id=?", (memory_id,))["fact_key"]
+            key = s.one('SELECT fact_key FROM memories WHERE memory_id = '
+                '%s', (memory_id,))["fact_key"]
             self.observe_trait(key, event, now)
         if reference:
             from companion import memory_references
@@ -580,7 +657,7 @@ class Memory:
         s, sources = self.store, MemorySources(self, now)
         ids = {row["memory_id"] for row in rows}
         links = [(row["key"][len(RELAYED):], json.loads(row["value"])["newer"])
-                 for row in s.rows("SELECT key,value FROM runtime_meta WHERE key LIKE ?",
+                 for row in s.rows('SELECT key, value FROM runtime_meta WHERE key LIKE %s',
                                    (RELAYED + "%",))]
         out, relations = list(rows), {}
         for older, newer in links:
@@ -590,8 +667,17 @@ class Memory:
             for memory_id in (older, newer):
                 row = next((item for item in out if item["memory_id"] == memory_id), None)
                 if row is None:
-                    row = s.one("SELECT * FROM memories WHERE memory_id=? AND status IN "
-                                "('HYPOTHESIS','CONFIRMED') AND confidence>0", (memory_id,))
+                    row = s.one('SELECT memories.memory_id AS memory_id, memories.subject AS '
+                        'subject, memories.kind AS kind, memories.content AS content, '
+                        'memories.status AS status, memories.origin AS origin, memories.confidence '
+                        'AS confidence, memories.importance AS importance, memories.privacy_scope '
+                        'AS privacy_scope, memories.supersedes_memory_id AS supersedes_memory_id, '
+                        'memories.created_at AS created_at, memories.updated_at AS updated_at, '
+                        'memories.valid_from AS valid_from, memories.valid_to AS valid_to, '
+                        'memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS '
+                        'fact_key, memories.needs_review AS needs_review FROM memories AS memories '
+                        "WHERE memories.memory_id = %s AND memories.status IN ('HYPOTHESIS', "
+                        "'CONFIRMED') AND memories.confidence > 0", (memory_id,))
                     evidence = row and sources.current(row) and [
                         e["event_id"] for e in sources.evidence(memory_id)]
                     if not evidence:
@@ -606,7 +692,12 @@ class Memory:
 
     def observe_trait(self, topic, event, now):
         s = self.store
-        trait = s.one("SELECT * FROM traits WHERE category='style' AND topic=?", (topic,))
+        trait = s.one('SELECT traits.trait_id AS trait_id, traits.category AS category, '
+            'traits.topic AS topic, traits.strength AS strength, traits.confidence AS confidence, '
+            'traits.status AS status, traits.independent_sessions AS independent_sessions, '
+            'traits.independent_days AS independent_days, traits.version AS version, '
+            'traits.last_evidence_at AS last_evidence_at, traits.updated_at AS updated_at FROM '
+            "traits AS traits WHERE traits.category = 'style' AND traits.topic = %s", (topic,))
         trait_id = trait["trait_id"] if trait else uid("trait")
         if not trait:
             s.insert(
@@ -620,13 +711,13 @@ class Memory:
                 updated_at=now,
             )
         s.execute(
-            "INSERT OR IGNORE INTO trait_evidence VALUES (?,?,1,0.5,?)",
+            'INSERT INTO trait_evidence VALUES (%s, %s, 1, 0.5, %s) ON CONFLICT DO NOTHING',
             (trait_id, event["event_id"], event["occurred_at"]),
         )
         evidence = s.rows(
-            "SELECT e.conversation_id,e.occurred_at FROM trait_evidence t "
-            "JOIN events e ON e.event_id=t.event_id WHERE t.trait_id=? "
-            "AND e.redacted=0 AND e.actor_id='owner'",
+            'SELECT e.conversation_id, e.occurred_at FROM trait_evidence AS t JOIN events AS e ON '
+            'e.event_id = t.event_id WHERE t.trait_id = %s AND e.redacted = 0 AND e.actor_id = '
+            "'owner'",
             (trait_id,),
         )
         sessions, days = set(), set()
@@ -637,7 +728,7 @@ class Memory:
             sessions.add((item["conversation_id"], int(dt.timestamp()) // 1800))
             days.add(dt.date())
         conflict = s.one(
-            "SELECT 1 FROM memories WHERE subject='self' AND fact_key=? AND needs_review=1",
+            "SELECT 1 FROM memories WHERE subject = 'self' AND fact_key = %s AND needs_review = 1",
             (topic,),
         )
         state = "EXPLORING"
@@ -648,9 +739,9 @@ class Memory:
         if conflict:
             state = "FADING"
         s.execute(
-            "UPDATE traits SET status=?,independent_sessions=?,independent_days=?,"
-            "strength=?,confidence=?,last_evidence_at=?,updated_at=?,version=version+1 "
-            "WHERE trait_id=?",
+            'UPDATE traits SET status = %s, independent_sessions = %s, independent_days = %s, '
+            'strength = %s, confidence = %s, last_evidence_at = %s, updated_at = %s, version = '
+            'version + 1 WHERE trait_id = %s',
             (
                 state,
                 len(sessions),
@@ -667,7 +758,7 @@ class Memory:
                             origin, owner_check):
         """Called only by the owner Console; receipt and native decision commit together."""
         s = self.store
-        with nullcontext() if s.db.in_transaction else s.transaction():
+        with self._write_scope():
             # Reuse the same session/control credential/CSRF/origin check inside the write
             # transaction. The bridge-token memory API never calls this entry point.
             owner_check()
@@ -679,26 +770,57 @@ class Memory:
                 "POST", "/v1/console/memories/" + memory_id + "/decision",
                 {"decision": decision, "corrected_content": corrected},
             ]).encode()).hexdigest()
-            operation = s.one("SELECT * FROM console_operations WHERE request_id=?",
+            operation = s.one('SELECT console_operations.request_id AS request_id, '
+                'console_operations.request_sha256 AS request_sha256, console_operations.state AS '
+                'state, console_operations.result_json AS result_json, '
+                'console_operations.created_at AS created_at, console_operations.updated_at AS '
+                'updated_at FROM console_operations AS console_operations WHERE '
+                'console_operations.request_id = %s',
                               (operation_id,))
             if (not operation or operation["state"] != "STARTED"
                 or operation["request_sha256"] != request_hash):
                 raise CoreError("CONSOLE_OPERATION_RECONCILIATION_REQUIRED", 409)
-            before = s.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+            before = s.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
+                'memories.kind AS kind, memories.content AS content, memories.status AS status, '
+                'memories.origin AS origin, memories.confidence AS confidence, memories.importance '
+                'AS importance, memories.privacy_scope AS privacy_scope, '
+                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
+                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
+                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
+                'memories AS memories WHERE memories.memory_id = %s', (memory_id,))
             if not before:
                 raise CoreError("MEMORY_NOT_FOUND", 404)
             roots = {e["event_id"] for e in s.rows(
-                "SELECT event_id FROM memory_evidence WHERE memory_id=?", (memory_id,),
+                'SELECT event_id FROM memory_evidence WHERE memory_id = %s', (memory_id,),
             )}
             result = self.decide(memory_id, decision, now, corrected)
             if decision == "forget":
                 return result
-            current = s.one("SELECT * FROM memories WHERE memory_id=?", (result["memory_id"],))
+            current = s.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
+                'memories.kind AS kind, memories.content AS content, memories.status AS status, '
+                'memories.origin AS origin, memories.confidence AS confidence, memories.importance '
+                'AS importance, memories.privacy_scope AS privacy_scope, '
+                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
+                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
+                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
+                'memories AS memories WHERE memories.memory_id = %s', (result["memory_id"],))
             roots.update(e["event_id"] for e in s.rows(
-                "SELECT event_id FROM memory_evidence WHERE memory_id=?", (result["memory_id"],),
+                'SELECT event_id FROM memory_evidence WHERE memory_id = %s', (result["memory_id"],),
             ))
-            evidence = s.one("SELECT * FROM events WHERE event_id IN "
-                             "(SELECT value FROM json_each(?)) ORDER BY event_id LIMIT 1",
+            evidence = s.one('SELECT events.event_id AS event_id, events.schema_version AS '
+                'schema_version, events.source AS source, events.source_event_id AS '
+                'source_event_id, events.conversation_id AS conversation_id, events.actor_id AS '
+                'actor_id, events.event_type AS event_type, events.occurred_at AS occurred_at, '
+                'events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, '
+                'events.body_json AS body_json, events.trace_id AS trace_id, '
+                'events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+                'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+                'events.reply_revision AS reply_revision FROM events AS events WHERE '
+                'events.event_id IN (SELECT parsed.value COLLATE "C" AS _col_0 FROM '
+                'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) ORDER BY '
+                'events.event_id NULLS FIRST LIMIT 1',
                              (encode(sorted(roots)),))
             if not evidence:
                 raise CoreError("MISSING_MEMORY_EVIDENCE", 409)
@@ -731,12 +853,29 @@ class Memory:
     def decide(self, memory_id, decision, now, corrected=None, *, evidence_event_id=None):
         self.require_owner("owner")
         s = self.store
-        with nullcontext() if s.db.in_transaction else s.transaction():
-            old = s.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+        with self._write_scope():
+            old = s.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
+                'memories.kind AS kind, memories.content AS content, memories.status AS status, '
+                'memories.origin AS origin, memories.confidence AS confidence, memories.importance '
+                'AS importance, memories.privacy_scope AS privacy_scope, '
+                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
+                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
+                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
+                'memories AS memories WHERE memories.memory_id = %s', (memory_id,))
             if not old:
                 raise CoreError("MEMORY_NOT_FOUND", 404)
             if evidence_event_id is not None:
-                source = s.one("SELECT * FROM events WHERE event_id=?", (evidence_event_id,))
+                source = s.one('SELECT events.event_id AS event_id, events.schema_version AS '
+                    'schema_version, events.source AS source, events.source_event_id AS '
+                    'source_event_id, events.conversation_id AS conversation_id, events.actor_id '
+                    'AS actor_id, events.event_type AS event_type, events.occurred_at AS '
+                    'occurred_at, events.ingested_at AS ingested_at, events.privacy_scope AS '
+                    'privacy_scope, events.body_json AS body_json, events.trace_id AS trace_id, '
+                    'events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+                    'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+                    'events.reply_revision AS reply_revision FROM events AS events WHERE '
+                    'events.event_id = %s', (evidence_event_id,))
                 operation = {
                     "confirm": "确认这一条",
                     "correct": "纠正这一条",
@@ -761,9 +900,9 @@ class Memory:
                     # The successor and this source link commit together. Recover
                     # the same result after a crash before Outbox/job completion.
                     previous = s.one(
-                        "SELECT m.memory_id,m.status,m.content FROM memories m "
-                        "JOIN memory_evidence v USING(memory_id) "
-                        "WHERE m.supersedes_memory_id=? AND v.event_id=? AND v.polarity=1",
+                        'SELECT m.memory_id, m.status, m.content FROM memories AS m JOIN '
+                        'memory_evidence AS v USING (memory_id) WHERE m.supersedes_memory_id = %s '
+                        'AND v.event_id = %s AND v.polarity = 1',
                         (memory_id, evidence_event_id),
                     )
                     if previous:
@@ -804,7 +943,7 @@ class Memory:
                 created_at=now,
             )
             s.execute(
-                "UPDATE memories SET status='SUPERSEDED',updated_at=? WHERE memory_id=?",
+                "UPDATE memories SET status = 'SUPERSEDED', updated_at = %s WHERE memory_id = %s",
                 (now, memory_id),
             )
             s.insert(
@@ -825,8 +964,15 @@ class Memory:
             )
             # Correction is itself an authenticated owner event; original evidence is retained.
             evidence = s.one(
-                "SELECT e.* FROM memory_evidence m JOIN events e ON e.event_id=m.event_id "
-                "WHERE m.memory_id=? LIMIT 1",
+                'SELECT e.event_id AS event_id, e.schema_version AS schema_version, e.source AS '
+                'source, e.source_event_id AS source_event_id, e.conversation_id AS '
+                'conversation_id, e.actor_id AS actor_id, e.event_type AS event_type, '
+                'e.occurred_at AS occurred_at, e.ingested_at AS ingested_at, e.privacy_scope AS '
+                'privacy_scope, e.body_json AS body_json, e.trace_id AS trace_id, '
+                'e.idempotency_key AS idempotency_key, e.fingerprint AS fingerprint, e.redacted AS '
+                'redacted, e.memory_processed AS memory_processed, e.reply_revision AS '
+                'reply_revision FROM memory_evidence AS m JOIN events AS e ON e.event_id = '
+                'm.event_id WHERE m.memory_id = %s LIMIT 1',
                 (memory_id,),
             )
             if not evidence:
@@ -866,36 +1012,38 @@ class Memory:
             # Invalidate only derived text that could restate the corrected attribute: what
             # covers evidence of any value of this fact key, or quotes the old value.
             sources = json.dumps(sorted({row["event_id"] for row in s.rows(
-                "SELECT DISTINCT v.event_id FROM memory_evidence v JOIN memories m "
-                "USING(memory_id) WHERE m.subject=? AND m.fact_key=? AND v.event_id<>?",
+                'SELECT DISTINCT v.event_id FROM memory_evidence AS v JOIN memories AS m USING '
+                '(memory_id) WHERE m.subject = %s AND m.fact_key = %s AND v.event_id <> %s',
                 (old["subject"], old["fact_key"], event_id))}))
             s.execute(
-                "DELETE FROM conversation_summaries WHERE instr(summary_text,?)>0 OR EXISTS ("
-                "SELECT 1 FROM events f JOIN events l ON l.event_id=last_event_id "
-                "JOIN events e ON e.conversation_id=f.conversation_id "
-                "AND e.rowid BETWEEN f.rowid AND l.rowid WHERE f.event_id=first_event_id "
-                "AND e.event_id IN (SELECT value FROM json_each(?)))",
+                'DELETE FROM conversation_summaries WHERE POSITION(%s IN summary_text) > 0 OR '
+                'EXISTS(SELECT 1 FROM events AS f JOIN events AS l ON l.event_id = last_event_id '
+                'JOIN events AS e ON e.conversation_id = f.conversation_id AND e.record_sequence '
+                'BETWEEN f.record_sequence AND l.record_sequence WHERE f.event_id = first_event_id '
+                'AND e.event_id IN (SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s '
+                'AS JSON)) AS parsed(value)))',
                 (old["content"], sources))
             s.execute(
-                "UPDATE episodes SET summary='',status='REDACTED' WHERE instr(summary,?)>0 "
-                "OR instr(title,?)>0 OR episode_id IN (SELECT episode_id FROM episode_events "
-                "WHERE event_id IN (SELECT value FROM json_each(?)))",
+                "UPDATE episodes SET summary = '', status = 'REDACTED' WHERE POSITION(%s IN "
+                'summary) > 0 OR POSITION(%s IN title) > 0 OR episode_id IN (SELECT episode_id '
+                'FROM episode_events WHERE event_id IN (SELECT value COLLATE "C" FROM '
+                'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)))',
                 (old["content"], old["content"], sources))
             s.execute(
-                "DELETE FROM trait_evidence WHERE trait_id IN "
-                "(SELECT trait_id FROM traits WHERE topic=?)",
+                'DELETE FROM trait_evidence WHERE trait_id IN (SELECT trait_id FROM traits WHERE '
+                'topic = %s)',
                 (old["fact_key"],),
             )
             s.execute(
-                "UPDATE traits SET status='FADING',confidence=0 WHERE topic=?", (old["fact_key"],)
+                "UPDATE traits SET status = 'FADING', confidence = 0 WHERE topic = "
+                '%s', (old["fact_key"],)
             )
             advance_epoch(s)
             return {"memory_id": new_id, "state": "CONFIRMED", "supersedes": memory_id}
 
     def episodes(self, events, now, *, mark_processed=True):
         """Encode one bounded extraction batch atomically and idempotently."""
-        s = self.store
-        with nullcontext() if s.db.in_transaction else s.transaction():
+        with self._write_scope():
             return self._encode_episode(events, now, mark_processed=mark_processed)
 
     def episode_summary(self, episode_id, source_event_ids, now):
@@ -909,10 +1057,11 @@ class Memory:
         if not 1 <= len(event_ids) <= 20:
             raise CoreError("INVALID_EPISODE_SOURCES", 400)
         rows = self.store.rows(
-            "SELECT DISTINCT ep.episode_id,ep.conversation_id FROM episodes ep "
-            "JOIN episode_events ee USING(episode_id) WHERE ep.status='ACTIVE' "
-            "AND ep.privacy_scope='private' AND ee.event_id IN "
-            "(SELECT value FROM json_each(?)) ORDER BY ep.episode_id LIMIT 101",
+            'SELECT DISTINCT ep.episode_id, ep.conversation_id FROM episodes AS ep JOIN '
+            "episode_events AS ee USING (episode_id) WHERE ep.status = 'ACTIVE' AND "
+            'ep.privacy_scope = \'private\' AND ee.event_id IN (SELECT value COLLATE "C" FROM '
+            'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) ORDER BY ep.episode_id '
+            'NULLS FIRST LIMIT 101',
             (encode(sorted(set(event_ids))),),
         )
         if len(rows) > 100:
@@ -920,7 +1069,8 @@ class Memory:
         sources, result = MemorySources(self, now), []
         for row in rows:
             ids = [link["event_id"] for link in self.store.rows(
-                "SELECT event_id FROM episode_events WHERE episode_id=? ORDER BY event_id LIMIT 21",
+                'SELECT event_id FROM episode_events WHERE episode_id = %s ORDER BY event_id NULLS '
+                'FIRST LIMIT 21',
                 (row["episode_id"],),
             )]
             if not 1 <= len(ids) <= 20:
@@ -960,7 +1110,7 @@ class Memory:
         # or become a permanently retried extraction job. It is not positive text evidence.
         if mark_processed:
             for event in events:
-                s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?",
+                s.execute('UPDATE events SET memory_processed = 1 WHERE event_id = %s',
                           (event["event_id"],))
         events = [event for event in events if json.loads(event["body_json"])["text"].strip()]
         if not events:
@@ -969,7 +1119,7 @@ class Memory:
         episode_id = "episode_" + hashlib.sha256(encode(
             sorted(e["event_id"] for e in events),
         ).encode()).hexdigest()[:32]
-        if s.one("SELECT 1 FROM episodes WHERE episode_id=?", (episode_id,)):
+        if s.one('SELECT 1 FROM episodes WHERE episode_id = %s', (episode_id,)):
             check_version(self, version)
             return episode_id
         covered = {key for row in self.episode_coverage([e["event_id"] for e in events], now)
@@ -982,7 +1132,7 @@ class Memory:
             episode_id = "episode_" + hashlib.sha256(encode(
                 sorted(e["event_id"] for e in events),
             ).encode()).hexdigest()[:32]
-            if s.one("SELECT 1 FROM episodes WHERE episode_id=?", (episode_id,)):
+            if s.one('SELECT 1 FROM episodes WHERE episode_id = %s', (episode_id,)):
                 check_version(self, version)
                 return episode_id
         excerpts = [json.loads(e["body_json"]).get("text", "")[:100] for e in events]

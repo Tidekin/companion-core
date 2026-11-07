@@ -127,7 +127,15 @@ def cosine(query, passage):
 
 def cached(store, identity):
     """Called only in current authorized scope, inside its short transaction."""
-    row = store.one("SELECT * FROM meme_vectors WHERE asset_id=? AND caption_job_id=?",
+    row = store.one('SELECT meme_vectors.cache_key AS cache_key, meme_vectors.asset_id AS '
+        'asset_id, meme_vectors.caption_job_id AS caption_job_id, meme_vectors.asset_sha256 AS '
+        'asset_sha256, meme_vectors.custody_sha256 AS custody_sha256, meme_vectors.source_sha256 '
+        'AS source_sha256, meme_vectors.record_sha256 AS record_sha256, '
+        'meme_vectors.caption_identity_sha256 AS caption_identity_sha256, '
+        'meme_vectors.caption_sha256 AS caption_sha256, meme_vectors.model_version AS '
+        'model_version, meme_vectors.dimensions AS dimensions, meme_vectors.vector_sha256 AS '
+        'vector_sha256, meme_vectors.vector AS vector FROM meme_vectors AS meme_vectors WHERE '
+        'meme_vectors.asset_id = %s AND meme_vectors.caption_job_id = %s',
                     (identity.asset_id, identity.caption_job_id))
     if not row:
         return None
@@ -139,8 +147,8 @@ def cached(store, identity):
         unpack(row["vector"])
         return row["vector"]
     except (ValueError, TypeError):
-        store.execute("DELETE FROM meme_vectors WHERE cache_key=? AND asset_id=? "
-                      "AND caption_job_id=?", (row["cache_key"], identity.asset_id,
+        store.execute('DELETE FROM meme_vectors WHERE cache_key = %s AND asset_id = %s AND '
+            'caption_job_id = %s', (row["cache_key"], identity.asset_id,
                                               identity.caption_job_id))
         return None
 
@@ -148,11 +156,11 @@ def cached(store, identity):
 def persist(store, identity, vector):
     """The caller has re-resolved this exact snapshot in the offer transaction."""
     unpack(vector)
-    old = store.one("SELECT 1 FROM meme_vectors WHERE asset_id=? AND caption_job_id=?",
+    old = store.one('SELECT 1 FROM meme_vectors WHERE asset_id = %s AND caption_job_id = %s',
                     (identity.asset_id, identity.caption_job_id))
-    if not old and store.one("SELECT COUNT(*) AS n FROM meme_vectors")["n"] >= LIMIT:
+    if not old and store.one('SELECT COUNT(*) AS n FROM meme_vectors')["n"] >= LIMIT:
         return
-    store.execute("DELETE FROM meme_vectors WHERE asset_id=? AND caption_job_id=?",
+    store.execute('DELETE FROM meme_vectors WHERE asset_id = %s AND caption_job_id = %s',
                   (identity.asset_id, identity.caption_job_id))
     store.insert("meme_vectors", cache_key=identity.key,
                  **identity.model_dump(exclude={"version"}),

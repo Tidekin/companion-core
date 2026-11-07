@@ -16,7 +16,7 @@ def update(core, old, *, key="讲座场地", resolution=None):
     candidate = Candidate(subject="project", kind="fact", fact_key=key, content=text,
                           evidence_event_id="evt_test_2", evidence_quote=text,
                           speaker="owner", update="replaces_previous")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         return core.memory.add(candidate, core.clock(), resolution=resolution)
 
 
@@ -34,7 +34,7 @@ def test_reviewed_nonconflicting_attribute_survives_coarse_key_update(core):
     update(core, old, resolution={"supported": True, "update_authorized": False,
         "claims_replacement": False,
         "same": None, "conflicts": [], "replaces": []})
-    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=?", (old,)) == {
+    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=%s", (old,)) == {
         "valid_to": None}
 
 
@@ -82,7 +82,7 @@ def test_natural_changes_are_readable_from_every_version_without_owner_correctio
         assert revisions[0]["supersedes_memory_id"] is None
     assert [r["memory_id"] for r in core.memory_context.history(
         new, core.clock(), memory_ids={new})["revisions"]] == [new]
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert [r["memory_id"] for r in core.memory_context.history(
         new, core.clock())["revisions"]] == [new]
@@ -120,9 +120,9 @@ def test_recall_timeout_default_preserves_startup_identity_after_config_roundtri
 def test_unexplained_conflict_cannot_end_old_value_even_if_extractor_claims_update(core):
     old = remember(core, 1, "讲座在苇灯厅", subject="project", fact_key="lecture_venue")
     new = update(core, old, resolution={"same": None, "conflicts": [old], "replaces": []})
-    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=?", (old,)) == {
+    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=%s", (old,)) == {
         "valid_to": None}
-    assert core.store.one("SELECT needs_review FROM memories WHERE memory_id=?", (new,)) == {
+    assert core.store.one("SELECT needs_review FROM memories WHERE memory_id=%s", (new,)) == {
         "needs_review": 1}
 
 
@@ -146,7 +146,7 @@ def test_review_rejects_invented_identity_and_preserves_later_candidate_referenc
     accepted, resolutions = run(core.prepare_memories(candidates))
     assert accepted == candidates[1:]
     assert resolutions[1]["conflicts"] == ["c0"]
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         ids = core.add_memories(accepted, resolutions, core.clock())
     assert len(ids) == 2
     assert all("即主人" not in row["content"] for row in core.store.rows("SELECT * FROM memories"))
@@ -206,10 +206,10 @@ def test_explicit_replacement_key_survives_another_unresolved_conflict(core):
     pending = remember(core, 3, "讲座在松蜜厅", subject="project", fact_key="讲座地点")
     new = update(core, old, resolution={"same": None, "conflicts": [old, pending],
                                        "replaces": [old]})
-    row = core.store.one("SELECT * FROM memories WHERE memory_id=?", (new,))
+    row = core.store.one("SELECT * FROM memories WHERE memory_id=%s", (new,))
     assert row["needs_review"] == 1
     assert row["fact_key"] == "lecture_venue"
-    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=?", (pending,)) == {
+    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=%s", (pending,)) == {
         "valid_to": None}
     assert [r["memory_id"] for r in core.memory_context.history(
         old, core.clock())["revisions"]] == [new, old]
@@ -244,5 +244,5 @@ def test_same_summary_with_new_negated_evidence_requires_support(core):
     candidates, resolutions = run(core.prepare_memories([item]))
     assert candidates == resolutions == []
     assert [kind for _, kind in core.model.calls] == ["memory_review"]
-    assert core.store.rows("SELECT event_id,polarity FROM memory_evidence WHERE memory_id=?",
+    assert core.store.rows("SELECT event_id,polarity FROM memory_evidence WHERE memory_id=%s",
                            (old,)) == [{"event_id": "evt_test_1", "polarity": 1}]

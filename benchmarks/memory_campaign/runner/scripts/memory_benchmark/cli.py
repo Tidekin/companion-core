@@ -7,7 +7,6 @@ import json
 import math
 import os
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -21,8 +20,11 @@ from urllib.parse import urlparse
 
 from filelock import FileLock
 
+import psycopg
+from psycopg.rows import dict_row
+
 from scripts.memory_benchmark.budget import Budget
-from scripts.memory_benchmark.runtime import credential
+from scripts.memory_benchmark.runtime import credential, database_info
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 NATIVE_OPTIONS = {
@@ -167,6 +169,17 @@ def configuration(path, preset=None):
             raise ValueError("Smoke requires the frozen24instances")
     config["selected_ids"] = [q["id"] for q in questions]
     config["personas"] = sorted({q["persona"] for q in questions})
+    private_connections = under_workspace(config["postgres"]["connections_file"], workspace)
+    connections = json.loads(private_connections.read_text("utf8"))
+    if set(connections) != set(config["personas"]) or len(set(connections.values())) != len(
+        config["personas"]
+    ):
+        raise ValueError("Native benchmark requires one distinct private DSN per persona")
+    from psycopg.conninfo import conninfo_to_dict
+
+    for info in connections.values():
+        if type(info) is not str or not info.strip() or not conninfo_to_dict(info).get("dbname"):
+            raise ValueError("Native benchmark database name is required")
     config["suite_dir"], config["asr_file"] = (
         str(suite / "suite-v1"),
         str(suite / "asr-observations.jsonl"),
@@ -308,25 +321,24 @@ def closure(config):
         raise RuntimeError("Answer coverage is incomplete or duplicated")
     if any(r["status"] not in ("SUCCEEDED", "FAILED", "CANCELLED") for r in records):
         raise RuntimeError("Nonterminal questions cannot be graded")
-    databases = list((run / "results").glob("*/core.sqlite3"))
-    if len(databases) != len(config["personas"]):
-        raise RuntimeError("Native profile database coverage is incomplete")
     closed_unknown_counts = {}
-    for path in databases:
-        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as connection:
+    for persona in config["personas"]:
+        path = run / "results" / persona
+        with psycopg.connect(database_info(config, persona).get_secret_value(),
+                             autocommit=True, row_factory=dict_row) as connection:
+            connection.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             if connection.execute(
                 "SELECT count(*) FROM model_usage WHERE state='RESERVED'"
-            ).fetchone()[0]:
+            ).fetchone()["count"]:
                 raise RuntimeError("Native reservation remains active; preserve it and inspect")
             count = connection.execute(
                 "SELECT count(*) FROM model_usage WHERE state='UNKNOWN'"
-            ).fetchone()[0]
-            closed_unknown_counts[path.parent.name] = count
+            ).fetchone()["count"]
+            closed_unknown_counts[persona] = count
             if count:
-                audit = json.loads((path.parent / "manifest.json").read_text("utf-8")).get(
+                audit = json.loads((path / "manifest.json").read_text("utf-8")).get(
                     "model_execution", {}
                 )
-                connection.row_factory = sqlite3.Row
                 actual = [
                     dict(r)
                     for r in connection.execute(
@@ -339,7 +351,7 @@ def closure(config):
                     or audit.get("unclosed_requests") != []
                     or audit.get("uncertain") != actual
                     or set(audit.get("closed_unknowns", {})) != {r["request_id"] for r in actual}
-                    or audit.get("journal_sha256") != sha(path.parent / "paid-budget.jsonl")
+                    or audit.get("journal_sha256") != sha(path / "paid-budget.jsonl")
                 ):
                     raise RuntimeError(
                         "Native UNKNOWN lacks verified local closure; preserve it and inspect"

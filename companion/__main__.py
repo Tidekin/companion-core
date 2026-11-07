@@ -6,12 +6,12 @@ import json
 import logging
 import os
 import random
-import sqlite3
 import sys
 from contextlib import ExitStack, closing
 from pathlib import Path
 
 import httpx
+import psycopg
 import uvicorn
 from pydantic import ValidationError
 
@@ -56,9 +56,9 @@ async def worker(settings):
                         try:
                             core.expire_raw_events()
                             core.cleanup_media()
-                        except sqlite3.OperationalError as error:
-                            if (getattr(error, "sqlite_errorcode", 0) & 0xFF != sqlite3.SQLITE_BUSY
-                                or core.store.db.in_transaction):
+                        except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected,
+                    psycopg.errors.SerializationFailure):
+                            if core.store.in_transaction:
                                 raise
                             # This is native local maintenance, without model or
                             # delivery dispatch. Its own durable recovery remains authoritative.
@@ -112,12 +112,9 @@ def main():
     server.add_argument("--memory-control-sha256")
     archive = sub.add_parser("backup")
     archive.add_argument("destination")
-    archive.add_argument("--immutable-source", action="store_true",
-                         help="Assert all source writers and maintenance stay stopped before "
-                              "invocation through completion; reject WAL/SHM/journal sidecars")
     recovery = sub.add_parser("restore")
     recovery.add_argument("source")
-    recovery.add_argument("destination")
+    recovery.add_argument("destination_config", help="Native target TOML; database must be empty")
     correction = sub.add_parser("reconcile-video-rates")
     correction.add_argument("--request", required=True)
     correction.add_argument("--request-sha256", required=True)
@@ -162,7 +159,7 @@ def main():
             )
         elif args.command == "worker":
             logging.getLogger("httpx").setLevel(logging.WARNING)
-            with single_worker(settings.database):
+            with single_worker(settings.state_directory):
                 shutdown.install()
                 asyncio.run(worker(settings))
         elif args.command == "status":
@@ -195,36 +192,36 @@ def main():
             # Life now owns diary generation. Also hold the retired diary-worker lock so
             # an orphaned pre-upgrade diary container fails this start loudly instead of
             # writing diaries in parallel.
-            with (single_worker(settings.database, "life-worker"),
-                  single_worker(settings.database, "diary-worker")):
+            with (single_worker(settings.state_directory, "life-worker"),
+                  single_worker(settings.state_directory, "diary-worker")):
                 shutdown.install()
                 asyncio.run(life_worker(settings))
         elif args.command == "executive-worker":
             from companion.executive_worker import executive_worker
 
             logging.getLogger("httpx").setLevel(logging.WARNING)
-            with single_worker(settings.database, "executive-worker"):
+            with single_worker(settings.state_directory, "executive-worker"):
                 shutdown.install()
                 asyncio.run(executive_worker(settings))
         elif args.command == "backup":
-            backup(settings.database, args.destination, os.environ["COMPANION_BACKUP_KEY"].encode(),
-                   immutable_source=args.immutable_source)
+            backup(settings.database, args.destination, os.environ["COMPANION_BACKUP_KEY"].encode())
             print("Encrypted backup saved. Keep the latest erasure ledger separately.")
         elif args.command == "content-worker":
             from companion.content_worker import content_worker
 
             logging.getLogger("httpx").setLevel(logging.WARNING)
-            with single_worker(settings.database, "content-worker"):
+            with single_worker(settings.state_directory, "content-worker"):
                 shutdown.install()
                 asyncio.run(content_worker(settings))
         elif args.command == "restore":
-            restore(
-                args.source,
-                args.destination,
-                os.environ["COMPANION_BACKUP_KEY"].encode(),
-                settings.erasure_ledger,
-            )
-            print("Restored to a new database; erasure ledger replay complete.")
+            import tomllib
+
+            # An explicit target file is not overlaid with the source process's environment.
+            target = Settings.model_validate(tomllib.loads(
+                Path(args.destination_config).read_text("utf8")))
+            restore(args.source, target.database, os.environ["COMPANION_BACKUP_KEY"].encode(),
+                    target.erasure_ledger, state_directory=target.state_directory)
+            print("Restored into the empty PostgreSQL target; erasure replay complete.")
         elif args.command in {"preview-model-carry", "carry-closed-model-attempts"}:
             from companion import model_carry, owner_authority
             from companion.model_carry_controller import verify
@@ -237,7 +234,7 @@ def main():
             with ExitStack() as locks:
                 for kind in ("worker", "diary-worker", "life-worker", "executive-worker",
                              "content-worker"):
-                    locks.enter_context(single_worker(settings.database, kind))
+                    locks.enter_context(single_worker(settings.state_directory, kind))
                 verified = verify(request["executors"])
                 with Runtime(settings) as runtime:
                     if args.command == "preview-model-carry":
@@ -257,7 +254,7 @@ def main():
             with ExitStack() as locks:
                 for kind in ("worker", "diary-worker", "life-worker", "executive-worker",
                              "content-worker"):
-                    locks.enter_context(single_worker(settings.database, kind))
+                    locks.enter_context(single_worker(settings.state_directory, kind))
                 with Runtime(settings) as runtime:
                     print(encode(model_carry.close_unstarted(
                         runtime.store, settings, args.request_id, utcnow(),
@@ -280,7 +277,7 @@ def main():
                 for kind in (
                     "worker", "diary-worker", "life-worker", "executive-worker", "content-worker",
                 ):
-                    locks.enter_context(single_worker(settings.database, kind))
+                    locks.enter_context(single_worker(settings.state_directory, kind))
                 with Runtime(settings) as runtime:
                     print(encode(reconcile(runtime.store, settings, json.loads(raw))))
     except ValidationError as error:

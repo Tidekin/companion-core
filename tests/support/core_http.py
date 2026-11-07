@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from tests.support.native_http import owned_http_protocol
 
 
@@ -21,6 +22,8 @@ async def real_core_http(core):
 
     api = create_app(core.settings)
     api.state.core = core
+    # This fixture explicitly supplies and owns Core; Uvicorn lifespan stays off.
+    api.state.api_store = ApiStore(core.database, core.settings.state_directory)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     # Native children have a 30s deadline. Keep server idle expiry beyond the

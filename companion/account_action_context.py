@@ -35,12 +35,23 @@ def _scope(core, job):
 def _record(core, message_id, as_of, view):
     s, cfg = core.store, core.settings
     row = s.one(
-        "SELECT p.*,r.message_id,r.receipt_json,r.receipt_sha256,r.dispatched_at,r.released_at,"
-        "o.state AS delivery_state,o.authority_json,o.lease_token,o.content_json,"
-        "o.content_sha256,o.action_type,o.updated_at AS result_at "
-        "FROM social_autonomy_plans p JOIN social_autonomy_reservations r USING(plan_id) "
-        "JOIN outbox o USING(message_id) WHERE r.message_id=? AND p.redacted=0 "
-        "AND p.state='READY' AND r.dispatched_at IS NOT NULL AND r.released_at IS NULL",
+        'SELECT p.plan_id AS plan_id, p.idempotency_key AS idempotency_key, p.request_sha256 AS '
+        'request_sha256, p.candidate_sha256 AS candidate_sha256, p.state AS state, '
+        'p.policy_version AS policy_version, p.policy_sha256 AS policy_sha256, '
+        'p.authorization_sha256 AS authorization_sha256, p.binding_sha256 AS binding_sha256, '
+        'p.timezone AS timezone, p.policy_json AS policy_json, p.input_snapshot_json AS '
+        'input_snapshot_json, p.source_snapshot_sha256 AS source_snapshot_sha256, p.plan_json AS '
+        'plan_json, p.payload_sha256 AS payload_sha256, p.model_request_id AS model_request_id, '
+        'p.last_error_code AS last_error_code, p.redacted AS redacted, p.created_at AS created_at, '
+        'p.expires_at AS expires_at, p.updated_at AS updated_at, r.message_id AS message_id, '
+        'r.receipt_json AS receipt_json, r.receipt_sha256 AS receipt_sha256, r.dispatched_at AS '
+        'dispatched_at, r.released_at AS released_at, o.state AS delivery_state, o.authority_json '
+        'AS authority_json, o.lease_token AS lease_token, o.content_json AS content_json, '
+        'o.content_sha256 AS content_sha256, o.action_type AS action_type, o.updated_at AS '
+        'result_at FROM social_autonomy_plans AS p JOIN social_autonomy_reservations AS r ON '
+        'p.plan_id = r.plan_id JOIN outbox AS o ON r.message_id = o.message_id WHERE r.message_id '
+        "= %s AND p.redacted = 0 AND p.state = 'READY' AND NOT r.dispatched_at IS NULL AND "
+        'r.released_at IS NULL',
         (message_id,),
     )
     if not row or not row["receipt_sha256"]:
@@ -75,7 +86,7 @@ def _record(core, message_id, as_of, view):
             or when <= datetime.fromisoformat(after(as_of, -days * 86400))):
             return None
         expected = {source["event_id"]: source["source_sha256"] for source in s.rows(
-            "SELECT event_id,source_sha256 FROM social_autonomy_sources WHERE plan_id=?",
+            'SELECT event_id, source_sha256 FROM social_autonomy_sources WHERE plan_id = %s',
             (row["plan_id"],))}
         declared = {}
         for material in original.get("profile_material", []):
@@ -113,9 +124,10 @@ def reference(core, job):
         return None
     as_of, records, sources, items = job["created_at"], [], set(), []
     rows = core.store.rows(
-        "SELECT r.message_id FROM social_autonomy_reservations r JOIN outbox o USING(message_id) "
-        "WHERE o.action_type IN ('qq.profile.nickname','qq.profile.signature','qq.profile.avatar') "
-        "AND o.updated_at<=? ORDER BY o.updated_at DESC,r.message_id LIMIT 20", (as_of,),
+        'SELECT r.message_id FROM social_autonomy_reservations AS r JOIN outbox AS o USING '
+        "(message_id) WHERE o.action_type IN ('qq.profile.nickname', 'qq.profile.signature', "
+        "'qq.profile.avatar') AND o.updated_at <= %s ORDER BY o.updated_at DESC NULLS LAST, "
+        'r.message_id NULLS FIRST LIMIT 20', (as_of,),
     )
     for row in rows:
         value = _record(core, row["message_id"], as_of, view)

@@ -1,7 +1,8 @@
 """Private event admission and creation of its original reply job."""
 
-import sqlite3
 from datetime import UTC
+
+import psycopg
 
 from companion import (
     input_debounce,
@@ -61,19 +62,35 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 and cfg.rich_input_scope != "references_v1"):
                 raise CoreError("RICH_INPUT_SCOPE_REQUIRED", 403)
             if s.one(
-                "SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event.event_id,)
+                'SELECT 1 FROM runtime_meta WHERE key = %s', ("erased_event:" + event.event_id,)
             ):
                 raise CoreError("EVENT_ERASED", 410)
             existing = s.one(
-                "SELECT * FROM events WHERE (source=? AND source_event_id=?) "
-                "OR idempotency_key=? OR event_id=?",
+                'SELECT events.event_id AS event_id, events.schema_version AS schema_version, '
+                'events.source AS source, events.source_event_id AS source_event_id, '
+                'events.conversation_id AS conversation_id, events.actor_id AS actor_id, '
+                'events.event_type AS event_type, events.occurred_at AS occurred_at, '
+                'events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, '
+                'events.body_json AS body_json, events.trace_id AS trace_id, '
+                'events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+                'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+                'events.reply_revision AS reply_revision FROM events AS events WHERE '
+                '(events.source = %s AND events.source_event_id = %s) OR events.idempotency_key = '
+                '%s OR events.event_id = %s',
                 (event.source, event.source_event_id, key, event.event_id),
             )
             if existing:
                 if existing["fingerprint"] != fingerprint or existing["idempotency_key"] != key:
                     raise CoreError("IDEMPOTENCY_CONFLICT")
                 job = s.one(
-                    "SELECT * FROM jobs WHERE idempotency_key=?",
+                    'SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, '
+                    'jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts '
+                    'AS attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS '
+                    'lease_owner, jobs.lease_until AS lease_until, jobs.next_attempt_at AS '
+                    'next_attempt_at, jobs.last_error_code AS last_error_code, jobs.created_at AS '
+                    'created_at, jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, '
+                    'jobs.context_tracked AS context_tracked, jobs.authority_json AS '
+                    'authority_json FROM jobs AS jobs WHERE jobs.idempotency_key = %s',
                     ("reply:" + existing["event_id"],),
                 )
                 return {
@@ -84,7 +101,13 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                     "reply_revision": existing["reply_revision"],
                 }
             conversation = s.one(
-                "SELECT * FROM conversations WHERE platform=? AND platform_session_key=?",
+                'SELECT conversations.conversation_id AS conversation_id, conversations.platform '
+                'AS platform, conversations.platform_session_key AS platform_session_key, '
+                'conversations.scope AS scope, conversations.owner_actor_id AS owner_actor_id, '
+                'conversations.last_event_at AS last_event_at, conversations.created_at AS '
+                'created_at, conversations.reply_revision AS reply_revision FROM conversations AS '
+                'conversations WHERE conversations.platform = %s AND '
+                'conversations.platform_session_key = %s',
                 (event.source, origin),
             )
             conversation_id = conversation["conversation_id"] if conversation else uid("conv")
@@ -99,7 +122,7 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                     created_at=now,
                 )
             s.execute(
-                "UPDATE conversations SET last_event_at=? WHERE conversation_id=?",
+                'UPDATE conversations SET last_event_at = %s WHERE conversation_id = %s',
                 (now, conversation_id),
             )
             body = event.payload.model_dump()
@@ -131,10 +154,13 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 body["diary_correction"] = command == "修改日记"
                 body["diary_timezone"] = cfg.timezone
             if native_controls and command == "暂停写日记" and not arguments:
-                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
+                s.execute("INSERT INTO runtime_meta (key, value) VALUES ('diary_paused', '1') ON "
+                    'CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = DEFAULT')
                 diary.cancel_pending("DIARY_PAUSED")
             if native_controls and command == "暂停主动分享" and not arguments:
-                s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused','1')")
+                s.execute("INSERT INTO runtime_meta (key, value) VALUES ('proactive_paused', '1') "
+                    'ON CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = '
+                    'DEFAULT')
                 cancel_proactive_work(s, now)
             # M0/M1 never fetch attachments; discard URL/ref content that may carry credentials.
             body["media"] = [{"kind": m["kind"], "sha256": m["sha256"]} for m in body["media"]]
@@ -171,7 +197,7 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 cancel_proactive_work(s, now)
             job_id = new_job(s, cfg, event.event_id, "chat", "reply:" + event.event_id, now)
             if debounce:
-                s.execute("UPDATE jobs SET next_attempt_at=? WHERE job_id=?",
+                s.execute('UPDATE jobs SET next_attempt_at = %s WHERE job_id = %s',
                           (debounce, job_id))
             if authority:
                 owner_authority.bind_job(s, cfg, clock, job_id, purpose="chat")
@@ -191,7 +217,7 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 "state": "QUEUED",
                 "reply_revision": revision,
             }
-    except sqlite3.IntegrityError as error:
+    except psycopg.IntegrityError as error:
         raise CoreError("IDEMPOTENCY_CONFLICT") from error
 
 

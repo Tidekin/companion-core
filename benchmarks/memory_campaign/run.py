@@ -85,7 +85,7 @@ def rag(name="rag"):
 
 
 def freeze_answers(configs):
-    for name in ("rag", *R.controls):
+    for name in (*R.references, *R.controls):
         assert completed(name), name
         answers = read_rows(ROOT / name / "answers.jsonl")
         assert len(answers) == len({a["id"] for a in answers}) == R.total
@@ -97,7 +97,7 @@ def freeze_answers(configs):
     assert qwen <= R.cfg["budget"]["qwen_total_cny"]
     assert not any(v["state"] == "RESERVED" for v in qlatest.values())
     files = [p for a in configs for p in (R.arm_dir(a) / "results").glob("*/answers.jsonl")]
-    files += [ROOT / name / "answers.jsonl" for name in ("rag", *R.controls)]
+    files += [ROOT / name / "answers.jsonl" for name in (*R.references, *R.controls)]
     save(ROOT / "all-answers-frozen.json", {
         "status": "ALL_ANSWERS_CLOSED_BEFORE_GOLD_READ", "answers": R.answers_total,
         "files_sha256": {p.relative_to(ROOT).as_posix(): sha(p) for p in files},
@@ -123,7 +123,7 @@ def main():
             else:
                 assert (ROOT / "native-run-completion.json").exists(), (
                     "Native inference never resumes; start a new round")
-            for name in ("rag", *R.controls):
+            for name in (*R.references, *R.controls):
                 if not completed(name):
                     rag(name)
             freeze_answers(configs)

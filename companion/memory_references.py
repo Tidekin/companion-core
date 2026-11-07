@@ -23,16 +23,17 @@ def _load(store, key, *, work=None):
     if work is not None:
         from companion.retrieval_work import WorkLimit
 
-        size = store.one("SELECT octet_length(value) AS size FROM runtime_meta WHERE key=?",
+        size = store.one('SELECT OCTET_LENGTH(value) AS size FROM runtime_meta WHERE key = %s',
                          (key,))
         if not size:
             return None
         if not work.take("text_bytes", size["size"]):
             raise WorkLimit("reference_text_bytes")
-        row = store.one("SELECT value FROM runtime_meta WHERE key=? AND octet_length(value)=?",
+        row = store.one('SELECT value FROM runtime_meta WHERE key = %s AND OCTET_LENGTH(value) = '
+            '%s',
                         (key, size["size"]))
     else:
-        row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+        row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
     try:
         return json.loads(row["value"]) if row else None
     except (ValueError, TypeError):
@@ -85,7 +86,7 @@ def replay_many(store, event_ids, *, item_chars=HISTORY_ITEM_CHARS, turn_chars=H
             "SELECT c.owner_event_id,c.kind,c.slot,e.body_json FROM content_items c "
             "JOIN observations o ON o.event_id=c.output_event_id "
             "JOIN events e ON e.event_id=o.event_id WHERE c.owner_event_id IN ("
-            + ",".join("?" for _ in part) + ") "
+            + ",".join("%s" for _ in part) + ") "
             "AND c.kind IN ('qq_file','qq_image') AND c.state='SUCCEEDED' "
             "AND c.redacted=0 AND o.redacted=0 AND e.redacted=0 AND o.result_status='FETCHED' "
             "ORDER BY c.owner_event_id,c.slot", tuple(part)):
@@ -96,10 +97,10 @@ def replay_many(store, event_ids, *, item_chars=HISTORY_ITEM_CHARS, turn_chars=H
     transcripts = {}
     for owner in found:
         for row in store.rows(
-            "SELECT json_extract(value,'$.text') AS text FROM runtime_meta "
-            "WHERE key GLOB 'memory_reference_input:*' AND json_valid(value) "
-            "AND json_extract(value,'$.owner_event_id')=? "
-            "AND json_extract(value,'$.kind')='transcript' ORDER BY key", (owner,)):
+            "SELECT (CASE WHEN value IS JSON THEN value::json ->> 'text' END) AS text FROM "
+            "runtime_meta WHERE starts_with(key,'memory_reference_input:') AND value IS JSON AND "
+            "(CASE WHEN value IS JSON THEN value::json ->> 'owner_event_id' END)=%s AND (CASE WHEN "
+            "value IS JSON THEN value::json ->> 'kind' END)='transcript' ORDER BY key", (owner,)):
             transcripts.setdefault(owner, []).append(row["text"])
     result = {}
     for key, items in found.items():
@@ -126,14 +127,15 @@ def _bounded_replay(store, event_ids, item_chars, turn_chars, work):
         queries = (
             ("SELECT e.event_id AS id,c.item_id,c.slot,c.kind,octet_length(e.body_json) AS size "
              "FROM content_items c JOIN observations o ON o.event_id=c.output_event_id "
-             "JOIN events e ON e.event_id=o.event_id WHERE c.owner_event_id=? "
+             "JOIN events e ON e.event_id=o.event_id WHERE c.owner_event_id=%s "
              "AND c.kind IN ('qq_file','qq_image') AND c.state='SUCCEEDED' "
              "AND c.redacted=0 AND o.redacted=0 AND e.redacted=0 "
              "AND o.result_status='FETCHED' ORDER BY c.slot LIMIT 9", False),
-            ("SELECT key AS id,0 AS slot,'transcript' AS kind,octet_length(value) AS size "
-             "FROM runtime_meta WHERE key GLOB 'memory_reference_input:*' AND json_valid(value) "
-             "AND json_extract(value,'$.owner_event_id')=? "
-             "AND json_extract(value,'$.kind')='transcript' ORDER BY key LIMIT 9", True),
+            ("SELECT key AS id,0 AS slot,'transcript' AS kind,octet_length(value) AS size FROM "
+                "runtime_meta WHERE starts_with(key,'memory_reference_input:') AND value IS JSON "
+                "AND (CASE WHEN value IS JSON THEN value::json ->> 'owner_event_id' END)=%s AND "
+                "(CASE WHEN value IS JSON THEN value::json ->> 'kind' END)='transcript' ORDER BY "
+                'key LIMIT 9', True),
         )
         try:
             for query, transcript in queries:
@@ -149,20 +151,19 @@ def _bounded_replay(store, event_ids, item_chars, turn_chars, work):
                     if not work.take("text_bytes", row["size"]):
                         continue
                     if transcript:
-                        value = store.one("SELECT value AS body FROM runtime_meta WHERE key=? "
-                            "AND octet_length(value)=? AND json_valid(value) "
-                            "AND json_extract(value,'$.owner_event_id')=? "
-                            "AND json_extract(value,'$.kind')='transcript'",
+                        value = store.one('SELECT value AS body FROM runtime_meta WHERE key=%s AND '
+                            'octet_length(value)=%s AND value IS JSON AND (CASE WHEN value IS JSON '
+                            "THEN value::json ->> 'owner_event_id' END)=%s AND (CASE WHEN value IS "
+                            "JSON THEN value::json ->> 'kind' END)='transcript'",
                             (row["id"], row["size"], owner))
                     else:
-                        value = store.one("SELECT e.body_json AS body FROM content_items c "
-                            "JOIN observations o ON o.event_id=c.output_event_id "
-                            "JOIN events e ON e.event_id=o.event_id WHERE c.item_id=? "
-                            "AND c.owner_event_id=? AND e.event_id=? "
-                            "AND octet_length(e.body_json)=? "
-                            "AND c.kind IN ('qq_file','qq_image') AND c.state='SUCCEEDED' "
-                            "AND c.redacted=0 AND o.redacted=0 AND e.redacted=0 "
-                            "AND o.result_status='FETCHED'",
+                        value = store.one('SELECT e.body_json AS body FROM content_items AS c JOIN '
+                            'observations AS o ON o.event_id = c.output_event_id JOIN events AS e '
+                            'ON e.event_id = o.event_id WHERE c.item_id = %s AND c.owner_event_id '
+                            '= %s AND e.event_id = %s AND OCTET_LENGTH(e.body_json) = %s AND '
+                            "c.kind IN ('qq_file', 'qq_image') AND c.state = 'SUCCEEDED' AND "
+                            'c.redacted = 0 AND o.redacted = 0 AND e.redacted = 0 AND '
+                            "o.result_status = 'FETCHED'",
                             (row["item_id"], owner, row["id"], row["size"]))
                     text = json.loads(value["body"]).get("text", "") if value else ""
                     if not isinstance(text, str) or not text.strip() or remaining <= 0:
@@ -194,7 +195,7 @@ def capture(memory, root, kind, text, receipt, now, *, sources=(), binding=None)
     old = _load(memory.store, INPUT + reference_id)
     if old is not None and old != value:
         raise CoreError("MEMORY_REFERENCE_CHANGED", 409)
-    memory.store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
+    memory.store.execute('INSERT INTO runtime_meta VALUES (%s, %s) ON CONFLICT DO NOTHING',
                          (INPUT + reference_id, encode(value)))
     return value
 
@@ -225,7 +226,22 @@ def read(memory, reference_id, now, *, work=None):
                 # receipt remains available in source-bound dialogue replay.
                 raise CoreError("MEMORY_REFERENCE_CHANGED", 409)
         if value["kind"] == "assistant":
-            row = memory.store.one("SELECT * FROM outbox WHERE message_id=? AND state='SENT'",
+            row = memory.store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id '
+                'AS origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type '
+                'AS action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+                'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+                'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+                'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+                'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+                'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS '
+                'updated_at, outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, '
+                'outbox.next_attempt_at AS next_attempt_at, outbox.reply_group_id AS '
+                'reply_group_id, outbox.segment_index AS segment_index, outbox.segment_count AS '
+                'segment_count, outbox.reply_group_sha256 AS reply_group_sha256, '
+                'outbox.segment_interval_ms AS segment_interval_ms, outbox.delivery_lane AS '
+                'delivery_lane, outbox.native_ack_json AS native_ack_json, outbox.authority_json '
+                'AS authority_json FROM outbox AS outbox WHERE outbox.message_id = %s AND '
+                "outbox.state = 'SENT'",
                                    (value["receipt"]["message_id"],))
             if not row or row["content_sha256"] != value["receipt"]["content_sha256"]:
                 raise ValueError()
@@ -235,7 +251,22 @@ def read(memory, reference_id, now, *, work=None):
             if not all(reply_revision.source_active(memory.store, event_id)
                        for event_id in value["proof"]["source_event_ids"]):
                 raise ValueError()
-            row = memory.store.one("SELECT * FROM outbox WHERE message_id=? AND state='SENT'",
+            row = memory.store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id '
+                'AS origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type '
+                'AS action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+                'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+                'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+                'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+                'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+                'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS '
+                'updated_at, outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, '
+                'outbox.next_attempt_at AS next_attempt_at, outbox.reply_group_id AS '
+                'reply_group_id, outbox.segment_index AS segment_index, outbox.segment_count AS '
+                'segment_count, outbox.reply_group_sha256 AS reply_group_sha256, '
+                'outbox.segment_interval_ms AS segment_interval_ms, outbox.delivery_lane AS '
+                'delivery_lane, outbox.native_ack_json AS native_ack_json, outbox.authority_json '
+                'AS authority_json FROM outbox AS outbox WHERE outbox.message_id = %s AND '
+                "outbox.state = 'SENT'",
                                    (value["receipt"]["message_id"],))
             if (not row or row["origin_event_id"] != value["receipt"]["target_event_id"]
                 or row["content_sha256"] != value["receipt"]["content_sha256"]):
@@ -243,7 +274,7 @@ def read(memory, reference_id, now, *, work=None):
         if value["kind"] == "quote":
             from companion import qq_quotes
 
-            event = memory.store.one("SELECT body_json FROM events WHERE event_id=?",
+            event = memory.store.one('SELECT body_json FROM events WHERE event_id = %s',
                                      (value["owner_event_id"],))
             if value["receipt"]["segment"]["index"] in qq_quotes.withdrawn(
                 memory.store, value["owner_event_id"], json.loads(event["body_json"]),
@@ -251,7 +282,21 @@ def read(memory, reference_id, now, *, work=None):
                 raise ValueError()
         binding = value["binding"]
         if binding:
-            row = memory.store.one("SELECT * FROM content_items WHERE item_id=?",
+            row = memory.store.one('SELECT content_items.item_id AS item_id, '
+                'content_items.owner_event_id AS owner_event_id, content_items.kind AS kind, '
+                'content_items.slot AS slot, content_items.source_event_id AS source_event_id, '
+                'content_items.target_url AS target_url, content_items.read_request_id AS '
+                'read_request_id, content_items.state AS state, content_items.media_sha256 AS '
+                'media_sha256, content_items.fingerprint AS fingerprint, '
+                'content_items.captured_privacy_epoch AS captured_privacy_epoch, '
+                'content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS '
+                'usage_request_id, content_items.output_event_id AS output_event_id, '
+                'content_items.lease_token AS lease_token, content_items.lease_until AS '
+                'lease_until, content_items.deadline AS deadline, content_items.error_code AS '
+                'error_code, content_items.redacted AS redacted, content_items.created_at AS '
+                'created_at, content_items.started_at AS started_at, content_items.updated_at AS '
+                'updated_at, content_items.attachment_json AS attachment_json FROM content_items '
+                'AS content_items WHERE content_items.item_id = %s',
                                    (binding["item_id"],))
             if not row or any(row[key] != item for key, item in binding.items()):
                 raise ValueError()
@@ -269,17 +314,26 @@ def inputs(core, event):
     memory, store, now = core.memory, core.store, core.clock()
     root = event["event_id"]
     for row in store.rows(
-        "SELECT c.*,o.source_kind,o.result_status,o.source_sha256,o.evidence_json,e.body_json "
-        "FROM content_items c JOIN observations o ON o.event_id=c.output_event_id "
-        "JOIN events e ON e.event_id=o.event_id WHERE c.owner_event_id=? "
-        "AND c.kind IN ('qq_file','qq_image') AND c.state='SUCCEEDED' "
-        "AND c.redacted=0 AND o.redacted=0 AND e.redacted=0 AND o.result_status='FETCHED' "
-        "ORDER BY c.slot LIMIT 8", (root,),
+        'SELECT c.item_id AS item_id, c.owner_event_id AS owner_event_id, c.kind AS kind, c.slot '
+        'AS slot, c.source_event_id AS source_event_id, c.target_url AS target_url, '
+        'c.read_request_id AS read_request_id, c.state AS state, c.media_sha256 AS media_sha256, '
+        'c.fingerprint AS fingerprint, c.captured_privacy_epoch AS captured_privacy_epoch, '
+        'c.reserved_bytes AS reserved_bytes, c.usage_request_id AS usage_request_id, '
+        'c.output_event_id AS output_event_id, c.lease_token AS lease_token, c.lease_until AS '
+        'lease_until, c.deadline AS deadline, c.error_code AS error_code, c.redacted AS redacted, '
+        'c.created_at AS created_at, c.started_at AS started_at, c.updated_at AS updated_at, '
+        'c.attachment_json AS attachment_json, o.source_kind AS source_kind, o.result_status AS '
+        'result_status, o.source_sha256 AS source_sha256, o.evidence_json AS evidence_json, '
+        'e.body_json AS body_json FROM content_items AS c JOIN observations AS o ON o.event_id = '
+        'c.output_event_id JOIN events AS e ON e.event_id = o.event_id WHERE c.owner_event_id = %s '
+        "AND c.kind IN ('qq_file', 'qq_image') AND c.state = 'SUCCEEDED' AND c.redacted = 0 AND "
+        "o.redacted = 0 AND e.redacted = 0 AND o.result_status = 'FETCHED' ORDER BY c.slot NULLS "
+        'FIRST LIMIT 8', (root,),
     ):
         text = json.loads(row["body_json"]).get("text", "")
         ids = [item["source_event_id"] for item in store.rows(
-            "SELECT source_event_id FROM event_dependencies WHERE event_id=? "
-            "ORDER BY source_event_id",
+            'SELECT source_event_id FROM event_dependencies WHERE event_id = %s ORDER BY '
+            'source_event_id NULLS FIRST',
             (row["output_event_id"],))]
         if (ids != [root] or not MemorySources(memory, now).lineage(row["output_event_id"])
             or hashlib.sha256(text.encode()).hexdigest() != row["source_sha256"]
@@ -303,13 +357,16 @@ def inputs(core, event):
     # Reuse native delivered-turn validation, including complete segmented replies.
     rows = recent_sent_sources(store, event["conversation_id"], root, 1,
                                event_ids=[root], cutoff_rowid=store.one(
-                                   "SELECT rowid FROM events WHERE event_id=?", (root,))["rowid"])
+                                   (
+                                       'SELECT record_sequence AS rowid FROM events '
+                                       'WHERE event_id = %s'
+                                   ), (root,))["rowid"])
     if rows:
         reply = rows[0]
         capture(memory, root, "assistant", reply["reply_text"],
                 {"message_id": reply["message_id"], "content_sha256": reply["content_sha256"]}, now)
     result = []
-    for row in store.rows("SELECT key FROM runtime_meta WHERE key LIKE ?", (INPUT + "%",)):
+    for row in store.rows('SELECT key FROM runtime_meta WHERE key LIKE %s', (INPUT + "%",)):
         value = _load(store, row["key"])
         if value and value.get("owner_event_id") == root:
             try:
@@ -331,20 +388,21 @@ def image_observation(core, job, slot, text):
         raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
     row = rows[0]
     if row["output_event_id"]:
-        existing = core.store.one("SELECT body_json FROM events WHERE event_id=? AND redacted=0",
+        existing = core.store.one('SELECT body_json FROM events WHERE event_id = %s AND redacted = '
+            '0',
                                   (row["output_event_id"],))
         if not existing or json.loads(existing["body_json"])["text"] != text:
             raise CoreError("MEMORY_REFERENCE_CHANGED", 409)
         return {"event_id": row["output_event_id"], "kind": "image_analysis", "duplicate": True}
-    usage = core.store.one("SELECT request_id FROM model_usage WHERE job_id=? "
-                           "AND scenario='chat' AND state='SETTLED' ORDER BY rowid DESC LIMIT 1",
+    usage = core.store.one('SELECT request_id FROM model_usage WHERE job_id = %s AND scenario = '
+        "'chat' AND state = 'SETTLED' ORDER BY record_sequence DESC NULLS LAST LIMIT 1",
                            (job["job_id"],))
     if not usage:
         raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
     with core.store.transaction():
         event_id = core.content._record_image(row, text, title="当前原图的可见内容记录",
             model=core.settings.model_name, source_event_ids=[job["event_id"]])
-        core.store.execute("UPDATE content_items SET usage_request_id=? WHERE item_id=?",
+        core.store.execute('UPDATE content_items SET usage_request_id = %s WHERE item_id = %s',
                             (usage["request_id"], row["item_id"]))
     return {"event_id": event_id, "kind": "image_analysis", "trust": "untrusted_analysis"}
 
@@ -382,10 +440,10 @@ def candidate(memory, item, now):
 
 def image_reviews(store, event_id, *, work=None):
     """IDs and source pins only; callers authorize the selected review before replay."""
-    query = ("FROM runtime_meta INDEXED BY idx_memory_image_review_target "
-             "WHERE key GLOB 'memory_reference_input:*' AND json_valid(value) "
-             "AND json_extract(value,'$.kind')='image_review' "
-             "AND json_extract(value,'$.receipt.target_event_id')=? ORDER BY rowid")
+    query = ("FROM runtime_meta WHERE starts_with(key,'memory_reference_input:') AND value IS JSON "
+        "AND (CASE WHEN value IS JSON THEN value::json ->> 'kind' END)='image_review' AND (CASE "
+        "WHEN value IS JSON THEN value::json #>> '{receipt,target_event_id}' END)=%s ORDER BY "
+        'record_sequence')
     if work is not None:
         from companion.retrieval_work import WorkLimit
 
@@ -396,7 +454,7 @@ def image_reviews(store, event_id, *, work=None):
         # This is a consumed source's validity check, including inside checkpoint
         # writes. Read indexed adjacency on that same Store so uncommitted disputes
         # are visible; optional nomination's separate snapshot cannot certify it.
-        rows = store.rows("SELECT key " + query + " LIMIT ?", (event_id, limit + 1))
+        rows = store.rows("SELECT key " + query + " LIMIT %s", (event_id, limit + 1))
         if len(rows) > limit:
             work.mark("attachment_rows")
             raise WorkLimit("attachment_rows")
@@ -417,9 +475,10 @@ def attributed(item, reference):
 
 def record(memory, memory_id, item, now):
     value = candidate(memory, item, now)
-    content = memory.store.one("SELECT content FROM memories WHERE memory_id=?",
+    content = memory.store.one('SELECT content FROM memories WHERE memory_id = %s',
                                (memory_id,))["content"]
-    memory.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (MEMORY + memory_id,
+    memory.store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) '
+        'DO UPDATE SET value = excluded.value, record_sequence = DEFAULT', (MEMORY + memory_id,
         encode({"reference_id": value["reference_id"], "content_sha256": sha(content)})))
 
 
@@ -437,14 +496,14 @@ def erase(store, event_ids):
     from companion.privacy import ErasureLedger
 
     removed = set()
-    for row in store.rows("SELECT key,value FROM runtime_meta WHERE key LIKE ?", (INPUT + "%",)):
+    for row in store.rows('SELECT key, value FROM runtime_meta WHERE key LIKE %s', (INPUT + "%",)):
         value = json.loads(row["value"])
         if set(value["proof"]["source_event_ids"]) & set(event_ids):
             removed.add(value["reference_id"])
-            store.execute("DELETE FROM runtime_meta WHERE key=?", (row["key"],))
-    for row in store.rows("SELECT key,value FROM runtime_meta WHERE key LIKE ?", (MEMORY + "%",)):
+            store.execute('DELETE FROM runtime_meta WHERE key = %s', (row["key"],))
+    for row in store.rows('SELECT key, value FROM runtime_meta WHERE key LIKE %s', (MEMORY + "%",)):
         if json.loads(row["value"])["reference_id"] in removed:
             memory_id = row["key"][len(MEMORY):]
-            event = store.one("SELECT updated_at FROM memories WHERE memory_id=?", (memory_id,))
+            event = store.one('SELECT updated_at FROM memories WHERE memory_id = %s', (memory_id,))
             ErasureLedger.erase_memories(store, [memory_id], event["updated_at"] if event else "")
-            store.execute("DELETE FROM runtime_meta WHERE key=?", (row["key"],))
+            store.execute('DELETE FROM runtime_meta WHERE key = %s', (row["key"],))

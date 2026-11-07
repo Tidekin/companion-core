@@ -3,7 +3,6 @@
 import re
 
 from companion import retrieval_work
-from companion.store import encode
 
 
 def terms(query):
@@ -35,11 +34,11 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
             "AND m.privacy_scope='private' AND m.confidence>0 ")
     params = []
     if memory_ids is not None:
-        base += "AND m.memory_id IN (SELECT value FROM json_each(?)) "
-        params.append(encode(memory_ids))
+        base += "AND m.memory_id = ANY(%s::text[]) "
+        params.append(list(memory_ids))
     if subjects:
-        base += "AND m.subject IN (SELECT value FROM json_each(?)) "
-        params.append(encode(subjects))
+        base += "AND m.subject = ANY(%s::text[]) "
+        params.append(list(subjects))
     projection = "SELECT m.memory_id,octet_length(m.content) AS text_bytes "
     headers, lexical = {}, []
 
@@ -56,31 +55,33 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
         if query != "*":
             exact = exact_terms(query)
             channel = min(24, ceiling)
-            lexical += collect(projection + base + "AND m.memory_id IN "
-                    "(SELECT value FROM json_each(?)) "
-                    "ORDER BY m.updated_at DESC,m.memory_id LIMIT ?",
-                    (*params, encode(exact), channel + 1), channel)
-            lexical += collect(projection + base + "AND m.fact_key COLLATE NOCASE IN "
-                    "(SELECT value FROM json_each(?)) "
-                    "ORDER BY m.updated_at DESC,m.memory_id LIMIT ?",
-                    (*params, encode(exact), channel + 1), channel)
-            match = " OR ".join('"' + value.replace('"', '""') + '"' for value in terms(query))
-            if match:
-                # rank is FTS5's native BM25 order and can stop at the requested head.
-                lexical += collect(projection + "FROM memories_fts JOIN memories m "
-                    "ON m.memory_id=memories_fts.memory_id WHERE memories_fts MATCH ? AND "
-                    + base.split(" WHERE ", 1)[1] + "ORDER BY rank LIMIT ?",
-                    (match, *params, channel + 1), channel)
+            lexical += collect(projection + base + "AND m.memory_id = ANY(%s::text[]) "
+                    "ORDER BY m.updated_at DESC,m.memory_id LIMIT %s",
+                    (*params, exact, channel + 1), channel)
+            # Preserve SQLite NOCASE's ASCII-only identity matching.
+            lexical += collect(projection + base + "AND translate(m.fact_key,"
+                    "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz') = ANY(%s::text[]) "
+                    "ORDER BY m.updated_at DESC,m.memory_id LIMIT %s",
+                    (*params, [value.translate(str.maketrans(
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
+                        for value in exact], channel + 1), channel)
+            patterns = ["%" + value.replace("\\", "\\\\").replace("%", "\\%").replace(
+                "_", "\\_") + "%" for value in terms(query)]
+            if patterns:
+                lexical += collect(projection + base + "AND m.content ILIKE ANY(%s::text[]) "
+                    "ORDER BY public.word_similarity(%s,m.content) DESC,"
+                    "m.updated_at DESC,m.memory_id LIMIT %s",
+                    (*params, patterns, query, channel + 1), channel)
             if semantic_ids:
-                values = work.rows(memory.store, projection + base + "AND m.memory_id IN "
-                    "(SELECT value FROM json_each(?)) LIMIT ?",
-                    (*params, encode(semantic_ids), ceiling), limit=ceiling)
+                values = work.rows(memory.store, projection + base
+                    + "AND m.memory_id = ANY(%s::text[]) LIMIT %s",
+                    (*params, list(semantic_ids), ceiling), limit=ceiling)
                 position = {mid: i for i, mid in enumerate(semantic_ids)}
                 for row in sorted(values, key=lambda row: position[row["memory_id"]]):
                     if row["memory_id"] not in headers and len(headers) < ceiling:
                         headers[row["memory_id"]] = row
         collect(projection + base + "ORDER BY m.needs_review,m.status='CONFIRMED' DESC,"
-                "m.updated_at DESC,m.memory_id LIMIT ?", (*params, ceiling + 1), ceiling)
+                "m.updated_at DESC,m.memory_id LIMIT %s", (*params, ceiling + 1), ceiling)
     except retrieval_work.WorkLimit:
         pass  # Already nominated identities can still undergo complete live validation.
     rows = []
@@ -89,9 +90,17 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
             break
         if not work.take("text_bytes", header["text_bytes"]):
             continue
-        row = memory.store.one("SELECT * FROM memories WHERE memory_id=? "
-            "AND octet_length(content)=? AND status IN ('CONFIRMED','HYPOTHESIS') "
-            "AND privacy_scope='private' AND confidence>0",
+        row = memory.store.one('SELECT memories.memory_id AS memory_id, memories.subject AS '
+            'subject, memories.kind AS kind, memories.content AS content, memories.status AS '
+            'status, memories.origin AS origin, memories.confidence AS confidence, '
+            'memories.importance AS importance, memories.privacy_scope AS privacy_scope, '
+            'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
+            'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
+            'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
+            'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM memories AS '
+            'memories WHERE memories.memory_id = %s AND OCTET_LENGTH(memories.content) = %s AND '
+            "memories.status IN ('CONFIRMED', 'HYPOTHESIS') AND memories.privacy_scope = 'private' "
+            'AND memories.confidence > 0',
             (header["memory_id"], header["text_bytes"]))
         if row:
             rows.append(row)

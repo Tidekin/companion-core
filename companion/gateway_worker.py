@@ -63,8 +63,8 @@ def main():
         elif args.command == "client-purge":
             gateway.revoke_client(store, args.client_id, utcnow())
             with store.transaction():
-                store.execute("UPDATE gateway_requests SET request_cipher=NULL,"
-                    "response_cipher=NULL,state='EXPIRED' WHERE client_id=?", (args.client_id,))
+                store.execute('UPDATE gateway_requests SET request_cipher = NULL, response_cipher '
+                    "= NULL, state = 'EXPIRED' WHERE client_id = %s", (args.client_id,))
         elif args.command == "worker":
             asyncio.run(worker(store, settings, once=args.once))
         elif args.command == "expire":

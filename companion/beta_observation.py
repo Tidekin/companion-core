@@ -42,7 +42,7 @@ def _utc(value):
 
 
 def _context(view, job_id, current_epoch):
-    row = view.one("SELECT value FROM runtime_meta WHERE key=?",
+    row = view.one('SELECT value FROM runtime_meta WHERE key = %s',
                    ("live_text_context:" + job_id,))
     if row is None:
         return _native_context(view, job_id, current_epoch)
@@ -94,7 +94,7 @@ def _native_context(view, job_id, current_epoch):
     from companion.context_planner import check_bound
 
     result = {"state": "NOT_RECORDED", "source_validity": "NOT_REVALIDATED"}
-    row = view.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?", (job_id,))
+    row = view.one('SELECT snapshots_json FROM agent_conversations WHERE job_id = %s', (job_id,))
     if row is None:
         return result
     try:
@@ -106,7 +106,7 @@ def _native_context(view, job_id, current_epoch):
             metadata = entries[0]["metadata"]["core_context"]
             if metadata.get("version") in {1, 2} and metadata.get("privacy_epoch") != current_epoch:
                 return {**result, "state": "STALE_EPOCH"}
-        job = view.one("SELECT job_id,authority_json FROM jobs WHERE job_id=?", (job_id,))
+        job = view.one('SELECT job_id, authority_json FROM jobs WHERE job_id = %s', (job_id,))
         plan = check_bound(view, job, snapshots, current_epoch)
         if plan is None:
             return result
@@ -132,7 +132,7 @@ def _native_context(view, job_id, current_epoch):
 def _memory_selection(view, job_id, event_id, current_epoch):
     """Project persisted decisions only; never rerun retrieval or infer the model's reason."""
     result = {"state": "NOT_RECORDED", "source_validity": "NOT_REVALIDATED"}
-    row = view.one("SELECT value FROM runtime_meta WHERE key=?", ("live_text_memory:" + job_id,))
+    row = view.one('SELECT value FROM runtime_meta WHERE key = %s', ("live_text_memory:" + job_id,))
     if row is None:
         return result
     try:
@@ -169,9 +169,9 @@ def _memory_selection(view, job_id, event_id, current_epoch):
                 if not isinstance(request, str) or not 1 <= len(request) <= 256:
                     raise ValueError
                 usage = view.one(
-                    "SELECT m.state,m.scenario,a.payload_sha256 FROM model_usage m "
-                    "LEFT JOIN model_admissions a USING(request_id) "
-                    "WHERE m.request_id=? AND m.job_id=?", (request, job_id),
+                    'SELECT m.state, m.scenario, a.payload_sha256 FROM model_usage AS m LEFT JOIN '
+                    'model_admissions AS a USING (request_id) WHERE m.request_id = %s AND m.job_id '
+                    '= %s', (request, job_id),
                 )
                 if (not usage or usage["state"] != "SETTLED"
                     or usage["scenario"] != "memory_review"
@@ -179,7 +179,7 @@ def _memory_selection(view, job_id, event_id, current_epoch):
                     raise ValueError
             elif request is not None:
                 raise ValueError
-        context = view.one("SELECT value FROM runtime_meta WHERE key=?",
+        context = view.one('SELECT value FROM runtime_meta WHERE key = %s',
                            ("live_text_context:" + job_id,))
         frozen = None
         if context is not None:
@@ -215,7 +215,8 @@ def _memory_selection(view, job_id, event_id, current_epoch):
 def _recorded_window(view, event_id, current_epoch):
     """Bind an event to its persisted window, independently of today's configuration."""
     result = {"state": "NOT_RECORDED", "source_validity": "NOT_REVALIDATED"}
-    row = view.one("SELECT value FROM runtime_meta WHERE key=?", ("live_text_input:" + event_id,))
+    row = view.one('SELECT value FROM runtime_meta WHERE key = '
+        '%s', ("live_text_input:" + event_id,))
     if row is None:
         return result
     try:
@@ -227,7 +228,7 @@ def _recorded_window(view, event_id, current_epoch):
         plan = _digest(value["window_sha256"])
         if not plan or value["event_id"] != event_id:
             raise ValueError
-        history = view.one("SELECT value FROM runtime_meta WHERE key=?",
+        history = view.one('SELECT value FROM runtime_meta WHERE key = %s',
                            ("live_text_window:" + plan,))
         if history is None or len(history["value"]) > 131072:
             raise ValueError
@@ -251,9 +252,9 @@ def _reply_groups(view, event_id, redacted):
     if redacted:
         return []
     heads = view.rows(
-        "SELECT MIN(message_id) message_id FROM outbox WHERE origin_event_id=? "
-        "AND action_type='qq.private.reply' AND reply_group_id IS NOT NULL "
-        "GROUP BY reply_group_id ORDER BY reply_group_id LIMIT 21", (event_id,),
+        'SELECT MIN(message_id) AS message_id FROM outbox WHERE origin_event_id = %s AND '
+        "action_type = 'qq.private.reply' AND NOT reply_group_id IS NULL GROUP BY reply_group_id "
+        'ORDER BY reply_group_id NULLS FIRST LIMIT 21', (event_id,),
     )
     if len(heads) > 20:
         raise ValueError("TRACE_REPLY_GROUP_LIMIT")
@@ -278,29 +279,28 @@ def _reply_groups(view, event_id, redacted):
 
 def _trace(view, trace_id):
     events = view.rows(
-        "SELECT e.event_id,e.redacted,e.occurred_at FROM events e "
-        "JOIN conversations c USING(conversation_id) "
-        "WHERE e.trace_id=? AND e.actor_id='owner' AND e.privacy_scope='private' "
-        "AND e.source='qq.onebot' AND c.scope='private' AND c.owner_actor_id='owner' LIMIT 2",
+        'SELECT e.event_id, e.redacted, e.occurred_at FROM events AS e JOIN conversations AS c '
+        "USING (conversation_id) WHERE e.trace_id = %s AND e.actor_id = 'owner' AND "
+        "e.privacy_scope = 'private' AND e.source = 'qq.onebot' AND c.scope = 'private' AND "
+        "c.owner_actor_id = 'owner' LIMIT 2",
         (trace_id,),
     )
     if len(events) != 1:
         return {"state": "NOT_FOUND" if not events else "AMBIGUOUS_TRACE"}
     event = events[0]
     current_epoch = epoch(view)
-    jobs = view.rows("SELECT job_id,state,attempts,last_error_code FROM jobs "
-                     "WHERE event_id=? AND kind='chat' LIMIT 21", (event["event_id"],))
+    jobs = view.rows('SELECT job_id, state, attempts, last_error_code FROM jobs WHERE event_id = '
+        "%s AND kind = 'chat' LIMIT 21", (event["event_id"],))
     if len(jobs) > 20:
         raise ValueError("TRACE_JOB_LIMIT")
     inspected = []
     for job in jobs:
         usage = view.rows(
-            "SELECT m.request_id,m.state,m.scenario,m.input_tokens,m.cached_input_tokens,"
-            "m.output_tokens,a.logical_request_id,"
-            "m.billed_micro_usd,m.pricing_known,a.io_started_at,a.attempt_number,"
-            "a.reserved_micro_usd,a.measurement_json "
-            "FROM model_usage m LEFT JOIN model_admissions a "
-            "USING(request_id) WHERE m.job_id=? ORDER BY m.rowid LIMIT 101", (job["job_id"],),
+            'SELECT m.request_id, m.state, m.scenario, m.input_tokens, m.cached_input_tokens, '
+            'm.output_tokens, a.logical_request_id, m.billed_micro_usd, m.pricing_known, '
+            'a.io_started_at, a.attempt_number, a.reserved_micro_usd, a.measurement_json FROM '
+            'model_usage AS m LEFT JOIN model_admissions AS a USING (request_id) WHERE m.job_id = '
+            '%s ORDER BY m.record_sequence NULLS FIRST LIMIT 101', (job["job_id"],),
         )
         if len(usage) > 100:
             raise ValueError("TRACE_USAGE_LIMIT")
@@ -349,8 +349,8 @@ def _trace(view, trace_id):
             "model_attempt_count": len(calls), "model_calls": calls,
         })
     deliveries = view.rows(
-        "SELECT state,COUNT(*) count FROM outbox WHERE origin_event_id=? "
-        "AND action_type='qq.private.reply' GROUP BY state", (event["event_id"],),
+        'SELECT state, COUNT(*) AS count FROM outbox WHERE origin_event_id = %s AND action_type = '
+        "'qq.private.reply' GROUP BY state", (event["event_id"],),
     )
     states = {row["state"]: row["count"] for row in deliveries}
     return {"state": "REDACTED" if event["redacted"] else "RECORDED",
@@ -419,11 +419,11 @@ def inspect_context(settings, trace_id):
             db.set_progress_handler(progress, 10000)
             db.execute("BEGIN")
             view = _ReadView(db)
-            version = view.one("SELECT version_num FROM alembic_version")
+            version = view.one('SELECT version_num FROM alembic_version')
             if not version or version["version_num"] != schema_head():
                 result["blockers"].append("MIGRATION_REQUIRED")
                 return result
-            owner = view.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+            owner = view.one("SELECT value FROM runtime_meta WHERE key = 'owner_qq_id'")
             if not owner or owner["value"] != settings.owner_qq_id:
                 result["blockers"].append("OWNER_IDENTITY_MISMATCH")
                 return result

@@ -69,8 +69,14 @@ class RoundRobin:
     def _next_due(self, selected):
         # A backed-off lane is not due before its retry, so an overdue next_at
         # cannot turn the idle wait into a spin.
-        return min((max(lane.next_at, lane.retry_at) for lane in self.lanes
-                    if lane.interval is not None and selected(lane)), default=None)
+        return min(
+            (
+                max(lane.next_at, lane.retry_at)
+                for lane in self.lanes
+                if lane.interval is not None and selected(lane)
+            ),
+            default=None,
+        )
 
     @staticmethod
     def _due(lane):
@@ -82,16 +88,18 @@ class RoundRobin:
             self.remaining = 0
             # Foreground precedence pauses model and network work only. Due local
             # bookkeeping (retention, diary scheduling, commitment expiry) still runs.
-            lane = next((lane for lane in self.lanes if lane.maintenance and self._due(lane)),
-                        None)
+            lane = next((lane for lane in self.lanes if lane.maintenance and self._due(lane)), None)
             if lane is None:
                 return Selection(None, UnitResult(False), False, blocked=True)
             selected = await self._run(lane)
             # Further due bookkeeping runs before the blocked wait, even when this unit
             # changed nothing; the wait then targets the next future maintenance.
-            return Selection(selected.lane, selected.result,
-                             any(lane.maintenance and self._due(lane) for lane in self.lanes),
-                             blocked=True)
+            return Selection(
+                selected.lane,
+                selected.result,
+                any(lane.maintenance and self._due(lane) for lane in self.lanes),
+                blocked=True,
+            )
         while self.remaining:
             lane = self.lanes[self.cursor]
             self.cursor = (self.cursor + 1) % len(self.lanes)
@@ -109,11 +117,16 @@ class RoundRobin:
             # turn is still consumed: the failed operation may have used its
             # one model attempt, and its domain keeps lease/UNKNOWN custody.
             lane.failures += 1
-            delay = min(FAILURE_BACKOFF_SECONDS * 2 ** (lane.failures - 1),
-                        FAILURE_BACKOFF_MAX_SECONDS)
+            delay = min(
+                FAILURE_BACKOFF_SECONDS * 2 ** (lane.failures - 1), FAILURE_BACKOFF_MAX_SECONDS
+            )
             lane.retry_at = monotonic() + delay
-            log.warning("autonomous lane %s failed (%s); retry in %ss",
-                        lane.name, getattr(error, "code", type(error).__name__), delay)
+            log.warning(
+                "autonomous lane %s failed (%s); retry in %ss",
+                lane.name,
+                getattr(error, "code", type(error).__name__),
+                delay,
+            )
             return Selection(lane.name, UnitResult(False), bool(self.remaining))
         lane.failures, lane.retry_at = 0, 0
         if lane.interval is not None:
@@ -133,7 +146,10 @@ def foreground_clear(core):
     # This is a scheduling hint over the native signed input receipt, not a new
     # permission or input queue. Final admission remains owned by the domain.
     pending = owner_authority.owner_waiting(
-        core.store, core.settings, core.clock(), authority=view.authority.as_dict(),
+        core.store,
+        core.settings,
+        core.clock(),
+        authority=view.authority.as_dict(),
     )
     return not pending
 
@@ -154,12 +170,19 @@ def native_selector(core, worker_id) -> RoundRobin:
     Core and domain owners provide the paid-admission/final-dispatch fences. This
     foreground check is a scheduling hint and grants no model or tool authority.
     """
-    if core.settings.consolidation_enabled and _allowed(core, ("consolidation",)) and not callable(
-        getattr(core.consolidation, "run_step", None),
+    if (
+        core.settings.consolidation_enabled
+        and _allowed(core, ("consolidation",))
+        and not callable(
+            getattr(core.consolidation, "run_step", None),
+        )
     ):
         raise CoreError("NATIVE_CONSOLIDATION_STEP_REQUIRED", 503)
-    if (core.settings.memory_enabled and _allowed(core, ("memory",))
-        and not callable(getattr(core, "extract_step", None))):
+    if (
+        core.settings.memory_enabled
+        and _allowed(core, ("memory",))
+        and not callable(getattr(core, "extract_step", None))
+    ):
         raise CoreError("NATIVE_MEMORY_STEP_REQUIRED", 503)
 
     def lane(name, operation, purposes=(), *, interval=None, maintenance=False):
@@ -209,27 +232,45 @@ def native_selector(core, worker_id) -> RoundRobin:
             except CoreError:
                 return UnitResult(False)
             authority = encode(view.authority.as_dict())
-            kinds = [kind for kind, purpose in (
-                ("life", "life"), ("share", "proactive"), ("commitment", "goals"),
-                ("followup", "proactive"),
-            ) if purpose in view.policy.purposes]
+            kinds = [
+                kind
+                for kind, purpose in (
+                    ("life", "life"),
+                    ("share", "proactive"),
+                    ("commitment", "goals"),
+                    ("followup", "proactive"),
+                )
+                if purpose in view.policy.purposes
+            ]
         row = core.store.one(
-            "SELECT j.* FROM jobs j JOIN events e USING(event_id) "
-            "WHERE j.kind='activity' AND e.redacted=0 "
-            "AND json_extract(e.body_json,'$.notice.kind') IN (SELECT value FROM json_each(?)) "
-            "AND (? IS NULL OR json(j.authority_json)=json(?)) "
-            "AND (j.state IN ('QUEUED','RETRY_WAIT') "
-            "OR (j.state='RUNNING' AND j.lease_until<=?)) "
-            "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) "
-            "ORDER BY j.rowid LIMIT 1",
+            (
+                (
+                    'SELECT j.* FROM jobs j JOIN events e USING(event_id) '
+                    "WHERE j.kind='activity' AND e.redacted=0 AND (CASE "
+                    'WHEN e.body_json IS JSON THEN '
+                    "(e.body_json::json#>>'{notice,kind}') END) IN (SELECT "
+                    'value FROM json_array_elements_text(%s::json) AS '
+                    'ids(value)) AND (%s::text IS NULL OR '
+                    'j.authority_json::jsonb=%s::jsonb) AND (j.state IN '
+                    "('QUEUED','RETRY_WAIT') OR (j.state='RUNNING' AND "
+                    'j.lease_until<=%s)) AND (j.next_attempt_at IS NULL OR '
+                    'j.next_attempt_at<=%s) ORDER BY j.record_sequence '
+                    'LIMIT 1'
+                )
+            ),
             (encode(kinds), authority, authority, core.clock(), core.clock()),
         )
         if row is None:
             return UnitResult(False)
         if authority is not None:
             try:
-                owner_authority.check_job(core.store, core.settings, core.clock, row,
-                    purpose=owner_authority.model_purpose(core.store, "activity", row["job_id"]))
+                owner_authority.check_job(
+                    core.store,
+                    core.settings,
+                    core.clock,
+                    row,
+                    purpose=owner_authority.model_purpose(core.store, "activity", row["job_id"]),
+                )
             except CoreError:
                 return UnitResult(False)
 
@@ -270,11 +311,18 @@ def native_selector(core, worker_id) -> RoundRobin:
             return UnitResult(False)
         now = core.clock()
         row = core.store.one(
-            "SELECT j.job_id FROM jobs j JOIN events e USING(event_id) "
-            "WHERE j.kind='rem' AND e.redacted=0 AND json(j.authority_json)=json(?) "
-            "AND (j.state='QUEUED' OR (j.state='RETRY_WAIT' AND j.next_attempt_at<=?) "
-            "OR (j.state='RUNNING' AND j.lease_until<=?)) "
-            "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) ORDER BY j.rowid LIMIT 1",
+            (
+                (
+                    'SELECT j.job_id FROM jobs j JOIN events e '
+                    "USING(event_id) WHERE j.kind='rem' AND e.redacted=0 "
+                    'AND j.authority_json::jsonb=%s::jsonb AND '
+                    "(j.state='QUEUED' OR (j.state='RETRY_WAIT' AND "
+                    "j.next_attempt_at<=%s) OR (j.state='RUNNING' AND "
+                    'j.lease_until<=%s)) AND (j.next_attempt_at IS NULL OR '
+                    'j.next_attempt_at<=%s) ORDER BY j.record_sequence '
+                    'LIMIT 1'
+                )
+            ),
             (encode(view.authority.as_dict()), now, now, now),
         )
         if row is None:
@@ -287,7 +335,11 @@ def native_selector(core, worker_id) -> RoundRobin:
 
     async def social():
         result = await social_autonomy_runtime.run_once(
-            core.store, core.settings, core.model, core.clock, worker_id=worker_id,
+            core.store,
+            core.settings,
+            core.model,
+            core.clock,
+            worker_id=worker_id,
         )
         return UnitResult(result)
 
@@ -299,20 +351,23 @@ def native_selector(core, worker_id) -> RoundRobin:
     async def watch():
         from companion import watch_ledger
 
-        return await run_native_unit(watch_ledger.run_once, core.store, core.settings,
-                                     core.model, core.clock)
+        return await run_native_unit(
+            watch_ledger.run_once, core.store, core.settings, core.model, core.clock
+        )
 
     async def style():
         from companion import style_distill
 
-        return await run_native_unit(style_distill.run_once, core.store, core.settings,
-                                     core.model, core.clock)
+        return await run_native_unit(
+            style_distill.run_once, core.store, core.settings, core.model, core.clock
+        )
 
     async def jargon_unit():
         from companion import jargon
 
-        return await run_native_unit(jargon.run_once, core.store, core.settings,
-                                     core.model, core.clock)
+        return await run_native_unit(
+            jargon.run_once, core.store, core.settings, core.model, core.clock
+        )
 
     async def meme_caption():
         if core.settings.mode != "live" or not core.settings.meme_semantics_enabled:
@@ -322,30 +377,36 @@ def native_selector(core, worker_id) -> RoundRobin:
     async def memory_index():
         from companion.memory_index_work import warm_once
 
-        return UnitResult(await warm_once(core.memory, core.clock,
-                                          lambda: _allowed(core, ("memory",))))
+        return UnitResult(
+            await warm_once(core.memory, core.clock, lambda: _allowed(core, ("memory",)))
+        )
 
-    return RoundRobin((
-        maintenance("retention", core.expire_raw_events),
-        maintenance("media_cleanup", core.cleanup_media),
-        maintenance("diary_schedule", core.diary.schedule_due, ("diary",)),
-        maintenance("consolidation_schedule", core.consolidation.schedule_due, ("consolidation",)),
-        maintenance("commitment_expiry", core.goals.expire_commitments, ("goals",)),
-        lane("wake", wake_goal, WAKE_PURPOSES, interval=MAINTENANCE_SECONDS),
-        lane("goal", schedule_goal, ("goals", "exploration")),
-        lane("life_topic", life_topic, ("life",)),
-        lane("private_share", private_share, ("proactive",)),
-        lane("follow_up", follow_up, ("proactive",)),
-        lane("activity", activity),
-        lane("poke", poke, ("poke",)),
-        lane("meme_caption", meme_caption, ("meme",)),
-        lane("watch", watch, ("exploration",)),
-        lane("style", style, ("expression",)),
-        lane("jargon", jargon_unit, ("memory",)),
-        lane("diary", diary, ("diary",)),
-        lane("consolidation", consolidation, ("consolidation",)),
-        lane("memory", memory, ("memory",)),
-        lane("memory_index", memory_index, ("memory",), interval=1.0),
-        lane("rem", rem, ("rem", "memory")),
-        lane("social", social, ("social",)),
-    ), lambda: foreground_clear(core))
+    return RoundRobin(
+        (
+            maintenance("retention", core.expire_raw_events),
+            maintenance("media_cleanup", core.cleanup_media),
+            maintenance("diary_schedule", core.diary.schedule_due, ("diary",)),
+            maintenance(
+                "consolidation_schedule", core.consolidation.schedule_due, ("consolidation",)
+            ),
+            maintenance("commitment_expiry", core.goals.expire_commitments, ("goals",)),
+            lane("wake", wake_goal, WAKE_PURPOSES, interval=MAINTENANCE_SECONDS),
+            lane("goal", schedule_goal, ("goals", "exploration")),
+            lane("life_topic", life_topic, ("life",)),
+            lane("private_share", private_share, ("proactive",)),
+            lane("follow_up", follow_up, ("proactive",)),
+            lane("activity", activity),
+            lane("poke", poke, ("poke",)),
+            lane("meme_caption", meme_caption, ("meme",)),
+            lane("watch", watch, ("exploration",)),
+            lane("style", style, ("expression",)),
+            lane("jargon", jargon_unit, ("memory",)),
+            lane("diary", diary, ("diary",)),
+            lane("consolidation", consolidation, ("consolidation",)),
+            lane("memory", memory, ("memory",)),
+            lane("memory_index", memory_index, ("memory",), interval=1.0),
+            lane("rem", rem, ("rem", "memory")),
+            lane("social", social, ("social",)),
+        ),
+        lambda: foreground_clear(core),
+    )

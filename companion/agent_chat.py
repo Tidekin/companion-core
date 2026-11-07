@@ -2,8 +2,8 @@
 
 import asyncio
 import json
-import sqlite3
 
+import psycopg
 from pydantic_ai import DeferredToolRequests
 
 from companion import qq_video, reply_revision
@@ -36,9 +36,9 @@ async def reply(core, job, snapshots):
                     wait(core, job, persistence)
                     return None, persistence
                 break
-            except sqlite3.OperationalError as error:
-                if (getattr(error, "sqlite_errorcode", 0) & 0xFF != sqlite3.SQLITE_BUSY
-                    or core.store.db.in_transaction):
+            except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected,
+                    psycopg.errors.SerializationFailure):
+                if core.store.in_transaction:
                     raise
                 # Restore only revalidates saved inputs and original Reader/voice
                 # results. Model requests and tool execution remain outside retry.
@@ -116,7 +116,8 @@ def wait(core, job, persistence):
     with core.store.transaction():
         persistence.check()
         core.store.execute(
-            "UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL,next_attempt_at=?,"
-            "attempts=MAX(0,attempts-1),updated_at=? WHERE job_id=? AND lease_token=?",
+            "UPDATE jobs SET state = 'RETRY_WAIT', lease_token = NULL, next_attempt_at = %s, "
+            'attempts = GREATEST(0, attempts - 1), updated_at = %s WHERE job_id = %s AND '
+            'lease_token = %s',
             (after(core.clock(), 1), core.clock(), job["job_id"], job["lease_token"]),
         )

@@ -21,51 +21,73 @@ CAPABILITIES = {"windows.read_text": 0, "windows.write_text": 2, "dsh.run": 2}
 
 
 def erase_executive(store, event_ids):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='tool_tasks'"):
+    if not store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE "
+        "relnamespace=current_schema()::regnamespace AND relname='tool_tasks' AND relkind IN "
+        "('r','p')"
+    ):
         return
     tasks = set()
     for event_id in event_ids:
         tasks.update(
             row["task_id"]
             for row in store.rows(
-                "SELECT task_id FROM tool_evidence WHERE event_id=? UNION SELECT task_id FROM "
-                "tool_tasks WHERE result_event_id=?",
+                "SELECT task_id FROM tool_evidence WHERE event_id = %s UNION SELECT task_id FROM "
+                "tool_tasks WHERE result_event_id = %s",
                 (event_id, event_id),
             )
         )
-    with nullcontext() if store.db.in_transaction else store.transaction():
-        cloud = store.one("SELECT 1 FROM sqlite_master WHERE name='cloud_cost_snapshots'")
+    with nullcontext() if store.in_transaction else store.transaction():
+        cloud = store.one(
+            "SELECT 1 FROM pg_catalog.pg_class WHERE "
+            "relnamespace=current_schema()::regnamespace AND relname='cloud_cost_snapshots' AND "
+            "relkind IN ('r','p')"
+        )
         for task_id in tasks:
-            held = store.one(
-                "SELECT 1 FROM cloud_cost_snapshots c JOIN tool_tasks t "
-                "ON c.reference_type='tool' AND c.reference_id=t.task_id WHERE t.task_id=? "
-                "AND t.state='RUNNING' AND c.state='RESERVED' AND c.legacy=0 "
-                "AND c.dispatched_at IS NULL", (task_id,),
-            ) if cloud else None
+            held = (
+                store.one(
+                    (
+                        'SELECT 1 FROM cloud_cost_snapshots AS c JOIN '
+                        "tool_tasks AS t ON c.reference_type = 'tool' AND "
+                        'c.reference_id = t.task_id WHERE t.task_id = %s AND '
+                        "t.state = 'RUNNING' AND c.state = 'RESERVED' AND "
+                        'c.legacy = 0 AND c.dispatched_at IS NULL'
+                    ),
+                    (task_id,),
+                )
+                if cloud
+                else None
+            )
             if held:
-                store.execute("UPDATE tool_tasks SET billed_micro_usd=0 WHERE task_id=?",
-                              (task_id,))
+                store.execute(
+                    "UPDATE tool_tasks SET billed_micro_usd = 0 WHERE task_id = %s", (task_id,)
+                )
                 store.audit("tool.cancelled_before_dispatch", task_id, task_id, utcnow())
             store.execute(
-                "UPDATE tool_tasks SET state='CANCELLED',scope_json='{}',scope_sha256='',"
-                "lease_token=NULL,lease_until=NULL,result_event_id=NULL,redacted=1,"
-                "last_error_code='PRIVACY_CHANGED' WHERE task_id=?",
+                "UPDATE tool_tasks SET state = 'CANCELLED', scope_json = '{}', scope_sha256 = '', "
+                "lease_token = NULL, lease_until = NULL, result_event_id = NULL, redacted = 1, "
+                "last_error_code = 'PRIVACY_CHANGED' WHERE task_id = %s",
                 (task_id,),
             )
-            store.execute("DELETE FROM tool_approvals WHERE task_id=?", (task_id,))
-            store.execute("DELETE FROM tool_evidence WHERE task_id=?", (task_id,))
+            store.execute("DELETE FROM tool_approvals WHERE task_id = %s", (task_id,))
+            store.execute("DELETE FROM tool_evidence WHERE task_id = %s", (task_id,))
             if cloud:
                 cloud_budget.sync_reference(store, "tool", task_id)
 
 
 def restore_executive(store, now):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='tool_tasks'"):
+    if not store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE "
+        "relnamespace=current_schema()::regnamespace AND relname='tool_tasks' AND relkind IN "
+        "('r','p')"
+    ):
         return
-    store.execute("UPDATE tool_approvals SET revoked_at=? WHERE revoked_at IS NULL", (now,))
+    store.execute("UPDATE tool_approvals SET revoked_at = %s WHERE revoked_at IS NULL", (now,))
     store.execute(
-        "UPDATE tool_tasks SET state=CASE WHEN state='RUNNING' THEN 'UNKNOWN' ELSE 'CANCELLED' END,"
-        "lease_token=NULL,lease_until=NULL,last_error_code='RESTORED_EXECUTION_NOT_AUTHORIZED' "
-        "WHERE state IN ('WAITING_APPROVAL','QUEUED','LEASED','RUNNING')"
+        "UPDATE tool_tasks SET state = CASE WHEN state = 'RUNNING' THEN 'UNKNOWN' ELSE 'CANCELLED' "
+        "END, lease_token = NULL, lease_until = NULL, last_error_code = "
+        "'RESTORED_EXECUTION_NOT_AUTHORIZED' WHERE state IN ('WAITING_APPROVAL', 'QUEUED', "
+        "'LEASED', 'RUNNING')"
     )
 
 
@@ -124,22 +146,37 @@ class Executive:
         return [
             row["event_id"]
             for row in self.store.rows(
-                "SELECT event_id FROM tool_evidence WHERE task_id=? ORDER BY event_id", (task_id,)
+                "SELECT event_id FROM tool_evidence WHERE task_id = %s ORDER BY event_id NULLS "
+                "FIRST",
+                (task_id,),
             )
         ]
 
     def validate_sources(self, source_ids):
         for source_id in source_ids:
             if not self.store.one(
-                "SELECT 1 FROM events WHERE event_id=? AND actor_id='owner' AND "
-                "source='qq.onebot' AND privacy_scope='private' AND redacted=0 "
-                "AND ingested_at>=?",
+                "SELECT 1 FROM events WHERE event_id = %s AND actor_id = 'owner' AND source = "
+                "'qq.onebot' AND privacy_scope = 'private' AND redacted = 0 AND ingested_at >= %s",
                 (source_id, after(self.clock(), -86400 * self.settings.raw_event_retention_days)),
             ):
                 raise CoreError("TOOL_OWNER_SOURCE_REQUIRED", 403)
 
     def get(self, task_id):
-        row = self.store.one("SELECT * FROM tool_tasks WHERE task_id=?", (task_id,))
+        row = self.store.one(
+            "SELECT tool_tasks.task_id AS task_id, tool_tasks.idempotency_key AS "
+            "idempotency_key, tool_tasks.request_sha256 AS request_sha256, tool_tasks.scope_sha256 "
+            "AS scope_sha256, tool_tasks.executor_id AS executor_id, tool_tasks.capability AS "
+            "capability, tool_tasks.scope_json AS scope_json, tool_tasks.risk_level AS risk_level, "
+            "tool_tasks.state AS state, tool_tasks.captured_privacy_epoch AS "
+            "captured_privacy_epoch, tool_tasks.lease_token AS lease_token, tool_tasks.lease_until "
+            "AS lease_until, tool_tasks.reserved_micro_usd AS reserved_micro_usd, "
+            "tool_tasks.billed_micro_usd AS billed_micro_usd, tool_tasks.dispatched_at AS "
+            "dispatched_at, tool_tasks.result_event_id AS result_event_id, "
+            "tool_tasks.last_error_code AS last_error_code, tool_tasks.created_at AS created_at, "
+            "tool_tasks.updated_at AS updated_at, tool_tasks.redacted AS redacted FROM tool_tasks "
+            "AS tool_tasks WHERE tool_tasks.task_id = %s",
+            (task_id,),
+        )
         if not row:
             raise CoreError("TOOL_TASK_NOT_FOUND", 404)
         return row
@@ -178,7 +215,20 @@ class Executive:
         s, now = self.store, self.clock()
         with s.transaction():
             previous = s.one(
-                "SELECT * FROM tool_tasks WHERE idempotency_key=?", (request.idempotency_key,)
+                "SELECT tool_tasks.task_id AS task_id, tool_tasks.idempotency_key AS "
+                "idempotency_key, tool_tasks.request_sha256 AS request_sha256, "
+                "tool_tasks.scope_sha256 AS scope_sha256, tool_tasks.executor_id AS executor_id, "
+                "tool_tasks.capability AS capability, tool_tasks.scope_json AS scope_json, "
+                "tool_tasks.risk_level AS risk_level, tool_tasks.state AS state, "
+                "tool_tasks.captured_privacy_epoch AS captured_privacy_epoch, "
+                "tool_tasks.lease_token AS lease_token, tool_tasks.lease_until AS lease_until, "
+                "tool_tasks.reserved_micro_usd AS reserved_micro_usd, tool_tasks.billed_micro_usd "
+                "AS billed_micro_usd, tool_tasks.dispatched_at AS dispatched_at, "
+                "tool_tasks.result_event_id AS result_event_id, tool_tasks.last_error_code AS "
+                "last_error_code, tool_tasks.created_at AS created_at, tool_tasks.updated_at AS "
+                "updated_at, tool_tasks.redacted AS redacted FROM tool_tasks AS tool_tasks WHERE "
+                "tool_tasks.idempotency_key = %s",
+                (request.idempotency_key,),
             )
             if previous:
                 if previous["request_sha256"] != request_hash:
@@ -233,7 +283,7 @@ class Executive:
                 created_at=now,
             )
             s.execute(
-                "UPDATE tool_tasks SET state=?,updated_at=? WHERE task_id=?",
+                "UPDATE tool_tasks SET state = %s, updated_at = %s WHERE task_id = %s",
                 ("QUEUED" if decision.decision == "APPROVE" else "CANCELLED", now, task_id),
             )
             s.audit(
@@ -246,16 +296,16 @@ class Executive:
 
     def recover(self):
         now, s = self.clock(), self.store
-        with nullcontext() if s.db.in_transaction else s.transaction():
+        with nullcontext() if s.in_transaction else s.transaction():
             s.execute(
-                "UPDATE tool_tasks SET state='UNKNOWN',lease_token=NULL,"
-                "last_error_code='EXECUTION_UNCERTAIN',updated_at=? WHERE state='RUNNING' "
-                "AND lease_until<=?",
+                "UPDATE tool_tasks SET state = 'UNKNOWN', lease_token = NULL, last_error_code = "
+                "'EXECUTION_UNCERTAIN', updated_at = %s WHERE state = 'RUNNING' AND lease_until <= "
+                "%s",
                 (now, now),
             )
             s.execute(
-                "UPDATE tool_tasks SET state='QUEUED',lease_token=NULL,updated_at=? "
-                "WHERE state='LEASED' AND lease_until<=?",
+                "UPDATE tool_tasks SET state = 'QUEUED', lease_token = NULL, updated_at = %s WHERE "
+                "state = 'LEASED' AND lease_until <= %s",
                 (now, now),
             )
 
@@ -266,12 +316,14 @@ class Executive:
                 owner_check()
             now = self.clock()
             self.get(task_id)
-            s.execute("UPDATE tool_approvals SET revoked_at=? WHERE task_id=?", (now, task_id))
             s.execute(
-                "UPDATE tool_tasks SET state=CASE WHEN state='RUNNING' THEN 'UNKNOWN' "
-                "ELSE 'CANCELLED' END,lease_token=NULL,lease_until=NULL,"
-                "last_error_code='OWNER_REVOKED',updated_at=? WHERE task_id=? AND state IN "
-                "('WAITING_APPROVAL','QUEUED','LEASED','RUNNING')",
+                "UPDATE tool_approvals SET revoked_at = %s WHERE task_id = %s", (now, task_id)
+            )
+            s.execute(
+                "UPDATE tool_tasks SET state = CASE WHEN state = 'RUNNING' THEN 'UNKNOWN' ELSE "
+                "'CANCELLED' END, lease_token = NULL, lease_until = NULL, last_error_code = "
+                "'OWNER_REVOKED', updated_at = %s WHERE task_id = %s AND state IN "
+                "('WAITING_APPROVAL', 'QUEUED', 'LEASED', 'RUNNING')",
                 (now, task_id),
             )
             s.audit("tool.revoked", task_id, task_id, now)
@@ -283,8 +335,20 @@ class Executive:
         self.recover()
         with self.store.transaction():
             row = self.store.one(
-                "SELECT * FROM tool_tasks WHERE state='QUEUED' "
-                "AND redacted=0 ORDER BY created_at LIMIT 1"
+                "SELECT tool_tasks.task_id AS task_id, tool_tasks.idempotency_key AS "
+                "idempotency_key, tool_tasks.request_sha256 AS request_sha256, "
+                "tool_tasks.scope_sha256 AS scope_sha256, tool_tasks.executor_id AS executor_id, "
+                "tool_tasks.capability AS capability, tool_tasks.scope_json AS scope_json, "
+                "tool_tasks.risk_level AS risk_level, tool_tasks.state AS state, "
+                "tool_tasks.captured_privacy_epoch AS captured_privacy_epoch, "
+                "tool_tasks.lease_token AS lease_token, tool_tasks.lease_until AS lease_until, "
+                "tool_tasks.reserved_micro_usd AS reserved_micro_usd, tool_tasks.billed_micro_usd "
+                "AS billed_micro_usd, tool_tasks.dispatched_at AS dispatched_at, "
+                "tool_tasks.result_event_id AS result_event_id, tool_tasks.last_error_code AS "
+                "last_error_code, tool_tasks.created_at AS created_at, tool_tasks.updated_at AS "
+                "updated_at, tool_tasks.redacted AS redacted FROM tool_tasks AS tool_tasks WHERE "
+                "tool_tasks.state = 'QUEUED' AND tool_tasks.redacted = 0 ORDER BY "
+                "tool_tasks.created_at NULLS FIRST LIMIT 1"
             )
             if not row:
                 return None
@@ -293,8 +357,8 @@ class Executive:
             runtime_config.bind(self.store, self.settings, self.clock, "tool:" + row["task_id"])
             token = uid("lease")
             self.store.execute(
-                "UPDATE tool_tasks SET state='LEASED',lease_token=?,lease_until=? "
-                "WHERE task_id=? AND state='QUEUED'",
+                "UPDATE tool_tasks SET state = 'LEASED', lease_token = %s, lease_until = %s WHERE "
+                "task_id = %s AND state = 'QUEUED'",
                 (token, after(self.clock(), self.config.timeout_seconds + 30), row["task_id"]),
             )
             return self.get(row["task_id"])
@@ -346,8 +410,8 @@ class Executive:
             if current["risk_level"] and (
                 not cfg.allow_changes
                 or not s.one(
-                    "SELECT 1 FROM tool_approvals WHERE task_id=? AND scope_sha256=? AND "
-                    "decision='APPROVE' AND revoked_at IS NULL AND expires_at>?",
+                    "SELECT 1 FROM tool_approvals WHERE task_id = %s AND scope_sha256 = %s AND "
+                    "decision = 'APPROVE' AND revoked_at IS NULL AND expires_at > %s",
                     (current["task_id"], current["scope_sha256"], now),
                 )
             ):
@@ -357,13 +421,17 @@ class Executive:
             month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
             cost = scope["max_cost_micro_usd"]
             daily = s.one(
-                "SELECT COUNT(*) n,COALESCE(SUM(billed_micro_usd),0) cost FROM "
-                "tool_tasks WHERE dispatched_at>=?",
+                (
+                    "SELECT COUNT(*) n,COALESCE(SUM(billed_micro_usd),0) "
+                    "cost FROM tool_tasks WHERE dispatched_at>=%s"
+                ),
                 (day.isoformat(),),
             )
             monthly = s.one(
-                "SELECT COALESCE(SUM(billed_micro_usd),0) cost FROM tool_tasks "
-                "WHERE dispatched_at>=?",
+                (
+                    "SELECT COALESCE(SUM(billed_micro_usd),0) cost FROM "
+                    "tool_tasks WHERE dispatched_at>=%s"
+                ),
                 (month.isoformat(),),
             )
             shared_monthly = total_monthly(s, month.isoformat(timespec="microseconds"))
@@ -376,14 +444,23 @@ class Executive:
             ):
                 raise CoreError("TOOL_BUDGET_EXHAUSTED", 429)
             cloud_budget.reserve(
-                s, self.settings, reference_type="tool", reference_id=current["task_id"],
-                estimated_micro_usd=cost, now=now, task_kind="tool", task_id=current["task_id"],
-                pricing={"pricing_known": True, "executor_id": current["executor_id"],
-                         "request_estimate_micro_usd": cost},
+                s,
+                self.settings,
+                reference_type="tool",
+                reference_id=current["task_id"],
+                estimated_micro_usd=cost,
+                now=now,
+                task_kind="tool",
+                task_id=current["task_id"],
+                pricing={
+                    "pricing_known": True,
+                    "executor_id": current["executor_id"],
+                    "request_estimate_micro_usd": cost,
+                },
             )
             s.execute(
-                "UPDATE tool_tasks SET state='RUNNING',reserved_micro_usd=?,"
-                "billed_micro_usd=?,dispatched_at=?,updated_at=? WHERE task_id=?",
+                "UPDATE tool_tasks SET state = 'RUNNING', reserved_micro_usd = %s, "
+                "billed_micro_usd = %s, dispatched_at = %s, updated_at = %s WHERE task_id = %s",
                 (cost, cost, now, now, current["task_id"]),
             )
             return endpoint, ExecutionEnvelope(
@@ -415,9 +492,9 @@ class Executive:
                 outcome = uid("evt_tool")
                 conversation = "conv_internal_observations"
                 s.execute(
-                    "INSERT OR IGNORE INTO conversations(conversation_id,platform,"
-                    "platform_session_key,scope,owner_actor_id,created_at) VALUES "
-                    "(?, 'companion','observations','private','owner',?)",
+                    "INSERT INTO conversations (conversation_id, platform, platform_session_key, "
+                    "scope, owner_actor_id, created_at) VALUES (%s, 'companion', 'observations', "
+                    "'private', 'owner', %s) ON CONFLICT DO NOTHING",
                     (conversation, now),
                 )
                 s.insert(
@@ -456,8 +533,8 @@ class Executive:
                 for source in self.sources(current["task_id"]):
                     s.insert("event_dependencies", event_id=outcome, source_event_id=source)
             s.execute(
-                "UPDATE tool_tasks SET state=?,billed_micro_usd=?,result_event_id=?,"
-                "last_error_code=?,lease_token=NULL,updated_at=? WHERE task_id=?",
+                "UPDATE tool_tasks SET state = %s, billed_micro_usd = %s, result_event_id = %s, "
+                "last_error_code = %s, lease_token = NULL, updated_at = %s WHERE task_id = %s",
                 (
                     receipt.status,
                     current["reserved_micro_usd"]
@@ -484,8 +561,8 @@ class Executive:
         except CoreError as error:
             with self.store.transaction():
                 self.store.execute(
-                    "UPDATE tool_tasks SET state='CANCELLED',lease_token=NULL,"
-                    "last_error_code=? WHERE task_id=? AND lease_token=?",
+                    "UPDATE tool_tasks SET state = 'CANCELLED', lease_token = NULL, "
+                    "last_error_code = %s WHERE task_id = %s AND lease_token = %s",
                     (error.code, task["task_id"], task["lease_token"]),
                 )
             return True
@@ -497,9 +574,9 @@ class Executive:
         except Exception:
             with self.store.transaction():
                 self.store.execute(
-                    "UPDATE tool_tasks SET state='UNKNOWN',lease_token=NULL,"
-                    "last_error_code='EXECUTION_UNCERTAIN' WHERE task_id=? AND "
-                    "state='RUNNING' AND lease_token=?",
+                    "UPDATE tool_tasks SET state = 'UNKNOWN', lease_token = NULL, last_error_code "
+                    "= 'EXECUTION_UNCERTAIN' WHERE task_id = %s AND state = 'RUNNING' AND "
+                    "lease_token = %s",
                     (task["task_id"], task["lease_token"]),
                 )
                 cloud_budget.sync_reference(self.store, "tool", task["task_id"])

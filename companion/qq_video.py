@@ -16,8 +16,9 @@ def current(store, settings, approval, job):
     video = value.get("video")
     source = {key: item for key, item in value.items() if key != "video"}
     primary = store.one(
-        "SELECT a.logical_request_id,a.payload_sha256,m.state,m.scenario FROM model_admissions a "
-        "JOIN model_usage m USING(request_id) WHERE request_id=?", (value["request_id"],),
+        'SELECT a.logical_request_id, a.payload_sha256, m.state, m.scenario FROM model_admissions '
+        'AS a JOIN model_usage AS m USING (request_id) WHERE request_id = '
+        '%s', (value["request_id"],),
     )
     if (not isinstance(video, dict) or video.get("source_sha256") != paid_budget.sha(source)
         or video.get("privacy_epoch") != epoch(store)
@@ -32,8 +33,16 @@ def current(store, settings, approval, job):
 def result(store, settings, approval, job):
     video, _, _ = current(store, settings, approval, job)
     admission = store.one(
-        "SELECT a.*,m.state,m.scenario,m.job_id FROM model_admissions a JOIN model_usage m "
-        "USING(request_id) WHERE request_id=?", (video["request_id"],),
+        'SELECT a.request_id AS request_id, a.logical_request_id AS logical_request_id, '
+        'a.attempt_id AS attempt_id, a.attempt_number AS attempt_number, a.window_id AS window_id, '
+        'a.contract_sha256 AS contract_sha256, a.payload_sha256 AS payload_sha256, a.snapshot_json '
+        'AS snapshot_json, a.reserved_micro_usd AS reserved_micro_usd, a.input_bound AS '
+        'input_bound, a.output_bound AS output_bound, a.lease_token AS lease_token, a.lease_until '
+        'AS lease_until, a.io_started_at AS io_started_at, a.journal_path AS journal_path, '
+        'a.journal_id AS journal_id, a.measurement_json AS measurement_json, a.authority_json AS '
+        'authority_json, m.state AS state, m.scenario AS scenario, m.job_id AS job_id FROM '
+        'model_admissions AS a JOIN model_usage AS m ON a.request_id = m.request_id WHERE '
+        'COALESCE(a.request_id, m.request_id) = %s', (video["request_id"],),
     )
     if (not admission or admission["state"] != "SETTLED" or admission["scenario"] != "content_video"
         or admission["job_id"] != job["job_id"]
@@ -49,7 +58,10 @@ def _inputs(core, job):
     inputs = agent_images.inputs(core.store, core.settings, core.clock, job)
     sources = []
     for row, image, _ in inputs:
-        captured = core.store.one("SELECT * FROM captured_images WHERE item_id=?",
+        captured = core.store.one('SELECT captured_images.item_id AS item_id, '
+            'captured_images.proof_json AS proof_json, captured_images.mime AS mime, '
+            'captured_images.expires_at AS expires_at FROM captured_images AS captured_images '
+            'WHERE captured_images.item_id = %s',
                                    (row["item_id"],))
         if captured is None:
             raise CoreError("LIVE_VIDEO_SOURCE_CHANGED", 403)
@@ -66,9 +78,14 @@ class PreviewReplyReady(Exception):
 
 
 def _binding(core, job, call_id, args):
-    row = core.store.one("SELECT t.*,m.state AS primary_state,m.scenario,m.job_id AS primary_job "
-        "FROM agent_tool_calls t JOIN model_usage m ON m.request_id=t.model_request_id "
-        "WHERE t.job_id=? AND t.tool_call_id=?", (job["job_id"], call_id))
+    row = core.store.one('SELECT t.job_id AS job_id, t.tool_call_id AS tool_call_id, t.tool_name '
+        'AS tool_name, t.args_sha256 AS args_sha256, t.model_request_id AS model_request_id, '
+        't.state AS state, t.result_json AS result_json, t.metadata_json AS metadata_json, '
+        't.request_id AS request_id, t.created_at AS created_at, t.updated_at AS updated_at, '
+        't.voice_job_id AS voice_job_id, m.state AS primary_state, m.scenario AS scenario, '
+        'm.job_id AS primary_job FROM agent_tool_calls AS t JOIN model_usage AS m ON m.request_id '
+        '= t.model_request_id WHERE t.job_id = %s AND t.tool_call_id = '
+        '%s', (job["job_id"], call_id))
     if (not row or row["state"] != "STARTED" or row["tool_name"] != "understand_video"
         or row["args_sha256"] != paid_budget.sha(args)
         or row["primary_state"] != "SETTLED" or row["scenario"] != "chat"
@@ -128,14 +145,14 @@ async def analyze(core, job, snapshots, call_id, question, preview_reply):
         check_conversation(core, job, snapshots, purpose="content")
         binding = _binding(core, job, call_id, args)
         if binding["metadata_json"] is not None or core.store.one(
-            "SELECT 1 FROM agent_tool_calls WHERE job_id=? AND tool_name='understand_video' "
-            "AND metadata_json IS NOT NULL AND tool_call_id<>?", (job["job_id"], call_id),
+            "SELECT 1 FROM agent_tool_calls WHERE job_id = %s AND tool_name = 'understand_video' "
+            'AND NOT metadata_json IS NULL AND tool_call_id <> %s', (job["job_id"], call_id),
         ):
             raise CoreError("MODEL_VIDEO_ALREADY_ATTEMPTED", 409)
         if paid_budget.sha(_inputs(core, job)[0]) != metadata["source_sha256"]:
             raise CoreError("LIVE_VIDEO_SOURCE_CHANGED", 403)
-        core.store.execute("UPDATE agent_tool_calls SET metadata_json=?,updated_at=? "
-                           "WHERE job_id=? AND tool_call_id=? AND state='STARTED'",
+        core.store.execute('UPDATE agent_tool_calls SET metadata_json = %s, updated_at = %s WHERE '
+            "job_id = %s AND tool_call_id = %s AND state = 'STARTED'",
                            (encode(metadata), core.clock(), job["job_id"], call_id))
 
     def check():
@@ -164,19 +181,20 @@ async def analyze(core, job, snapshots, call_id, question, preview_reply):
             text = redact(preview_reply, core.settings)
             proof = {"kind": "video_preview_reply", "request_id": request_id,
                      "call_id": call_id, "text_sha256": paid_budget.sha(text)}
-            core.store.execute("UPDATE agent_tool_calls SET state='RETURNED',result_json=?,"
-                "updated_at=? WHERE job_id=? AND tool_call_id=?",
+            core.store.execute("UPDATE agent_tool_calls SET state = 'RETURNED', result_json = %s, "
+                'updated_at = %s WHERE job_id = %s AND tool_call_id = %s',
                 (encode({"state": "UNAVAILABLE", "reason": "HTTP_503"}), core.clock(),
                  job["job_id"], call_id))
             snapshots.append(proof)
-            if core.store.execute("UPDATE agent_conversations SET phase='OUTPUT',output_text=?,"
-                "snapshots_json=?,updated_at=? WHERE job_id=? AND phase='READY' AND request_id=?",
+            if core.store.execute("UPDATE agent_conversations SET phase = 'OUTPUT', output_text = "
+                "%s, snapshots_json = %s, updated_at = %s WHERE job_id = %s AND phase = 'READY' "
+                'AND request_id = %s',
                 (text, encode(snapshots), core.clock(), job["job_id"],
-                 binding["model_request_id"])).rowcount != 1:
+                 binding["model_request_id"])) != 1:
                 raise CoreError("CONVERSATION_OUTPUT_REQUIRED", 409) from error
         raise PreviewReplyReady(text) from error
     check()
-    usage = core.store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
+    usage = core.store.one('SELECT state FROM model_usage WHERE request_id = %s', (request_id,))
     if not usage or usage["state"] != "SETTLED":
         raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
     text = redact(response.text, wire)

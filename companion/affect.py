@@ -14,7 +14,7 @@ RESET_KEY = "owner_feedback_reset_at"
 
 
 def feedback_reset_at(store):
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (RESET_KEY,))
+    row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (RESET_KEY,))
     if row is None:
         return None
     try:
@@ -61,19 +61,20 @@ def apply_feedback_reset(store, record):
     """Idempotent, monotonic projection; no event/fact/trait/autonomy deletion."""
     from companion.privacy import advance_epoch
 
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("AFFECT_RESET_REQUIRES_TRANSACTION")
     validate_reset_record(record)
     stamp = datetime.fromisoformat(record["at"]).astimezone(UTC).isoformat(timespec="microseconds")
     previous = feedback_reset_at(store)
     cutoff = max(stamp, previous or stamp)
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (RESET_KEY, cutoff))
+    store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO '
+        'UPDATE SET value = excluded.value, record_sequence = DEFAULT', (RESET_KEY, cutoff))
     removed = store.execute(
-        "DELETE FROM affect_evidence WHERE identity_id='companion' AND created_at<=?",
+        "DELETE FROM affect_evidence WHERE identity_id = 'companion' AND created_at <= %s",
         (cutoff,),
-    ).rowcount
+    )
     if cutoff != previous or removed:
-        store.execute("DELETE FROM affect_states WHERE identity_id='companion'")
+        store.execute("DELETE FROM affect_states WHERE identity_id = 'companion'")
         advance_epoch(store)
     return {"state": "RESET", "reset_at": cutoff}
 
@@ -153,11 +154,11 @@ def _feedback_clause(text):
 def owner_feedback(store, settings, event_id, now):
     """Revalidate original, retained owner wording; no summaries or inferred mood."""
     event = store.one(
-        "SELECT e.body_json,e.ingested_at,e.occurred_at FROM events e "
-        "JOIN conversations c USING(conversation_id) WHERE e.event_id=? AND e.redacted=0 "
-        "AND e.actor_id='owner' AND e.source='qq.onebot' AND e.privacy_scope='private' "
-        "AND e.event_type='message.received' AND c.scope='private' "
-        "AND c.owner_actor_id='owner' AND length(e.body_json)<=16000",
+        'SELECT e.body_json, e.ingested_at, e.occurred_at FROM events AS e JOIN conversations AS c '
+        "USING (conversation_id) WHERE e.event_id = %s AND e.redacted = 0 AND e.actor_id = 'owner' "
+        "AND e.source = 'qq.onebot' AND e.privacy_scope = 'private' AND e.event_type = "
+        "'message.received' AND c.scope = 'private' AND c.owner_actor_id = 'owner' AND "
+        'LENGTH(e.body_json) <= 16000',
         (event_id,),
     )
     if not event or not (
@@ -197,15 +198,17 @@ def owner_feedback(store, settings, event_id, now):
 
 
 def erase_affect(store, event_ids):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='affect_evidence' AND type='table'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='affect_evidence' AND relkind IN "
+        "('r','p')"):
         return
     changed = 0
     for event_id in event_ids:
         changed += store.execute(
-            "DELETE FROM affect_evidence WHERE event_id=?", (event_id,)
-        ).rowcount
+            'DELETE FROM affect_evidence WHERE event_id = %s', (event_id,)
+        )
     if changed:
-        store.execute("DELETE FROM affect_states WHERE identity_id='companion'")
+        store.execute("DELETE FROM affect_states WHERE identity_id = 'companion'")
 
 
 class AffectEngine:
@@ -219,7 +222,7 @@ class AffectEngine:
         if not callable(getattr(ledger, "reset_affect", None)):
             raise CoreError("AFFECT_RESET_NOT_INTEGRATED", 503)
         # Also available while Affect is disabled; reset cannot enable a feature.
-        with nullcontext() if self.store.db.in_transaction else self.store.transaction():
+        with nullcontext() if self.store.in_transaction else self.store.transaction():
             return ledger.reset_affect(self.store, request_id, self.clock())
 
     def revalidate(self, snapshot):
@@ -231,11 +234,18 @@ class AffectEngine:
         if not self.settings.affect_enabled:
             return result
         rows = self.store.rows(
-            "SELECT * FROM (SELECT a.*,a.rowid AS evidence_row,row_number() OVER "
-            "(PARTITION BY a.dimension ORDER BY a.rowid DESC) AS rank "
-            "FROM affect_evidence a JOIN events e USING(event_id) "
-            "WHERE identity_id='companion' AND e.redacted=0 AND a.expires_at>? "
-            "AND a.created_at<=?) WHERE rank<=? ORDER BY evidence_row DESC",
+            'SELECT _0.identity_id AS identity_id, _0.event_id AS event_id, _0.dimension AS '
+            'dimension, _0.prior_state AS prior_state, _0.new_state AS new_state, _0.reason_code '
+            'AS reason_code, _0.confidence AS confidence, _0.created_at AS created_at, '
+            '_0.expires_at AS expires_at, _0.evidence_row AS evidence_row, _0.rank AS rank FROM '
+            '(SELECT a.identity_id AS identity_id, a.event_id AS event_id, a.dimension AS '
+            'dimension, a.prior_state AS prior_state, a.new_state AS new_state, a.reason_code AS '
+            'reason_code, a.confidence AS confidence, a.created_at AS created_at, a.expires_at AS '
+            'expires_at, a.record_sequence AS evidence_row, ROW_NUMBER() OVER (PARTITION BY '
+            'a.dimension ORDER BY a.record_sequence DESC NULLS LAST) AS rank FROM affect_evidence '
+            "AS a JOIN events AS e ON a.event_id = e.event_id WHERE a.identity_id = 'companion' "
+            'AND e.redacted = 0 AND a.expires_at > %s AND a.created_at <= %s) AS _0 WHERE _0.rank '
+            '<= %s ORDER BY _0.evidence_row DESC NULLS LAST',
             (self.clock(), self.clock(), self.settings.affect_max_evidence),
         )
         seen = set()
@@ -291,19 +301,19 @@ class AffectEngine:
 
     def _topic_targets(self, row):
         previous = self.store.one(
-            "SELECT event_id,ingested_at FROM events WHERE conversation_id=? AND rowid<? "
-            "AND source='qq.onebot' AND actor_id='owner' AND NOT EXISTS (SELECT 1 FROM "
-            "affect_evidence a WHERE a.event_id=events.event_id AND a.dimension='engagement') "
-            "ORDER BY rowid DESC LIMIT 1",
+            'SELECT event_id, ingested_at FROM events WHERE conversation_id = %s AND '
+            "record_sequence < %s AND source = 'qq.onebot' AND actor_id = 'owner' AND NOT "
+            'EXISTS(SELECT 1 FROM affect_evidence AS a WHERE a.event_id = events.event_id AND '
+            "a.dimension = 'engagement') ORDER BY record_sequence DESC NULLS LAST LIMIT 1",
             (row["conversation_id"], row["event_row"]),
         )
         # A delivered share can be the subject even hours after the last owner turn.
         sent = self.store.one(
-            "SELECT origin_event_id FROM outbox WHERE conversation_id=? "
-            "AND action_type IN ('qq.private.reply','qq.private.proactive') AND state='SENT' "
-            "AND NOT EXISTS (SELECT 1 FROM affect_evidence a WHERE a.event_id=origin_event_id "
-            "AND a.dimension='engagement') "
-            "AND sent_at>? AND sent_at<=? ORDER BY sent_at DESC,rowid DESC LIMIT 1",
+            'SELECT origin_event_id FROM outbox WHERE conversation_id = %s AND action_type IN '
+            "('qq.private.reply', 'qq.private.proactive') AND state = 'SENT' AND NOT EXISTS(SELECT "
+            '1 FROM affect_evidence AS a WHERE a.event_id = origin_event_id AND a.dimension = '
+            "'engagement') AND sent_at > %s AND sent_at <= %s ORDER BY sent_at DESC NULLS LAST, "
+            'record_sequence DESC NULLS LAST LIMIT 1',
             (row["conversation_id"], previous["ingested_at"] if previous else "",
              row["created_at"]),
         )
@@ -311,7 +321,7 @@ class AffectEngine:
         if sent:
             targets.add(sent["origin_event_id"])
             targets.update(item["source_event_id"] for item in self.store.rows(
-                "SELECT source_event_id FROM event_dependencies WHERE event_id=?",
+                'SELECT source_event_id FROM event_dependencies WHERE event_id = %s',
                 (sent["origin_event_id"],)))
         elif previous:
             targets.add(previous["event_id"])
@@ -324,10 +334,13 @@ class AffectEngine:
         ids = set(source_ids)
         contact = topic = None
         for row in self.store.rows(
-            "SELECT a.*,e.conversation_id,e.rowid AS event_row "
-            "FROM affect_evidence a JOIN events e USING(event_id) "
-            "WHERE a.identity_id='companion' AND a.dimension='engagement' AND e.redacted=0 "
-            "AND a.expires_at>? ORDER BY a.rowid DESC LIMIT ?",
+            'SELECT a.identity_id AS identity_id, a.event_id AS event_id, a.dimension AS '
+            'dimension, a.prior_state AS prior_state, a.new_state AS new_state, a.reason_code AS '
+            'reason_code, a.confidence AS confidence, a.created_at AS created_at, a.expires_at AS '
+            'expires_at, e.conversation_id AS conversation_id, e.record_sequence AS event_row FROM '
+            'affect_evidence AS a JOIN events AS e ON a.event_id = e.event_id WHERE a.identity_id '
+            "= 'companion' AND a.dimension = 'engagement' AND e.redacted = 0 AND a.expires_at > %s "
+            'ORDER BY a.record_sequence DESC NULLS LAST LIMIT %s',
             (self.clock(), self.settings.affect_max_evidence),
         ):
             proposal = self.preview(row["event_id"])
@@ -345,7 +358,7 @@ class AffectEngine:
         if not self.settings.affect_enabled:
             return False
         s = self.store
-        with nullcontext() if s.db.in_transaction else s.transaction():
+        with nullcontext() if s.in_transaction else s.transaction():
             proposal = self.preview(event_id)
             if proposal is None:
                 return False
@@ -354,26 +367,39 @@ class AffectEngine:
             )
             prior = self.snapshot()["state"][dimension]
             changed = s.execute(
-                "INSERT OR IGNORE INTO affect_evidence VALUES ('companion',?,?,?,?,?,?,?,?)",
+                "INSERT INTO affect_evidence VALUES ('companion', %s, %s, %s, %s, %s, %s, %s, %s) "
+                'ON CONFLICT DO NOTHING',
                 (event_id, dimension, prior, value, cause, 1.0, proposal["created_at"], expires),
-            ).rowcount
+            )
             if not changed:
                 return False
             # Each dimension keeps its own bounded window, so frequent wording
             # feedback cannot evict a still-current contact or topic pause.
             s.execute(
-                "DELETE FROM affect_evidence WHERE identity_id='companion' AND rowid NOT IN "
-                "(SELECT rowid FROM (SELECT rowid,row_number() OVER (PARTITION BY dimension "
-                "ORDER BY rowid DESC) AS rank FROM affect_evidence "
-                "WHERE identity_id='companion') WHERE rank<=?)",
+                (
+                    'DELETE FROM affect_evidence WHERE identity_id = '
+                    "'companion' AND NOT record_sequence IN (SELECT "
+                    'record_sequence FROM (SELECT record_sequence AS rowid, '
+                    'ROW_NUMBER() OVER (PARTITION BY dimension ORDER BY '
+                    'record_sequence DESC NULLS LAST) AS rank FROM '
+                    "affect_evidence WHERE identity_id = 'companion') WHERE "
+                    'rank <= %s)'
+                ),
                 (self.settings.affect_max_evidence,),
             )
             current = self.snapshot()
             s.execute(
-                "INSERT INTO affect_states VALUES ('companion',?,?,?,?,1) "
-                "ON CONFLICT(identity_id) DO UPDATE SET state_json=excluded.state_json,"
-                "confidence=excluded.confidence,updated_at=excluded.updated_at,"
-                "expires_at=excluded.expires_at,version=version+1",
+                (
+                    (
+                        "INSERT INTO affect_states VALUES ('companion',%s,%s,%s,"
+                        '%s,1) ON CONFLICT(identity_id) DO UPDATE SET '
+                        'state_json=excluded.state_json,'
+                        'confidence=excluded.confidence,'
+                        'updated_at=excluded.updated_at,'
+                        'expires_at=excluded.expires_at,'
+                        'version=affect_states.version+1'
+                    )
+                ),
                 (
                     encode(current["state"]),
                     current["confidence"],

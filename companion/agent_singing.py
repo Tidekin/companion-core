@@ -54,7 +54,7 @@ def revalidate(store, settings, clock, job, snapshots):
 
 
 def selected(store, settings, clock, job, request_id):
-    saved = store.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+    saved = store.one('SELECT snapshots_json FROM agent_conversations WHERE job_id = %s',
                        (job["job_id"],))
     proofs = json.loads(saved["snapshots_json"]) if saved else []
     if not any(p["kind"] == "singing" and p["request_id"] == request_id for p in proofs):

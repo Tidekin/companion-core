@@ -18,7 +18,20 @@ def stopped_chain(store, ref):
     Bridge, which never held it, cannot leave anything of it unreconciled.
     """
     original = store.one(
-        "SELECT * FROM owner_authority_revisions WHERE grant_id=? AND revision=?",
+        'SELECT owner_authority_revisions.grant_id AS grant_id, owner_authority_revisions.revision '
+        'AS revision, owner_authority_revisions.operation_id AS operation_id, '
+        'owner_authority_revisions.request_sha256 AS request_sha256, '
+        'owner_authority_revisions.state AS state, owner_authority_revisions.policy_json AS '
+        'policy_json, owner_authority_revisions.policy_sha256 AS policy_sha256, '
+        'owner_authority_revisions.policy_redacted AS policy_redacted, '
+        'owner_authority_revisions.restore_generation AS restore_generation, '
+        'owner_authority_revisions.predecessor_sha256 AS predecessor_sha256, '
+        'owner_authority_revisions.record_sha256 AS record_sha256, '
+        'owner_authority_revisions.journal_id AS journal_id, '
+        'owner_authority_revisions.journal_path AS journal_path, '
+        'owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS '
+        'owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND '
+        'owner_authority_revisions.revision = %s',
         (ref.grant_id, ref.revision),
     )
     latest = owner_authority._latest(store)
@@ -30,8 +43,21 @@ def stopped_chain(store, ref):
             != ref.restore_generation):
         return None
     rows = store.rows(
-        "SELECT * FROM owner_authority_revisions WHERE grant_id=? AND revision>? "
-        "AND revision<=? ORDER BY revision",
+        'SELECT owner_authority_revisions.grant_id AS grant_id, owner_authority_revisions.revision '
+        'AS revision, owner_authority_revisions.operation_id AS operation_id, '
+        'owner_authority_revisions.request_sha256 AS request_sha256, '
+        'owner_authority_revisions.state AS state, owner_authority_revisions.policy_json AS '
+        'policy_json, owner_authority_revisions.policy_sha256 AS policy_sha256, '
+        'owner_authority_revisions.policy_redacted AS policy_redacted, '
+        'owner_authority_revisions.restore_generation AS restore_generation, '
+        'owner_authority_revisions.predecessor_sha256 AS predecessor_sha256, '
+        'owner_authority_revisions.record_sha256 AS record_sha256, '
+        'owner_authority_revisions.journal_id AS journal_id, '
+        'owner_authority_revisions.journal_path AS journal_path, '
+        'owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS '
+        'owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND '
+        'owner_authority_revisions.revision > %s AND owner_authority_revisions.revision <= %s '
+        'ORDER BY owner_authority_revisions.revision NULLS FIRST',
         (ref.grant_id, ref.revision, latest["revision"]),
     )
     previous = original
@@ -48,10 +74,19 @@ def stopped_chain(store, ref):
         return None
     unbound = [row["revision"] for row in rows if row["state"] == "ACTIVE"]
     for table in BOUND_WORK if unbound else ():
-        placeholders = ",".join("?" for _ in unbound)
+        placeholders = ",".join('%s' for _ in unbound)
         if store.one(
-            f"SELECT 1 FROM {table} WHERE json_extract(authority_json,'$.grant_id')=? "
-            f"AND json_extract(authority_json,'$.revision') IN ({placeholders}) LIMIT 1",
+            (
+                'SELECT 1 FROM '
+                f'{table}'
+                ' WHERE (CASE WHEN authority_json IS JSON THEN '
+                "(authority_json::json#>>'{grant_id}') END)=%s AND "
+                '(CASE WHEN authority_json IS JSON THEN '
+                "((authority_json::json#>>'{revision}'))::numeric END) "
+                'IN ('
+                f'{placeholders}'
+                ') LIMIT 1'
+            ),
             (ref.grant_id, *unbound),
         ):
             return None
@@ -61,7 +96,7 @@ def stopped_chain(store, ref):
 def read(store, settings, authority, *, chain=False):
     """`chain` admits an unbound STOP chain; carry custody keeps the single-STOP rule."""
     ref = AuthorityRef.from_dict(authority)
-    with nullcontext() if store.db.in_transaction else store.transaction():
+    with nullcontext() if store.in_transaction else store.transaction():
         owner_authority.custody(store, settings, settlement=True)
         found = stopped_chain(store, ref)
         if found is None or not chain and found[1]["revision"] != ref.revision + 1:

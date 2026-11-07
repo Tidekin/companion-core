@@ -49,3 +49,31 @@ worker 的合成验证及 QQ 验收，仍是生产切换的必要条件。
 - [PostgreSQL 外键检查时机](https://www.postgresql.org/docs/16/sql-set-constraints.html)
 - [PostgreSQL JSON 文本语义](https://www.postgresql.org/docs/16/datatype-json.html)
 - [PostgreSQL pg_trgm](https://www.postgresql.org/docs/16/pgtrgm.html)
+
+
+## 运行迁移中的备份恢复（尚未完成生产验收）
+
+运行入口正在改用原生 PostgreSQL。备份沿用 Fernet 加密，明文载荷改为原生
+`pg_dump --format=custom`，独立费用、删除日志仍需另外保留。`pg_restore` 只向
+没有用户表的目标数据库写入，并以单笔事务恢复表、数据、序列及约束；随后执行原有
+删除回放、授权撤销、费用恢复核对及未知投递保护。目标在验证完成前须与 API、worker
+保持断开。恢复入口读取显式目标配置文件，不沿用源进程的数据库环境覆盖值。
+
+客户端连接采用 libpq 原生 service/password 文件，临时文件位于目标工作目录且权限
+为私有；凭据不进入命令参数。发布镜像仍需纳入匹配的 PostgreSQL 客户端工具并通过
+恢复用例；本节不代表生产已经切换。
+
+- [PostgreSQL pg_dump 一致快照及自定义归档](https://www.postgresql.org/docs/16/app-pgdump.html)
+- [PostgreSQL pg_restore 单笔事务恢复](https://www.postgresql.org/docs/16/app-pgrestore.html)
+- [libpq 原生连接服务文件](https://www.postgresql.org/docs/16/libpq-pgservice.html)
+- [libpq 密码文件及权限](https://www.postgresql.org/docs/16/libpq-pgpass.html)
+
+默认 `public` schema 的恢复使用 `pg_restore --list/--use-list`，仅跳过目标已有的
+`CREATE SCHEMA public`，保留归档的全部表、数据、索引和约束。十八项记忆生命周期
+与恢复后删除重放已经在隔离 PostgreSQL 上验证；完整 Core 业务与生产切换仍待验收。
+
+后台唤醒改用独立原生 LISTEN 连接，事务提交时发布空 NOTIFY，回滚不发布。
+通知只提示重新扫描；定时边界也会实际返回扫描，不依赖通知完整性。等待在线程中
+有限执行，取消时先等待该调用退出，再释放监听连接。
+
+- [Psycopg 原生通知与有限等待](https://www.psycopg.org/psycopg3/docs/advanced/async.html#asynchronous-notifications)

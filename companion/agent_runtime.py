@@ -145,7 +145,8 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
                 persistence.failed_response(error.response)
             raise
         model_finished = perf_counter_ns()
-        usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=?",
+        usage = core.store.one('SELECT state, billed_micro_usd FROM model_usage WHERE request_id = '
+            '%s',
                                (request_id,))
         emit("t_model_done", job["trace_id"],
              elapsed_ms=(model_finished - model_started) / 1e6, at_ns=model_finished,

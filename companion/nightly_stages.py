@@ -33,8 +33,8 @@ def _yield(nightly, run, *, waiting=False, code=None, due=None):
 
 def _next(nightly):
     row = nightly.store.one(
-        "SELECT MIN(CASE WHEN state='LEASED' THEN lease_until ELSE next_attempt_at END) AS due "
-        "FROM consolidation_runs WHERE timezone=? AND state IN ('LEASED','PARTIAL')",
+        "SELECT MIN(CASE WHEN state = 'LEASED' THEN lease_until ELSE next_attempt_at END) AS due "
+        "FROM consolidation_runs WHERE timezone = %s AND state IN ('LEASED', 'PARTIAL')",
         (nightly.settings.timezone,),
     )
     return datetime.fromisoformat(row["due"]) if row and row["due"] else None
@@ -56,10 +56,26 @@ def _episodes(nightly, run, memory):
     if not pending:
         steps["n2"] = "MATERIAL_READY"
         return _yield(nightly, run)
-    first = nightly.store.one("SELECT * FROM events WHERE event_id=?", (pending[0],))
+    first = nightly.store.one('SELECT events.event_id AS event_id, events.schema_version AS '
+        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
+        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
+        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
+        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
+        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
+        '%s', (pending[0],))
     events = []
     for key in pending:
-        event = nightly.store.one("SELECT * FROM events WHERE event_id=?", (key,))
+        event = nightly.store.one('SELECT events.event_id AS event_id, events.schema_version AS '
+            'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
+            'events.conversation_id AS conversation_id, events.actor_id AS actor_id, '
+            'events.event_type AS event_type, events.occurred_at AS occurred_at, '
+            'events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, '
+            'events.body_json AS body_json, events.trace_id AS trace_id, events.idempotency_key AS '
+            'idempotency_key, events.fingerprint AS fingerprint, events.redacted AS redacted, '
+            'events.memory_processed AS memory_processed, events.reply_revision AS reply_revision '
+            'FROM events AS events WHERE events.event_id = %s', (key,))
         if event and first and event["conversation_id"] == first["conversation_id"]:
             if not source_allowed(nightly.store, nightly.settings, nightly.clock, key, "memory"):
                 raise CoreError("PRIVACY_CHANGED", 409)
@@ -85,7 +101,7 @@ async def _memory(nightly, run, day):
         return _yield(nightly, run)
     def persist(record):
         store = nightly.store
-        with nullcontext() if store.db.in_transaction else store.transaction():
+        with nullcontext() if store.in_transaction else store.transaction():
             # Memory batches can extend beyond Diary's bounded display sources.
             # Pending candidates must still be owned by the existing erasure closure.
             batch = record["batch"]
@@ -96,7 +112,8 @@ async def _memory(nightly, run, day):
                 steps["n2"] = batch["phase"]
             ids = record["source_event_ids"]
             for key in ids:
-                store.execute("INSERT OR IGNORE INTO consolidation_evidence VALUES (?,?)",
+                store.execute('INSERT INTO consolidation_evidence VALUES (%s, %s) ON CONFLICT DO '
+                    'NOTHING',
                               (run["run_id"], key))
             if batch.get("committed"):
                 nightly.after_memory_commit(run)
@@ -155,12 +172,30 @@ async def _diary(nightly, run, day, worker_id):
     if not diary_id:
         steps["diary"] = "SKIPPED"
         return _yield(nightly, run)
-    row = nightly.store.one("SELECT * FROM diary_runs WHERE run_id=?", (diary_id,))
+    row = nightly.store.one('SELECT diary_runs.run_id AS run_id, diary_runs.identity_id AS '
+        'identity_id, diary_runs.local_date AS local_date, diary_runs.timezone AS timezone, '
+        'diary_runs.state AS state, diary_runs.source_set_sha256 AS source_set_sha256, '
+        'diary_runs.captured_privacy_epoch AS captured_privacy_epoch, diary_runs.lease_owner AS '
+        'lease_owner, diary_runs.lease_token AS lease_token, diary_runs.lease_until AS '
+        'lease_until, diary_runs.next_attempt_at AS next_attempt_at, diary_runs.attempts AS '
+        'attempts, diary_runs.max_attempts AS max_attempts, diary_runs.model_request_id AS '
+        'model_request_id, diary_runs.last_error_code AS last_error_code, diary_runs.created_at AS '
+        'created_at, diary_runs.updated_at AS updated_at FROM diary_runs AS diary_runs WHERE '
+        'diary_runs.run_id = %s', (diary_id,))
     if row["state"] in {"PENDING", "RETRY_WAIT"} or (
         row["state"] == "RUNNING" and row["lease_until"] <= nightly.clock()
     ):
         await nightly.diary.generate_once(worker_id, run_id=diary_id)
-        row = nightly.store.one("SELECT * FROM diary_runs WHERE run_id=?", (diary_id,))
+        row = nightly.store.one('SELECT diary_runs.run_id AS run_id, diary_runs.identity_id AS '
+            'identity_id, diary_runs.local_date AS local_date, diary_runs.timezone AS timezone, '
+            'diary_runs.state AS state, diary_runs.source_set_sha256 AS source_set_sha256, '
+            'diary_runs.captured_privacy_epoch AS captured_privacy_epoch, diary_runs.lease_owner '
+            'AS lease_owner, diary_runs.lease_token AS lease_token, diary_runs.lease_until AS '
+            'lease_until, diary_runs.next_attempt_at AS next_attempt_at, diary_runs.attempts AS '
+            'attempts, diary_runs.max_attempts AS max_attempts, diary_runs.model_request_id AS '
+            'model_request_id, diary_runs.last_error_code AS last_error_code, '
+            'diary_runs.created_at AS created_at, diary_runs.updated_at AS updated_at FROM '
+            'diary_runs AS diary_runs WHERE diary_runs.run_id = %s', (diary_id,))
     steps["diary"] = row["state"]
     if row["state"] not in TERMINAL:
         due = row["lease_until"] if row["state"] == "RUNNING" else row["next_attempt_at"]
@@ -183,15 +218,15 @@ def _goals(nightly, run, day):
         run["steps"]["goals"] = "SKIPPED"
         return _yield(nightly, run)
     proposals = nightly.store.rows(
-        "SELECT s.suggestion_id,s.content,r.run_id FROM reflection_suggestions s "
-        "JOIN reflection_runs r USING(run_id) WHERE r.local_date=? AND r.timezone=? "
-        "AND r.state='COMMITTED' AND s.kind='next_question' "
-        "AND s.state IN ('PENDING','ACCEPT_AS_HYPOTHESIS')",
+        'SELECT s.suggestion_id, s.content, r.run_id FROM reflection_suggestions AS s JOIN '
+        'reflection_runs AS r USING (run_id) WHERE r.local_date = %s AND r.timezone = %s AND '
+        "r.state = 'COMMITTED' AND s.kind = 'next_question' AND s.state IN ('PENDING', "
+        "'ACCEPT_AS_HYPOTHESIS')",
         (day.isoformat(), run["timezone"]),
     )
     for proposal in proposals:
         ids = [row["event_id"] for row in nightly.store.rows(
-            "SELECT DISTINCT event_id FROM reflection_evidence WHERE run_id=?",
+            'SELECT DISTINCT event_id FROM reflection_evidence WHERE run_id = %s',
             (proposal["run_id"],),
         )]
         try:
@@ -253,8 +288,9 @@ async def run_step(nightly, worker_id):
     except Exception as error:
         code = error.code if isinstance(error, CoreError) else "CONSOLIDATION_INTERNAL_ERROR"
         nightly.store.execute(
-            "UPDATE consolidation_runs SET state=?,lease_token=NULL,steps_json='{}',"
-            "last_error_code=?,updated_at=? WHERE run_id=? AND state='LEASED' AND lease_token=?",
+            "UPDATE consolidation_runs SET state = %s, lease_token = NULL, steps_json = '{}', "
+            "last_error_code = %s, updated_at = %s WHERE run_id = %s AND state = 'LEASED' AND "
+            'lease_token = %s',
             ("CANCELLED" if code == "PRIVACY_CHANGED" else "FAILED", code, nightly.clock(),
              run["run_id"], run["lease_token"]),
         )

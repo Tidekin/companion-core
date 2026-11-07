@@ -168,21 +168,33 @@ class Core(Runtime):
         # The autonomous selector no longer consumes old fixed-timer greetings.
         # Only unadmitted queued work can be retired; retain all model/send custody.
         for job in s.rows(
-            "SELECT j.job_id,j.event_id,e.trace_id FROM jobs j JOIN events e USING(event_id) "
-            "WHERE j.kind='activity' AND j.state IN ('QUEUED','RETRY_WAIT') "
-            "AND e.source='system.timer' AND e.event_type='activity.tick' "
-            "AND json_type(e.body_json,'$.notice') IS NULL "
-            "AND NOT EXISTS (SELECT 1 FROM model_usage m WHERE m.job_id=j.job_id) "
-            "AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.origin_event_id=j.event_id)",
+            (
+                'SELECT j.job_id,j.event_id,e.trace_id FROM jobs j JOIN '
+                "events e USING(event_id) WHERE j.kind='activity' AND "
+                "j.state IN ('QUEUED','RETRY_WAIT') AND "
+                "e.source='system.timer' AND "
+                "e.event_type='activity.tick' AND "
+                "json_typeof(e.body_json::json#>'{notice}') IS NULL AND "
+                'NOT EXISTS (SELECT 1 FROM model_usage m WHERE '
+                'm.job_id=j.job_id) AND NOT EXISTS (SELECT 1 FROM '
+                'outbox o WHERE o.origin_event_id=j.event_id)'
+            ),
         ):
-            s.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                      "last_error_code='LEGACY_TIMER_RETIRED' WHERE job_id=?", (now, job["job_id"]))
+            s.execute("UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, updated_at = %s, "
+                "last_error_code = 'LEGACY_TIMER_RETIRED' WHERE job_id = %s", (now, job["job_id"]))
             s.audit("activity.legacy_timer_retired", job["job_id"], job["trace_id"], now)
-        expired = s.rows("SELECT * FROM jobs WHERE state='RUNNING' "
-                         "AND kind IN ('chat','activity') AND lease_until<=?", (now,))
+        expired = s.rows('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS '
+            'kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS '
+            'attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, '
+            'jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, '
+            'jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, '
+            'jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked '
+            'AS context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs WHERE '
+            "jobs.state = 'RUNNING' AND jobs.kind IN ('chat', 'activity') AND jobs.lease_until <= "
+            '%s', (now,))
         for job in expired:
             s.execute(
-                "UPDATE model_usage SET state='UNKNOWN' WHERE job_id=? AND state='RESERVED'",
+                "UPDATE model_usage SET state = 'UNKNOWN' WHERE job_id = %s AND state = 'RESERVED'",
                 (job["job_id"],),
             )
             state = "QUEUED" if job["attempts"] < job["max_attempts"] else "FAILED"
@@ -191,8 +203,8 @@ class Core(Runtime):
             if not recoverable(s, job["job_id"]):
                 state = "FAILED"
             s.execute(
-                "UPDATE jobs SET state=?,lease_token=NULL,last_error_code='WORKER_LEASE_EXPIRED',"
-                "updated_at=? WHERE job_id=?",
+                'UPDATE jobs SET state = %s, lease_token = NULL, last_error_code = '
+                "'WORKER_LEASE_EXPIRED', updated_at = %s WHERE job_id = %s",
                 (state, now, job["job_id"]),
             )
         budget.expire_cancelled_reservations(s, self.settings, now)
@@ -254,7 +266,7 @@ class Core(Runtime):
                                    and self.settings.paid_model
                                    and self.settings.paid_model.concurrency > 1)
             if private_life.busy(s, now, foreground_only=foreground_only) or s.one(
-                "SELECT 1 FROM outbox WHERE state='SENDING' LIMIT 1",
+                "SELECT 1 FROM outbox WHERE state = 'SENDING' LIMIT 1",
             ):
                 # Input admission and tail cancellation proceed independently;
                 # chat waits for its existing model/send responsibility. Separate
@@ -263,18 +275,24 @@ class Core(Runtime):
         if not proactive_allowed(s, self.settings, now):
             cancel_proactive_work(s, now)
         row = s.one(
-            "SELECT j.*,e.conversation_id,e.body_json,e.trace_id,e.redacted,e.reply_revision "
-            "FROM jobs j "
-            "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
-            "AND j.kind IN ('chat','activity','evaluation','rem') "
-            "AND ((? IS NULL AND j.kind IN ('chat','evaluation')) OR j.job_id=?) "
-            "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) AND e.redacted=0 "
-            "AND NOT EXISTS (SELECT 1 FROM jobs b JOIN events be ON be.event_id=b.event_id "
-            "WHERE be.conversation_id=e.conversation_id AND b.rowid<j.rowid "
-            "AND (b.kind='chat' OR (b.kind='activity' "
-            "AND (j.kind<>'chat' OR b.state='RUNNING'))) "
-            "AND b.state IN ('QUEUED','RUNNING','RETRY_WAIT')) "
-            "ORDER BY CASE WHEN j.kind='evaluation' THEN 1 ELSE 0 END,j.rowid LIMIT 1",
+            'SELECT j.job_id AS job_id, j.event_id AS event_id, j.kind AS kind, j.state AS state, '
+            'j.idempotency_key AS idempotency_key, j.attempts AS attempts, j.max_attempts AS '
+            'max_attempts, j.lease_owner AS lease_owner, j.lease_until AS lease_until, '
+            'j.next_attempt_at AS next_attempt_at, j.last_error_code AS last_error_code, '
+            'j.created_at AS created_at, j.updated_at AS updated_at, j.lease_token AS lease_token, '
+            'j.context_tracked AS context_tracked, j.authority_json AS authority_json, '
+            'e.conversation_id AS conversation_id, e.body_json AS body_json, e.trace_id AS '
+            'trace_id, e.redacted AS redacted, e.reply_revision AS reply_revision FROM jobs AS j '
+            "JOIN events AS e ON e.event_id = j.event_id WHERE j.state IN ('QUEUED', 'RETRY_WAIT') "
+            "AND j.kind IN ('chat', 'activity', 'evaluation', 'rem') AND ((CAST(%s AS TEXT) IS "
+            "NULL AND j.kind IN ('chat', 'evaluation')) OR j.job_id = %s) AND (j.next_attempt_at "
+            'IS NULL OR j.next_attempt_at <= %s) AND e.redacted = 0 AND NOT EXISTS(SELECT 1 AS "1" '
+            'FROM jobs AS b JOIN events AS be ON be.event_id = b.event_id WHERE be.conversation_id '
+            "= e.conversation_id AND b.record_sequence < j.record_sequence AND (b.kind = 'chat' OR "
+            "(b.kind = 'activity' AND (j.kind <> 'chat' OR b.state = 'RUNNING'))) AND b.state IN "
+            "('QUEUED', 'RUNNING', 'RETRY_WAIT')) ORDER BY CASE WHEN j.kind = 'evaluation' THEN 1 "
+            'ELSE 0 END NULLS FIRST, j.record_sequence NULLS FIRST LIMIT 1'
+            + (' FOR UPDATE OF j SKIP LOCKED' if s.in_write_transaction else ''),
             (job_id, job_id, now),
         )
         if not row:
@@ -289,8 +307,8 @@ class Core(Runtime):
                 owner_authority.check_job(s, self.settings, self.clock, row,
                     purpose=owner_authority.model_purpose(s, row["kind"], row["job_id"]))
             except CoreError as error:
-                s.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
-                          "last_error_code=? WHERE job_id=?", (now, error.code, row["job_id"]))
+                s.execute("UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, updated_at = "
+                    '%s, last_error_code = %s WHERE job_id = %s', (now, error.code, row["job_id"]))
                 return None
         if self.memes.waiting_offer(row, now):
             return None
@@ -310,9 +328,9 @@ class Core(Runtime):
                 return None
             if qq_images.enabled(self.settings):
                 inflight = s.one(
-                    "SELECT m.request_id FROM model_usage m JOIN model_admissions a "
-                    "USING(request_id) WHERE m.job_id=? AND m.scenario='content_vision' "
-                    "AND m.state='RESERVED' AND a.window_id=? AND a.lease_until>?",
+                    'SELECT m.request_id FROM model_usage AS m JOIN model_admissions AS a USING '
+                    "(request_id) WHERE m.job_id = %s AND m.scenario = 'content_vision' AND "
+                    "m.state = 'RESERVED' AND a.window_id = %s AND a.lease_until > %s",
                     (row["job_id"], self.settings.live_text_window.window_id, self.clock()),
                 )
                 if inflight:
@@ -326,12 +344,12 @@ class Core(Runtime):
         try:
             runtime_config.bind(s, self.settings, self.clock, "job:" + row["job_id"])
         except CoreError as error:
-            s.execute("UPDATE jobs SET state='FAILED',last_error_code=?,updated_at=? "
-                      "WHERE job_id=?", (error.code, now, row["job_id"]))
+            s.execute("UPDATE jobs SET state = 'FAILED', last_error_code = %s, updated_at = %s "
+                'WHERE job_id = %s', (error.code, now, row["job_id"]))
             return None
         s.execute(
-            "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
-            "attempts=attempts+1,updated_at=? WHERE job_id=?",
+            "UPDATE jobs SET state = 'RUNNING', lease_owner = %s, lease_token = %s, lease_until = "
+            '%s, attempts = attempts + 1, updated_at = %s WHERE job_id = %s',
             (worker_id, token, after(now, self.settings.lease_seconds), now, row["job_id"]),
         )
         return {**row, "lease_token": token, "attempts": row["attempts"] + 1}
@@ -339,10 +357,13 @@ class Core(Runtime):
     def _self_quote_indices(self, job, body):
         """Attribute only the current captured quote, without retrieving extra history."""
         current = self.store.one(
-            "SELECT e.rowid,e.conversation_id,e.actor_id,e.privacy_scope,e.redacted,e.ingested_at,"
-            "e.source_event_id,"
-            "c.scope,c.owner_actor_id FROM events e JOIN conversations c USING(conversation_id) "
-            "WHERE e.event_id=?", (job["event_id"],),
+            (
+                'SELECT e.record_sequence AS rowid, e.conversation_id, '
+                'e.actor_id, e.privacy_scope, e.redacted, e.ingested_at,'
+                ' e.source_event_id, c.scope, c.owner_actor_id FROM '
+                'events AS e JOIN conversations AS c USING '
+                '(conversation_id) WHERE e.event_id = %s'
+            ), (job["event_id"],),
         )
         if not current or current["redacted"] or (
             current["actor_id"], current["privacy_scope"], current["scope"],
@@ -365,11 +386,23 @@ class Core(Runtime):
                 or nodes[0]["path"] not in ([], [0])):
                 continue
             rows = self.store.rows(
-                "SELECT o.*,e.rowid AS source_rowid,e.redacted,e.actor_id,e.privacy_scope,"
-                "e.source,e.source_event_id,e.conversation_id AS source_conversation_id "
-                "FROM outbox o "
-                "JOIN events e ON e.event_id=o.origin_event_id "
-                "WHERE o.conversation_id=? AND o.provider_message_id=? LIMIT 2",
+                'SELECT o.message_id AS message_id, o.origin_event_id AS origin_event_id, '
+                'o.conversation_id AS conversation_id, o.action_type AS action_type, '
+                'o.content_json AS content_json, o.content_sha256 AS content_sha256, o.approval_id '
+                'AS approval_id, o.state AS state, o.delivery_key AS delivery_key, o.lease_owner '
+                'AS lease_owner, o.lease_until AS lease_until, o.attempt_count AS attempt_count, '
+                'o.provider_message_id AS provider_message_id, o.last_error_code AS '
+                'last_error_code, o.created_at AS created_at, o.updated_at AS updated_at, '
+                'o.sent_at AS sent_at, o.lease_token AS lease_token, o.next_attempt_at AS '
+                'next_attempt_at, o.reply_group_id AS reply_group_id, o.segment_index AS '
+                'segment_index, o.segment_count AS segment_count, o.reply_group_sha256 AS '
+                'reply_group_sha256, o.segment_interval_ms AS segment_interval_ms, o.delivery_lane '
+                'AS delivery_lane, o.native_ack_json AS native_ack_json, o.authority_json AS '
+                'authority_json, e.record_sequence AS source_rowid, e.redacted AS redacted, '
+                'e.actor_id AS actor_id, e.privacy_scope AS privacy_scope, e.source AS source, '
+                'e.source_event_id AS source_event_id, e.conversation_id AS source_conversation_id '
+                'FROM outbox AS o JOIN events AS e ON e.event_id = o.origin_event_id WHERE '
+                'o.conversation_id = %s AND o.provider_message_id = %s LIMIT 2',
                 (current["conversation_id"], segment["reference"]),
             )
             if len(rows) != 1:
@@ -397,8 +430,8 @@ class Core(Runtime):
         if not row["reply_group_id"] or (row["segment_count"] or 1) < 2:
             return None
         parts = self.store.rows(
-            "SELECT state,content_json FROM outbox WHERE reply_group_id=? "
-            "ORDER BY segment_index LIMIT 33", (row["reply_group_id"],))
+            'SELECT state, content_json FROM outbox WHERE reply_group_id = %s ORDER BY '
+            'segment_index NULLS FIRST LIMIT 33', (row["reply_group_id"],))
         if len(parts) != row["segment_count"] or any(part["state"] != "SENT" for part in parts):
             return None
         text = "\n".join(_bubble_text(json.loads(part["content_json"])["text"]) for part in parts)
@@ -585,12 +618,17 @@ class Core(Runtime):
             if not authority and allowed is None:
                 def source_check(event_id):
                     return bool(s.one(
-                        "SELECT 1 FROM events e JOIN conversations c USING(conversation_id) "
-                        "WHERE e.event_id=? AND e.conversation_id=? AND e.actor_id='owner' "
-                        "AND e.source='qq.onebot' AND e.privacy_scope='private' "
-                        "AND c.scope='private' AND c.owner_actor_id='owner' AND e.redacted=0 "
-                        "AND e.occurred_at>=? AND e.occurred_at<=? "
-                        "AND e.rowid<(SELECT rowid FROM events WHERE event_id=?)",
+                        (
+                            'SELECT 1 FROM events AS e JOIN conversations AS c '
+                            'USING (conversation_id) WHERE e.event_id = %s AND '
+                            "e.conversation_id = %s AND e.actor_id = 'owner' AND "
+                            "e.source = 'qq.onebot' AND e.privacy_scope = 'private' "
+                            "AND c.scope = 'private' AND c.owner_actor_id = 'owner' "
+                            'AND e.redacted = 0 AND e.occurred_at >= %s AND '
+                            'e.occurred_at <= %s AND e.record_sequence < (SELECT '
+                            'record_sequence AS rowid FROM events WHERE event_id = '
+                            '%s)'
+                        ),
                         (event_id, job["conversation_id"],
                          after(now, -cfg.raw_event_retention_days * 86400), now, job["event_id"]),
                     ))
@@ -603,8 +641,12 @@ class Core(Runtime):
                     try:
                         check(event_id)
                         return bool(s.one(
-                            "SELECT 1 FROM events WHERE event_id=? AND conversation_id=? "
-                            "AND rowid<(SELECT rowid FROM events WHERE event_id=?)",
+                            (
+                                'SELECT 1 FROM events WHERE event_id = %s AND '
+                                'conversation_id = %s AND record_sequence < (SELECT '
+                                'record_sequence AS rowid FROM events WHERE event_id = '
+                                '%s)'
+                            ),
                             (event_id, job["conversation_id"], job["event_id"]),
                         ))
                     except CoreError:
@@ -772,11 +814,15 @@ class Core(Runtime):
         dynamic_rules = [expression_data, policy_data]
         if job["kind"] == "chat" and not cfg.chat_time_labels:
             # Stored event times keep a rebuilt context identical to the measured one.
-            current_event = s.one("SELECT rowid,occurred_at FROM events WHERE event_id=?",
+            current_event = s.one((
+                'SELECT record_sequence AS rowid, occurred_at FROM '
+                'events WHERE event_id = %s'
+            ),
                                   (job["event_id"],))
             previous = s.one(
-                "SELECT occurred_at FROM events WHERE conversation_id=? AND actor_id='owner' "
-                "AND rowid<? AND redacted=0 ORDER BY rowid DESC LIMIT 1",
+                "SELECT occurred_at FROM events WHERE conversation_id = %s AND actor_id = 'owner' "
+                'AND record_sequence < %s AND redacted = 0 ORDER BY record_sequence DESC NULLS '
+                'LAST LIMIT 1',
                 (job["conversation_id"], current_event["rowid"]),
             ) if current_event and permitted("history") else None
             dynamic_rules.append(conversation_policy.time_hint(
@@ -1178,7 +1224,7 @@ class Core(Runtime):
                 current_input.extend(notice_messages[1:-1])
             else:
                 # The owner's stored time keeps a rebuilt chat context identical.
-                received = s.one("SELECT occurred_at FROM events WHERE event_id=?",
+                received = s.one('SELECT occurred_at FROM events WHERE event_id = %s',
                                  (job["event_id"],))
                 current_input.append(time_context.now_message(
                     received["occurred_at"] if received else self.clock(), cfg.timezone))
@@ -1358,7 +1404,7 @@ class Core(Runtime):
         if not ids:
             return time_context.day(row["created_at"], zone) if row.get("created_at") else None
         days = sorted({time_context.day(item["occurred_at"], zone) for item in self.store.rows(
-            "SELECT occurred_at FROM events WHERE event_id IN (" + ",".join("?" for _ in ids)
+            "SELECT occurred_at FROM events WHERE event_id IN (" + ",".join('%s' for _ in ids)
             + ") AND occurred_at IS NOT NULL ORDER BY occurred_at", tuple(ids))},
             key=lambda value: [int(part) for part in value.replace("年", "-").replace(
                 "月", "-").rstrip("日").split("-")])
@@ -1512,7 +1558,7 @@ class Core(Runtime):
         except ValueError as error:
             self.store.audit("memory.recall_invalid", job["job_id"], job["trace_id"], self.clock(),
                              reason=validation_reason, request_id=request_id)
-            usage = self.store.one("SELECT state FROM model_usage WHERE request_id=?",
+            usage = self.store.one('SELECT state FROM model_usage WHERE request_id = %s',
                                    (request_id,))
             if (not bounded_text and private_life.enabled(self.settings) and job["kind"] == "chat"
                 and reply_revision.owner_input(self.store, job["event_id"])
@@ -1587,7 +1633,7 @@ class Core(Runtime):
                        "当前交互状态", "为什么形成偏好", "你记得什么"}:
             # These service responses do not yet expose complete source receipts.
             # Recall treats them conservatively instead of claiming exact lineage.
-            s.execute("UPDATE jobs SET context_tracked=0 WHERE job_id=?", (job["job_id"],))
+            s.execute('UPDATE jobs SET context_tracked = 0 WHERE job_id = %s', (job["job_id"],))
         diary_reply = self.diary.command(text, self.settings.owner_qq_id)
         if diary_reply is not None:
             return diary_reply
@@ -1597,8 +1643,8 @@ class Core(Runtime):
         text = command + (" " + arguments if arguments else "")
         if text == "发送状态":
             uncertain = s.rows(
-                "SELECT message_id,created_at FROM outbox "
-                "WHERE state='DELIVERY_UNCERTAIN' ORDER BY rowid LIMIT 10"
+                "SELECT message_id, created_at FROM outbox WHERE state = 'DELIVERY_UNCERTAIN' "
+                'ORDER BY record_sequence NULLS FIRST LIMIT 10'
             )
             return encode(uncertain) if uncertain else "没有待核对的发送。"
         reconciliation = re.fullmatch(r"核对发送\s+(msg_[a-f0-9]+)\s+(已发送|取消)", text)
@@ -1612,7 +1658,8 @@ class Core(Runtime):
         if text in {"暂停主动分享", "恢复主动分享"}:
             with s.transaction():
                 s.execute(
-                    "INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
+                    "INSERT INTO runtime_meta (key, value) VALUES ('proactive_paused', %s) ON "
+                    'CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = DEFAULT',
                     ("1" if text.startswith("暂停") else "0",),
                 )
                 if text.startswith("暂停"):
@@ -1651,10 +1698,14 @@ class Core(Runtime):
             evidence_id = job["event_id"]
             if not content:
                 prior = s.one(
-                    "SELECT event_id,body_json FROM events WHERE actor_id='owner' "
-                    "AND event_type IN ('message.received','message.media_received') "
-                    "AND redacted=0 AND conversation_id=? AND rowid<(SELECT rowid "
-                    "FROM events WHERE event_id=?) ORDER BY rowid DESC LIMIT 1",
+                    (
+                        'SELECT event_id, body_json FROM events WHERE actor_id '
+                        "= 'owner' AND event_type IN ('message.received', "
+                        "'message.media_received') AND redacted = 0 AND "
+                        'conversation_id = %s AND record_sequence < (SELECT '
+                        'record_sequence AS rowid FROM events WHERE event_id = '
+                        '%s) ORDER BY record_sequence DESC NULLS LAST LIMIT 1'
+                    ),
                     (job["conversation_id"], evidence_id),
                 )
                 if prior:
@@ -1676,19 +1727,20 @@ class Core(Runtime):
             )
             if not candidates:
                 return "这条内容包含凭据，未保存为记忆。"
-            with s.transaction():
+            with s.transaction(control_write=True):
                 if captured_epoch != epoch(s):
                     raise CoreError("PRIVACY_CHANGED", 503)
                 if not s.one(
-                    "SELECT 1 FROM jobs WHERE job_id=? AND state='RUNNING' "
-                    "AND lease_token=? AND lease_until>?",
+                    "SELECT 1 FROM jobs WHERE job_id = %s AND state = 'RUNNING' AND lease_token = "
+                    '%s AND lease_until > %s',
                     (job["job_id"], job["lease_token"], self.clock()),
                 ):
                     raise CoreError("JOB_LEASE_EXPIRED", 409)
                 reply_revision.check_job(s, job)
                 memory_id = self.add_memories(candidates, resolutions, self.clock(),
                                               confirmed=True)[0]
-                review = s.one("SELECT needs_review FROM memories WHERE memory_id=?", (memory_id,))
+                review = s.one('SELECT needs_review FROM memories WHERE memory_id = '
+                    '%s', (memory_id,))
             if review["needs_review"]:
                 return f"已记录：{memory_id}。这与已有记忆存在冲突，请澄清或用“/纠正这一条”修订。"
             return f"已记住：{memory_id}"
@@ -1699,12 +1751,12 @@ class Core(Runtime):
             decision = {"确认这一条": "confirm", "忘记这一条": "forget", "纠正这一条": "correct"}[
                 match[1]
             ]
-            with s.transaction():
+            with s.transaction(control_write=True):
                 if live_text.active(s, self.settings):
                     live_text.check_job(s, self.settings, self.clock, job)
                 if not s.one(
-                    "SELECT 1 FROM jobs WHERE job_id=? AND state='RUNNING' "
-                    "AND lease_token=? AND lease_until>?",
+                    "SELECT 1 FROM jobs WHERE job_id = %s AND state = 'RUNNING' AND lease_token = "
+                    '%s AND lease_until > %s',
                     (job["job_id"], job["lease_token"], self.clock()),
                 ):
                     raise CoreError("JOB_LEASE_EXPIRED", 409)
@@ -1718,7 +1770,7 @@ class Core(Runtime):
         if epoch(self.store) == captured_epoch:
             return
         tracked = self.store.one(
-            "SELECT context_tracked FROM jobs WHERE job_id=?", (job["job_id"],),
+            'SELECT context_tracked FROM jobs WHERE job_id = %s', (job["job_id"],),
         )
         if private_life.enabled(self.settings) and tracked and tracked["context_tracked"]:
             # Revalidate the actual prompt sources. An unrelated recall must not
@@ -1765,8 +1817,8 @@ class Core(Runtime):
             code = error.code if isinstance(error, CoreError) else "PRIVATE_POKE_FAILED"
             with self.store.transaction():
                 self.store.execute(
-                    "UPDATE jobs SET state='FAILED',lease_token=NULL,last_error_code=?,"
-                    "updated_at=? WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+                    "UPDATE jobs SET state = 'FAILED', lease_token = NULL, last_error_code = %s, "
+                    "updated_at = %s WHERE job_id = %s AND state = 'RUNNING' AND lease_token = %s",
                     (code, self.clock(), job["job_id"], job["lease_token"]),
                 )
                 self.store.audit("poke.failed", job["job_id"], job["trace_id"], self.clock(),
@@ -1895,7 +1947,7 @@ class Core(Runtime):
                 )
                 model_done_ns = time.perf_counter_ns()
                 usage = self.store.one(
-                    "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
+                    'SELECT billed_micro_usd, state FROM model_usage WHERE request_id = %s',
                     (request_id,),
                 )
                 emit(
@@ -1927,7 +1979,15 @@ class Core(Runtime):
                 task_settings = self._check_context_snapshots(job, context_snapshots)
                 if bounded_text:
                     live_text.check_job(self.store, self.settings, self.clock, job)
-                current = self.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+                current = self.store.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, '
+                    'jobs.kind AS kind, jobs.state AS state, jobs.idempotency_key AS '
+                    'idempotency_key, jobs.attempts AS attempts, jobs.max_attempts AS '
+                    'max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS '
+                    'lease_until, jobs.next_attempt_at AS next_attempt_at, jobs.last_error_code AS '
+                    'last_error_code, jobs.created_at AS created_at, jobs.updated_at AS '
+                    'updated_at, jobs.lease_token AS lease_token, jobs.context_tracked AS '
+                    'context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs '
+                    'WHERE jobs.job_id = %s', (job["job_id"],))
                 if current["state"] != "RUNNING" or current["lease_token"] != job["lease_token"]:
                     return True
                 if current["lease_until"] <= self.clock():
@@ -1967,10 +2027,14 @@ class Core(Runtime):
                     elif mixed_reply:
                         from companion import reply_composition
 
-                        newer = self.store.one("SELECT 1 FROM events WHERE conversation_id=? "
-                            "AND actor_id='owner' AND source='qq.onebot' "
-                            "AND event_type IN ('message.received','message.media_received') "
-                            "AND rowid>(SELECT rowid FROM events WHERE event_id=?) LIMIT 1",
+                        newer = self.store.one((
+                            'SELECT 1 FROM events WHERE conversation_id = %s AND '
+                            "actor_id = 'owner' AND source = 'qq.onebot' AND "
+                            "event_type IN ('message.received', "
+                            "'message.media_received') AND record_sequence > "
+                            '(SELECT record_sequence AS rowid FROM events WHERE '
+                            'event_id = %s) LIMIT 1'
+                        ),
                             (job["conversation_id"], job["event_id"]))
                         message_ids = [] if newer else reply_composition.enqueue(self, job, now)
                     elif singing_reply:
@@ -1997,8 +2061,8 @@ class Core(Runtime):
                     elif policy and generated_reply and job["kind"] == "chat" and (
                         intent is None or intent.image is None or authority is not None
                         and not self.store.one(
-                            "SELECT 1 FROM generated_images WHERE job_id=? AND state='SUCCEEDED' "
-                            "AND message_id IS NULL", (job["job_id"],),
+                            'SELECT 1 FROM generated_images WHERE job_id = %s AND state = '
+                            "'SUCCEEDED' AND message_id IS NULL", (job["job_id"],),
                         )
                     ):
                         parts = split_text(intent.text if intent else reply, policy)
@@ -2021,10 +2085,14 @@ class Core(Runtime):
                             if len(parts) > available:
                                 parts = [reply]
                         if (len(parts) > 1 or image is not None) and self.store.one(
-                            "SELECT 1 FROM events WHERE conversation_id=? AND actor_id='owner' "
-                            "AND event_type IN ('message.received','message.media_received') "
-                            "AND source='qq.onebot' AND rowid>(SELECT rowid FROM events "
-                            "WHERE event_id=?) LIMIT 1", (job["conversation_id"], job["event_id"]),
+                            (
+                                'SELECT 1 FROM events WHERE conversation_id = %s AND '
+                                "actor_id = 'owner' AND event_type IN "
+                                "('message.received', 'message.media_received') AND "
+                                "source = 'qq.onebot' AND record_sequence > (SELECT "
+                                'record_sequence AS rowid FROM events WHERE event_id = '
+                                '%s) LIMIT 1'
+                            ), (job["conversation_id"], job["event_id"]),
                         ):
                             parts = []  # The owner already moved on while the model was answering.
                         quote_to = reply_quote.target(
@@ -2059,8 +2127,8 @@ class Core(Runtime):
                 if conversation_store is not None:
                     conversation_store.complete()
                 self.store.execute(
-                    "UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
-                    "WHERE job_id=?",
+                    "UPDATE jobs SET state = 'SUCCEEDED', lease_token = NULL, updated_at = %s "
+                    'WHERE job_id = %s',
                     (now, job["job_id"]),
                 )
                 self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now,
@@ -2075,7 +2143,7 @@ class Core(Runtime):
             emit("job_failed", job["trace_id"])
             if request_id:
                 usage = self.store.one(
-                    "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
+                    'SELECT billed_micro_usd, state FROM model_usage WHERE request_id = %s',
                     (request_id,),
                 )
                 emit(
@@ -2093,7 +2161,7 @@ class Core(Runtime):
     def fail_job(self, job, code):
         now = self.clock()
         with self.store.transaction():
-            current = self.store.one("SELECT state,lease_token FROM jobs WHERE job_id=?",
+            current = self.store.one('SELECT state, lease_token FROM jobs WHERE job_id = %s',
                                      (job["job_id"],))
             if (not current or current["state"] != "RUNNING"
                 or current["lease_token"] != job["lease_token"]):
@@ -2102,8 +2170,8 @@ class Core(Runtime):
                         reply_revision.CANCELLED, "INPUT_RECALLED", "OWNER_SOURCE_CHANGED",
                         "OWNER_CAPTURE_INVALID", "OWNER_SOURCE_JOB_BINDING_REQUIRED"}:
                 self.store.execute(
-                    "UPDATE jobs SET state='CANCELLED',lease_token=NULL,last_error_code=?,"
-                    "updated_at=? WHERE job_id=?", (code, now, job["job_id"]),
+                    "UPDATE jobs SET state = 'CANCELLED', lease_token = NULL, last_error_code = "
+                    '%s, updated_at = %s WHERE job_id = %s', (code, now, job["job_id"]),
                 )
                 return
             if notices.retry_required_wording(self.store, self.settings, job, code, now):
@@ -2111,33 +2179,34 @@ class Core(Runtime):
             if notices.reference(job) is not None and code in {
                 "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "BACKGROUND_YIELD_TO_CHAT",
                 "DAILY_BUDGET_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",
-            } and not self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
+            } and not self.store.one('SELECT 1 FROM model_usage WHERE job_id = %s',
                                      (job["job_id"],)):
                 self.store.execute(
-                    "UPDATE jobs SET state='RETRY_WAIT',attempts=MAX(0,attempts-1),"
-                    "last_error_code=?,next_attempt_at=?,lease_token=NULL,updated_at=? "
-                    "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+                    "UPDATE jobs SET state = 'RETRY_WAIT', attempts = GREATEST(0, attempts - 1), "
+                    'last_error_code = %s, next_attempt_at = %s, lease_token = NULL, updated_at = '
+                    "%s WHERE job_id = %s AND state = 'RUNNING' AND lease_token = %s",
                     (code, after(now, 60), now, job["job_id"], job["lease_token"]),
                 )
                 return
             checkpoint = self.store.one(
-                "SELECT phase FROM agent_conversations WHERE job_id=?", (job["job_id"],))
-            admitted = self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
+                'SELECT phase FROM agent_conversations WHERE job_id = %s', (job["job_id"],))
+            admitted = self.store.one('SELECT 1 FROM model_usage WHERE job_id = %s',
                                       (job["job_id"],))
             resumable = (checkpoint and checkpoint["phase"] in {"READY", "WAITING"}
                          and not self.store.one(
-                             "SELECT 1 FROM model_usage WHERE job_id=? AND state!='SETTLED'",
+                             "SELECT 1 FROM model_usage WHERE job_id = %s AND state <> 'SETTLED'",
                              (job["job_id"],))
                          and not self.store.one(
-                             "SELECT 1 FROM agent_tool_calls WHERE job_id=? "
-                             "AND state IN ('STARTED','UNKNOWN')", (job["job_id"],)))
+                             'SELECT 1 FROM agent_tool_calls WHERE job_id = %s AND state IN '
+                             "('STARTED', 'UNKNOWN')", (job["job_id"],)))
             if code in budget.CAPACITY_WAIT_CODES and (not admitted or resumable):
                 # Admission contention is a wait, including between SDK model turns.
                 # A READY checkpoint retains paid responses and observed tool results;
                 # an uncertain original attempt never authorizes this continuation.
                 self.store.execute(
-                    "UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL,last_error_code=?,"
-                    "next_attempt_at=?,attempts=MAX(0,attempts-1),updated_at=? WHERE job_id=?",
+                    "UPDATE jobs SET state = 'RETRY_WAIT', lease_token = NULL, last_error_code = "
+                    '%s, next_attempt_at = %s, attempts = GREATEST(0, attempts - 1), updated_at = '
+                    '%s WHERE job_id = %s',
                     (code, after(now, 1), now, job["job_id"]),
                 )
                 return
@@ -2154,9 +2223,9 @@ class Core(Runtime):
             state = ("RETRY_WAIT" if retryable and not bounded_text
                      and job["attempts"] < job["max_attempts"] else "FAILED")
             changed = self.store.execute(
-                "UPDATE jobs SET state=?,last_error_code=?,next_attempt_at=?,"
-                "lease_token=NULL,updated_at=? WHERE job_id=? "
-                "AND state='RUNNING' AND lease_token=?",
+                'UPDATE jobs SET state = %s, last_error_code = %s, next_attempt_at = %s, '
+                "lease_token = NULL, updated_at = %s WHERE job_id = %s AND state = 'RUNNING' AND "
+                'lease_token = %s',
                 (
                     state,
                     code,
@@ -2165,7 +2234,7 @@ class Core(Runtime):
                     job["job_id"],
                     job["lease_token"],
                 ),
-            ).rowcount
+            )
             if changed:
                 self.store.audit(
                     "job.failed", job["job_id"], job["trace_id"], now, code=code, state=state
@@ -2186,10 +2255,10 @@ class Core(Runtime):
         """Tell the owner a reply finally failed; best effort, never blocks the failure."""
         if (reply_revision.control_job(self.store, job)
                 or not reply_revision.owner_input(self.store, job["event_id"])
-                or self.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+                or self.store.one('SELECT 1 FROM outbox WHERE origin_event_id = %s',
                                   (job["event_id"],))):
             return
-        code = self.store.one("SELECT last_error_code FROM jobs WHERE job_id=?",
+        code = self.store.one('SELECT last_error_code FROM jobs WHERE job_id = %s',
                               (job["job_id"],))["last_error_code"]
         self.store.execute("SAVEPOINT failure_notice")
         try:
@@ -2215,7 +2284,7 @@ class Core(Runtime):
 
     def _owns_memory_lease(self, lease):
         current = self.store.one(
-            "SELECT value FROM runtime_meta WHERE key='memory_extraction_lease'"
+            "SELECT value FROM runtime_meta WHERE key = 'memory_extraction_lease'"
         )
         return bool(
             current and current["value"] == lease and json.loads(lease)["until"] > self.clock()

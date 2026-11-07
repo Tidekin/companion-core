@@ -81,7 +81,21 @@ def _owner_id(store, job, row):
 def _reply_id(store, job, message_id):
     from companion.transport import digest
 
-    row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    row = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+        'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+        'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+        'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+        'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+        'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+        'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+        'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+        'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at AS '
+        'next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+        'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+        'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+        'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+        'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id = '
+        '%s', (message_id,))
     if (not row or row["state"] != "SENT" or row["action_type"] != "qq.private.reply"
             or row["conversation_id"] != job["conversation_id"]
             or not row["provider_message_id"] or not row["content_sha256"]
@@ -105,7 +119,15 @@ def target(store, settings, clock, job, chosen):
 
     if settings.quote_policy == "never" or job["kind"] != "chat":
         return None
-    current = store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
+    current = store.one('SELECT events.event_id AS event_id, events.schema_version AS '
+        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
+        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
+        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
+        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
+        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
+        '%s', (job["event_id"],))
     if not current:
         return None
     sources = owner_input.history_sources(store, settings, clock, job)
