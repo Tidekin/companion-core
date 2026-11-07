@@ -59,9 +59,11 @@ def archived(core, tmp_path, *, private=False, segmented=False):
     message = message.model_copy(update={"source_event_id": source_id,
         "event_id": "evt_" + hashlib.sha256(source_id.encode()).hexdigest()})
     accepted = core.ingest(message, "archived-input")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (accepted["job_id"],))
-    job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
-                         "WHERE job_id=?", (accepted["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (accepted["job_id"],))
+    job = core.store.one((
+        'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+        'USING(event_id) WHERE job_id=%s'
+    ), (accepted["job_id"],))
     core.settings.mode = "live"
     captured = dict(kind="authenticated_onebot_ws", window_sha256=policy.plan_sha256,
         event_id=message.event_id, source_event_id=source_id,
@@ -117,11 +119,13 @@ def archived(core, tmp_path, *, private=False, segmented=False):
         mids = enqueue_reply_parts(core.store, job, parts, 0, core.clock())
         group = reply_group(core.store, mids[0])
         envelopes = segment_envelopes(group)
-        original = core.store.one("SELECT * FROM events WHERE event_id=?", (message.event_id,))
+        original = core.store.one('SELECT * FROM events WHERE event_id=%s', (message.event_id,))
         for i, mid in enumerate(mids):
-            row = core.store.one("SELECT * FROM outbox WHERE message_id=?", (mid,))
-            core.store.execute("UPDATE outbox SET state=?,sent_at=?,provider_message_id=? "
-                "WHERE message_id=?", ("SENT" if i == 0 else "CANCELLED",
+            row = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (mid,))
+            core.store.execute((
+                'UPDATE outbox SET state=%s,sent_at=%s,'
+                'provider_message_id=%s WHERE message_id=%s'
+            ), ("SENT" if i == 0 else "CANCELLED",
                 core.clock() if i == 0 else None, "1234" if i == 0 else None, mid))
             proof = dict(message_id=mid, event_id=message.event_id,
                          plan_sha256=policy.plan_sha256, privacy_epoch=0)
@@ -162,7 +166,7 @@ def turn(core, job):
 @pytest.mark.parametrize("private,segmented", [(False, False), (True, False), (True, True)])
 def test_v1_sent_history_preserves_original_custody(core, tmp_path, private, segmented):
     _, view, job, mids, _ = archived(core, tmp_path, private=private, segmented=segmented)
-    before = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+    before = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],))
     source = owner_input.source(core.store, core.settings, view, job["event_id"],
                                 core.clock(), history=True)
     assert source[2]["authority_json"] == "{}"
@@ -172,7 +176,7 @@ def test_v1_sent_history_preserves_original_custody(core, tmp_path, private, seg
     assert item["message_id"] == mids[0]
     legacy_owner_input.source(core.store, core.settings, view, job["event_id"],
                               core.clock(), purpose="memory")
-    assert core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],)) == before
+    assert core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],)) == before
     with pytest.raises(CoreError):
         owner_input.source(core.store, core.settings, view, job["event_id"], core.clock())
 
@@ -186,22 +190,26 @@ def test_v1_unprovable_history_is_rejected(core, tmp_path, damage):
         key = {"unsigned": "live_text_input:" + job["event_id"],
                "archive": "live_text_window:" + policy.plan_sha256,
                "receipt": "live_text_reply:" + mids[0]}[damage]
-        core.store.execute("DELETE FROM runtime_meta WHERE key=?", (key,))
+        core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (key,))
     elif damage == "approval":
-        core.store.execute("UPDATE runtime_meta SET value=json_set(value,"
-            "'$.binding.approval_sha256',?) WHERE key=?",
+        core.store.execute((
+            'UPDATE runtime_meta SET value=json_set(value,'
+            "'$.binding.approval_sha256',%s) WHERE key=%s"
+        ),
             ("f" * 64, "live_text_window:" + policy.plan_sha256))
     elif damage == "signature":
-        core.store.execute("UPDATE runtime_meta SET value=json_set(value,'$.capture.signature',?) "
-            "WHERE key=?", ("0" * 128, "live_text_input:" + job["event_id"]))
+        core.store.execute((
+            'UPDATE runtime_meta SET value=json_set(value,'
+            "'$.capture.signature',%s) WHERE key=%s"
+        ), ("0" * 128, "live_text_input:" + job["event_id"]))
     elif damage == "ack":
         core.store.execute("UPDATE outbox SET provider_message_id=NULL")
     elif damage == "payload":
-        core.store.execute("UPDATE model_admissions SET payload_sha256=?", ("f" * 64,))
+        core.store.execute('UPDATE model_admissions SET payload_sha256=%s', ("f" * 64,))
     elif damage == "journal":
         Path(core.settings.paid_model.journal_path).write_text("{}\n", encoding="utf-8")
     elif damage == "erased":
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (job["event_id"],))
+        core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (job["event_id"],))
     with pytest.raises(CoreError):
         legacy_owner_input.validate_turn(core.store, core.settings, view, item, core.clock())
 
@@ -243,7 +251,7 @@ def test_clock_rollback_does_not_expose_future_legacy_history(core, tmp_path, bo
         core.clock.advance(-61)  # One second before the original signed frame.
     else:
         # Archived delivery occurred 30 seconds after input, before grant creation.
-        core.store.execute("UPDATE outbox SET sent_at=? WHERE message_id=?",
+        core.store.execute('UPDATE outbox SET sent_at=%s WHERE message_id=%s',
                            (after(core.clock(), -30), mids[0]))
         core.clock.advance(-45)  # Input is past, but the confirmed delivery is future.
     with pytest.raises(CoreError):

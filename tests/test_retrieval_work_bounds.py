@@ -162,7 +162,7 @@ def test_vector_warmer_is_one_bounded_unit_and_rejects_withdrawal(core, monkeypa
     assert core.store.one("SELECT COUNT(*) n FROM memory_vectors")["n"] == 8
 
     async def withdrawn(*args, revalidate):
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_17"], core.clock())
         revalidate()
 

@@ -297,16 +297,21 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.get(prefix + "/health/ready", dependencies=auth)
     async def ready():
-        from companion.ops_status import schema_head
+        from companion.ops_status import schema_readiness
 
-        schema_head()
-        core = app.state.core
-        version = core.store.one('SELECT version_num FROM alembic_version')
-        if not core.store.schema_capabilities():
-            raise CoreError("MIGRATION_REQUIRED", 503)
+        def check(store):
+            with store.read_snapshot():
+                store.execute("SET LOCAL statement_timeout='2s'")
+                store.execute("SET LOCAL lock_timeout='1s'")
+                details, blocker = schema_readiness(store)
+                if blocker:
+                    raise CoreError(blocker, 503)
+                return details["schema"]
+
+        version = await app.state.api_store.run(check)
         return {
             "status": "ready",
-            "schema": version["version_num"],
+            "schema": version,
             "capabilities": [
                 "m0",
                 "m1",

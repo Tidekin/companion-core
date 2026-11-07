@@ -141,18 +141,24 @@ class Store:
             raise RuntimeError("READ_SNAPSHOT_WRITE_REQUIRED")
         self._session.ledger_lock(domain, shared=shared)
 
+    @contextmanager
+    def read_snapshot(self):
+        """Own one repeatable, read-only scope without a write retry."""
+        with self._session.transaction(readonly=True):
+            self._readonly = True
+            self._scope += 1
+            try:
+                yield self
+            finally:
+                self._readonly = False
+
     def read_or_write(self, operation):
         if self.in_transaction:
             return operation()
         caller = sys._getframe(1)
         try:
-            with self._session.transaction(readonly=True):
-                self._readonly = True
-                self._scope += 1
-                try:
-                    return operation()
-                finally:
-                    self._readonly = False
+            with self.read_snapshot():
+                return operation()
         except Exception:
             pass  # The authoritative write attempt below decides the result.
         with self.transaction(site=(caller.f_code, caller.f_lineno)):
@@ -167,7 +173,9 @@ class Store:
             raise RuntimeError("POSTGRES_RUNTIME_BOOTSTRAP_REQUIRED")
 
     @contextmanager
-    def transaction(self, *, site=None, delivery_preflight=False, control_write=False):
+    def transaction(
+        self, *, site=None, delivery_preflight=False, control_write=False, rollback=False,
+    ):
         if self.in_transaction:
             raise RuntimeError("POSTGRES_TRANSACTION_ALREADY_ACTIVE")
         if site is None:
@@ -178,7 +186,7 @@ class Store:
         outcome = "ROLLBACK"
         self._budget_stops = set()
         try:
-            with self._session.transaction():
+            with self._session.transaction(rollback=rollback):
                 self.execute("SET LOCAL lock_timeout='5s'")
                 self._control_lock(control_write)
                 locked = time.perf_counter()
@@ -189,7 +197,7 @@ class Store:
                 # Native NOTIFY commits or rolls back with the business change.
                 # Hints carry no content, authority or delivery permission.
                 self._session.notify()
-            outcome = "COMMIT"
+            outcome = "ROLLBACK" if rollback else "COMMIT"
         except BaseException as error:
             pending = self._budget_stops
             if pending:

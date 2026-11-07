@@ -265,7 +265,11 @@ def main():
             request = model_accounting.load_request(args.request, args.request_sha256)
             action = (model_accounting.preview if args.command == "preview-model-accounting"
                       else model_accounting.record)
-            with closing(Store(settings.database)) as store:
+            from companion.postgres import Database
+
+            with Database(settings.database) as database, closing(
+                Store(database, settings.state_directory),
+            ) as store:
                 print(encode(action(store, settings, request, args.evidence)))
         elif args.command == "reconcile-video-rates":
             from companion.video_accounting import reconcile

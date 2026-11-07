@@ -113,6 +113,7 @@ class MemoryProjections:
             )
             truncated |= len(rows) > 20
             for row in rows[:20]:
+                row.pop("record_sequence", None)
                 if row["episode_id"] in selected:
                     continue
                 if self.work:
@@ -306,18 +307,20 @@ class MemoryProjections:
         rows = read(
             (
                 (
-                    'SELECT DISTINCT g.* FROM goals g JOIN goal_evidence ge '
+                    'SELECT g.* FROM goals g JOIN goal_evidence ge '
                     'USING(goal_id) LEFT JOIN goal_steps s USING(goal_id) '
                     'LEFT JOIN commitments c USING(goal_id) WHERE '
                     'g.redacted=0 AND ge.event_id IN (SELECT value FROM '
                     'json_array_elements_text(%s::json) AS ids(value)) '
-                    'ORDER BY ('
+                    'GROUP BY g.goal_id ORDER BY bool_or('
                 )
             )
             + GOAL_ATTENTION
-            + ") DESC,g.goal_id LIMIT 21",
+            + ") DESC NULLS LAST,g.goal_id LIMIT 21",
             (encode(ids), encode(sorted(ACTIVE))),
         )
+        for row in rows:
+            row.pop("record_sequence", None)
         result = []
         for goal in rows[:20]:
             if (
@@ -474,7 +477,7 @@ class MemoryProjections:
                     'END)=%s AND (CASE WHEN r.goal_step_json IS JSON THEN '
                     "(r.goal_step_json::json#>>'{step_id}') END)=%s ORDER "
                     "BY (r.state='UNKNOWN' OR COALESCE(a.state='UNKNOWN',"
-                    '0)) DESC,r.created_at DESC,r.request_id LIMIT 21'
+                    'false)) DESC,r.created_at DESC,r.request_id LIMIT 21'
                 )
             ),
             (goal["goal_id"], step["step_id"]),

@@ -6,17 +6,18 @@ import binascii
 import json
 import os
 import re
-import sqlite3
 import stat
 import tomllib
 from contextlib import closing
 from pathlib import Path
 
+import psycopg
 from pydantic import ValidationError
 
 from companion import meme_assets
 from companion.config import Settings
 from companion.contracts import CoreError
+from companion.postgres import Database
 from companion.privacy import ErasureLedger, epoch
 from companion.store import Store
 from companion_delivery_protocol.authority import validate_authority_ref
@@ -45,13 +46,6 @@ def regular_file(path, maximum=None):
         or maximum is not None and path.stat().st_size > maximum):
         raise ValueError("MEME_MIGRATION_FILE_INVALID")
     return path
-
-
-def readonly(path):
-    path = regular_file(path)
-    db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
-    db.execute("PRAGMA query_only=ON")
-    return db
 
 
 def checked_hash(value):
@@ -158,30 +152,31 @@ def run(settings, manifest_path, *, operation="dry-run"):
     manifest, items = read_manifest(manifest_path)
     # Preflight the existing target read-only: missing/corrupt ledgers never create
     # a database, initialize a new Ledger or modify schema during a rehearsal.
-    with closing(readonly(settings.database)) as source, closing(Store(":memory:")) as staged:
-        source.backup(staged.db)
-        _ledger(staged, settings.erasure_ledger)
-        if not staged.one("SELECT 1 FROM sqlite_master WHERE name='meme_asset_sources'"):
-            raise ValueError("MEME_ASSET_SCHEMA_REQUIRED")
-        if operation == "import":
-            with closing(Store(settings.database)) as target:
-                return _run(target, settings, manifest, items, operation)
-        return _run(staged, settings, manifest, items, operation)
+    with Database(settings.database, max_connections=1) as database, closing(
+        Store(database, settings.state_directory),
+    ) as store:
+        with store.read_snapshot():
+            _ledger(store, settings.erasure_ledger)
+            if not store.one("SELECT 1 FROM pg_class WHERE "
+                "relnamespace=current_schema()::regnamespace AND relname='meme_asset_sources' "
+                "AND relkind IN ('r','p')"):
+                raise ValueError("MEME_ASSET_SCHEMA_REQUIRED")
+        return _run(store, settings, manifest, items, operation)
 
 
 def _run(store, settings, manifest, items, operation):
-    before = _projection(store)
-    ledger, ledger_hash = _ledger(store, settings.erasure_ledger)
-    ledger.replay(store)
-    with store.transaction():
+    with store.transaction(control_write=True, rollback=operation != "import"):
+        before = _projection(store)
+        ledger, ledger_hash = _ledger(store, settings.erasure_ledger)
+        ledger.replay(store)
         if _ledger(store, settings.erasure_ledger)[1] != ledger_hash:
             raise ValueError("MEME_MIGRATION_PRIVACY_CHANGED")
         version = epoch(store)
         results = _apply(store, settings, manifest, items)
         if epoch(store) != version or _ledger(store, settings.erasure_ledger)[1] != ledger_hash:
             raise ValueError("MEME_MIGRATION_PRIVACY_CHANGED")
-    return {"operation": operation, "manifest_sha256": manifest["sha256"],
-            "matches": before == _projection(store), "items": results}
+        return {"operation": operation, "manifest_sha256": manifest["sha256"],
+                "matches": before == _projection(store), "items": results}
 
 
 def main():
@@ -193,7 +188,7 @@ def main():
     try:
         config = tomllib.loads(regular_file(args.config, 1024 * 1024).read_text("utf-8"))
         result = run(Settings.model_validate(config), args.manifest, operation=args.operation)
-    except (CoreError, ValueError, KeyError, TypeError, OSError, sqlite3.Error,
+    except (CoreError, ValueError, KeyError, TypeError, OSError, psycopg.Error,
             binascii.Error, ValidationError):
         print(json.dumps({"error": "MEME_MIGRATION_REFUSED"}))
         return 1

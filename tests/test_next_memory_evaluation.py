@@ -39,7 +39,7 @@ def test_frozen_recall_quality_and_provenance(core, record_testsuite_property):
     core.clock.advance(86400)
     ids["handoff_new"] = core.memory.decide(ids["handoff_old"], "correct", core.clock(),
                                             "青禾项目的资料现在放在西门。")["memory_id"]
-    core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+    core.store.execute('UPDATE memories SET valid_to=%s WHERE memory_id=%s',
                        (after(core.clock(), -1), ids["expired"]))
     view, cases = MemoryContext(core.memory), []
     expected_total = recalled = false_positive = evidence_total = complete_evidence = 0

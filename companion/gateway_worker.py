@@ -14,6 +14,7 @@ from companion.config import Settings
 from companion.gateway_api import create_app
 from companion.gateway_contract import ClientGrant
 from companion.model import ModelClient
+from companion.postgres import Database
 from companion.store import Store, migrate, utcnow
 
 
@@ -51,7 +52,9 @@ def main():
         return
     if args.command == "init":
         migrate(settings.database)
-    with closing(Store(settings.database)) as store:
+    with Database(settings.database, max_connections=1) as database, closing(
+        Store(database, settings.state_directory),
+    ) as store:
         if args.command == "init":
             print(json.dumps(gateway.budget_reference(store, settings, utcnow())))
         elif args.command == "client-put":

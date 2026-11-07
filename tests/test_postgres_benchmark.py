@@ -82,4 +82,12 @@ def test_native_campaign_exam_keeps_memory_and_settled_liability(core, tmp_path)
                 assert audit["journal_sha256"] == hashlib.sha256(
                     Path(worker.settings.paid_model.journal_path).read_bytes()  # noqa: ASYNC240 -- local test receipt
                 ).hexdigest()
+                from companion.ops_status import snapshot
+
+                observed = snapshot(worker.settings, integrity=True)
+                assert observed["resources"]["budget_journal"]["checked"] == "FULL_JOURNAL"
+                assert audit["journal_sha256"] == hashlib.sha256(
+                    Path(worker.settings.paid_model.journal_path).read_bytes()  # noqa: ASYNC240 -- local test receipt
+                ).hexdigest()
+                json.dumps(observed)
     run(scenario())

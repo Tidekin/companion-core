@@ -77,3 +77,38 @@ worker 的合成验证及 QQ 验收，仍是生产切换的必要条件。
 有限执行，取消时先等待该调用退出，再释放监听连接。
 
 - [Psycopg 原生通知与有限等待](https://www.psycopg.org/psycopg3/docs/advanced/async.html#asynchronous-notifications)
+
+运行诊断和私聊 trace 查询使用独立、有限连接及 PostgreSQL 只读可重复快照，
+每条语句和锁等待均有超时。查询不会初始化身份、升级结构或重放删除。
+费用与删除文件的核对沿用事务级共享账本锁。
+
+诊断中的 `integrity=CATALOG_VALID` 表示目录内约束均已验证、索引均有效；
+完整的堆表与索引物理检查须在独立维护或恢复演练中使用 PostgreSQL 原生工具，
+验收时保留其检查范围和结果。
+
+- [PostgreSQL amcheck 检查范围与锁行为](https://www.postgresql.org/docs/16/amcheck.html)
+- [PostgreSQL pg_amcheck](https://www.postgresql.org/docs/16/app-pgamcheck.html)
+
+运行中的容器只加载不可变的依赖文件；更新测试环境不得截断或覆盖其他进程
+正在映射的原生库。长时间评测独立冻结依赖目录、文件哈希、Python、驱动与
+等待实现。业务容器和 CI 沿用 Psycopg 的平台默认等待实现。
+
+- [Psycopg 3.3.8 等待实现与环境选择](https://github.com/psycopg/psycopg/blob/3.3.8/psycopg/psycopg/waiting.py)
+
+表情目录的离线导入直接使用 PostgreSQL 原生事务；`dry-run` 和 `reconcile`
+在强制回滚事务内验证完整来源、删除重放与容量，返回物化结果后回滚。
+`import` 将删除重放和导入一并提交。预检不会初始化身份或创建替代删除日志。
+试运行会回滚表数据；PostgreSQL 序列允许留下空档，顺序值不作为连续计数或费用凭证。
+
+情景接续和目标投影在比较来源快照时，仅比较原有业务字段；物理排序字段
+`record_sequence` 不参与证据一致性判断。目标候选按原生聚合后的注意状态排序，
+实际来源、授权、过期和未知执行状态仍须逐项核验。
+
+记忆抽取沿用原有共享租约与检查点，以唯一键 upsert 锁住首次领取和已有租约，
+在锁内重新检查所有者和到期状态。空任务不留下新租约；过期恢复仅处理该检查点
+拥有的费用请求。模型请求在事务外执行。夜间 N2 创建情景使用原有独占证据写入
+事务，保留较早情景与晚到消息的分组。
+
+就绪接口和运行诊断共用版本与结构能力检查，并在有限只读快照内执行。
+打包的旧版本必须迁移；未知的新版本只有具备全部所需能力时才允许兼容回退。
+打包的 SQLite 版本在导入后仍属于已知旧版本。

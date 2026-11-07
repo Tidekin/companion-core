@@ -12,6 +12,7 @@ from companion.memory_context import MemoryContext
 from companion.privacy import epoch
 from companion.store import after
 from tests.conftest import ingest
+from tests.postgres_fixture import isolated_database, logical_state
 from tests.test_m1 import remember
 
 
@@ -21,7 +22,7 @@ def context(core):
 
 
 def episode(core, *numbers):
-    events = [core.store.one("SELECT * FROM events WHERE event_id=?", (f"evt_test_{n}",))
+    events = [core.store.one("SELECT * FROM events WHERE event_id=%s", (f"evt_test_{n}",))
               for n in numbers]
     return core.memory.episodes(events, core.clock())
 
@@ -61,7 +62,7 @@ def test_expired_derived_copy_does_not_count_as_independent_support(core):
                                  evidence_event_id=command["event_id"])["memory_id"]
     # Simulate a recent materialization backed only by an expired raw correction.
     core.clock.advance(4 * 86400)
-    core.store.execute("UPDATE events SET ingested_at=? WHERE source='owner.decision'",
+    core.store.execute("UPDATE events SET ingested_at=%s WHERE source='owner.decision'",
                        (core.clock(),))
     assert view.recall("红茶", core.clock())["state"] == "NO_RECORD"
     assert view.history(revised, core.clock())["revisions"] == []
@@ -75,11 +76,11 @@ def test_independent_support_survives_expiry_and_plan_never_mutates(core):
     core.clock.advance(2 * 86400)
     assert remember(core, 2, "常用饮料是绿茶", confirmed=True) == mid
     core.clock.advance(2 * 86400)
-    before = core.ledger.path.read_bytes(), core.store.db.total_changes, epoch(core.store)
+    before = core.ledger.path.read_bytes(), logical_state(core.store), epoch(core.store)
     plan = view.invalidation_plan(["evt_test_1"], core.clock())
     assert plan["retain"] == [{"memory_id": mid, "evidence_ids": ["evt_test_2"]}]
     assert plan["withdraw"] == [] and len(plan["recompute_episode_ids"]) == 1
-    assert before == (core.ledger.path.read_bytes(), core.store.db.total_changes, epoch(core.store))
+    assert before == (core.ledger.path.read_bytes(), logical_state(core.store), epoch(core.store))
     facts = view.recall("绿茶", core.clock())["facts"]
     assert [e["event_id"] for e in facts[0]["evidence"]] == ["evt_test_2"]
     assert view.invalidation_plan(["evt_test_2"], core.clock())["withdraw"] == [mid]
@@ -111,7 +112,7 @@ def test_episode_encoding_is_atomic_ordered_and_idempotent(core):
     assert core.store.one("SELECT COUNT(*) n FROM episodes")["n"] == 1
     assert core.store.one("SELECT COUNT(*) n FROM conversation_summaries")["n"] == 1
     assert all(row["memory_processed"] for row in core.store.rows("SELECT * FROM events"))
-    conv = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+    conv = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                           (receipt["event_id"],))["conversation_id"]
     core.clock.advance(86400)
     item = view.continuation(conv, core.clock())["items"][0]
@@ -129,7 +130,7 @@ def test_episode_rejects_invalid_sources_without_partial_commit(core, invalid):
            else None)
     events = core.store.rows("SELECT * FROM events")
     if invalid == "changed":
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_2'",
+        core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_2'",
                            (json.dumps({"text": "新的正文"}),))
     elif invalid == "redacted":
         core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_2'")
@@ -197,7 +198,7 @@ def test_conflicts_separate_from_facts_and_owner_correction_is_current(core):
 def test_fact_validity_is_explicit_and_half_open(core):
     view = context(core)
     mid = remember(core, 1, "本周交接点在东门", confirmed=True)
-    core.store.execute("UPDATE memories SET valid_from=?,valid_to=? WHERE memory_id=?",
+    core.store.execute('UPDATE memories SET valid_from=%s,valid_to=%s WHERE memory_id=%s',
                        (after(core.clock(), 60), after(core.clock(), 120), mid))
     assert view.recall("交接点", core.clock())["state"] == "NO_RECORD"
     core.clock.advance(60)
@@ -260,22 +261,24 @@ def test_forget_and_old_backup_replay_remove_facts_revisions_and_continuation(co
     episode(core, 1)
     other = remember(core, 2, "独立事实是爱吃苹果", confirmed=True)
     new = core.memory.decide(old, "correct", core.clock(), "项目约定是周三交接")["memory_id"]
-    archive, destination = tmp_path / "before.enc", tmp_path / "restored.db"
+    archive = tmp_path / "before.enc"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     core.memory.decide(new, "forget", core.clock())
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    reopened = Core(core.settings.model_copy(update={"database": str(destination)}),
-                    core.model, core.clock)
-    try:
-        for service in (view, MemoryContext(reopened.memory)):
-            assert service.recall("交接", core.clock())["state"] == "NO_RECORD"
-            assert service.history(new, core.clock())["revisions"] == []
-            assert service.recall("苹果", core.clock())["facts"][0]["memory_id"] == other
-            conv = service.store.one("SELECT conversation_id FROM conversations")["conversation_id"]
-            assert service.continuation(conv, core.clock())["items"] == []
-    finally:
-        reopened.store.close()
+    with isolated_database() as destination:
+        state = tmp_path / 'restored-state'
+        restore(archive, destination, key, core.settings.erasure_ledger, state_directory=state)
+        settings = core.settings.model_copy(update={'database':destination,
+                                                    'state_directory':str(state)})
+        with Core(settings, core.model, core.clock) as reopened:
+            for service in (view, MemoryContext(reopened.memory)):
+                assert service.recall("交接", core.clock())["state"] == "NO_RECORD"
+                assert service.history(new, core.clock())["revisions"] == []
+                assert service.recall("苹果", core.clock())["facts"][0]["memory_id"] == other
+                conv = service.store.one(
+                    "SELECT conversation_id FROM conversations WHERE scope='private'"
+                )["conversation_id"]
+                assert service.continuation(conv, core.clock())["items"] == []
 
 
 def test_candidate_cannot_use_expired_or_nonprivate_source(core):
@@ -316,7 +319,7 @@ def test_delayed_extraction_cannot_undo_owner_correction(core):
         "evidence_quote": "周三是项目交接时间", "evidence_event_id": "evt_test_3"})
     assert core.memory.add(candidate, core.clock(),
                            resolution={"same": new, "conflicts": [pending]}) == new
-    assert core.store.one("SELECT needs_review FROM memories WHERE memory_id=?",
+    assert core.store.one('SELECT needs_review FROM memories WHERE memory_id=%s',
                           (new,))["needs_review"] == 0
 
 
@@ -330,9 +333,9 @@ def test_source_withdrawal_read_contract_retains_only_independent_support(core):
     # The integration owner supplies input_recall + Ledger replay. This tests its read contract.
     with core.store.transaction():
         for key in ("evt_test_1", "evt_test_2"):
-            core.store.execute("UPDATE events SET redacted=1,body_json='{}' WHERE event_id=?",
+            core.store.execute("UPDATE events SET redacted=1,body_json='{}' WHERE event_id=%s",
                                (key,))
-            core.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+            core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                                ("erased_event:" + key, "synthetic-input-recall"))
     found = view.recall("绿茶", core.clock())["facts"]
     assert found[0]["memory_id"] == shared

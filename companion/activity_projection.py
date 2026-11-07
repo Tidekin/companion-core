@@ -57,7 +57,7 @@ class ConversationSources(MemorySources):
 def _roots(store, table, key, identifier):
     # All identifiers here are module constants, never caller-supplied SQL.
     return [row["event_id"] for row in store.rows(
-        f"SELECT event_id FROM {table} WHERE {key}'=%s ORDER BY event_id LIMIT 101'",
+        f"SELECT event_id FROM {table} WHERE {key}=%s ORDER BY event_id LIMIT 101",
         (identifier,),
     )]
 
@@ -301,10 +301,9 @@ def snapshot(reader, selection):
         raise CoreError("ACTIVITY_SNAPSHOT_BUSY", 409)
     version = read_version(core.memory)
     now = core.clock()
-    # A deferred read transaction pins all native rows without taking a writer
+    # A repeatable read-only transaction pins all native rows without taking a writer
     # reservation. Recheck *after* ending it, on the latest epoch and Ledger.
-    store.execute("BEGIN")
-    try:
+    with store.read_snapshot():
         conversation = store.one('SELECT 1 FROM conversations WHERE conversation_id = %s AND scope '
             "= 'private' AND owner_actor_id = 'owner'",
                                  (selection.conversation_id,))
@@ -337,8 +336,6 @@ def snapshot(reader, selection):
                   "presence": {"state": "UNKNOWN", "reason": "NO_TRUSTED_SCENE_SOURCE"},
                   "interruptibility": "NOT_RECORDED", "progress": "NOT_RECORDED",
                   "reasoning": "NOT_EXPOSED", "source_valid_until": sources.valid_until}
-    finally:
-        store.db.rollback()
     check_version(core.memory, version)
     if sources.valid_until and core.clock() >= sources.valid_until:
         raise CoreError("PRIVACY_CHANGED", 409)

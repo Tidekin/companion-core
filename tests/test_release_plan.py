@@ -8,8 +8,8 @@ import pytest
 
 from companion import owner_authority, release_probe
 from companion.contracts import CoreError
-from companion.store import migrate
 from scripts import release_plan as plan
+from tests.postgres_fixture import isolated_database
 from tests.support.owner_authority import activate
 from tests.test_owner_authority import prepare
 
@@ -22,14 +22,16 @@ def test_probe_on_current_schema_needs_no_migration(core):
 
 
 def test_probe_migrates_only_the_copy_it_is_given_and_times_it(core, tmp_path):
-    old = tmp_path / "old.sqlite3"
-    migrate(str(old), revision="0048_meme_vectors")
-    settings = core.settings.model_copy(update={"database": str(old)})
-    result = release_probe.probe(load=lambda: settings)
-    assert result["migration"]["needed"] and result["migration"]["ok"]
-    assert result["migration"]["seconds"] >= 0
-    assert result["before"]["schema"] == "0048_meme_vectors"
-    assert result["after"]["schema"] == result["before"]["expected_schema"]
+    original = release_probe.snapshot(core.settings)["database"]["schema"]
+    with isolated_database() as empty:
+        settings = core.settings.model_copy(update={"database": empty,
+            "state_directory": str(tmp_path / "copy-state")})
+        result = release_probe.probe(load=lambda: settings)
+        assert result["migration"]["needed"] and result["migration"]["ok"]
+        assert result["migration"]["seconds"] >= 0
+        assert result["before"]["schema"] is None
+        assert result["after"]["schema"] == result["before"]["expected_schema"]
+    assert release_probe.snapshot(core.settings)["database"]["schema"] == original
 
 
 def test_probe_reports_whether_the_stored_policy_survives(core, tmp_path):

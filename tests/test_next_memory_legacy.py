@@ -7,6 +7,7 @@ from companion.backup import backup, restore
 from companion.core import Core
 from companion.memory_context import MemoryContext, MemorySources
 from tests.conftest import ingest
+from tests.postgres_fixture import isolated_database
 from tests.test_m1 import remember
 
 
@@ -79,35 +80,33 @@ def test_legacy_correction_expires_before_cleanup_and_after_backup_restore(core,
     assert core.ledger.path.read_bytes() == ledger
     assert core.store.rows("SELECT * FROM events ORDER BY event_id") == state
     # Restore without any cleanup record: startup replay alone cannot implement read-time expiry.
-    destination = tmp_path / "restored-before-cleanup.db"
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    reopened = Core(core.settings.model_copy(update={"database": str(destination)}),
-                    core.model, core.clock)
-    try:
-        assert_read_contract(reopened, revised, original, copied, support)
-        assert not reopened.store.rows("SELECT * FROM privacy_erasure_ledger")
-        assert not any(row["redacted"] for row in reopened.store.rows(
-            "SELECT redacted FROM events",
-        ))
-    finally:
-        reopened.close()
+    with isolated_database() as destination:
+        state_directory = tmp_path / "restored-before-cleanup"
+        restore(archive, destination, key, core.settings.erasure_ledger,
+                state_directory=state_directory)
+        with Core(core.settings.model_copy(update={"database": destination,
+                  "state_directory": state_directory}), core.model, core.clock) as reopened:
+            assert_read_contract(reopened, revised, original, copied, support)
+            assert not reopened.store.rows("SELECT * FROM privacy_erasure_ledger")
+            assert not any(row["redacted"] for row in reopened.store.rows(
+                "SELECT redacted FROM events",
+            ))
     # Then exercise actual Ledger cleanup and replay against the exact same old backup.
     assert core.expire_raw_events() == 2
-    destination = tmp_path / "restored-after-cleanup.db"
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    reopened = Core(core.settings.model_copy(update={"database": str(destination)}),
-                    core.model, core.clock)
-    try:
-        for instance in (core, reopened):
-            result = MemoryContext(instance.memory).recall("红茶", core.clock())
-            assert result["state"] == ("FOUND" if support == "independent" else "NO_RECORD")
-            assert [row["memory_id"] for row in result["facts"]] == (
-                [revised] if support == "independent" else []
-            )
-            assert instance.store.one("SELECT redacted FROM events WHERE event_id=?",
-                                      (copied,)) == {"redacted": 1}
-    finally:
-        reopened.close()
+    with isolated_database() as destination:
+        state_directory = tmp_path / "restored-after-cleanup"
+        restore(archive, destination, key, core.settings.erasure_ledger,
+                state_directory=state_directory)
+        with Core(core.settings.model_copy(update={"database": destination,
+                  "state_directory": state_directory}), core.model, core.clock) as reopened:
+            for instance in (core, reopened):
+                result = MemoryContext(instance.memory).recall("红茶", core.clock())
+                assert result["state"] == ("FOUND" if support == "independent" else "NO_RECORD")
+                assert [row["memory_id"] for row in result["facts"]] == (
+                    [revised] if support == "independent" else []
+                )
+                assert instance.store.one("SELECT redacted FROM events WHERE event_id=%s",
+                                          (copied,)) == {"redacted": 1}
 
 
 def test_native_owner_decision_is_not_inferred_to_depend_on_old_fact(core):

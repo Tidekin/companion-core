@@ -1,6 +1,6 @@
 """Core custody for SDK Conversation snapshots over the original job lease.
 
-SQLite owns snapshots and tool-to-Reader bindings. The original paid journal owns
+PostgreSQL owns snapshots and tool-to-Reader bindings. The original paid journal owns
 money. An unresolved gap between those systems stops the step, never replays I/O.
 The SDK remains the only model/tool loop; this module does not schedule effects.
 """

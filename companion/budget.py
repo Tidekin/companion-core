@@ -1234,9 +1234,9 @@ def _actual_limit_violations(store, admission, snapshot, usage, actual):
     return limits
 
 
-def usage_diagnostics(db):
+def usage_diagnostics(store):
     """Read-only calibration from settled paid usage; no prompts or account identifiers."""
-    cursor = db.execute(
+    row = store.one(
         # Read correction IDs once instead of scanning the audit log for every call.
         "SELECT COUNT(*) AS calibrated_calls, COALESCE(CAST(SUM(a.input_bound) AS BIGINT), 0) AS "
         "input_estimated_tokens, COALESCE(CAST(SUM(m.input_tokens) AS BIGINT), 0) AS "
@@ -1248,18 +1248,17 @@ def usage_diagnostics(db):
         "(request_id) WHERE m.state = 'SETTLED' AND NOT m.request_id IN (SELECT entity_id FROM "
         "audit_log WHERE action = 'model.video_rate_correction' AND NOT entity_id IS NULL)"
     )
-    row = dict(zip((column[0] for column in cursor.description), cursor.fetchone(), strict=True))
     # Diagnostics never reinterpret the reserved tokens of an UNKNOWN as observed usage.
-    anomalies = db.execute(
+    anomalies = store.one(
 
-            'SELECT COUNT(DISTINCT entity_id) FROM audit_log WHERE '
+            'SELECT COUNT(DISTINCT entity_id) AS n FROM audit_log WHERE '
             "action='model.usage_diagnostic' AND (CASE WHEN "
             'safe_detail_json IS JSON THEN '
             "(safe_detail_json::json#>>'{code}') END) IN "
             "('INPUT_USAGE_SPIKE','LOCAL_LIMIT_EXCEEDED',"
             "'USAGE_MISSING_OR_INVALID')"
 
-    ).fetchone()[0]
+    )["n"]
     return {
         **row,
         "input_error_tokens": row["input_actual_tokens"] - row["input_estimated_tokens"],

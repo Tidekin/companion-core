@@ -47,7 +47,7 @@ def finish_node(jobs, *, operation="tts", partial=False, text="/forget all Âè™Êò
 
 def signed_input(core, event_id, key, *, index=0, partial=False):
     data = wav_bytes(0.125)
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (event_id,))
     proof = sign_asr_proof(
         key,
         authority=voice_authority.current(
@@ -246,15 +246,15 @@ def test_reply_policy_does_not_speak_every_reply(core, monkeypatch, policy):
 def test_voice_choice_preserves_existing_picture_expression(core, monkeypatch):
     flow, _, message_id, _, _ = flow_fixture(core, monkeypatch,
                                             reply=VoiceReplyPolicy(mode="auto"))
-    original = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    original = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
     content = {**json.loads(original["content_json"]), "image": {"asset_id": "existing-meme"}}
-    core.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+    core.store.execute('UPDATE outbox SET content_json=%s,content_sha256=%s WHERE message_id=%s',
                        (encode(content), transport.digest(content), message_id))
-    original = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    original = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
         (owner_delivery.DELIVERY + message_id,))["value"])
-    updated = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    updated = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
     job = owner_delivery._job(core.store, original["job_id"])
-    core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+    core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                        (encode(owner_delivery._material(core.store, updated,
                             job,
                             voice_authority.current(core.store, core.settings, core.clock),
@@ -262,7 +262,7 @@ def test_voice_choice_preserves_existing_picture_expression(core, monkeypatch):
                         owner_delivery.DELIVERY + message_id))
     assert prepare(core, flow, message_id).state == "TEXT"
     assert not core.store.rows("SELECT * FROM voice_jobs")
-    current = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    current = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
     assert current["delivery_key"] == original["delivery_key"]
     assert json.loads(current["content_json"]) == content
 
@@ -293,7 +293,7 @@ def test_asr_record_limit_marks_partial_without_accepting_extra_upload(core, mon
 
 def test_asr_gate_context_and_no_memory_or_owner_text_upgrade(core, monkeypatch):
     flow, jobs, _, event_id, key = flow_fixture(core, monkeypatch, make_reply=False)
-    body = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,))
+    body = core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event_id,))
     assert flow.input_status(event_id).state == "WAITING"
     status, data, proof = upload(core, flow, event_id, key, partial=True)
     assert flow.input_status(event_id).state == "WAITING"
@@ -314,7 +314,7 @@ def test_asr_gate_context_and_no_memory_or_owner_text_upgrade(core, monkeypatch)
         assert (
             flow.submit_signed_asr(event_id, data, upload_proof=proof)["job_id"] == status["job_id"]
         )
-    assert core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,)) == body
+    assert core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event_id,)) == body
     assert core.store.rows("SELECT * FROM memories") == []
     assert core.store.rows("SELECT * FROM model_usage") == []
     metadata = encode(core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'voice_%'"))
@@ -420,7 +420,7 @@ def test_real_native_asr_context_tts_outbox_send_check_and_counter_chain(
         nodes={"local": VoiceNode(token=config.credential,
                                   manifest_sha256=digest(local_manifest(config)))})
     capture, capture_key, _ = native_voice(core, tmp_path, config=core_voice)
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (capture.event_id,))
     original_body = event["body_json"]
     data, proof = signed_input(core, capture.event_id, capture_key, partial=True)
     calls = []
@@ -514,7 +514,7 @@ def test_real_native_asr_context_tts_outbox_send_check_and_counter_chain(
                     original["content_sha256"])
                 assert core.store.rows(
                     "SELECT request_id,state,billed_micro_usd FROM model_usage") == usage
-                assert core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                assert core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                     (capture.event_id,))["body_json"] == original_body
                 assert len(child_receipts(counter)) == 2
                 assert core.store.rows("SELECT * FROM memories") == []

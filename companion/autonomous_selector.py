@@ -195,12 +195,11 @@ def native_selector(core, worker_id) -> RoundRobin:
 
     def maintenance(name, operation, purposes=()):
         async def run():
-            changes = core.store.db.total_changes
+            before = core.store.change_token()
             operation()
-            # Completed a scheduled maintenance unit. Its next monotonic deadline
-            # advances once; rescan only to observe work it enqueued on our own Store,
-            # whose commits do not change this connection's data_version.
-            return UnitResult(core.store.db.total_changes != changes)
+            # A changed native snapshot prompts one rescan after this scheduled unit.
+            # Concurrent commits may also prompt a rescan, like other wake hints.
+            return UnitResult(core.store.change_token() != before)
 
         return lane(name, run, purposes, interval=MAINTENANCE_SECONDS, maintenance=True)
 

@@ -70,9 +70,11 @@ def provider(request):
 
 def api(harness, method, path, *, token=None, **kwargs):
     async def call():
-        transport = httpx.ASGITransport(app=create_app(harness.core.settings,
-            clock=harness.core.clock), client=("127.0.0.1", 1234))
-        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+        app = create_app(harness.core.settings, clock=harness.core.clock)
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 1234))
+        async with app.router.lifespan_context(app), httpx.AsyncClient(
+            transport=transport, base_url="http://127.0.0.1",
+        ) as client:
             return await client.request(method, path, headers={"Authorization": "Bearer " + (
                 harness.key if token is None else token), **kwargs.pop("headers", {})}, **kwargs)
     return run(call())
@@ -206,7 +208,7 @@ def test_budget_journal_detects_gateway_attribution_loss_and_key_rollback(harnes
     harness.process(provider)
     core = harness.core
     with core.store.transaction():
-        core.store.execute("UPDATE gateway_requests SET client_id='client-a',body_sha256=?",
+        core.store.execute("UPDATE gateway_requests SET client_id='client-a',body_sha256=%s",
                            ("0" * 64,))
     with pytest.raises(CoreError):
         paid_budget.journal(core.store, core.settings.paid_model)
@@ -230,7 +232,7 @@ def test_key_rotation_keeps_usage_and_invalidates_old_execution(harness):
     assert api(harness, "GET", "/v1/models", token=old_key).status_code == 401
     assert api(harness, "GET", "/v1/models").status_code == 200
     harness.process(lambda req: pytest.fail("old grant resumed by new Key"))
-    row = harness.core.store.one("SELECT state FROM gateway_requests WHERE request_id=?",
+    row = harness.core.store.one('SELECT state FROM gateway_requests WHERE request_id=%s',
                                 (pending,))
     assert row["state"] == "FAILED"
     recovered = api(harness, "GET", "/v1/gateway/requests/" + completed)
@@ -272,7 +274,7 @@ def test_native_client_quota_serializes_independent_workers(harness):
             await release.wait()
             return provider(request)
 
-        other = Store(harness.core.settings.database)
+        other = Store(harness.core.database, harness.core.settings.state_directory)
         try:
             async with httpx.AsyncClient(transport=httpx.MockTransport(delayed)) as a:
                 async with httpx.AsyncClient(transport=httpx.MockTransport(
@@ -371,24 +373,30 @@ def test_restore_invalidates_keys_and_clears_receipt_bodies(harness, tmp_path):
     from cryptography.fernet import Fernet
 
     from companion.backup import backup, restore
+    from companion.postgres import Database
+    from tests.postgres_fixture import isolated_database
 
     harness.submit()
     harness.process(provider)
     key = Fernet.generate_key()
-    archive, destination = tmp_path / "snapshot.enc", tmp_path / "restored.db"
+    archive = tmp_path / "snapshot.enc"
     backup(harness.core.settings.database, str(archive), key)
-    restore(str(archive), str(destination), key, harness.core.settings.erasure_ledger)
-    settings = harness.core.settings.model_copy(update={"database": str(destination)})
-    with closing(Store(str(destination))) as restored:
-        with pytest.raises(CoreError, match="GATEWAY_INVALID_KEY"):
-            gateway.authenticate(restored, settings, harness.key, harness.core.clock())
-        row = restored.one("SELECT * FROM gateway_requests")
-        assert row["state"] == "UNKNOWN"
-        assert row["request_cipher"] is None and row["response_cipher"] is None
-        with pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
-            gateway.submit(restored, settings, harness.grant,
-                ChatRequest.model_validate(body()), RequestContext(), "new-intent-123",
-                harness.core.clock())
+    with isolated_database() as destination:
+        state = tmp_path / 'restored-state'
+        restore(archive, destination, key, harness.core.settings.erasure_ledger,
+                state_directory=state)
+        settings = harness.core.settings.model_copy(update={"database": destination,
+                                                           "state_directory": str(state)})
+        with Database(destination) as database, closing(Store(database, state)) as restored:
+            with pytest.raises(CoreError, match="GATEWAY_INVALID_KEY"):
+                gateway.authenticate(restored, settings, harness.key, harness.core.clock())
+            row = restored.one("SELECT * FROM gateway_requests")
+            assert row["state"] == "UNKNOWN"
+            assert row["request_cipher"] is None and row["response_cipher"] is None
+            with pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
+                gateway.submit(restored, settings, harness.grant,
+                    ChatRequest.model_validate(body()), RequestContext(), "new-intent-123",
+                    harness.core.clock())
 
 
 def test_worker_budget_error_is_returned_as_429_with_original_receipt_id(harness):
@@ -417,25 +425,30 @@ def test_remote_socket_and_disabled_listener_cannot_be_bypassed_by_headers(harne
 
 
 def test_gateway_custody_blocks_schema_downgrade(harness, tmp_path):
-    from contextlib import closing
     from pathlib import Path
 
+    import psycopg
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
 
-    from companion.store import Store
-    from tests.test_test_fixtures import historical_database
-
-    path = historical_database(harness.core.store, tmp_path / "gateway.db", "0059_gateway")
     config = Config()
     config.set_main_option("script_location", str(
-        Path(__file__).resolve().parents[1] / "migrations"))
-    config.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
-    with pytest.raises(RuntimeError, match="Gateway custody blocks downgrade"):
-        command.downgrade(config, "0058_bili_discovery")
-    with closing(Store(path)) as store:
-        client = store.one("SELECT client_id FROM gateway_clients")
-        assert client["client_id"] == "client-a"
+        Path(__file__).resolve().parents[1] / "migrations/postgresql"))
+    engine = create_engine('postgresql+psycopg://',poolclass=NullPool,hide_parameters=True,
+        creator=lambda: psycopg.connect(harness.core.settings.database.get_secret_value()))
+    try:
+        with engine.begin() as connection:
+            config.attributes['connection'] = connection
+            with pytest.raises(
+                RuntimeError, match='CORE_POSTGRES_DOWNGRADE_REQUIRES_BACKUP_RESTORE',
+            ):
+                command.downgrade(config, 'base')
+    finally:
+        engine.dispose()
+    client = harness.core.store.one("SELECT client_id FROM gateway_clients")
+    assert client['client_id'] == 'client-a'
 
 
 def test_gateway_unknown_never_uses_private_owner_attempt_closures(harness):
@@ -464,3 +477,47 @@ def test_gateway_obeys_original_cumulative_account_without_owner_message(harness
     harness.process(lambda req: pytest.fail("original cumulative account bypassed"))
     assert len(core.store.rows("SELECT * FROM model_usage")) == 1
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
+
+
+def test_concurrent_native_submission_keeps_one_original_request(harness, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutureTimeout
+    from pathlib import Path
+    from threading import Event
+
+    selected, release = Event(), Event()
+    original = Store.one
+    journal = Path(harness.core.settings.paid_model.journal_path)
+    before = journal.read_bytes()
+
+    def pause(store, statement, parameters=()):
+        result = original(store, statement, parameters)
+        if (getattr(store, "_pause_submission", False)
+            and "gateway_requests.idempotency_sha256 = %s" in statement):
+            selected.set()
+            assert release.wait(10), "native submit barrier was not released"
+        return result
+
+    monkeypatch.setattr(Store, "one", pause)
+
+    def submit(paused):
+        core = harness.core
+        with closing(Store(core.database, core.settings.state_directory)) as store:
+            store._pause_submission = paused
+            return gateway.submit(store, core.settings, harness.grant,
+                ChatRequest.model_validate(body()), RequestContext(), "concurrent-request-123",
+                core.clock())
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(submit, True)
+        try:
+            assert selected.wait(10)
+            second = pool.submit(submit, False)
+            with pytest.raises(FutureTimeout):
+                second.result(timeout=0.3)
+        finally:
+            release.set()
+        assert first.result(timeout=10) == second.result(timeout=10)
+    assert len(harness.core.store.rows("SELECT * FROM gateway_requests")) == 1
+    assert harness.core.store.rows("SELECT * FROM model_usage") == []
+    assert journal.read_bytes() == before

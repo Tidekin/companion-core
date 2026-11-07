@@ -11,9 +11,11 @@ from companion.goals import GoalProposal, GoalScope
 from companion.memory import Memory
 from companion.memory_context import MemorySources
 from companion.memory_projections import MemoryProjections
+from companion.postgres import Database
 from companion.store import Store
 from companion.transport import begin_send, delivery_result, lease_deliveries, reconcile_delivery
 from tests.conftest import ingest, run
+from tests.postgres_fixture import isolated_database, logical_state
 from tests.test_goals import setup_goal
 from tests.test_m1 import remember
 from tests.test_next_memory_context import episode
@@ -34,7 +36,7 @@ def test_temperature_is_rebuilt_without_changing_recall_or_facts(core):
     eid = episode(core, 1)
     view = MemoryProjections(core.memory)
     scope = {"memory_ids": [mid], "episode_ids": [eid]}
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     assert view.snapshot(core.clock(), **scope)["memories"][0]["temperature"] == "Warm"
     hot = view.snapshot(core.clock(), current_event_ids=["evt_test_1"], **scope)
     assert hot["memories"][0]["temperature"] == "Hot"
@@ -43,11 +45,11 @@ def test_temperature_is_rebuilt_without_changing_recall_or_facts(core):
     cold = view.snapshot(core.clock(), **scope)
     assert cold["memories"][0]["temperature"] == "Cold"
     assert cold["episodes"][0]["temperature"] == "Cold"
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     assert mid in {row["memory_id"] for row in core.memory.search("松绿色", now=core.clock())}
     assert view.snapshot(core.clock(), used_memory_ids=[mid], **scope)["memories"][0][
         "temperature"] == "Hot"
-    with closing(Store(core.settings.database)) as reopened:
+    with closing(Store(core.database, core.settings.state_directory)) as reopened:
         rebuilt = MemoryProjections(Memory(reopened, core.settings, core.ledger))
         assert rebuilt.snapshot(core.clock(), **scope) == cold
     assert view.snapshot(core.clock(), memory_ids=[mid, mid], episode_ids=[eid, eid]) == cold
@@ -70,17 +72,39 @@ def test_goal_lifecycle_promotes_attention_without_inventing_completion(core):
     assert read()["temperature"] == "Hot"
     step = core.goals.claim()
     assert read()["goals"][0]["state"] == "running"
-    core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE goal_id=?", (goal,))
+    core.store.execute((
+        "UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' "
+        'WHERE goal_id=%s'
+    ), (goal,))
     assert read()["goals"][0]["state"] == "UNKNOWN"
-    core.store.execute("UPDATE goal_steps SET state='RUNNING' WHERE goal_id=?", (goal,))
+    core.store.execute("UPDATE goal_steps SET state='RUNNING' WHERE goal_id=%s", (goal,))
     result = fetched(core, goal)
     core.goals.finish(step, result)
     completed = read()["goals"][0]
     assert completed["state"] == "done" and not completed["told"] and not completed["closed"]
-    core.store.execute("UPDATE observations SET result_status='UNKNOWN' WHERE event_id=?",
+    core.store.execute("UPDATE observations SET result_status='UNKNOWN' WHERE event_id=%s",
                        (result,))
     assert read()["goals"][0]["state"] == "UNKNOWN"
     assert read()["temperature"] == "Hot"
+
+
+def test_active_goal_is_not_hidden_by_proposals_without_steps(core):
+    setup_goal(core)
+    core.settings.goals_max_active = 32
+    core.settings.memory_enabled = True
+    proposals = [core.goals.propose(GoalProposal(
+        topic=f"讨论中的阅读方向 {number}", source_event_ids=["evt_test_1"],
+        scope=GoalScope(operation="read_content", url=f"https://example.org/{number}"),
+    )) for number in range(21)]
+    active = proposals[-1]
+    core.goals.accept(active)
+    eid = episode(core, 1)
+    core.clock.advance(8 * 86400)
+    projected = MemoryProjections(core.memory).snapshot(core.clock(), episode_ids=[eid])[
+        "episodes"][0]
+    assert projected["temperature"] == "Hot"
+    assert any(goal["goal_id"] == active and goal["state"] == "planned"
+               for goal in projected["goals"])
 
 
 @pytest.mark.parametrize("invalid", ["expired", "erased", "upstream", "scope", "future"])
@@ -169,14 +193,19 @@ def test_restore_replays_erasure_before_projection_reconstruction(core, tmp_path
     mid = remember(core, 1, "项目封面采用松绿色", confirmed=True)
     eid = episode(core, 1)
     key = Fernet.generate_key()
-    archive, restored = tmp_path / "before.enc", tmp_path / "restored.db"
+    archive = tmp_path / "before.enc"
     backup(core.settings.database, archive, key)
     core.memory.decide(mid, "forget", core.clock())
-    restore(archive, restored, key, core.settings.erasure_ledger)
-    with closing(Store(str(restored))) as store:
-        view = MemoryProjections(Memory(store, core.settings, core.ledger))
-        result = view.snapshot(core.clock(), memory_ids=[mid], episode_ids=[eid])
-        assert result["memories"] == result["episodes"] == []
+    with isolated_database() as restored:
+        state = tmp_path / 'restored-state'
+        restore(archive, restored, key, core.settings.erasure_ledger, state_directory=state)
+        settings = core.settings.model_copy(update={
+            'database': restored, 'state_directory': str(state),
+        })
+        with Database(restored) as database, closing(Store(database, state)) as store:
+            view = MemoryProjections(Memory(store, settings, core.ledger))
+            result = view.snapshot(core.clock(), memory_ids=[mid], episode_ids=[eid])
+            assert result["memories"] == result["episodes"] == []
 
 
 @pytest.mark.parametrize("damage", ["simulation", "missing_step", "unrelated", "result_scope"])
@@ -189,16 +218,18 @@ def test_goal_done_label_alone_is_insufficient(core, damage):
     result = fetched(core, goal)
     core.goals.finish(step, result)
     if damage == "simulation":
-        core.store.execute("UPDATE events SET source='observation.simulation' WHERE event_id=?",
+        core.store.execute("UPDATE events SET source='observation.simulation' WHERE event_id=%s",
                            (result,))
     elif damage == "missing_step":
-        core.store.execute("DELETE FROM goal_step_evidence WHERE step_id IN "
-                           "(SELECT step_id FROM goal_steps WHERE goal_id=?)", (goal,))
-        core.store.execute("DELETE FROM goal_steps WHERE goal_id=?", (goal,))
+        core.store.execute((
+            'DELETE FROM goal_step_evidence WHERE step_id IN '
+            '(SELECT step_id FROM goal_steps WHERE goal_id=%s)'
+        ), (goal,))
+        core.store.execute('DELETE FROM goal_steps WHERE goal_id=%s', (goal,))
     elif damage == "unrelated":
-        core.store.execute("DELETE FROM event_dependencies WHERE event_id=?", (result,))
+        core.store.execute('DELETE FROM event_dependencies WHERE event_id=%s', (result,))
     else:
-        core.store.execute("UPDATE events SET privacy_scope='public' WHERE event_id=?", (result,))
+        core.store.execute("UPDATE events SET privacy_scope='public' WHERE event_id=%s", (result,))
     snapshot = MemoryProjections(core.memory).snapshot(core.clock(), episode_ids=[eid])
     assert snapshot["episodes"][0]["goals"][0]["state"] == "UNKNOWN"
 
@@ -233,7 +264,7 @@ def test_native_mixed_goal_roots_keep_observation_identity_and_source_boundaries
         assert view.snapshot(core.clock(), **scope)["episodes"][0] == first
         return
     if boundary == "withdrawn":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [observed], core.clock())
     elif boundary == "ttl":
         core.clock.advance((core.settings.raw_event_retention_days + 1) * 86400)
@@ -287,7 +318,7 @@ def test_native_reader_no_replay_preserves_unknown_and_accounting(core, boundary
     if boundary == "valid":
         return
     if boundary == "withdrawn":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     elif boundary == "ttl":
         core.clock.advance((core.settings.raw_event_retention_days + 1) * 86400)

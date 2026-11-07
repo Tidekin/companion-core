@@ -46,7 +46,10 @@ def queued(core, source="web", *, owner=True, hosts=None, grant=None):
     body = envelope(source, grant=grant.snapshot() if grant else None)
     if owner:
         accept(core, text="请阅读 " + body["observations"][0]["url"])
-    row = core.store.one("SELECT request_id FROM exploration_requests ORDER BY rowid DESC")
+    row = core.store.one(
+        'SELECT request_id FROM exploration_requests ORDER BY '
+        'record_sequence DESC'
+    )
     if not row:
         with core.store.transaction():
             request = core.exploration.create(
@@ -83,10 +86,10 @@ def test_superseded_queued_read_does_not_block_the_next_owner_request(core):
     item = core.reading.lease("web")
     assert item["request_id"] == second
     assert core.store.one(
-        "SELECT state,started_at,reserved_requests FROM exploration_requests WHERE request_id=?",
+        'SELECT state,started_at,reserved_requests FROM exploration_requests WHERE request_id=%s',
         (first,),
     ) == {"state": "CANCELLED", "started_at": None, "reserved_requests": 1}
-    assert not core.store.one("SELECT 1 FROM reading_attempts WHERE request_id=?", (first,))
+    assert not core.store.one('SELECT 1 FROM reading_attempts WHERE request_id=%s', (first,))
 
 
 @pytest.mark.parametrize("source", ["web", "bilibili", "heybox"])
@@ -98,12 +101,12 @@ def test_commit_binds_real_observation_ids_and_exact_evidence(core, source):
     result = core.reading.complete(adapter, item["request_id"], receipt)
     assert result["state"] == "DONE" and len(result["event_ids"]) == 1
     event_id = result["event_ids"][0]
-    stored = core.store.one("SELECT * FROM observations WHERE event_id=?", (event_id,))
+    stored = core.store.one('SELECT * FROM observations WHERE event_id=%s', (event_id,))
     evidence = json.loads(stored["evidence_json"])["read_observation"]
     assert evidence["content_sha256"] == body["observations"][0]["content_sha256"]
     assert evidence["coverage"] == body["observations"][0]["coverage"]
     assert evidence["quotes"] == body["observations"][0]["quotes"]
-    assert core.store.one("SELECT * FROM event_dependencies WHERE event_id=?", (event_id,))[
+    assert core.store.one('SELECT * FROM event_dependencies WHERE event_id=%s', (event_id,))[
         "source_event_id"
     ] == "evt_test_1"
     assert core.reading.complete(adapter, item["request_id"], receipt)["duplicate"]

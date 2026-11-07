@@ -64,7 +64,7 @@ def test_malformed_offer_is_bounded_and_cannot_enable_the_legacy_selection_path(
         value["offer_key"] = "meme:evt_other"
     else:
         value["candidates"][0]["url"] = "https://example.com/private"
-    core.store.execute("UPDATE runtime_meta SET value=? WHERE key='live_text_input:evt_test_1'",
+    core.store.execute("UPDATE runtime_meta SET value=%s WHERE key='live_text_input:evt_test_1'",
                        (encode({"event_id": "evt_test_1", "meme_offer": value}),))
     assert engine.intent("evt_test_1", "完整文字。⬡happy⬡").image is None
     assert "本轮只回复文字" in engine.instruction("evt_test_1")
@@ -111,7 +111,7 @@ async def discovery_environment(core, tmp_path, monkeypatch, *, paid=None, purpo
         assert accepted.status_code == 202, accepted.text
         # Background availability is a unit-test precondition. Other tests run
         # the real reply model and the independent worker through this entry point.
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                            (accepted.json()["job_id"],))
         yield event, accepted.json(), values
 
@@ -182,7 +182,7 @@ def test_discovery_uses_native_jobs_and_a_single_consumable_attempt(core, tmp_pa
             assert settled["state"] == "SETTLED" and result(core, item) == settled
             with pytest.raises(CoreError, match="MEME_DISCOVERY_RESULT_CONFLICT"):
                 result(core, item, download_bytes=127)
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (item["job_id"],)) == {
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (item["job_id"],)) == {
                 "state": "SUCCEEDED",
             }
             assert not core.store.one("SELECT 1 FROM model_usage")

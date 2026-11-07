@@ -84,7 +84,7 @@ def _episodes(nightly, run, memory):
             break
     if not events:
         raise CoreError("PRIVACY_CHANGED", 409)
-    with nightly.store.transaction():
+    with nightly.store.transaction(control_write=True):
         episode_id = memory.episodes(events, nightly.clock(), mark_processed=False)
         steps["episode_sources"] = sorted(done | {event["event_id"] for event in events})
         covered = memory.episode_coverage([event["event_id"] for event in events], nightly.clock())

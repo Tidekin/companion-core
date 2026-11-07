@@ -169,12 +169,12 @@ class Session:
             return result
 
     @contextmanager
-    def transaction(self, *, readonly=False):
+    def transaction(self, *, readonly=False, rollback=False):
         if self._closed:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
         if self._connection.info.transaction_status != TransactionStatus.IDLE:
             raise RuntimeError("POSTGRES_TRANSACTION_ALREADY_ACTIVE")
-        with self._connection.transaction():
+        with self._connection.transaction(force_rollback=rollback):
             if readonly:
                 self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             yield self

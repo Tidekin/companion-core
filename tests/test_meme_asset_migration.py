@@ -13,12 +13,14 @@ from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
+from pydantic import SecretStr
 
 from companion import meme_asset_migration as migration
 from companion import meme_assets
 from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.meme_core import CaptionBody, MemeCaptionService
+from companion.postgres import Database
 from companion.privacy import ErasureLedger
 from companion.store import Store, encode
 from companion_meme_protocol import digest
@@ -28,6 +30,7 @@ from companion_onebot_bridge.meme_library import MemeLibrary
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.test_meme_core import body, caption_environment, worker
 from tests.test_test_fixtures import historical_database
 
@@ -42,7 +45,8 @@ def config_file(path, values):
             literal = "{ " + ", ".join(k + " = " + json.dumps(v)
                                       for k, v in value.items()) + " }"
         else:
-            literal = json.dumps(value)
+            scalar = value.get_secret_value() if isinstance(value, SecretStr) else value
+            literal = json.dumps(scalar)
         lines.append(key + " = " + literal)
     path.write_text("\n".join(lines) + "\n", "utf-8")
     path.chmod(0o600)
@@ -66,12 +70,18 @@ def core_cli(bundle, operation, **kwargs):
 
 
 def logical_database(path):
-    with closing(migration.readonly(path)) as db:
+    if isinstance(path, SecretStr):
+        with Database(path) as database, closing(
+            Store(database, ROOT / '.local/test-temp'),
+        ) as store:
+            return logical_state(store)
+    with closing(sqlite3.connect(Path(path).as_uri() + '?mode=ro', uri=True)) as db:
+        db.execute('PRAGMA query_only=ON')
         return tuple(db.iterdump())
 
 
 def original_work(store):
-    return {name: store.rows("SELECT * FROM " + name + " ORDER BY rowid") for name in (
+    return {name: store.rows("SELECT * FROM " + name + " ORDER BY record_sequence") for name in (
         "jobs", "job_sources", "meme_captions", "meme_discovery_reservations",
         "model_usage", "model_admissions", "outbox",
     )}
@@ -113,7 +123,8 @@ def bundle(core, tmp_path, monkeypatch):
     core_config = config_file(tmp_path / "core.toml", {
         "owner_qq_id": core.settings.owner_qq_id, "bot_qq_id": core.settings.bot_qq_id,
         "bridge_token": core.settings.bridge_token.get_secret_value(),
-        "database": core.settings.database, "erasure_ledger": core.settings.erasure_ledger})
+        "database": core.settings.database, "state_directory": core.settings.state_directory,
+        "erasure_ledger": core.settings.erasure_ledger})
     manifest = tmp_path / "catalog.json"
     return SimpleNamespace(core=core, bridge=bridge, bridge_config=bridge_config,
                            core_config=core_config, manifest=manifest, event=event,
@@ -164,7 +175,7 @@ def test_real_export_dry_run_import_twice_and_reconcile_leave_original_work_unch
 def test_unverified_identity_or_source_never_copies_content(bundle, change):
     make_export(bundle)
     if change == "no_capture":
-        bundle.core.store.execute("DELETE FROM runtime_meta WHERE key=?",
+        bundle.core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
                                   ("owner_input:" + bundle.event["event_id"],))
     else:
         def alter(value):
@@ -217,7 +228,7 @@ def test_same_bytes_with_two_original_licensed_sources_remain_independent(bundle
                                  bundle.core.clock)
     original = service.submit(CaptionBody.model_validate(payload))
     assert original["job_id"] != bundle.job
-    assert bundle.core.store.one("SELECT reuse_job_id FROM meme_captions WHERE job_id=?",
+    assert bundle.core.store.one('SELECT reuse_job_id FROM meme_captions WHERE job_id=%s',
                                  (original["job_id"],))["reuse_job_id"] == bundle.job
     def new_source(value):
         item = value["assets"][0]
@@ -329,7 +340,7 @@ def test_old_complete_repair_clears_catalog_without_rewriting_original_receipts(
                                          bundle.core.clock())
     assert bundle.core.store.one("SELECT state FROM meme_assets")["state"] == "ERASED"
     # Model an old COMPLETE snapshot that omitted this newly registered projection.
-    bundle.core.store.execute("UPDATE meme_assets SET state=?,data=?,metadata_json=?,mime=?",
+    bundle.core.store.execute('UPDATE meme_assets SET state=%s,data=%s,metadata_json=%s,mime=%s',
         (asset["state"], asset["data"], asset["metadata_json"], asset["mime"]))
     bundle.core.store.execute("DELETE FROM runtime_meta WHERE key='derived_erasure_contract'")
     before, ledger = original_work(bundle.core.store), bundle.core.ledger.path.read_bytes()
@@ -459,7 +470,7 @@ def test_dry_run_replays_pending_erasure_only_in_memory(bundle):
         raise RuntimeError("synthetic database interruption after durable erase")
     bundle.core.ledger.apply = fail
     with pytest.raises(RuntimeError):
-        with bundle.core.store.transaction():
+        with bundle.core.store.transaction(control_write=True):
             bundle.core.ledger.expire_events(bundle.core.store, [bundle.event["event_id"]],
                                              bundle.core.clock())
     bundle.core.ledger.apply = original

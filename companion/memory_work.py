@@ -6,7 +6,7 @@ references in steps_json. Both use the original leases, facts and erasure closur
 """
 
 import json
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime
 
 from companion import (
@@ -236,7 +236,7 @@ async def prepare_memories(
     review_feedback=None,
     repair_candidates=(),
 ):
-    """Plan semantic matches without holding a SQLite transaction across model I/O."""
+    """Plan semantic matches without holding a transaction across model I/O."""
     authority = (
         owner_authority.current(self.store, self.settings, self.clock, purpose="memory")
         if owner_authority.required(self.store, self.settings)
@@ -650,6 +650,23 @@ def _input_deadline(core, local_day):
     return datetime.fromisoformat(min(times)) if times else None
 
 
+@contextmanager
+def _extraction_lease_row(store, now):
+    # A unique upsert also locks the first claim, when there is no row to SELECT
+    # FOR UPDATE yet. Keep an existing owner's value; the caller rechecks it.
+    placeholder = encode({"token": uid("memory_lease"), "until": now})
+    row = store.one(
+        "INSERT INTO runtime_meta(key,value) VALUES ('memory_extraction_lease',%s) "
+        "ON CONFLICT(key) DO UPDATE SET value=runtime_meta.value RETURNING value",
+        (placeholder,),
+    )
+    yield None if row["value"] == placeholder else row
+    # Empty/not-due work leaves no newly created lease behind. Exceptions roll
+    # the owning transaction back, including a newly inserted placeholder.
+    store.execute("DELETE FROM runtime_meta WHERE key='memory_extraction_lease' "
+                  "AND value=%s", (placeholder,))
+
+
 async def extract_step(core, local_day=None, *, on_checkpoint=None):
     """One shared persistent batch for standalone and natural-day extraction.
 
@@ -678,7 +695,7 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
         raise CoreError("MEMORY_ERASURE_CONTRACT_REQUIRED", 503)
     s, now = core.store, core.clock()
     lease = encode({"token": uid("memory_lease"), "until": after(now, core.settings.lease_seconds)})
-    with s.transaction():
+    with s.transaction(), _extraction_lease_row(s, now) as old:
         if authority:
             if private_life.busy(s, now) or budget.chat_pending(s, now):
                 return UnitResult(False)
@@ -686,7 +703,6 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
             live_text.guard(s, core.settings, core.clock)
             if private_life.busy(s, now) or private_life.owner_waiting(s, core.settings, now):
                 return UnitResult(False)
-        old = s.one("SELECT value FROM runtime_meta WHERE key = 'memory_extraction_lease'")
         if old and json.loads(old["value"])["until"] > now:
             return UnitResult(False, datetime.fromisoformat(json.loads(old["value"])["until"]))
         row = s.one("SELECT value FROM runtime_meta WHERE key = %s", (CHECKPOINT_KEY,))
@@ -754,14 +770,8 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
                 ),
                 (CHECKPOINT_KEY, expected),
             )
-        if old:
-            s.execute(
-
-                    "UPDATE model_usage SET state = 'UNKNOWN' WHERE state = "
-                    "'RESERVED' AND job_id IS NULL AND scenario IN "
-                    "('memory_extract', 'memory_review')"
-
-            )
+        if old and record["batch"].get("request_id"):
+            budget.mark_reservation_unknown(s, record["batch"]["request_id"])
         s.execute(
             (
                 "INSERT INTO runtime_meta (key, value) VALUES "

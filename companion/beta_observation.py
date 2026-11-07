@@ -3,15 +3,15 @@
 import hashlib
 import json
 import re
-import sqlite3
 from collections import Counter
-from contextlib import closing
 from datetime import UTC, datetime
-from pathlib import Path
+
+from psycopg import Error as PostgresError
+from psycopg_pool import PoolTimeout
 
 from companion.cognition_read import cache_usage, measurement, observed_usage
 from companion.contracts import CoreError
-from companion.ops_status import _ReadView, schema_head
+from companion.ops_status import read_view, schema_readiness
 from companion.paid_budget import sha
 from companion.privacy import epoch
 from companion.transport import reply_group
@@ -401,34 +401,17 @@ def inspect_context(settings, trace_id):
         },
         "billing_basis": "configured_rates_not_invoice", "blockers": [],
     }
-    path = Path(settings.database).resolve()
-    if not path.is_file():
-        result["blockers"].append("DATABASE_MISSING")
-        return result
     try:
-        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA query_only=ON")
-            remaining = 1000
-
-            def progress():
-                nonlocal remaining
-                remaining -= 1
-                return remaining <= 0
-
-            db.set_progress_handler(progress, 10000)
-            db.execute("BEGIN")
-            view = _ReadView(db)
-            version = view.one('SELECT version_num FROM alembic_version')
-            if not version or version["version_num"] != schema_head():
-                result["blockers"].append("MIGRATION_REQUIRED")
+        with read_view(settings) as view:
+            _, blocker = schema_readiness(view)
+            if blocker:
+                result["blockers"].append(blocker)
                 return result
             owner = view.one("SELECT value FROM runtime_meta WHERE key = 'owner_qq_id'")
             if not owner or owner["value"] != settings.owner_qq_id:
                 result["blockers"].append("OWNER_IDENTITY_MISMATCH")
                 return result
             result["trace"] = _trace(view, trace_id)
-            db.rollback()
-    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, AttributeError):
+    except (PostgresError, PoolTimeout, OSError, ValueError, TypeError, KeyError, AttributeError):
         result["blockers"].append("TRACE_SNAPSHOT_UNAVAILABLE")
     return result

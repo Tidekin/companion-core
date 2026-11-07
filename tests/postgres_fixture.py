@@ -8,7 +8,7 @@ or fallback database is consulted, and only this context's generated database is
 import json
 import os
 import re
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from uuid import uuid4
 
@@ -28,6 +28,19 @@ def connection_parameters():
     value = json.loads(Path(path).read_text("utf8"))
     return {**{key: value[key] for key in ("host", "port", "dbname", "user", "password")},
             "connect_timeout": 5}
+
+
+def logical_state(store):
+    """Compare all fixture table values without PostgreSQL's physical/WAL noise."""
+    with nullcontext() if store.in_transaction else store.read_snapshot():
+        tables = store.rows("SELECT schemaname,tablename FROM pg_tables "
+                            "WHERE schemaname=current_schema() ORDER BY tablename")
+        statements = [sql.SQL(
+            "SELECT %s::text AS name,COALESCE(jsonb_agg(to_jsonb(t) "
+            "ORDER BY to_jsonb(t)::text),'[]'::jsonb) AS rows FROM {} AS t"
+        ).format(sql.Identifier(row['schemaname'], row['tablename'])) for row in tables]
+        return store.rows(sql.SQL(" UNION ALL ").join(statements),
+                          [row['tablename'] for row in tables]) if statements else []
 
 
 @contextmanager

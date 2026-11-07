@@ -17,9 +17,11 @@ from companion.diary import day_bounds
 from companion.memory_context import MemoryContext
 from companion.memory_work import checkpoint_state
 from companion.model import ModelResponse
+from companion.postgres import Database
 from companion.store import Store, encode
 from companion.worker_schedule import UnitResult
 from tests.conftest import ingest, run
+from tests.postgres_fixture import isolated_database, logical_state
 from tests.test_consolidation import ReflectionModel, enable_nightly
 from tests.test_diary import DAY
 
@@ -171,7 +173,7 @@ def test_missing_usage_never_commits_or_replays_the_affected_step(core, scenario
 def test_withdraw_pending_candidates_and_derived_episode_in_same_native_erasure(core):
     staged(core)
     advance_to(core, "REVIEW")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_3"], core.clock())
     assert core.consolidation.status(DAY)["steps_json"] == "{}"
     assert core.consolidation.status(DAY)["state"] == "CANCELLED"
@@ -212,9 +214,9 @@ def test_diary_step_only_consumes_its_owned_day(core):
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     earlier_run = core.diary.schedule_day(earlier)
     drain(core)
-    earlier_state = core.store.one("SELECT state FROM diary_runs WHERE run_id=?", (earlier_run,))
+    earlier_state = core.store.one('SELECT state FROM diary_runs WHERE run_id=%s', (earlier_run,))
     assert earlier_state["state"] == "PENDING"
-    assert core.store.one("SELECT state FROM diary_runs WHERE local_date=?",
+    assert core.store.one('SELECT state FROM diary_runs WHERE local_date=%s',
                           (DAY.isoformat(),))["state"] == "COMMITTED"
 
 
@@ -292,9 +294,9 @@ def test_standalone_steps_resume_with_no_nightly_run_and_quiesce(core):
     assert [kind for _, kind in model.calls] == ["memory_extract"]
     with Core(core.settings, model, core.clock) as restarted:
         assert run(restarted.extract_step()).progressed
-        changes = restarted.store.db.total_changes
+        before = logical_state(restarted.store)
         assert not run(restarted.extract_step()).progressed
-        assert restarted.store.db.total_changes == changes
+        assert logical_state(restarted.store) == before
     assert [kind for _, kind in model.calls] == ["memory_extract", "memory_review"]
     assert len(core.store.rows("SELECT * FROM memories")) == 2
     assert core.store.rows("SELECT * FROM consolidation_runs") == []
@@ -308,7 +310,7 @@ def test_standalone_checkpoint_erasure_and_restore_cannot_revive_candidates(
     core.store.execute("DELETE FROM consolidation_runs")
     if during_call:
         def withdraw():
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, ["evt_test_3"], core.clock())
         model.callback = withdraw
         assert not run(core.extract_step()).progressed
@@ -316,14 +318,16 @@ def test_standalone_checkpoint_erasure_and_restore_cannot_revive_candidates(
     else:
         assert run(core.extract_step()).progressed
         key = Fernet.generate_key()
-        archive, restored = tmp_path / "pending.enc", tmp_path / "restored.db"
+        archive = tmp_path / "pending.enc"
         backup(core.settings.database, archive, key)
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_3"], core.clock())
         assert checkpoint_state(core.store) is None
-        restore(archive, restored, key, core.settings.erasure_ledger)
-        with closing(Store(str(restored))) as reopened:
-            assert checkpoint_state(reopened) is None
+        with isolated_database() as restored, Database(restored) as database:
+            state = tmp_path / "restored-state"
+            restore(archive, restored, key, core.settings.erasure_ledger, state_directory=state)
+            with closing(Store(database, state)) as reopened:
+                assert checkpoint_state(reopened) is None
     assert core.store.rows("SELECT * FROM memories") == []
 
 
@@ -438,6 +442,6 @@ def test_native_no_review_shortcut_does_not_claim_an_unmade_call(core):
     record = checkpoint_state(core.store)
     assert record["batch"]["phase"] == "COMPLETE"
     assert "request_id" not in record["batch"]
-    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                           (record["batch"]["extraction_request_id"],)) == {"state": "SETTLED"}
     assert [kind for _, kind in model.calls] == ["memory_extract"]

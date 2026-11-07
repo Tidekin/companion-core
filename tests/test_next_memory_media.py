@@ -25,7 +25,7 @@ def test_mixed_encoding_links_only_text_and_completes_every_valid_source_idempot
     core.settings.memory_enabled = True
     ingest(core, 1, FACT)
     media(core)
-    events = core.store.rows("SELECT * FROM events ORDER BY rowid")
+    events = core.store.rows("SELECT * FROM events ORDER BY record_sequence")
     sources = MemorySources(core.memory, core.clock())
     assert sources.event("evt_test_2") is None  # Empty media is never textual fact evidence.
     assert sources.event("evt_test_2", require_text=False)
@@ -72,7 +72,7 @@ def test_empty_media_must_pass_all_source_checks_before_any_processing_marker(co
     if invalid == "redacted":
         core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_2'")
     elif invalid == "tombstone":
-        core.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+        core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                            ("erased_event:evt_test_2", "synthetic"))
     elif invalid == "scope":
         core.store.execute("UPDATE events SET privacy_scope='public' WHERE event_id='evt_test_2'")
@@ -82,7 +82,7 @@ def test_empty_media_must_pass_all_source_checks_before_any_processing_marker(co
             body["text"] = "替换过的正文"
         else:
             body["media"][0]["sha256"] = "b" * 64
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_2'",
+        core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_2'",
                            (encode(body),))
     elif invalid == "type":
         core.store.execute("UPDATE events SET event_type='message.received' "
@@ -114,7 +114,7 @@ def test_source_invalidated_during_extraction_rolls_back_sibling_fact(core, muta
 
     def invalidate():
         if mutation == "recall":
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, ["evt_test_2"], core.clock())
         else:
             row = core.store.one("SELECT body_json FROM events WHERE event_id='evt_test_2'")
@@ -123,7 +123,7 @@ def test_source_invalidated_during_extraction_rolls_back_sibling_fact(core, muta
                 body["text"] = "模型请求后正文被替换"
             else:
                 body["media"][0]["sha256"] = "b" * 64
-            core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_2'",
+            core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_2'",
                                (encode(body),))
 
     core.model.callback = invalidate

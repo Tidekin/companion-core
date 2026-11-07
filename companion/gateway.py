@@ -25,6 +25,7 @@ from companion.gateway_admission import (
 )
 from companion.gateway_contract import ChatRequest, ClientGrant, RequestContext, route_intent
 from companion.model import GenerationOptions, ModelClient
+from companion.postgres import BUDGET_LEDGER
 from companion.store import after, encode, uid, utcnow
 
 
@@ -74,6 +75,7 @@ def put_client(store, settings, grant, now):
         raise CoreError("GATEWAY_BUDGET_REFERENCE_CHANGED", 403)
     token = "gwk_" + secrets.token_urlsafe(32)
     with store.transaction():
+        store.ledger_lock(BUDGET_LEDGER)
         old = store.one('SELECT grant_json FROM gateway_clients WHERE client_id = %s',
                         (grant.client_id,))
         if old and grant.revision <= ClientGrant.model_validate_json(old["grant_json"]).revision:
@@ -99,6 +101,7 @@ def put_client(store, settings, grant, now):
 
 def revoke_client(store, client_id, now):
     with store.transaction():
+        store.ledger_lock(BUDGET_LEDGER)
         store.execute('UPDATE gateway_clients SET revoked = 1, updated_at = %s WHERE client_id = '
             '%s',
                       (now, client_id))
@@ -157,7 +160,6 @@ def _authenticate_locked(store, settings, token, now):
 def submit(store, settings, grant, body, context, idempotency_key, now):
     current = config()
     require_passthrough(grant)
-    require_reference(store, settings, grant, now)
     if body.model not in grant.model_aliases:
         raise CoreError("GATEWAY_MODEL_NOT_ALLOWED", 404)
     if settings.provider == "deepseek" and any(m.role == "developer" for m in body.messages):
@@ -176,6 +178,9 @@ def submit(store, settings, grant, body, context, idempotency_key, now):
     policy = {"grant": grant.model_dump(mode="json"), "alias": selected.model_dump(),
               "context": context.model_dump(mode="json"), "request_sha256": request_hash}
     with store.transaction():
+        # Keep the existing budget custody lock through idempotency and queue
+        # capacity admission. PostgreSQL permits concurrent unrelated writers.
+        require_reference(store, settings, grant, now)
         existing = store.one('SELECT gateway_requests.request_id AS request_id, '
             'gateway_requests.client_id AS client_id, gateway_requests.model_request_id AS '
             'model_request_id, gateway_requests.idempotency_sha256 AS idempotency_sha256, '
@@ -315,7 +320,7 @@ async def run_once(store, settings, model, clock=utcnow):
             'error_code, gateway_requests.error_status AS error_status FROM gateway_requests AS '
             "gateway_requests WHERE gateway_requests.state = 'QUEUED' ORDER BY "
             'gateway_requests.created_at NULLS FIRST, gateway_requests.request_id NULLS FIRST '
-            'LIMIT 1')
+            'LIMIT 1 FOR UPDATE SKIP LOCKED')
         if row is None:
             return False
         lease = uid("gateway_lease")

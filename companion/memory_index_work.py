@@ -67,5 +67,7 @@ async def warm_once(memory, clock, guard):
             store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) '
                 'DO UPDATE SET value = excluded.value, record_sequence = DEFAULT',
                           (KEY, encode({"version": INDEX_VERSION, "cursor": next_cursor})))
-        return True
-    return bool(rows)
+    # Wrapping or advancing past cached rows is bookkeeping. Reporting it as
+    # work keeps a slow idle sweep alive whenever this one-second lane is due
+    # again. A full page still requests another bounded scan of the backlog.
+    return bool(rows) or len(headers) == SCAN_ROWS
