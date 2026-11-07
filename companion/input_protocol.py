@@ -448,20 +448,18 @@ def cancel_before_send(store, settings, clock, body):
                         raise
                 else:
                     raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
+            from companion.transport import cancel_origin_replies, mark_not_dispatched
+
             # The authenticated Bridge may already have a new signed owner frame
             # queued while this HTTP check is in flight. Its explicit pre-delegate
             # attestation cancels delivery only; inbox admission still owns revision.
             # FAILED closes the quota operation but does not refund its reservation.
             cumulative.send_result(store, body.message_id, "FAILED", clock())
-            store.execute("UPDATE outbox SET state='CANCELLED',updated_at=?,"
-                          "attempt_count=MAX(attempt_count,1),"
-                          "last_error_code='REPLY_NOT_DISPATCHED' WHERE message_id=?",
-                          (clock(), body.message_id))
+            mark_not_dispatched(store, body.message_id, clock(),
+                                attempt_count=max(row["attempt_count"], 1))
             if row["action_type"] == "qq.private.reply":
                 # The queued replacement may itself be recalled before ingestion.
                 # Once interrupted, no unsent tail of this reply may resume.
-                from companion.transport import cancel_origin_replies
-
                 cancel_origin_replies(store, row["origin_event_id"], clock())
             live_text._put(store, key, material)
         return {"cancelled": True, "message_id": body.message_id,
