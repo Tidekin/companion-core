@@ -393,8 +393,8 @@ def validate_model(store, settings, clock, request_id):
 
 
 class BiliVideoService:
-    def __init__(self, store, settings, reading, model=None, clock=utcnow):
-        self.store, self.settings, self.reading = store, settings, reading
+    def __init__(self, store, settings, exploration, model=None, clock=utcnow):
+        self.store, self.settings, self.exploration = store, settings, exploration
         self.model, self.clock = model, clock
 
     def schedule(self, item_id, source_event_id, *, job_id=None):
@@ -444,7 +444,7 @@ class BiliVideoService:
             deadline = min(deadlines).isoformat(timespec="microseconds")
             if instant(deadline) <= instant(now):
                 raise CoreError("BILI_VIDEO_DEADLINE_EXPIRED", 409)
-            request = self.reading.exploration.create(
+            request = self.exploration.create(
                 source["adapter_id"],
                 "read",
                 "bili-video:" + item_id,
@@ -589,14 +589,14 @@ class BiliVideoService:
                 raise CoreError("BILI_VIDEO_LEASE_CHANGED", 403)
             _current(self.store, self.settings, self.clock, row, current_request,
                      allow_terminal=allow_terminal)
-            attempt = self.reading._attempt(adapter_id, request_id, body["lease_token"])
+            from companion.reading import reading_attempt, validate_attempt
+
+            attempt = reading_attempt(self.store, adapter_id, request_id, body["lease_token"])
             validation = ReaderReadValidation(
                 lease_token=body["lease_token"], source_grant=body.get("source_grant")
             )
-            if current_request is None:
-                self.reading._validate(attempt, validation)
-            else:
-                self.reading._validate(attempt, validation, current_request=current_request)
+            validate_attempt(self.store, self.settings, self.clock, self.exploration,
+                             attempt, validation, current_request=current_request)
         return row
 
     def _duplicate(self, request_id, phase, fingerprint):
@@ -1088,7 +1088,7 @@ class BiliVideoService:
                 processor_id=model,
             ),
         )
-        result = self.reading.exploration.observations.append(
+        result = self.exploration.observations.append(
             row["adapter_id"], event, reading=True
         )
         proof = {

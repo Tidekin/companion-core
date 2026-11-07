@@ -268,8 +268,9 @@ def register_link_images(store, settings, clock, options, owner_event_id, source
 class ContentIntake:
     """Schedule incoming shares on the owner's connection without opening media providers."""
 
-    def __init__(self, store, settings, clock, create_read=None, *, options=None):
+    def __init__(self, store, settings, clock, create_read=None, *, options=None, video=None):
         self.store, self.settings, self.clock = store, settings, clock
+        self.video = video
         self.create_read = create_read
         self.options = options or settings.content
 
@@ -463,7 +464,7 @@ class ContentIntake:
         }
 
     def _video_context(self, row):
-        video = getattr(self, "video", None)
+        video = self.video
         if row["kind"] != "link" or video is None or not self.store.one(
             "SELECT 1 FROM sqlite_master WHERE name='bili_video_items'",
         ):
@@ -489,11 +490,12 @@ class ContentService(ContentIntake):
         clock=utcnow,
         *,
         options=None,
+        video=None,
         provider=None,
         image_transport=None,
         model=None,
     ):
-        super().__init__(store, settings, clock, create_read, options=options)
+        super().__init__(store, settings, clock, create_read, options=options, video=video)
         self.observations = observations
         if self.options.use_chat_model_for_vision:
             endpoint = MediaEndpoint(

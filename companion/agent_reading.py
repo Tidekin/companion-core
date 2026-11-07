@@ -85,7 +85,7 @@ def _reading_result(store, settings, clock, job, request_id, *, executing):
     # These existing services only hold references; no Core lifecycle or model is opened.
     goals = GoalEngine(store, settings, None, clock)
     observations = ObservationService(store, settings, clock)
-    exploration = ExplorationService(store, settings, observations, goals, None, None, clock)
+    exploration = ExplorationService(store, settings, observations, goals, None, clock)
     row = store.one("SELECT * FROM exploration_requests WHERE request_id=? AND redacted=0",
                          (request_id,))
     if not row or row["goal_step_json"] != "{}":
