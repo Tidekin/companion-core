@@ -42,7 +42,11 @@ def campaign(tmp_path, monkeypatch):
     rows(suite / "review-only/criteria.jsonl",
          [dict(id=q["id"], required=["绿茶"], forbidden=[]) for q in questions])
     rows(suite / "inputs/P1.jsonl", [dict(id="P1-S1", text="喜欢绿茶。")])
+    rc.save(tmp_path / "bank/bundle-manifest.json", {
+        "files_sha256": {p.relative_to(tmp_path / "bank").as_posix(): rc.sha(p)
+                         for p in suite.rglob("*") if p.is_file()}})
     rc.save(tmp_path / "corpus-freeze.json", {
+        "bundle_manifest_sha256": rc.sha(tmp_path / "bank/bundle-manifest.json"),
         "questions_sha256": rc.sha(suite / "questions.jsonl"),
         "criteria_sha256": rc.sha(suite / "review-only/criteria.jsonl")})
     files = []
@@ -172,6 +176,22 @@ def test_report_refuses_unfrozen_answer_file(campaign):
     rows(root / "arms/new/results/extra/answers.jsonl",
          [dict(id="P1-Q/d00", answer="绿茶", status="FAILED")])
     with pytest.raises(AssertionError, match="inventory"):
+        report.load()
+
+
+@pytest.mark.parametrize("change", ["changed_history", "added_history", "bundle"])
+def test_report_rejects_changed_source_evidence(campaign, change):
+    root, _, report, _, rows, _ = campaign
+    path = root / "bank/suite-v1/inputs/P1.jsonl"
+    if change == "added_history":
+        path = path.with_name("added.jsonl")
+    elif change == "bundle":
+        path = root / "bank/bundle-manifest.json"
+    if change == "bundle":
+        path.write_text(path.read_text("utf-8") + "\n", "utf-8")
+    else:
+        rows(path, [dict(id="P1-S1", text="被改写的历史。")])
+    with pytest.raises(AssertionError, match="Corpus freeze"):
         report.load()
 
 

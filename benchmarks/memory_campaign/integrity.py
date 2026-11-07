@@ -23,6 +23,15 @@ def answer_freeze(r):
     corpus_path = r.root / "corpus-freeze.json"
     assert sha(corpus_path) == frozen["corpus_freeze_sha256"], "Corpus freeze changed"
     corpus = json.loads(corpus_path.read_text("utf-8"))
+    bundle_path = r.bank / "bundle-manifest.json"
+    assert sha(bundle_path) == corpus["bundle_manifest_sha256"], "Corpus freeze changed: bundle manifest"
+    bundle = json.loads(bundle_path.read_text("utf-8"))["files_sha256"]
+    for name, digest in bundle.items():
+        assert sha(r.bank / name) == digest, "Corpus freeze changed: " + name
+    expected_inputs = {name for name in bundle if Path(name).parent.as_posix() == "suite-v1/inputs"
+                       and name.endswith(".jsonl")}
+    assert expected_inputs == {p.relative_to(r.bank).as_posix() for p in (r.suite / "inputs").glob("*.jsonl")}, \
+        "Corpus freeze input inventory changed"
     for name, field in (("questions.jsonl", "questions_sha256"),
                         ("review-only/criteria.jsonl", "criteria_sha256")):
         assert sha(r.suite / name) == corpus[field], "Corpus freeze changed: " + name

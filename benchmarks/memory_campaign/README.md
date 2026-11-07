@@ -107,8 +107,9 @@ python diagnose.py --round R                  # evidence chain by required field
 ### Frozen scoring and denominators
 
 Before judging or reporting, the toolkit checks the answer-file inventory and hashes,
-the answer-to-corpus freeze link, and the frozen questions and criteria. Resuming a
-grading directory additionally requires the same rubric text, grading settings, anchor
+the answer-to-corpus freeze link, the original bank manifest and every listed file,
+the frozen questions and criteria, and the history-file inventory used for report
+evidence. Resuming a grading directory additionally requires the same rubric text, grading settings, anchor
 file, judge configuration and resolved vote count (including a `--votes` override).
 The final manifest binds the raw grades and grading freeze; duplicate/missing keys
 or an unsuccessful anchor gate prevent publication of a normal report.
