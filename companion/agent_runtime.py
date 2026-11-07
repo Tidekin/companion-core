@@ -66,17 +66,22 @@ class ControlledModel(Model):
 
 def check_conversation(core, job, snapshots=(), *, current_request=None, purpose="chat"):
     """Recheck the original job lease and Core's existing source/snapshot contracts."""
+    if not core.store.in_transaction:
+        # One synchronous validation reads one native snapshot. This scope ends
+        # before any await; the next boundary takes a fresh custody check.
+        return core.store.read_or_write(lambda: check_conversation(
+            core, job, snapshots, current_request=current_request, purpose=purpose,
+        ))
     if job["kind"] != "chat":
         raise CoreError("CONVERSATION_CHAT_JOB_REQUIRED", 403)
     view = owner_authority.check_job(
         core.store, core.settings, core.clock, job, purpose="chat", executing=True,
     )
-    if purpose != "chat":
-        owner_authority.check_job(
-            core.store, core.settings, core.clock, job, purpose=purpose, executing=True,
-        )
+    if purpose not in view.policy.purposes:
+        raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
     owner_input.source(core.store, core.settings, view, job["event_id"], core.clock())
-    core._check_context_snapshots(job, snapshots, current_request=current_request)
+    core._check_context_snapshots(job, snapshots, current_request=current_request,
+                                  owner_view=view)
     from companion import agent_images, agent_reading
 
     agent_reading.check_results(core, job, snapshots)

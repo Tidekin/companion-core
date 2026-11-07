@@ -188,13 +188,24 @@ def source(
     store, settings, view, event_id, now, *, allow_commands=False, history=False, purpose="chat"
 ):
     """Read an admitted private source; history requires an explicit current source scope."""
+    if not store.in_transaction:
+        return store.read_or_write(lambda: source(
+            store, settings, view, event_id, now, allow_commands=allow_commands,
+            history=history, purpose=purpose,
+        ))
     view = owner_authority.current(
         store, settings, lambda: now, purpose=purpose, authority=view.authority
     )
-    if history:
-        view = owner_authority.current(
-            store, settings, lambda: now, purpose="history", authority=view.authority
-        )
+    if history and "history" not in view.policy.purposes:
+        raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
+
+    def evidence(ref):
+        # The current policy has just passed native custody. Its immutable
+        # capture key is also the original key for this exact revision.
+        if ref == view.authority.as_dict():
+            return view
+        return owner_authority.evidence(store, settings, ref)
+
     return _source(
         store,
         settings,
@@ -203,7 +214,7 @@ def source(
         now,
         allow_commands=allow_commands,
         history=history,
-        verify_capture=lambda value: verify(store, settings, value),
+        verify_capture=lambda value: _verify(store, settings, value, evidence),
     )
 
 

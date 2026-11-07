@@ -31,7 +31,9 @@ async def scenario():
         provider_model = model.ModelClient(settings, client)
         with core_module.Core(settings, provider_model, clock) as core:
             assert await core.run_once("independent-sdk-worker", job_id=job_id)
-            row = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job_id,))
+            row = core.store.one((
+                'SELECT state,last_error_code FROM jobs WHERE job_id=%s'
+            ), (job_id,))
             assert row["state"] == "SUCCEEDED", dict(row)
             assert core.store.one("SELECT phase FROM agent_conversations")["phase"] == "COMPLETE"
     assert len(calls) == 1

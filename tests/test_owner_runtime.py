@@ -49,7 +49,7 @@ def test_native_chat_admission_rechecks_authority_after_http_hooks(core, tmp_pat
     messages = core.context(job)
     request_id = budget.reserve(core.store, core.settings, job["job_id"], "chat", messages,
                                 core.clock(), clock=core.clock)
-    row = core.store.one("SELECT authority_json FROM model_admissions WHERE request_id=?",
+    row = core.store.one('SELECT authority_json FROM model_admissions WHERE request_id=%s',
                          (request_id,))
     assert json.loads(row["authority_json"]) == capture.authority
     calls = []
@@ -75,7 +75,7 @@ def test_native_chat_admission_rechecks_authority_after_http_hooks(core, tmp_pat
     else:
         assert asyncio.run(execute()).text == "SYNTHETIC observed reply"
         assert len(calls) == 1
-    state = core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=?",
+    state = core.store.one('SELECT state,billed_micro_usd FROM model_usage WHERE request_id=%s',
                            (request_id,))
     assert state["state"] == "SETTLED"
     if fence:
@@ -88,9 +88,9 @@ def test_native_chat_outbox_requires_same_reference_and_live_send_lease(core, tm
     owner_input.approve(core.store, core.settings, core.clock, capture)
     source = core.ingest(inbound(core, capture), "full-native-chat")
     assert work(core)
-    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (source["job_id"],))
+    job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (source["job_id"],))
     assert job["state"] == "SUCCEEDED", job["last_error_code"]
-    row = core.store.one("SELECT * FROM outbox WHERE origin_event_id=?", (capture.event_id,))
+    row = core.store.one('SELECT * FROM outbox WHERE origin_event_id=%s', (capture.event_id,))
     assert json.loads(row["authority_json"]) == capture.authority
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_REFERENCE_REQUIRED"):
         lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"), core.clock())
@@ -108,13 +108,13 @@ def test_native_chat_outbox_requires_same_reference_and_live_send_lease(core, tm
         operation_id="operation-stop-native-send", authority=capture.authority))
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_DISABLED"):
         owner_delivery.send_check(core.store, core.settings, core.clock, check)
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                            (item["message_id"],))["state"] == "SENDING"
 
 
 def test_retire_old_timer_queue_preserves_admitted_running_and_delivery_custody(core):
     source = ingest(core)
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+    conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                    (source["event_id"],))["conversation_id"]
     jobs = {}
     for kind in ("queued", "model", "outbox", "running", "notice"):
@@ -132,7 +132,7 @@ def test_retire_old_timer_queue_preserves_admitted_running_and_delivery_custody(
             enqueue(core.store, event_id, conversation, "synthetic", core.clock(),
                     action="qq.private.proactive")
         elif kind == "running":
-            core.store.execute("UPDATE jobs SET state='RUNNING',lease_until=? WHERE job_id=?",
+            core.store.execute("UPDATE jobs SET state='RUNNING',lease_until=%s WHERE job_id=%s",
                                 (after(core.clock(), 60), jobs[kind]))
     usage = core.store.rows("SELECT * FROM model_usage")
     outbox = core.store.rows("SELECT * FROM outbox")
@@ -140,7 +140,7 @@ def test_retire_old_timer_queue_preserves_admitted_running_and_delivery_custody(
         core.recover(core.clock())
         core.recover(core.clock())
     for kind, job_id in jobs.items():
-        row = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job_id,))
+        row = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s', (job_id,))
         assert row["state"] == ("CANCELLED" if kind == "queued" else (
             "RUNNING" if kind == "running" else "QUEUED"))
         if kind == "queued":

@@ -438,9 +438,9 @@ class Core(Runtime):
         return {"part": row["segment_index"] + 1, "count": row["segment_count"],
                 "text": text if len(text) <= 1200 else text[:1200] + "…"}
 
-    def _check_context_snapshots(self, job, snapshots, *, current_request=None):
+    def _check_context_snapshots(self, job, snapshots, *, current_request=None, owner_view=None):
         reply_revision.check_job(self.store, job)
-        authority = self._owner_job_view(job)
+        authority = owner_view if owner_view is not None else self._owner_job_view(job)
         configuration = runtime_config.check(self.store, self.settings, "job:" + job["job_id"])
         task_settings = runtime_config.effective(self.settings, configuration)
         markers = [item for item in snapshots if item["kind"] == "runtime_configuration"]

@@ -33,7 +33,7 @@ def test_tools_and_results_are_measured_in_exact_reserved_payload(core, tmp_path
     assert measured.payload_sha256 != plain.payload_sha256
     request = sdk_modules["budget"].reserve(core.store, core.settings, job["job_id"], "chat",
         messages, core.clock(), clock=core.clock, tools=tools)
-    row = core.store.one("SELECT * FROM model_admissions WHERE request_id=?", (request,))
+    row = core.store.one('SELECT * FROM model_admissions WHERE request_id=%s', (request,))
     assert json.loads(row["measurement_json"])["payload_sha256"] == measured.payload_sha256
     with pytest.raises(CoreError):
         sdk_modules["budget"]._check_measurement(core.settings, row, messages, "chat")
@@ -146,7 +146,7 @@ def test_uncertain_execution_is_not_replayed(core, tmp_path, sdk_modules, phase)
 
 def test_core_entry_commits_sdk_output_with_original_outbox(core, tmp_path, sdk_modules):
     _, job = chat(core, tmp_path)
-    core.store.execute("UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=?",
+    core.store.execute("UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=%s",
                        (job["job_id"],))
     calls = []
 
@@ -162,12 +162,12 @@ def test_core_entry_commits_sdk_output_with_original_outbox(core, tmp_path, sdk_
             assert await core.run_once("sdk-entry-worker", job_id=job["job_id"])
 
     asyncio.run(scenario())
-    state = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+    state = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                           (job["job_id"],))
     assert state["state"] == "SUCCEEDED", dict(state)
     assert core.store.one("SELECT phase FROM agent_conversations")["phase"] == "COMPLETE"
     assert len(calls) == 1
-    assert len(core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+    assert len(core.store.rows('SELECT * FROM outbox WHERE origin_event_id=%s',
                                (job["event_id"],))) == 1
 
 
@@ -227,15 +227,16 @@ def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_module
         configuration.write_bytes(pickle.dumps((core.settings, core.clock.now, job_id)))
         process = await asyncio.create_subprocess_exec(sys.executable,
             str(Path(__file__).with_name("agent_sdk_worker.py")), str(configuration),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
-            output, _ = await asyncio.wait_for(process.communicate(), 40)
+            output, diagnostics = await asyncio.wait_for(process.communicate(), 40)
         except BaseException:
             process.kill()
             await process.wait()
             raise
-        assert process.returncode == 0, output.decode(errors="replace")
-        assert "independent synthetic reasoning" not in output.decode(errors="replace")
+        assert process.returncode == 0, (output + diagnostics).decode(errors="replace")
+        assert "independent synthetic reasoning" not in (output + diagnostics).decode(
+            errors="replace")
         metrics = [json.loads(line) for line in output.decode().splitlines()
                    if line.startswith("{")]
         stages = {row["stage"] for row in metrics}
@@ -246,7 +247,7 @@ def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_module
         assert all(set(row) <= FIELDS for row in metrics)
         assert summarize(metrics, "OFFLINE_FIXTURE")["model_budget_estimate_complete"]
         assert len(core.store.rows("SELECT * FROM model_usage WHERE state='SETTLED'")) == 1
-        assert len(core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+        assert len(core.store.rows('SELECT * FROM outbox WHERE origin_event_id=%s',
                                   (capture.event_id,))) == 1
         async with real_core_http(core) as port, httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}", trust_env=False,
@@ -309,7 +310,7 @@ def test_erasure_contract_scrubs_sdk_state_without_refunding_usage(core, tmp_pat
         tool_name="current_time", args_sha256="private-args", model_request_id=request,
         state="STARTED", result_json='{"private":"result"}', metadata_json='{"private":"source"}',
         created_at=core.clock(), updated_at=core.clock())
-    before = dict(core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request,)))
+    before = dict(core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,)))
     from companion import erasure
 
     contracts = [item for item in erasure.cleanup_contracts()
@@ -326,7 +327,7 @@ def test_erasure_contract_scrubs_sdk_state_without_refunding_usage(core, tmp_pat
     tool = core.store.one("SELECT * FROM agent_tool_calls")
     assert tool["state"] == "UNKNOWN" and tool["args_sha256"] == ""
     assert tool["metadata_json"] is None and tool["result_json"] is None
-    after = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request,))
+    after = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,))
     assert dict(after) == before
 
 
