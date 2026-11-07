@@ -76,7 +76,7 @@ class OwnerSendGuard:
     def reserve(self, item):
         from .owner_native_resolution import binding
 
-        self.runtime.verify()
+        self.runtime.verify(include_records=False)
         if self.current_item is not None or validate_authority_ref(
             item.get("authority")
         ) != self.authority:
@@ -110,7 +110,7 @@ class OwnerSendGuard:
         self.current_item, self.item_hash, self.lease_until = item, value["item_hash"], lease_until
 
     def _local(self):
-        self.runtime.verify()
+        self.runtime.verify(include_records=False)
         if self.current_item is None:
             raise ValueError("OWNER_DELIVERY_SEND_FENCED")
         if not account_actions.is_account(self.current_item) and owner_notices.recalled(
@@ -251,7 +251,7 @@ class OwnerSendGuard:
         if (self.dispatched or item is not self.current_item
             or self.item_hash != journal.digest(item)):
             return False
-        self.runtime.verify(active=False)
+        self.runtime.verify(active=False, include_records=False)
         attempt = self.db.execute("SELECT state FROM window_attempts WHERE message_id=?",
                                    (item["message_id"],)).fetchone()
         if not attempt or attempt[0] not in {"RESERVED", "IO_STARTED"}:
@@ -288,7 +288,7 @@ class OwnerSendGuard:
                 content_sha256=body["content_sha256"], payload_sha256=body["payload_sha256"])
         if receipt != expected or self.dispatched or self.item_hash != journal.digest(item):
             raise ValueError("OWNER_CANCEL_RECEIPT_INVALID")
-        self.runtime.verify(active=False)
+        self.runtime.verify(active=False, include_records=False)
         with self.db:
             self.runtime.append("NOT_SENT", {"message_id": item["message_id"],
                 "provider_ack_hash": None, "core_receipt": receipt})
@@ -297,7 +297,7 @@ class OwnerSendGuard:
             self.runtime.spool.cancel_delivery(item, receipt)
         if self.meme_prepared:
             self.runtime.memes.confirm_not_sent(item, self, receipt)
-        self.runtime.verify(active=False)
+        self.runtime.verify(active=False, include_records=False)
         return True
 
     def complete(self, item, provider_id):
@@ -344,7 +344,7 @@ class OwnerOneBot:
         reused = getattr(runtime, "_ready_probe", None)
         if (reused is not None and reused[1] == self.guard.authority
                 and monotonic() < reused[0]):
-            runtime.verify()
+            runtime.verify(include_records=False)
             return dict(reused[2])
         runtime._ready_probe = None
         result = await runtime.probe(self.guard.client, self.protocol)
@@ -371,7 +371,7 @@ class OwnerOneBot:
         elif item["action_type"] == "qq.private.poke":
             from .native_actions import prepare
 
-            self.guard.runtime.verify()
+            self.guard.runtime.verify(include_records=False)
             self.guard.prepared_native = prepare(item["content"], self.config.owner_qq_id)
         elif "voice" in item:
             from .voice_runtime import prepare_delivery
@@ -386,7 +386,7 @@ class OwnerOneBot:
             original = journal.digest(item)
 
             def fence():
-                self.guard.runtime.verify()
+                self.guard.runtime.verify(include_records=False)
                 if journal.digest(item) != original:
                     raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
 
@@ -413,7 +413,7 @@ class OwnerOneBot:
             original = journal.digest(item)
 
             def fence():
-                self.guard.runtime.verify()
+                self.guard.runtime.verify(include_records=False)
                 if journal.digest(item) != original:
                     raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
 
