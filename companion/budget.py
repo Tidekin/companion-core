@@ -6,9 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-import httpx
-
-from companion import cloud_budget, cumulative, paid_budget
+from companion import cloud_budget, cumulative, model_scope, paid_budget
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
 from companion.token_measurement import byte_estimate, measure_request
@@ -149,56 +147,19 @@ def reserve(
     clock=None, cloud_task_kind=None, cloud_task_id=None, source_check=None, tools=(),
     generation=None,
 ):
-    from companion import owner_authority
-    from companion.runtime_config import video_settings
+    from companion import runtime_config
 
-    wire = (video_settings(store, settings, "job:" + job_id, scenario, clock=clock or (lambda: now))
-            if job_id else settings)
-    native_image_chat = False
+    current_time = clock or (lambda: now)
+    wire = (runtime_config.video_settings(store, settings, "job:" + job_id, scenario,
+                                          clock=current_time) if job_id else settings)
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
-    video_binding = None
-    if scenario == "meme_caption":
-        from companion import meme_input
-
-        logical_request_id = logical_request_id or job_id
-        meme_input.contract(settings, job_id, logical_request_id)
-    elif scenario in VIDEO_SCENARIOS:
-        from companion.bili_video import reserve_model_input
-
-        logical_request_id = logical_request_id or job_id
-        video_binding = reserve_model_input(
-            store, settings, clock or (lambda: now), request_id, job_id, scenario,
-            logical_request_id, wire, messages, tools, cloud_task_kind, cloud_task_id,
-        )
-        if video_binding is not None:
-            cloud_task_kind, cloud_task_id = "video", video_binding["task_id"]
-    elif scenario == "evaluation" and any(
-        isinstance(message, dict) and isinstance(message.get("content"), list)
-        for message in messages
-    ):
-        from companion.image_input import messages_and_estimate
-
-        if not approval or not approval.image_input:
-            raise CoreError("PAID_IMAGE_APPROVAL_REQUIRED", 503)
-        messages_and_estimate(approval.image_input, messages)
-        # The existing evaluation admission below owns the finite job, exact
-        # frozen payload and per-attempt request identity (not a chat job ID).
-    elif scenario == "content_vision" or any(
-        isinstance(message, dict) and isinstance(message.get("content"), list)
-        for message in messages
-    ):
-        from companion.image_input import contract as image_contract
-
-        logical_request_id = logical_request_id or job_id
-        image_contract(settings, job_id, logical_request_id)
-        if scenario == "chat" and owner_authority.required(store, settings):
-            native_image_chat = True
-        elif scenario != "content_vision" and (
-            scenario != "chat" or not settings.live_text_window
-            or settings.live_text_window.image_scope != "owner_image_v1"
-        ):
-            raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
+    inputs = model_scope.prepare_input(store, settings, current_time, wire, approval, request_id,
+                                       logical_request_id, job_id, scenario, messages, tools,
+                                       cloud_task_kind, cloud_task_id)
+    logical_request_id = inputs.logical_id
+    if inputs.video_binding is not None:
+        cloud_task_kind, cloud_task_id = "video", inputs.video_binding["task_id"]
     autonomous = scenario not in {"chat", "qq_poke", "evaluation", "gateway"}
     if autonomous and not settings.pricing_known:
         raise CoreError("UNKNOWN_PRICING", 429)
@@ -214,28 +175,11 @@ def reserve(
         receipt["video_profile"] = wire.video_models.selected
     estimate = cost(wire, estimated_input, output_tokens, scenario=scenario)
     with store.transaction():
-        from companion import live_text, owner_authority, runtime_config
-
-        configuration = runtime_config.bind(store, settings, clock or (lambda: now),
+        configuration = runtime_config.bind(store, settings, current_time,
                                            "job:" + job_id) if job_id is not None else None
 
-        if job_id is not None:
-            from companion.reply_revision import check_job
-
-            job = store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
-            if job:
-                check_job(store, job)
-        if source_check is not None:
-            source_check()
-        if native_image_chat:
-            from companion import agent_images
-
-            if not job or job["kind"] != "chat":
-                raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
-            owner_authority.check_job(store, settings, clock or (lambda: now), job,
-                                      purpose="image", executing=True)
-            agent_images.check_payload(store, settings, clock or (lambda: now), job, messages)
-
+        model_scope.check_sources(store, settings, current_time, job_id, messages,
+                                  inputs, source_check)
         if job_id is None and scenario in {"memory_extract", "memory_review"} and chat_pending(
             store, clock() if callable(clock) else now,
         ):
@@ -248,66 +192,13 @@ def reserve(
             local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
             month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
             day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-        if scenario == "meme_caption":
-            meme_input.check_attempt(store, job_id)
-        if video_binding is not None:
-            from companion.bili_video import model_binding
-
-            if model_binding(
-                store, settings, clock or (lambda: now), request_id, job_id=job_id,
-                scenario=scenario, logical_request_id=logical_request_id,
-            ) != video_binding:
-                raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
-        owner_view = None
-        if scenario == "gateway":
-            from companion import gateway_admission
-
-            gateway_admission.admit(store, settings, clock or (lambda: now), request_id,
-                          estimate, estimated_input)
-        elif scenario == "evaluation":
-            from companion import evaluation
-
-            evaluation.admit(store, settings, clock, job_id, request_id, messages,
-                             estimate, estimated_input)
-        elif owner_authority.required(store, settings):
-            owner_view = owner_authority.admit_model(
-                store, settings, clock or (lambda: now), job_id, scenario)
-        else:
-            live_text.reserve_model(store, settings, clock, job_id, scenario)
-        if scenario == "rem":
-            from companion import rem
-
-            rem.admit(store, settings, clock or (lambda: now), job_id,
-                      estimated_input, estimate)
+        owner_view = model_scope.admit(store, settings, clock, now, job_id, scenario, request_id,
+                                       inputs, messages, estimate, estimated_input)
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
-        if scenario == "social_autonomy":
-            from companion.social_autonomy import SocialAutonomy
-
-            if job_id is not None and source_check is None:
-                raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
-            SocialAutonomy(store, settings, clock=clock or (lambda: now)).admit_model(
-                request_id, logical_request_id, messages, job_id=job_id,
-            )
-        if scenario in {"content_vision", *VIDEO_SCENARIOS}:
-            if not store.one("SELECT 1 FROM jobs WHERE job_id=? AND kind='chat'", (job_id,)):
-                raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
-            if video_binding is None and store.one(
-                "SELECT 1 FROM model_usage WHERE job_id=? AND scenario=?", (job_id, scenario),
-            ):
-                raise CoreError("MODEL_IMAGE_ALREADY_ATTEMPTED", 409)
-        if scenario == "activity":
-            from companion import notices
-            from companion.social import proactive_allowed
-
-            job = store.one("SELECT j.*,e.body_json FROM jobs j JOIN events e USING(event_id) "
-                            "WHERE job_id=?", (job_id,))
-            if notices.reference(job) is not None:
-                notices.validate(store, settings, job, now)
-            if (not notices.shadow(job) and not notices.required(store, job_id)
-                and not proactive_allowed(store, settings, now)):
-                raise CoreError("AUTONOMY_PAUSED", 409)
+        model_scope.admit_attempt(store, settings, current_time, now, job_id, scenario,
+                                 request_id, inputs, messages, source_check)
         total = total_monthly(store, month.isoformat(timespec="microseconds"))
         unlimited_period = bool(approval and approval.unlimited_period_spend)
         if (settings.pricing_known and not unlimited_period
@@ -431,7 +322,7 @@ def reserve(
             occurred_at=now,
         )
         if configuration is not None:
-            runtime_config.bind(store, settings, clock or (lambda: now), "model:" + request_id,
+            runtime_config.bind(store, settings, current_time, "model:" + request_id,
                                 snapshot=configuration)
         if approval:
             from companion.model import model_payload
@@ -476,25 +367,11 @@ def reserve(
                     "measurement": {"version": 1, "sha256": paid_budget.sha(
                         receipt)},
                     **({"quota": quota} if quota else {}),
-                    **({"gateway": gateway_admission.binding(store, request_id)}
-                       if scenario == "gateway" else {}),
+                    **model_scope.journal_binding(store, scenario, request_id),
                 },
             )
-            from companion.private_life import freeze_model
-
-            if owner_view is not None:
-                store.execute("UPDATE model_admissions SET authority_json=? WHERE request_id=?",
-                              (encode(owner_view.authority.as_dict()), request_id))
-            elif scenario not in {"evaluation", "gateway"}:
-                freeze_model(store, settings, request_id)
-            elif scenario == "evaluation":
-                from companion import owner_authority
-
-                view = owner_authority.check_job(store, settings, clock,
-                    store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)),
-                    purpose="evaluation", executing=True)
-                store.execute("UPDATE model_admissions SET authority_json=? WHERE request_id=?",
-                              (encode(view.authority.as_dict()), request_id))
+            model_scope.freeze_authority(store, settings, clock, scenario,
+                                         job_id, request_id, owner_view)
         return request_id
 
 
@@ -1018,40 +895,12 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
             model_carry.close_owned(store, settings, request_id, dispatch, clock())
 
 
-def _model_scope(store, settings, clock, request_id, scenario, *, yield_to_chat=True):
-    from companion import evaluation, live_text, owner_authority
-
-    if scenario == "gateway":
-        from companion import gateway_admission
-
-        return gateway_admission.check_model(store, settings, clock, request_id)
-    if scenario == "evaluation":
-        return evaluation.check_request(store, settings, clock, request_id)
-    if owner_authority.required(store, settings):
-        return owner_authority.check_model(store, settings, clock, request_id,
-                                           yield_to_chat=yield_to_chat)
-    return live_text.check_model(store, settings, clock, request_id)
-
-
-def _check_media_admission(store, settings, clock, request_id, scenario, row):
-    if scenario == "meme_caption":
-        from companion.meme_input import validate_admission
-
-        validate_admission(store, settings, request_id,
-                           row["usage_job_id"], row["logical_request_id"])
-    elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
-        from companion.bili_video import validate_model_input
-
-        validate_model_input(store, settings, clock, request_id, scenario,
-                             row["usage_job_id"], row["logical_request_id"])
-
-
 async def _dispatch(
     model, store, settings, request_id, messages, scenario, clock, *, dispatch=None,
     source_check=None, tools=(), trace_id=None, generation=None,
 ):
     """Persisted admission is fenced before adapter I/O."""
-    from companion import live_text, notices, owner_authority, runtime_config
+    from companion import notices, runtime_config
     from companion.telemetry import phase
 
     if source_check is not None:
@@ -1059,7 +908,7 @@ async def _dispatch(
             source_check()
     with phase("dispatch_scope", trace_id):
         runtime_config.check_request(store, settings, request_id)
-        _model_scope(store, settings, clock, request_id, scenario)
+        model_scope.check(store, settings, clock, request_id, scenario)
         notices.check_request(store, settings, request_id, clock() if callable(clock) else clock)
     if settings.mode != "live":
         with store.transaction():
@@ -1075,20 +924,7 @@ async def _dispatch(
     wire = runtime_config.video_settings(store, settings, "model:" + request_id, scenario)
     profile = wire.video_models.selected if wire is not settings else None
 
-    if (owner_authority.required(store, settings) or live_text.active(store, settings)
-        or scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption", "gateway"}):
-        if not isinstance(model, ModelClient):
-            raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
-        target_url = (wire.paid_model.video_input.endpoint if scenario in VIDEO_SCENARIOS
-                      else settings.model_url)
-        if live_text.active(store, settings) and (
-            settings.live_text_window.execution == "local_synthetic"
-        ) and not isinstance(
-            model.client._transport_for_url(httpx.URL(target_url)), httpx.MockTransport
-        ):
-            raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
-    if isinstance(model, ModelClient) and model.settings is not settings:
-        raise CoreError("MODEL_ADMISSION_CONFIGURATION_MISMATCH", 503)
+    model_scope.check_adapter(store, settings, wire, model, scenario)
     approval = paid_budget.contract(settings, now)
     # Pure counting can load/tokenize the full request. Keep it outside the writer;
     # reuse only inside this invocation while its exact wire/counting contract matches.
@@ -1111,7 +947,7 @@ async def _dispatch(
             raise CoreError("MODEL_REQUEST_ALREADY_STARTED", 409)
         if row["usage_scenario"] != scenario:
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-        _check_media_admission(store, settings, clock, request_id, scenario, row)
+        model_scope.check_media(store, settings, clock, request_id, scenario, row)
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
             raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
         snapshot = paid_budget.snapshot(settings)
@@ -1162,7 +998,7 @@ async def _dispatch(
         paid_budget.contract(settings, clock())
         # I/O custody already began and this phase cannot prove non-dispatch, so a late
         # owner message is left to the HTTP-boundary check, which can.
-        _model_scope(store, settings, clock, request_id, scenario, yield_to_chat=False)
+        model_scope.check(store, settings, clock, request_id, scenario, yield_to_chat=False)
         if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
@@ -1175,7 +1011,7 @@ async def _dispatch(
                 runtime_config.check_request(store, settings, request_id)
                 custody = paid_budget.journal(store, approval)
                 quota_state = cumulative.check(store, settings, clock(), custody=custody)
-                current_job = _model_scope(store, settings, clock, request_id, scenario)
+                current_job = model_scope.check(store, settings, clock, request_id, scenario)
                 notices.check_request(store, settings, request_id, clock())
                 current = store.one(
                     "SELECT a.*,m.state,m.scenario,m.job_id AS usage_job_id "
@@ -1189,18 +1025,14 @@ async def _dispatch(
                     or current["payload_sha256"] != row["payload_sha256"]
                     or current["contract_sha256"] != row["contract_sha256"]
                     or current["measurement_json"] != row["measurement_json"]
-                    or (scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption"} and (
-                        current["scenario"] != scenario
-                        or current["usage_job_id"] != row["usage_job_id"]
-                        or current["logical_request_id"] != row["logical_request_id"]
-                    ))
+                    or model_scope.media_identity_changed(scenario, current, row)
                 ):
                     raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
                 if store.one("SELECT 1 FROM runtime_meta WHERE key IN "
                              "('model_budget_blocked','model_budget_restore_required')"):
                     raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
             paid_budget.contract(settings, clock())
-            _check_media_admission(store, settings, clock, request_id, scenario, row)
+            model_scope.check_media(store, settings, clock, request_id, scenario, row)
             with phase("transport_payload", trace_id):
                 if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
                     raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
@@ -1217,38 +1049,8 @@ async def _dispatch(
                     source_check()
             with store.transaction():
                 cloud_budget.mark_dispatched(store, "model", request_id, clock())
-            if (scenario != "gateway" and live_text.active(store, settings)
-                and not owner_authority.required(store, settings)):
-                if settings.live_text_window.execution == "local_synthetic" and not isinstance(
-                    model.client._transport_for_url(request.url), httpx.MockTransport
-                ):
-                    raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
-                live_text.dispatch_fence(
-                    settings, clock, current_job["lease_until"], current["lease_until"],
-                    quota_state=quota_state, request_id=request_id,
-                )
-            else:
-                paid = paid_budget.contract(settings, clock())
-                lease_deadline = datetime.fromisoformat(current["lease_until"])
-                if scenario == "gateway" or owner_authority.required(store, settings):
-                    # Budget synchronization can race a separate owner's STOP.
-                    # Re-read its native authority/consent before the final clock sample.
-                    current_job = _model_scope(store, settings, clock, request_id, scenario)
-                # All preceding checks are complete. One final sample must fence
-                # every time limit, not only the longer admission lease.
-                dispatch_now = datetime.fromisoformat(clock())
-                if not paid_budget.active(paid, dispatch_now):
-                    raise CoreError("PAID_APPROVAL_EXPIRED", 503)
-                if not paid_budget.rates_valid(paid, dispatch_now):
-                    raise CoreError("PAID_RATES_EXPIRED", 503)
-                if dispatch_now >= lease_deadline:
-                    raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
-                if current_job and dispatch_now >= datetime.fromisoformat(
-                    current_job["lease_until"]
-                ):
-                    raise CoreError("EVALUATION_JOB_FENCED" if scenario == "evaluation"
-                                    else "JOB_LEASE_LOST", 409)
-                cumulative.final_fence(settings, quota_state, dispatch_now, request_id)
+            model_scope.transport_fence(store, settings, clock, request_id, scenario, model,
+                                        request.url, current, current_job, quota_state)
             if dispatch is not None:
                 # The checked model transport calls its delegate immediately after
                 # this hook; no await separates the final proof from that handoff.
