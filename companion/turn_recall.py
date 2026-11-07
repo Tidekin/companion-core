@@ -424,3 +424,22 @@ def _data(rows, notes, chosen, zone, query=""):
             item["you_replied"] = row["reply_text"][:DISPLAY_CHARS]
         items.append(item)
     return {"turns": items}
+
+
+def add_reply_reference(store, settings, clock, job, text, sources, turns, scope, *,
+                        available, ranked_ids, memory_context, selection):
+    from companion.context_selection import RELATED
+
+    recalled = reference(
+        store, settings, job, text, {source["event_id"] for source in sources},
+        lambda ids: available(ids, "memory"), ranked_ids=ranked_ids,
+        max_turns=scope.max_turns - len(sources),
+        max_bytes=int(settings.turn_recall_history_share * (
+            scope.max_utf8_bytes - sum(len(message["content"].encode())
+                                       for turn in turns for message in turn))))
+    if recalled:
+        selection.add(HEADING, recalled["data"], recalled["event_ids"],
+                      priority=RELATED, required=True, module="memory",
+                      proofs=[{"kind": "memory", "proof": memory_context.pin(
+                          clock(), event_ids=set(recalled["event_ids"]))}])
+    return recalled

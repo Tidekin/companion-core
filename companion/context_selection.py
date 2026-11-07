@@ -7,6 +7,7 @@ remain the responsibility of Core and the request planner.
 import json
 import re
 import unicodedata
+from dataclasses import dataclass
 
 from companion.store import encode
 
@@ -137,6 +138,22 @@ def _without_fact(value, text):
     return value
 
 
+class PromptRules:
+    """Keep the static prefix before turn-specific guidance, including rules added after fitting."""
+
+    def __init__(self, static, dynamic):
+        self.static = static
+        self.dynamic = dynamic
+        self.message = {"role": "system", "content": static + "".join(dynamic)}
+
+    def append(self, text, *, dynamic=False):
+        if dynamic:
+            self.dynamic.append(text)
+        else:
+            self.static += text
+        self.message["content"] = self.static + "".join(self.dynamic)
+
+
 class References:
     """Coalesce only exact claims with the same subject and overlapping evidence.
 
@@ -181,3 +198,60 @@ class References:
             self.required.add(id(message))
         self.proofs.extend((message, proof) for proof in proofs)
         return message
+
+    def include(self, message, sources, *, proof=None):
+        """Attach an already-rendered reference without changing its original wording."""
+        self.messages.append(message)
+        self.sources.append((message, sources))
+        if proof is not None:
+            self.proofs.append((message, proof))
+
+    def retained(self, messages, initial_proofs):
+        visible = {id(message) for message in messages}
+        sources = {key for ref, ids in self.sources if id(ref) in visible for key in ids}
+        proofs = list(initial_proofs)
+        for ref, proof in self.proofs:
+            if id(ref) in visible and proof not in proofs:
+                proofs.append(proof)
+        return sources, proofs
+
+
+@dataclass
+class FittedReply:
+    messages: list
+    blocks: list
+    dropped: list
+
+    def retained_blocks(self):
+        visible = {id(message) for message in self.messages}
+        return [(kind, block, required, priority) for kind, block, required, priority in self.blocks
+                if id(block[0]) in visible]
+
+
+def fit_reply(settings, kind, rules, references, history, current_input, related, *, protected):
+    """Keep each source group atomic; reuse the same priorities at final SDK admission."""
+    from companion.dialogue_history import fit_context
+
+    preserve = bool(protected or history.continuation)
+    recent = protected_recent(settings, history.sources, history.turns, current_input, kind)
+    blocks = [("rules", [rules], True, TOPIC)]
+    for message in references.messages:
+        blocks.append(("reference", [message], preserve or id(message) in references.required,
+                       references.priorities.get(id(message), BACKGROUND)))
+    target_id = history.review_target and history.review_target.get("event_id")
+    for source, turn in zip(history.sources, history.turns, strict=True):
+        event_id = source["event_id"]
+        required = preserve or source.get("reply_complete") is False or event_id in recent
+        on_topic = related(source.get("user_text", "")) == RELATED
+        priority = TOPIC if on_topic or event_id == target_id or event_id in recent else OLD_HISTORY
+        blocks.append(("history", turn, required, priority))
+    blocks.append(("current", current_input, True, TOPIC))
+    dropped = []
+    if protected:
+        # A signed window already bounded its reviewed sources. Hard admission still applies.
+        messages = [message for _, group, _, _ in blocks for message in group]
+    else:
+        messages = fit_context(rules, references.messages, history.turns, current_input,
+                               settings.context_soft_tokens, settings=settings, scenario=kind,
+                               blocks=blocks, dropped=dropped)
+    return FittedReply(messages, blocks, dropped)

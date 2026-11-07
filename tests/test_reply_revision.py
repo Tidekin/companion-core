@@ -297,7 +297,7 @@ def test_newer_input_stops_an_old_context_build_midway(core, monkeypatch):
         return None
 
     # The newer message lands while the old job is still collecting references.
-    monkeypatch.setattr(core, "_expression_learning_reference", newer_input)
+    monkeypatch.setattr(core.expression_learning, "reply_reference", newer_input)
     monkeypatch.setattr(dialogue_history, "turn_messages", turn_messages)
     with pytest.raises(CoreError) as error:
         core.context(job)
