@@ -1,6 +1,6 @@
 """Synthetic retained v1 custody for original revocation and read-only validators.
 
-This follows tests.test_legacy_owner_input.archived and the schema/record seeding in
+This follows tests.support.legacy_owner_input.archived and the schema/record seeding in
 tests.test_native_image_migration. These fixtures do not execute retired approvals
 or invoke a model/provider.
 The signed capture, terminal rows and fees below are explicit historical fixtures,
