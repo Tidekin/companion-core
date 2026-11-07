@@ -24,9 +24,9 @@ from companion_onebot_bridge.voice_media import prepare_delivery
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
 from tests.support.owner_authority import activate
+from tests.support.voice_jobs import TOKEN, voice_config
 from tests.test_reading_followup import URL, admit, window
 from tests.test_singing_protocol import result as song_result
-from tests.test_voice_jobs import TOKEN, voice_config
 
 
 @asynccontextmanager

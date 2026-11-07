@@ -10,7 +10,7 @@ from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.reading_protocol import ReadObservation
 from companion.store import after, encode
 from tests.conftest import ingest, run
-from tests.test_exploration import URL
+from tests.support.exploration import URL
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import configure
 from tests.test_social_owner_authority import authorize

@@ -12,7 +12,7 @@ from companion.contracts import CoreError
 from companion.model import ModelClient, model_payload
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 class UnreadableStream(httpx.AsyncByteStream):

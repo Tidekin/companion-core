@@ -9,7 +9,7 @@ from companion.voice_protocol import VoiceLeaseRef, VoiceProtocolError
 from companion_voice_node.state import NodeState
 from companion_voice_node.worker import VoiceNodeWorker
 from tests.conftest import run
-from tests.test_voice_jobs import TOKEN, claim, create_tts, prepared
+from tests.support.voice_jobs import TOKEN, claim, create_tts, prepared
 from tests.test_voice_node_api import app_for
 from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 

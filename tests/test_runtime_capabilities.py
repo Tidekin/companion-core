@@ -8,9 +8,9 @@ import pytest
 from companion.capabilities import prompt, public_source_readiness, snapshot
 from companion.config import ObservationAdapterConfig
 from companion.source_grants import SourceGrantRegistration
-from tests.test_exploration import configure
-from tests.test_paid_model_gate import approved_live
-from tests.test_source_grants import GRANT_ID, authorization, prepare
+from tests.support.exploration import configure
+from tests.support.paid_model import approved_live
+from tests.support.source_grants import GRANT_ID, authorization, prepare
 
 
 @pytest.fixture
@@ -640,10 +640,10 @@ def native_capabilities(core, tmp_path):
     from companion.poke_protocol import PokePolicy
     from companion.social_autonomy import SocialAutonomy
     from companion.social_autonomy_protocol import ProfileBaseline, SocialAutonomyConfig
+    from tests.support.voice_jobs import voice_config
     from tests.test_bili_video import paid_options
     from tests.test_onebot_capture import pinned_plan
     from tests.test_social_autonomy import avatar
-    from tests.test_voice_jobs import voice_config
 
     options = paid_options(core)
     files = PrivateFilesConfig(enabled=True, parser_image="sha256:" + "d" * 64,
@@ -878,7 +878,7 @@ def test_unknown_voice_resource_is_not_released_by_capability_projection(core, t
     from companion.voice_jobs import VoiceJobs
     from tests.conftest import run
     from tests.sdk_reader_fixture import Provider, answer, worker_for
-    from tests.test_voice_jobs import TEXT
+    from tests.support.voice_jobs import TEXT
     from tests.voice_owner_fixtures import native_voice
 
     native_voice(core, tmp_path, record=False)

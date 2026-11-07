@@ -18,9 +18,9 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
+from tests.support.paid_model import approved_live
 from tests.test_cumulative_budget import policy, view
 from tests.test_live_text_window import live_clients, live_fixture
-from tests.test_paid_model_gate import approved_live
 
 
 @asynccontextmanager

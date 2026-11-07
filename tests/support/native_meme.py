@@ -20,7 +20,7 @@ from companion_onebot_bridge.spool import Spool
 from tests.support.core_http import real_core_http
 from tests.support.onebot_events import raw_event
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 CASES = WeakKeyDictionary()
 

@@ -13,7 +13,7 @@ from companion.model import ModelClient, ModelResponse, ModelResponseError
 from companion.store import encode
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 MESSAGES = [{"role": "user", "content": "synthetic cache observation"}]
 ABSENT = object()

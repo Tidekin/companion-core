@@ -14,7 +14,7 @@ from companion.gateway_contract import ChatRequest, ClientGrant, RequestContext
 from companion.model import ModelClient
 from companion.store import Store, after, encode
 from tests.conftest import run
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 @dataclass

@@ -16,9 +16,9 @@ from tests.conftest import run
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.onebot import provider
 from tests.support.onebot_events import raw_event
+from tests.support.paid_model import approved_live
 from tests.test_onebot_delivery import core_client
 from tests.test_onebot_window import plan_fixture
-from tests.test_paid_model_gate import approved_live
 
 
 @asynccontextmanager

@@ -8,8 +8,8 @@ import pytest
 from companion import paid_budget, style_distill, style_observation
 from companion.model import ModelClient
 from tests.conftest import run
+from tests.support.exploration import configure
 from tests.support.owner_authority import activate
-from tests.test_exploration import configure
 from tests.test_owner_authority import prepare
 from tests.test_watch_ledger import Provider, observe
 
@@ -163,7 +163,7 @@ def test_unknown_call_is_never_replayed(core, tmp_path):
 
 
 def test_disabled_distillation_does_nothing_and_keeps_the_paid_contract(core, tmp_path):
-    from tests.test_paid_model_gate import approved_live
+    from tests.support.paid_model import approved_live
 
     configure(core)
     approved_live(core, tmp_path)

@@ -19,11 +19,11 @@ from tests.model_carry_support import MESSAGES, migrated
 from tests.owner_model_fixtures import authorized_job
 from tests.sdk_reader_fixture import answer, call
 from tests.support.core_http import real_core_http
+from tests.support.exploration import configure
+from tests.support.paid_model import approved_live
 from tests.test_bili_video_entrypoint import TOKEN, URL, reader_files, reader_once, upstream
-from tests.test_exploration import configure
 from tests.test_model_carry_lifecycle import current_unknown
 from tests.test_native_bili_video import sdk_step
-from tests.test_paid_model_gate import approved_live
 from tests.test_reading_followup import admit
 
 

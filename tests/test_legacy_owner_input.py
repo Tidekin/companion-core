@@ -18,7 +18,7 @@ from companion.transport import enqueue_reply_parts, reply_group, segment_envelo
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import event
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 def archived(core, tmp_path, *, private=False, segmented=False):

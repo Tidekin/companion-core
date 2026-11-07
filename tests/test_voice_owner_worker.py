@@ -16,7 +16,7 @@ from companion.voice_jobs import VoiceJobs, sign_asr_proof
 from companion.voice_protocol import canonical_bytes, digest
 from companion_voice_node.worker import local_manifest
 from tests.conftest import run
-from tests.test_voice_jobs import voice_config
+from tests.support.voice_jobs import voice_config
 from tests.test_voice_node_api import independent_node, tls_core
 from tests.test_voice_node_worker import child_receipts
 from tests.test_voice_node_worker import node as node  # noqa: F401

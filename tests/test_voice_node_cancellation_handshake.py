@@ -30,7 +30,7 @@ from companion_voice_node.state import NodeState
 from companion_voice_node.supervisor import ProcessSupervisor, process_has_exited
 from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker, local_manifest
 from tests.conftest import run
-from tests.test_voice_jobs import voice_config
+from tests.support.voice_jobs import voice_config
 from tests.test_voice_node_api import independent_node, node_wall_clock, tls_core
 from tests.test_voice_node_worker import FakeCore, FixtureSupervisor, child_receipts
 from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture

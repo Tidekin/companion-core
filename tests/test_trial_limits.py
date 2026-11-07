@@ -19,12 +19,12 @@ from companion_onebot_bridge.window import WindowPlan
 from scripts.trial_limits import load_limits
 from tests.conftest import run
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.paid_model import approved_live
 from tests.test_cumulative_budget import policy as quota_policy
 from tests.test_cumulative_budget import view
 from tests.test_live_continuity import native_continuity
 from tests.test_live_text_window import live_fixture
 from tests.test_onebot_window import plan_fixture
-from tests.test_paid_model_gate import approved_live
 
 ROOT = Path(__file__).resolve().parents[1]
 

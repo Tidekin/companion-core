@@ -27,8 +27,8 @@ from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
 from tests.life_shadow_process import run_native
 from tests.support.core_http import real_core_http
+from tests.support.exploration import URL, configure
 from tests.support.owner_authority import activate
-from tests.test_exploration import URL, configure
 from tests.test_owner_authority import prepare
 from tests.test_reading_followup import admit as admit_owner
 from tests.test_reading_followup import select_read

@@ -127,7 +127,7 @@ def test_invalid_text_and_corrupt_snapshot_cannot_partially_apply(hot):
 def test_expression_values_keep_contracts_and_still_obey_real_input_limit(hot, tmp_path):
     from companion import owner_authority, paid_budget
     from tests.owner_model_fixtures import authorized_job
-    from tests.test_paid_model_gate import approved_live
+    from tests.support.paid_model import approved_live
 
     approved_live(hot, tmp_path, max_input_tokens=1000)
     contract, capabilities = paid_budget.snapshot(hot.settings), (

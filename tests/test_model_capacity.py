@@ -15,7 +15,7 @@ from companion.contracts import CoreError
 from companion.model import ModelClient
 from companion.store import Store
 from tests.owner_model_fixtures import authorized_job
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 from tests.test_watch_ledger import ready
 
 MESSAGES = [{"role": "user", "content": "synthetic capacity check"}]

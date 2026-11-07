@@ -17,9 +17,9 @@ from companion.contracts import CoreError
 from companion.store import Store, encode, migrate
 from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import VoiceLeaseRef
+from tests.support.voice_jobs import claim, create_tts, prepared
 from tests.test_delivery_reconciliation import decide, prepare, put, signed
 from tests.test_delivery_reconciliation import native as current_fixture
-from tests.test_voice_jobs import claim, create_tts, prepared
 
 OLD = "0033_model_usage_job_index"
 NEW = "0044_voice_owner_authority"

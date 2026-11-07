@@ -40,7 +40,7 @@ from tests.support.native_http import owned_http_protocol
 from tests.support.onebot import provider
 from tests.support.onebot_events import config, raw_event
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 def frame(number=1, text="你好", **changes):

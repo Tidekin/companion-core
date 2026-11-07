@@ -682,7 +682,7 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
 ):
     from companion.config import ObservationAdapterConfig
     from companion.exploration import ReadItem, ReadResult
-    from tests.test_exploration import URL, discover, read_goal
+    from tests.support.exploration import URL, discover, read_goal
 
     async def source(ws):
         await ws.send(json.dumps(raw_event(1, text="一起聊聊手绘游戏")))

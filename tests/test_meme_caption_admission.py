@@ -17,9 +17,9 @@ from companion.model import ModelClient, ModelResponse, model_payload
 from companion.owner_authority_protocol import AuthorityStop, OwnerRuntimeConfig
 from companion.store import after
 from tests.conftest import run
+from tests.support.paid_model import approved_live
 from tests.test_meme_core import body
 from tests.test_meme_service import claim, discovery_environment, reservation, result, submit
-from tests.test_paid_model_gate import approved_live
 
 
 def policy(**changes):

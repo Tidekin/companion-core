@@ -8,9 +8,9 @@ from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import VoiceLeaseRef
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+from tests.support.voice_jobs import claim, control
 from tests.test_reading_followup import admit
 from tests.test_singing_integration import queue_song, singing_window
-from tests.test_voice_jobs import claim, control
 
 
 def test_model_bilibili_song_query_uses_original_reader_queue(core, tmp_path, monkeypatch):

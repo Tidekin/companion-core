@@ -13,10 +13,10 @@ from companion import api_store
 from companion.store import Store, after
 from tests.conftest import ingest
 from tests.support.core_http import real_core_http
-from tests.test_exploration import configure
+from tests.support.exploration import configure
+from tests.support.source_grants import URL, prepare
 from tests.test_reading_service import configure as configure_reading
 from tests.test_reply_revision import accept
-from tests.test_source_grants import URL, prepare
 
 
 def pending(core, version):

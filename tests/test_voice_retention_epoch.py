@@ -25,8 +25,8 @@ from companion.voice_protocol import (
     digest,
 )
 from tests.conftest import ingest, run
+from tests.support.voice_jobs import TOKEN, result, voice_config
 from tests.test_voice_flow import signed_input
-from tests.test_voice_jobs import TOKEN, result, voice_config
 from tests.test_voice_node_api import claim_body, tls_core
 
 OLD_TRANSCRIPT = "不应在新隐私版本读取的旧语音转写"

@@ -20,7 +20,7 @@ from companion.qq_rich import input_digest
 from companion.runtime import Runtime
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import event, ingest
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 def prepare(core, tmp_path, *, chat=False, **limits):

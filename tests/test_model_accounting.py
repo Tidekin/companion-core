@@ -17,9 +17,9 @@ from companion.store import encode
 from tests.model_carry_support import MESSAGES, migrated, stranded
 from tests.owner_model_fixtures import authorized_job
 from tests.support.owner_authority import activate
+from tests.support.paid_model import approved_live
 from tests.test_model_carry_lifecycle import current_unknown
 from tests.test_model_renewal import renewal
-from tests.test_paid_model_gate import approved_live
 
 
 def proposal(tmp_path, request_id, *, operation="estimate-first", basis=None):

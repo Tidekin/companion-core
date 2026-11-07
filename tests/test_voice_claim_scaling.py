@@ -5,7 +5,7 @@ import pytest
 from companion import private_life
 from companion.contracts import CoreError
 from companion.voice_protocol import VoiceLeaseRef
-from tests.test_voice_jobs import (
+from tests.support.voice_jobs import (
     claim,
     control,
     create_asr,

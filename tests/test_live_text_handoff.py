@@ -18,8 +18,8 @@ from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.store import Store, encode
 from tests.conftest import event, run
+from tests.support.paid_model import approved_live
 from tests.test_onebot_delivery import core_client
-from tests.test_paid_model_gate import approved_live
 
 KEY = Ed25519PrivateKey.from_private_bytes(bytes.fromhex("e" * 64))
 

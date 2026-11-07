@@ -11,7 +11,7 @@ from companion.store import after
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import ReadFailure
 from source_reader.protocol import decode_lease
-from tests.test_exploration import configure
+from tests.support.exploration import configure
 from tests.test_watch_ledger import observe
 
 

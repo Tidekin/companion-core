@@ -3,7 +3,7 @@
 from companion import owner_authority, paid_budget
 from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
 from tests.support.owner_authority import activate
-from tests.test_paid_model_gate import approved_live
+from tests.support.paid_model import approved_live
 
 
 async def run_notice(core):
