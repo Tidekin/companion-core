@@ -34,19 +34,47 @@ class _ReadView:
         return dict(row) if row else None
 
 
+def _migration_scripts():
+    root = Path(__file__).resolve().parent
+    migrations = root.parent / "migrations"
+    if not migrations.is_dir():
+        migrations = root / "migrations"
+    return ScriptDirectory(str(migrations))
+
+
 @lru_cache(maxsize=1)
 def schema_head():
     try:
-        root = Path(__file__).resolve().parent
-        migrations = root.parent / "migrations"
-        if not migrations.is_dir():
-            migrations = root / "migrations"
-        head = ScriptDirectory(str(migrations)).get_current_head()
+        head = _migration_scripts().get_current_head()
     except (OSError, CommandError) as error:
         raise CoreError("SCHEMA_HEAD_UNAVAILABLE", 503) from error
     if not isinstance(head, str) or not head:
         raise CoreError("SCHEMA_HEAD_UNAVAILABLE", 503)
     return head
+
+
+@lru_cache(maxsize=1)
+def _packaged_revisions(head):
+    return frozenset(rev.revision for rev in _migration_scripts().walk_revisions(head=head))
+
+
+def schema_readiness(view):
+    versions = []
+    if view.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='alembic_version'"):
+        versions = view.rows("SELECT version_num FROM alembic_version LIMIT 2")
+    version = versions[0]["version_num"] if len(versions) == 1 else None
+    details = {"schema": version, "expected_schema": None}
+    try:
+        head = details["expected_schema"] = schema_head()
+        capable = details["capabilities_present"] = Store.schema_capabilities(view)
+        # A rollback may encounter a newer compatible schema. Known ancestors need migration.
+        if capable and version and (version == head or version not in _packaged_revisions(head)):
+            return details, None
+    except CoreError as error:
+        return details, error.code
+    except (OSError, CommandError):
+        return details, "SCHEMA_HEAD_UNAVAILABLE"
+    return details, "MIGRATION_REQUIRED"
 
 
 def _resource(path):
@@ -199,22 +227,10 @@ def snapshot(settings, *, integrity=False):
             db.set_progress_handler(progress, 10_000)
             db.execute("BEGIN")
             view = _ReadView(db)
-            if not view.one("SELECT 1 FROM sqlite_master WHERE name='alembic_version'"):
-                result["blockers"].append("MIGRATION_REQUIRED")
-                return result
-            version = view.one("SELECT version_num FROM alembic_version")
-            result["database"]["schema"] = version["version_num"] if version else None
-            result["database"]["expected_schema"] = None
-            try:
-                result["database"]["expected_schema"] = schema_head()
-            except CoreError as error:
-                result["blockers"].append(error.code)
-                return result
-            # Reuse the existing pure capability query without invoking Store.__init__.
-            capable = Store.schema_capabilities(view)
-            result["database"]["capabilities_present"] = capable
-            if not version or not capable:
-                result["blockers"].append("MIGRATION_REQUIRED")
+            schema, blocker = schema_readiness(view)
+            result["database"].update(schema)
+            if blocker:
+                result["blockers"].append(blocker)
                 return result
             from companion.worker_loop import snapshot as loop_snapshot
 

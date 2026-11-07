@@ -17,7 +17,7 @@ from companion.config import Settings
 from companion.core import Core
 from companion.privacy import ErasureLedger
 from companion.runtime import Runtime
-from companion.store import Store
+from companion.store import Store, migrate
 from tests.conftest import ingest, run
 from tests.test_test_fixtures import assert_schema_metadata
 
@@ -182,6 +182,41 @@ def test_schema_capabilities_reuse_existing_readiness_contract(core):
     assert result["database"]["schema"] == "future_compatible"
     assert result["database"]["capabilities_present"] is True
     assert "MIGRATION_REQUIRED" not in result["blockers"]
+
+
+def test_ready_and_diagnostics_require_upgrade_from_single_topic_schema(tmp_path):
+    cfg = settings(tmp_path).model_copy(update={"memory_enabled": False})
+    old = "0063_mood_appraisal_targets"
+    migrate(cfg.database, old)
+    headers = {"Authorization": "Bearer " + cfg.bridge_token.get_secret_value()}
+    with TestClient(create_app(cfg)) as client:
+        response = client.get("/internal/v1/health/ready", headers=headers)
+        assert response.status_code == 503 and response.json() == {"error": "MIGRATION_REQUIRED"}
+        result = ops_status.snapshot(cfg)
+        assert result["database"]["schema"] == old and "MIGRATION_REQUIRED" in result["blockers"]
+    migrate(cfg.database)
+    with TestClient(create_app(cfg)) as client:
+        response = client.get("/internal/v1/health/ready", headers=headers)
+        assert response.status_code == 200 and response.json()["schema"] == ops_status.schema_head()
+        assert "MIGRATION_REQUIRED" not in ops_status.snapshot(cfg)["blockers"]
+
+
+@pytest.mark.parametrize("change", [
+    "UPDATE alembic_version SET version_num='0067_relationship_standing'",
+    "INSERT INTO alembic_version VALUES ('other_head')",
+    "DELETE FROM alembic_version",
+    "DROP INDEX idx_memory_image_review_target",
+    "DROP INDEX idx_memories_relationship_standing",
+])
+def test_readiness_checks_revision_and_query_requirements_independently(core, change):
+    core.store.execute(change)
+    app = create_app(core.settings)
+    app.state.core = core
+    response = TestClient(app).get("/internal/v1/health/ready", headers={
+        "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value(),
+    })
+    assert response.status_code == 503 and response.json() == {"error": "MIGRATION_REQUIRED"}
+    assert "MIGRATION_REQUIRED" in ops_status.snapshot(core.settings)["blockers"]
 
 
 @pytest.mark.parametrize("failure", ["empty_versions", "permission", "unavailable"])
