@@ -29,8 +29,7 @@ def receive(store, settings, clock, ledger, event, key, *, content_options):
     """Bind the same admission path to the HTTP request's independent connection."""
     reading = service_for_store(store, settings, clock)
     content = ContentIntake(store, settings, clock, reading.exploration.create,
-                            options=content_options)
-    content.video = reading.video
+                            options=content_options, video=reading.video)
     return ingest(
         store, settings, clock, ledger, event, key, content=content,
         diary=DiaryRepository(store, settings, clock), affect=AffectEngine(store, settings, clock),

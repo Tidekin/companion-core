@@ -123,22 +123,19 @@ class Core(Runtime):
             from companion.life_topics import LifeTopics
 
             self.life_topics = LifeTopics(self.store, settings, clock)
-            # These finite callbacks expose only the read/model operations each service needs.
-            self.content = ContentService(
-                self.store, settings, self.observations,
-                lambda *args, **kwargs: exploration.create(*args, **kwargs), clock,
-                model=lambda: self.model,
+            self.exploration = ExplorationService(
+                self.store, settings, self.observations, self.goals, self.social, clock,
             )
-            exploration = self.exploration = ExplorationService(
-                self.store, settings, self.observations, self.goals, self.social,
-                self.content.register_link_images, clock,
-            )
-            self.reading = ReadingService(self.store, settings, self.exploration, clock)
             from companion.bili_video import BiliVideoService
 
-            self.bili_video = BiliVideoService(self.store, settings, self.reading, model, clock)
-            self.reading.video = self.bili_video
-            self.content.video = self.bili_video
+            self.bili_video = BiliVideoService(self.store, settings, self.exploration, model, clock)
+            self.reading = ReadingService(
+                self.store, settings, self.exploration, clock, video=self.bili_video,
+            )
+            self.content = ContentService(
+                self.store, settings, self.observations, self.exploration.create, clock,
+                model=lambda: self.model, video=self.bili_video,
+            )
             self.expression = ExpressionEngine(self.store, settings, clock)
             self.memes = MemeCaptionService(self.store, settings, lambda: self.model, clock)
             self.voice = VoiceFlow(self.store, settings, clock)

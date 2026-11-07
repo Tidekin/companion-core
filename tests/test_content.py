@@ -82,14 +82,13 @@ def enable(core, **options):
         ),
         image_daily_micro_usd=100,
     ).model_copy(update=options)
-    core.content = ContentService(
-        core.store, core.settings, core.observations,
-        lambda *args, **kwargs: exploration.create(*args, **kwargs), core.clock,
-        options=config, provider=vision,
+    core.exploration = ExplorationService(
+        core.store, core.settings, core.observations, core.goals, core.social, core.clock,
+        content_options=config,
     )
-    exploration = core.exploration = ExplorationService(
-        core.store, core.settings, core.observations, core.goals, core.social,
-        core.content.register_link_images, core.clock,
+    core.content = ContentService(
+        core.store, core.settings, core.observations, core.exploration.create, core.clock,
+        options=config, provider=vision,
     )
     return core.content, vision
 

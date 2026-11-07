@@ -83,7 +83,7 @@ def metadata(core, *, deadline=None, duration=60, enabled=True, grant=None):
     result = core.reading.complete(
         adapter, item["request_id"], ReadObservation.model_validate(body)
     )
-    module = BiliVideoService(core.store, core.settings, core.reading, core.model, core.clock)
+    module = BiliVideoService(core.store, core.settings, core.exploration, core.model, core.clock)
     return module, content["item_id"], result["event_ids"][0]
 
 
@@ -582,7 +582,7 @@ def test_migration_preserves_existing_data_and_refuses_downgrade_with_media_hist
         command.downgrade(config, "0031_voice_nodes")
     with closing(Store(database)) as store:
         assert store.rows("SELECT * FROM reading_attempts") == before
-        historical = BiliVideoService(store, core.settings, module.reading, clock=core.clock)
+        historical = BiliVideoService(store, core.settings, module.exploration, clock=core.clock)
         assert historical.context(item["media"]["content_item_id"])["state"] == "PREPARED"
 
 
