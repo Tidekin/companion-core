@@ -11,6 +11,7 @@ from companion.contracts import CoreError
 from companion.store import after, encode, uid
 from companion.token_measurement import byte_estimate, measure_request
 from companion.video_input import SCENARIOS as VIDEO_SCENARIOS
+from companion.video_input import approved_route as video_route
 
 
 def token_upper_bound(messages):
@@ -19,15 +20,14 @@ def token_upper_bound(messages):
 
 
 def cost(settings, input_tokens, output_tokens, cached=0, *, scenario=None):
-    if scenario in VIDEO_SCENARIOS and settings.paid_model and settings.paid_model.video_input:
-        settings = SimpleNamespace(pricing_known=True,
-                                   **settings.paid_model.video_input.model_dump())
-    if not settings.pricing_known:
+    video = video_route(settings, scenario)
+    if video is None and not settings.pricing_known:
         return 0
+    rates = video or settings
     numerator = (
-        (input_tokens - cached) * settings.input_rate
-        + cached * settings.cached_input_rate
-        + output_tokens * settings.output_rate
+        (input_tokens - cached) * rates.input_rate
+        + cached * rates.cached_input_rate
+        + output_tokens * rates.output_rate
     )
     return (numerator + 999999) // 1000000
 
@@ -142,6 +142,58 @@ def check_request_limits(approval, measured, scenario):
         raise CoreError("MODEL_CONTEXT_LIMIT", 429)
 
 
+def _period_starts(now, timezone):
+    local = datetime.fromisoformat(now).astimezone(ZoneInfo(timezone))
+    day = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return day.astimezone(UTC), day.replace(day=1).astimezone(UTC)
+
+
+def _check_period_limits(store, settings, approval, scenario, estimate, day, month, *, autonomous):
+    month = month.isoformat(timespec="microseconds")
+    unlimited = bool(approval and approval.unlimited_period_spend)
+    total = total_monthly(store, month)
+    if (settings.pricing_known and not unlimited
+        and total + estimate > settings.monthly_limit_micro_usd):
+        raise CoreError("MONTHLY_BUDGET_EXHAUSTED", 429)
+    if not autonomous:
+        return
+
+    cap = paid_budget.daily_limits(settings).get(scenario)
+    if cap is None:
+        raise CoreError("UNKNOWN_BUDGET_SCENARIO", 400)
+    feature = {
+        "style_distill": settings.style_distill, "jargon": settings.jargon,
+        "watch_review": settings.watch_ledger, "social_autonomy": settings.social_autonomy,
+    }.get(scenario)
+    if feature is not None and (not feature.enabled or cap == 0):
+        raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
+
+    group = (scenario,)
+    if scenario in {"memory_extract", "memory_review"}:
+        group = ("memory_extract", "memory_review")
+    elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
+        group = ("content_vision", *sorted(VIDEO_SCENARIOS))
+    daily = store.one(
+        "SELECT COUNT(*) n,COALESCE(SUM(billed_micro_usd),0) amount FROM model_usage "
+        "WHERE occurred_at>=? AND scenario IN (" + ",".join("?" for _ in group) + ")",
+        (day.isoformat(timespec="microseconds"), *group),
+    )
+    if scenario == "reflection":
+        monthly = store.one("SELECT COALESCE(SUM(billed_micro_usd),0) n FROM model_usage "
+                            "WHERE occurred_at>=? AND scenario='reflection'", (month,))["n"]
+        if cap == 0 or settings.reflection_monthly_micro_usd == 0:
+            raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
+        if not unlimited and monthly + estimate > settings.reflection_monthly_micro_usd:
+            raise CoreError("SCENARIO_MONTHLY_BUDGET_EXHAUSTED", 429)
+        if daily["n"] >= settings.reflection_max_daily_calls:
+            raise CoreError("SCENARIO_CALL_LIMIT", 429)
+    if scenario == "social_autonomy" and daily["n"] >= settings.social_autonomy.model_daily_calls:
+        raise CoreError("SCENARIO_CALL_LIMIT", 429)
+    capped = not unlimited or scenario in {"meme_caption", "social_autonomy"}
+    if capped and daily["amount"] + estimate > cap:
+        raise CoreError("DAILY_BUDGET_EXHAUSTED", 429)
+
+
 def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
     clock=None, cloud_task_kind=None, cloud_task_id=None, source_check=None, tools=(),
@@ -163,9 +215,7 @@ def reserve(
     autonomous = scenario not in {"chat", "qq_poke", "evaluation", "gateway"}
     if autonomous and not settings.pricing_known:
         raise CoreError("UNKNOWN_PRICING", 429)
-    local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
-    month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-    day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+    day, month = _period_starts(now, settings.timezone)
     measurement = measure_request(wire, messages, scenario, tools=tools, generation=generation)
     estimated_input = measurement.reserved_input_tokens
     output_tokens = measurement.output_allowance
@@ -189,9 +239,7 @@ def reserve(
         )))
         if activate_cumulative:
             now = clock() if callable(clock) else now
-            local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
-            month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-            day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+            day, month = _period_starts(now, settings.timezone)
         owner_view = model_scope.admit(store, settings, clock, now, job_id, scenario, request_id,
                                        inputs, messages, estimate, estimated_input)
         request_id = request_id or uid("model")
@@ -199,92 +247,13 @@ def reserve(
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
         model_scope.admit_attempt(store, settings, current_time, now, job_id, scenario,
                                  request_id, inputs, messages, source_check)
-        total = total_monthly(store, month.isoformat(timespec="microseconds"))
-        unlimited_period = bool(approval and approval.unlimited_period_spend)
-        if (settings.pricing_known and not unlimited_period
-            and total + estimate > settings.monthly_limit_micro_usd):
-            raise CoreError("MONTHLY_BUDGET_EXHAUSTED", 429)
-        if autonomous:
-            if scenario in {"memory_extract", "memory_review"}:
-                scenarios = ("memory_extract", "memory_review")
-                limit = settings.memory_daily_micro_usd
-            elif scenario == "rem":
-                scenarios = ("rem",)
-                limit = settings.rem.daily_micro_usd
-            elif scenario == "style_distill":
-                scenarios = ("style_distill",)
-                limit = settings.style_distill.daily_micro_usd
-                if not settings.style_distill.enabled or limit == 0:
-                    raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
-            elif scenario == "jargon":
-                scenarios = ("jargon",)
-                limit = settings.jargon.daily_micro_usd
-                if not settings.jargon.enabled or limit == 0:
-                    raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
-            elif scenario == "watch_review":
-                scenarios = ("watch_review",)
-                limit = settings.watch_ledger.daily_micro_usd
-                if not settings.watch_ledger.enabled or limit == 0:
-                    raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
-            elif scenario == "diary":
-                scenarios = ("diary",)
-                limit = settings.diary_daily_micro_usd
-            elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
-                scenarios = ("content_vision", *sorted(VIDEO_SCENARIOS))
-                limit = settings.content.image_daily_micro_usd
-            elif scenario == "meme_caption":
-                scenarios = ("meme_caption",)
-                limit = settings.meme_caption_daily_micro_usd
-            elif scenario == "social_autonomy":
-                scenarios = ("social_autonomy",)
-                limit = settings.social_autonomy.model_daily_micro_usd
-                calls = store.one("SELECT COUNT(*) n FROM model_usage "
-                                  "WHERE scenario='social_autonomy' AND occurred_at>=?",
-                                  (day.isoformat(timespec="microseconds"),))["n"]
-                if not settings.social_autonomy.enabled or limit == 0:
-                    raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
-                if calls >= settings.social_autonomy.model_daily_calls:
-                    raise CoreError("SCENARIO_CALL_LIMIT", 429)
-            elif scenario == "activity":
-                scenarios = ("activity",)
-                limit = settings.autonomous_daily_micro_usd
-            elif scenario == "reflection":
-                scenarios = ("reflection",)
-                limit = settings.reflection_daily_micro_usd
-                monthly = store.one(
-                    "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-                    "WHERE occurred_at>=? AND scenario='reflection'",
-                    (month.isoformat(timespec="microseconds"),),
-                )["n"]
-                calls = store.one(
-                    "SELECT COUNT(*) AS n FROM model_usage WHERE scenario='reflection' AND "
-                    "occurred_at>=?",
-                    (day.isoformat(timespec="microseconds"),),
-                )["n"]
-                if limit == 0 or settings.reflection_monthly_micro_usd == 0:
-                    raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
-                if (not unlimited_period
-                    and monthly + estimate > settings.reflection_monthly_micro_usd):
-                    raise CoreError("SCENARIO_MONTHLY_BUDGET_EXHAUSTED", 429)
-                if calls >= settings.reflection_max_daily_calls:
-                    raise CoreError("SCENARIO_CALL_LIMIT", 429)
-            else:
-                raise CoreError("UNKNOWN_BUDGET_SCENARIO", 400)
-            spent = store.one(
-                "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-                "WHERE occurred_at>=? AND scenario IN (" + ",".join("?" for _ in scenarios) + ")",
-                (day.isoformat(timespec="microseconds"), *scenarios),
-            )["n"]
-            if (not unlimited_period or scenario in {"meme_caption", "social_autonomy"}) and (
-                spent + estimate > limit
-            ):
-                raise CoreError("DAILY_BUDGET_EXHAUSTED", 429)
+        _check_period_limits(store, settings, approval, scenario, estimate, day, month,
+                             autonomous=autonomous)
         if approval:
             logical_request_id = logical_request_id or job_id or uid("logical")
             _admit(store, settings, approval, logical_request_id, estimate, now, day, month,
                    scenario=scenario, job_id=job_id)
-        cloud_pricing = (wire.paid_model.video_input if scenario in VIDEO_SCENARIOS
-                         and settings.paid_model and settings.paid_model.video_input else settings)
+        cloud_pricing = video_route(wire, scenario) or settings
         cloud_budget.reserve(
             store, settings, reference_type="model", reference_id=request_id,
             estimated_micro_usd=estimate, now=now,
@@ -303,16 +272,17 @@ def reserve(
             paid_budget.journal(store, approval)
             quota = cumulative.admit_model(store, settings, request_id, logical_request_id, now,
                                             estimate, estimated_input, output_tokens)
+        from companion.model import model_route
+
+        provider, name, _ = model_route(wire, scenario)
         store.insert(
             "model_usage",
             usage_id=uid("usage"),
             request_id=request_id,
             job_id=job_id,
             scenario=scenario,
-            provider=(wire.paid_model.video_input.provider if scenario in VIDEO_SCENARIOS
-                      else settings.provider),
-            model=(wire.paid_model.video_input.model if scenario in VIDEO_SCENARIOS
-                   else settings.model_name),
+            provider=provider,
+            model=name,
             input_tokens=estimated_input,
             output_tokens=output_tokens,
             billed_micro_usd=estimate,
@@ -327,52 +297,61 @@ def reserve(
         if approval:
             from companion.model import model_payload
 
-            snapshot = paid_budget.snapshot(settings)
-            contract_hash = paid_budget.sha(snapshot)
-            store.insert(
-                "model_admissions",
-                request_id=request_id,
-                logical_request_id=logical_request_id,
-                attempt_id=uid("attempt"),
-                attempt_number=1
-                + store.one(
-                    "SELECT COUNT(*) AS n FROM model_admissions WHERE logical_request_id=?",
-                    (logical_request_id,),
-                )["n"],
-                window_id=approval.window_id,
-                contract_sha256=contract_hash,
-                payload_sha256=paid_budget.sha(model_payload(
-                    wire, messages, scenario, tools=tools, generation=generation)),
-                snapshot_json=encode(snapshot),
-                measurement_json=encode(receipt),
-                reserved_micro_usd=estimate,
-                input_bound=estimated_input,  # Historical SQL column; this is a local estimate.
-                output_bound=output_tokens,
-                journal_path=str(Path(approval.journal_path).resolve()),
-                journal_id=store.one(
-                    "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
-                )["value"],
-                lease_token=uid("model_lease"),
-                lease_until=after(now, settings.model_timeout(scenario) + 10),
-            )
-            paid_budget.journal(
-                store,
-                approval,
-                {
-                    "kind": "reserve",
-                    "state": "RESERVED",
-                    "request_id": request_id,
-                    "minimum_micro_usd": estimate,
-                    "contract_sha256": contract_hash,
-                    "measurement": {"version": 1, "sha256": paid_budget.sha(
-                        receipt)},
-                    **({"quota": quota} if quota else {}),
-                    **model_scope.journal_binding(store, scenario, request_id),
-                },
+            payload = model_payload(wire, messages, scenario, tools=tools, generation=generation)
+            _record_paid_reservation(
+                store, settings, approval, scenario, request_id, logical_request_id,
+                estimate, measurement, receipt, paid_budget.sha(payload), quota, now,
             )
             model_scope.freeze_authority(store, settings, clock, scenario,
                                          job_id, request_id, owner_view)
         return request_id
+
+
+def _record_paid_reservation(store, settings, approval, scenario, request_id, logical_request_id,
+                             estimate, measurement, receipt, payload_sha256, quota, now):
+    """Persist the priced admission and append its independent proof before the caller commits."""
+    snapshot = paid_budget.snapshot(settings)
+    contract_hash = paid_budget.sha(snapshot)
+    store.insert(
+        "model_admissions",
+        request_id=request_id,
+        logical_request_id=logical_request_id,
+        attempt_id=uid("attempt"),
+        attempt_number=1
+        + store.one(
+            "SELECT COUNT(*) AS n FROM model_admissions WHERE logical_request_id=?",
+            (logical_request_id,),
+        )["n"],
+        window_id=approval.window_id,
+        contract_sha256=contract_hash,
+        payload_sha256=payload_sha256,
+        snapshot_json=encode(snapshot),
+        measurement_json=encode(receipt),
+        reserved_micro_usd=estimate,
+        input_bound=measurement.reserved_input_tokens,
+        output_bound=measurement.output_allowance,
+        journal_path=str(Path(approval.journal_path).resolve()),
+        journal_id=store.one(
+            "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
+        )["value"],
+        lease_token=uid("model_lease"),
+        lease_until=after(now, settings.model_timeout(scenario) + 10),
+    )
+    paid_budget.journal(
+        store,
+        approval,
+        {
+            "kind": "reserve",
+            "state": "RESERVED",
+            "request_id": request_id,
+            "minimum_micro_usd": estimate,
+            "contract_sha256": contract_hash,
+            "measurement": {"version": 1, "sha256": paid_budget.sha(
+                receipt)},
+            **({"quota": quota} if quota else {}),
+            **model_scope.journal_binding(store, scenario, request_id),
+        },
+    )
 
 
 def _admit(store, settings, approval, logical, estimate, now, day, month, *, scenario="chat",
@@ -681,12 +660,9 @@ def _actual_limit_violations(store, admission, snapshot, usage, actual):
 
         limits.extend(actual_limits(store, usage, actual))
     if usage["scenario"] == "evaluation":
-        from companion.evaluation import COST
+        from companion.evaluation import actual_limits
 
-        total = store.one("SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-                          "WHERE job_id=?", (usage["job_id"],))["n"]
-        if actual > 5000 or total + delta > COST:
-            limits.append("EVALUATION_AMOUNT")
+        limits.extend(actual_limits(store, usage, actual))
     if actual > snapshot["per_attempt_micro_usd"]:
         limits.append("ATTEMPT_AMOUNT")
     for column, value, cap, code in (
@@ -895,6 +871,89 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
             model_carry.close_owned(store, settings, request_id, dispatch, clock())
 
 
+def _start_paid_attempt(store, settings, clock, approval, request_id, scenario, now, check_payload):
+    """Bind one usage row and journal I/O start under the caller's writer lock."""
+    cumulative.preflight(store, settings, clock)
+    paid_budget.contract(settings, clock())
+    custody = paid_budget.journal(store, approval)
+    cumulative.check(store, settings, clock(), custody=custody)
+    row = store.one(
+        "SELECT a.*,m.state,m.scenario AS usage_scenario,m.job_id AS usage_job_id "
+        "FROM model_admissions a JOIN model_usage m USING(request_id) "
+        "WHERE request_id=?",
+        (request_id,),
+    )
+    if not row or row["io_started_at"] or row["state"] != "RESERVED":
+        raise CoreError("MODEL_REQUEST_ALREADY_STARTED", 409)
+    if row["usage_scenario"] != scenario:
+        raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
+    model_scope.check_media(store, settings, clock, request_id, scenario, row)
+    if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
+        raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+    check_payload(row)
+    if store.one(
+        "SELECT 1 FROM runtime_meta WHERE key IN "
+        "('model_budget_blocked','model_budget_restore_required')"
+    ):
+        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+    quota = cumulative.admission_metadata(store, row)
+    if quota:
+        now = clock()
+        cumulative.check(store, settings, now)
+        if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
+            raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+    store.execute(
+        "UPDATE model_admissions SET io_started_at=? WHERE request_id=?", (now, request_id)
+    )
+    paid_budget.journal(
+        store,
+        approval,
+        {
+            "kind": "io_started",
+            "state": "RESERVED",
+            "request_id": request_id,
+            "minimum_micro_usd": row["reserved_micro_usd"],
+            "contract_sha256": row["contract_sha256"],
+            "io_started_at": now,
+            **({"quota": quota} if quota else {}),
+        },
+    )
+    return row, now
+
+
+def _transport_custody(store, settings, clock, approval, request_id, scenario, row, now):
+    """Reacquire the original lease and scope after all user HTTP hooks have returned."""
+    from companion import notices, runtime_config
+
+    runtime_config.check_request(store, settings, request_id)
+    custody = paid_budget.journal(store, approval)
+    quota_state = cumulative.check(store, settings, clock(), custody=custody)
+    current_job = model_scope.check(store, settings, clock, request_id, scenario)
+    notices.check_request(store, settings, request_id, clock())
+    current = store.one(
+        "SELECT a.*,m.state,m.scenario,m.job_id AS usage_job_id "
+        "FROM model_admissions a JOIN model_usage m "
+        "USING(request_id) WHERE request_id=?", (request_id,),
+    )
+    if (
+        not current or current["state"] != "RESERVED"
+        or current["lease_token"] != row["lease_token"]
+        or current["io_started_at"] != now
+        or current["payload_sha256"] != row["payload_sha256"]
+        or current["contract_sha256"] != row["contract_sha256"]
+        or current["measurement_json"] != row["measurement_json"]
+        or current["scenario"] != scenario
+        or current["usage_job_id"] != row["usage_job_id"]
+        or current["logical_request_id"] != row["logical_request_id"]
+        or current["authority_json"] != row["authority_json"]
+    ):
+        raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+    if store.one("SELECT 1 FROM runtime_meta WHERE key IN "
+                 "('model_budget_blocked','model_budget_restore_required')"):
+        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+    return current, current_job, quota_state
+
+
 async def _dispatch(
     model, store, settings, request_id, messages, scenario, clock, *, dispatch=None,
     source_check=None, tools=(), trace_id=None, generation=None,
@@ -932,59 +991,20 @@ async def _dispatch(
     with phase("dispatch_measure", trace_id):
         prepared = (measure_request(wire, messages, scenario, tools=tools,
                                     generation=generation), counting_contract)
-    with phase("dispatch_journal", trace_id), store.transaction():
-        cumulative.preflight(store, settings, clock)
-        paid_budget.contract(settings, clock())
-        custody = paid_budget.journal(store, approval)
-        cumulative.check(store, settings, clock(), custody=custody)
-        row = store.one(
-            "SELECT a.*,m.state,m.scenario AS usage_scenario,m.job_id AS usage_job_id "
-            "FROM model_admissions a JOIN model_usage m USING(request_id) "
-            "WHERE request_id=?",
-            (request_id,),
-        )
-        if not row or row["io_started_at"] or row["state"] != "RESERVED":
-            raise CoreError("MODEL_REQUEST_ALREADY_STARTED", 409)
-        if row["usage_scenario"] != scenario:
-            raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-        model_scope.check_media(store, settings, clock, request_id, scenario, row)
-        if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
-            raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
-        snapshot = paid_budget.snapshot(settings)
-        if row["contract_sha256"] != paid_budget.sha(snapshot):
+
+    def check_payload(admission):
+        if admission["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
-        if row["payload_sha256"] != paid_budget.sha(model_payload(
-            wire, messages, scenario, tools=tools, generation=generation)):
+        if admission["payload_sha256"] != paid_budget.sha(model_payload(
+            wire, messages, scenario, tools=tools, generation=generation,
+        )):
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-        _check_measurement(wire, row, messages, scenario, tools=tools, generation=generation,
+        _check_measurement(wire, admission, messages, scenario, tools=tools, generation=generation,
                            video_profile=profile, prepared=prepared)
-        if store.one(
-            "SELECT 1 FROM runtime_meta WHERE key IN "
-            "('model_budget_blocked','model_budget_restore_required')"
-        ):
-            raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
-        quota = cumulative.admission_metadata(store, row)
-        if quota:
-            now = clock()
-            cumulative.check(store, settings, now)
-            if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
-                raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
-        store.execute(
-            "UPDATE model_admissions SET io_started_at=? WHERE request_id=?", (now, request_id)
-        )
-        paid_budget.journal(
-            store,
-            approval,
-            {
-                "kind": "io_started",
-                "state": "RESERVED",
-                "request_id": request_id,
-                "minimum_micro_usd": row["reserved_micro_usd"],
-                "contract_sha256": row["contract_sha256"],
-                "io_started_at": now,
-                **({"quota": quota} if quota else {}),
-            },
-        )
+
+    with phase("dispatch_journal", trace_id), store.transaction():
+        row, now = _start_paid_attempt(store, settings, clock, approval, request_id, scenario,
+                                       now, check_payload)
     if dispatch is not None:
         dispatch.update(owned=True, io_started_at=now)
         from companion import model_carry
@@ -1008,40 +1028,13 @@ async def _dispatch(
             # Every user hook has completed. Custody and current runtime checks
             # remain here; the adapter only binds the actual HTTP request bytes.
             with phase("transport_custody", trace_id), store.transaction():
-                runtime_config.check_request(store, settings, request_id)
-                custody = paid_budget.journal(store, approval)
-                quota_state = cumulative.check(store, settings, clock(), custody=custody)
-                current_job = model_scope.check(store, settings, clock, request_id, scenario)
-                notices.check_request(store, settings, request_id, clock())
-                current = store.one(
-                    "SELECT a.*,m.state,m.scenario,m.job_id AS usage_job_id "
-                    "FROM model_admissions a JOIN model_usage m "
-                    "USING(request_id) WHERE request_id=?", (request_id,),
+                current, current_job, quota_state = _transport_custody(
+                    store, settings, clock, approval, request_id, scenario, row, now,
                 )
-                if (
-                    not current or current["state"] != "RESERVED"
-                    or current["lease_token"] != row["lease_token"]
-                    or current["io_started_at"] != now
-                    or current["payload_sha256"] != row["payload_sha256"]
-                    or current["contract_sha256"] != row["contract_sha256"]
-                    or current["measurement_json"] != row["measurement_json"]
-                    or model_scope.media_identity_changed(scenario, current, row)
-                ):
-                    raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
-                if store.one("SELECT 1 FROM runtime_meta WHERE key IN "
-                             "('model_budget_blocked','model_budget_restore_required')"):
-                    raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
             paid_budget.contract(settings, clock())
             model_scope.check_media(store, settings, clock, request_id, scenario, row)
             with phase("transport_payload", trace_id):
-                if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
-                    raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
-                if row["payload_sha256"] != paid_budget.sha(
-                    model_payload(wire, messages, scenario, tools=tools, generation=generation),
-                ):
-                    raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-                _check_measurement(wire, current, messages, scenario, tools=tools,
-                                   generation=generation, video_profile=profile, prepared=prepared)
+                check_payload(current)
             if source_check is not None:
                 # Caller-owned evidence may expire while an HTTP hook awaits.
                 # Keep this synchronous proof inside the existing transport fence.
@@ -1058,7 +1051,6 @@ async def _dispatch(
         admission = ModelAdmission(row["payload_sha256"], before_dispatch, trace_id=trace_id)
         if dispatch is not None:
             dispatch["admission"] = admission
-    if isinstance(model, ModelClient):
         try:
             if wire is not settings:
                 model = ModelClient(wire, model.client)

@@ -98,6 +98,12 @@ TOOL = {"type": "function", "function": {
 }}
 
 
+def approved_route(settings, scenario):
+    if scenario in SCENARIOS and settings.paid_model:
+        return settings.paid_model.video_input
+    return None
+
+
 def enabled(settings):
     return bool(settings.paid_model and settings.paid_model.video_input)
 

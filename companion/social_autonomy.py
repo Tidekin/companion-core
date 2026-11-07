@@ -551,10 +551,13 @@ class SocialAutonomy:
             raise CoreError("SOCIAL_RETRY_JOB_FENCED", 409)
         return event
 
-    def admit_model(self, request_id, logical_request_id, messages, *, job_id=None):
+    def admit_model(self, request_id, logical_request_id, messages, *, job_id=None,
+                    source_check=None):
         """Native reserve transaction owns retry claim, current sources and budget together."""
         from companion import social_plan_jobs
 
+        if job_id is not None and source_check is None:
+            raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
         _require_tx(self.store)
         row = self.store.one("SELECT * FROM social_autonomy_plans WHERE model_request_id=?",
                              (request_id,))

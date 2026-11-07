@@ -62,10 +62,7 @@ def check_sources(store, settings, clock, job_id, messages, inputs, source_check
     if inputs.native_image_chat:
         from companion import agent_images
 
-        if not job or job["kind"] != "chat":
-            raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
-        owner_authority.check_job(store, settings, clock, job, purpose="image", executing=True)
-        agent_images.check_payload(store, settings, clock, job, messages)
+        agent_images.check_chat_admission(store, settings, clock, job, messages)
 
 
 def admit(store, settings, clock, now, job_id, scenario, request_id, inputs, messages,
@@ -78,12 +75,10 @@ def admit(store, settings, clock, now, job_id, scenario, request_id, inputs, mes
 
         meme_input.check_attempt(store, job_id)
     if inputs.video_binding is not None:
-        from companion.bili_video import model_binding
+        from companion.bili_video import recheck_input_binding
 
-        if model_binding(store, settings, current_time, request_id, job_id=job_id,
-                         scenario=scenario, logical_request_id=inputs.logical_id
-                         ) != inputs.video_binding:
-            raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
+        recheck_input_binding(store, settings, current_time, request_id, job_id, scenario,
+                              inputs.logical_id, inputs.video_binding)
 
     if scenario == "gateway":
         from companion import gateway_admission
@@ -114,10 +109,8 @@ def admit_attempt(store, settings, clock, now, job_id, scenario, request_id, inp
     if scenario == "social_autonomy":
         from companion.social_autonomy import SocialAutonomy
 
-        if job_id is not None and source_check is None:
-            raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
         SocialAutonomy(store, settings, clock=clock).admit_model(
-            request_id, inputs.logical_id, messages, job_id=job_id,
+            request_id, inputs.logical_id, messages, job_id=job_id, source_check=source_check,
         )
     elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
         from companion import image_input
@@ -180,13 +173,6 @@ def check_media(store, settings, clock, request_id, scenario, row):
                              row["usage_job_id"], row["logical_request_id"])
 
 
-def media_identity_changed(scenario, current, saved):
-    return scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption"} and (
-        current["scenario"] != scenario or current["usage_job_id"] != saved["usage_job_id"]
-        or current["logical_request_id"] != saved["logical_request_id"]
-    )
-
-
 def check_adapter(store, settings, wire, model, scenario):
     from companion import live_text
     from companion.model import ModelClient, model_route
@@ -196,15 +182,10 @@ def check_adapter(store, settings, wire, model, scenario):
         if not isinstance(model, ModelClient):
             raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
         if live_text.active(store, settings):
-            _check_synthetic_transport(settings, model, httpx.URL(model_route(wire, scenario)[2]))
+            url = httpx.URL(model_route(wire, scenario)[2])
+            live_text.check_synthetic_transport(settings, model, url)
     if isinstance(model, ModelClient) and model.settings is not settings:
         raise CoreError("MODEL_ADMISSION_CONFIGURATION_MISMATCH", 503)
-
-
-def _check_synthetic_transport(settings, model, url):
-    if (settings.live_text_window.execution == "local_synthetic"
-        and not isinstance(model.client._transport_for_url(url), httpx.MockTransport)):
-        raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
 
 
 def transport_fence(store, settings, clock, request_id, scenario, model, url,
@@ -213,7 +194,7 @@ def transport_fence(store, settings, clock, request_id, scenario, model, url,
 
     if (scenario != "gateway" and live_text.active(store, settings)
         and not owner_authority.required(store, settings)):
-        _check_synthetic_transport(settings, model, url)
+        live_text.check_synthetic_transport(settings, model, url)
         live_text.dispatch_fence(
             settings, clock, current_job["lease_until"], admission["lease_until"],
             quota_state=quota_state, request_id=request_id,
@@ -225,12 +206,7 @@ def transport_fence(store, settings, clock, request_id, scenario, model, url,
         # The budget sync may race a STOP. Check the current grant before sampling time.
         current_job = check(store, settings, clock, request_id, scenario)
     dispatch_now = datetime.fromisoformat(clock())
-    if not paid_budget.active(paid, dispatch_now):
-        raise CoreError("PAID_APPROVAL_EXPIRED", 503)
-    if not paid_budget.rates_valid(paid, dispatch_now):
-        raise CoreError("PAID_RATES_EXPIRED", 503)
-    if dispatch_now >= lease_deadline:
-        raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+    paid_budget.check_dispatch_deadlines(paid, dispatch_now, lease_deadline)
     if current_job and dispatch_now >= datetime.fromisoformat(current_job["lease_until"]):
         raise CoreError("EVALUATION_JOB_FENCED" if scenario == "evaluation" else "JOB_LEASE_LOST",
                         409)
