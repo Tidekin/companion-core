@@ -12,18 +12,8 @@ from companion.memory_context import MemoryContext
 from companion.privacy import epoch
 from companion.store import after
 from tests.conftest import ingest
-from tests.test_m1 import remember
-
-
-def context(core):
-    core.settings.memory_enabled = True
-    return MemoryContext(core.memory)
-
-
-def episode(core, *numbers):
-    events = [core.store.one("SELECT * FROM events WHERE event_id=?", (f"evt_test_{n}",))
-              for n in numbers]
-    return core.memory.episodes(events, core.clock())
+from tests.support.confirmed_memory import remember
+from tests.support.next_memory_context import context, episode
 
 
 @pytest.mark.parametrize("invalid", ["negative", "event_scope", "conversation_scope",

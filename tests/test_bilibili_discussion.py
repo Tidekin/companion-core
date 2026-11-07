@@ -23,8 +23,8 @@ from source_reader.network import PublicHTTP, ReadFailure, permitted_url
 from source_reader.worker import read_result, tick
 from tests.conftest import ingest, run
 from tests.support.exploration import configure
+from tests.support.heybox_reader import mock_pool
 from tests.support.source_reader import ITEM, META, NOW, PLAYER, SUBTITLE, response
-from tests.test_heybox_reader import mock_pool
 
 METADATA = {"code": 0, "data": {**META["data"], "aid": 77, "cid": 1234, "duration": 12}}
 COMMENTS = {"code": 0, "data": {"page": {"count": 500}, "replies": [{

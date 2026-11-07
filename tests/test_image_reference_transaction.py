@@ -7,7 +7,7 @@ from companion import retrieval_work
 from companion.contracts import CoreError
 from companion.store import encode
 from tests.conftest import ingest
-from tests.test_memory_references import TEXT, prepared
+from tests.support.memory_references import TEXT, prepared
 
 
 def test_image_memory_proof_revalidates_inside_checkpoint_transaction(core):

@@ -8,9 +8,9 @@ from companion import delivery_reconciliation as reconciliation
 from companion import paid_budget
 from companion.contracts import CoreError
 from companion.store import after
+from tests.support.confirmed_memory import remember
 from tests.support.delivery_reconciliation import decide, native, prepare
 from tests.support.owner_delivery_reconciliation import pending
-from tests.test_m1 import remember
 
 
 def unrelated_memory(core):

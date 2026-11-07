@@ -290,8 +290,8 @@ def test_native_bili_tool_requires_content_even_when_given_as_exposed(core, tmp_
 
 
 def test_retired_fact_window_does_not_claim_native_memory_admission(core, tmp_path):
+    from tests.support.live_memory_recall import scope_facts
     from tests.support.onebot_capture import pinned_plan
-    from tests.test_live_memory_recall import scope_facts
 
     _, _, pins = scope_facts(core)
     pinned_plan(core, tmp_path, 3001, live=True, approved=True, scope_options={

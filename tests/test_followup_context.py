@@ -15,11 +15,11 @@ from companion.transport import enqueue
 from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.life_worker_integration import process_worker
 from tests.support.owner_authority import activate
 from tests.support.paid_model import approved_live
 from tests.support.reading_followup import admit
-from tests.test_life_worker_integration import process_worker
-from tests.test_turn_taking import enable, history_messages
+from tests.support.turn_taking import enable, history_messages
 
 
 @pytest.mark.parametrize("change", ["none", "erase_during", "erase_before_delivery",

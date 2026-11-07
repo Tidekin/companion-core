@@ -241,9 +241,7 @@ def test_source_opaque_read_command_is_explicitly_conservative(core):
 def test_owner_interrupts_dispatched_activity_without_poisoning_observed_usage(
     core, tmp_path, monkeypatch,
 ):
-    from tests.test_life_worker_integration import (
-        test_real_http_source_to_independent_worker_shadow as produce,
-    )
+    from tests.support.life_worker_integration import check_independent_life_worker as produce
 
     produce(core, tmp_path, monkeypatch, "preempt")
     result = core.store.one("SELECT * FROM life_activity_results")

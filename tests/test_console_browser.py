@@ -11,11 +11,11 @@ import pytest
 from companion import delegation, operator_config, runtime_config
 from tests.conftest import run
 from tests.console_proxy import ROOT
+from tests.support.cognition_goal_steps import finish_record, retained_plan
 from tests.support.console_browser import console_page, navigate, submit_dialog
-from tests.test_cognition_goal_steps import finish_record, retained_plan
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
-from tests.test_goals import setup_goal
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY
+from tests.support.goals import setup_goal
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("COMPANION_TEST_BROWSER") != "1", reason="Explicit isolated browser run"

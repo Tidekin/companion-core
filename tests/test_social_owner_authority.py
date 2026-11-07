@@ -13,6 +13,7 @@ from companion.life_protocol import LifeShadowApproval
 from companion.owner_authority_protocol import OwnerRuntimeConfig
 from companion.store import after, uid
 from tests.conftest import ingest, run
+from tests.support.life_topics import bug, due, proposal
 from tests.support.owner_authority import activate
 from tests.support.social_autonomy import background, planned, queue
 from tests.support.social_owner_authority import (
@@ -22,7 +23,6 @@ from tests.support.social_owner_authority import (
 from tests.support.social_owner_authority import (
     close_provider_clients as close_provider_clients,
 )
-from tests.test_life_topics import bug, due, proposal
 
 
 def life_authorized(core, tmp_path):

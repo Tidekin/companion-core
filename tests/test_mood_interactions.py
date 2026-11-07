@@ -9,7 +9,7 @@ from companion.memory import Memory
 from companion.mood import MoodService
 from companion.store import Store, encode
 from tests.conftest import ingest
-from tests.test_mood import erase, feedback
+from tests.support.mood import erase, feedback
 
 
 @pytest.mark.parametrize("text,reason,delta", [

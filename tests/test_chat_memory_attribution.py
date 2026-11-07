@@ -5,7 +5,7 @@ import json
 from companion.contracts import Candidate
 from companion.model import MEMORY_HEADING, RELATIONSHIP_HEADING
 from tests.conftest import run
-from tests.test_dialogue_context import current_job, sent_history
+from tests.support.dialogue_context import current_job, sent_history
 
 
 def test_chat_memory_preserves_episode_kind_and_confirmed_fact(core):

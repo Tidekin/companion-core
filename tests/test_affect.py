@@ -7,7 +7,7 @@ from companion.affect import NEUTRAL
 from companion.backup import backup, restore
 from companion.core import Core
 from tests.conftest import ingest, run
-from tests.test_observations import enable_observations, observation
+from tests.support.observation_capture import enable_observations, observation
 
 
 def test_affect_off_neutral_and_no_hidden_model_calls(core):

@@ -12,7 +12,7 @@ from companion.cognition_read import CognitionRead
 from companion.contracts import CoreError
 from companion.privacy import advance_epoch
 from companion.store import after, encode
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
 
 
 def retained_record(core, number=1):

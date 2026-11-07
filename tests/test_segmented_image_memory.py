@@ -13,13 +13,7 @@ from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
 from tests.support.native_image_memory import PREFERENCE, native_image_memory
 from tests.support.onebot import provider
-
-PARTS = [
-    "图1是红色耳机，我会结合你已确认的轻便需求考虑。",
-    "图2是蓝色耳机，图片本身无法证明哪款隔音更好。",
-    "如果你补充重量和隔音参数，我可以继续帮你比较。",
-]
-REPLY = "".join(PARTS)
+from tests.support.segmented_image_memory import PARTS, REPLY
 
 
 @pytest.mark.parametrize("no_candidates", [False, True])

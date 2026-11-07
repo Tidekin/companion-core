@@ -7,12 +7,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from companion import topic_selection as ts
-from companion.store import after
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import ReadFailure
 from source_reader.protocol import decode_lease
 from tests.support.exploration import configure
-from tests.test_watch_ledger import observe
+from tests.support.topic_selection import judged
 
 
 class Rng:
@@ -21,17 +20,6 @@ class Rng:
 
     def random(self):
         return self.values.pop(0)
-
-
-def judged(core, number, tags, rating, *, days_ago=0, url=None):
-    event_id = observe(core, number, url=url)
-    at = after(core.clock(), -days_ago * 86400)
-    core.store.execute(
-        "INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_ref,depth,state,rating,"
-        "take,topic_tags_json,created_at,updated_at) VALUES(?,?,'bilibili',?,'text','JUDGED',"
-        "?,'看过',?,?,?)", (f"watch_{number}", event_id, url or event_id, rating,
-                           json.dumps(tags, ensure_ascii=False), at, at))
-    return event_id
 
 
 def test_clean_keeps_short_plain_terms_only():

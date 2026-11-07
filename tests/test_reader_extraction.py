@@ -209,7 +209,7 @@ def test_compose_diagnostic_distinguishes_missing_output_from_received_empty_byt
 @pytest.mark.parametrize("outcome", ["success", "erased", "report_lost", "discover"])
 def test_exported_reader_cli_real_http_and_restart(core, tmp_path, source, outcome):
     from tests.support.exploration import URL as BILI_URL
-    from tests.test_heybox_reader import URL as HEYBOX_URL
+    from tests.support.heybox_reader import URL as HEYBOX_URL
 
     configure(core)
     core.settings.content_enabled = True
@@ -272,8 +272,8 @@ if __name__ == "__main__" and sys.argv[1:] == ["--reader"]:
     import source_reader.bilibili as bili
     import source_reader.heybox as heybox
     import source_reader.network as network
+    from tests.support.heybox_reader import mock_pool
     from tests.support.source_reader import META, response
-    from tests.test_heybox_reader import mock_pool
 
     packet = json.loads(sys.stdin.buffer.read())
     raw = response(META) if packet["source"] == "bilibili" else response(

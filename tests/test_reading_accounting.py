@@ -14,9 +14,9 @@ from companion.reading_protocol import ReadObservation
 from source_reader import worker_v1
 from source_reader.web import WebHTTP
 from tests.conftest import FakeModel, run
+from tests.support.heybox_reader import mock_pool
 from tests.support.reading_service import TOKEN, configure
 from tests.support.reply_revision import accept
-from tests.test_heybox_reader import mock_pool
 
 
 def limited(core):

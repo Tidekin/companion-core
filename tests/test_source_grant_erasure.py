@@ -9,8 +9,8 @@ from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
 from companion.store import Store
 from tests.conftest import event
+from tests.support.observation_capture import observation
 from tests.support.source_grants import accepted, derived_records, prepare
-from tests.test_observations import observation
 
 
 def corrected_source_memory(core):

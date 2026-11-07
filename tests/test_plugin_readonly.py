@@ -27,9 +27,9 @@ from source_reader.network import PublicHTTP, ReadBudget, ReadFailure, permitted
 from source_reader.worker import read_result, tick
 from tests.conftest import ingest, run
 from tests.support.exploration import configure
+from tests.support.heybox_reader import IMAGE, ITEM, POST, URL, mock_pool
 from tests.support.source_reader import ITEM as BILI_ITEM
 from tests.support.source_reader import META, NOW, PLAYER, SUBTITLE, response
-from tests.test_heybox_reader import IMAGE, ITEM, POST, URL, mock_pool
 
 NOW_DT = datetime.fromisoformat(NOW)
 SECRET = "fixture-only-isolated-account-cookie"

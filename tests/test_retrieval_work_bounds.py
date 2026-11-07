@@ -10,13 +10,9 @@ from companion import memory_index_work, memory_references, retrieval, retrieval
 from companion.contracts import CoreError
 from companion.memory_context import MemorySources
 from tests.conftest import ingest, run
-from tests.test_m1 import remember
-from tests.test_retrieval_query_reuse import Encoder
-
-
-def assert_bounded(receipt):
-    assert all(0 <= value <= receipt["limits"][name]
-               for name, value in receipt["counts"].items())
+from tests.support.confirmed_memory import remember
+from tests.support.retrieval_query_reuse import Encoder
+from tests.support.retrieval_work_bounds import assert_bounded
 
 
 def test_old_exact_sources_and_work_survive_tenfold_growth(core, monkeypatch, record_property):
@@ -191,7 +187,7 @@ def test_transcript_nomination_is_indexed_bounded_and_preserves_excerpt(core, mo
 
 
 def test_history_and_episode_limits_are_partial_without_snapshot_write_retry(core, monkeypatch):
-    from tests.test_next_memory_context import episode
+    from tests.support.next_memory_context import episode
 
     target = remember(core, 1, "相机放在湖蓝色硬壳箱。", confirmed=True)
     episode(core, 1)

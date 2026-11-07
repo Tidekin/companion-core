@@ -22,9 +22,9 @@ from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
 from companion.store import encode
 from tests.conftest import event, ingest, run
+from tests.support.dialogue_context import current_job, sent_history
 from tests.support.live_text_handoff import KEY, configure, reference
 from tests.support.native_segments import session
-from tests.test_dialogue_context import current_job, sent_history
 
 
 @asynccontextmanager

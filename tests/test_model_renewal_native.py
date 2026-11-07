@@ -10,9 +10,9 @@ from companion import model_carry
 from companion.store import encode
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.life_worker_integration import process_worker
 from tests.support.model_carry_native import child, finished
 from tests.support.model_renewal_native import life_case, source_and_renewal
-from tests.test_life_worker_integration import process_worker
 
 
 def test_renewed_life_uses_native_cli_http_and_worker_without_replaying_unknown(

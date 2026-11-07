@@ -6,8 +6,8 @@ from pydantic import SecretStr
 
 from companion import api
 from companion.core import Core
-from tests.test_m1 import remember
-from tests.test_next_memory_context import episode
+from tests.support.confirmed_memory import remember
+from tests.support.next_memory_context import episode
 
 PATH = "/internal/v2/memory/projection"
 

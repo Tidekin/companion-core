@@ -4,7 +4,7 @@ from companion import memory_references as refs
 from companion import turn_recall
 from companion.dialogue_history import turn_messages
 from companion.privacy import memory_sensitive, sensitive
-from tests.test_memory_references import TEXT, prepared
+from tests.support.memory_references import TEXT, prepared
 
 
 def test_history_replays_read_media_and_erasure_removes_it(core):

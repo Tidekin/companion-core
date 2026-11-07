@@ -7,11 +7,11 @@ from companion.memory_authority import source_allowed
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import after, encode
 from tests.conftest import run
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY
 from tests.support.owner_authority import activate
 from tests.support.owner_authority_setup import prepare
 from tests.support.owner_input import captured, inbound
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
 
 
 def grant(core, tmp_path, purposes):
@@ -105,7 +105,7 @@ def test_legacy_memory_read_uses_original_archive_without_rebinding(core, tmp_pa
 
 
 def test_raw_read_rejection_does_not_discard_retained_memory_fact(core, tmp_path):
-    from tests.test_m1 import remember
+    from tests.support.confirmed_memory import remember
 
     mid = remember(core, 1, "松林项目的封面选用绿色", confirmed=True)
     core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE state='QUEUED'")

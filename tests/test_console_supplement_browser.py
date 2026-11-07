@@ -11,17 +11,17 @@ from companion.console_cognition import tool_scope
 from companion.executive_protocol import ExecutorEndpoint, ToolArguments, ToolRequest
 from companion.source_grants import grant_tombstone
 from tests.conftest import run
+from tests.support.confirmed_memory import remember
 from tests.support.console_browser import console_page, navigate, submit_dialog
 from tests.support.executive import FakeExecutor
 from tests.support.executive import configured as configure_executive
 from tests.support.executive import proposal as tool_proposal
+from tests.support.growth_foundations import complete_read, view
+from tests.support.life_topics import bug, due
+from tests.support.life_topics import proposal as life_proposal
+from tests.support.next_life_growth import feedback_days, snapshot
 from tests.support.source_grants import accepted, derived_records
 from tests.support.source_grants import prepare as prepare_grant
-from tests.test_growth_foundations import complete_read, view
-from tests.test_life_topics import bug, due
-from tests.test_life_topics import proposal as life_proposal
-from tests.test_m1 import remember
-from tests.test_next_life_growth import feedback_days, snapshot
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("COMPANION_TEST_BROWSER") != "1", reason="Explicit isolated browser run"
@@ -65,7 +65,7 @@ def test_memory_candidates_show_in_pending_and_badges_refresh_after_confirmation
 def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
     from pathlib import Path
 
-    from tests.test_mood import feedback
+    from tests.support.mood import feedback
 
     core.clock.now = datetime.now(UTC)
     feedback(core)

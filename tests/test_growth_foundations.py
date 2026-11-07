@@ -15,16 +15,13 @@ from companion.store import encode
 from companion.timeline import recent_timeline
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.support.confirmed_memory import remember
+from tests.support.diary import DAY, generate, seed_day
 from tests.support.exploration import configure, discover
+from tests.support.goals import setup_goal
+from tests.support.growth_foundations import complete_read, view
+from tests.support.observation_capture import enable_observations, observation
 from tests.support.source_grants import accepted, prepare
-from tests.test_diary import DAY, generate, seed_day
-from tests.test_goals import result_for, setup_goal
-from tests.test_m1 import remember
-from tests.test_observations import enable_observations, observation
-
-
-def view(core):
-    return profile(core.store, core.settings, core.clock(), core.settings.owner_qq_id)
 
 
 def timeline(core, **kwargs):
@@ -36,14 +33,6 @@ def timeline(core, **kwargs):
         topic="天文",
         **kwargs,
     )
-
-
-def complete_read(core, number, url):
-    goal = setup_goal(core, number, topic="天文研究", url=url)
-    core.goals.accept(goal)
-    step = core.goals.claim()
-    core.goals.finish(step, result_for(core, goal, number))
-    return goal
 
 
 def test_feedback_shadow_is_readonly_and_disabled_never_changes_expression(core):

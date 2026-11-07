@@ -8,8 +8,8 @@ from companion.commands import command_parts
 from companion.diary import DIARY_COMMANDS
 from companion.life import COMMANDS
 from tests.conftest import ingest, run
-from tests.test_m1 import remember
-from tests.test_memory_workflows import reply
+from tests.support.confirmed_memory import remember
+from tests.support.memory_workflows import reply
 
 BARE_COMMANDS = (
     "记住这个：我喜欢绿茶",

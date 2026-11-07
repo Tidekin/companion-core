@@ -13,10 +13,10 @@ from companion.core import Core
 from companion.privacy import advance_epoch
 from companion.store import encode, uid
 from tests.conftest import run
+from tests.support.dialogue_context import sent_history
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.live_continuity import history_snapshot, native_continuity
 from tests.support.live_text_window import live_fixture
-from tests.test_dialogue_context import sent_history
 
 
 @pytest.mark.parametrize("microsecond", [995999, 999792])

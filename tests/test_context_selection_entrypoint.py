@@ -12,10 +12,10 @@ from companion.contracts import Candidate
 from companion.goals import GoalProposal, GoalScope
 from companion.store import encode
 from tests.conftest import run
+from tests.support.goals import result_for
 from tests.support.native_consumer_entry import environment
-from tests.test_goals import result_for
-from tests.test_observations import enable_observations
-from tests.test_subjective_cognition import ASTRONOMY, judge
+from tests.support.observation_capture import enable_observations
+from tests.support.subjective_cognition import ASTRONOMY, judge
 
 
 @pytest.mark.parametrize("hot_reload", [False, True])

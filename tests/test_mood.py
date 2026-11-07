@@ -14,37 +14,17 @@ from companion.mood import RESET_KEY, MoodService, reset_record, validate_reset_
 from companion.store import Store, encode
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.support.cognition_goal_steps import finish_record, retained_plan
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import generate
+from tests.support.mood import erase, feedback
 from tests.support.owner_authority import activate
 from tests.support.owner_authority_setup import prepare
-from tests.test_cognition_goal_steps import finish_record, retained_plan
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import generate
-from tests.test_watch_ledger import JUDGEMENT, Provider, enable, observe, step
-
-
-def feedback(core, number=1, text="这个回答很有帮助"):
-    core.settings.mood_enabled = True
-    ingest(core, number * 2, "一起看看这个问题")
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (f"evt_test_{number * 2}",))
-    mid = enqueue(
-        core.store, event["event_id"], event["conversation_id"], "有依据的回答", core.clock()
-    )
-    core.store.execute(
-        "UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?", (core.clock(), mid)
-    )
-    core.clock.advance(1)
-    ingest(core, number * 2 + 1, text)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    return f"evt_test_{number * 2 + 1}"
+from tests.support.watch_ledger import JUDGEMENT, Provider, enable, observe, step
 
 
 def pleasure(core, layer="expression"):
     return core.mood.snapshot()[layer]["pleasure"]
-
-
-def erase(core, ids):
-    with core.store.transaction():
-        core.ledger.expire_events(core.store, ids, core.clock())
 
 
 def test_continuity_inertia_conflicting_events_and_hourly_decay(core):
@@ -341,7 +321,7 @@ def test_serious_context_uses_existing_expression_guard(core):
 def test_life_job_revalidates_frozen_mood_during_model_and_readback(core):
     import json
 
-    from tests.test_life_topics import configure, due, proposal
+    from tests.support.life_topics import configure, due, proposal
 
     configure(core)
     feedback_id = feedback(core, 2)

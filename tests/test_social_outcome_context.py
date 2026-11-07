@@ -10,8 +10,8 @@ from companion.social_autonomy import SocialAutonomy, _sha
 from companion.store import encode
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.life_expression_consumption import prepared, request
 from tests.support.social_owner_authority import close_provider_clients as close_provider_clients
-from tests.test_life_expression_consumption import prepared, request
 
 
 def recorded(core, tmp_path, outcome):

@@ -16,6 +16,7 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import ReadFailure
 from source_reader.web import WebHTTP
 from tests.conftest import run
+from tests.support.heybox_reader import mock_pool
 from tests.support.source_reader import (
     ITEM,
     META,
@@ -25,7 +26,6 @@ from tests.support.source_reader import (
     Responses,
     response,
 )
-from tests.test_heybox_reader import mock_pool
 from tests.test_next_reading import HTML, WEB, web_response
 from tests.test_plugin_readonly import SECRET, grant
 

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from companion.api import create_app
 from tests.conftest import run
-from tests.test_memory_control import real_http
+from tests.support.memory_control import real_http
 
 
 @pytest.mark.parametrize("partial", [False, True])

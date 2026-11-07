@@ -1,7 +1,7 @@
 """Chat context carries the local time and when each past turn happened."""
 
 from companion import time_context
-from tests.test_dialogue_context import current_job, sent_history
+from tests.support.dialogue_context import current_job, sent_history
 
 
 def test_history_turns_are_dated_and_the_current_time_precedes_the_new_input(core):

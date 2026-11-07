@@ -5,36 +5,19 @@ import json
 import os
 import subprocess
 import sys
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
-import httpx
 import pytest
 
-from companion import life_worker
-from companion.config import Settings
-from companion.core import Core
 from companion.memory_work import checkpoint_state
 from companion.store import encode
 from tests.conftest import ingest, run
 from tests.sdk_reader_fixture import worker_for
+from tests.support.mood import erase
+from tests.support.mood_appraisals_integration import prepare_extraction
 from tests.support.native_consumer_entry import environment
-from tests.test_mood import erase
-from tests.test_next_memory_worker import provider_response
-
-
-def prepare_extraction(core, *, quote="想你了", mood_enabled=True):
-    core.settings.memory_enabled = True
-    core.settings.mood_enabled = mood_enabled
-    core.settings.extraction_min_events = 1
-    core.settings.extraction_idle_seconds = 0
-    key = ingest(core, 1, "想你了，什么时候再聊")["event_id"]
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    core.model.extraction = encode({"memories": [], "interaction_signals": [{
-        "event_id": key, "reason": "OWNER_AFFECTION", "quote": quote,
-    }]})
-    return key
+from tests.support.next_memory_worker import provider_response
 
 
 @pytest.mark.parametrize("mood_enabled", [True, False])
@@ -71,39 +54,6 @@ def test_erasure_between_extract_and_commit_cannot_restore_appraisal(core):
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
 
 
-def run_isolated_worker(settings_path, now):
-    """Actual life-worker entry point; only the external model HTTP transport is mocked."""
-    settings = Settings.model_validate_json(Path(settings_path).read_text("utf-8"))
-    calls = []
-    original_client = httpx.AsyncClient
-
-    def provider(request):
-        assert request.url.host == "synthetic.invalid"
-        payload = json.loads(request.content)
-        sources = json.loads(payload["messages"][-1]["content"])
-        # The extractor sees short refs (e0, ...); Core maps them back to event IDs.
-        key = next(row["ref"] for row in sources["events"] if row["text"].startswith("想你了"))
-        calls.append("memory_extract")
-        return provider_response(encode({"memories": [], "interaction_signals": [{
-            "event_id": key, "reason": "OWNER_AFFECTION", "quote": "想你了",
-        }]}))
-
-    def client(**kwargs):
-        return original_client(**kwargs, transport=httpx.MockTransport(provider))
-
-    async def stop(*_args):
-        raise asyncio.CancelledError
-
-    life_worker.Core = partial(Core, clock=lambda: now)
-    life_worker.httpx = SimpleNamespace(AsyncClient=client)
-    life_worker.Wakeup.wait = stop
-    try:
-        asyncio.run(life_worker.life_worker(settings))
-    except asyncio.CancelledError:
-        pass
-    print(encode({"calls": calls, "pid": os.getpid()}))
-
-
 def test_http_acceptance_independent_worker_and_restart(core, tmp_path):
     workspace = Path(__file__).resolve().parents[1]
     async def scenario():
@@ -125,7 +75,7 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path):
             settings_path = tmp_path / "worker-settings.json"
             settings_path.write_text(encode(settings), encoding="utf-8")
             script = (
-                "import sys; from tests.test_mood_appraisals_integration import "
+                "import sys; from tests.support.mood_appraisals_integration import "
                 "run_isolated_worker; run_isolated_worker(sys.argv[1],sys.argv[2])")
             for attempt in range(3):
                 completed = await asyncio.to_thread(subprocess.run,
@@ -225,7 +175,7 @@ def test_memory_extract_cap_never_exceeds_the_paid_approval(core):
 
 
 def test_valid_appraisal_survives_exhausted_unrelated_fact_reviews(core):
-    from tests.test_memory_write_consistency import candidate
+    from tests.support.memory_write_consistency import candidate
 
     key = prepare_extraction(core)
     text = "讲座地点是海盐厅"

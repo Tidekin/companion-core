@@ -7,7 +7,7 @@ from companion.memory_recovery import failures, retry
 from companion.memory_work import checkpoint_state
 from companion.store import encode
 from tests.conftest import run
-from tests.test_memory_write_consistency import (
+from tests.support.memory_write_consistency import (
     CORRECTION,
     candidate,
     extraction,

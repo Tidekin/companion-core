@@ -11,19 +11,10 @@ from companion.autonomous_selector import Lane, RoundRobin, native_selector
 from companion.contracts import CoreError
 from companion.worker_schedule import UnitResult
 from tests.conftest import ingest, run
+from tests.support.autonomous_selector import drain
+from tests.support.diary import seed_day
+from tests.support.life_topics import bug, proposal
 from tests.support.social_autonomy import background
-from tests.test_diary import seed_day
-from tests.test_life_topics import bug, proposal
-
-
-async def drain(selector, limit=100):
-    turns = []
-    for _ in range(limit):
-        selected = await selector.step()
-        turns.append(selected)
-        if not selected.more:
-            return turns
-    pytest.fail("native selector did not finish its bounded idle sweep")
 
 
 def test_fenced_units_consume_turns_and_idle_sweep_is_finite():

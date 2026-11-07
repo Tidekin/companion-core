@@ -16,7 +16,7 @@ from companion.model import ModelClient
 from companion.store import Store
 from tests.owner_model_fixtures import authorized_job
 from tests.support.paid_model import approved_live
-from tests.test_watch_ledger import ready
+from tests.support.watch_ledger import ready
 
 MESSAGES = [{"role": "user", "content": "synthetic capacity check"}]
 
@@ -25,7 +25,9 @@ MESSAGES = [{"role": "user", "content": "synthetic capacity check"}]
 @pytest.mark.parametrize("boundary", ["admission", "before_io"])
 def test_background_capacity_waits_do_not_spend_domain_retries(core, tmp_path, monkeypatch, lane,
                                                               boundary):
-    from tests import test_jargon, test_style_distill, test_watch_ledger
+    from tests.support import jargon as test_jargon
+    from tests.support import style_distill as test_style_distill
+    from tests.support import watch_ledger as test_watch_ledger
 
     if lane == "jargon":
         for index, text in enumerate(["今天好累", "摸鱼王上线了", "开会", "下班了"], 1):

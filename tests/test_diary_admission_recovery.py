@@ -15,7 +15,7 @@ from companion.model import ModelClient, ModelResponse
 from companion.owner_authority_protocol import AuthorityStop
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
-from tests.test_diary import DiaryModel
+from tests.support.diary import DiaryModel
 
 
 @asynccontextmanager

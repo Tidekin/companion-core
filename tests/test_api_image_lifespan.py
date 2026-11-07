@@ -31,13 +31,13 @@ from tests.native_continuous_support import until
 from tests.support import onebot_window as window_fixtures
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.live_image_input import options, png
+from tests.support.memory_control import grant
 from tests.support.onebot_capture import pinned_plan
 from tests.support.onebot_events import config as bridge_config
 from tests.support.onebot_events import raw_event
 from tests.support.onebot_images import image_segment
 from tests.support.owner_authority import activate
 from tests.support.paid_model import approved_live
-from tests.test_memory_control import grant
 
 
 def image_settings(core, tmp_path, monkeypatch):

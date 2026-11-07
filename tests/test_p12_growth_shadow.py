@@ -13,10 +13,10 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
 from tests.conftest import ingest, run
-from tests.test_consolidation import enable_nightly
-from tests.test_goals import setup_goal
-from tests.test_growth_foundations import complete_read, view
-from tests.test_observations import enable_observations, observation
+from tests.support.consolidation import enable_nightly
+from tests.support.goals import setup_goal
+from tests.support.growth_foundations import complete_read, view
+from tests.support.observation_capture import enable_observations, observation
 
 
 @pytest.mark.parametrize(

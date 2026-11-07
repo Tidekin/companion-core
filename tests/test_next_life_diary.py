@@ -10,19 +10,8 @@ from companion.contracts import CoreError
 from companion.core import Core
 from companion.diary import DiaryDraft, render_draft
 from tests.conftest import run
-from tests.test_diary import DAY, DiaryModel, generate, seed_day
-
-
-def seed(core, count=4):
-    model = seed_day(core, [f"今天讨论了读书计划的第 {i} 步。" for i in range(count)])
-    assert generate(core)["state"] == "COMMITTED"
-    return model
-
-
-def withdraw(core, event_id="evt_test_1"):
-    with core.store.transaction():
-        core.ledger.expire_events(core.store, [event_id], core.clock())
-    assert core.diary.get_day(DAY, core.settings.owner_qq_id) is None
+from tests.support.diary import DAY, DiaryModel
+from tests.support.next_life_diary import seed, withdraw
 
 
 def recompute(core):

@@ -3,8 +3,8 @@
 import pytest
 
 from companion.store import after, encode
-from tests.test_m1 import remember
-from tests.test_retrieval_work_bounds import assert_bounded
+from tests.support.confirmed_memory import remember
+from tests.support.retrieval_work_bounds import assert_bounded
 
 
 @pytest.mark.parametrize("scale", [120, 1200])
