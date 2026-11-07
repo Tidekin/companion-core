@@ -1,4 +1,4 @@
-"""Authenticated evidence for an expired, pre-dispatch owner reply."""
+"""Authenticated evidence for an expired, pre-dispatch owner text delivery."""
 
 from companion_delivery_protocol import canonical
 
@@ -7,8 +7,10 @@ KIND = "owner_reply_preflight_expired_v1"
 
 
 def eligible(item):
-    return (item.get("action_type") == "qq.private.reply" and "authority" in item
-            and "reply_revision" in item and "voice" not in item
+    return ("authority" in item
+            and (item.get("action_type") == "qq.private.proactive"
+                 or item.get("action_type") == "qq.private.reply" and "reply_revision" in item)
+            and "voice" not in item
             and not ({"image", "generated_image"} & item["content"].keys()))
 
 
