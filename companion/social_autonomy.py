@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from companion import budget, owner_authority, social_profile_sources
+from companion import budget, owner_authority, social_profile_sources, transport
 from companion.contracts import CoreError
 from companion.observation import ArticleEvidence, ReadingEvidence, expired_sources
 from companion.privacy import redact
@@ -1029,12 +1029,9 @@ class SocialAutonomy:
                          frozen.authorization_sha256)
             authority = view.authority.as_dict()
         content = frozen.model_dump(mode="json")
-        s.insert("outbox", message_id=frozen.message_id,
-                 origin_event_id=sources[0]["ref"] if sources else None,
-                 conversation_id=conversation_id, action_type=frozen.action_type,
-                 content_json=encode(content), content_sha256=_sha(content), state="PENDING",
-                 delivery_key=frozen.delivery_key, delivery_lane="qq_account",
-                 created_at=now, updated_at=now, authority_json=encode(authority))
+        transport.queue_delivery(s, frozen.message_id, sources[0]["ref"] if sources else None,
+                                 conversation_id, frozen.action_type, content, frozen.delivery_key,
+                                 now, lane="qq_account", authority=authority)
         s.insert("social_autonomy_reservations", plan_id=plan_id, message_id=frozen.message_id,
                  action_type=frozen.action_type, semantic_sha256=semantic,
                  reserved_day=_day(now, row["timezone"]), reserved_at=now)
@@ -1152,13 +1149,9 @@ def erase_social_autonomy(store, event_ids):
             "WHERE attempt_count=0 AND state IN ('PENDING','LEASED','RETRY_WAIT'))",
             (utcnow(), plan_id),
         )
-        store.execute(
-            "UPDATE outbox SET content_json='{}',content_sha256='',state=CASE "
-            "WHEN state='SENDING' THEN 'DELIVERY_UNCERTAIN' "
-            "WHEN state IN ('PENDING','LEASED','RETRY_WAIT') THEN 'CANCELLED' ELSE state END,"
-            "last_error_code='SOCIAL_SOURCE_ERASED' WHERE message_id IN "
-            "(SELECT message_id FROM social_autonomy_reservations WHERE plan_id=?)", (plan_id,),
-        )
+        transport.revoke_deliveries(store, "message_id IN (SELECT message_id FROM "
+                                    "social_autonomy_reservations WHERE plan_id=?)",
+                                    (plan_id,), erase_content=True, reason="SOCIAL_SOURCE_ERASED")
         store.execute("DELETE FROM social_autonomy_sources WHERE plan_id=?", (plan_id,))
 
 
@@ -1183,9 +1176,8 @@ def restore_social_autonomy(store, now):
         "(SELECT 1 FROM social_autonomy_reservations r JOIN outbox o USING(message_id) "
         "WHERE r.plan_id=social_autonomy_plans.plan_id AND o.state IN ('SENT','FAILED'))", (now,),
     )
-    store.execute(
-        "UPDATE outbox SET state=CASE WHEN state='SENDING' THEN 'DELIVERY_UNCERTAIN' "
-        "ELSE 'CANCELLED' END,last_error_code='SOCIAL_RESTORE_RECONCILIATION_REQUIRED',"
-        "updated_at=? WHERE message_id IN (SELECT message_id FROM social_autonomy_reservations) "
-        "AND state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')", (now,),
+    transport.revoke_deliveries(
+        store, "message_id IN (SELECT message_id FROM social_autonomy_reservations) "
+        "AND state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')",
+        reason="SOCIAL_RESTORE_RECONCILIATION_REQUIRED", now=now,
     )

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
+from companion import transport
 from companion.contracts import CoreError
 from companion.executive import restore_executive
 from companion.privacy import ErasureLedger, advance_epoch
@@ -69,11 +70,7 @@ def restore(source, destination, key, ledger_path):
                 from companion.gateway import restore as restore_gateway
 
                 restore_gateway(store)
-                store.execute(
-                    "UPDATE outbox SET state='DELIVERY_UNCERTAIN',lease_token=NULL,"
-                    "last_error_code='RESTORED_DELIVERY_REQUIRES_RECONCILIATION' "
-                    "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
-                )
+                transport.restore_deliveries(store)
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
                 store.execute(
                     "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
