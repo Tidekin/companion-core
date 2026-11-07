@@ -6,12 +6,12 @@ import pytest
 
 from companion import budget, jargon, style_distill, watch_ledger
 from tests.conftest import run
-from tests.test_jargon import ready as jargon_ready
-from tests.test_jargon import say
-from tests.test_style_distill import comment, thread
-from tests.test_style_distill import ready as style_ready
-from tests.test_watch_ledger import JUDGEMENT, observe
-from tests.test_watch_ledger import ready as watch_ready
+from tests.support.jargon import ready as jargon_ready
+from tests.support.jargon import say
+from tests.support.style_distill import comment, thread
+from tests.support.style_distill import ready as style_ready
+from tests.support.watch_ledger import JUDGEMENT, observe
+from tests.support.watch_ledger import ready as watch_ready
 
 
 @pytest.mark.parametrize(("module", "table"), [

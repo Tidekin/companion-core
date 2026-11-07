@@ -19,11 +19,11 @@ from companion.runtime import Runtime
 from companion.store import Store
 from companion.transport import begin_send, delivery_result, lease_deliveries, reconcile_delivery
 from tests.conftest import ingest, run
-from tests.test_goals import setup_goal
-from tests.test_m1 import remember
-from tests.test_memory_projections import fetched
-from tests.test_next_memory_context import episode
-from tests.test_observations import enable_observations, observation
+from tests.support.confirmed_memory import remember
+from tests.support.goals import setup_goal
+from tests.support.memory_projections import fetched
+from tests.support.next_memory_context import episode
+from tests.support.observation_capture import enable_observations, observation
 
 
 def conversation(core):
@@ -332,8 +332,8 @@ def test_corrected_memory_reuses_native_correction_lineage(core):
 
 @pytest.mark.parametrize("boundary", ["expiry", "read_revoke", "processing_withdrawal"])
 def test_future_read_permission_and_historical_processing_stay_separate(core, boundary):
+    from tests.support.heybox_reader import URL
     from tests.support.source_grants import prepare
-    from tests.test_heybox_reader import URL
 
     key = setup_goal(core, url=URL)
     grant = prepare(core)

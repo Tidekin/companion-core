@@ -1,7 +1,7 @@
 """Recent-turn lookup must not aggregate all previously delivered replies."""
 
 from companion.dialogue_history import recent_sent_sources
-from tests.test_dialogue_context import current_job, sent_history
+from tests.support.dialogue_context import current_job, sent_history
 
 
 def test_recent_sources_sqlite_work_does_not_follow_tenfold_history(core, record_property):

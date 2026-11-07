@@ -19,12 +19,12 @@ from tests.conftest import run
 from tests.native_continuous_support import Host
 from tests.support.bridge_owner_resolution import child
 from tests.support.core_http import real_core_http
+from tests.support.life_expression_consumption import prepared, request
+from tests.support.life_expression_entrypoint import native_child
 from tests.support.onebot import provider
 from tests.support.onebot_events import config, raw_event
 from tests.support.owner_authority import activate
 from tests.support.social_owner_authority import stop
-from tests.test_life_expression_consumption import prepared, request
-from tests.test_life_expression_entrypoint import native_child
 
 TEXT = "合成第一段。\n\n合成第二段。\n\n合成第三段。"
 

@@ -13,7 +13,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 from websockets.asyncio.server import serve
 
-from companion import live_text
 from companion.config import LiveTextWindowApproval
 from companion.model import ModelClient
 from companion.privacy import advance_epoch, epoch
@@ -26,32 +25,16 @@ from companion_onebot_bridge.window import TestWindow, WindowPlan
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
 from tests.support.failure_notice import assert_failure_notice
+from tests.support.live_memory_recall import scope_facts
 from tests.support.live_text_window import live_fixture
+from tests.support.memory_commands import fact
+from tests.support.memory_review_output import assert_settled_calls
 from tests.support.native_recall_entry import native_recall, returned
 from tests.support.onebot import provider
 from tests.support.onebot_capture import bootstrap_frames, capture_approval
 from tests.support.onebot_delivery import core_client
 from tests.support.onebot_events import raw_event
 from tests.support.onebot_window import reply_approval
-from tests.test_memory_commands import fact
-from tests.test_memory_review_output import assert_settled_calls
-
-
-def scope_facts(core):
-    memory_id = fact(core, 900, "本次临时项目的验收代号是青竹七号。")
-    outsider = fact(core, 901, "未批准的另一个项目代号是紫云三号。")
-    return (
-        memory_id,
-        outsider,
-        [
-            live_text.memory_fact(
-                core.store,
-                core.settings,
-                core.clock,
-                memory_id,
-            )
-        ],
-    )
 
 
 @asynccontextmanager

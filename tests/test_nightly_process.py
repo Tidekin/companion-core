@@ -19,9 +19,9 @@ from companion.store import encode
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import event, run
 from tests.support.core_http import real_core_http
+from tests.support.diary import DAY
 from tests.support.owner_authority import activate
 from tests.support.paid_model import approved_live
-from tests.test_diary import DAY
 
 
 def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_path):

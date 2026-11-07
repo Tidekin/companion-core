@@ -35,8 +35,8 @@ from source_reader.worker import tick
 from tests.conftest import ingest, run
 from tests.support.exploration import URL, configure, discover
 from tests.support.historical_schema import historical_database
+from tests.support.observation_capture import enable_observations, observation
 from tests.support.source_reader import ITEM, META, NOW, PLAYER, SUBTITLE, Responses, read, response
-from tests.test_observations import enable_observations, observation
 
 
 @pytest.mark.parametrize("sample", range(10))

@@ -1,9 +1,6 @@
 """Optional capability jobs run through the same bounded native selector."""
 
-import asyncio
 import json
-import os
-import sys
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -19,8 +16,8 @@ from tests.meme_authority_fixture import stop as stop_meme
 from tests.poke_authority_fixture import environment as poke_environment
 from tests.poke_authority_fixture import owner_turn, signed
 from tests.support.core_http import real_core_http
-from tests.support.evaluation_process import process_config
 from tests.support.owner_authority import activate
+from tests.support.selector_capabilities import child
 from tests.test_meme_core import body
 from tests.test_meme_owner_authority import configure, discovery
 from tests.test_meme_service import result
@@ -42,24 +39,6 @@ def test_m0_m1_never_invoke_live_capability_operations(core, monkeypatch, memory
         if lane.name in {"poke", "meme_caption"}:
             assert not run(lane.run()).progressed
     assert core.store.rows("SELECT * FROM model_usage") == []
-
-
-async def child(core, tmp_path, target, number):
-    config, output = tmp_path / f"capability-{number}.json", tmp_path / f"result-{number}.json"
-    process_config(core, config)
-    process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
-        "tests.selector_capability_process", str(config), core.clock(), str(output), target,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    try:
-        _, error = await asyncio.wait_for(process.communicate(), 60)
-        assert process.returncode == 0, error.decode(errors="replace")
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-    value = json.loads(output.read_text(encoding="utf-8"))
-    assert value["pid"] != os.getpid()
-    return value
 
 
 def test_actual_caption_job_runs_in_independent_selector_without_core_fallback(

@@ -5,7 +5,7 @@ import pytest
 
 from tests.conftest import run
 from tests.support.core_http import real_core_http
-from tests.test_life_rem_consumption import draft, prepared
+from tests.support.life_rem_consumption import draft, prepared
 
 
 @pytest.mark.parametrize("change", ["none", "source", "output", "recall", "queued"])

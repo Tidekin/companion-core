@@ -2,9 +2,9 @@
 
 from companion.memory_context import MemoryContext
 from tests.conftest import ingest
-from tests.test_goals import setup_goal
-from tests.test_m1 import remember
-from tests.test_next_memory_context import episode
+from tests.support.confirmed_memory import remember
+from tests.support.goals import setup_goal
+from tests.support.next_memory_context import episode
 
 
 def read(core, **kwargs):

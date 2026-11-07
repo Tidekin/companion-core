@@ -6,19 +6,13 @@ import pytest
 
 from companion import conversation_policy, style_candidates, style_observation
 from companion.contracts import CoreError
-from tests.test_bili_style_candidates import GOOD, corpus, live, pair_rows
-from tests.test_bili_style_corpus import NOW, OTHER
+from tests.support.bili_style_candidates import GOOD, corpus, live, pair_rows
+from tests.support.bili_style_corpus import NOW, OTHER
+from tests.support.bili_style_observation import approved
 
 ON = style_observation.StyleObservationConfig(mode="SHADOW")
 MESSAGES = [{"role": "system", "content": "你是主人的 QQ 伙伴。不得编造事实。"},
             {"role": "user", "content": "今天在楼下看到一只猫把自己卡在纸箱里"}]
-
-
-def approved(pattern=GOOD, rows=None):
-    c = corpus(*(rows or [pair_rows()]))
-    cand = style_candidates.distill(c, NOW, live(c), lambda pair: pattern)[0][0]
-    return style_candidates.review(cand, reviewer="主人", approve=True, reason="",
-                                   approved_versions={}), live(c)
 
 
 def payload(candidates, text="今天在楼下看到一只猫把自己卡在纸箱里", config=ON, live_ids=None,

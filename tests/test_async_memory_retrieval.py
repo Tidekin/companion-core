@@ -9,7 +9,7 @@ import pytest
 from companion import reply_revision
 from companion.contracts import CoreError
 from tests.conftest import ingest, run
-from tests.test_memory_commands import fact
+from tests.support.memory_commands import fact
 
 
 @pytest.mark.parametrize(

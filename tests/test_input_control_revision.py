@@ -11,8 +11,8 @@ from companion.core import Core
 from companion.model import REVIEW_RULES, ModelClient
 from tests.conftest import FakeModel, run
 from tests.native_input_protocol_fixture import notice
+from tests.support.confirmed_memory import remember
 from tests.support.native_control_input import admit, environment
-from tests.test_m1 import remember
 
 
 def seed_memory(core):

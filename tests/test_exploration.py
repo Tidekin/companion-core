@@ -186,7 +186,7 @@ def test_erase_during_read_rejects_old_output_and_restore_clears_sources(core, t
 
 def test_sharing_uses_same_outbox_and_common_proactive_limit(core, monkeypatch):
     from companion.social import proactive_counts
-    from tests.test_autonomous_selector import drain
+    from tests.support.autonomous_selector import drain
 
     configure(core, social=True)
     core.settings.proactive_enabled = True
@@ -250,7 +250,7 @@ def test_similar_content_different_urls_is_suppressed(core, monkeypatch):
 
 
 def public_fixture(*responses):
-    from tests.test_heybox_reader import mock_pool
+    from tests.support.heybox_reader import mock_pool
 
     pool, backend = mock_pool(*responses)
     return PublicHTTP(pool), backend
@@ -336,8 +336,8 @@ def test_bridge_result_report_failure_does_not_repeat_public_io():
 
 
 def test_optional_heybox_http_contract_keeps_get_scope_and_business_status():
+    from tests.support.heybox_reader import ITEM, POST, SOURCE_TOKEN, URL, mock_pool
     from tests.support.source_reader import response
-    from tests.test_heybox_reader import ITEM, POST, SOURCE_TOKEN, URL, mock_pool
 
     async def scenario():
         pool, backend = mock_pool(response({"status": "ok", "result": {"links": [{

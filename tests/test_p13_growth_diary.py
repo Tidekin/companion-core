@@ -10,14 +10,14 @@ from companion.diary import DiaryDraft, render_draft
 from companion.goals import GoalProposal, GoalScope
 from companion.source_grants import ReaderReadValidation
 from tests.conftest import ingest, run
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY
+from tests.support.growth_foundations import complete_read, view
+from tests.support.heybox_reader import URL
+from tests.support.observation_capture import enable_observations, observation
 from tests.support.owner_authority import activate as activate_owner
 from tests.support.owner_authority_setup import prepare as prepare_owner
 from tests.support.source_grants import prepare, receipt
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
-from tests.test_growth_foundations import complete_read, view
-from tests.test_heybox_reader import URL
-from tests.test_observations import enable_observations, observation
 
 
 def test_live_daily_sources_exclude_retained_simulation_before_any_model_request(core, tmp_path):

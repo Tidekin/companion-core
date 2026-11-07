@@ -13,19 +13,7 @@ from companion.core import Core
 from companion.growth import ExpressionLearning
 from companion.store import encode
 from tests.conftest import ingest
-
-
-def snapshot(core):
-    return ExpressionLearning(core.store, core.settings, core.clock).snapshot(
-        core.settings.owner_qq_id,
-    )
-
-
-def feedback_days(core, count=7):
-    for index in range(count):
-        if index:
-            core.clock.advance(86400)
-        ingest(core, index + 1, "简短一点")
+from tests.support.next_life_growth import feedback_days, snapshot
 
 
 def test_repeated_feedback_needs_distinct_days_and_strength_is_bounded(core):

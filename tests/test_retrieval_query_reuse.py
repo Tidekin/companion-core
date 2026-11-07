@@ -5,23 +5,11 @@ import threading
 from collections import OrderedDict
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 from companion import retrieval, turn_recall
 from tests.conftest import run
-
-
-class Encoder:
-    def __init__(self, vector=(1., 0.)):
-        self.vector, self.queries = np.array(vector), []
-
-    def query_embed(self, query):
-        self.queries.append(query)
-        return iter([self.vector.copy()])
-
-    def passage_embed(self, texts, batch_size):
-        return (self.vector.copy() for _ in texts)
+from tests.support.retrieval_query_reuse import Encoder
 
 
 def test_fact_and_turn_search_share_one_query_inference(tmp_path, monkeypatch):

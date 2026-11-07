@@ -11,24 +11,9 @@ from companion.contracts import Candidate, CoreError
 from companion.memory_context import MemorySources
 from companion.memory_work import checkpoint_state
 from companion.store import encode
-from tests.conftest import ingest, run
+from tests.conftest import run
+from tests.support.memory_references import TEXT, prepared
 from tests.test_voice_flow import finish_node, flow_fixture, upload
-
-TEXT = "青栎资料卡写着：入场日期是十二月九日，座位为B17。"
-
-
-def prepared(core, kind="document"):
-    core.settings.memory_enabled = True
-    core.settings.extraction_min_events = 1
-    core.settings.extraction_idle_seconds = 0
-    ingest(core, 1, "这是一份别人整理的资料")
-    assert run(core.run_once())
-    value = refs.capture(core.memory, "evt_test_1", kind, TEXT,
-                         {"fixture": "native-reference-contract"}, core.clock())
-    item = Candidate(subject="project", kind="fact", fact_key="visit", content=TEXT,
-        evidence_event_id="evt_test_1", evidence_quote="入场日期是十二月九日",
-        evidence_reference_id=value["reference_id"])
-    return value, item
 
 
 @pytest.mark.parametrize("kind", ["document", "image", "transcript", "quote", "assistant"])
@@ -100,7 +85,7 @@ def test_reference_changed_during_extraction_prevents_summary_and_fact_commit(co
 
 
 def test_erasing_derived_observation_clears_pending_reference_candidates(core):
-    from tests.test_observations import enable_observations, observation
+    from tests.support.observation_capture import enable_observations, observation
 
     _, item = prepared(core)
     enable_observations(core)

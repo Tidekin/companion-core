@@ -27,7 +27,7 @@ from tests.conftest import run
 from tests.native_continuous_support import answer, frame, host, recall_frame, until
 from tests.native_continuous_support import worker as worker
 from tests.support.onebot import onebot_http
-from tests.test_segmented_image_memory import PARTS, REPLY
+from tests.support.segmented_image_memory import PARTS, REPLY
 
 
 async def one_message(ws):

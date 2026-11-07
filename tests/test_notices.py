@@ -13,7 +13,7 @@ from companion.social import proactive_counts
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from tests.conftest import run
 from tests.notice_owner_fixtures import run_notice
-from tests.test_goals import result_for, setup_goal
+from tests.support.goals import result_for, setup_goal
 from tests.test_source_definitions import BILI, accepted_text, enable_sharing
 
 

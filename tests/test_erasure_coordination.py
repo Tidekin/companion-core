@@ -12,7 +12,7 @@ from companion.privacy import epoch
 from companion.store import Store
 from companion.transport import enqueue
 from tests.conftest import ingest
-from tests.test_observations import enable_observations, observation
+from tests.support.observation_capture import enable_observations, observation
 
 
 def test_replay_contract_discovery_does_not_hold_database_write_lock(core, monkeypatch):

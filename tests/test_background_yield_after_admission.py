@@ -4,7 +4,7 @@ import pytest
 
 from companion import budget, model_scope, owner_authority
 from companion.contracts import CoreError
-from tests.test_watch_ledger import ready
+from tests.support.watch_ledger import ready
 
 
 def test_the_pre_http_recheck_does_not_yield_but_the_boundary_check_still_can(

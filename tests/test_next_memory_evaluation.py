@@ -5,7 +5,7 @@ import json
 
 from companion.memory_context import MemoryContext
 from companion.store import after, encode
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
 
 FACTS = (
     ("tea", "我平时最爱喝的饮料是茉莉绿茶。", "drink"),

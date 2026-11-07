@@ -10,26 +10,8 @@ from companion.contracts import Candidate, CoreError
 from companion.core import Core
 from companion.privacy import epoch
 from companion.store import after, encode, migrate
-from tests.conftest import event, ingest, run
-
-
-def remember(core, number, content, subject="user", fact_key=None, confirmed=False):
-    core.settings.memory_enabled = True
-    ev = event(core, number, content)
-    core.ingest(ev, f"key-{number}")
-    with core.store.transaction():
-        return core.memory.add(
-            Candidate(
-                subject=subject,
-                kind="preference",
-                fact_key=fact_key or content,
-                content=content,
-                evidence_event_id=ev.event_id,
-                evidence_quote=content,
-            ),
-            core.clock(),
-            confirmed=confirmed,
-        )
+from tests.conftest import ingest, run
+from tests.support.confirmed_memory import remember
 
 
 def test_m1_01_no_bootstrap_personality(core):

@@ -9,7 +9,7 @@ from companion.cognition_read import KINDS, CognitionRead, measurement
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.privacy import advance_epoch
-from tests.test_goals import setup_goal
+from tests.support.goals import setup_goal
 
 
 @pytest.mark.parametrize("kind", KINDS)

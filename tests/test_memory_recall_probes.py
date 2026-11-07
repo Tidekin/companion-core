@@ -6,7 +6,7 @@ from pathlib import Path
 
 from companion.memory_context import MemoryContext
 from companion.store import after, encode
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
 
 
 def test_frozen_entity_time_and_scope_probes(core, record_property):

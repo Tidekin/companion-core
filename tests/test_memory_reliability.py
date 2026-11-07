@@ -7,7 +7,7 @@ import pytest
 from companion.contracts import Candidate, CoreError
 from companion.turn_recall import focus
 from tests.conftest import ingest, run
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
 
 
 def update(core, old, *, key="讲座场地", resolution=None):

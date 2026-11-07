@@ -12,9 +12,9 @@ from companion.contracts import CoreError
 from companion.core import Core
 from companion.retrieval import SemanticIndex
 from tests.conftest import run
+from tests.support.consolidation import enable_nightly
 from tests.support.delegation import delegate, submit
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
+from tests.support.diary import DAY
 
 ORIGIN = "https://console.example.test"
 PASSWORD = "owner-delegation-test-password-" * 2

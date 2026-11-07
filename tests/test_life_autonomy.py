@@ -11,8 +11,8 @@ from companion.core import Core
 from companion.life_context import decision_context
 from companion.life_protocol import LifeDecision, LifeLoopConfig
 from companion.store import encode
-from tests.test_goals import result_for, setup_goal
-from tests.test_growth_foundations import complete_read
+from tests.support.goals import result_for, setup_goal
+from tests.support.growth_foundations import complete_read
 
 
 def context(core, ids):

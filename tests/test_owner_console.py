@@ -458,7 +458,7 @@ def test_overview_review_count_matches_visible_sources_and_reports_disabled_as_u
 
 def test_life_projection_rejects_diary_erasure_during_combined_read(client, core, monkeypatch):
     from companion.core import Core
-    from tests.test_diary import DAY, generate, seed_day
+    from tests.support.diary import DAY, generate, seed_day
 
     seed_day(core)
     assert generate(core)["state"] == "COMMITTED"

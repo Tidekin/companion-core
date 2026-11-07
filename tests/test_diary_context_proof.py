@@ -3,7 +3,7 @@
 import pytest
 
 from companion.contracts import CoreError
-from tests.test_diary import DAY, generate, seed_day
+from tests.support.diary import DAY, generate, seed_day
 
 
 @pytest.mark.parametrize("change", ["entry", "source", "forget", "retention"])

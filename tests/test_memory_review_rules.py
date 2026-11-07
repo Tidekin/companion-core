@@ -3,7 +3,7 @@
 from companion.contracts import Candidate
 from companion.model import REVIEW_RULES
 from tests.conftest import event
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
 
 
 def add_episode(core, number, content, fact_key):

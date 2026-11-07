@@ -14,7 +14,7 @@ from tests.notice_owner_fixtures import run_notice
 from tests.social_model_transport import NativeTestModel
 from tests.support.input_debounce import accept as accept_batched
 from tests.support.social_owner_authority import authorize
-from tests.test_turn_taking import enable, lease, lively, system, turn
+from tests.support.turn_taking import enable, lease, lively, system, turn
 
 FOLLOWUP = "那个配角最后没有回头，我觉得比直接解释自己的选择更有意思。"
 

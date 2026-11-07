@@ -8,61 +8,16 @@ import pytest
 
 from companion import time_context, turn_taking
 from companion.config import Settings
-from companion.contracts import DeliveryResult, LeaseRequest
-from companion.model import ModelResponse
+from companion.contracts import DeliveryResult
 from companion.reply_segments import SEMANTIC_RULES, SegmentedReplyConfig
-from companion.transport import begin_send, delivery_result, lease_deliveries
-from companion.turn_taking import SILENCE_RULES, TurnTakingConfig
+from companion.transport import begin_send, delivery_result
+from companion.turn_taking import SILENCE_RULES
 from tests.conftest import event, ingest, run
 from tests.notice_owner_fixtures import run_notice
 from tests.support.core_http import real_core_http
+from tests.support.life_worker_integration import process_worker
 from tests.support.social_owner_authority import authorize
-from tests.test_life_worker_integration import process_worker
-
-
-class Model:
-    def __init__(self):
-        self.calls, self.chat, self.activity = [], [], []
-
-    async def complete(self, messages, scenario):
-        self.calls.append((messages, scenario))
-        queue = self.chat if scenario == "chat" else self.activity
-        return ModelResponse(queue.pop(0) if queue else "嗯嗯，我也这么觉得。", 100, 20, 40)
-
-
-def enable(core, **values):
-    core.settings.turn_taking = TurnTakingConfig(**values)
-    core.settings.proactive_enabled = True
-    core.settings.quiet_start = core.settings.quiet_end = 0
-    core.settings.context_soft_tokens = 12000
-    core.model = Model()
-
-
-def turn(core, number, text, answer=None, *, deliver=True):
-    """One owner message, its chat job, and (optionally) the delivered reply."""
-    if answer is not None:
-        core.model.chat.append(answer)
-    result = ingest(core, number, text)
-    assert run(core.run_once("worker"))
-    if deliver:
-        core.store.execute(
-            "UPDATE outbox SET state='SENT',sent_at=? WHERE origin_event_id=? "
-            "AND state='PENDING'", (core.clock(), result["event_id"]))
-    return result
-
-
-def system(core, index=-1):
-    return core.model.calls[index][0][0]["content"]
-
-
-def history_messages(messages):
-    return [message for message in messages if message["role"] == "user"
-            and isinstance(message["content"], str) and message["content"].startswith("【")]
-
-
-def lease(core):
-    return lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
-                            core.clock())["items"]
+from tests.support.turn_taking import enable, history_messages, lease, lively, system, turn
 
 
 def outbox(core):
@@ -133,12 +88,6 @@ def test_silence_never_repeats_and_respects_the_switch(core):
     core.clock.advance(20)
     turn(core, 5, "嗯")
     assert SILENCE_RULES not in system(core)
-
-
-def lively(core):
-    turn(core, 1, "我刚看完那部电影", "结局你喜欢吗？")
-    core.clock.advance(60)
-    return turn(core, 2, "还行，就是有点仓促", "我也觉得后半段太赶了。")
 
 
 def test_a_lull_after_a_lively_chat_gets_one_follow_up(core):
@@ -432,7 +381,7 @@ def test_erasing_a_turn_cancels_a_queued_follow_up(core):
 
 def test_the_life_worker_selector_schedules_and_words_the_follow_up(core):
     from companion.autonomous_selector import native_selector
-    from tests.test_autonomous_selector import drain
+    from tests.support.autonomous_selector import drain
 
     enable(core)
     lively(core)

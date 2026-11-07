@@ -10,9 +10,9 @@ from companion.contracts import InteractionSignal
 from companion.model import EXTRACT_RULES
 from companion.store import encode
 from tests.conftest import ingest, run
-from tests.test_mood import erase, feedback
-from tests.test_mood_appraisals import appraise
-from tests.test_mood_appraisals_integration import prepare_extraction
+from tests.support.mood import erase, feedback
+from tests.support.mood_appraisals import appraise
+from tests.support.mood_appraisals_integration import prepare_extraction
 
 
 def settle(core, request_id):

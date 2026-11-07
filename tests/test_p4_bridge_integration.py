@@ -30,9 +30,9 @@ from tests.conftest import FakeModel, run
 from tests.support.astrbot_delivery import deliver_expression
 from tests.support.exploration import URL as BILI_URL
 from tests.support.exploration import configure
+from tests.support.heybox_reader import URL, mock_pool
 from tests.support.source_reader import META, PLAYER, SUBTITLE, response
 from tests.test_content_bridge import event as bridge_event
-from tests.test_heybox_reader import URL, mock_pool
 from tests.test_plugin_readonly import SECRET, native_post, registered_grant
 
 ROOT = Path(__file__).resolve().parents[1]

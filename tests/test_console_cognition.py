@@ -7,11 +7,11 @@ from pydantic import SecretStr
 
 from companion.store import after
 from tests.conftest import run
+from tests.support.cognition_goal_steps import finish_record, retained_plan
 from tests.support.console_cognition import ORIGIN, PASSWORD, login
 from tests.support.console_cognition import client as client
-from tests.test_cognition_goal_steps import finish_record, retained_plan
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY
 
 
 @pytest.mark.parametrize("path", ["/cognition?kind=goal", "/affect", "/goals", "/reflections",
@@ -221,7 +221,7 @@ def test_affect_view_distinguishes_disabled_from_neutral(client, core):
 
 @pytest.mark.parametrize("appraisal", ["这个回答很有帮助", "这个想法很有意思"])
 def test_mood_console_authentication_controls_and_idempotent_clear(client, core, appraisal):
-    from tests.test_mood import feedback
+    from tests.support.mood import feedback
 
     feedback(core, text=appraisal)
     assert client.get("/v1/console/mood").status_code == 401

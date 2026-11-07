@@ -14,8 +14,8 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
 from source_reader.worker import tick
 from tests.conftest import ingest, run
+from tests.support.consolidation import enable_nightly
 from tests.support.source_reader import ITEM, META, Responses, read, response
-from tests.test_consolidation import enable_nightly
 
 
 def test_bilibili_discovery_reads_the_bounded_public_feed_once():
@@ -166,9 +166,9 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
     from companion.model import ModelClient
     from companion.reflection import REFLECTION_RULES
     from tests.native_continuous_support import host
+    from tests.support.consolidation import ReflectionModel
     from tests.support.native_context import Capture
     from tests.support.onebot_events import raw_event
-    from tests.test_consolidation import ReflectionModel
 
     fixture_model = ReflectionModel()
     calls, instances = [], []

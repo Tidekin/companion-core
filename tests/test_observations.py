@@ -1,51 +1,20 @@
-import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 from companion.api import create_app
 from companion.backup import backup, restore
-from companion.config import ObservationAdapterConfig, Settings
+from companion.config import Settings
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.observation import ObservationEvent
 from companion.policy import ConsentRequest
-from companion.privacy import epoch
 from tests.conftest import ingest
-
-
-def enable_observations(core, source="simulation", media=False):
-    core.settings.observation_enabled = True
-    core.settings.control_token = SecretStr("owner-control-" * 4)
-    core.settings.observation_adapters = {
-        "reader": ObservationAdapterConfig(
-            token="reader-token-" * 4, source=source, media_analysis=media
-        )
-    }
-
-
-def observation(core, number=1, text="已获取的文章内容", **changes):
-    return ObservationEvent.model_validate(
-        {
-            "schema_version": 2,
-            "event_id": f"obs_test_{number}",
-            "event_type": "content.observed",
-            "source": "simulation",
-            "source_kind": "text",
-            "provider_event_id": str(number),
-            "occurred_at": core.clock(),
-            "trace_id": f"trace_obs_{number}",
-            "result_status": "FETCHED",
-            "source_sha256": hashlib.sha256(text.encode()).hexdigest(),
-            "privacy_epoch": epoch(core.store),
-            "payload": {"text": text, "url": "https://example.org/article"},
-            **changes,
-        }
-    )
+from tests.support.observation_capture import enable_observations, observation
 
 
 def test_observation_disabled_and_qq_v1_boundary(core):

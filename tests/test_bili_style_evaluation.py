@@ -7,8 +7,8 @@ import pytest
 from companion import evaluation
 from companion.contracts import CoreError
 from scripts import evaluate_r1_conversation as experiment
-from tests.test_bili_style_corpus import NOW
-from tests.test_bili_style_observation import approved
+from tests.support.bili_style_corpus import NOW
+from tests.support.bili_style_observation import approved
 
 MULTITURN = experiment.ROOT / "tests/fixtures/r1_multiturn_cases.json"
 CASES = experiment.load_cases(MULTITURN)

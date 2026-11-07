@@ -16,13 +16,12 @@ from companion.privacy import epoch
 from companion.store import encode
 from companion.transport import begin_send, delivery_result, enqueue, lease_deliveries
 from tests.conftest import ingest, run
-from tests.support.exploration import configure
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY
+from tests.support.goals import result_for, setup_goal
+from tests.support.heybox_reader import URL
+from tests.support.p12_diary_life import source_with_older_parent
 from tests.support.source_grants import prepare
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
-from tests.test_goals import result_for, setup_goal
-from tests.test_heybox_reader import URL
-from tests.test_observations import observation
 
 
 def test_native_daily_pipeline_revision_next_day_and_latest_ledger_restore(core, tmp_path):
@@ -129,23 +128,6 @@ def test_completed_commitment_is_not_delivered_until_outbox_ack_and_never_claims
     sent = core.goals.recent()[0]
     assert sent["delivery"]["state"] == "SENT" and sent["delivery"]["sent_at"]
     assert sent["commitment_state"] == "FULFILLED" and sent["phone_confirmation"] is None
-
-
-def source_with_older_parent(core):
-    configure(core, social=True)
-    core.settings.raw_event_retention_days = 2
-    core.settings.proactive_enabled = True
-    core.settings.proactive_idle_seconds = 0
-    ingest(core, 1, "主人提供的阅读线索")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    core.clock.advance(86400)
-    item = observation(
-        core, source="heybox", source_event_ids=["evt_test_1"], text="有据的天文阅读正文",
-        payload={"title": "天文进展", "text": "有据的天文阅读正文", "url": URL},
-    )
-    core.observations.append("heybox", item)
-    core.clock.advance(86399)
-    return item.event_id
 
 
 def queued_share(core):

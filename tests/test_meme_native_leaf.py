@@ -24,10 +24,10 @@ from tests.support.core_http import real_core_http
 from tests.support.onebot_events import raw_event
 from tests.support.owner_authority import activate
 from tests.support.paid_model import approved_live
+from tests.support.selector_capabilities import child
 from tests.test_meme_runtime import RULE, item, public_transport
 from tests.test_next_memes_catalog import metadata, png
 from tests.test_next_memes_discovery import resolver
-from tests.test_selector_capabilities import child
 
 
 @asynccontextmanager

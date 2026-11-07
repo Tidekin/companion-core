@@ -7,7 +7,7 @@ from companion.backup import backup, restore
 from companion.core import Core
 from companion.memory_context import MemoryContext, MemorySources
 from tests.conftest import ingest
-from tests.test_m1 import remember
+from tests.support.confirmed_memory import remember
 
 
 def delayed_correction(core, support):

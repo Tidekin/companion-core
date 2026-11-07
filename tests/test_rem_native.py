@@ -3,7 +3,6 @@
 import asyncio
 import json
 import sys
-from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -12,46 +11,17 @@ import pytest
 from cryptography.fernet import Fernet
 from pydantic import SecretStr
 
-from companion import paid_budget, rem
+from companion import rem
 from companion.backup import backup, restore
 from companion.core import Core
 from companion.model import ModelClient
-from companion.rem_protocol import RemConfig
 from tests.conftest import run
 from tests.support.core_http import real_core_http
 from tests.support.evaluation_process import process_config
-from tests.support.owner_memory import environment
+from tests.support.rem_native import FACT, prepared, response, usage
 
-FACT = "青禾项目下一步检查配色"
 DREAM = {"decision": "DREAM", "title": "纸上的花园", "text": "虚构：配色化成了纸上的花园。",
          "questions": ["冷暖配色可以如何组合？"]}
-
-
-def response(value):
-    return httpx.Response(200, json={"choices": [{"message": {
-        "role": "assistant", "content": json.dumps(value, ensure_ascii=False)},
-        "finish_reason": "stop"}], "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
-
-
-@asynccontextmanager
-async def prepared(core, tmp_path, *, seed=True, diary=False, **config):
-    core.settings.rem = RemConfig.model_validate({"enabled": True, "daily_micro_usd": 50000,
-                                                "monthly_micro_usd": 200000, **config})
-    core.settings.diary_enabled = diary
-    core.settings.diary_min_source_events = 1
-    async with environment(core, tmp_path, history=False,
-        additional_purposes=("rem", "diary") if diary else ("rem",),
-        capability_policies={"rem": paid_budget.sha(core.settings.rem.model_dump())}) as (
-            admit, _, reference):
-        if seed:
-            await admit(1, "/记住这个 " + FACT)
-            assert await core.run_once()
-            assert core.store.one("SELECT content FROM memories") == {"content": FACT}
-        yield reference, admit
-
-
-def usage(core):
-    return core.store.rows("SELECT * FROM model_usage WHERE scenario='rem'")
 
 
 def test_rem_explicit_off_and_empty_material_are_quiet(core, tmp_path):

@@ -17,8 +17,8 @@ from source_reader.worker import tick
 from tests.conftest import run
 from tests.support.exploration import URL as BILI_URL
 from tests.support.exploration import configure
+from tests.support.heybox_reader import URL, mock_pool
 from tests.support.source_reader import META, PLAYER, SUBTITLE, response
-from tests.test_heybox_reader import URL, mock_pool
 from tests.test_plugin_readonly import native_post, registered_grant
 
 

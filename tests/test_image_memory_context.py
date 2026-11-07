@@ -15,11 +15,11 @@ from companion.store import Store, encode
 from tests.conftest import run
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.live_image_input import options
+from tests.support.memory_commands import fact
 from tests.support.native_image_memory import native_image_memory
 from tests.support.onebot_capture import capture_approval, source_window
 from tests.support.onebot_events import raw_event
 from tests.support.onebot_images import image_segment
-from tests.test_memory_commands import fact
 
 PREFERENCE = "我挑选耳机优先考虑轻便和隔音。"
 CUES = "图片1：红色轻便头戴耳机；图片2：蓝色头戴耳机。检索主题：耳机、轻便、隔音。"

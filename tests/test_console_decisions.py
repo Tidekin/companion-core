@@ -6,8 +6,8 @@ from companion.store import after
 from tests.conftest import run
 from tests.support.console_cognition import client as client
 from tests.support.console_cognition import login
-from tests.test_consolidation import enable_nightly
-from tests.test_diary import DAY
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY
 
 
 def test_decisions_list_wake_and_reflection_records_without_reasoning(core, client):

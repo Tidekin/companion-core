@@ -1,7 +1,7 @@
 """Multi-day reads, her own judgements, views that change, and the choices they inform."""
 
 import json
-from datetime import date, datetime
+from datetime import date
 
 import pytest
 from cryptography.fernet import Fernet
@@ -11,55 +11,15 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.diary import DiaryDraft, DiaryRepository, render_draft
-from companion.goals import CommitmentRequest, GoalProposal, GoalScope
+from companion.goals import GoalProposal, GoalScope
 from companion.life_context import decision_context
-from companion.life_protocol import LifeDecision, LifeLoopConfig
+from companion.life_protocol import LifeDecision
 from companion.life_topics import interest_shift_supported
-from companion.store import after, encode
+from companion.store import encode
 from tests.conftest import ingest, run
-from tests.test_goals import result_for
-from tests.test_observations import enable_observations, observation
-from tests.test_watch_ledger import ready
-
-ASTRONOMY, BAKING = "天文研究", "烘焙尝试"
-
-
-def prepare(core):
-    core.settings.goals_enabled = core.settings.exploration_enabled = True
-    core.settings.wake_enabled = core.settings.memory_enabled = True
-    core.settings.watch_ledger = core.settings.watch_ledger.model_copy(update={"enabled": True})
-    core.settings.life_loop = LifeLoopConfig(autonomy_enabled=True)
-    enable_observations(core)
-
-
-def read(core, number, topic, url, *, said="想找点东西看看", commitment=False):
-    """One real chain: owner message -> native goal -> leased step -> Reader receipt."""
-    ingest(core, number, said)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=?",
-                       (f"evt_test_{number}",))
-    proposal = GoalProposal(topic=topic, source_event_ids=[f"evt_test_{number}"],
-                            scope=GoalScope(operation="read_content", url=url))
-    if commitment:
-        goal = core.goals.accept_commitment(CommitmentRequest(
-            proposal=proposal, accepted_event_id=f"evt_test_{number}",
-            deadline=datetime.fromisoformat(after(core.clock(), 86400))))["goal_id"]
-    else:
-        goal = core.goals.propose(proposal)
-        core.goals.accept(goal)
-    step = core.goals.claim()
-    core.goals.finish(step, result_for(core, goal, number))
-    return goal, f"obs_test_{number}"
-
-
-def judge(core, event_id, rating, take):
-    """A settled Watch Ledger judgement; the paid path itself is covered below."""
-    entry_id = "watch_" + event_id
-    core.store.execute(
-        "INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_ref,depth,state,rating,"
-        "take,topic_tags_json,created_at,updated_at) SELECT ?,event_id,'web',canonical_url,"
-        "'text','JUDGED',?,?,'[]',?,? FROM observations WHERE event_id=?",
-        (entry_id, rating, take, core.clock(), core.clock(), event_id))
-    return entry_id
+from tests.support.observation_capture import observation
+from tests.support.subjective_cognition import ASTRONOMY, BAKING, judge, prepare, read
+from tests.support.watch_ledger import ready
 
 
 def item(core, topic):

@@ -7,7 +7,7 @@ from companion.contracts import Candidate, InboundEvent
 from companion.store import encode
 from tests.conftest import event, run
 from tests.support import native_image_memory as image_fixture
-from tests.test_dialogue_context import current_job, sent_history
+from tests.support.dialogue_context import current_job, sent_history
 from tests.test_image_review import reply
 
 

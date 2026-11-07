@@ -74,7 +74,7 @@ def test_running_request_and_next_task_use_distinct_fixed_versions(hot):
 
 
 def test_mood_provenance_remains_live_across_configuration_switch(hot):
-    from tests.test_mood import erase, feedback
+    from tests.support.mood import erase, feedback
 
     source = feedback(hot)
     job = task(hot, number=10)

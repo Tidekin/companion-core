@@ -17,10 +17,10 @@ from companion.privacy import advance_epoch
 from companion.store import after, encode, uid
 from companion.transport import begin_send, enqueue, lease_deliveries
 from tests.conftest import ingest, run
-from tests.test_diary import DAY, generate, seed_day
-from tests.test_life_topics import configure as configure_life
-from tests.test_life_topics import proposal as life_proposal
-from tests.test_observations import enable_observations, observation
+from tests.support.diary import DAY, generate, seed_day
+from tests.support.life_topics import configure as configure_life
+from tests.support.life_topics import proposal as life_proposal
+from tests.support.observation_capture import enable_observations, observation
 
 
 @pytest.mark.parametrize("day_alias", ["20261018", "2026-W42-7"])

@@ -8,9 +8,9 @@ from companion import owner_authority, paid_budget
 from companion.contracts import CoreError
 from companion.store import Store
 from tests.conftest import run
+from tests.support.life_history_scope import configure, grant, scope
+from tests.support.life_topics import bug
 from tests.support.owner_memory import environment
-from tests.test_life_history_scope import configure, grant, scope
-from tests.test_life_topics import bug
 
 
 def test_idle_projection_does_not_block_an_independent_writer(core, monkeypatch):
