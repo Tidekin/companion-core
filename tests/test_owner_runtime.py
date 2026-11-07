@@ -84,6 +84,13 @@ def test_native_chat_admission_rechecks_authority_after_http_hooks(core, tmp_pat
 
 
 def test_native_chat_outbox_requires_same_reference_and_live_send_lease(core, tmp_path):
+    snapshot_reads = []
+
+    def trace(sql):
+        if sql.startswith("SELECT phase,snapshots_json FROM agent_conversations"):
+            snapshot_reads.append(core.store.frozen_scope)
+
+    core.store.db.set_trace_callback(trace)
     capture, _ = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
     source = core.ingest(inbound(core, capture), "full-native-chat")
@@ -104,6 +111,13 @@ def test_native_chat_outbox_requires_same_reference_and_live_send_lease(core, tm
     begin_send(core.store, item["message_id"], item["lease_token"], core.clock(),
                core.settings, clock=core.clock)
     assert owner_delivery.send_check(core.store, core.settings, core.clock, check)["approved"]
+    # The next preflight must read the original evidence again, even for the same lease.
+    core.store.execute("UPDATE agent_conversations SET snapshots_json='[]' WHERE job_id=?",
+                       (job["job_id"],))
+    with pytest.raises(CoreError, match="REPLY_CANCELLED"):
+        owner_delivery.send_check(core.store, core.settings, core.clock, check)
+    assert len(snapshot_reads) >= 5 and None not in snapshot_reads
+    assert len(set(snapshot_reads)) == len(snapshot_reads)
     owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
         operation_id="operation-stop-native-send", authority=capture.authority))
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_DISABLED"):
