@@ -1,6 +1,5 @@
 """Closed platform policy and accepted-evidence regressions; no external requests."""
 
-import hashlib
 import json
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta
@@ -10,8 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError, InboundEvent
-from companion.observation import ArticleEvidence, ArticleImage, ObservationEvent, ReadingSource
-from companion.privacy import epoch
+from companion.observation import ArticleEvidence, ArticleImage, ReadingSource
 from companion.source_grants import SourceGrantRegistration, SourceGrantSnapshot
 from companion.sources import (
     ContentSource,
@@ -23,10 +21,8 @@ from companion.sources import (
     source_names,
     supports,
 )
-from tests.conftest import ingest, run
-
-BILI = "https://www.bilibili.com/video/BV1xx411c7mD"
-HEYBOX = "https://www.xiaoheihe.cn/app/bbs/link/123456"
+from tests.conftest import run
+from tests.support.source_definitions import BILI, HEYBOX, accepted_text, enable_sharing
 
 
 def test_fixed_definitions_and_protocol_source_types_cannot_enable_third_platform():
@@ -135,33 +131,6 @@ def test_download_normalization_and_persisted_evidence_have_distinct_strict_limi
             ReadingSource(role="metadata", url=url, sha256="a" * 64, bytes=10)
 
 
-def accepted_text(core, source="bilibili", number=1, **changes):
-    core.settings.observation_enabled = True
-    core.settings.observation_adapters["reader"] = ObservationAdapterConfig(
-        source=source, token="synthetic-reader-token"
-    )
-    text = "这是已经成功读取的真实证据文本。"
-    return ObservationEvent(
-        schema_version=2,
-        event_id=f"source_definition_{number}",
-        event_type="content.observed",
-        source=source,
-        source_kind="text",
-        provider_event_id=str(number),
-        occurred_at=core.clock(),
-        trace_id=f"source_trace_{number}",
-        result_status="FETCHED",
-        privacy_epoch=epoch(core.store),
-        source_sha256=hashlib.sha256(text.encode()).hexdigest(),
-        payload={
-            "title": "来源材料",
-            "text": text,
-            "url": BILI if source == "bilibili" else HEYBOX,
-        },
-        **changes,
-    )
-
-
 def test_observation_rejects_cross_platform_url_and_evidence_before_storage(core):
     event = accepted_text(core)
     event.payload.url = HEYBOX
@@ -196,14 +165,6 @@ def test_non_platform_adapter_cannot_register_account_grant(core, source):
             )
         )
     assert core.store.rows("SELECT * FROM source_grants") == []
-
-
-def enable_sharing(core):
-    core.settings.social_enabled = core.settings.proactive_enabled = True
-    core.settings.proactive_idle_seconds = 0
-    core.settings.quiet_start = core.settings.quiet_end = 0
-    ingest(core)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
 
 
 @pytest.mark.parametrize("source", ["bilibili", "heybox"])

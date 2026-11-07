@@ -24,11 +24,11 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import bridge_code_sha256, digest
 from tests.conftest import run
 from tests.support.core_http import real_core_http
+from tests.support.native_account_host import configure_host
 from tests.support.onebot_account_actions import fixture
 from tests.support.onebot_events import raw_event
 from tests.support.onebot_pokes import silent
 from tests.support.social_owner_authority import authorize, close_provider_clients  # noqa: F401
-from tests.test_native_account_host import configure_host
 
 
 @asynccontextmanager

@@ -8,9 +8,9 @@ import pytest
 from companion_onebot_bridge.meme_runtime import MemeRuntime
 from companion_onebot_bridge.owner_memes import MemePump
 from tests.conftest import run
+from tests.support.meme_runtime import RULE
 from tests.support.native_meme import NativeCase, capture
-from tests.test_meme_runtime import RULE
-from tests.test_next_memes_catalog import metadata, png
+from tests.support.next_memes_catalog import metadata, png
 
 
 @pytest.mark.parametrize("text,expected,query", [

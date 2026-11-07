@@ -252,7 +252,7 @@ def test_m0_11_encrypted_backup_restore(core, tmp_path):
 
 def test_m0_12_proactive_quota_does_not_block_chat(core):
     from companion.social import proactive_counts
-    from tests.test_source_definitions import accepted_text
+    from tests.support.source_definitions import accepted_text
 
     core.settings.social_enabled = core.settings.proactive_enabled = True
     core.settings.proactive_daily_limit = 1

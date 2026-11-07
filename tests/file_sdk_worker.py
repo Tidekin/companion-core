@@ -10,7 +10,7 @@ from companion import file_parser
 from companion.retrieval import SemanticIndex
 from tests.conftest import Clock
 from tests.sdk_reader_fixture import Provider, answer, worker_for
-from tests.test_file_parser import FakeProcess
+from tests.support.file_parser import FakeProcess
 
 with open(sys.argv[1], "rb") as stream:
     settings, now, job_id, data, output = pickle.load(stream)

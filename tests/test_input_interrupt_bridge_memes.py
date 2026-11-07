@@ -18,9 +18,9 @@ from companion_onebot_bridge.profile_probe import ProfilePump
 from tests.conftest import run
 from tests.native_continuous_support import frame, host, recall_frame, until
 from tests.support.input_interrupt_bridge import model_response
+from tests.support.meme_runtime import RULE
+from tests.support.next_memes_catalog import metadata, png
 from tests.support.private_companion import companion_options
-from tests.test_meme_runtime import RULE
-from tests.test_next_memes_catalog import metadata, png
 
 
 def options(core, *, discovery=False):

@@ -1,9 +1,5 @@
 """Native SDK deferral uses the real isolated Reader and original media phases."""
-import asyncio
 import json
-import pickle
-import sys
-from pathlib import Path
 
 import httpx
 import pytest
@@ -16,25 +12,9 @@ from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call
 from tests.support import bili_video_entrypoint as reader_fixture
 from tests.support.bili_video_entrypoint import URL, reader_files, reader_once, upstream
+from tests.support.native_bili_video import sdk_step
+from tests.support.native_image_pipeline import admit_image
 from tests.support.prepare_owner_input import window
-from tests.test_native_image_pipeline import admit_image
-
-
-async def sdk_step(core, tmp_path, job_id, replies, expected, name):
-    config_path, output = tmp_path / (name + ".pickle"), tmp_path / (name + ".json")
-    config_path.write_bytes(pickle.dumps((core.settings, core.clock.now, job_id,
-                                         replies, expected, str(output))))
-    process = await asyncio.create_subprocess_exec(sys.executable,
-        str(Path(__file__).with_name("reader_sdk_worker.py")), str(config_path),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    try:
-        logs, _ = await asyncio.wait_for(process.communicate(), 45)
-    except BaseException:
-        process.kill()
-        await process.wait()
-        raise
-    assert process.returncode == 0, logs.decode(errors="replace")
-    return json.loads(output.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("boundary", ["complete", "stop", "binding", "unknown"])

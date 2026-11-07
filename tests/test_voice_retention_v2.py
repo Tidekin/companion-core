@@ -22,7 +22,7 @@ from companion.voice_protocol import (
 )
 from tests.conftest import run
 from tests.support.voice_jobs import TOKEN, create_asr, create_tts, prepared
-from tests.test_voice_node_api import app_for
+from tests.support.voice_node_api import app_for
 
 
 def request(jobs, sequence=None):

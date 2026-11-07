@@ -29,10 +29,10 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP, ReadFailure
 from tests.conftest import run
 from tests.support.bili_media import CDN, NAV, NOW, PLAY, VIEW, lease, pool
+from tests.support.plugin_readonly import SECRET, grant
 from tests.support.source_reader import response
 from tests.support.video_extract import local_media
 from tests.support.video_media_contract import clips, preview
-from tests.test_plugin_readonly import SECRET, grant
 
 
 class MediaCore:

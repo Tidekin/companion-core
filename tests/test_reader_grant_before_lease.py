@@ -7,7 +7,7 @@ from companion.contracts import CoreError, InboundEvent
 from tests.support.exploration import URL as BILI_URL
 from tests.support.exploration import configure
 from tests.support.onebot_events import normalized, raw_event
-from tests.test_plugin_readonly import registered_grant
+from tests.support.plugin_readonly import registered_grant
 
 
 @pytest.fixture

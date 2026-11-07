@@ -14,7 +14,7 @@ from companion.store import after, encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, worker_for
 from tests.support.native_consumer_entry import environment
-from tests.test_native_history_delivery import sdk_step
+from tests.support.native_history_delivery import sdk_step
 
 
 async def native_history(core, tmp_path, check, *, turns=3, independent=False):

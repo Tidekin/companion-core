@@ -21,6 +21,7 @@ from tests.native_continuous_support import Host
 from tests.support.core_http import real_core_http
 from tests.support.cumulative_budget import policy as quota_policy
 from tests.support.cumulative_budget import view
+from tests.support.native_account_host import configure_host
 from tests.support.onebot import provider
 from tests.support.onebot_account_actions import (
     catalog,
@@ -31,7 +32,6 @@ from tests.support.onebot_account_actions import (
 )
 from tests.support.onebot_events import config
 from tests.support.social_owner_authority import authorize
-from tests.test_native_account_host import configure_host
 
 
 @asynccontextmanager

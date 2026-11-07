@@ -15,7 +15,7 @@ from companion.worker_lock import single_worker
 from companion.worker_schedule import ClaimBusy
 from tests.conftest import run
 from tests.support.evaluation_process import process_config
-from tests.test_meme_core import body, caption_environment
+from tests.support.meme_core import body, caption_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 

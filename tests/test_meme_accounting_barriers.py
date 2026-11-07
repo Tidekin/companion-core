@@ -15,8 +15,8 @@ from cryptography.fernet import Fernet
 
 from companion_onebot_bridge import meme_accounting_drain as drain
 from tests.conftest import run
-from tests.test_meme_accounting_drain import stopped_case
-from tests.test_meme_responsibility import snapshot
+from tests.support.meme_accounting_drain import stopped_case
+from tests.support.meme_responsibility import snapshot
 
 
 @pytest.mark.parametrize("kind", ["stale_snapshot", "restored_backup"])
@@ -74,9 +74,9 @@ def test_original_reconciled_v2_then_legally_redacted_policy_is_still_refused(
     from tests import meme_authority_fixture
     from tests.conftest import ingest
     from tests.meme_authority_fixture import admit
+    from tests.support.meme_core import worker
+    from tests.support.meme_responsibility_bridge import bridge_case
     from tests.support.owner_delivery_reconciliation import delivery_proof
-    from tests.test_meme_core import worker
-    from tests.test_meme_responsibility_bridge import bridge_case
 
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     ingest(core, number=99, origin="synthetic-policy-source:FriendMessage:10001")

@@ -12,7 +12,7 @@ from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, worker_for
 from tests.support.native_consumer_entry import environment
-from tests.test_native_history_delivery import sdk_step
+from tests.support.native_history_delivery import sdk_step
 
 
 @pytest.mark.parametrize("turns,independent,history_bytes,padding,expected_items", [

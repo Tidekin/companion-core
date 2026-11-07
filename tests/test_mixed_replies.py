@@ -13,12 +13,12 @@ from companion_onebot_bridge import reply_segments
 from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+from tests.support.image_generation import config, draw, image_reply, owner_text, png
 from tests.support.onebot import provider as onebot_provider
 from tests.support.onebot_voice_pipeline import tick
 from tests.support.prepare_owner_input import native_spool, window
+from tests.support.voice_flow import finish_node
 from tests.support.voice_jobs import voice_config
-from tests.test_image_generation import config, draw, image_reply, owner_text, png
-from tests.test_voice_flow import finish_node
 from tests.voice_owner_fixtures import native_voice
 
 

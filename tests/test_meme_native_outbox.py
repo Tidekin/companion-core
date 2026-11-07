@@ -4,8 +4,8 @@ import pytest
 
 from companion.transport import enqueue
 from tests.conftest import run
-from tests.test_meme_native_discovery import native_case, release_foreground
-from tests.test_meme_service import claim, discovery_environment, submit
+from tests.support.meme_native_discovery import native_case, release_foreground
+from tests.support.meme_service import claim, discovery_environment, submit
 
 
 @pytest.mark.parametrize("state", ["PENDING", "LEASED", "SENDING"])

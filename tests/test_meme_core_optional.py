@@ -13,7 +13,7 @@ from companion.privacy import advance_epoch
 from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
-from tests.test_meme_core_runtime import runtime_case as runtime_case
+from tests.support.meme_core_runtime import runtime_case as runtime_case
 
 
 @pytest.mark.parametrize(

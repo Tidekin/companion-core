@@ -7,34 +7,14 @@ import pytest
 
 from companion import budget
 from companion.contracts import DeliveryResult, LeaseRequest
-from companion.model import ModelResponse
 from companion.reply_segments import SegmentedReplyConfig
 from companion.social import proactive_counts
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from tests.conftest import run
 from tests.notice_owner_fixtures import run_notice
 from tests.support.goals import result_for, setup_goal
-from tests.test_source_definitions import BILI, accepted_text, enable_sharing
-
-
-class NoticeModel:
-    def __init__(self, text):
-        self.text, self.calls = text, []
-
-    async def complete(self, messages, scenario):
-        self.calls.append((messages, scenario))
-        assert scenario == "activity"
-        return ModelResponse(self.text, 100, 20)
-
-
-def ready_share(core, text):
-    enable_sharing(core)
-    event = accepted_text(core)
-    core.observations.append("reader", event)
-    core.social.consider(event.event_id)
-    core.model = NoticeModel(text)
-    assert core.social.flush()
-    return event
+from tests.support.notices import NoticeModel, ready_share
+from tests.support.source_definitions import BILI, accepted_text, enable_sharing
 
 
 @pytest.mark.parametrize(

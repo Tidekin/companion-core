@@ -11,10 +11,10 @@ from companion.config import Settings
 from companion.core import Core
 from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
-from tests.test_meme_core import CAPTION
-from tests.test_meme_gallery import GalleryUpstream
-from tests.test_meme_pack_files import Upstream
-from tests.test_next_memes_discovery import resolver
+from tests.support.meme_core import CAPTION
+from tests.support.meme_gallery import GalleryUpstream
+from tests.support.meme_pack_files import Upstream
+from tests.support.next_memes_discovery import resolver
 
 config, now, candidate, output, *control = sys.argv[1:]
 assert control in ([], ["gate"])

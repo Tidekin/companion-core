@@ -7,7 +7,7 @@ import pytest
 
 from companion import file_parser, file_parser_client
 from companion.contracts import CoreError
-from tests.test_file_parser import IMAGE, FakeProcess
+from tests.support.file_parser import IMAGE, FakeProcess
 
 
 @pytest.mark.parametrize("stop_at", [1, 2])

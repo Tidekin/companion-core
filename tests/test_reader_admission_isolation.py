@@ -172,7 +172,7 @@ def test_reader_queue_rechecks_source_grant(core, monkeypatch, version, operatio
 
 def test_http_reader_lease_preserves_explicit_video_capability_and_media_limits(core):
     from companion.bili_video_protocol import CAPABILITY
-    from tests.test_bili_video import metadata
+    from tests.support.bili_video import metadata
 
     module, item_id, source = metadata(core)
     original = core.store.one("SELECT read_request_id FROM content_items WHERE item_id=?",

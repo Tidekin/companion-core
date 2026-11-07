@@ -7,7 +7,7 @@ from companion import meme_service
 from companion.config import Settings
 from companion.contracts import CoreError
 from tests.conftest import run
-from tests.test_meme_core_runtime import runtime_case as runtime_case
+from tests.support.meme_core_runtime import runtime_case as runtime_case
 
 
 @pytest.mark.parametrize("runtime_case", ["two_sources"], indirect=True)

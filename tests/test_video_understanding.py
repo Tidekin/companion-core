@@ -16,12 +16,12 @@ from companion.store import encode
 from companion.video_input import encode_animation, preview, text_and_estimate
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call, worker_for
+from tests.support.animated_owner_images import animation, policy
 from tests.support.failure_notice import assert_failure_notice
 from tests.support.live_image_input import png
 from tests.support.onebot_images import image_segment
 from tests.support.prepare_owner_input import native_spool, window
 from tests.support.video_understanding import video_policy
-from tests.test_animated_owner_images import animation, policy
 
 
 @pytest.mark.parametrize("format,mime", [
@@ -82,7 +82,7 @@ def test_fractional_apng_frame_durations_do_not_accumulate_rounding_drift():
 async def native_media(core, tmp_path, client, config, plan, *, extra_static=False):
     from companion_onebot_bridge.images import OriginalImage, upload_original
     from companion_onebot_bridge.network import private_http_client
-    from tests.test_native_image_pipeline import admit_image
+    from tests.support.native_image_pipeline import admit_image
 
     message = [image_segment("https://gchat.qpic.cn/animation")]
     if extra_static:

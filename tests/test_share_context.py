@@ -8,7 +8,7 @@ from companion.store import encode
 from tests.conftest import event, run
 from tests.support import native_image_memory as image_fixture
 from tests.support.dialogue_context import current_job, sent_history
-from tests.test_image_review import reply
+from tests.support.image_review import reply
 
 
 def test_media_only_input_does_not_inherit_the_previous_text_topic():

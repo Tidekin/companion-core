@@ -13,7 +13,7 @@ from companion.retrieval import SemanticIndex
 from companion.store import encode, uid
 from tests.conftest import run
 from tests.historical_input_retirement import historical_input
-from tests.test_qq_rich_input import rich_event
+from tests.support.qq_rich_input import rich_event
 
 
 @pytest.fixture(autouse=True)

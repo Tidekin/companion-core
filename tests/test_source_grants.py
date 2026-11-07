@@ -25,6 +25,7 @@ from tests.support.heybox_reader import mock_pool
 from tests.support.historical_schema import historical_database
 from tests.support.input_reply_migration import config_for
 from tests.support.observation_capture import observation
+from tests.support.plugin_readonly import NOW_DT, grant
 from tests.support.source_grants import (
     GRANT_ID,
     URL,
@@ -35,7 +36,6 @@ from tests.support.source_grants import (
     prepare,
     receipt,
 )
-from tests.test_plugin_readonly import NOW_DT, grant
 
 
 @pytest.mark.parametrize("stop", ["expiry", "read_revoke"])

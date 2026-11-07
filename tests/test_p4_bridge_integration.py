@@ -28,12 +28,12 @@ from source_reader.network import PublicHTTP, ReadFailure
 from source_reader.worker import tick
 from tests.conftest import FakeModel, run
 from tests.support.astrbot_delivery import deliver_expression
+from tests.support.content_bridge import event as bridge_event
 from tests.support.exploration import URL as BILI_URL
 from tests.support.exploration import configure
 from tests.support.heybox_reader import URL, mock_pool
+from tests.support.plugin_readonly import SECRET, native_post, registered_grant
 from tests.support.source_reader import META, PLAYER, SUBTITLE, response
-from tests.test_content_bridge import event as bridge_event
-from tests.test_plugin_readonly import SECRET, native_post, registered_grant
 
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLES = json.loads((ROOT / "docs/design-v0.6/heybox-live-p3.json").read_text("utf-8"))["samples"]
@@ -310,7 +310,7 @@ def test_p4_bilibili_source_scope_reaches_bridge_reply(rehearsal, subtitles):
 
 @pytest.mark.parametrize("slots", [1, 2])
 def test_p4_historical_image_manifests_remain_readable_in_core(rehearsal, slots):
-    from tests.test_content import enable, png
+    from tests.support.content import enable, png
 
     core, bridge, _ = rehearsal
     _, vision = enable(core)

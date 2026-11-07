@@ -25,9 +25,9 @@ from tests.support.model_carry_lifecycle import current_unknown, stop_current
 from tests.support.model_renewal import renewal
 from tests.support.owner_authority import activate
 from tests.support.voice_jobs import voice_config
-from tests.test_voice_node_api import independent_node, tls_core
-from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
-from tests.test_voice_quiescence import stopped_unknown
+from tests.support.voice_node_api import independent_node, tls_core
+from tests.support.voice_node_worker import node as node  # noqa: F401 -- pytest fixture
+from tests.support.voice_quiescence import stopped_unknown
 from tests.voice_owner_fixtures import native_reply
 
 

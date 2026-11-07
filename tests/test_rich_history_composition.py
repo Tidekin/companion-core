@@ -13,7 +13,7 @@ from tests.support.failure_notice import assert_failure_notice
 from tests.support.memory_review_output import assert_settled_calls
 from tests.support.native_recall_entry import native_recall, returned
 from tests.support.onebot_reference_reader import enriched
-from tests.test_qq_rich_input import card
+from tests.support.qq_rich_input import card
 
 OWNER_FIRST = "本次临时项目的验收代号改说白帆九号。"
 OWNER_NOW = "那这个临时项目的代号还是原来的？"

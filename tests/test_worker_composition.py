@@ -146,8 +146,8 @@ def test_content_worker_finishes_queued_article_images_without_semantic_startup(
     core, unavailable_semantics, opened_stores, monkeypatch,
 ):
     from companion import content, content_worker
-    from tests.test_article_vision import article
-    from tests.test_content import enable, png
+    from tests.support.article_vision import article
+    from tests.support.content import enable, png
 
     service, _ = enable(core)
     owner_id, article_id = article(core, 1)
@@ -200,8 +200,8 @@ def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_ret
     core, unavailable_semantics, opened_stores, monkeypatch,
 ):
     from companion import content, content_worker
-    from tests.test_article_vision import article
-    from tests.test_content import enable, png
+    from tests.support.article_vision import article
+    from tests.support.content import enable, png
 
     service, vision = enable(core)
     owner_id, article_id = article(core, 1)

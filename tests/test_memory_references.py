@@ -13,7 +13,7 @@ from companion.memory_work import checkpoint_state
 from companion.store import encode
 from tests.conftest import run
 from tests.support.memory_references import TEXT, prepared
-from tests.test_voice_flow import finish_node, flow_fixture, upload
+from tests.support.voice_flow import finish_node, flow_fixture, upload
 
 
 @pytest.mark.parametrize("kind", ["document", "image", "transcript", "quote", "assistant"])

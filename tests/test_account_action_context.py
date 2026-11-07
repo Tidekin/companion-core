@@ -25,6 +25,7 @@ from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer
 from tests.support.core_http import real_core_http
+from tests.support.native_account_host import configure_host
 from tests.support.onebot import provider
 from tests.support.onebot_account_actions import (
     model_response,
@@ -35,7 +36,6 @@ from tests.support.onebot_account_actions import (
 from tests.support.onebot_events import raw_event
 from tests.support.owner_authority import activate
 from tests.support.social_owner_authority import authorize, close_provider_clients  # noqa: F401
-from tests.test_native_account_host import configure_host
 
 
 @asynccontextmanager

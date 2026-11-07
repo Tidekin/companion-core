@@ -9,11 +9,8 @@ from companion import conversation_policy
 from companion import token_measurement as tm
 from companion.config import Settings
 from companion.model import MEMORY_RULES, PRINCIPLES, model_payload
+from tests.support.humanlike_defaults import plain
 from tests.support.token_measurement import MESSAGES, configure
-
-
-def plain(**values):
-    return Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="x" * 32, **values)
 
 
 def test_defaults_enable_policy_memory_bubbles_and_chat_thinking():

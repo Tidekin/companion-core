@@ -10,9 +10,9 @@ from companion import meme_assets
 from companion.backup import backup, restore
 from companion.store import Store
 from tests.conftest import run
-from tests.test_meme_core import worker
-from tests.test_meme_native_discovery import native_case, release_foreground
-from tests.test_meme_pack_files import Upstream, blob_sha
+from tests.support.meme_core import worker
+from tests.support.meme_native_discovery import native_case, release_foreground
+from tests.support.meme_pack_files import Upstream, blob_sha
 
 
 def test_identical_bytes_distinct_sources_count_both_blobs_and_reuse_one_original_caption_fee(

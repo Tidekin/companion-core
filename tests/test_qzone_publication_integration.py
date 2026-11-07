@@ -17,7 +17,7 @@ from tests.conftest import run
 from tests.support.life_worker_integration import process_worker
 from tests.support.native_consumer_entry import environment
 from tests.support.owner_authority import activate
-from tests.test_qzone_integration import options, reader_process, selected
+from tests.support.qzone_integration import options, reader_process, selected
 
 
 async def retained_space_draft(core, entry, tmp_path):

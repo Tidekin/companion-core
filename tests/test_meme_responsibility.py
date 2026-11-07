@@ -1,50 +1,19 @@
 """Known-caption private reads preserve original finance and erase custody."""
 
 import asyncio
-from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from companion import meme_responsibility, meme_service
-from companion.config import ImageInputPolicy
 from companion.store import after
 from companion_meme_protocol import digest
 from tests.conftest import run
 from tests.meme_authority_fixture import admit, notice, stop
-from tests.test_meme_core import body, caption_environment, worker
-from tests.test_meme_service import claim, discovery_environment, reservation, result, submit
-
-
-def snapshot(core):
-    return {
-        "database": tuple(core.store.db.iterdump()),
-        "journal": Path(core.settings.paid_model.journal_path).read_bytes(),
-        "ledger": core.ledger.path.read_bytes(),
-    }
-
-
-@asynccontextmanager
-async def liability_case(core, tmp_path, monkeypatch, *, cap=50000):
-    paid = {"max_output_tokens": 4096, "meme_input": ImageInputPolicy(
-        approval_sha256="e" * 64, estimated_tokens_per_image=100,
-        max_bytes_per_image=4000000, max_pixels_per_image=16000000,
-        max_images_per_request=5)}
-    async with discovery_environment(core, tmp_path, monkeypatch, paid=paid,
-        meme_semantics_enabled=True, meme_caption_daily_micro_usd=cap) as values:
-        event, _, (client, config, grant, now) = values
-        submit(core, event)
-        attempt = claim(core)
-        reservation(core, attempt)
-        result(core, attempt)
-        payload = body(core, event, attempt, now)
-        response = await client.post("/internal/v1/memes/captions", json=payload)
-        assert response.status_code == 200, response.text
-        job_id = response.json()["job_id"]
-        yield SimpleNamespace(client=client, job_id=job_id, event=event, config=config,
-            grant=grant, now=now, payload=payload, attempt=attempt,
-            path="/internal/v1/memes/captions/" + job_id + "/responsibility")
+from tests.support.meme_core import body, caption_environment, worker
+from tests.support.meme_responsibility import liability_case, snapshot
+from tests.support.meme_service import claim, reservation, result
 
 
 async def unchanged_read(core, c, *, status=200):

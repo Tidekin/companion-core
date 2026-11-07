@@ -6,32 +6,16 @@ measurement of semantic model quality.
 
 import json
 
-import httpx
 import pytest
 
 from companion import image_spool, memory_references, retrieval_work
-from companion.config import ObservationAdapterConfig
 from companion.contracts import Candidate, CoreError
 from companion.memory_context import MemoryContext
 from tests.conftest import run
-from tests.sdk_reader_fixture import answer, worker_for
+from tests.support.image_review import OBSERVATION, reply
+from tests.support.native_history_delivery import sdk_step
+from tests.support.native_image_bursts import model_images
 from tests.support.native_image_memory import native_image_memory
-from tests.test_native_history_delivery import sdk_step
-from tests.test_native_image_bursts import model_images
-
-OBSERVATION = {"observation_adapters": {"content_image": ObservationAdapterConfig(
-    source="qq_image", token="synthetic-image-reference-token-12345", media_analysis=True)}}
-
-
-async def reply(core, entry, text, calls):
-    def provider(request):
-        calls.append(json.loads(request.content))
-        return httpx.Response(200, json=answer(text))
-
-    async with worker_for(core, provider) as worker:
-        assert await worker.run_once()
-    delivered = await entry.send(entry.client, entry.protocol)
-    assert delivered["attempt_states"].get("ACK")
 
 
 def test_image_derived_fact_survives_native_checkpoint_and_delivery(core, tmp_path):

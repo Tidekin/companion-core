@@ -18,8 +18,8 @@ from companion.privacy import advance_epoch
 from companion.store import Store, encode
 from companion_meme_protocol import digest
 from tests.conftest import run
-from tests.test_meme_core_runtime import runtime_case as runtime_case
-from tests.test_meme_index import Encoder, local_encoder, vector
+from tests.support.meme_core_runtime import runtime_case as runtime_case
+from tests.support.meme_index import Encoder, local_encoder, vector
 
 
 def freeze(c, monkeypatch):

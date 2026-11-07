@@ -11,7 +11,7 @@ from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import VoiceDeliveryEnvelope
 from tests.support.evaluation import work
 from tests.support.owner_delivery_reconciliation import delivery_proof
-from tests.test_voice_flow import delivery_check, finish_node
+from tests.support.voice_flow import delivery_check, finish_node
 from tests.voice_owner_fixtures import native_voice
 
 

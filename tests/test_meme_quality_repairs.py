@@ -12,10 +12,10 @@ from companion.expression import ExpressionEngine
 from companion.meme_retrieval import OFFER, _candidate, query_for
 from tests.conftest import run
 from tests.meme_authority_fixture import admit
-from tests.test_meme_core import worker
-from tests.test_meme_core_runtime import runtime_case as runtime_case
-from tests.test_meme_native_discovery import native_case, release_foreground
-from tests.test_meme_pack_files import Upstream
+from tests.support.meme_core import worker
+from tests.support.meme_core_runtime import runtime_case as runtime_case
+from tests.support.meme_native_discovery import native_case, release_foreground
+from tests.support.meme_pack_files import Upstream
 
 
 @pytest.mark.parametrize("text,intent,target,request_kind", [

@@ -197,7 +197,7 @@ def test_numeric_target_mismatch_cannot_be_overridden_by_share_url():
 
 def test_native_short_share_http_worker_keeps_ordered_media_and_provenance(core, tmp_path):
     from source_reader.heybox_source import NativeHeyboxSource
-    from tests.test_plugin_readonly import registered_grant
+    from tests.support.plugin_readonly import registered_grant
 
     configure(core)
     core.settings.content_enabled = True

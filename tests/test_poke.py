@@ -23,26 +23,12 @@ from companion.store import Store, encode, migrate
 from companion.transport import enqueue_reply_parts
 from tests.poke_authority_fixture import environment as native_environment
 from tests.poke_authority_fixture import owner_turn, refresh, settle, signed
-
-
-def native_frame(now=1792382400, **changes):
-    return {"post_type": "notice", "notice_type": "notify", "sub_type": "poke",
-            "time": now, "self_id": 10002, "user_id": 10001, "sender_id": 10001,
-            "target_id": 10002, "action": "拍了拍", "suffix": "", **changes}
+from tests.support.poke import claim, native_frame, receive
 
 
 @pytest.fixture
 def environment(core, tmp_path):
     return native_environment(core, tmp_path)
-
-
-def receive(env, **changes):
-    return poke.receive(env.store, env.settings, env.clock, signed(env, **changes))
-
-
-def claim(env):
-    env.clock.advance(2)
-    return poke.claim_ready(env.store, env.settings, env.clock, "poke-worker")
 
 
 def test_claim_aggregates_day_range_and_keeps_midnight_boundary(environment, monkeypatch):

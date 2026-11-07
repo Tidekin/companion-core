@@ -13,9 +13,9 @@ from companion.store import encode
 from companion.video_input import VideoCandidate
 from tests.conftest import Clock, run
 from tests.sdk_reader_fixture import Provider, worker_for
+from tests.support.native_video import animation, responses
 from tests.support.owner_console import ORIGIN, PASSWORD
 from tests.support.prepare_owner_input import window
-from tests.test_native_video import animation, responses
 
 
 async def resident(config_file):

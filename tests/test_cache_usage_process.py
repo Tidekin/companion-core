@@ -12,7 +12,7 @@ from companion import beta_observation, budget, paid_budget
 from companion.store import encode
 from tests.support.native_consumer_entry import environment
 from tests.support.token_measurement import configure
-from tests.test_voice_node_api import tls_core
+from tests.support.voice_node_api import tls_core
 
 
 def test_signed_entry_and_worker_keep_absent_cache_distinct_from_explicit_zero(core, tmp_path):

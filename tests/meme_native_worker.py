@@ -11,7 +11,7 @@ from companion.config import Settings
 from companion.core import Core
 from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
-from tests.test_meme_core import CAPTION
+from tests.support.meme_core import CAPTION
 
 settings_path, now, output = sys.argv[1:]
 settings = Settings.model_validate_json(Path(settings_path).read_text("utf-8"))

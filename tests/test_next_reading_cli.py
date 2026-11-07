@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 
 from companion.reading_protocol import ReadObservation
-from tests.test_next_reading import HTML
-from tests.test_next_reading_worker import TOKEN, lease
+from tests.support.next_reading import HTML
+from tests.support.next_reading_worker import TOKEN, lease
 
 
 @pytest.mark.parametrize("protocol", ["legacy", "reading-v1"])

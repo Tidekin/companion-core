@@ -21,7 +21,7 @@ from tests.conftest import run
 from tests.poke_authority_fixture import environment as native_environment
 from tests.poke_authority_fixture import refresh
 from tests.support.core_http import real_core_http
-from tests.test_poke import native_frame
+from tests.support.poke import native_frame
 
 
 @pytest.fixture(autouse=True)

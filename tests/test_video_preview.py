@@ -9,22 +9,8 @@ from PIL import Image
 from companion import video_input
 from companion.contracts import CoreError
 from companion.image_input import text_and_estimate
-from tests.test_animated_owner_images import policy
-
-FORMATS = [("GIF", "image/gif"), ("WEBP", "image/webp"), ("PNG", "image/apng")]
-COLORS = ["white", "red", "lime", "blue", "yellow", "magenta", "cyan"]
-
-
-def animation(format, *, count=4, size=(48, 24), poster=False, fractional=False):
-    frames = [Image.new("RGBA", size, color) for color in COLORS[:count]]
-    if poster:
-        frames.insert(0, Image.new("RGBA", size, "black"))
-    output = io.BytesIO()
-    durations = [1.4] * count if fractional else [80, 10, 10, 80, 120, 400, 80][:count]
-    frames[0].save(output, format=format, save_all=True, append_images=frames[1:],
-                   default_image=poster, duration=durations, loop=0,
-                   optimize=False, lossless=True)
-    return output.getvalue()
+from tests.support.animated_owner_images import policy
+from tests.support.video_preview import COLORS, FORMATS, animation
 
 
 @pytest.mark.parametrize("format,mime", FORMATS)
@@ -111,7 +97,7 @@ def test_original_bounds_are_not_relaxed_by_sampling(limit):
     elif limit == "pixels":
         image_policy = image_policy.model_copy(update={"max_pixels_per_image": 48 * 24 - 1})
     elif limit in {"frames", "decoded"}:
-        from tests.test_animated_owner_images import animation as many_frames
+        from tests.support.animated_owner_images import animation as many_frames
 
         original = many_frames(count=241 if limit == "frames" else 65,
                                size=(12, 8) if limit == "frames" else (1000, 1000))

@@ -18,9 +18,9 @@ from companion.token_measurement import measure_request
 from companion.transport import enqueue
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, call
+from tests.support.context_planner import request_context
 from tests.support.owner_memory import environment
 from tests.support.owner_runtime import chat
-from tests.test_context_planner import request_context
 
 
 def result():

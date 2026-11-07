@@ -263,8 +263,8 @@ def test_owner_pending_blocks_all_autonomous_lanes_but_not_native_chat(core):
 
 def test_chat_bound_content_dependency_keeps_running_while_selector_yields(core, monkeypatch):
     from companion import content
-    from tests.test_article_vision import article
-    from tests.test_content import enable, png
+    from tests.support.article_vision import article
+    from tests.support.content import enable, png
 
     service, provider = enable(core)
     owner_id, article_id = article(core, 1)

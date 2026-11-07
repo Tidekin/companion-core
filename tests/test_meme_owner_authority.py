@@ -9,38 +9,14 @@ import pytest
 
 from companion import meme_service, owner_authority
 from companion.contracts import CoreError
-from companion.image_input import ImageInputPolicy
 from companion.model import ModelClient
 from companion.owner_authority_protocol import AuthorityStop
 from tests.conftest import run
-from tests.meme_authority_fixture import admit, environment
+from tests.meme_authority_fixture import environment
 from tests.support.evaluation_process import process_config
-from tests.test_meme_core import CAPTION, body
-from tests.test_meme_service import claim, reservation, result, submit
-
-
-def configure(core, *, caption=False):
-    core.settings.meme_discovery_enabled = True
-    core.settings.meme_semantics_enabled = caption
-    core.settings.meme_caption_daily_micro_usd = 50000
-    return {"max_output_tokens": 4096, **({"meme_input": ImageInputPolicy(
-        approval_sha256="e" * 64, estimated_tokens_per_image=100,
-        max_bytes_per_image=4000000, max_pixels_per_image=16000000,
-        max_images_per_request=5)} if caption else {})}
-
-
-async def discovery(core, client, config, grant, now):
-    event, response = await admit(client, config, grant, now)
-    assert response.status_code == 202, response.text
-    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?",
-                       (response.json()["job_id"],))
-    queued = await client.post("/internal/v1/memes/discovery/submit", json={
-        "event_id": event["event_id"], "reply_revision": 1,
-        "intent": "celebrate", "provider": "community"})
-    assert queued.status_code == 200, queued.text
-    item = claim(core)
-    reservation(core, item)
-    return event, item
+from tests.support.meme_core import CAPTION, body
+from tests.support.meme_owner_authority import configure, discovery
+from tests.support.meme_service import result, submit
 
 
 def test_discovery_only_requires_its_original_native_grant(core, tmp_path, monkeypatch):

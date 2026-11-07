@@ -12,7 +12,7 @@ from companion_onebot_bridge import images, pending_media, voice_runtime
 from companion_onebot_bridge.spool import encode
 from companion_onebot_bridge.window import digest
 from tests.support.onebot_images import image_segment
-from tests.test_qq_face_images import face
+from tests.support.qq_face_images import face
 
 
 def queue_window(db):

@@ -15,7 +15,7 @@ from companion.model import EXTRACT_RULES, ModelClient
 from companion.store import Store
 from tests.conftest import run
 from tests.meme_authority_fixture import admit
-from tests.test_meme_service import claim, discovery_environment, reservation, result, submit
+from tests.support.meme_service import claim, discovery_environment, reservation, result, submit
 
 
 def test_restored_discovery_reservation_cannot_refund_unknown_post_snapshot_io(

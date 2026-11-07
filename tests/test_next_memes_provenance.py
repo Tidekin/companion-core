@@ -8,9 +8,9 @@ import pytest
 
 from companion_meme_sources import ArchiveMember, ReviewApproval, SearchImage
 from companion_onebot_bridge.meme_discovery import run_discovery
-from tests.test_next_memes_catalog import check, metadata, png
-from tests.test_next_memes_discovery import async_check, resolver
-from tests.test_next_memes_discovery import setup as setup
+from tests.support.next_memes_catalog import check, metadata, png
+from tests.support.next_memes_discovery import async_check, resolver
+from tests.support.next_memes_discovery import setup as setup
 
 REQUESTED = "https://licensed.example/image.png"
 FINAL = "https://unlicensed.example/image.png"

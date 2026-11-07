@@ -3,7 +3,7 @@
 import os
 
 from companion import image_generation, image_spool
-from tests.test_image_originals import staged_original
+from tests.support.image_originals import staged_original
 
 
 def test_claim_does_not_scan_or_read_media_directories(core, monkeypatch):

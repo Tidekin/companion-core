@@ -10,9 +10,9 @@ from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.native_image_pipeline import admit_image
 from tests.support.onebot import provider
 from tests.support.prepare_owner_input import native_spool, window
-from tests.test_native_image_pipeline import admit_image
 
 
 def test_preflight_failure_does_not_poison_retry_or_restart(core, tmp_path):

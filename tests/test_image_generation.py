@@ -1,13 +1,11 @@
 """Model-requested pictures: one priced tool call, Outbox attachment and leased Bridge read."""
 
 import base64
-import io
 import json
 from contextlib import closing
 
 import httpx
 import pytest
-from PIL import Image
 from pydantic import SecretStr, ValidationError
 
 from companion import image_generation
@@ -18,33 +16,9 @@ from companion.store import Store
 from companion_onebot_bridge.generated_image_http import read_image
 from companion_onebot_bridge.outbound import validate_item
 from tests.conftest import run
-from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.image_generation import URL, config, draw, image_reply, owner_text, png
 from tests.support.prepare_owner_input import native_spool, window
-from tests.test_native_image_pipeline import admit_image
-
-URL = "https://images.example.test/v1/images/generations"
-
-
-def png(color="orange", size=(16, 12)):
-    stream = io.BytesIO()
-    Image.new("RGB", size, color).save(stream, format="PNG")
-    return stream.getvalue()
-
-
-def config(**changes):
-    values = {
-        "enabled": True,
-        "endpoint": MediaEndpoint(url=URL, key=SecretStr("synthetic-image-provider-key"),
-                                  model="gpt-image-1", max_request_micro_usd=40000),
-        "daily_micro_usd": 200000,
-        **changes,
-    }
-    return ImageGenerationConfig(**values)
-
-
-def image_reply(data):
-    return httpx.Response(200, json={"created": 1, "data": [
-        {"b64_json": base64.b64encode(data).decode()}]})
 
 
 def test_maintenance_preserves_bytes_between_dispatch_and_result_commit(
@@ -84,16 +58,6 @@ def test_maintenance_preserves_bytes_between_dispatch_and_result_commit(
 
     monkeypatch.setattr(image_generation, "_write", write)
     run(scenario())
-
-
-def draw(prompt="一只在窗边晒太阳的橘猫", size="1024x1024", call_id="draw-1"):
-    return answer(calls=[call(call_id, "generate_image", {"prompt": prompt, "size": size})])
-
-
-async def owner_text(core, client, config_, plan, tmp_path, text, number=42):
-    event, _ = await admit_image(core, client, config_, plan, tmp_path, number=number,
-                                 message=[{"type": "text", "data": {"text": text}}])
-    return event
 
 
 def test_config_requires_priced_https_provider():

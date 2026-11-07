@@ -7,13 +7,13 @@ import httpx
 import pytest
 
 from companion import content_files, file_parser, owner_authority
-from companion.config import ObservationAdapterConfig
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from companion_delivery_protocol.authority import file_upload_signing_payload
 from tests.conftest import run
+from tests.support.native_file_pipeline import configure
+from tests.support.native_image_pipeline import admit_image
 from tests.support.prepare_owner_input import window
-from tests.test_native_image_pipeline import admit_image
 
 
 async def upload(core, client, config, plan, tmp_path):
@@ -41,12 +41,6 @@ async def upload(core, client, config, plan, tmp_path):
     assert response.json()["state"] == "QUEUED"
     assert (await client.post(path + "/file", content=data, headers=headers)).json()["duplicate"]
     return event, data
-
-
-def configure(core):
-    core.settings.observation_enabled = True
-    core.settings.observation_adapters = {"content_file": ObservationAdapterConfig(
-        source="qq_file", token="synthetic-file-adapter-token-12345")}
 
 
 def test_native_file_http_upload_and_guarded_worker(core, tmp_path):
@@ -99,9 +93,9 @@ def test_native_file_bridge_queue_recovery(core, tmp_path, recovery):
     from companion_onebot_bridge.capture import prepare_owner_input
     from companion_onebot_bridge.network import private_http_client
     from companion_onebot_bridge.onebot_client import OneBotClient
+    from tests.support.native_media_queue import row
     from tests.support.onebot_events import raw_event
     from tests.support.prepare_owner_input import native_spool
-    from tests.test_native_media_queue import row
 
     async def scenario():
         configure(core)

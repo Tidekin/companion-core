@@ -10,8 +10,8 @@ from companion.contracts import CoreError
 from companion.meme_retrieval import OFFER
 from companion.store import encode
 from tests.conftest import run
-from tests.test_meme_core_runtime import runtime_case as runtime_case
-from tests.test_meme_index import local_encoder, vector
+from tests.support.meme_core_runtime import runtime_case as runtime_case
+from tests.support.meme_index import local_encoder, vector
 
 
 @pytest.mark.parametrize("runtime_case", ["no_match"], indirect=True)
@@ -189,7 +189,7 @@ def test_unindexed_selected_candidate_records_actual_batch_limit(runtime_case, m
         return original_rows(sql, params)
 
     from companion.meme_retrieval import MemeRetrieval
-    from tests.test_meme_index import Encoder
+    from tests.support.meme_index import Encoder
 
     class Orthogonal(Encoder):
         def passage_embed(self, texts, *, batch_size):

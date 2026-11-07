@@ -3,14 +3,11 @@
 import asyncio
 import json
 import os
-import ssl
 import subprocess
 import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from pathlib import Path
-from unittest.mock import patch
 
 import httpx
 import pytest
@@ -28,12 +25,12 @@ from companion.voice_protocol import (
 )
 from companion_voice_node.state import NodeState
 from companion_voice_node.supervisor import ProcessSupervisor, process_has_exited
-from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker, local_manifest
+from companion_voice_node.worker import VoiceNodeWorker, local_manifest
 from tests.conftest import run
 from tests.support.voice_jobs import voice_config
-from tests.test_voice_node_api import independent_node, node_wall_clock, tls_core
-from tests.test_voice_node_worker import FakeCore, FixtureSupervisor, child_receipts
-from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
+from tests.support.voice_node_api import independent_node, tls_core
+from tests.support.voice_node_worker import FakeCore, FixtureSupervisor, child_receipts
+from tests.support.voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 
 
 class CancelCore(FakeCore):
@@ -179,7 +176,7 @@ async def launch_node(config, certificate, counter, tmp_path, timestamp, *, mono
     config_file.write_text(encode(config.model_dump(mode="json") | {
         "credential": config.credential.get_secret_value()}), encoding="utf-8")
     return await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
-        "tests.test_voice_node_cancellation_handshake", "--cancel-node", str(config_file),
+        "tests.support.voice_node_cancellation_handshake", "--cancel-node", str(config_file),
         str(certificate), str(counter), "gate" if gate else "resume", loss or "none",
         str(timestamp), str(monotonic_start),
         cwd=str(config.workspace), stdin=asyncio.subprocess.PIPE,
@@ -312,50 +309,3 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
                     "active_job_id"] is None
 
     run(scenario())
-
-
-async def independent_cancel_node():
-    config = VoiceNodeConfig.model_validate_json(await asyncio.to_thread(
-        Path(sys.argv[2]).read_text, "utf-8"))
-    trust = ssl.create_default_context(cafile=sys.argv[3])
-    counter, gate, loss = Path(sys.argv[4]), sys.argv[5] == "gate", sys.argv[6]
-
-    class GatedSupervisor(FixtureSupervisor):
-        async def start(self, seconds):
-            await super().start(seconds)
-            if gate:
-                print(json.dumps({"stage": "child-ready", "pid": self.process.pid,
-                    "identity": self.identity, "node_pid": os.getpid()}), flush=True)
-                assert await asyncio.wait_for(asyncio.to_thread(sys.stdin.readline), 15) == (
-                    "continue\n")
-
-    class LostControl(httpx.AsyncHTTPTransport):
-        async def handle_async_request(self, request):
-            nonlocal loss
-            cancel = (request.url.path.endswith("/stop")
-                      and json.loads(request.content).get("outcome") == "CANCELLED")
-            if cancel and loss == "before":
-                loss = "none"
-                raise httpx.ReadError("synthetic cancel request lost", request=request)
-            response = await super().handle_async_request(request)
-            if cancel and loss == "after":
-                loss = "none"
-                await response.aread()
-                await response.aclose()
-                raise httpx.ReadError("synthetic cancel ACK lost", request=request)
-            return response
-
-    # Both processes advance from the same anchor, including startup and imports.
-    clock = node_wall_clock(float(sys.argv[7]), float(sys.argv[8]))
-    with patch("companion_voice_node.worker.time.time", side_effect=clock):
-        try:
-            outcome = await VoiceNodeWorker(config, transport=LostControl(verify=trust),
-                supervisor_factory=lambda workspace, temporary: GatedSupervisor(
-                    workspace, temporary, counter=counter)).run(once=True)
-        except VoiceProtocolError as error:
-            outcome = error.code
-    print(json.dumps({"stage": "finished", "outcome": outcome, "pid": os.getpid()}), flush=True)
-
-
-if __name__ == "__main__" and sys.argv[1:2] == ["--cancel-node"]:
-    asyncio.run(independent_cancel_node())

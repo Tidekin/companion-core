@@ -14,7 +14,7 @@ from companion.transport import begin_send, delivery_result, lease_deliveries
 from tests.conftest import ingest, run
 from tests.notice_owner_fixtures import activate_notice_authority, run_notice
 from tests.support.goals import result_for, setup_goal
-from tests.test_notices import NoticeModel
+from tests.support.notices import NoticeModel
 
 
 def failed_commitment(core, tmp_path=None, **paid_limits):
