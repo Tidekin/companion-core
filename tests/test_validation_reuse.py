@@ -48,7 +48,7 @@ def test_recording_a_group_validates_once_and_retains_all_receipts(core, tmp_pat
     original, recorded = owner_delivery.record_replies, []
 
     def record(store, settings, clock, job, ids):
-        assert store.db.in_transaction
+        assert store.in_transaction
         with monkeypatch.context() as patch:
             sources = count_calls(patch, owner_delivery, "_sources")
             usage = count_calls(patch, owner_delivery, "_usage")
@@ -82,7 +82,7 @@ def test_recording_requires_the_entire_ordered_group(core, tmp_path, monkeypatch
     original, errors = owner_delivery.record_replies, []
 
     def record(store, settings, clock, job, ids):
-        assert store.db.in_transaction and len(ids) == 2
+        assert store.in_transaction and len(ids) == 2
         supplied = {"incomplete": ids[:1], "reversed": ids[::-1], "duplicate": ids * 2}[invalid]
         try:
             original(store, settings, clock, job, supplied)

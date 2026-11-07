@@ -3,16 +3,16 @@
 import asyncio
 import json
 import pickle
-import sqlite3
 import sys
-from contextlib import closing
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from companion import agent_chat, reply_revision
 from companion.agent_persistence import ConversationStore
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
 from tests.support.reading_followup import READER_AUTH, admit, lease, window
 from tests.support.reading_protocol import envelope
@@ -23,17 +23,17 @@ def test_recorded_sources_revalidate_without_competing_for_the_writer(core):
     accepted = accept(core)
     job = core.claim_job("source-worker")
     reply_revision.remember_sources(core.store, job, [])
-    before = core.store.db.total_changes
-    core.store.db.execute("PRAGMA busy_timeout=5")
-    with closing(sqlite3.connect(core.settings.database, isolation_level=None)) as writer:
-        writer.execute("BEGIN IMMEDIATE")
+    before = logical_state(core.store)
+    with psycopg.connect(core.settings.database.get_secret_value()) as writer:
+        writer.execute("LOCK TABLE job_sources IN SHARE MODE")
+        core.store.execute("SET lock_timeout='100ms'")
         try:
             reply_revision.remember_sources(core.store, job, [accepted["event_id"]])
         finally:
-            writer.rollback()
-    assert core.store.db.total_changes == before
-    assert not core.store.db.in_transaction
-    assert core.store.db.execute("PRAGMA query_only").fetchone()[0] == 0
+            core.store.execute("RESET lock_timeout")
+    assert logical_state(core.store) == before
+    assert not core.store.in_transaction
+    assert core.store.one("SHOW transaction_read_only")["transaction_read_only"] == "off"
 
 
 @pytest.mark.parametrize("failure,boundary", [
@@ -58,19 +58,19 @@ def test_deferred_reader_restore_handles_only_real_busy_and_resumes_once(
             def contend(persistence):
                 attempts.append(1)
                 if len(attempts) == 1:
-                    with closing(sqlite3.connect(core.settings.database,
-                                                 isolation_level=None)) as writer:
-                        writer.execute("BEGIN IMMEDIATE")
-                        try:
+                    try:
+                        with psycopg.connect(core.settings.database.get_secret_value()) as writer:
+                            writer.execute("LOCK TABLE agent_conversations IN SHARE MODE")
                             if failure == "schema":
                                 persistence.store.execute("SELECT * FROM missing_restore_table")
                             with persistence.store.transaction():
-                                pass
-                        finally:
-                            writer.rollback()
-                            if failure == "recalled":
-                                core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s',
-                                                   (event["event_id"],))
+                                persistence.store.execute(
+                                    "LOCK TABLE agent_conversations IN ROW EXCLUSIVE MODE NOWAIT"
+                                )
+                    finally:
+                        if failure == "recalled":
+                            core.store.execute("UPDATE events SET redacted=1 WHERE event_id=%s",
+                                               (event["event_id"],))
 
             def restore(persistence):
                 if boundary == "load":
@@ -85,7 +85,6 @@ def test_deferred_reader_restore_handles_only_real_busy_and_resumes_once(
             provider = Provider()
             core.clock.advance(2)
             async with worker_for(core, provider) as worker:
-                worker.store.db.execute("PRAGMA busy_timeout=5")
                 with monkeypatch.context() as patch:
                     patch.setattr(ConversationStore, "load", restore)
                     patch.setattr(agent_chat, "wait", waiting)
