@@ -8,6 +8,7 @@ from cryptography.fernet import Fernet
 from pydantic import SecretStr, ValidationError
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.backup import backup, restore
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
@@ -103,6 +104,7 @@ def test_owner_registry_cannot_be_forged_by_reader_or_bridge_and_contains_no_cre
     core.settings.control_token = SecretStr("owner-control-" * 4)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     body = {"adapter_id": "heybox", **authorization(core).snapshot()}
 
     async def scenario():
@@ -137,8 +139,13 @@ def test_owner_registry_cannot_be_forged_by_reader_or_bridge_and_contains_no_cre
             assert rejected.status_code == 400 and "PRIVATE" not in rejected.text
 
     run(scenario())
-    columns = {row["name"] for row in core.store.rows("PRAGMA table_info(source_grant_revisions)")}
-    assert columns == {"grant_id", "epoch", "fingerprint", "expires_at", "created_at"}
+    columns = {row["name"] for row in core.store.rows(
+        "SELECT column_name AS name FROM information_schema.columns "
+        "WHERE table_schema=current_schema() AND table_name='source_grant_revisions'"
+    )}
+    assert columns == {
+        "grant_id", "epoch", "fingerprint", "expires_at", "created_at", "record_sequence",
+    }
 
 
 def test_open_ended_expiry_requires_explicit_registered_bilibili_authority(core, tmp_path):

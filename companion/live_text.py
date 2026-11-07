@@ -576,14 +576,17 @@ def _ledger_custody(store, settings, expected_sha256=None):
     if expected_sha256 is not None and digest != expected_sha256:
         raise CoreError("LIVE_TEXT_HANDOFF_LEDGER_CHANGED", 409)
     records = ledger.read()
-    ledger_id = store.one("SELECT value FROM runtime_meta WHERE key = 'ledger_id'")
-    if not ledger_id or ledger_id["value"] != records[0]["ledger_id"]:
+    projection = store.rows(
+        "SELECT identity.value AS ledger_id, applied.erasure_id, applied.state, "
+        "applied.restore_min_replay_version FROM (VALUES (1)) AS anchor(value) "
+        "LEFT JOIN runtime_meta AS identity ON identity.key='ledger_id' "
+        "LEFT JOIN privacy_erasure_ledger AS applied ON TRUE"
+    )
+    if projection[0]["ledger_id"] != records[0]["ledger_id"]:
         raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
     applied = {
         row["erasure_id"]: row
-        for row in store.rows(
-            "SELECT erasure_id, state, restore_min_replay_version FROM privacy_erasure_ledger"
-        )
+        for row in projection if row["erasure_id"] is not None
     }
     if len(applied) != len(records) - 1 or any(
         not (row := applied.get(record["erasure_id"]))

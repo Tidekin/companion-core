@@ -95,6 +95,7 @@ class OwnerAuthorityView:
     policy: OwnerGrantPolicy
     journal_id: str
     journal_path: str
+    created_at: str
 
 
 def check_response(view, purpose):
@@ -284,7 +285,9 @@ def current(store, settings, clock, *, purpose=None, authority=None):
     _ledger_custody(store, settings)
     if policy.expires_at is not None and datetime.fromisoformat(clock()) >= policy.expires_at:
         raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
-    return OwnerAuthorityView(ref, policy, row["journal_id"], row["journal_path"])
+    return OwnerAuthorityView(
+        ref, policy, row["journal_id"], row["journal_path"], row["created_at"],
+    )
 
 
 def evidence(store, settings, authority):
@@ -318,6 +321,7 @@ def evidence(store, settings, authority):
         OwnerGrantPolicy.model_validate_json(row["policy_json"]),
         row["journal_id"],
         row["journal_path"],
+        row["created_at"],
     )
 
 

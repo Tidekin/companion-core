@@ -215,13 +215,16 @@ def test_recent_judgements_say_who_chose_the_item(core, kind):
             ',%s,%s)'
         ), (event_id, core.clock(), core.clock()))
     if kind:
-        columns = {row["name"]: row for row in core.store.rows("PRAGMA table_info(goals)")}
+        columns = {row["name"] for row in core.store.rows(
+            "SELECT column_name AS name FROM information_schema.columns "
+            "WHERE table_schema=current_schema() AND table_name='goals'"
+        )}
         values = {"goal_id": "goal_watch", "kind": kind, "topic": "t", "scope_json": "{}",
                   "proposal_key": "k", "state": "DONE", "priority": 1, "version": 1,
                   "result_event_id": event_id, "next_due_at": core.clock(),
                   "created_at": core.clock(), "updated_at": core.clock(), "redacted": 0}
         values = {key: value for key, value in values.items() if key in columns}
         core.store.execute(f"INSERT INTO goals({','.join(values)}) VALUES "
-                           f"({','.join('?' for _ in values)})", tuple(values.values()))
+                           f"({','.join('%s' for _ in values)})", tuple(values.values()))
     assert [item["origin"] for item in watch_ledger.recent(core.store)] == [
         watch_ledger.ORIGINS[kind]]

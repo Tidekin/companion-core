@@ -41,13 +41,6 @@ def _verify(store, settings, value, evidence):
             f"{settings.bot_qq_id}:onebot-direct:FriendMessage:{view.policy.owner_qq_id}:"
             f"epoch:{identity.protocol_epoch}:"
         )
-        row = store.one(
-            (
-                "SELECT created_at FROM owner_authority_revisions WHERE "
-                "grant_id = %s AND revision = %s"
-            ),
-            (view.authority.grant_id, view.authority.revision),
-        )
         if (
             capture.authority != view.authority.as_dict()
             or capture.identity_sha256 != identity.identity_sha256
@@ -56,7 +49,7 @@ def _verify(store, settings, value, evidence):
             or not re.fullmatch(r"-?[1-9][0-9]{0,19}", capture.source_event_id[len(prefix) :])
             or capture.event_id
             != "evt_" + hashlib.sha256(capture.source_event_id.encode()).hexdigest()
-            or not datetime.fromisoformat(row["created_at"]) <= capture.occurred_at
+            or not datetime.fromisoformat(view.created_at) <= capture.occurred_at
             or not 0 <= (capture.received_at - capture.occurred_at).total_seconds() <= 30
             or (
                 view.policy.expires_at is not None and capture.received_at >= view.policy.expires_at
@@ -382,12 +375,15 @@ def history_batch(store, settings, clock, job, *, purpose):
         return source(store, settings, view, event_id, clock(), purpose=purpose, history=True)
 
     def finish():
+        # A source exclusion must never swallow a changed batch-wide boundary.
+        owner_authority.check_job(store, settings, clock, job, purpose=purpose)
         if batched:
-            # Deliberately outside any per-source exclusion handler: STOP, expiry or
-            # changed independent custody invalidates the entire batch.
-            owner_authority.check_job(store, settings, clock, job, purpose=purpose)
             if not frozen() or store.change_token() != changes:
                 raise CoreError(reply_revision.CANCELLED, 409)
+        elif not store.in_transaction or store.change_token()["writes"] != changes["writes"]:
+            # READ COMMITTED may observe unrelated commits. Only this transaction's
+            # own changes invalidate the source rows it has already checked here.
+            raise CoreError(reply_revision.CANCELLED, 409)
 
     return view, check, finish
 
