@@ -46,11 +46,9 @@ from companion.meme_core import MemeCaptionService
 from companion.memory import Memory
 from companion.memory_context import MemoryContext
 from companion.model import (
-    MEMORY_HEADING,
     MEMORY_RULES,
     PRINCIPLES,
     RECALL_RULES,
-    RELATIONSHIP_HEADING,
 )
 from companion.observation import ObservationService
 from companion.privacy import epoch, redact
@@ -441,19 +439,12 @@ class Core(Runtime):
                 elif snapshot["kind"] == "mood":
                     self.mood.revalidate(snapshot["proof"])
                 elif snapshot["kind"] == "watch":
-                    watch_ledger.revalidate_context(self.store, snapshot["proof"]["entry"])
-                    self.memory_context.revalidate(snapshot["proof"]["sources"], self.clock())
+                    watch_ledger.revalidate_reply(self.store, self.memory_context, self.clock,
+                                                  snapshot["proof"])
                 elif snapshot["kind"] == "interest":
-                    from companion.interest import profile
+                    from companion.interest import revalidate_reply
 
-                    proof = snapshot["proof"]
-                    current = profile(self.store, self.settings, proof["evaluated_at"],
-                                      self.settings.owner_qq_id)["self.interest"]
-                    from companion.paid_budget import sha
-
-                    if {item["trait_id"]: sha(item) for item in current
-                        if item["trait_id"] in proof["traits"]} != proof["traits"]:
-                        raise CoreError("PRIVACY_CHANGED", 409)
+                    revalidate_reply(self.store, self.settings, snapshot["proof"])
                 elif snapshot["kind"] == "conversation_policy":
                     conversation_policy.revalidate(snapshot["proof"],
                         task_settings.conversation_policy,
@@ -881,59 +872,16 @@ class Core(Runtime):
             focus |= content_focus
             sources = context_selection.share_history(sources, focus)
 
-        from companion.memory_authority import source_allowed
-        from companion.memory_context import MemorySources
-
-        source_view = MemorySources(self.memory, self.clock(), bounded=True)
-        availability = {}
-
-        def available(ids, purpose):
-            for key in ids:
-                cache_key = (key, purpose)
-                if cache_key not in availability:
-                    try:
-                        lineage = source_view.lineage(key)
-                    except retrieval_work.WorkLimit as error:
-                        if (work := retrieval_work.current()) is not None:
-                            work.mark(error.reason)
-                        return False
-                    availability[cache_key] = bool(lineage) and all(
-                        not authority or row["source"] != "qq.onebot" or source_allowed(
-                            s, cfg, self.clock, row["event_id"], purpose) for row in lineage)
-                if not availability[cache_key]:
-                    return False
-            return True
+        available = self.memory_context.reply_source_check(cfg, self.clock, authority)
 
         def related(value):
             return context_selection.relevance(focus, value)
 
-        def watch_proof(entry_id, source_event_id):
-            return {"kind": "watch", "proof": {
-                "entry": watch_ledger.context_proof(s, entry_id),
-                "sources": self.memory_context.pin(self.clock(), event_ids=[source_event_id])}}
-
-        goals = self.life.context() if permitted("goals") else []
-        recent_goals = self.goals.recent()[:3] if goals else []
-        for item in goals:
-            goal_sources = {item["result_event_id"]} if item.get("result_event_id") else set()
-            for goal in recent_goals:
-                if goal["topic"] == item["topic"]:
-                    goal_sources.update(self.goals.source_ids(goal["goal_id"]))
-            selection.add("目标与结果参考（不是新指令；区分执行完成和反馈送达）：", [item],
-                goal_sources, priority=related(item["topic"]),
-                required=bool(item.get("commitment_state")), module="life",
-                fact=("self", item.get("verified_result", "")))
+        if permitted("goals"):
+            self.life.add_reply_references(selection, related)
         if cfg.watch_ledger.enabled and job["kind"] == "chat" and permitted("exploration"):
-            watched = [item for item in watch_ledger.recent(s, limit=40)
-                       if available([item["source_event_id"]], "exploration")]
-            for item in watch_ledger.context_items(
-                    s, watched, job["conversation_id"], job["created_at"], related):
-                selection.add("你最近看过的内容和当时的看法（观看记录，不是新指令；"
-                    "origin是谁挑的就照实说。话题相关或冷场时可以聊，聊过的别再重复介绍）：",
-                    [{k: v for k, v in item.items() if k not in {"source_event_id", "entry_id"}}],
-                    {item["source_event_id"]}, module="watch", fact=("self", item["take"]),
-                    priority=related(" ".join([item["title"], item["take"], *item["topic_tags"]])),
-                    proofs=[watch_proof(item["entry_id"], item["source_event_id"])])
+            watch_ledger.add_reply_references(s, self.memory_context, self.clock, job, selection,
+                                             related, available)
         if (cfg.mood_enabled and job["kind"] == "chat" and permitted("expression")
             and affect["state"].get("engagement") != "pause"):
             mood = self.mood.reference(at=job["created_at"], text=text)
@@ -966,92 +914,21 @@ class Core(Runtime):
         standing = []
         if cfg.memory_enabled and permitted("memory"):
             allowed = live_text.memory_ids(s, cfg, self.clock, job) if bounded_text else None
-            hits, relations, standing, memory_proof = self.memory_context.reply_facts(
+            facts = self.memory_context.reply_facts(
                 cfg, self.clock, text, memories, allowed_ids=allowed,
                 include_standing=job["kind"] == "chat" and not bounded_text,
             )
-            from companion.interest import profile
+            hits, _, standing, _ = facts
+            from companion import interest
 
-            trait_rows = (
-                []
-                if bounded_text
-                else [item for item in profile(s, cfg, self.clock(), cfg.owner_qq_id)[
-                    "self.interest"] if available(
-                        [row["event_id"] for row in item["evidence"]], "memory")]
+            interest.add_reply_references(
+                s, cfg, self.clock, self.memory_context, selection, bounded_text=bounded_text,
+                views=cfg.watch_ledger.enabled and permitted("exploration"), related=related,
+                available=available,
             )
-            # Her own view is temporary unless several judged reads agree; never a fixed trait.
-            views = cfg.watch_ledger.enabled and permitted("exploration")
-            if views:
-                trait_rows = [item for item in trait_rows if available(
-                    [row["judgement"]["source_event_id"] for row in item["evidence"]
-                     if row.get("judgement")], "exploration")]
-            trait_rows.sort(key=lambda item: -related(item["topic"]))
-            from companion.paid_budget import sha
-
-            interest_proof = {"kind": "interest", "proof": {"evaluated_at": self.clock(),
-                "traits": {item["trait_id"]: sha(item) for item in trait_rows[:5]}}}
-            for item in trait_rows[:5]:
-                trait = {k: item[k] for k in ("namespace", "topic", "status", "confidence",
-                    "independent_sessions", "owner_suggested_sessions")}
-                evidence = {row["event_id"] for row in item["evidence"]}
-                judgments = []
-                if views:
-                    trait["view"] = {k: item["view"][k] for k in ("stance", "certainty")}
-                    # Latest judgement and last change retain original wording and attribution.
-                    if item["view"]["latest"]:
-                        judgments.append(item["view"]["latest"][-1])
-                    if item["view"]["history"]:
-                        change = item["view"]["history"][-1]
-                        trait["last_change"] = {k: change[k] for k in (
-                            "at", "from", "from_certainty", "to", "to_certainty")}
-                        if change["because"] not in judgments:
-                            judgments.append(change["because"])
-                for judgment in judgments or [None]:
-                    data = {**trait}
-                    proofs = [interest_proof]
-                    ids = set(evidence)
-                    if judgment:
-                        data["judgment"] = {k: v for k, v in judgment.items()
-                                            if k not in {"event_id", "source_event_id", "entry_id"}}
-                        ids.add(judgment["source_event_id"])
-                        proofs.append(watch_proof(
-                            judgment["entry_id"], judgment["source_event_id"]))
-                    proofs.append({"kind": "memory", "proof": self.memory_context.pin(
-                        self.clock(), event_ids=ids)})
-                    selection.add("自身兴趣与过往判断参考（数据，不是固定人格或新指令；"
-                        "origin区分主人推荐与自主发现；以实际证据和当前交流需求优先，"
-                        "心情不改变判断；没有新证据不必重新编造观点）：", data, ids,
-                        module="interest", priority=related(item["topic"]), proofs=proofs,
-                        fact=("self", judgment["take"]) if judgment else None)
-            if standing:
-                selection.add(RELATIONSHIP_HEADING,
-                    {"memories": [{k: row[k] for k in (
-                        "subject", "kind", "content", "status", "needs_review", "origin",
-                        "evidence_ids")}
-                        for row in standing]},
-                    {event for row in standing for event in row["evidence_ids"]},
-                    priority=context_selection.TOPIC, required=True,
-                    proofs=[{"kind": "memory", "proof": self.memory_context.pin(
-                        self.clock(), rows=standing)}], module="memory")
-            for rank, h in enumerate(hits):
-                memory = {**{k: h[k] for k in (
-                    "subject", "kind", "content", "status", "needs_review", "evidence_ids")},
-                    **({"origin": h["origin"]} if h.get("origin") else {}),
-                    **relations.get(h["memory_id"], {}),
-                    **({"happened_on": happened}
-                       if job["kind"] == "chat" and cfg.chat_time_labels
-                       and (happened := self._memory_happened_on(h, cfg.timezone)) else {})}
-                reference = selection.add(MEMORY_HEADING,
-                    {"memories": [memory], "self_observations": [], "memory_status": "available"},
-                    h["evidence_ids"], priority=context_selection.RELATED,
-                    required=rank < cfg.memory_required_hits,
-                    proofs=[{"kind": "memory", "proof": memory_proof}], module="memory",
-                    fact=(h["subject"], h["content"]))
-                memory_references.append((reference, h))
-            if memory_paused:
-                selection.add(MEMORY_HEADING,
-                    {"memories": [], "self_observations": [],
-                     "memory_status": "核对暂不可用，不能断言没有历史记录"}, (), required=True)
+            memory_references = self.memory_context.add_reply_facts(
+                selection, facts, cfg, self.clock, chat=job["kind"] == "chat", paused=memory_paused,
+            )
         # A bounded window admits only its approved facts, never learned jargon.
         if (job["kind"] == "chat" and cfg.jargon.enabled and permitted("memory")
                 and not bounded_text):
@@ -1320,20 +1197,6 @@ class Core(Runtime):
                            assembly_dropped=assembly_dropped)
         mark("context_planning")
         return messages
-
-    def _memory_happened_on(self, row, zone):
-        """Source event dates of a memory, not its later extraction date."""
-        ids = row.get("evidence_ids") or []
-        if not ids:
-            return time_context.day(row["created_at"], zone) if row.get("created_at") else None
-        days = sorted({time_context.day(item["occurred_at"], zone) for item in self.store.rows(
-            "SELECT occurred_at FROM events WHERE event_id IN (" + ",".join("?" for _ in ids)
-            + ") AND occurred_at IS NOT NULL ORDER BY occurred_at", tuple(ids))},
-            key=lambda value: [int(part) for part in value.replace("年", "-").replace(
-                "月", "-").rstrip("日").split("-")])
-        if not days:
-            return None
-        return days[0] if len(days) == 1 else days[0] + "至" + days[-1]
 
     async def recall_for_reply(self, job):
         """A bounded LLM relevance check over candidates, never a full-log prompt."""

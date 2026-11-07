@@ -245,6 +245,85 @@ class MemoryContext:
             "event_id", "source", "occurred_at", "ingested_at",
         )} for source in sources[-8:]], "evidence_truncated": len(sources) > 8}
 
+    def reply_source_check(self, settings, clock, authority):
+        """Return a purpose-specific lineage check for this one prompt build."""
+        from companion.memory_authority import source_allowed
+
+        source_view = MemorySources(self.memory, clock(), bounded=True)
+        availability = {}
+
+        def available(ids, purpose):
+            for key in ids:
+                cache_key = (key, purpose)
+                if cache_key not in availability:
+                    try:
+                        lineage = source_view.lineage(key)
+                    except retrieval_work.WorkLimit as error:
+                        if (work := retrieval_work.current()) is not None:
+                            work.mark(error.reason)
+                        return False
+                    availability[cache_key] = bool(lineage) and all(
+                        not authority or row["source"] != "qq.onebot" or source_allowed(
+                            self.store, settings, clock, row["event_id"], purpose)
+                        for row in lineage)
+                if not availability[cache_key]:
+                    return False
+            return True
+        return available
+
+    def add_reply_facts(self, selection, facts, settings, clock, *, chat, paused):
+        from companion import context_selection
+        from companion.model import MEMORY_HEADING, RELATIONSHIP_HEADING
+
+        hits, relations, standing, memory_proof = facts
+        memory_references = []
+        if standing:
+            selection.add(RELATIONSHIP_HEADING,
+                {"memories": [{k: row[k] for k in (
+                    "subject", "kind", "content", "status", "needs_review", "origin",
+                    "evidence_ids")}
+                    for row in standing]},
+                {event for row in standing for event in row["evidence_ids"]},
+                priority=context_selection.TOPIC, required=True,
+                proofs=[{"kind": "memory", "proof": self.pin(
+                    clock(), rows=standing)}], module="memory")
+        for rank, h in enumerate(hits):
+            memory = {**{k: h[k] for k in (
+                "subject", "kind", "content", "status", "needs_review", "evidence_ids")},
+                **({"origin": h["origin"]} if h.get("origin") else {}),
+                **relations.get(h["memory_id"], {}),
+                **({"happened_on": happened}
+                   if chat and settings.chat_time_labels
+                   and (happened := self._memory_happened_on(h, settings.timezone)) else {})}
+            reference = selection.add(MEMORY_HEADING,
+                {"memories": [memory], "self_observations": [], "memory_status": "available"},
+                h["evidence_ids"], priority=context_selection.RELATED,
+                required=rank < settings.memory_required_hits,
+                proofs=[{"kind": "memory", "proof": memory_proof}], module="memory",
+                fact=(h["subject"], h["content"]))
+            memory_references.append((reference, h))
+        if paused:
+            selection.add(MEMORY_HEADING,
+                {"memories": [], "self_observations": [],
+                 "memory_status": "核对暂不可用，不能断言没有历史记录"}, (), required=True)
+        return memory_references
+
+    def _memory_happened_on(self, row, zone):
+        """Source event dates of a memory, not its later extraction date."""
+        from companion import time_context
+
+        ids = row.get("evidence_ids") or []
+        if not ids:
+            return time_context.day(row["created_at"], zone) if row.get("created_at") else None
+        days = sorted({time_context.day(item["occurred_at"], zone) for item in self.store.rows(
+            "SELECT occurred_at FROM events WHERE event_id IN (" + ",".join("?" for _ in ids)
+            + ") AND occurred_at IS NOT NULL ORDER BY occurred_at", tuple(ids))},
+            key=lambda value: [int(part) for part in value.replace("年", "-").replace(
+                "月", "-").rstrip("日").split("-")])
+        if not days:
+            return None
+        return days[0] if len(days) == 1 else days[0] + "至" + days[-1]
+
     def reply_facts(self, settings, clock, text, memories, *, allowed_ids, include_standing):
         """Select reply facts and pin the recalled rows after removing standing duplicates."""
         if memories is None:
