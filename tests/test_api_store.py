@@ -74,7 +74,8 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
             assert ready.rstrip(b"\r\n") == b"LOCKED"
             async with real_core_http(core) as port, httpx.AsyncClient(
                 base_url=f"http://127.0.0.1:{port}", trust_env=False, headers=headers(core),
-            ) as client:
+            ) as client, httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe:
+                assert (await probe.get(PREFIX + "/health/live")).status_code == 200
                 requests = [asyncio.create_task(client.post(
                     PREFIX + "/owner-authority/inputs/approve",
                     json=capture.model_dump(mode="json"),
@@ -82,7 +83,7 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
                 await event_wait(entered)
                 assert not any(request.done() for request in requests)
                 before = perf_counter()
-                response = await asyncio.wait_for(client.get(PREFIX + "/health/live"), 0.75)
+                response = await asyncio.wait_for(probe.get(PREFIX + "/health/live"), 0.75)
                 elapsed = perf_counter() - before
                 record_property("health_during_write_wait_ms", round(elapsed * 1000, 3))
                 assert response.status_code == 200
@@ -144,7 +145,8 @@ def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
             assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
             async with real_core_http(core) as port, httpx.AsyncClient(
                 base_url=f"http://127.0.0.1:{port}", trust_env=False,
-            ) as client:
+            ) as client, httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe:
+                assert (await probe.get(PREFIX + "/health/live")).status_code == 200
                 path = "/internal/v2/affect/reset"
                 body = {"request_id": "concurrent-affect-reset"}
                 denied = await client.post(path, json=body, headers=headers(core))
@@ -157,7 +159,7 @@ def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
                             for _ in range(2)]
                 await event_wait(entered)
                 before = perf_counter()
-                health = await asyncio.wait_for(client.get(PREFIX + "/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get(PREFIX + "/health/live"), 0.75)
                 elapsed = perf_counter() - before
                 record_property("health_during_affect_write_wait_ms", round(elapsed * 1000, 3))
                 assert health.status_code == 200 and elapsed < 0.75
@@ -373,7 +375,8 @@ def test_owner_check_waits_for_fsynced_uncommitted_authority(
     async def scenario():
         async with real_core_http(core) as port, httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}", trust_env=False, headers=headers(core),
-        ) as client:
+        ) as client, httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe:
+            assert (await probe.get(PREFIX + "/health/live")).status_code == 200
             writing = asyncio.create_task(asyncio.to_thread(writer))
             checking = None
             try:
@@ -382,7 +385,7 @@ def test_owner_check_waits_for_fsynced_uncommitted_authority(
                     json={"authority": capture.authority, "purpose": "chat"}))
                 await asyncio.sleep(0.05)
                 before = perf_counter()
-                health = await asyncio.wait_for(client.get(PREFIX + "/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get(PREFIX + "/health/live"), 0.75)
                 elapsed = perf_counter() - before
                 record_property("health_during_journal_commit_gap_ms", round(elapsed * 1000, 3))
                 assert health.status_code == 200 and elapsed < 0.75

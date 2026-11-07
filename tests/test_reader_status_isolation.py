@@ -68,7 +68,9 @@ def test_reader_receipt_lock_wait_keeps_health_and_rechecks_lease(
         def __init__(self, path):
             super().__init__(path)
             connections.append((self, threading.get_ident()))
-            entered.set()
+            self.db.set_trace_callback(
+                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
+            )
 
     monkeypatch.setattr(api_store, "Store", ObservedStore)
 
@@ -81,17 +83,20 @@ def test_reader_receipt_lock_wait_keeps_health_and_rechecks_lease(
         pending = None
         try:
             assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
-            async with real_core_http(core) as port, httpx.AsyncClient(
-                base_url=f"http://127.0.0.1:{port}", trust_env=False,
-            ) as client:
+            async with (
+                real_core_http(core) as port,
+                httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False) as client,
+                httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe,
+            ):
                 path = f"/internal/v{version}/readers/{adapter}/{item['request_id']}/result"
                 denied = await client.post(path, json=body)
                 assert denied.status_code == 401 and not connections
+                assert (await probe.get("/internal/v1/health/live")).status_code == 200
                 headers = {"Authorization": "Bearer " + token}
                 pending = asyncio.create_task(client.post(path, json=body, headers=headers))
                 assert await asyncio.to_thread(entered.wait, 3)
                 before = perf_counter()
-                health = await asyncio.wait_for(client.get("/internal/v1/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 0.75)
                 elapsed = perf_counter() - before
                 record_property("health_during_reader_write_wait_ms", round(elapsed * 1000, 3))
                 assert health.status_code == 200 and elapsed < 0.75 and not pending.done()
@@ -146,12 +151,13 @@ def test_status_native_snapshot_wait_keeps_health_responsive(core, monkeypatch, 
         async with real_core_http(core) as port, httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}", trust_env=False,
             headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
-        ) as client:
+        ) as client, httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe:
+            assert (await probe.get("/internal/v1/health/live")).status_code == 200
             pending = asyncio.create_task(client.get("/internal/v1/ops/status",
                 params={"summary_only": str(summary).lower()}))
             try:
                 assert await asyncio.to_thread(entered.wait, 3)
-                health = await asyncio.wait_for(client.get("/internal/v1/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 0.75)
                 assert health.status_code == 200 and not pending.done()
                 release.set()
                 response = await asyncio.wait_for(pending, 5)

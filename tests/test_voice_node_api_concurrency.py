@@ -44,7 +44,8 @@ def test_node_claim_write_wait_keeps_http_responsive(core, monkeypatch, record_p
             assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
             async with real_core_http(core) as port, httpx.AsyncClient(
                 base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=10,
-            ) as client:
+            ) as client, httpx.AsyncClient(base_url=client.base_url, trust_env=False) as probe:
+                assert (await probe.get("/internal/v1/health/live")).status_code == 200
                 request = asyncio.create_task(client.post(
                     ROUTE_PREFIX + "/claim", json=body,
                     headers={"Authorization": "Bearer " + TOKEN,
@@ -55,7 +56,7 @@ def test_node_claim_write_wait_keeps_http_responsive(core, monkeypatch, record_p
                 before = perf_counter()
                 await event_wait(entered)
                 assert not request.done(), "claim blocked the HTTP loop until its lock timeout"
-                health = await asyncio.wait_for(client.get("/internal/v1/health/live"), 0.75)
+                health = await asyncio.wait_for(probe.get("/internal/v1/health/live"), 0.75)
                 elapsed = perf_counter() - before
                 record_property("health_during_node_claim_wait_ms", round(elapsed * 1000, 3))
                 assert health.status_code == 200 and elapsed < 0.75
