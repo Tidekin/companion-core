@@ -1,15 +1,15 @@
 """Real judge checkpoint recovery with mocked provider transport only."""
 
 import asyncio
-import hashlib
 import importlib
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import httpx
 import pytest
+
+from tests.test_memory_campaign_integrity import campaign as campaign
 
 
 @pytest.fixture
@@ -123,30 +123,23 @@ def test_recovery_keeps_discarded_anchor_verdict_without_resending(judge, monkey
 @pytest.mark.parametrize("flag", [
     "judge_unresolved", "anchor_failed", "interrupted_review_required",
 ])
-def test_report_requires_explicit_override_for_each_uncertain_grade(judge, monkeypatch, flag):
-    grade, out, _, _ = judge
-    monkeypatch.delitem(sys.modules, "report", raising=False)
-    report = importlib.import_module("report")
-    root = out.parent
-    grade.save(root / "all-answers-frozen.json", {"files_sha256": {}})
-    grade.save(out / "blind-mapping.json", [{
-        "key": "k", "arm": "core", "id": "q",
-        "answer_sha256": hashlib.sha256("绿茶".encode()).hexdigest(),
-    }])
-    (out / "grades.jsonl").write_text("", "utf8")
-    grade.append(out / "grades.jsonl", {"key": "k", "pass": False, flag: True})
-    monkeypatch.setattr(report, "GRADING", out)
-    monkeypatch.setattr(report, "R", SimpleNamespace(
-        graded_arms=("core",), answers_total=1, questions=[{"id": "q", "source_ids": []}],
-        criteria={"q": {"required": ["绿茶"]}}, suite=root / "bank/suite-v1",
-        arm_answers=lambda _: [{"id": "q", "answer": "绿茶", "status": "SUCCEEDED"}],
-    ))
+def test_report_requires_explicit_override_for_each_uncertain_grade(campaign, flag):
+    root, _, report, rc, rows, _ = campaign
+    out = root / "grading"
+    target = json.loads((out / "blind-mapping.json").read_text("utf8"))[0]
+    grades = rc.read_rows(out / "grades.jsonl")
+    original = {"key": target["key"], "pass": False, flag: True}
+    rows(out / "grades.jsonl", [original if row["key"] == target["key"] else row
+                               for row in grades])
+    manifest = json.loads((out / "manifest.json").read_text("utf8"))
+    manifest["raw_grades_sha256"] = rc.sha(out / "grades.jsonl")
+    rc.save(out / "manifest.json", manifest)
     with pytest.raises(AssertionError, match="explicit review overrides"):
         report.load()
-    assert len(report.load(allow_unresolved=True)[0]) == 1
-    grade.append(out / "overrides.jsonl", {
-        "key": "k", "original_grade": {"key": "k", "pass": False, flag: True},
+    assert len(report.load(allow_failed_gate=True)[0]) == report.R.total
+    rc.append(out / "overrides.jsonl", {
+        "key": target["key"], "original_grade": original,
         "pass": True, "reason": "Answer contains the required fact.",
     })
-    assert report.load()[0][0]["arms"]["core"]["passed"] is True
-    sys.modules.pop("report", None)
+    result = next(row for row in report.load()[0] if row["id"] == target["id"])
+    assert result["arms"][target["arm"]]["passed"] is True
