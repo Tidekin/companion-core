@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from companion import api, notices, owner_authority
+from companion.api_store import ApiStore
 from companion.core import Core
 from companion.goals import CommitmentRequest, GoalProposal, GoalScope
 from companion.model import ModelClient
@@ -37,6 +38,7 @@ async def owner_environment(core, tmp_path):
     app = api.create_app(core.settings)
     with Core(core.settings, core.model, core.clock) as api_core:
         app.state.core = api_core
+        app.state.api_store = ApiStore(api_core.database, api_core.settings.state_directory)
         assert api_core.store is not core.store
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
             base_url="http://127.0.0.1", headers={"Authorization": "Bearer " +

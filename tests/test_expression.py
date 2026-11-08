@@ -454,12 +454,14 @@ def test_core_chat_creates_expression_intent_in_normal_outbox(core):
     }
 
 
-def test_expression_categories_from_environment_validate(monkeypatch, tmp_path):
+def test_expression_categories_from_environment_validate(core, monkeypatch, tmp_path):
     from pydantic import ValidationError
 
     from companion.config import Settings
 
     monkeypatch.setenv("COMPANION_CONFIG", str(tmp_path / "absent.toml"))
+    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database.get_secret_value())
+    monkeypatch.setenv("COMPANION_STATE_DIRECTORY", core.settings.state_directory)
     monkeypatch.setenv("COMPANION_OWNER_QQ_ID", "10001")
     monkeypatch.setenv("COMPANION_BOT_QQ_ID", "10002")
     monkeypatch.setenv("COMPANION_BRIDGE_TOKEN", "config-test-token-" * 3)

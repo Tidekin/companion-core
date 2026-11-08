@@ -111,7 +111,7 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch, o
                     # the original 30-second processing deadline begins after that gate.
                     ready = await asyncio.wait_for(process.stdout.readline(), 30)
                     stdout, stderr = await asyncio.wait_for(process.communicate(), 30)
-                    assert ready == b"MEMORY_WORKER_READY\n", stderr.decode()
+                    assert ready.rstrip(b"\r\n") == b"MEMORY_WORKER_READY", stderr.decode()
                     assert process.returncode == 0, stderr.decode()
                     result = json.loads(stdout.splitlines()[-1])
                 finally:

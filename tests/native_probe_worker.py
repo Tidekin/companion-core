@@ -1,4 +1,4 @@
-"""Linux test host: a named native-watch frame and failure-triggered thread dump.
+"""Linux test host: a named native LISTEN frame and failure-triggered thread dump.
 
 The early Wakeup import and forwarding frame can perturb startup or scheduling.
 The real CLI, native watcher, operation parameters and lifetime remain unchanged.
@@ -14,8 +14,14 @@ class NativeWatch:
     def __init__(self, native):
         self.native = native
 
-    def watch(self, *args):
-        return self.native.watch(*args)
+    def watch(self, *args, **kwargs):
+        yield from self.native.notifies(*args, **kwargs)
+
+    def notifies(self, *args, **kwargs):
+        yield from self.watch(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.native, name)
 
     def close(self):
         return self.native.close()
@@ -30,7 +36,7 @@ def main():
 
     def enter(self):
         result = original_enter(self)
-        self.watcher = NativeWatch(self.watcher)
+        self.listener = NativeWatch(self.listener)
         return result
 
     Wakeup.__enter__ = enter

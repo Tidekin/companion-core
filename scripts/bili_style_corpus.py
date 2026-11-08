@@ -6,10 +6,12 @@ report (statistics only) into a new directory under this worktree's `.local`.
 
 import argparse
 import json
-import sqlite3
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+
+import psycopg
+from psycopg.rows import dict_row
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -19,23 +21,24 @@ from companion import style_corpus  # noqa: E402
 
 
 def rows(database):
-    db = sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA query_only=ON")
-    try:
+    if not database:
+        from companion.config import Settings
+
+        database = Settings.load(apply_operator_config=False).database.get_secret_value()
+    with psycopg.connect(database, row_factory=dict_row,
+                         options="-c default_transaction_read_only=on") as db:
+        db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         return [dict(row) for row in db.execute(
             "SELECT event_id,source_kind,canonical_url,evidence_json,redacted,created_at "
             "FROM observations WHERE canonical_url LIKE 'https://www.bilibili.com/video/%' "
             "AND result_status IN ('FETCHED','WATCHED') ORDER BY created_at")]
-    finally:
-        db.close()
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", type=Path, required=True)
+    parser.add_argument("--database", help="Core PostgreSQL DSN; default: COMPANION_CONFIG")
     parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     output = args.output.resolve()
     if not output.is_relative_to(ROOT / ".local"):
         raise SystemExit("Corpus output must stay in this worktree's .local directory")

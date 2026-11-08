@@ -26,7 +26,8 @@ def campaign(tmp_path, monkeypatch, request):
     monkeypatch.setattr(sys, "argv", ["grade.py"])
     rc = importlib.import_module("roundcfg")
     controls = getattr(request, "param", [])
-    rc.save(tmp_path / "round.json", {"name": "offline", "arms": {"old": {}}, "controls": controls})
+    rc.save(tmp_path / "round.json", {"name": "offline", "arms": {"old": {}, "new": {}},
+                                     "controls": controls})
     suite = tmp_path / "bank/suite-v1"
     (suite / "review-only").mkdir(parents=True)
     (suite / "inputs").mkdir()
@@ -51,7 +52,7 @@ def campaign(tmp_path, monkeypatch, request):
         "questions_sha256": rc.sha(suite / "questions.jsonl"),
         "criteria_sha256": rc.sha(suite / "review-only/criteria.jsonl")})
     files = []
-    for arm in (*rc.ARMS, *controls):
+    for arm in rc.Round(tmp_path).graded_arms:
         path = (tmp_path / arm / "answers.jsonl" if arm == "rag" or arm in controls else
                 tmp_path / "arms" / arm / "results/P1/answers.jsonl")
         rows(path, [dict(id=q["id"], answer="绿茶", status="SUCCEEDED", elapsed_seconds=1)
