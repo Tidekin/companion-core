@@ -319,7 +319,7 @@ class StoppedMemoryControl:
     def apply(self, body):
         body = MemoryControlInput.model_validate(body)
         s, g, event = self.store, self.grant, body.event
-        with s.transaction():
+        with s.transaction(control_write=True):
             now = self.check()
             content = self.verify_source(body, now)
             key = RECEIPT + g.grant_id

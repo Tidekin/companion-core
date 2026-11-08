@@ -306,7 +306,8 @@ def test_restart_replay_is_idempotent_and_later_privacy_change_does_not_report_s
         different["capture"]["evidence_sha256"] = "d" * 64
         with pytest.raises(CoreError):
             restarted.apply(different)
-        advance_epoch(store)
+        with store.transaction(control_write=True):
+            advance_epoch(store)
         with pytest.raises(CoreError, match="RESULT_STALE"):
             restarted.apply(body)
     finally:
@@ -350,8 +351,8 @@ def test_forget_ledger_survives_commit_failure_and_retry_cannot_claim_success(co
     original = core.store.transaction
 
     @contextmanager
-    def fail_commit():
-        with original():
+    def fail_commit(**options):
+        with original(**options):
             yield
             raise OSError("synthetic commit failure after fsynced Ledger append")
 
