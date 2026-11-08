@@ -74,18 +74,25 @@ def check_conversation(core, job, snapshots=(), *, current_request=None, purpose
         ))
     if job["kind"] != "chat":
         raise CoreError("CONVERSATION_CHAT_JOB_REQUIRED", 403)
-    view = owner_authority.check_job(
-        core.store, core.settings, core.clock, job, purpose="chat", executing=True,
+    from companion.conversation_guard import read
+
+    reads = read(core.store, job)
+    ref = owner_authority._job_reference(reads.job)
+    view = owner_authority._checked_current(
+        core.store, core.settings, core.clock, reads.authority, purpose="chat", authority=ref,
     )
+    owner_authority._checked_job(reads.job, job, view, core.clock, executing=True)
     if purpose not in view.policy.purposes:
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
-    owner_input._checked_source(core.store, core.settings, view, job["event_id"], core.clock())
+    owner_input._checked_source(core.store, core.settings, view, job["event_id"], core.clock(),
+                                _loaded=reads.source)
     core._check_context_snapshots(job, snapshots, current_request=current_request,
-                                  owner_view=view)
+                                  owner_view=view, reads=reads)
     from companion import agent_images, agent_reading
 
     agent_reading.check_results(core, job, snapshots)
-    agent_images.input_sources(core.store, core.settings, core.clock, job)
+    agent_images.input_sources(core.store, core.settings, core.clock, job,
+                               _item_ids=reads.image_item_ids)
     return view
 
 
