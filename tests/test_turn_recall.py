@@ -1,5 +1,7 @@
 """Raw past-turn recall, history media replay and the memory-only sensitivity check."""
 
+import pytest
+
 from companion import memory_references as refs
 from companion import turn_recall
 from companion.dialogue_history import turn_messages
@@ -116,6 +118,52 @@ def test_reference_with_prefetched_ranking_keeps_order_and_skips_models(core, mo
                                    lambda ids: True, max_turns=1, max_bytes=32000,
                                    ranked_ids=["evt_2", "evt_1", "evt_0"])
     assert result["event_ids"] == ["evt_2"]
+
+
+@pytest.mark.parametrize("limit", [1, 2, 4, 8])
+@pytest.mark.parametrize("unavailable", [False, True])
+def test_prefetched_snapshot_keeps_exact_picks_and_refills_invalid_sources(
+    core, monkeypatch, limit, unavailable,
+):
+    rows = {f"evt_{i:02}": {"event_id": f"evt_{i:02}", "record_sequence": i,
+            "user_text": f"第{i}条", "reply_text": "好", "body_json": None,
+            "occurred_at": "2026-05-01T01:00:00+00:00"} for i in range(24)}
+    missing = {"evt_01", "evt_12"} if unavailable else set()
+    denied = {"evt_00", "evt_13"} if unavailable else set()
+    reads, checks = [], []
+
+    def candidates(store, settings, job, ids):
+        reads.append(list(ids))
+        selected = [rows[key] for key in sorted(ids) if key not in missing]
+        return selected, [[] for _ in selected]
+
+    def allowed(ids):
+        checks.extend(ids)
+        return not (set(ids) & denied)
+
+    monkeypatch.setattr(turn_recall, "_candidates", candidates)
+    ranking = {"first": list(rows)[:12], "hop": ["evt_02", *list(rows)[12:]]}
+    job = {"conversation_id": "conv", "event_id": "evt_now"}
+
+    def reference():
+        return turn_recall.reference(core.store, core.settings, job, "第条", set(), allowed,
+                                     max_turns=limit, max_bytes=32000, ranked_ids=ranking)
+
+    # The mutable path retains its original complete per-source checks.
+    with core.store.transaction():
+        expected = reference()
+    original_checks = len(checks)
+    checks.clear()
+    reads.clear()
+    with core.store.read_snapshot():
+        actual = reference()
+    assert actual == expected
+    assert len(checks) < original_checks
+    assert len(reads) <= 4
+    if actual:
+        selected = actual["event_ids"]
+        assert selected == sorted(selected)
+        assert not (set(selected) & (missing | denied))
 
 
 def test_async_memory_search_rescores_in_a_worker_thread(core, monkeypatch):

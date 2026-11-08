@@ -11,6 +11,7 @@ import hashlib
 import math
 import re
 from collections import Counter, OrderedDict
+from itertools import islice
 from threading import Lock
 
 from companion import retrieval_work, time_context
@@ -335,6 +336,46 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
                           history_costs=history_costs)
 
 
+def _prefetched_sources(store, settings, job, ranking, exclude_ids, allowed, limit):
+    """Materialize only the valid prefixes needed by the existing two-hop merge."""
+    scope, loaded = store.frozen_scope, {}
+
+    def collect(keys, count, excluded=()):
+        selected = []
+        pending = (key for key in keys if key not in exclude_ids and key not in excluded
+                   and allowed([key]))
+        while len(selected) < count:
+            batch = list(islice(pending, count - len(selected)))
+            if not batch:
+                break
+            fresh = list(dict.fromkeys(key for key in batch if key not in loaded))
+            if fresh:
+                rows, notes = _candidates(store, settings, job, fresh)
+                loaded.update((key, None) for key in fresh)
+                loaded.update((row["event_id"], (row, note))
+                              for row, note in zip(rows, notes, strict=True))
+            selected.extend(key for key in batch if loaded[key] is not None)
+        return selected
+
+    first = collect(ranking["first"], limit)
+    extra = settings.turn_recall_second_hop if ranking["hop"] else 0
+    head = first[:max(1, limit - extra)]
+    # merge() puts at most two seeds before the chained evidence. Further
+    # second-hop items cannot enter this finite result.
+    chained = min(extra, max(0, limit - min(2, len(head))))
+    hop = collect(ranking["hop"], chained, head)
+    if store.frozen_scope != scope:
+        from companion.contracts import CoreError
+
+        raise CoreError("PRIVACY_CHANGED", 409)
+    values = sorted((value for value in loaded.values() if value is not None),
+                    key=lambda value: value[0]["record_sequence"])
+    rows, notes = [value[0] for value in values], [value[1] for value in values]
+    positions = {row["event_id"]: index for index, row in enumerate(rows)}
+    return rows, notes, merge([positions[key] for key in first],
+                              [positions[key] for key in hop], limit, extra)
+
+
 def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, max_bytes,
                ranked_ids, history_costs=None):
     from companion.dialogue_history import turn_messages
@@ -349,13 +390,17 @@ def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, 
         def keep(keys):
             return [key for key in keys if key not in exclude_ids and allowed([key])]
 
-        first, hop = keep(ranked_ids["first"]), keep(ranked_ids["hop"])
-        wanted = list(dict.fromkeys(first + hop))
-        rows, notes = _candidates(store, settings, job, wanted) if wanted else ([], [])
-        position = {row["event_id"]: index for index, row in enumerate(rows)}
-        ranked = merge([position[k] for k in first if k in position],
-                       [position[k] for k in hop if k in position], limit,
-                       settings.turn_recall_second_hop if ranked_ids["hop"] else 0)
+        if store.frozen_scope is not None:
+            rows, notes, ranked = _prefetched_sources(
+                store, settings, job, ranked_ids, exclude_ids, allowed, limit)
+        else:
+            first, hop = keep(ranked_ids["first"]), keep(ranked_ids["hop"])
+            wanted = list(dict.fromkeys(first + hop))
+            rows, notes = _candidates(store, settings, job, wanted) if wanted else ([], [])
+            position = {row["event_id"]: index for index, row in enumerate(rows)}
+            ranked = merge([position[k] for k in first if k in position],
+                           [position[k] for k in hop if k in position], limit,
+                           settings.turn_recall_second_hop if ranked_ids["hop"] else 0)
     else:
         rows, notes = _candidates(store, settings, job)
         pairs = [(row, note) for row, note in zip(rows, notes, strict=True)
