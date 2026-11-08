@@ -1,13 +1,16 @@
 # Core PostgreSQL 结构与离线导入
 
 数据库归属与协调范围见 [ADR 0002](adr/0002-core-postgresql-and-local-sqlite.md)。
-本阶段提供原生结构迁移与离线导入入口，Core 的运行存储调用尚未切换。
+Core 运行存储使用原生 PostgreSQL；本文记录结构迁移与离线导入入口。
 
 ## 原生结构
 
 PostgreSQL 16 及以上版本使用独立 Alembic 修订 `pg0001_core`，对应原 SQLite
 `0068_image_review_target` 的 103 张业务表。SQLite 的旧迁移历史仅用于读取原备份，
 不参与 PostgreSQL 运行时查询，也不形成另一套 Core 主库。
+
+当前新建与离线导入目标为 `pg0002_fact_key_ascii`。该增量迁移只将 fact-key 索引改成
+查询使用的 ASCII `translate` 表达式，业务表列和值仍按上述冻结备份逐项核对。
 
 裸结构保持业务表为空，供离线导入使用。原 SQLite 修订还初始化三条运行数据：语音
 incarnation、授权恢复代次和 OFF 模式；导入保留这些原值。新的 PostgreSQL 安装需在

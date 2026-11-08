@@ -2,6 +2,7 @@
 # Supply identities/tokens through the existing private environment mechanism.
 # Enable an approved capability only in a separately reviewed, pinned window config.
 mode = "demo"
+database = "host=127.0.0.1 port=5432 dbname=companion_demo user=companion_demo connect_timeout=5"
 timezone = "Asia/Shanghai"
 max_recent_messages = 0
 proactive_enabled = false

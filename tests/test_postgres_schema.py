@@ -91,7 +91,7 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
             "WHERE constraint_schema=current_schema() AND constraint_type='FOREIGN KEY'"
         )["n"] == foreign_keys
         assert session.one("SELECT version_num FROM alembic_version") == {
-            "version_num": "pg0001_core"}
+            "version_num": "pg0002_fact_key_ascii"}
 
 
 def audit(session, document):
