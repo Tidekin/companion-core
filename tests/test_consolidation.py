@@ -1,6 +1,8 @@
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from threading import Barrier
 
 import pytest
 from cryptography.fernet import Fernet
@@ -371,3 +373,41 @@ def test_observed_content_can_be_diary_evidence_without_pretending_it_was_watche
     body = core.diary.get_day(DAY, "10001")["body_md"]
     assert "发现的标题" in body and "我回复" not in body and "看完" not in body
     assert len(core.store.rows("SELECT * FROM diary_evidence")) == 4
+
+
+def test_due_schedule_reports_a_retryable_resume_once(core):
+    from companion import budget
+
+    enable_nightly(core)
+    core.settings.consolidation_catchup_days = 1
+    nightly = core.consolidation.schedule_day(DAY)
+    assert core.consolidation.schedule_due() == []
+    budget.reserve(core.store, core.settings, None, "reflection", [], core.clock())
+    reflection = run(core.reflections.run_day(DAY))
+    assert reflection["state"] == "RETRY_WAIT"
+    reflection = core.store.one(
+        "SELECT run_id, source_set_sha256, model_request_id FROM reflection_runs WHERE run_id=%s",
+        (reflection["run_id"],),
+    )
+    assert reflection["model_request_id"] is None
+    core.store.execute(
+        "UPDATE consolidation_runs SET state='PARTIAL',steps_json=%s,source_set_sha256=%s "
+        "WHERE run_id=%s", (encode({"reflection": "RETRY_WAIT"}), reflection["source_set_sha256"],
+                             nightly),
+    )
+    core.store.execute("UPDATE reflection_runs SET next_attempt_at=%s WHERE run_id=%s",
+                       (core.clock(), reflection["run_id"]))
+    usage = core.store.rows("SELECT * FROM model_usage")
+    ready = Barrier(2)
+
+    def schedule(service):
+        ready.wait(timeout=5)
+        return service.schedule_due()
+
+    with (Core(core.settings, core.model, core.clock) as peer,
+          ThreadPoolExecutor(max_workers=2) as pool):
+        results = list(pool.map(schedule, (core.consolidation, peer.consolidation)))
+    assert sorted(results) == [[], [nightly]]
+    assert core.consolidation.schedule_due() == []
+    assert core.consolidation.status(DAY)["state"] == "SCHEDULED"
+    assert core.store.rows("SELECT * FROM model_usage") == usage

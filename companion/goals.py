@@ -732,23 +732,26 @@ class GoalEngine:
         )
 
     def expire_commitments(self):
-        for row in self.store.rows(
-            "SELECT c.goal_id FROM commitments AS c JOIN goals AS g USING (goal_id) WHERE "
-            "c.deadline <= %s AND c.state IN ('ACKNOWLEDGED', 'IN_PROGRESS') AND NOT g.state IN "
-            "('DONE', 'FAILED', 'CANCELLED') FOR UPDATE OF g, c SKIP LOCKED",
-            (self.clock(),),
-        ):
-            self.store.execute(
-                "UPDATE goals SET state = 'FAILED', last_error_code = 'DEADLINE_EXCEEDED', version "
-                "= version + 1 WHERE goal_id = %s",
-                (row["goal_id"],),
+        with nullcontext() if self.store.in_transaction else self.store.transaction():
+            rows = self.store.rows(
+                "SELECT c.goal_id FROM commitments AS c JOIN goals AS g USING (goal_id) WHERE "
+                "c.deadline <= %s AND c.state IN ('ACKNOWLEDGED', 'IN_PROGRESS') AND "
+                "g.state NOT IN ('DONE', 'FAILED', 'CANCELLED') FOR UPDATE OF g, c SKIP LOCKED",
+                (self.clock(),),
             )
-            self.store.execute(
-                "UPDATE goal_steps SET state = 'FAILED', lease_token = NULL, last_error_code = "
-                "'DEADLINE_EXCEEDED' WHERE goal_id = %s",
-                (row["goal_id"],),
-            )
-            self.feedback(row["goal_id"], "EXPLAINED_FAILURE", "DEADLINE_EXCEEDED")
+            for row in rows:
+                self.store.execute(
+                    "UPDATE goals SET state = 'FAILED', last_error_code = 'DEADLINE_EXCEEDED', "
+                    "version = version + 1 WHERE goal_id = %s",
+                    (row["goal_id"],),
+                )
+                self.store.execute(
+                    "UPDATE goal_steps SET state = 'FAILED', lease_token = NULL, last_error_code = "
+                    "'DEADLINE_EXCEEDED' WHERE goal_id = %s",
+                    (row["goal_id"],),
+                )
+                self.feedback(row["goal_id"], "EXPLAINED_FAILURE", "DEADLINE_EXCEEDED")
+        return len(rows)
 
     def claim(self):
         self.expire_sources()

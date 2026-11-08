@@ -1,6 +1,7 @@
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime
 
 import pytest
@@ -12,7 +13,7 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
 from companion.core import Core
 from companion.goals import GoalProposal
-from companion.store import after
+from companion.store import Store, after
 from companion.transport import begin_send, delivery_result, lease_deliveries, reconcile_delivery
 from tests.conftest import ingest, run
 from tests.postgres_fixture import isolated_database
@@ -342,3 +343,27 @@ def test_restored_pending_commitment_feedback_is_never_blindly_replayed(core, tm
                                     LeaseRequest(worker_id="bridge"), core.clock())["items"] == []
             assert restored.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
             assert restored.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
+
+
+def test_expiry_skips_locked_goals_and_rolls_back_failed_feedback(core, monkeypatch):
+    goal = setup_goal(core, commitment=True)
+    core.clock.advance(86401)
+    with (closing(Store(core.database, core.settings.state_directory)) as owner,
+          owner.transaction()):
+        owner.one("SELECT goal_id FROM goals WHERE goal_id=%s FOR UPDATE", (goal,))
+        assert core.goals.expire_commitments() == 0
+    before = core.goals.get(goal)
+
+    def fail(*args):
+        raise RuntimeError("feedback unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(core.goals, "feedback", fail)
+        with pytest.raises(RuntimeError, match="feedback unavailable"):
+            core.goals.expire_commitments()
+    assert core.goals.get(goal) == before
+    assert core.goals.expire_commitments() == 1
+    assert core.goals.expire_commitments() == 0
+    assert core.store.one("SELECT failure_code FROM commitments") == {
+        "failure_code": "DEADLINE_EXCEEDED",
+    }

@@ -12,7 +12,9 @@ from companion.contracts import CoreError
 from companion.worker_schedule import UnitResult
 from tests.conftest import ingest, run
 from tests.support.autonomous_selector import drain
-from tests.support.diary import seed_day
+from tests.support.consolidation import enable_nightly
+from tests.support.diary import DAY, seed_day
+from tests.support.goals import setup_goal
 from tests.support.life_topics import bug, proposal
 from tests.support.social_autonomy import background
 
@@ -403,3 +405,34 @@ def test_foreground_precedence_pauses_model_lanes_but_not_local_bookkeeping():
         assert selector.next_blocked_maintenance > monotonic()
 
     run(scenario())
+
+
+def test_maintenance_lanes_report_only_committed_work(core):
+    from companion import image_generation
+
+    enable_nightly(core)
+    core.settings.diary_catchup_days = core.settings.consolidation_catchup_days = 1
+    goal = setup_goal(core, number=50, commitment=True)
+    lanes = {lane.name: lane for lane in native_selector(core, "maintenance").lanes}
+
+    def progressed(name):
+        return run(lanes[name].run()).progressed
+
+    for name, schedule in (("diary_schedule", core.diary.schedule_day),
+                           ("consolidation_schedule", core.consolidation.schedule_day)):
+        assert progressed(name)
+        run_id = schedule(DAY)
+        assert run_id and schedule(DAY) == run_id
+        assert not progressed(name)
+    assert not progressed("commitment_expiry")
+    core.clock.advance(86401)
+    assert progressed("commitment_expiry")
+    assert core.goals.get(goal)["state"] == "FAILED"
+    assert not progressed("commitment_expiry")
+
+    root = image_generation.directory(core.store)
+    root.mkdir(mode=0o700, exist_ok=True)
+    assert not progressed("media_cleanup")
+    (root / "orphan.tmp").write_bytes(b"orphan")
+    assert progressed("media_cleanup")
+    assert not progressed("media_cleanup")

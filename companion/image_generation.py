@@ -110,11 +110,11 @@ def cleanup(store, now, *, entries=None, limit=None):
     """Delete spooled bytes that no live, unexpired Outbox item can still send."""
     root = directory(store)
     if root.is_symlink() or not root.is_dir() or not _table(store):
-        return 0
+        return 0, 0
     if entries is None:
         with os.scandir(root) as entries:
             return cleanup(store, now, entries=entries, limit=limit)
-    processed = 0
+    processed = removed = 0
     for entry in islice(entries, limit):
         processed += 1
         path = Path(entry.path)
@@ -151,8 +151,12 @@ def cleanup(store, now, *, entries=None, limit=None):
                 and (row["message_id"] is None or row["outbox_state"] in LIVE_OUTBOX)
             )
             if not keep and not path.is_dir():
-                path.unlink(missing_ok=True)
-    return processed
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                removed += 1
+    return processed, removed
 
 
 def _table(store):

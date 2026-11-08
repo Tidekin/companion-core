@@ -608,7 +608,7 @@ class DiaryRepository:
             sources = [row for row in sources if row["event_id"] in read_ids]
         return sorted(sources, key=lambda row: row["source_id"])
 
-    def schedule(self, day):
+    def schedule(self, day, *, changed_only=False):
         now = self.clock()
         local = datetime.fromisoformat(now).astimezone(ZoneInfo(self.settings.timezone))
         if day >= local.date():
@@ -627,7 +627,7 @@ class DiaryRepository:
                 (day.isoformat(), self.settings.timezone),
             )
             if prior:
-                return prior["run_id"]
+                return None if changed_only else prior["run_id"]
             run_id = uid("diary_run")
             inserted = self.store.execute(
                 "INSERT INTO diary_runs (run_id, identity_id, local_date, timezone, state, "
@@ -639,6 +639,8 @@ class DiaryRepository:
             )
             if inserted:
                 return run_id
+            if changed_only:
+                return None
             return self.store.one(
                 "SELECT run_id FROM diary_runs WHERE identity_id = 'companion' "
                 "AND local_date = %s AND timezone = %s", (day.isoformat(), self.settings.timezone),
@@ -950,7 +952,7 @@ class DiaryService:
             candidate = local.date() - timedelta(days=offset)
             if candidate > latest:
                 continue
-            result = self.schedule_day(candidate)
+            result = self.repo.schedule(candidate, changed_only=True)
             if result:
                 scheduled.append(result)
         return scheduled

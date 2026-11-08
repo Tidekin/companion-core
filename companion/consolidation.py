@@ -58,14 +58,22 @@ class NightlyConsolidator:
     def enabled(self):
         return enabled(self.store, self.settings, self.clock)
 
-    def schedule_day(self, day):
+    def schedule_day(self, day, *, changed_only=False):
         if not self.enabled():
             return None
         self.reflections.validate_day(day)
         with self.store.transaction():
             existing = self.status(day)
             if existing:
+                unchanged = None if changed_only else existing["run_id"]
                 steps = json.loads(existing["steps_json"])
+                if not (
+                    (existing["state"] == "PARTIAL" or
+                     (existing["state"] == "CANCELLED"
+                      and existing["last_error_code"] == "LIVE_WINDOW_STOPPED"))
+                    and steps.get("reflection") in {"FAILED", "RETRY_WAIT", "CANCELLED"}
+                ):
+                    return unchanged
                 reflection = self.store.one(
                     'SELECT reflection_runs.run_id AS run_id, reflection_runs.identity_id AS '
                     'identity_id, reflection_runs.local_date AS local_date, '
@@ -82,11 +90,7 @@ class NightlyConsolidator:
                     (day.isoformat(), self.settings.timezone),
                 )
                 if (
-                    (existing["state"] == "PARTIAL" or
-                     (existing["state"] == "CANCELLED"
-                      and existing["last_error_code"] == "LIVE_WINDOW_STOPPED"))
-                    and steps.get("reflection") in {"FAILED", "RETRY_WAIT", "CANCELLED"}
-                    and retryable_admission(reflection, self.clock())
+                    retryable_admission(reflection, self.clock())
                     and existing["source_set_sha256"] == reflection["source_set_sha256"]
                     == source_hash(self.diary.repo.sources(day, purpose="consolidation"))
                 ):
@@ -106,7 +110,8 @@ class NightlyConsolidator:
                             "consolidation.resumed", existing["run_id"], existing["run_id"],
                             self.clock(), reason="UNADMITTED_REFLECTION",
                         )
-                return existing["run_id"]
+                        return existing["run_id"]
+                return unchanged
             run_id, now = uid("nightly"), self.clock()
             steps = {}
             if owner_authority.required(self.store, self.settings):
@@ -121,7 +126,9 @@ class NightlyConsolidator:
                 (run_id, day.isoformat(), self.settings.timezone, CONFIG_VERSION,
                  encode(steps), epoch(self.store), now, now),
             )
-            return run_id if inserted else self.status(day)["run_id"]
+            if inserted:
+                return run_id
+            return None if changed_only else self.status(day)["run_id"]
 
     def schedule_due(self):
         if not self.enabled():
@@ -130,11 +137,14 @@ class NightlyConsolidator:
         latest = local.date() - timedelta(
             days=1 if local.hour >= self.settings.consolidation_local_hour else 2
         )
-        return [
-            self.schedule_day(local.date() - timedelta(days=offset))
-            for offset in reversed(range(1, self.settings.consolidation_catchup_days + 1))
-            if local.date() - timedelta(days=offset) <= latest
-        ]
+        scheduled = []
+        for offset in reversed(range(1, self.settings.consolidation_catchup_days + 1)):
+            day = local.date() - timedelta(days=offset)
+            if day <= latest:
+                run_id = self.schedule_day(day, changed_only=True)
+                if run_id:
+                    scheduled.append(run_id)
+        return scheduled
 
     def status(self, day):
         return self.store.one(

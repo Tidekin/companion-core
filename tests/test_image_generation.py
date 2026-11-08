@@ -31,12 +31,12 @@ def test_maintenance_preserves_bytes_between_dispatch_and_result_commit(
         root.mkdir(mode=0o700, exist_ok=True)
         partial = root / (image_id + ".tmp")
         partial.write_bytes(data[:10])
-        with closing(Store(store.path)) as other:
-            image_generation.cleanup(other, core.clock())
+        with closing(Store(store.database, store.state_directory)) as other:
+            assert image_generation.cleanup(other, core.clock()) == (1, 0)
             assert partial.exists()
             partial.unlink()
             original_write(store, image_id, data)
-            image_generation.cleanup(other, core.clock())
+            assert image_generation.cleanup(other, core.clock()) == (1, 0)
             assert (root / (image_id + ".img")).exists()
         observed.append(image_id)
 
