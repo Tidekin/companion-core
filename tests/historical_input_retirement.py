@@ -187,18 +187,19 @@ async def historical_input(core, tmp_path, *, failure="budget", scope_options=No
                      "OWNER_STOP" if stopped else None))
                 spool.db.commit()
                 approval = core.settings.live_text_window
-                paid_budget.journal(core.store, core.settings.paid_model, dict(kind="window_open",
-                    window_id=approval.window_id, plan_sha256=plan.sha256, handoff_sha256=None))
-                job = seed_input(core, window, failure=failure, message=message)
-                if terminal == "SUPERSEDED":
-                    seed_input(core, window, failure="cancelled", number=2)
-                elif terminal == "RECALLED":
-                    with core.store.transaction():
+                with core.store.transaction(control_write=True):
+                    paid_budget.journal(core.store, core.settings.paid_model, dict(
+                        kind="window_open", window_id=approval.window_id,
+                        plan_sha256=plan.sha256, handoff_sha256=None))
+                    job = seed_input(core, window, failure=failure, message=message)
+                    if terminal == "SUPERSEDED":
+                        seed_input(core, window, failure="cancelled", number=2)
+                    elif terminal == "RECALLED":
                         core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
-                if stopped:
-                    paid_budget.journal(core.store, core.settings.paid_model,
-                        dict(kind="window_stop", window_id=approval.window_id,
-                             plan_sha256=plan.sha256), allow_settlement=True)
+                    if stopped:
+                        paid_budget.journal(core.store, core.settings.paid_model,
+                            dict(kind="window_stop", window_id=approval.window_id,
+                                 plan_sha256=plan.sha256), allow_settlement=True)
                 budget_path, erasures = await asyncio.gather(
                     asyncio.to_thread(Path(core.settings.paid_model.journal_path).resolve),
                     asyncio.to_thread(Path(core.settings.erasure_ledger).read_bytes))
@@ -226,7 +227,9 @@ async def historical_input(core, tmp_path, *, failure="budget", scope_options=No
                     append_history(window, "STOP", {"reason": "OWNER_STOP"})
                     append_history(window, "CORE_STOP_CONFIRMED", {})
                     journal.stop_marker(window.stop_path)
-                assert not core.store.rows("PRAGMA foreign_key_check")
+                assert not core.store.rows(
+                    "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+                    "AND contype='f' AND NOT convalidated")
                 window.verify(active=False)
                 async with private_http_client(cfg.core_url, cfg.bridge_token) as client:
                     yield window, client, job
