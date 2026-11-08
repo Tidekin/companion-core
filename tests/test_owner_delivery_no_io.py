@@ -185,7 +185,7 @@ def test_erasure_retains_only_original_hashes_for_no_io_closure(core, tmp_path, 
     first = None
     if not before_receipt:
         first = delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock())
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         ErasureLedger(core.settings.erasure_ledger).expire_events(
             core.store, [proof["event_id"]], core.clock())
     result = delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock())

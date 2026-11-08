@@ -259,7 +259,8 @@ def test_snapshot_binds_scheduled_import_and_preserves_history_fallback():
 
 def test_core_policy_binds_nondefault_rules_even_if_bridge_selected():
     settings = Settings(
-        owner_qq_id="10001", bot_qq_id="20002", bridge_token="b" * 32, expression_enabled=True
+        owner_qq_id="10001", bot_qq_id="20002", bridge_token="b" * 32,
+        database="dbname=synthetic", expression_enabled=True,
     )
     original = meme_service.policy_hash(settings)
     assert original == "bc622473bb58029fc341e02be873ee24740eaf38f9721c8c5c461b693d04c43a"

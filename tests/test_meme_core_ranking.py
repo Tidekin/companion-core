@@ -71,7 +71,7 @@ def test_partial_index_batches_32_and_never_reranks_after_later_cache_fill(
     store_rows = c.core.store.rows
 
     def rows(sql, params=()):
-        if sql.startswith("SELECT a.asset_id,a.asset_sha256,src.caption_job_id"):
+        if sql.startswith("SELECT a.asset_id, a.asset_sha256, src.caption_job_id"):
             return [
                 {
                     "asset_id": b.asset_id,
@@ -177,7 +177,7 @@ def test_unindexed_selected_candidate_records_actual_batch_limit(runtime_case, m
     original_rows = c.core.store.rows
 
     def rows(sql, params=()):
-        if sql.startswith("SELECT a.asset_id,a.asset_sha256,src.caption_job_id"):
+        if sql.startswith("SELECT a.asset_id, a.asset_sha256, src.caption_job_id"):
             return [
                 {
                     "asset_id": b.asset_id,

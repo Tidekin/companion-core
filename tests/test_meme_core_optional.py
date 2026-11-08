@@ -68,7 +68,8 @@ def test_even_frozen_null_offer_refuses_later_revocation(runtime_case, change):
     elif change == "mode":
         c.core.settings.meme_catalog_owner = "bridge"
     elif change == "epoch":
-        advance_epoch(c.core.store)
+        with c.core.store.transaction(control_write=True):
+            advance_epoch(c.core.store)
     elif change == "policy":
         c.core.settings.meme_cooldown_seconds = 1
     else:

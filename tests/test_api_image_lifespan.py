@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -205,7 +204,7 @@ def test_api_lifespan_image_upload_calls_model_and_worker_continues_same_budget(
         assert paid_budget.journal(core.store, core.settings.paid_model)["head_sha256"]
     assert clients == []
     for instance in instances:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
             instance.store.one("SELECT 1")
 
 

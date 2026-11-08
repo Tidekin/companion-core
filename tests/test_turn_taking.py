@@ -26,7 +26,8 @@ def outbox(core):
 
 
 def test_defaults_are_on_and_stay_out_of_the_settings_dump():
-    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="x" * 32)
+    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="x" * 32,
+                        database="dbname=synthetic")
     assert settings.turn_taking.silence_enabled and settings.turn_taking.follow_up_enabled
     assert "turn_taking" not in settings.model_dump()
 
@@ -299,7 +300,8 @@ def test_changing_omitted_text_still_withholds_the_follow_up(core):
     changed = original[:200] + "改" + original[201:]
     assert turn_taking.excerpt(original) == turn_taking.excerpt(changed)
     core.store.execute((
-        "UPDATE events SET body_json=json_set(body_json,'$.text',%s) WHERE "
+        "UPDATE events SET body_json=jsonb_set(body_json::jsonb,'{text}',to_jsonb(%s::text))::text "
+        "WHERE "
         "event_id='evt_test_2'"
     ), (changed,))
     assert lease(core) == []

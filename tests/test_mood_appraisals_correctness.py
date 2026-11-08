@@ -16,12 +16,10 @@ from tests.support.mood_appraisals_integration import prepare_extraction
 
 
 def settle(core, request_id):
-    core.store.execute(
-        (
-            'INSERT INTO model_usage (request_id,scenario,provider,model,stat'
-            'e,input_tokens,output_tokens,occurred_at) VALUES (%s, '
-            "'memory_extract','synthetic','synthetic','SETTLED',100,20,%s)"
-        ), (request_id, core.clock()),
+    core.store.insert(
+        "model_usage", usage_id="usage_" + request_id, request_id=request_id,
+        scenario="memory_extract", provider="synthetic", model="synthetic",
+        state="SETTLED", input_tokens=100, output_tokens=20, occurred_at=core.clock(),
     )
 
 

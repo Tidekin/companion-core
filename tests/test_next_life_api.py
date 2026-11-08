@@ -35,6 +35,7 @@ def credentials(core):
 def client_for(core):
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     return httpx.AsyncClient(base_url="http://core", transport=httpx.ASGITransport(app=app))
 
 

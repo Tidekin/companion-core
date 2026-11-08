@@ -72,6 +72,7 @@ def test_http_recall_requires_bridge_auth_and_v2_signature(core, tmp_path):
     from fastapi.testclient import TestClient
 
     from companion.api import create_app
+    from companion.api_store import ApiStore
     from companion.store import encode
 
     capture, key = captured(core, tmp_path)
@@ -80,6 +81,7 @@ def test_http_recall_requires_bridge_auth_and_v2_signature(core, tmp_path):
     body = receipt(core, capture, key).model_dump(mode="json")
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     client = TestClient(app)
     path = "/internal/v1/owner-authority/inputs/recall"
     headers = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}

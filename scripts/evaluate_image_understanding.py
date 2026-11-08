@@ -44,7 +44,7 @@ def planning_settings():
         concurrency=1, journal_path=str(ROOT / ".local/vision-evaluation/budget.jsonl"),
         image_input=image)
     return Settings(owner_qq_id="10001", bot_qq_id="10002",
-        bridge_token="planning-only-token-12345",
+        bridge_token="planning-only-token-12345", database="dbname=synthetic",
         provider=paid.provider, model_name=paid.model, model_url=paid.endpoint,
         input_rate=paid.input_rate, cached_input_rate=paid.cached_input_rate,
         output_rate=paid.output_rate, paid_model=paid, max_output_tokens=2048,

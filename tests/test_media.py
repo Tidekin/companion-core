@@ -645,6 +645,7 @@ def test_settings_load_nested_media_configuration(core, monkeypatch, tmp_path):
     from companion.config import Settings
 
     monkeypatch.setenv("COMPANION_CONFIG", str(tmp_path / "absent.toml"))
+    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database.get_secret_value())
     monkeypatch.setenv("COMPANION_OWNER_QQ_ID", core.settings.owner_qq_id)
     monkeypatch.setenv("COMPANION_BOT_QQ_ID", core.settings.bot_qq_id)
     monkeypatch.setenv("COMPANION_BRIDGE_TOKEN", core.settings.bridge_token.get_secret_value())

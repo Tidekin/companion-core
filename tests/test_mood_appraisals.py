@@ -127,8 +127,9 @@ def test_record_writes_to_mood_appraisals_table(core):
     # Create model_usage record for FK constraint
     core.store.execute(
         (
-            'INSERT INTO model_usage (request_id,scenario,provider,model,stat'
-            'e,input_tokens,output_tokens,occurred_at) VALUES (%s, %s, %s, '
+            'INSERT INTO model_usage (usage_id,request_id,scenario,provider,model,stat'
+            'e,input_tokens,output_tokens,occurred_at) VALUES '
+            "('usage_test_request', %s, %s, %s, "
             '%s, %s, %s, %s, %s)'
         ),
         ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
@@ -174,8 +175,9 @@ def test_erase_removes_appraisals_by_event_ids(core):
     # Create model_usage record
     core.store.execute(
         (
-            'INSERT INTO model_usage (request_id,scenario,provider,model,stat'
-            'e,input_tokens,output_tokens,occurred_at) VALUES (%s, %s, %s, '
+            'INSERT INTO model_usage (usage_id,request_id,scenario,provider,model,stat'
+            'e,input_tokens,output_tokens,occurred_at) VALUES '
+            "('usage_test_request', %s, %s, %s, "
             '%s, %s, %s, %s, %s)'
         ),
         ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
@@ -216,8 +218,9 @@ def test_still_valid_checks_quote_and_source_retention(core):
     # Create model_usage record
     core.store.execute(
         (
-            'INSERT INTO model_usage (request_id,scenario,provider,model,stat'
-            'e,input_tokens,output_tokens,occurred_at) VALUES (%s, %s, %s, '
+            'INSERT INTO model_usage (usage_id,request_id,scenario,provider,model,stat'
+            'e,input_tokens,output_tokens,occurred_at) VALUES '
+            "('usage_test_request', %s, %s, %s, "
             '%s, %s, %s, %s, %s)'
         ),
         ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
@@ -245,8 +248,9 @@ def test_capped_enforces_daily_limit_per_reason(core):
     # Create model_usage record
     core.store.execute(
         (
-            'INSERT INTO model_usage (request_id,scenario,provider,model,stat'
-            'e,input_tokens,output_tokens,occurred_at) VALUES (%s, %s, %s, '
+            'INSERT INTO model_usage (usage_id,request_id,scenario,provider,model,stat'
+            'e,input_tokens,output_tokens,occurred_at) VALUES '
+            "('usage_test_request', %s, %s, %s, "
             '%s, %s, %s, %s, %s)'
         ),
         ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",

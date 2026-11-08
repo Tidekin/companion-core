@@ -32,7 +32,8 @@ def test_serve_proxy_source_limits_and_untrusted_spoofing(core, tmp_path, proxy)
     env = {k: v for k, v in os.environ.items() if not k.startswith("COMPANION_")}
     env.update(
         COMPANION_CONFIG=str(tmp_path / "absent.toml"),
-        COMPANION_DATABASE=core.settings.database,
+        COMPANION_DATABASE=core.settings.database.get_secret_value(),
+        COMPANION_STATE_DIRECTORY=core.settings.state_directory,
         COMPANION_ERASURE_LEDGER=core.settings.erasure_ledger,
         COMPANION_OWNER_QQ_ID="10001", COMPANION_BOT_QQ_ID="10002",
         COMPANION_BRIDGE_TOKEN="synthetic-bridge-token-" * 2,

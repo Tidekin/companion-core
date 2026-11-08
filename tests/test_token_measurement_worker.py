@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 from companion import __main__
 from companion.config import Settings
+from companion.postgres import Database
 from companion.store import Store
 
 value = json.loads(Path(sys.argv[1]).read_text("utf-8"))
@@ -43,13 +44,14 @@ __main__.httpx.AsyncClient = OfflineClient
 async def exercise():
     task = asyncio.create_task(__main__.worker(settings))
     try:
-        with closing(Store(settings.database)) as observer:
+        with (Database(settings.database) as database,
+              closing(Store(database, settings.state_directory)) as observer):
             async with asyncio.timeout(20):
                 while True:
                     if task.done():
                         await task
                         raise AssertionError("worker exited before the native job completed")
-                    job = observer.one("SELECT state FROM jobs WHERE job_id=?", (value["job_id"],))
+                    job = observer.one("SELECT state FROM jobs WHERE job_id=%s", (value["job_id"],))
                     if calls and job["state"] in {"SUCCEEDED", "FAILED", "RETRY_WAIT"}:
                         break
                     await asyncio.sleep(0.02)
@@ -74,6 +76,7 @@ def test_http_to_independent_worker_count_and_accounting(core, tmp_path, outcome
         }) as (entry, _):
             source = await entry.admit(1, "synthetic token measurement request")
             settings = core.settings.model_dump(mode="json")
+            settings["database"] = core.settings.database.get_secret_value()
             settings["model_key"] = "synthetic-key"
             settings["bridge_token"] = core.settings.bridge_token.get_secret_value()
             settings["control_token"] = core.settings.control_token.get_secret_value()

@@ -1,13 +1,13 @@
 """Synthetic fragment envelopes and original Bridge delivery boundaries."""
 
 import json
-import sqlite3
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
 from unittest.mock import patch
 
 import httpx
+import psycopg
 import pytest
 
 from companion.reply_segments import SegmentedReplyConfig
@@ -382,14 +382,14 @@ def test_later_fragment_cannot_replace_acknowledged_group_manifest(core, tmp_pat
                 "event": ("delivery_key", "reply:evt_" + "e" * 64 + ":v2:1"),
             }[damage]
             if damage in {"index", "group"}:
-                with pytest.raises(sqlite3.IntegrityError):
-                    core.store.execute(f"UPDATE outbox SET {field}=? WHERE message_id=?",
+                with pytest.raises(psycopg.IntegrityError):
+                    core.store.execute(f"UPDATE outbox SET {field}=%s WHERE message_id=%s",
                                        (value, row["message_id"]))
                 assert core.store.one('SELECT * FROM outbox WHERE message_id=%s',
                                       (row["message_id"],)) == row
                 assert len(sends) == len(calls) == 1 and active.attempts() == {"ACK": 1}
                 return
-            core.store.execute(f"UPDATE outbox SET {field}=? WHERE message_id=?",
+            core.store.execute(f"UPDATE outbox SET {field}=%s WHERE message_id=%s",
                                (value, row["message_id"]))
             try:
                 await active.pump()

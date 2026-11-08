@@ -171,7 +171,7 @@ def load_environment(core, tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("COMPANION_CONFIG", str(path))
-    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database)
+    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database.get_secret_value())
     monkeypatch.setenv("COMPANION_ERASURE_LEDGER", core.settings.erasure_ledger)
     monkeypatch.setenv("COMPANION_MEME_CATALOG_OWNER", "core")
     monkeypatch.setenv("COMPANION_MEME_TRUSTED_SOURCES", json.dumps([RULE]))

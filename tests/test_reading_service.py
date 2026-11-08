@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
 from companion.exploration import ReadResult
@@ -171,6 +172,7 @@ def test_actual_worker_through_authenticated_core_http_commits_parser_evidence(c
     monkeypatch.setattr(worker_v1, "WebHTTP", lambda hosts: WebHTTP(hosts, pool))
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     async def scenario():
         async with httpx.AsyncClient(

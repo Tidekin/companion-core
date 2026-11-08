@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from companion import meme_service, owner_authority, owner_delivery, owner_input
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.contracts import CoreError, LeaseRequest
 from companion.expression import ExpressionEngine, MemeOffer
 from companion.owner_authority_protocol import AuthorityStop, OwnerCapture, OwnerSendCheck
@@ -42,6 +43,7 @@ def test_static_offer_api_keeps_signature_separate_and_freezes_retry(core, tmp_p
     capture, offer = source(core, tmp_path)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     client = TestClient(app)
     headers = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
     path = "/internal/v1/owner-authority/inputs/approve"

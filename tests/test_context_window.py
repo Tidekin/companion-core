@@ -231,7 +231,7 @@ def test_signed_http_ingress_to_independent_worker_enforces_loaded_joint_window(
             source = await entry.admit(1, "synthetic joint-window source")
             job_id = entry.accepted[source["event_id"]]["job_id"]
             settings = core.settings.model_dump(mode="json")
-            for key in ("model_key", "bridge_token", "control_token"):
+            for key in ("database", "model_key", "bridge_token", "control_token"):
                 settings[key] = getattr(core.settings, key).get_secret_value()
             path = tmp_path / "context-window-worker.json"
             path.write_text(encode({"settings": settings, "now": core.clock(), "job_id": job_id}),

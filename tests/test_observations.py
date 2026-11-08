@@ -254,6 +254,7 @@ def test_restoring_backup_never_restores_device_permission(empty_database, core,
 
 def test_adapter_configuration_environment_validation(core, monkeypatch, tmp_path):
     monkeypatch.setenv("COMPANION_CONFIG", str(tmp_path / "absent.toml"))
+    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database.get_secret_value())
     monkeypatch.setenv("COMPANION_OWNER_QQ_ID", "10001")
     monkeypatch.setenv("COMPANION_BOT_QQ_ID", "10002")
     monkeypatch.setenv("COMPANION_BRIDGE_TOKEN", core.settings.bridge_token.get_secret_value())

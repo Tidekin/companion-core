@@ -188,11 +188,13 @@ def test_recalled_relationship_survives_context_pressure(core):
 def test_ineligible_relationships_are_not_standing(core, field, value):
     core.settings.memory_enabled = True
     key = _add(core, 1, '长期约定叫你小鱼', kind='fact', confirmed=True)
-    core.store.execute(f'UPDATE memories SET {field}=? WHERE memory_id=?', (value, key))
+    core.store.execute(f'UPDATE memories SET {field}=%s WHERE memory_id=%s', (value, key))
     assert core.memory.standing_relationship(now=core.clock()) == []
 
 
-@pytest.mark.parametrize('resource', ['candidates', 'text_bytes', 'source_nodes', 'sql_steps'])
+@pytest.mark.parametrize('resource', [
+    'candidates', 'text_bytes', 'source_nodes', 'sql_milliseconds',
+])
 def test_standing_respects_shared_retrieval_work(core, resource):
     core.settings.memory_enabled = True
     _add(core, 1, '长期约定叫你小鱼', kind='fact', confirmed=True)

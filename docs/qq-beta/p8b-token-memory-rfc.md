@@ -92,7 +92,10 @@ experiment 仅在独立脚本里跑小规模本地规则与一次有界参考装
 
 ### 复现入口
 
-在现有锁定依赖环境运行；这组脚本无需 FastEmbed 模型、供应商密钥或网络：
+在现有锁定依赖环境运行；这组脚本无需 FastEmbed 模型、供应商密钥或供应商网络。
+原生 PostgreSQL 版本使用[隔离测试集群配置](../postgresql-migration.md)
+`COMPANION_POSTGRES_TEST_CONFIG`，每个 case 从空白原生模板复制独立数据库并在结束时删除。
+新的运行结果保存在新的输出目录；冻结读数继续保留其原始源码和环境标识。
 
 ```powershell
 python scripts/benchmark_p8b_context.py --help

@@ -49,7 +49,7 @@ def test_native_testmon_with_xdist_selects_changed_function_and_full_can_refresh
     assert len(list(ElementTree.parse(root / ".local/full.xml").iter("testcase"))) == 2
 
 
-def test_real_schema_is_prepared_once_across_workers_and_backups_stay_private(tmp_path):
+def test_real_schema_is_prepared_once_per_worker_and_copies_stay_private(tmp_path):
     root = project(tmp_path)
     (root / "conftest.py").write_text(
         "from pathlib import Path\nimport tests.conftest as shared\n"
@@ -60,12 +60,13 @@ def test_real_schema_is_prepared_once_across_workers_and_backups_stay_private(tm
         "    return original(path)\nshared.migrate = counted\n")
     for index in range(4):
         (root / f"test_isolation_{index}.py").write_text(
-            "import json,os,socket,sqlite3,subprocess,sys\nfrom pathlib import Path\n"
+            "import json,os,socket,psycopg,subprocess,sys\nfrom pathlib import Path\n"
             "def test_copy(core,tmp_path,migrated_database):\n"
-            "    sql = \"SELECT name FROM sqlite_master WHERE name='private'\"\n"
+            "    sql = (\"SELECT tablename FROM pg_tables WHERE \"\n"
+            "           \"schemaname=current_schema() AND tablename='private'\")\n"
             "    assert not core.store.rows(sql)\n"
-            "    core.store.execute('CREATE TABLE private(value)')\n"
-            "    with sqlite3.connect(migrated_database) as db:\n"
+            "    core.store.execute('CREATE TABLE private(value TEXT)')\n"
+            "    with psycopg.connect(migrated_database.get_secret_value()) as db:\n"
             "        assert not db.execute(sql).fetchall()\n"
             "    with socket.socket() as server:\n"
             "        server.bind(('127.0.0.1',0))\n        server.listen()\n"
@@ -80,7 +81,8 @@ def test_real_schema_is_prepared_once_across_workers_and_backups_stay_private(tm
             "        peer,_ = server.accept()\n"
             "        with peer:\n            assert peer.recv(64) == b'SYNTHETIC'\n"
             f"    (Path(__file__).parent / '.local/worker-{index}.json').write_text(json.dumps(\n"
-            "        {'pid':os.getpid(),'schema':str(migrated_database),'tmp':str(tmp_path),\n"
+            "        {'pid':os.getpid(),'schema':psycopg.conninfo.conninfo_to_dict(\n"
+            "         migrated_database.get_secret_value())['dbname'],'tmp':str(tmp_path),\n"
             "         'child_tmp':os.environ['TMP'],'child_env':json.loads(child.stdout),\n"
             "         'port':port}))\n")
     env = {**os.environ, "PYTHONPATH": str(ROOT)}
@@ -88,10 +90,10 @@ def test_real_schema_is_prepared_once_across_workers_and_backups_stay_private(tm
                "--basetemp=" + str(root / ".local/pytest"), "-o", "cache_dir=.local/cache"]
     result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (root / ".local/preparations").read_text().splitlines() == ["prepared"]
+    assert (root / ".local/preparations").read_text().splitlines() == ["prepared"] * 2
     records = [json.loads(path.read_text()) for path in (root / ".local").glob("worker-*.json")]
     assert len(records) == 4 and len({r["pid"] for r in records}) == 2
-    assert len({r["schema"] for r in records}) == 1
+    assert len({r["schema"] for r in records}) == 2
     assert len({r["tmp"] for r in records}) == 4
     assert len({r["child_tmp"] for r in records}) == 2
     assert all(r["child_env"] == [r["child_tmp"]] * 3 and r["port"] > 0 for r in records)

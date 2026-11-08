@@ -2,7 +2,6 @@
 
 import asyncio
 import importlib
-import sqlite3
 from functools import partial
 
 import httpx
@@ -18,12 +17,13 @@ from companion.worker_wakeup import Wakeup
 
 
 @pytest.fixture
-def worker_settings(tmp_path):
+def worker_settings(tmp_path, empty_database):
     settings = Settings(
         owner_qq_id="10001",
         bot_qq_id="10002",
         bridge_token="test-token-" * 4,
-        database=str(tmp_path / "core.db"),
+        database=empty_database,
+        state_directory=str(tmp_path / "state"),
         erasure_ledger=str(tmp_path / "privacy.jsonl"),
         memory_enabled=True,
     )
@@ -99,7 +99,7 @@ def test_nonsemantic_worker_enters_own_loop_and_closes_store(
     assert len(worked) == 1
     assert unavailable_semantics == []
     assert len(opened_stores) == 1
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+    with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
         opened_stores[0].one("SELECT 1")
 
 
@@ -122,7 +122,7 @@ def test_shared_bootstrap_rejects_identity_or_ledger_mismatch_and_closes_store(
     assert unavailable_semantics == []
     assert len(opened_stores) == 2
     for store in opened_stores:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
             store.one("SELECT 1")
 
 
@@ -138,7 +138,7 @@ def test_semantic_worker_still_fails_closed_and_closes_store(
         asyncio.run(getattr(module, entry)(worker_settings))
     assert len(unavailable_semantics) == 1
     assert len(opened_stores) == 1
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+    with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
         opened_stores[0].one("SELECT 1")
 
 
@@ -182,7 +182,7 @@ def test_content_worker_finishes_queued_article_images_without_semantic_startup(
     assert len(calls) == 1
     assert calls[0].method == "POST"
     assert len(opened_stores) == 1
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+    with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
         opened_stores[0].one("SELECT 1")
     with Runtime(settings, clock) as runtime:
         image = runtime.store.one("SELECT * FROM content_items WHERE kind='link_image'")
@@ -249,7 +249,7 @@ def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_ret
     assert fetches == provider_calls == unavailable_semantics == []
     assert len(opened_stores) == 2
     for store in opened_stores:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
             store.one("SELECT 1")
     with Runtime(settings, clock) as runtime:
         recovered = runtime.store.one(
@@ -276,5 +276,5 @@ def test_init_bootstraps_identity_without_semantic_index(
     assert "identity and erasure ledger initialized" in capsys.readouterr().out
     assert unavailable_semantics == []
     assert len(opened_stores) == 1
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+    with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
         opened_stores[0].one("SELECT 1")

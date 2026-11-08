@@ -465,7 +465,7 @@ def test_legitimate_local_success_survives_raw_core_erasure_cancellation(
                     commit_check=lambda: c.owner.verify(),
                 )
             )["state"] == "READY"
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [c.context["event_id"]], core.clock())
             c.owner.stop()
             database, config = c.owner.spool.directory / "spool.sqlite3", c.owner.config

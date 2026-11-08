@@ -32,6 +32,7 @@ def test_every_configuration_field_has_a_chinese_label_or_is_custody():
 
 def test_conversation_policy_is_always_an_editable_value():
     settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="x" * 32,
+                        database="dbname=synthetic",
                         conversation_policy=None)  # An earlier operator version stored null.
     assert (settings.conversation_policy.mode, settings.conversation_policy.strategy) == (
         "ENABLED", "participation_v2")

@@ -98,13 +98,10 @@ def test_appraisals_contribute_to_immediate_and_undertone(core):
 
 def test_deterministic_signal_wins_for_the_same_owner_event(core):
     key = feedback(core, text="这个想法很有意思")
-    core.store.execute(
-        (
-            'INSERT INTO model_usage(request_id,scenario,provider,model,state'
-            ",occurred_at) VALUES ('duplicate','memory_extract','synthetic','"
-            "synthetic','SETTLED',%s)"
-        ),
-        (core.clock(),),
+    core.store.insert(
+        "model_usage", usage_id="usage_duplicate", request_id="duplicate",
+        scenario="memory_extract", provider="synthetic", model="synthetic",
+        state="SETTLED", occurred_at=core.clock(),
     )
     signals = mood_appraisals.validate(core.store, [InteractionSignal(
         event_id=key, reason="OWNER_AFFECTION", quote="这个想法很有意思")], {key})

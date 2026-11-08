@@ -70,7 +70,7 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path):
                 assert await worker.run_once("before-appraisal")
             assert (await entry.send(entry.client, entry.protocol))["worked"]
             settings = core.settings.model_dump(mode="json")
-            for name in ("model_key", "bridge_token", "control_token"):
+            for name in ("database", "model_key", "bridge_token", "control_token"):
                 settings[name] = getattr(core.settings, name).get_secret_value()
             settings_path = tmp_path / "worker-settings.json"
             settings_path.write_text(encode(settings), encoding="utf-8")

@@ -45,7 +45,7 @@ def test_rollback_and_self_hints_do_not_wake_another_business_scan(core):
 
 
 def test_missing_all_notifications_still_returns_for_a_real_rescan(core, monkeypatch):
-    monkeypatch.setattr(worker_wakeup, "CHAT_WAIT_RESCAN_SECONDS", .08)
+    monkeypatch.setattr(worker_wakeup, "MAINTENANCE_SECONDS", .08)
 
     async def scenario():
         with Wakeup(core.store, core.settings, "worker", utcnow) as wake:

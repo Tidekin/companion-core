@@ -268,7 +268,7 @@ def test_link_images_have_get_only_origin_binding_and_separate_article_limit(cor
     service.schedule(event_id)
     obs_id = source_observation(core)
     service.register_link_images(event_id, obs_id, [CDN + "?imageMogr2/private", CDN + "2"])
-    rows = core.store.rows("SELECT * FROM content_items WHERE kind='link_image'")
+    rows = core.store.rows("SELECT * FROM content_items WHERE kind='link_image' ORDER BY slot")
     assert len(rows) == 2 and rows[0]["target_url"] == CDN
     calls = []
 
@@ -280,9 +280,9 @@ def test_link_images_have_get_only_origin_binding_and_separate_article_limit(cor
     assert run(service.run_once())
     assert len(vision.calls) == 1
     assert calls[0].method == "GET" and str(calls[0].url) == CDN
-    image_obs = core.store.one("SELECT output_event_id FROM content_items WHERE kind='link_image'")[
-        "output_event_id"
-    ]
+    image_obs = core.store.one(
+        "SELECT output_event_id FROM content_items WHERE kind='link_image' AND state='SUCCEEDED'"
+    )["output_event_id"]
     roots = {
         row["source_event_id"]
         for row in core.store.rows(
@@ -323,7 +323,7 @@ def test_erasure_between_preflight_and_write_lock_cannot_restore_content(
         nonlocal erased
         if not erased:
             erased = True
-            with original():
+            with original(control_write=True):
                 core.ledger.expire_events(core.store, [observation_id or event_id], core.clock())
         with original():
             yield core.store

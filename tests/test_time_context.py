@@ -39,7 +39,8 @@ def test_disabled_labels_leave_the_context_unchanged(core):
 def test_default_is_on_and_absent_from_the_settings_dump():
     from companion.config import Settings
 
-    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="t" * 40)
+    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="t" * 40,
+                        database="dbname=synthetic")
     assert settings.chat_time_labels and "chat_time_labels" not in settings.model_dump()
 
 

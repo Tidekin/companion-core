@@ -20,7 +20,8 @@ def seconds(core, value):
 
 
 def test_defaults_are_on_and_stay_out_of_the_settings_dump():
-    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="x" * 32)
+    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="x" * 32,
+                        database="dbname=synthetic")
     assert settings.input_debounce.enabled is True
     assert "input_debounce" not in settings.model_dump()
 

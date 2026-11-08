@@ -121,8 +121,8 @@ def test_history_sources_retain_native_identity_scope_and_recall(core, tmp_path,
             if mutation == "text":
                 core.store.execute((
                     'UPDATE events SET '
-                    "body_json=json_set(body_json,'$.text','changed without "
-                    "signed capture') WHERE event_id=%s"
+                    "body_json=jsonb_set(body_json::jsonb,'{text}',"
+                    "to_jsonb('changed without signed capture'::text))::text WHERE event_id=%s"
                 ),
                                    (event.event_id,))
                 source = _source(core.store, core.settings, event.event_id, core.clock())

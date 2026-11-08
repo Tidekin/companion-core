@@ -13,6 +13,7 @@ from pydantic import SecretStr
 
 from companion import life_worker, owner_authority
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.core import Core
 from companion.diary import DIARY_RULES, DiaryService
 from companion.model import ModelClient
@@ -48,6 +49,7 @@ def test_command_and_owner_api_report_actual_queue_state(core, state, label):
     core.settings.diary_admin_token = SecretStr(ADMIN_TOKEN)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     client = TestClient(app)
     url = f"/internal/v1/diary/{DAY}/recompute"
     assert client.post(url).status_code == 401

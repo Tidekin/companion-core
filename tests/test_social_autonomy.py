@@ -165,8 +165,8 @@ def test_nonpublic_or_unverifiable_material_cannot_become_a_publish_source(core,
                            (encode({"title": "原题", "text": "被私聊摘要替换"}), event_id))
     elif mutation == "account_read":
         core.store.execute((
-            "UPDATE observations SET evidence_json=json_set(evidence_json,'$."
-            "read_observation.evidence.method','account_api') WHERE "
+            "UPDATE observations SET evidence_json=jsonb_set(evidence_json::jsonb,"
+            "'{read_observation,evidence,method}',to_jsonb('account_api'::text))::text WHERE "
             'event_id=%s'
         ),
                            (event_id,))
@@ -185,9 +185,9 @@ def test_web_access_query_cannot_be_exported_as_a_public_source(core):
     service(core)
     url = "https://articles.example/story?access_token=private-access"
     core.store.execute((
-        'UPDATE observations SET canonical_url=%s,evidence_json=json_set(evid'
-        "ence_json,'$.read_observation.url',%s,'$.read_observation.original_u"
-        "rl',%s) WHERE event_id=%s"
+        "UPDATE observations SET canonical_url=%s,evidence_json=jsonb_set("
+        "jsonb_set(evidence_json::jsonb,'{read_observation,url}',to_jsonb(%s::text)),"
+        "'{read_observation,original_url}',to_jsonb(%s::text))::text WHERE event_id=%s"
     ), (url, url, url, ref))
     with pytest.raises(CoreError, match="SOCIAL_PUBLIC_SOURCE_REQUIRED"):
         public_source(core.store, core.settings, ref, core.clock())

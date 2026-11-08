@@ -3,6 +3,7 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from companion import __main__, beta_observation
@@ -16,10 +17,19 @@ from tests.support.beta_observation import feedback_template, paid_fixture
 from tests.support.ops_status import settings
 
 
-def test_missing_database_and_wrong_owner_never_bootstrap_or_disclose(core, tmp_path):
+def test_unready_database_and_wrong_owner_never_bootstrap_or_disclose(
+    core, tmp_path, empty_database,
+):
     cfg = settings(tmp_path / "absent")
-    assert beta_observation.inspect_context(cfg, "trace")['blockers'] == ["DATABASE_MISSING"]
-    assert not Path(cfg.database).parent.exists()
+    assert beta_observation.inspect_context(cfg, "trace")['blockers'] == [
+        "TRACE_SNAPSHOT_UNAVAILABLE"]
+    assert not (tmp_path / "absent").exists()
+    unready = core.settings.model_copy(update={"database": empty_database})
+    assert beta_observation.inspect_context(unready, "trace")["blockers"] == ["MIGRATION_REQUIRED"]
+    with psycopg.connect(empty_database.get_secret_value()) as db:
+        assert not db.execute(
+            "SELECT 1 FROM pg_tables WHERE schemaname=current_schema()"
+        ).fetchall()
     ingest(core, text="PRIVATE_OWNER_BODY")
     wrong = core.settings.model_copy(update={"owner_qq_id": "99999"})
     result = beta_observation.inspect_context(wrong, "trace_test_1")

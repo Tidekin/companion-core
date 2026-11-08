@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from companion import qzone_publication as publication
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.backup import backup, restore
 from companion.contracts import CoreError, LeaseRequest
 from companion.postgres import Database
@@ -121,6 +122,7 @@ def test_decision_route_is_owner_only_and_checks_exact_body(core, tmp_path):
     core.settings.control_token = SecretStr("synthetic-publication-control-" * 2)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app),

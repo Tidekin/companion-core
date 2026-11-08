@@ -75,7 +75,7 @@ jobs:
     name: test (${{ matrix.os }}, ${{ matrix.shard }})
     needs: preflight
     if: ${{ needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected' }}
-    timeout-minutes: 20
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}

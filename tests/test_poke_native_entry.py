@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from companion import input_protocol, owner_delivery, poke
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.contracts import CoreError, LeaseRequest
 from companion.model import ModelClient
 from companion.owner_authority_protocol import OwnerSendCheck
@@ -23,6 +24,7 @@ def test_real_native_poke_admission_runner_and_delivery(core, tmp_path, kind):
     capture = signed(env)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     headers = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
     client = TestClient(app)
     received = client.post("/internal/v1/pokes", headers=headers,

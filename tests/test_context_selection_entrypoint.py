@@ -28,7 +28,7 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
 
     async def worker(label):
         config = core.settings.model_dump(mode="json")
-        for key in ("model_key", "bridge_token", "control_token"):
+        for key in ("database", "model_key", "bridge_token", "control_token"):
             config[key] = getattr(core.settings, key).get_secret_value()
         for name, adapter in core.settings.observation_adapters.items():
             config["observation_adapters"][name]["token"] = adapter.token.get_secret_value()

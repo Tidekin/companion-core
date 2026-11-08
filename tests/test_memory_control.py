@@ -237,7 +237,8 @@ def test_current_scope_is_revalidated_at_commit(core, change):
     if change == "expiry":
         core.clock.advance(601)
     elif change == "privacy":
-        advance_epoch(core.store)
+        with core.store.transaction(control_write=True):
+            advance_epoch(core.store)
     elif change == "owner":
         core.settings.owner_qq_id = "10009"
     elif change == "ledger":

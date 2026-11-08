@@ -58,7 +58,7 @@ def test_short_link_song_rechecks_original_reader_proof(core, tmp_path, monkeypa
             elif change in {"redacted", "digest"}:
                 column, value = ("redacted", 1) if change == "redacted" else (
                     "source_sha256", "f" * 64)
-                core.store.execute(f"UPDATE observations SET {column}=? WHERE event_id=?",
+                core.store.execute(f"UPDATE observations SET {column}=%s WHERE event_id=%s",
                                    (value, event_id))
             elif change == "event_redacted":
                 core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (event_id,))

@@ -83,7 +83,7 @@ def test_final_candidate_card_carries_use_and_avoid_conditions():
 
 
 def erase_marker(store, event_id):
-    store.execute("INSERT INTO runtime_meta(key,value) VALUES (?,?)",
+    store.execute("INSERT INTO runtime_meta(key,value) VALUES (%s,%s)",
                   ("erased_event:" + event_id, "{}"))
 
 
@@ -93,7 +93,7 @@ def test_unavailable_inventory_source_leaves_the_current_chat_running(runtime_ca
     s = c.core.store
     if change == "receipt":
         # The original receipt was cleaned while the staged asset still waits for cleanup.
-        s.execute("DELETE FROM runtime_meta WHERE key=?", ("owner_input:" + c.source["event_id"],))
+        s.execute("DELETE FROM runtime_meta WHERE key=%s", ("owner_input:" + c.source["event_id"],))
     else:
         erase_marker(s, c.source["event_id"])
     run(c.service.prepare_offer(c.job))

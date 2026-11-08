@@ -180,7 +180,7 @@ def test_expiry_stale_token_and_late_ack(core_factory):
 
 
 def test_scenario_factory_isolates_state(core_factory, core, tmp_path):
-    assert Path(core.settings.database) == tmp_path / "core.db"
+    assert Path(core.settings.state_directory) == tmp_path / "state"
     with core_factory() as first, core_factory() as second:
         assert first.settings.database != second.settings.database
         assert first.settings.erasure_ledger != second.settings.erasure_ledger

@@ -40,7 +40,7 @@ def test_real_localhost_samples_use_wall_and_monotonic_time_without_worker_claim
     assert url.removeprefix("http://") == requests[0][2]
     text = output.read_text("utf-8")
     assert url not in text and core.settings.bridge_token.get_secret_value() not in text
-    assert core.settings.database not in text
+    assert core.settings.database.get_secret_value() not in text
 
 
 def test_remote_missing_schema_head_is_an_observed_blocker_not_a_clear_sample(

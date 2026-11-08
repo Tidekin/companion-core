@@ -30,7 +30,8 @@ def test_owner_http_recovery_and_separate_worker_save_once(client, core, tmp_pat
     assert client.post(retry_path, json={"confirm": True}, headers=headers).json() == reply.json()
     config = tmp_path / "worker.json"
     settings = core.settings.model_dump(mode="json")
-    settings.update(bridge_token=core.settings.bridge_token.get_secret_value(),
+    settings.update(database=core.settings.database.get_secret_value(),
+                    bridge_token=core.settings.bridge_token.get_secret_value(),
                     control_token=core.settings.control_token.get_secret_value())
     config.write_text(json.dumps(settings), encoding="utf-8")
     workspace = Path(__file__).resolve().parents[1]

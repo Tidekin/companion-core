@@ -105,7 +105,8 @@ def mutate_source(core, kind):
     source = core.store.one('SELECT * FROM events ORDER BY record_sequence LIMIT 1')
     event_id = source["event_id"]
     if kind == "privacy":
-        advance_epoch(core.store)
+        with core.store.transaction(control_write=True):
+            advance_epoch(core.store)
     elif kind in {"PENDING", "FAILED", "DELIVERY_UNCERTAIN"}:
         core.store.execute('UPDATE outbox SET state=%s WHERE origin_event_id=%s', (kind, event_id))
     elif kind == "UNKNOWN":
@@ -136,6 +137,7 @@ def mutate_source(core, kind):
         conversation = core.store.one("SELECT * FROM conversations LIMIT 1")
         conversation["conversation_id"] = uid("conv")
         conversation["platform_session_key"] = "synthetic-different-conversation"
+        conversation.pop("record_sequence")
         core.store.insert("conversations", **conversation)
         core.store.execute('UPDATE events SET conversation_id=%s WHERE event_id=%s',
                            (conversation["conversation_id"], event_id))
@@ -224,7 +226,8 @@ def test_unrelated_privacy_epoch_keeps_original_history_source_and_scope(core, t
 
             async def advance_unrelated_epoch(_request):
                 selected.extend(history_snapshot(core))
-                advance_epoch(core.store)
+                with core.store.transaction(control_write=True):
+                    advance_epoch(core.store)
 
             core.model.client.event_hooks["request"].append(advance_unrelated_epoch)
             assert await core.run_once()

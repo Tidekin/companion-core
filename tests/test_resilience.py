@@ -131,11 +131,11 @@ def test_raw_retention_is_replayed_and_downgrades_memory(core):
 
 
 def test_single_worker_lock_releases(core):
-    with single_worker(core.settings.database):
+    with single_worker(core.settings.state_directory):
         with pytest.raises(CoreError, match="WORKER_ALREADY_RUNNING"):
-            with single_worker(core.settings.database):
+            with single_worker(core.settings.state_directory):
                 pass
-    with single_worker(core.settings.database):
+    with single_worker(core.settings.state_directory):
         pass
 
 
@@ -163,18 +163,30 @@ def test_correction_removes_superseded_fact_from_context(core):
     assert "我喜欢绿茶" not in json.dumps(core.context(job), ensure_ascii=False)
 
 
-def test_migrations_up_down_up(tmp_path):
+def test_native_migrations_require_restore_for_downgrade(empty_database):
     from pathlib import Path
 
+    import psycopg
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
 
-    path = tmp_path / "migration.db"
-    migrate(str(path), "0033_model_usage_job_index")
+    migrate(empty_database, "pg0001_core")
     cfg = Config()
-    cfg.set_main_option("script_location", str(Path("migrations").resolve()))
-    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
-    command.downgrade(cfg, "0001_m0")
-    command.upgrade(cfg, "0033_model_usage_job_index")
-    command.downgrade(cfg, "base")
-    command.upgrade(cfg, "head")
+    cfg.set_main_option("script_location", str(Path("migrations/postgresql").resolve()))
+    engine = create_engine(
+        "postgresql+psycopg://", poolclass=NullPool, hide_parameters=True,
+        creator=lambda: psycopg.connect(empty_database.get_secret_value()),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="CORE_POSTGRES_DOWNGRADE_REQUIRES_BACKUP_RESTORE"):
+            with engine.begin() as connection:
+                cfg.attributes["connection"] = connection
+                command.downgrade(cfg, "base")
+        migrate(empty_database)
+        with psycopg.connect(empty_database.get_secret_value()) as db:
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
+                "pg0002_relationship_standing",)
+    finally:
+        engine.dispose()

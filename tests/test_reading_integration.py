@@ -16,6 +16,7 @@ import pytest
 import uvicorn
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.config import ObservationAdapterConfig
 from companion.core import Core
 from tests.conftest import event, run
@@ -37,6 +38,7 @@ def test_inbox_to_independent_reader_cli_then_restart_cannot_reexecute(core, tmp
     with Core(core.settings) as http_core:
         app = create_app(core.settings)
         app.state.core = http_core
+        app.state.api_store = ApiStore(http_core.database, http_core.settings.state_directory)
         bound = socket.socket()
         bound.bind(("127.0.0.1", 0))
         origin = f"http://127.0.0.1:{bound.getsockname()[1]}"

@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.model import ModelClient
 from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.outbound import deliver_tick
@@ -51,6 +52,7 @@ def test_account_host_checked_native_delivery(core, tmp_path, outcome):
     cfg, frozen = prepared_host(core, tmp_path)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     sent = []
 
     def native(request):

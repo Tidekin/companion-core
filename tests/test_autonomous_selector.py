@@ -373,7 +373,7 @@ def test_life_worker_refuses_to_start_beside_an_orphaned_diary_worker(core, monk
     monkeypatch.setattr("companion.life_worker.life_worker", never)
     monkeypatch.setattr(__main__.Settings, "load", staticmethod(lambda: core.settings))
     monkeypatch.setattr("sys.argv", ["companion", "life-worker"])
-    with single_worker(core.settings.database, "diary-worker"):
+    with single_worker(core.settings.state_directory, "diary-worker"):
         with pytest.raises(SystemExit) as error:
             __main__.main()
     assert error.value.code == 2 and started == []

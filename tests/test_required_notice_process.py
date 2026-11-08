@@ -68,7 +68,7 @@ def test_required_wording_retries_in_new_process_without_replaying_paid_request(
             grant.authority = activate(core, policy, revision=grant.authority["revision"],
                 operation="required-notice-purpose")[0]["authority"]
             settings = core.settings.model_dump(mode="json")
-            for name in ("model_key", "bridge_token", "control_token"):
+            for name in ("database", "model_key", "bridge_token", "control_token"):
                 settings[name] = getattr(core.settings, name).get_secret_value()
             settings_path.write_text(encode(settings), encoding="utf-8")
             source, accepted = await native.admit(client, config, grant, now)

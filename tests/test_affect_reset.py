@@ -38,7 +38,7 @@ def test_owner_reset_uses_native_control_scope_and_refuses_lock_upgrade(core, sc
 
 def apply(core, request="owner-reset"):
     record = reset_record(1, request, core.clock())
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         result = apply_feedback_reset(core.store, record)
     return record, result
 
@@ -57,7 +57,7 @@ def test_reset_clears_old_feedback_and_growth_without_erasing_facts_or_permissio
     assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE '%%paused'")
     assert core.model.calls == []
     old_epoch = epoch(core.store)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         apply_feedback_reset(core.store, record)
     assert epoch(core.store) == old_epoch
 
@@ -68,11 +68,11 @@ def test_new_feedback_survives_replay_and_reset_cutoff_cannot_move_backward(core
     first, _ = apply(core)
     core.clock.advance(1)
     ingest(core, 2, "详细解释")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         apply_feedback_reset(core.store, first)
     assert core.affect.snapshot()["state"]["interaction_tone"] == "detailed"
     second, _ = apply(core, "second")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         apply_feedback_reset(core.store, first)
     assert feedback_reset_at(core.store) == second["at"]
     assert core.affect.snapshot()["state"] == NEUTRAL
@@ -83,7 +83,7 @@ def test_restore_projection_replay_blocks_old_source_even_when_cached_rows_retur
     ingest(core, 1, "简短一点")
     old = core.store.one("SELECT * FROM affect_evidence")
     record, _ = apply(core)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (RESET_KEY,))
         core.store.insert("affect_evidence", **old)
         apply_feedback_reset(core.store, record)

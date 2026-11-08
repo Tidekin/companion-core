@@ -232,7 +232,7 @@ def test_a_reply_cleared_by_a_later_erasure_keeps_the_input_state_readable(core,
     if erasure:
         core.store.execute('INSERT INTO privacy_erasure_ledger VALUES (%s,%s,%s,%s,%s,%s)',
                            ("erase_test", "memory", "mem_test", core.clock(), 1, "COMPLETE"))
-    transport.revoke_deliveries(core.store, "1", erase_content=True)
+    transport.revoke_deliveries(core.store, "TRUE", erase_content=True)
     if erasure:
         after = owner_input_state.read(core.store, core.settings, capture)
         assert after["terminal"] == before["terminal"]

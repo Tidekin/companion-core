@@ -146,7 +146,8 @@ def test_reasoning_read_rejects_concurrent_privacy_change(core, tmp_path, monkey
 
     def changed(*args):
         result = original(*args)
-        advance_epoch(core.store)
+        with core.store.transaction(control_write=True):
+            advance_epoch(core.store)
         return result
 
     monkeypatch.setattr(view, "_record", changed)

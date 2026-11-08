@@ -1,8 +1,8 @@
 import asyncio
 import json
-import sqlite3
 from types import SimpleNamespace
 
+import psycopg
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -83,8 +83,8 @@ def test_stream_is_not_buffered_or_timed_at_headers(enabled, capsys, monkeypatch
 
 
 @pytest.mark.parametrize(("failure", "error_class"), [
-    (sqlite3.OperationalError("SECRET_SQL"), "OperationalError"),
-    (sqlite3.DatabaseError("SECRET_DB"), "DatabaseError"),
+    (psycopg.OperationalError("SECRET_SQL"), "OperationalError"),
+    (psycopg.DatabaseError("SECRET_DB"), "DatabaseError"),
     (RuntimeError("SECRET_INTERNAL"), "UnhandledError"),
 ])
 def test_unhandled_error_propagates_and_outer_500_is_not_invented(
@@ -244,11 +244,13 @@ def test_non_http_bypass_and_unregistered_scope_route(enabled, capsys):
 
 def test_api_registration_reuses_one_lifespan_and_fixed_core_routes(enabled, monkeypatch, capsys):
     lifecycle = []
-    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="x" * 32)
+    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="x" * 32,
+                        database="dbname=synthetic")
 
     def make_core(*args):
         lifecycle.append("init")
-        return SimpleNamespace(store=SimpleNamespace(close=lambda: lifecycle.append("close")))
+        return SimpleNamespace(database=object(), store=SimpleNamespace(),
+                               close=lambda: lifecycle.append("close"))
 
     monkeypatch.setattr(api, "Core", make_core)
     with TestClient(api.create_app(settings)) as client:

@@ -364,12 +364,14 @@ def test_deadline_pre_io_and_already_in_flight_receipt(core, tmp_path, phase):
 @pytest.mark.parametrize("fault", ["before-begin", "after-begin", "after-result"])
 def test_core_disconnects_stop_and_preserve_attempt_before_restart(core, tmp_path, fault):
     from companion.api import create_app
+    from companion.api_store import ApiStore
 
     cfg, value, inventory, now = plan_fixture(tmp_path)
     core.clock.now = now
     plan, sends = WindowPlan(value, cfg, inventory), []
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     inner = httpx.ASGITransport(app=app)
     tripped = False
 
