@@ -250,10 +250,12 @@ def fit_reply(settings, kind, rules, references, history, current_input, related
         from companion.token_measurement import measure_request
 
         required = [rules, *[ref for ref in references.messages
-            if ref is not history.recalled_reference and (preserve or id(ref) in references.required)],
+            if ref is not history.recalled_reference
+            and (preserve or id(ref) in references.required)],
             *[message for source, group in zip(history.sources, history.turns, strict=True)
               if preserve or source.get("reply_complete") is False for message in group],
-            *[message for _, group in history.recalled_history for message in group], *current_input]
+            *[message for _, group in history.recalled_history for message in group],
+            *current_input]
         if pressure(settings, measure_request(settings, required, kind), scenario=kind) is None:
             references.messages = [ref for ref in references.messages
                                    if ref is not history.recalled_reference]
@@ -265,7 +267,8 @@ def fit_reply(settings, kind, rules, references, history, current_input, related
     required_messages = [rules, *[ref for ref in references.messages
         if preserve or id(ref) in references.required],
         *[message for source, group in zip(history.sources, history.turns, strict=True)
-          if preserve or source.get("reply_complete") is False or source["event_id"] in full_recalled
+          if (preserve or source.get("reply_complete") is False
+              or source["event_id"] in full_recalled)
           for message in group]]
     recent = protected_recent(settings, history.sources, history.turns, current_input, kind,
                               query=query, required=required_messages)
