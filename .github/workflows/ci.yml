@@ -117,7 +117,6 @@ jobs:
         timeout-minutes: 2
         run: docker compose version --short
       - name: Initialize isolated native PostgreSQL
-        if: ${{ fromJSON(needs.preflight.outputs.windows).product }}
         run: uv run --frozen python -B scripts/ci_postgres.py start
       - name: Run a complete, disjoint suite shard
         if: ${{ fromJSON(needs.preflight.outputs.windows).product }}
@@ -141,7 +140,7 @@ jobs:
       - if: ${{ matrix.shard == matrix.verify_shard }}
         run: uv run python scripts/verify_package.py
       - name: Stop the owned PostgreSQL test cluster
-        if: ${{ always() && fromJSON(needs.preflight.outputs.windows).product }}
+        if: ${{ always() }}
         run: uv run --frozen python -B scripts/ci_postgres.py stop
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ always() }}
@@ -276,9 +275,6 @@ jobs:
             -e COMPANION_MODE=demo -e COMPANION_MEMORY_ENABLED=true -e COMPANION_DIARY_ENABLED=true \
             -e COMPANION_STATE_DIRECTORY=/data -e COMPANION_ERASURE_LEDGER=/privacy/test.jsonl \
             -e COMPANION_EMBEDDING_CACHE_DIR=/data/embedding-cache companion-core:test init
-      - name: Stop the packaged Core test database
-        if: always()
-        run: python -B scripts/ci_postgres.py stop
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
@@ -347,6 +343,9 @@ jobs:
             --bridge-container "${protected[1]}" --reader-container "${protected[2]}" \
             --output .local/test-results/console-ui-replacement.json
           python -c 'import json; from pathlib import Path; r=json.loads(Path(".local/test-results/console-ui-replacement.json").read_text()); assert r["protected_unchanged"] and all(r["protected_running"].values())'
+      - name: Stop the packaged Core test database
+        if: always()
+        run: python -B scripts/ci_postgres.py stop
       - name: Preserve native UI and proxy results
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -458,6 +457,8 @@ jobs:
           cache-suffix: python-3.12
       - run: uv sync --frozen --group reader
       - run: uv run --group reader python -m playwright install chromium --only-shell
+      - name: Initialize isolated native PostgreSQL
+        run: uv run --frozen --group reader python -B scripts/ci_postgres.py start
       - name: Prepare Nginx for console proxy checks
         shell: pwsh
         run: |
@@ -484,6 +485,9 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7
+      - name: Stop the owned PostgreSQL test cluster
+        if: ${{ always() }}
+        run: uv run --frozen --group reader python -B scripts/ci_postgres.py stop
   plugin-native:
     needs: preflight
     if: ${{ (needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected') && fromJSON(needs.preflight.outputs.windows).product }}
