@@ -164,6 +164,30 @@ def test_snapshot_token_observes_actual_cte_writes_and_pins_read_only_view(datab
         first.read_or_write(operation)
 
 
+def test_write_token_matches_native_statistics_with_indexes_triggers_and_ctes(database, tmp_path):
+    with closing(Store(database, tmp_path)) as store:
+        store.execute("CREATE INDEX items_value ON items(value)")
+        store.execute("CREATE TABLE write_audit (id bigint NOT NULL)")
+        store.execute("CREATE FUNCTION record_item_write() RETURNS trigger LANGUAGE plpgsql "
+                      "AS $$ BEGIN INSERT INTO write_audit VALUES (NEW.id); RETURN NEW; END $$")
+        store.execute("CREATE TRIGGER record_item_write AFTER INSERT ON items "
+                      "FOR EACH ROW EXECUTE FUNCTION record_item_write()")
+        with store.transaction():
+            initial = int(store.change_token()["writes"])
+            for statement, count in (
+                ("INSERT INTO items VALUES (3,0)", 2),
+                ("WITH changed AS (UPDATE items SET value=1 WHERE id<=2 RETURNING id) "
+                 "SELECT count(*) FROM changed", 4),
+                ("DELETE FROM items WHERE id=3", 5),
+            ):
+                store.execute(statement)
+                previous = store.one("SELECT COALESCE(sum(n_tup_ins+n_tup_upd+n_tup_del),0)::text "
+                                     "AS writes FROM pg_stat_xact_user_tables "
+                                     "WHERE schemaname=current_schema()")
+                assert store.change_token()["writes"] == previous["writes"]
+                assert int(previous["writes"]) - initial == count
+
+
 def test_control_change_waits_for_existing_transaction(database, tmp_path):
     identity = Queue()
 

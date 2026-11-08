@@ -19,6 +19,16 @@ from pydantic import SecretStr
 WAKE_CHANNEL = "companion_wakeup"
 BUDGET_LEDGER = 1
 ERASURE_LEDGER = 2
+# The system view also joins every index and groups rows for scan statistics.
+# Custody needs only these same continuously updated per-transaction row counts.
+TRANSACTION_WRITE_COUNT = (
+    "COALESCE((SELECT sum(pg_stat_get_xact_tuples_inserted(c.oid) + "
+    "pg_stat_get_xact_tuples_updated(c.oid) + pg_stat_get_xact_tuples_deleted(c.oid)) "
+    "FROM pg_catalog.pg_class AS c WHERE c.relnamespace=current_schema()::regnamespace "
+    "AND c.relkind IN ('r','t','m','p') "
+    "AND current_schema() NOT IN ('pg_catalog','information_schema') "
+    "AND current_schema() !~ '^pg_toast'),0)::text"
+)
 
 
 def migrate(conninfo: SecretStr, revision="head"):

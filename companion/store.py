@@ -14,7 +14,7 @@ import psycopg
 from psycopg import sql
 
 from companion.contracts import CoreError
-from companion.postgres import BUDGET_LEDGER, Database
+from companion.postgres import BUDGET_LEDGER, TRANSACTION_WRITE_COUNT, Database
 from companion.postgres import migrate as migrate
 
 
@@ -95,10 +95,7 @@ class Store:
         """Native snapshot plus actual transaction writes, including triggers/CTEs."""
         # A repeatable read-only transaction cannot write business tables. Backend
         # statistics for prior writes can still differ between identical snapshots.
-        writes = "'0'::text" if self.in_read_snapshot else (
-            "COALESCE((SELECT sum(n_tup_ins+n_tup_upd+n_tup_del) "
-            "FROM pg_stat_xact_user_tables WHERE schemaname=current_schema()),0)::text"
-        )
+        writes = "'0'::text" if self.in_read_snapshot else TRANSACTION_WRITE_COUNT
         return self.one(
             "SELECT pg_current_snapshot()::text AS snapshot, "
             "current_schema() AS schema, pg_postmaster_start_time()::text AS instance, "

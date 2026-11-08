@@ -58,7 +58,7 @@ async def reply(core, job, snapshots):
             tools.append(qq_video.toolset(core, job, snapshots))
         from companion import image_generation
 
-        if image_generation.available(core, job) and "expression" in view.policy.purposes:
+        if "expression" in view.policy.purposes and image_generation.available(core, job):
             tools.append(image_generation.toolset(core, job, snapshots))
     with phase("context_build", job["trace_id"]):
         memories = []

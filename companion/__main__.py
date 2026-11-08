@@ -29,9 +29,7 @@ from companion.worker_schedule import ClaimBusy, run_native_unit
 from companion.worker_wakeup import Maintenance, Wakeup
 
 
-async def worker(settings):
-    from companion.core import Core
-
+def warmup_chat(settings):
     if settings.owner_runtime.mode == "ENABLED":
         from pydantic_ai.conversation import ConversationTypeAdapter
         from pydantic_ai.messages import ModelMessagesTypeAdapter
@@ -47,6 +45,12 @@ async def worker(settings):
             from companion import meme_wiki
 
             meme_wiki.warmup()
+
+
+async def worker(settings):
+    from companion.core import Core
+
+    warmup_chat(settings)
     async with httpx.AsyncClient(timeout=settings.timeout_seconds, trust_env=False) as client:
         core = Core(settings, ModelClient(settings, client))
         worker_id = uid("worker")
@@ -177,6 +181,8 @@ def main():
             logging.getLogger("httpx").setLevel(logging.WARNING)
             with single_worker(settings.state_directory):
                 shutdown.install()
+                # Local schema/import work must not block the running worker loop.
+                warmup_chat(settings)
                 asyncio.run(worker(settings))
         elif args.command == "status":
             from companion.ops_status import snapshot

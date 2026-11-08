@@ -340,7 +340,8 @@ def mutate(core, kind):
             (encode({"text": "漂移回复"}), event_id),
         )
     elif kind == "epoch":
-        advance_epoch(core.store)
+        with core.store.transaction(control_write=True):
+            advance_epoch(core.store)
     elif kind in {"history_approval", "memory_approval"}:
         view = owner_authority.current(core.store, core.settings, core.clock)
         purpose = kind.removesuffix("_approval")
@@ -714,8 +715,10 @@ def test_fsynced_forget_with_rolled_back_db_blocks_the_next_model_http(
 
                 with monkeypatch.context() as patch:
                     patch.setattr(core.ledger, "apply", crash_apply)
-                    with pytest.raises(RuntimeError):
-                        with core.store.transaction():
+                    with pytest.raises(
+                        RuntimeError, match="SYNTHETIC_AFTER_FSYNC_BEFORE_DB_COMMIT",
+                    ):
+                        with core.store.transaction(control_write=True):
                             core.ledger.append(core.store, memory_id, core.clock())
                 assert (
                     core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_id,))[

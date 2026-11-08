@@ -242,16 +242,23 @@ def _source(
             " redacted, e.memory_processed AS memory_processed, "
             "e.reply_revision AS reply_revision, c.scope AS scope, "
             "c.owner_actor_id AS owner_actor_id, receipt.value AS capture_receipt, "
-            "privacy.value AS source_epoch FROM (VALUES (%s::text)) AS target(event_id) "
+            "privacy.value AS source_epoch, bindings.jobs AS source_jobs "
+            "FROM (VALUES (%s::text)) AS target(event_id) "
             "LEFT JOIN events AS e ON e.event_id=target.event_id "
             "LEFT JOIN conversations AS c ON e.conversation_id=c.conversation_id "
             "LEFT JOIN runtime_meta AS receipt ON receipt.key='owner_input:'||target.event_id "
-            "LEFT JOIN runtime_meta AS privacy ON privacy.key='privacy_epoch'"
+            "LEFT JOIN runtime_meta AS privacy ON privacy.key='privacy_epoch' "
+            "LEFT JOIN LATERAL (SELECT jsonb_agg(bound) AS jobs FROM ("
+            "SELECT job_id,event_id,kind,state,idempotency_key,attempts,max_attempts,"
+            "lease_owner,lease_until,next_attempt_at,last_error_code,created_at,updated_at,"
+            "lease_token,context_tracked,authority_json FROM jobs "
+            "WHERE event_id=target.event_id AND kind='chat') AS bound) AS bindings ON true"
         ),
         (event_id,),
     )
     receipt_value = loaded.pop("capture_receipt")
     source_epoch = loaded.pop("source_epoch")
+    jobs = loaded.pop("source_jobs") or []
     receipt = {"value": receipt_value} if receipt_value is not None else None
     event = loaded if loaded["event_id"] is not None and loaded["scope"] is not None else None
     if (
@@ -321,22 +328,6 @@ def _source(
     except (ValueError, KeyError, TypeError):
         raise CoreError("OWNER_SOURCE_CHANGED", 403) from None
     input_recall.require_not_recalled(store, event["source_event_id"])
-    jobs = store.rows(
-        (
-            "SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, "
-            "jobs.kind AS kind, jobs.state AS state, jobs.idempotency_key"
-            " AS idempotency_key, jobs.attempts AS attempts, "
-            "jobs.max_attempts AS max_attempts, jobs.lease_owner AS "
-            "lease_owner, jobs.lease_until AS lease_until, "
-            "jobs.next_attempt_at AS next_attempt_at, "
-            "jobs.last_error_code AS last_error_code, jobs.created_at AS "
-            "created_at, jobs.updated_at AS updated_at, jobs.lease_token "
-            "AS lease_token, jobs.context_tracked AS context_tracked, "
-            "jobs.authority_json AS authority_json FROM jobs AS jobs "
-            "WHERE jobs.event_id = %s AND jobs.kind = 'chat'"
-        ),
-        (event_id,),
-    )
     if len(jobs) != 1 or json.loads(jobs[0]["authority_json"]) != original.authority.as_dict():
         raise CoreError("OWNER_SOURCE_JOB_BINDING_REQUIRED", 403)
     return event, body, jobs[0]
@@ -364,9 +355,10 @@ def history_batch(store, settings, clock, job, *, purpose):
     `finish` rechecks live authority and independent files for the whole batch.
     """
     view = owner_authority.check_job(store, settings, clock, job, purpose=purpose)
+    scope = store.frozen_scope
 
     def frozen():
-        return store.in_read_snapshot
+        return scope is not None and store.frozen_scope == scope
 
     batched, changes = frozen(), store.change_token()
     originals = {encode(view.authority.as_dict()): view}
@@ -381,7 +373,7 @@ def history_batch(store, settings, clock, job, *, purpose):
         return _verify(store, settings, value, evidence)
 
     def check(event_id):
-        if batched and frozen() and store.change_token() == changes:
+        if batched and frozen():
             if settings.owner_runtime.mode != "ENABLED":
                 raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
             if purpose not in view.policy.purposes or "history" not in view.policy.purposes:
@@ -401,7 +393,7 @@ def history_batch(store, settings, clock, job, *, purpose):
         # A source exclusion must never swallow a changed batch-wide boundary.
         owner_authority.check_job(store, settings, clock, job, purpose=purpose)
         if batched:
-            if not frozen() or store.change_token() != changes:
+            if not frozen():
                 raise CoreError(reply_revision.CANCELLED, 409)
         elif not store.in_transaction or store.change_token()["writes"] != changes["writes"]:
             # READ COMMITTED may observe unrelated commits. Only this transaction's

@@ -138,7 +138,7 @@ worker 的合成验证及 QQ 验收，仍是生产切换的必要条件。
 在同一条 SELECT 中读取，保持 READ COMMITTED 下的变化检测和只读快照内的复用边界。
 启用原生私聊的主 Worker 启动时加载会话、输出类型模块，并通过 Pydantic 的
 `TypeAdapter.rebuild()` 完成 SDK Conversation 及其消息序列化类型延迟执行的本地结构构建，
-随后才开始领取任务。
+CLI 在创建工作循环前完成这些同步初始化，随后才开始领取任务。
 相同的启动阶段预加载 SDK 自带的本地定价数据与已启用的只读梗词库，沿用各自原有
 校验和内存复用。Core 的原费用批准、预留与独立账本继续决定实际调用和结算。
 累计预算预检沿用 Store 的只读检查与权威写入重试；正常检查使用只读快照，
@@ -147,9 +147,13 @@ worker 的合成验证及 QQ 验收，仍是生产切换的必要条件。
 一次完整账本校验中的模型控制、对账、暂停见证与累计预算指针通过原生前缀范围查询
 一并读取。各验证器仍逐项比对原值与日志，待处理责任继续核对原费用行；读取结果仅
 用于当次持有原账本锁的校验，不跨事务保留。
+实际事务写入计数直接调用 PostgreSQL 统计视图使用的原生计数函数，保留同样的用户
+模式与关系类型范围；不为仅需行变更数的检查重复连接所有索引并分组。触发器与 CTE
+写入仍计入其中，并与系统视图逐项对照验证。
 
 - [Pydantic TypeAdapter 延迟构建与显式 rebuild](https://docs.pydantic.dev/latest/concepts/type_adapter/#rebuilding-a-typeadapters-schema)
 - [Pydantic AI 首次调用本地加载开销及原生预加载修复](https://github.com/pydantic/pydantic-ai/issues/7405)
+- [PostgreSQL 事务统计视图的原生定义](https://github.com/postgres/postgres/blob/REL_16_STABLE/src/backend/catalog/system_views.sql#L656-L693)
 
 ## 有限检索读取的往返
 

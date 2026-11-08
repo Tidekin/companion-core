@@ -16,7 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from companion.contracts import CoreError
-from companion.postgres import BUDGET_LEDGER
+from companion.postgres import BUDGET_LEDGER, TRANSACTION_WRITE_COUNT
 from companion.store import encode, uid
 
 # The chain codec retains at most this many source bytes. Whole custody views
@@ -349,8 +349,7 @@ SUMMARY = (
     "usage.usage_count, usage.usage_size, pg_current_snapshot()::text AS snapshot, "
     "current_schema() AS schema, pg_postmaster_start_time()::text AS instance, "
     "CASE WHEN current_setting('transaction_read_only')='on' THEN '0' ELSE "
-    "COALESCE((SELECT sum(n_tup_ins+n_tup_upd+n_tup_del) FROM pg_stat_xact_user_tables "
-    "WHERE schemaname=current_schema()),0)::text END AS writes FROM "
+    + TRANSACTION_WRITE_COUNT + " END AS writes FROM "
     "(SELECT count(*) AS metadata_count, "
     "max(value) FILTER (WHERE key='model_budget_journal_id') AS journal_id, "
     "COALESCE(sum(length(key)+length(value)),0)::double precision AS metadata_size "

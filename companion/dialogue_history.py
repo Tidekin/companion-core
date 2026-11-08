@@ -45,7 +45,8 @@ def reply_sources(store, settings, clock, job, *, authority, bounded_text, follo
     if authority:
         sources = owner_input.history_sources(store, settings, clock, job,
             purpose="proactive" if followup else "chat") if (
-            job["kind"] == "chat" or followup) else []
+            "history" in authority.policy.purposes and (job["kind"] == "chat" or followup)
+        ) else []
     elif bounded_text:
         sources = live_text.history_sources(store, settings, clock, job)
     else:
