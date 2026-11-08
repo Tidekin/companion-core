@@ -409,3 +409,28 @@ context priority even when topic retrieval found the same fact. Topic references
 duplicates. Current input and full paid admission keep their existing budget rules. Memory
 permission is still required, and signed bounded-text windows keep only their reviewed facts.
 Erasure, expiry and source changes invalidate the same native proof before generation/delivery.
+
+### Foreground CPU and raw-turn materialization
+
+The pinned FastEmbed encoder uses one inference thread. A foreground worker shares its CPU
+quota with SQL and source validation, so an additional ONNX spinning thread can consume that
+quota while no inference is running. The model revision, tokenization, vectors and ranking
+rules are unchanged. A local comparison of 46 documents and four queries produced identical
+vectors and semantic order with one and two threads; multicore batch throughput can differ.
+This uses FastEmbed's existing public `threads` option, following
+[ONNX Runtime thread and spinning guidance](https://onnxruntime.ai/docs/performance/tune-performance/threading.html)
+and [FastEmbed's ONNX session implementation](https://github.com/qdrant/fastembed/blob/main/fastembed/common/onnx_model.py).
+
+After asynchronous raw-turn ranking, an owned immutable read snapshot materializes only the
+valid prefixes needed by the existing first-hop/second-hop merge. Missing or denied sources
+refill from the original ranking, and the result keeps the same chronological order, source
+checks, byte allowance and replay limits. The local materialization map ends with that
+synchronous snapshot. Mutable or unowned transactions retain the complete fresh-read path.
+Attachment presence nomination uses bounded native `EXISTS` queries for the finite owner set;
+actual attachment headers and bodies still consume their original work allowances.
+
+Latency acceptance uses real TCP admission and an independent persistent CLI worker with
+mock provider transport. The Core measurement ends at durable outbox completion; model
+generation and QQ transport are measured separately. Results must state source revision,
+CPU/memory limits, cold and warm samples, mean and P95. Profiling runs and unrestricted
+desktop timings do not establish the server latency target.

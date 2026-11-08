@@ -197,14 +197,25 @@ CLI 在创建工作循环前完成这些同步初始化，随后才开始领取�
 
 临时超时取本次读取预算与已有服务器上限中的较小值。原超时通过 `current_setting`
 及 PostgreSQL 原生 interval 换算读取，避免每次枚举服务器设置。上述三条 SQL 在原
-保存点内复用 Psycopg 的原生 pipeline 顺序发送，完成同步后再返回有界结果；错误仍
-交由原保存点回滚。其同步与异常边界遵循
-[Psycopg Pipeline 文档](https://www.psycopg.org/psycopg3/docs/advanced/pipeline.html)。
+保存点内通过 Psycopg `ClientCursor` 绑定、转义参数，以一个原生 simple-Query 消息发送，
+按结果集顺序取得有限 SELECT 的结果。发送前仍检查绝对截止时间；第一条 SQL 再读取
+当时的服务器上限，不能放宽刚收紧的截止时间。错误仍交由原保存点回滚。其他查询继续
+使用原服务器参数绑定；数组、字节、空值、引号及行数上限有独立回归检查。实现遵循
+[Psycopg 客户端绑定游标](https://www.psycopg.org/psycopg3/docs/advanced/cursors.html#client-side-binding-cursors)、
+[多语句查询](https://www.psycopg.org/psycopg3/docs/basic/from_pg2.html#multiple-statements-in-the-same-query)
+和 [PostgreSQL statement_timeout](https://www.postgresql.org/docs/16/runtime-config-client.html#GUC-STATEMENT-TIMEOUT)
+的原生语义；同一消息中的超时分别作用于每条语句，整个操作仍受 Core 的绝对截止时间约束。
 
 回复校验在一条 SELECT 中读取事件撤回标记、消息类型和双方回复版本；来源读取也在
 一条 SELECT 中取回原事件、签名回执和隐私版本。原有限来源图在读取正文时一并读取
 有上限的邻接 ID，正文读取前仍先申请原字节预算。重复读取合并在各次原校验边界内，
 不跨模型调用，也不保存权限或费用验证结果。
+
+历史输入与已投递片段在 Store 持有的只读重复读快照内批量取回来源绑定、签名回执、
+任务绑定及原投递字段。每条来源仍核验原签名、时间与撤回，批次开始和结束仍核验当前
+授权及独立账本文件。普通写事务和调用方自行打开的事务继续逐条读取当前状态，
+包括当前事务自己写入的撤回、私有范围变化和证据修订。有限来源图的同一次读取可以
+共享原 `MemorySources`，超过联合工作上限时恢复逐份证明的既有上限。
 
 滚动更新脚本使用 `--state-directory` 指向宿主机的 Core 状态目录，按 Worker 原生名称
 核对锁文件。授权修订、UNKNOWN 数量及在途任务和投递在仍运行的 API 容器内通过原生
