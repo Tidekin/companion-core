@@ -3,18 +3,16 @@
 import asyncio
 import json
 import os
-import sqlite3
 import sys
-from contextlib import closing
 from pathlib import Path
 
 from companion import image_spool
 from companion.config import SegmentedReplyConfig
-from companion.store import encode
 from companion_onebot_bridge.metrics import Metrics
 from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.conftest import run
+from tests.support.evaluation_process import process_config
 from tests.support.native_consumer_entry import environment
 
 
@@ -32,11 +30,8 @@ def test_independent_chat_survives_writer_contention_without_scanning_media(
             root.mkdir(mode=0o700)
             for number in range(97):
                 (root / f"content_{number:032x}.raw").write_bytes(b"synthetic orphan")
-            config = core.settings.model_dump(mode="json")
-            for name in ("model_key", "bridge_token", "control_token"):
-                config[name] = getattr(core.settings, name).get_secret_value()
             settings_path = tmp_path / "worker-settings.json"
-            settings_path.write_text(encode(config), encoding="utf-8")
+            process_config(core, settings_path)
             child = await asyncio.create_subprocess_exec(sys.executable, "-B", "-c",
                 "import sys; from tests.support.chat_claim_worker import run_worker; "
                 "run_worker(sys.argv[1], sys.argv[2])", str(settings_path), core.clock(),
@@ -55,15 +50,10 @@ def test_independent_chat_survives_writer_contention_without_scanning_media(
             try:
                 ready = await phase("ready")
                 assert ready["pid"] != os.getpid()
-                with closing(sqlite3.connect(core.settings.database,
-                                             isolation_level=None)) as writer:
-                    writer.execute("BEGIN IMMEDIATE")
-                    try:
-                        child.stdin.write(b"continue\n")
-                        await child.stdin.drain()
-                        await phase("busy")
-                    finally:
-                        writer.rollback()
+                with core.store.transaction(control_write=True):
+                    child.stdin.write(b"continue\n")
+                    await child.stdin.drain()
+                    assert (await phase("busy"))["provider_calls"] == 0
                 result = await phase("finished")
                 stdout, stderr = await asyncio.wait_for(child.communicate(), 45)
                 assert child.returncode == 0, (stdout + stderr).decode(errors="replace")

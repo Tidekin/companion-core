@@ -7,6 +7,7 @@ import pytest
 
 from companion import __main__, budget, life_worker
 from companion import core as core_module
+from companion.postgres import Database
 from companion.store import Store, after
 from companion.worker_schedule import UnitResult
 from tests.conftest import ingest, run
@@ -64,9 +65,10 @@ def test_chat_restart_does_not_reclassify_another_workers_reserved_request(core,
     monkeypatch.setattr(core, "run_once", stop)
     with pytest.raises(asyncio.CancelledError):
         run(__main__.worker(core.settings))
-    with closing(Store(core.settings.database)) as reopened:
+    with (Database(core.settings.database) as database,
+          closing(Store(database, core.settings.state_directory)) as reopened):
         assert reopened.one(
-            "SELECT * FROM model_usage WHERE request_id=?", (request_id,),
+            "SELECT * FROM model_usage WHERE request_id=%s", (request_id,),
         ) == original
 
 

@@ -1,7 +1,6 @@
 """Offline cumulative liability regressions; never contact a provider or QQ."""
 
 import asyncio
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -186,13 +185,16 @@ def test_two_processes_share_account_cap(core, tmp_path):
     import sys
 
     enable(core, tmp_path, account={"model_attempts": 1})
-    script = tmp_path / "quota_reserve.py"
-    script.write_text("import sys\nfrom tests.process_helpers import reservation_process\n"
-                      "reservation_process(*sys.argv[1:])\n", encoding="utf-8")
-    config = core.settings.model_dump(mode="json")
-    config["model_key"] = core.settings.model_key.get_secret_value()
-    command = [sys.executable, str(script), core.settings.database,
-               json.dumps(config), core.clock(), authorized_job(core)]
+    from tests.support.evaluation_process import process_config
+
+    private_config = tmp_path / "reservation-settings.json"
+    process_config(core, private_config)
+    command = [
+        sys.executable, "-B", "-c",
+        "import sys; from tests.process_helpers import reservation_process; "
+        "reservation_process(*sys.argv[1:])", str(private_config), core.clock(),
+        authorized_job(core),
+    ]
     processes = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   text=True) for _ in range(2)]
     results = [process.communicate(timeout=40) for process in processes]

@@ -2,20 +2,22 @@
 
 import asyncio
 import pickle
-import sqlite3
 import sys
 import threading
+from contextlib import closing
 from pathlib import Path
 from time import perf_counter
 
 import anyio
 import httpx
+import psycopg
 import pytest
 from pydantic import SecretStr
 
-from companion import api, api_store, owner_authority, owner_input
+from companion import api, api_store, owner_authority, owner_input, postgres
 from companion.privacy import epoch
 from companion.store import Store
+from tests.api_store_lock_worker import start as start_lock_worker
 from tests.support.api_store import PREFIX, child_done, event_wait, headers
 from tests.support.core_http import real_core_http
 from tests.support.owner_authority import activate
@@ -37,9 +39,9 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
     owner_thread = threading.get_ident()
 
     class ObservedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
-            opened.append((self, self.db, threading.get_ident()))
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
+            opened.append((self, self.backend_pid, threading.get_ident()))
             if len(opened) == 2:
                 entered.set()
 
@@ -50,11 +52,7 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
     monkeypatch.setattr(api_store, "Store", ObservedStore)
 
     async def scenario():
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-            core.settings.database, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+        process = await start_lock_worker(core)
         requests = []
         try:
             ready = await asyncio.wait_for(process.stdout.readline(), 5)
@@ -78,7 +76,9 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
                 process.stdin.write(b"release\n")
                 await process.stdin.drain()
                 responses = await asyncio.wait_for(asyncio.gather(*requests), 8)
-                assert all(response.status_code == 200 for response in responses)
+                assert all(response.status_code == 200 for response in responses), [
+                    (r.status_code, r.text[:200]) for r in responses if r.status_code != 200
+                ]
                 if action == "stop":
                     assert responses[0].json() == responses[1].json()
                     assert responses[0].json()["state"] == "STOPPED"
@@ -93,13 +93,14 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
             await asyncio.gather(*requests, return_exceptions=True)
     asyncio.run(scenario())
     assert len(opened) == len(closed) == 2
-    assert opened[0][1] is not opened[1][1]
-    assert all(db is not core.store.db and thread != owner_thread for _, db, thread in opened)
+    assert opened[0][1] != opened[1][1]
+    assert all(pid != core.store.backend_pid and thread != owner_thread
+               for _, pid, thread in opened)
     assert {id(store): thread for store, _, thread in opened} == {
         id(store): thread for store, thread in closed}
-    for _, connection, _ in opened:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
-            connection.execute("SELECT 1")
+    for store, _, _ in opened:
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
+            store.execute("SELECT 1")
     if action == "inputs/approve":
         assert core.store.one('SELECT COUNT(*) n FROM runtime_meta WHERE key=%s',
                               (owner_input.INPUT + capture.event_id,))["n"] == 1
@@ -116,8 +117,8 @@ def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
     owner_thread, previous_epoch = threading.get_ident(), epoch(core.store)
 
     class ObservedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             opened.append((self, threading.get_ident()))
             if len(opened) == 2:
                 entered.set()
@@ -129,11 +130,7 @@ def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
     monkeypatch.setattr(api_store, "Store", ObservedStore)
 
     async def scenario():
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-            core.settings.database, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+        process = await start_lock_worker(core)
         requests = []
         try:
             assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
@@ -162,7 +159,9 @@ def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
                 process.stdin.write(b"release\n")
                 await process.stdin.drain()
                 responses = await asyncio.wait_for(asyncio.gather(*requests), 8)
-                assert all(response.status_code == 200 for response in responses)
+                assert all(response.status_code == 200 for response in responses), [
+                    (r.status_code, r.text[:200]) for r in responses if r.status_code != 200
+                ]
                 assert all(response.headers["Cache-Control"] == "no-store"
                            for response in responses)
                 assert responses[0].json() == responses[1].json() == {
@@ -181,7 +180,7 @@ def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
         id(store): thread for store, thread in closed}
     for store, thread in opened:
         assert store is not core.store and thread != owner_thread
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
             store.one("SELECT 1")
     assert epoch(core.store) == previous_epoch + 1
     assert len([row for row in core.ledger.read() if row.get("target_type") == "affect_reset"]) == 1
@@ -201,8 +200,8 @@ def test_http_clock_is_sampled_after_connection_wait(
     owner_thread = threading.get_ident()
 
     class GatedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             entered.set()
             assert release.wait(3)
 
@@ -255,8 +254,8 @@ def test_cancel_joins_native_operation_and_closes_in_own_thread(
     connections = []
 
     class ObservedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             connections.append((self, threading.get_ident()))
 
         def close(self):
@@ -265,7 +264,7 @@ def test_cancel_joins_native_operation_and_closes_in_own_thread(
             closed.set()
 
     monkeypatch.setattr(api_store, "Store", ObservedStore)
-    runner = api_store.ApiStore(core.settings.database)
+    runner = api_store.ApiStore(core.database, core.settings.state_directory)
 
     def operation(store):
         # Hold a real write transaction across cancellation. Native admission is
@@ -319,23 +318,30 @@ def test_cancel_joins_native_operation_and_closes_in_own_thread(
                               (owner_input.INPUT + capture.event_id,)) is None
 
 
-def test_constructor_pragma_failure_closes_connection_and_retains_original(monkeypatch):
-    failure = sqlite3.OperationalError("synthetic pragma lock")
-    closed = []
+def test_constructor_failure_returns_clean_pool_lease_and_preserves_error(core, monkeypatch):
+    errors, pids = [], []
 
-    class Connection:
-        def execute(self, sql):
-            raise failure
+    def fail(connection):
+        pids.append(connection.info.backend_pid)
+        connection.execute("BEGIN")
+        connection.execute("INSERT INTO runtime_meta VALUES ('lease-setup-probe','1')")
+        try:
+            connection.execute("SELECT * FROM missing_session_setup_table")
+        except psycopg.errors.UndefinedTable as error:
+            errors.append(error)
+            raise
 
-        def close(self):
-            closed.append(True)
-            raise RuntimeError("synthetic cleanup failure")
-
-    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: Connection())
-    with pytest.raises(sqlite3.OperationalError) as caught:
-        Store("unused-test-path")
-    assert caught.value is failure
-    assert closed == [True]
+    with postgres.Database(core.settings.database, max_connections=1) as database:
+        with monkeypatch.context() as patch:
+            patch.setattr(postgres, "Session", fail)
+            with pytest.raises(psycopg.errors.UndefinedTable) as caught:
+                Store(database, core.settings.state_directory)
+        assert len(errors) == 1 and errors[0] is caught.value
+        assert caught.value.sqlstate == "42P01"
+        with closing(Store(database, core.settings.state_directory)) as recovered:
+            assert pids == [recovered.backend_pid]
+            assert not recovered.in_transaction
+            assert recovered.one("SELECT 1 FROM runtime_meta WHERE key='lease-setup-probe'") is None
 
 
 def test_owner_check_waits_for_fsynced_uncommitted_authority(
@@ -359,7 +365,7 @@ def test_owner_check_waits_for_fsynced_uncommitted_authority(
     monkeypatch.setattr(owner_authority, "_append", paused_append)
 
     def writer():
-        store = Store(core.settings.database)
+        store = Store(core.database, core.settings.state_directory)
         try:
             runtime = SimpleNamespace(store=store, settings=core.settings, clock=core.clock)
             return activate(runtime, policy, revision=1, operation="thread-journal-writer")[0]

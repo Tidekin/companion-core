@@ -3,13 +3,13 @@
 import asyncio
 import json
 import os
-import sqlite3
 import sys
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import psycopg
 
 from companion import __main__ as entrypoint
 from companion import core as core_module
@@ -28,13 +28,12 @@ def run_worker(settings_path, now):
 
     class Worker(Core):
         def claim_job(self, *args, **kwargs):
-            self.store.db.execute("PRAGMA busy_timeout=1")
             try:
                 return super().claim_job(*args, **kwargs)
-            except sqlite3.OperationalError as error:
-                if getattr(error, "sqlite_errorcode", 0) & 0xFF == sqlite3.SQLITE_BUSY:
-                    busy.append(1)
-                    print(json.dumps({"phase": "busy"}), flush=True)
+            except psycopg.errors.LockNotAvailable:
+                assert not self.store.in_transaction
+                busy.append(1)
+                print(json.dumps({"phase": "busy", "provider_calls": len(calls)}), flush=True)
                 raise
 
     async def ready(*args):

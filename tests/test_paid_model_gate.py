@@ -352,18 +352,14 @@ def test_multiprocess_concurrency_and_abrupt_exit_preserve_reservations(core, tm
 
     approved_live(core, tmp_path, concurrency=1)
     job_id = authorized_job(core)
-    script = tmp_path / "reserve.py"
-    script.write_text(
-        "import sys\nfrom tests.process_helpers import reservation_process\n"
-        "reservation_process(*sys.argv[1:])\n",
-        encoding="utf-8",
-    )
+    from tests.support.evaluation_process import process_config
+
+    private_config = tmp_path / "reservation-settings.json"
+    process_config(core, private_config)
     command = [
-        sys.executable,
-        str(script),
-        core.settings.database,
-        core.settings.model_dump_json(),
-        core.clock(),
+        sys.executable, "-B", "-c",
+        "import sys; from tests.process_helpers import reservation_process; "
+        "reservation_process(*sys.argv[1:])", str(private_config), core.clock(),
         job_id,
     ]
     processes = [
