@@ -326,7 +326,7 @@ def test_valid_warm_chain_keeps_fold_failure_and_clears_cache(core, tmp_path, mo
     assert paid_budget._validated_bytes.cache_info().currsize == 0
 
 
-def test_warm_chain_does_not_cache_settlement_permission_or_lower_charges(core, tmp_path):
+def test_warm_chain_preserves_unknown_liability_when_costs_are_advisory(core, tmp_path):
     approval, request = settled(core, tmp_path)
     before = core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=%s",
                             (request,))["billed_micro_usd"]
@@ -335,9 +335,9 @@ def test_warm_chain_does_not_cache_settlement_permission_or_lower_charges(core, 
         budget._persist_accounting(core.store, admission, before, "UNKNOWN", True)
         view = paid_budget.journal(core.store, approval, allow_settlement=True)
         assert view["blocked_request_ids"] == [request]
-        with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
-            paid_budget.journal(core.store, approval)
-    assert paid_budget._validated_bytes.cache_info().currsize == 0
+        advisory = paid_budget.journal(core.store, approval)
+        assert advisory["blocked_request_ids"] == [request]
+        assert advisory == view
     assert core.store.one("SELECT billed_micro_usd,state FROM model_usage WHERE request_id=%s",
                           (request,)) == {"billed_micro_usd": before, "state": "UNKNOWN"}
 
