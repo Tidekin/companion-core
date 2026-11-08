@@ -206,16 +206,27 @@ def test_transaction_history_still_checks_every_selected_source(
 def test_full_history_batches_without_the_journal_byte_cache(core, tmp_path, monkeypatch):
     def check(job, expected):
         monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", 1)
-        calls = []
+        calls, per_turn_reads = [], []
         native = paid_budget.journal
+        native_one = core.store.one
 
         def journal(*args, **kwargs):
             calls.append(1)
             return native(*args, **kwargs)
 
+        def one(statement, parameters=()):
+            if statement.startswith("SELECT sent_at FROM outbox") or (
+                statement.startswith("SELECT 1 FROM runtime_meta")
+                and parameters and str(parameters[0]).startswith(owner_input.INPUT)
+            ):
+                per_turn_reads.append(statement)
+            return native_one(statement, parameters)
+
         monkeypatch.setattr(paid_budget, "journal", journal)
+        monkeypatch.setattr(core.store, "one", one)
         assert owner_input.history_sources(core.store, core.settings, core.clock, job) == expected
         assert len(calls) == 2
+        assert per_turn_reads == []
         assert not core.store.in_transaction
 
     run(native_history(core, tmp_path, check, turns=15))

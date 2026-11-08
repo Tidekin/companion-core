@@ -441,14 +441,33 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
     # The signed scope is an authority ceiling; the existing presentation setting
     # may select fewer recent pairs and leave room for episodic continuation.
     max_turns = min(scope.max_turns, settings.max_recent_messages // 2)
-    for item in recent_context_sources(
+    candidates = recent_context_sources(
         store, job["conversation_id"], job["event_id"], max_turns, cutoff_rowid=cutoff_rowid
-    ):
+    )
+    frozen = store.frozen_scope
+    deliveries, receipts = {}, set()
+    if frozen is not None and candidates:
+        message_ids = list(dict.fromkeys(
+            part["message_id"] for item in candidates
+            for part in (item.get("reply_segments") or ([item] if item.get("message_id") else []))
+        ))
+        if message_ids:
+            deliveries = {row["message_id"]: row for row in store.rows(
+                "SELECT message_id,sent_at FROM outbox WHERE message_id=ANY(%s::text[])",
+                (message_ids,),
+            )}
+        receipts = {row["key"] for row in store.rows(
+            "SELECT key FROM runtime_meta WHERE key=ANY(%s::text[])",
+            ([INPUT + item["event_id"] for item in candidates],),
+        )}
+    for item in candidates:
         try:
             check(item["event_id"])
             parts = item.get("reply_segments") or ([item] if item.get("message_id") else [])
             for part in parts:
-                sent = store.one(
+                sent = deliveries.get(part["message_id"]) if (
+                    frozen is not None and store.frozen_scope == frozen
+                ) else store.one(
                     "SELECT sent_at FROM outbox WHERE message_id = %s", (part["message_id"],)
                 )
                 if (
@@ -457,9 +476,12 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
                     or datetime.fromisoformat(sent["sent_at"]) > datetime.fromisoformat(clock())
                 ):
                     raise CoreError("OWNER_HISTORY_FUTURE_DELIVERY", 403)
-            if not store.one(
+            has_receipt = INPUT + item["event_id"] in receipts if (
+                frozen is not None and store.frozen_scope == frozen
+            ) else store.one(
                 "SELECT 1 FROM runtime_meta WHERE key = %s", (INPUT + item["event_id"],)
-            ):
+            )
+            if not has_receipt:
                 from companion import legacy_owner_input
 
                 legacy_owner_input.validate_turn(store, settings, view, item, clock())
