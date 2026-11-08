@@ -358,6 +358,9 @@ class Core(Runtime):
         return {**row, "lease_token": token, "attempts": row["attempts"] + 1}
 
     def _check_context_snapshots(self, job, snapshots, *, current_request=None, owner_view=None):
+        if not self.store.in_transaction:
+            return self.store.read_or_write(lambda: self._check_context_snapshots(
+                job, snapshots, current_request=current_request, owner_view=owner_view))
         reply_revision.check_job(self.store, job)
         authority = owner_view if owner_view is not None else self._owner_job_view(job)
         configuration = runtime_config.check(self.store, self.settings, "job:" + job["job_id"])

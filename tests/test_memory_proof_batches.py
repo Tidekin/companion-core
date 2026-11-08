@@ -131,8 +131,7 @@ def test_context_boundary_reads_shared_sources_once_and_rechecks_next_boundary(
     monkeypatch.setattr(core.store, "bounded_source_read", read)
     if shared_limit:
         monkeypatch.setattr(retrieval_work, "SOURCE_NODES", shared_limit)
-    with core.store.read_snapshot():
-        core._check_context_snapshots(job, snapshots)
+    core._check_context_snapshots(job, snapshots)
     if shared_limit is None:
         assert len(bodies) == len(set(bodies)) == 9
     else:
