@@ -17,7 +17,9 @@ from companion import meme_asset_migration as migration
 from companion import meme_assets
 from companion.backup import backup, restore
 from companion.contracts import CoreError
+from companion.legacy_import import import_sqlite_backup, migrate_sqlite
 from companion.meme_core import CaptionBody, MemeCaptionService
+from companion.postgres import Database, migrate
 from companion.privacy import ErasureLedger
 from companion.store import Store, encode
 from companion_meme_protocol import digest
@@ -26,6 +28,7 @@ from companion_onebot_bridge.meme_library import MemeLibrary
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.postgres_fixture import isolated_database
 from tests.support.historical_schema import historical_database
 from tests.support.meme_asset_migration import (
     ROOT,
@@ -156,7 +159,7 @@ def test_same_bytes_with_two_original_licensed_sources_remain_independent(bundle
     assert first["asset_id"] != second["asset_id"]
     assert len(bundle.core.store.rows("SELECT * FROM meme_assets")) == 2
     assert len(bundle.core.store.rows("SELECT * FROM meme_asset_sources")) == 3
-    with bundle.core.store.transaction():
+    with bundle.core.store.transaction(control_write=True):
         bundle.core.ledger.expire_events(bundle.core.store, [bundle.event["event_id"]],
                                          bundle.core.clock())
     assert all(r["state"] == "ERASED" and r["data"] is None and r["metadata_json"] is None
@@ -211,12 +214,13 @@ def test_conflicting_metadata_refuses_atomic_import_and_removal_never_reactivate
         "data": None, "metadata_json": None}
 
 
-def test_erasure_before_import_and_old_backup_restore_reimport_cannot_revive(bundle, tmp_path):
+def test_erasure_before_import_and_old_backup_restore_reimport_cannot_revive(
+    bundle, tmp_path, empty_database
+):
     make_export(bundle)
-    archive, restored = tmp_path / "old.enc", tmp_path / "restored.db"
+    archive = tmp_path / "old.enc"
+    state = tmp_path / "restored-state"
     key = Fernet.generate_key()
-    # An actual pre-catalog schema copy proves restore's existing migrate-before-
-    # replay order is sufficient; do not add a new restore mechanism.
     legacy = tmp_path / "pre-catalog-0046.db"
     historical_database(bundle.core.store, str(legacy), "0046_capability_delegation")
     with closing(sqlite3.connect(legacy)) as destination:
@@ -226,20 +230,26 @@ def test_erasure_before_import_and_old_backup_restore_reimport_cannot_revive(bun
             "AND name IN ('meme_assets','meme_asset_sources','meme_vectors')").fetchall()
         destination.execute("DELETE FROM runtime_meta WHERE key='derived_erasure_contract'")
         destination.commit()
-    backup(legacy, archive, key)
+    migrate_sqlite(legacy)
+    with isolated_database() as converted:
+        migrate(converted)
+        import_sqlite_backup(legacy, converted)
+        backup(converted, archive, key)
     before = original_work(bundle.core.store)
-    with bundle.core.store.transaction():
+    with bundle.core.store.transaction(control_write=True):
         bundle.core.ledger.expire_events(bundle.core.store, [bundle.event["event_id"]],
                                          bundle.core.clock())
     result = core_cli(bundle, "import")
     assert result["items"][0]["state"] == "ERASED"
     assert bundle.core.store.one("SELECT data,metadata_json FROM meme_assets") == {
         "data": None, "metadata_json": None}
-    restore(archive, restored, key, bundle.core.settings.erasure_ledger)
-    settings = bundle.core.settings.model_copy(update={"database": str(restored)})
+    restore(archive, empty_database, key, bundle.core.settings.erasure_ledger,
+            state_directory=state)
+    settings = bundle.core.settings.model_copy(update={"database": empty_database,
+                                                      "state_directory": str(state)})
     assert migration.run(settings, bundle.manifest, operation="import")["items"][0]["state"] == (
         "ERASED")
-    with closing(Store(str(restored))) as store:
+    with Database(empty_database) as database, closing(Store(database, state)) as store:
         assert store.one("SELECT data,metadata_json FROM meme_assets") == {
             "data": None, "metadata_json": None}
         assert store.rows("SELECT * FROM model_usage") == before["model_usage"]
@@ -250,7 +260,7 @@ def test_old_complete_repair_clears_catalog_without_rewriting_original_receipts(
     make_export(bundle)
     core_cli(bundle, "import")
     asset = bundle.core.store.one("SELECT * FROM meme_assets")
-    with bundle.core.store.transaction():
+    with bundle.core.store.transaction(control_write=True):
         bundle.core.ledger.expire_events(bundle.core.store, [bundle.event["event_id"]],
                                          bundle.core.clock())
     assert bundle.core.store.one("SELECT state FROM meme_assets")["state"] == "ERASED"
@@ -276,7 +286,7 @@ def test_latest_independent_ledger_required_without_creating_a_replacement(bundl
     elif problem == "mismatch":
         path.write_text(encode({"ledger_id": "different"}) + "\n", "utf-8")
     else:
-        with bundle.core.store.transaction():
+        with bundle.core.store.transaction(control_write=True):
             bundle.core.ledger.expire_events(bundle.core.store, [bundle.event["event_id"]],
                                              bundle.core.clock())
         path.write_text(path.read_text("utf-8").splitlines()[0] + "\n", "utf-8")
@@ -288,12 +298,12 @@ def test_latest_independent_ledger_required_without_creating_a_replacement(bundl
 
 def test_sql_failure_rolls_back_whole_import_and_restart_is_idempotent(bundle):
     make_export(bundle)
-    bundle.core.store.execute("CREATE TRIGGER fail_asset BEFORE INSERT ON meme_asset_sources "
-                              "BEGIN SELECT RAISE(ABORT,'synthetic crash'); END")
+    bundle.core.store.execute("ALTER TABLE meme_asset_sources ADD CONSTRAINT fail_asset "
+                              "CHECK (false) NOT VALID")
     before = logical_database(bundle.core.settings.database)
     core_cli(bundle, "import", ok=False)
     assert logical_database(bundle.core.settings.database) == before
-    bundle.core.store.execute("DROP TRIGGER fail_asset")
+    bundle.core.store.execute("ALTER TABLE meme_asset_sources DROP CONSTRAINT fail_asset")
     assert core_cli(bundle, "import")["items"][0]["state"] == "STAGED"
 
 
@@ -306,7 +316,7 @@ from companion.store import Store
 class CrashStore(Store):
     def execute(self, sql, params=()):
         result = super().execute(sql, params)
-        if sql.startswith('INSERT OR IGNORE INTO meme_asset_sources'):
+        if isinstance(sql, str) and sql.startswith('INSERT INTO meme_asset_sources'):
             os._exit(73)
         return result
 migration.Store = CrashStore

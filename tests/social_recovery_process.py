@@ -1,9 +1,11 @@
+
 """Crash at native planning boundaries in a separate synthetic-only process."""
 
 import asyncio
 import json
 import os
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import httpx
@@ -12,6 +14,7 @@ from companion import budget
 from companion.autonomous_selector import native_selector
 from companion.config import Settings
 from companion.model import ModelClient
+from companion.postgres import Database
 from companion.social_autonomy import SocialAutonomy
 from companion.social_autonomy_runtime import run_once
 from companion.store import Store, encode
@@ -77,8 +80,10 @@ async def main():
         return
 
     budget.reserve, budget.complete = reserve, complete
-    store = Store(settings.database)
-    try:
+    with (
+        Database(settings.database) as database,
+        closing(Store(database, settings.state_directory)) as store,
+    ):
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
             module = SocialAutonomy(store, settings, ModelClient(settings, client),
                                     lambda: args["now"])
@@ -86,8 +91,6 @@ async def main():
                 await run_once(store, settings, module.model, module.clock, worker_id="child")
             else:
                 await module.plan("crashed-social-plan", source_ids=[args["source_id"]])
-    finally:
-        store.close()
 
 
 if __name__ == "__main__":

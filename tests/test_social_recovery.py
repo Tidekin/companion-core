@@ -1,6 +1,7 @@
 """Recover planning metadata without repeating an admitted model or account action."""
 
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -17,16 +18,19 @@ from companion.contracts import CoreError
 from companion.social_autonomy_runtime import _expire, run_once
 from companion.store import Store
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.social_autonomy import MockPlanner, background, extra_public, planned
 from tests.support.social_owner_authority import authorize
 
 
 def crash(core, tmp_path, ref, mode):
     config = tmp_path / "synthetic-social-crash.json"
-    config.write_text(json.dumps({"settings": core.settings.model_dump(mode="python"),
-                                 "source_id": ref, "now": core.clock(), "mode": mode},
-                                default=lambda value: value.get_secret_value()
-                                if isinstance(value, SecretStr) else str(value)), encoding="utf-8")
+    with open(config, "x", encoding="utf-8",
+              opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
+        json.dump({"settings": core.settings.model_dump(mode="python"), "source_id": ref,
+                   "now": core.clock(), "mode": mode}, stream,
+                  default=lambda value: value.get_secret_value()
+                  if isinstance(value, SecretStr) else str(value))
     child = subprocess.run([sys.executable, "-B", "-m", "tests.social_recovery_process",
                             str(config)], capture_output=True, timeout=20)
     assert child.returncode == 23, child.stderr.decode(errors="replace")
@@ -41,7 +45,7 @@ def test_actual_process_death_retires_only_expired_known_planning(core, tmp_path
     assert not _expire(core.store, core.clock())
     assert core.store.one("SELECT * FROM social_autonomy_plans") == prior
     core.clock.advance(86400)
-    with closing(Store(core.settings.database)) as restarted:
+    with closing(Store(core.store.database, core.store.state_directory)) as restarted:
         assert run(run_once(restarted, core.settings, None, core.clock)) == (mode != "reserved")
     assert core.store.rows("SELECT * FROM model_usage") == usage
     assert not core.store.rows("SELECT * FROM outbox")
@@ -101,10 +105,9 @@ def test_budget_refusal_reuses_original_plan_and_request_without_poll_writes(cor
     with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
         planned(module, ref)
     before = core.store.one("SELECT * FROM social_autonomy_plans")
-    changes = core.store.db.total_changes
+    changes = logical_state(core.store)
     assert planned(module, ref)["state"] == "REJECTED"
-    # SQLite total_changes includes rolled-back writes; durable rows/audit do not change.
-    assert core.store.db.total_changes >= changes
+    assert logical_state(core.store) == changes
     assert core.store.one("SELECT * FROM social_autonomy_plans") == before
     assert len(core.store.rows("SELECT * FROM audit_log WHERE action='social.plan_failed'")) == 1
     assert not core.store.rows("SELECT * FROM model_usage")
@@ -195,7 +198,7 @@ def test_unadmitted_retry_cannot_outlive_original_source_authority_or_liability(
     if change == "expire":
         core.clock.advance(301)
     elif change == "erase":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [ref], core.clock())
     elif change == "policy":
         core.settings.social_autonomy = module.config.model_copy(update={"policy_version": 2})
@@ -232,7 +235,7 @@ def test_two_connections_retry_one_original_unadmitted_request(core):
     calls = []
 
     def attempt(_):
-        with closing(Store(core.settings.database)) as store:
+        with closing(Store(core.store.database, core.store.state_directory)) as store:
             model = MockPlanner()
             model.callback = lambda: calls.append(True)
             barrier.wait(timeout=5)

@@ -53,18 +53,19 @@ def test_frozen_source_cannot_be_replaced_or_silently_dropped(runtime_case, chan
     if change == "remove":
         s.execute("UPDATE meme_assets SET state='REMOVED',data=NULL,mime=NULL,metadata_json=NULL")
     elif change == "caption":
-        s.execute("UPDATE meme_captions SET result_json=NULL WHERE job_id=?", (c.caption_id,))
+        s.execute("UPDATE meme_captions SET result_json=NULL WHERE job_id=%s", (c.caption_id,))
     elif change == "usage":
         s.execute("UPDATE model_usage SET state='UNKNOWN'")
     elif change == "epoch":
         from companion.privacy import advance_epoch
 
-        advance_epoch(s)
+        with s.transaction(control_write=True):
+            advance_epoch(s)
     elif change == "binding":
         saved = c.retrieval.check(c.job)
         next(iter(saved["catalog_bindings"].values()))["source_sha256"] = "f" * 64
         s.execute(
-            "UPDATE runtime_meta SET value=? WHERE key=?",
+            "UPDATE runtime_meta SET value=%s WHERE key=%s",
             (encode(saved), "meme_offer:" + c.job["event_id"]),
         )
     else:
@@ -115,14 +116,14 @@ def test_physical_sha_cooldown_uses_original_sent_time_and_active_holds(runtime_
 
     message = enqueue(s, c.current["event_id"], c.job["conversation_id"], "sent", now)
     s.execute(
-        "UPDATE outbox SET content_json=?,state='SENT',sent_at=? WHERE message_id=?",
+        "UPDATE outbox SET content_json=%s,state='SENT',sent_at=%s WHERE message_id=%s",
         (encode({"text": "sent", "image": {"candidate_id": sha}}), after(now, -1801), message),
     )
     assert not blocked(s, c.core.settings, sha, now)
-    s.execute("UPDATE outbox SET sent_at=? WHERE message_id=?", (now, message))
+    s.execute("UPDATE outbox SET sent_at=%s WHERE message_id=%s", (now, message))
     assert blocked(s, c.core.settings, sha, now)
     s.execute(
-        "UPDATE outbox SET state='DELIVERY_UNCERTAIN',sent_at=NULL WHERE message_id=?", (message,)
+        "UPDATE outbox SET state='DELIVERY_UNCERTAIN',sent_at=NULL WHERE message_id=%s", (message,)
     )
     assert blocked(s, c.core.settings, sha, after(now, 86401))
 
@@ -156,7 +157,7 @@ def test_erasure_of_original_root_invalidates_derived_offer_without_refunding(ru
     c = runtime_case
     run(c.retrieval.prepare(c.job))
     before = c.core.store.rows("SELECT * FROM model_usage")
-    with c.core.store.transaction():
+    with c.core.store.transaction(control_write=True):
         c.core.ledger.expire_events(c.core.store, [c.source["event_id"]], c.core.clock())
     assert not c.core.store.one(
         'SELECT 1 FROM runtime_meta WHERE key=%s', ("meme_offer:" + c.job["event_id"],)
@@ -181,7 +182,7 @@ def test_independent_connections_to_same_authoritative_store_reserve_one_image(r
     barrier = Barrier(2)
 
     def compete(index):
-        with closing(Store(c.core.settings.database)) as store:
+        with closing(Store(c.core.store.database, c.core.store.state_directory)) as store:
             engine = ExpressionEngine(store, c.core.settings, c.core.clock)
             barrier.wait(timeout=10)
             message = engine.enqueue(
@@ -192,7 +193,7 @@ def test_independent_connections_to_same_authoritative_store_reserve_one_image(r
                 key="race:" + str(index),
             )
             return json.loads(
-                store.one("SELECT content_json FROM outbox WHERE message_id=?", (message,))[
+                store.one("SELECT content_json FROM outbox WHERE message_id=%s", (message,))[
                     "content_json"
                 ]
             )
