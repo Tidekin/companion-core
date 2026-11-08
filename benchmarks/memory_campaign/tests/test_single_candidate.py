@@ -31,11 +31,11 @@ def test_single_report_retains_failed_questions_without_pair_statistics(tmp_path
     spec = importlib.util.spec_from_file_location("single_candidate_report", TOOLS / "report.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    rows = [{"persona": "P1", "family": "基本", "category_id": "A01", "delay_days": 0,
-             "criteria": {}, "input_modalities": ["text"], "arms": {"core": {
+    rows = [{**question, "criteria": {}, "arms": {"core": {
                  "passed": i == 0, "status": "SUCCEEDED" if i == 0 else "FAILED",
                  "answer": "合成答案" if i == 0 else "",
-                 "elapsed_seconds": 1 + i, "exact_pass": None}}} for i in range(2)]
+                 "elapsed_seconds": 1 + i, "exact_pass": None}}}
+            for i, question in enumerate(module.R.questions[:2])]
     summary = module.summarize(rows)
     assert summary["overall"] == {"core": {
         "passed": 1, "total": 2, "rate": .5, "execution_failures": 1,

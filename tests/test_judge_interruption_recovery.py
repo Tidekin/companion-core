@@ -124,7 +124,7 @@ def test_recovery_keeps_discarded_anchor_verdict_without_resending(judge, monkey
     "judge_unresolved", "anchor_failed", "interrupted_review_required",
 ])
 def test_report_requires_explicit_override_for_each_uncertain_grade(campaign, flag):
-    root, _, report, rc, rows, _ = campaign
+    root, grade, report, rc, rows, _ = campaign
     out = root / "grading"
     target = json.loads((out / "blind-mapping.json").read_text("utf8"))[0]
     grades = rc.read_rows(out / "grades.jsonl")
@@ -137,7 +137,7 @@ def test_report_requires_explicit_override_for_each_uncertain_grade(campaign, fl
     with pytest.raises(AssertionError, match="explicit review overrides"):
         report.load()
     assert len(report.load(allow_failed_gate=True)[0]) == report.R.total
-    rc.append(out / "overrides.jsonl", {
+    grade.append(out / "overrides.jsonl", {
         "key": target["key"], "original_grade": original,
         "pass": True, "reason": "Answer contains the required fact.",
     })
