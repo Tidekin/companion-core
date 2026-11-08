@@ -743,14 +743,25 @@ class Core(Runtime):
         s, cfg, job, text = self.store, turn.settings, turn.job, turn.text
         authority = turn.authority
         turns = [dialogue_history.turn_messages(source, s, text) for source in sources]
-        recalled = None
+        recalled = recalled_reference = None
+        recalled_history = []
+        original_order = {source["event_id"]: i for i, source in enumerate(sources)}
         if (job["kind"] == "chat" and authority and not bounded_text and text and not scoped_share
                 and cfg.memory_enabled and turn.permits("memory")
                 and "history" in authority.policy.purposes):
-            recalled = turn_recall.add_reply_reference(
+            recalled, recalled_reference = turn_recall.add_reply_reference(
                 s, cfg, self.clock, job, text, sources, turns, authority.policy.history,
                 available=available, ranked_ids=turn_ranking, memory_context=self.memory_context,
                 selection=selection)
+            if recalled:
+                recalled_ids = set(recalled["event_ids"])
+                recalled_history = [(source, group)
+                    for source, group in zip(sources, turns, strict=True)
+                    if source["event_id"] in recalled_ids]
+                remaining = [(source, group) for source, group in zip(sources, turns, strict=True)
+                             if source["event_id"] not in recalled_ids]
+                sources, turns = ([source for source, _ in remaining],
+                                  [group for _, group in remaining])
         mark("context_turn_recall")
         continuation = None
         if not scoped_share:
@@ -772,7 +783,8 @@ class Core(Runtime):
             if turn.permits("memory"):
                 image_review_proofs = image_review.annotate(self, job, sources, turns)
         return dialogue_history.ReplyHistory(sources, turns, continuation, image_review_target,
-                                            image_review_proofs)
+            image_review_proofs, recalled=recalled, recalled_reference=recalled_reference,
+            recalled_history=recalled_history, original_order=original_order)
 
     def _format_reply_turns(self, turn, rules, current, history, content_reference, selection,
                            notice_messages, has_images):
@@ -911,7 +923,7 @@ class Core(Runtime):
         protected = combined or image_memory or (
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and memory_refs)
         fitted = context_selection.fit_reply(cfg, job["kind"], rules.message, selection, history,
-                                             current_input, related, protected=protected)
+            current_input, related, protected=protected, query=turn.text)
         if authority and job["kind"] == "chat" and turn.permits("image"):
             from companion import agent_images, image_review
 

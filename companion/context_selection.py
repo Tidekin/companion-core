@@ -53,6 +53,13 @@ def focus(current, sources, *, shared=False):
     return terms(current)
 
 
+def history_text(source, turn):
+    """Rank the authorized owner/source content, including expanded attachments."""
+    return "\n".join([source.get("user_text", ""), *[
+        message["content"] for message in turn
+        if message["role"] == "user" and isinstance(message["content"], str)]])
+
+
 def share_continuation(text):
     """Only current owner text supplies discourse cues, never image/OCR text."""
     return not _NEW_TOPIC.search(text) and bool(_SHARE_BACKREF.search(text))
@@ -105,24 +112,25 @@ def drop_order(groups):
                   key=lambda group: (group["priority"], group["wire_start"]))
 
 
-def protected_recent(settings, sources, turns, current_input, scenario):
-    """Keep a bounded tail of complete pairs alongside the current input.
+def protected_recent(settings, sources, turns, current_input, scenario, *, query="", required=()):
+    """Protect relevant recent source groups within the complete required request.
 
     Pending inputs do not consume the pair count. Oversized pairs remain optional;
     static rules, attached media and actual tools still face full hard admission.
     """
+    from companion.context_planner import pressure
     from companion.token_measurement import measure_request
 
     pairs = [(source, turn) for source, turn in zip(sources, turns, strict=True)
              if source.get("reply_text") and source.get("reply_complete") is not False]
     retained, messages = set(), list(current_input)
+    continuation = not query.strip() or bool(_CONTINUATION.fullmatch(query.strip()))
+    topic = focus(query, sources)
     for source, turn in reversed(pairs[-settings.recent_protected_turns:]):
-        # turn_messages prepends source references (cards, quotes or observations)
-        # to the pair. Keep that richer group atomic under its normal budget.
-        if len(turn) != 2:
+        if not continuation and relevance(topic, history_text(source, turn)) != RELATED:
             continue
-        measured = measure_request(settings, [*turn, *messages], scenario)
-        if measured.reserved_input_tokens <= settings.context_soft_tokens:
+        measured = measure_request(settings, [*required, *turn, *messages], scenario)
+        if pressure(settings, measured, scenario=scenario) is None:
             retained.add(source["event_id"])
             messages = [*turn, *messages]
     return retained
@@ -228,12 +236,39 @@ class FittedReply:
                 if id(block[0]) in visible]
 
 
-def fit_reply(settings, kind, rules, references, history, current_input, related, *, protected):
+def fit_reply(settings, kind, rules, references, history, current_input, related, *, protected,
+              query=""):
     """Keep each source group atomic; reuse the same priorities at final SDK admission."""
     from companion.dialogue_history import fit_context
 
     preserve = bool(protected or history.continuation)
-    recent = protected_recent(settings, history.sources, history.turns, current_input, kind)
+    full_recalled = set()
+    if history.recalled and {source["event_id"] for source, _ in history.recalled_history} == set(
+        history.recalled["event_ids"]
+    ):
+        from companion.context_planner import pressure
+        from companion.token_measurement import measure_request
+
+        required = [rules, *[ref for ref in references.messages
+            if ref is not history.recalled_reference and (preserve or id(ref) in references.required)],
+            *[message for source, group in zip(history.sources, history.turns, strict=True)
+              if preserve or source.get("reply_complete") is False for message in group],
+            *[message for _, group in history.recalled_history for message in group], *current_input]
+        if pressure(settings, measure_request(settings, required, kind), scenario=kind) is None:
+            references.messages = [ref for ref in references.messages
+                                   if ref is not history.recalled_reference]
+            merged = [*zip(history.sources, history.turns, strict=True), *history.recalled_history]
+            merged.sort(key=lambda pair: history.original_order[pair[0]["event_id"]])
+            history.sources, history.turns = ([source for source, _ in merged],
+                                            [group for _, group in merged])
+            full_recalled = {source["event_id"] for source, _ in history.recalled_history}
+    required_messages = [rules, *[ref for ref in references.messages
+        if preserve or id(ref) in references.required],
+        *[message for source, group in zip(history.sources, history.turns, strict=True)
+          if preserve or source.get("reply_complete") is False or source["event_id"] in full_recalled
+          for message in group]]
+    recent = protected_recent(settings, history.sources, history.turns, current_input, kind,
+                              query=query, required=required_messages)
     blocks = [("rules", [rules], True, TOPIC)]
     for message in references.messages:
         blocks.append(("reference", [message], preserve or id(message) in references.required,
@@ -241,8 +276,9 @@ def fit_reply(settings, kind, rules, references, history, current_input, related
     target_id = history.review_target and history.review_target.get("event_id")
     for source, turn in zip(history.sources, history.turns, strict=True):
         event_id = source["event_id"]
-        required = preserve or source.get("reply_complete") is False or event_id in recent
-        on_topic = related(source.get("user_text", "")) == RELATED
+        required = (preserve or source.get("reply_complete") is False or event_id in recent
+                    or event_id in full_recalled)
+        on_topic = related(history_text(source, turn)) == RELATED
         priority = TOPIC if on_topic or event_id == target_id or event_id in recent else OLD_HISTORY
         blocks.append(("history", turn, required, priority))
     blocks.append(("current", current_input, True, TOPIC))

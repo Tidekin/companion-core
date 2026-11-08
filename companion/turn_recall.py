@@ -318,7 +318,7 @@ async def _prefetch(store, settings, job, query):
 
 
 def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, max_bytes,
-              ranked_ids=None):
+              ranked_ids=None, history_costs=None):
     """Return {data, event_ids, cost_bytes} within the turn and UTF-8 allowance, or None.
 
     With `ranked_ids` from prefetch() no model runs here; without it ranking is inline.
@@ -326,11 +326,12 @@ def reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, m
     """
     with retrieval_work.scope():
         return _reference(store, settings, job, query, exclude_ids, allowed,
-                          max_turns=max_turns, max_bytes=max_bytes, ranked_ids=ranked_ids)
+                          max_turns=max_turns, max_bytes=max_bytes, ranked_ids=ranked_ids,
+                          history_costs=history_costs)
 
 
 def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, max_bytes,
-               ranked_ids):
+               ranked_ids, history_costs=None):
     from companion.dialogue_history import turn_messages
 
     limit = min(settings.turn_recall_limit, max_turns)
@@ -372,7 +373,15 @@ def _reference(store, settings, job, query, exclude_ids, allowed, *, max_turns, 
         data = _data(rows, notes, sorted(ranked), settings.timezone, query)
         shown = len((HEADING + "\n" + encode(data)).encode())
         cost = max(shown, len(HEADING.encode()) + sum(full[index] for index in ranked))
-        if cost <= max_bytes:
+        # Recent and recalled renderings share one signed history allowance. A
+        # recalled original replaces its recent group rather than being excluded
+        # before later trimming can remove that group. Full replay cost still applies.
+        chosen_ids = {rows[index]["event_id"] for index in ranked}
+        other = {key: size for key, size in (history_costs or {}).items()
+                 if key not in chosen_ids}
+        allowance = int(settings.turn_recall_history_share * (
+            max_bytes - sum(other.values()))) if history_costs is not None else max_bytes
+        if len(other) + len(ranked) <= max_turns and cost <= allowance:
             return {"data": data, "cost_bytes": cost,
                     "event_ids": [rows[index]["event_id"] for index in sorted(ranked)]}
         ranked = ranked[:-1]
@@ -431,15 +440,16 @@ def add_reply_reference(store, settings, clock, job, text, sources, turns, scope
     from companion.context_selection import RELATED
 
     recalled = reference(
-        store, settings, job, text, {source["event_id"] for source in sources},
+        store, settings, job, text, set(),
         lambda ids: available(ids, "memory"), ranked_ids=ranked_ids,
-        max_turns=scope.max_turns - len(sources),
-        max_bytes=int(settings.turn_recall_history_share * (
-            scope.max_utf8_bytes - sum(len(message["content"].encode())
-                                       for turn in turns for message in turn))))
+        max_turns=scope.max_turns, max_bytes=scope.max_utf8_bytes,
+        history_costs={source["event_id"]: sum(len(message["content"].encode())
+                                              for message in turn)
+                       for source, turn in zip(sources, turns, strict=True)})
+    message = None
     if recalled:
-        selection.add(HEADING, recalled["data"], recalled["event_ids"],
+        message = selection.add(HEADING, recalled["data"], recalled["event_ids"],
                       priority=RELATED, required=True, module="memory",
                       proofs=[{"kind": "memory", "proof": memory_context.pin(
                           clock(), event_ids=set(recalled["event_ids"]))}])
-    return recalled
+    return recalled, message

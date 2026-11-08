@@ -5,7 +5,7 @@ without settings use the historical byte estimate. Neither grants source authori
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from companion import qq_quotes, reply_revision
 from companion.budget import token_upper_bound
@@ -20,6 +20,10 @@ class ReplyHistory:
     continuation: dict | None
     review_target: dict | None
     review_proofs: list
+    recalled: dict | None = None
+    recalled_reference: dict | None = None
+    recalled_history: list = field(default_factory=list)
+    original_order: dict = field(default_factory=dict)
 
     def retained(self, messages):
         visible = {id(message) for message in messages}
