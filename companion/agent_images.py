@@ -30,13 +30,13 @@ def enabled(settings):
 
 
 def erase_images(store, event_ids):
-    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
-        "relnamespace=current_schema()::regnamespace AND relname='captured_images' AND relkind IN "
-        "('r','p')"):
+    if not store.has_table("captured_images"):
         return
     for event_id in event_ids:
-        store.execute('DELETE FROM captured_images WHERE item_id IN (SELECT item_id FROM '
-            'content_items WHERE owner_event_id = %s)', (event_id,))
+        store.execute("DELETE FROM agent_image_inputs WHERE item_id IN "
+                      "(SELECT item_id FROM content_items WHERE owner_event_id=%s)", (event_id,))
+        store.execute("DELETE FROM captured_images WHERE item_id IN "
+                      "(SELECT item_id FROM content_items WHERE owner_event_id=%s)", (event_id,))
 
 
 def expire_downloads(service):
