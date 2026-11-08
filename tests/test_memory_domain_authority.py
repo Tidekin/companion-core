@@ -89,6 +89,25 @@ def test_prior_v2_raw_revision_requires_explicit_history_for_domain(core, tmp_pa
     assert not source_allowed(core.store, core.settings, core.clock, capture.event_id, "diary")
 
 
+def test_raw_source_reuses_one_checked_view_and_rechecks_next_read(core, tmp_path, monkeypatch):
+    capture, _ = captured(core, tmp_path)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    core.ingest(inbound(core, capture), "source-view-test")
+    checked = []
+    original = owner_authority.current
+
+    def current(store, *args, **kwargs):
+        checked.append(store.in_read_snapshot)
+        return original(store, *args, **kwargs)
+
+    monkeypatch.setattr(owner_authority, "current", current)
+    assert source_allowed(core.store, core.settings, core.clock, capture.event_id, "chat")
+    assert checked == [True]
+    core.store.execute("UPDATE events SET redacted=1 WHERE event_id=%s", (capture.event_id,))
+    assert not source_allowed(core.store, core.settings, core.clock, capture.event_id, "chat")
+    assert checked == [True, True]
+
+
 def test_legacy_memory_read_uses_original_archive_without_rebinding(core, tmp_path):
     from tests.support.legacy_owner_input import archived
 

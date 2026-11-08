@@ -16,6 +16,9 @@ def source_allowed(store, settings, clock, event_id, purpose, *, allow_commands=
     """
     if not owner_authority.required(store, settings):
         return True  # Existing Demo/legacy callers retain their native source checks.
+    if not store.in_transaction:
+        return store.read_or_write(lambda: source_allowed(
+            store, settings, clock, event_id, purpose, allow_commands=allow_commands))
     view = owner_authority.current(store, settings, clock, purpose=purpose)
     receipt = store.one('SELECT value FROM runtime_meta WHERE key = %s',
                         (owner_input.INPUT + event_id,))
@@ -25,7 +28,7 @@ def source_allowed(store, settings, clock, event_id, purpose, *, allow_commands=
                                       purpose="memory", allow_commands=allow_commands)
         else:
             original = json.loads(receipt["value"]).get("authority") if receipt else None
-            owner_input.source(store, settings, view, event_id, clock(), purpose=purpose,
+            owner_input._checked_source(store, settings, view, event_id, clock(), purpose=purpose,
                 history=original != view.authority.as_dict(), allow_commands=allow_commands)
     except (CoreError, ValueError, TypeError, AttributeError):
         return False

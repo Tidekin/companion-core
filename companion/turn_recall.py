@@ -439,17 +439,22 @@ def add_reply_reference(store, settings, clock, job, text, sources, turns, scope
                         available, ranked_ids, memory_context, selection):
     from companion.context_selection import RELATED
 
-    recalled = reference(
-        store, settings, job, text, set(),
-        lambda ids: available(ids, "memory"), ranked_ids=ranked_ids,
-        max_turns=scope.max_turns, max_bytes=scope.max_utf8_bytes,
-        history_costs={source["event_id"]: sum(len(message["content"].encode())
-                                              for message in turn)
-                       for source, turn in zip(sources, turns, strict=True)})
+    def collect():
+        recalled = reference(
+            store, settings, job, text, set(),
+            lambda ids: available(ids, "memory"), ranked_ids=ranked_ids,
+            max_turns=scope.max_turns, max_bytes=scope.max_utf8_bytes,
+            history_costs={source["event_id"]: sum(len(message["content"].encode())
+                                                  for message in turn)
+                           for source, turn in zip(sources, turns, strict=True)})
+        proof = memory_context.pin(clock(), event_ids=set(recalled["event_ids"])) if (
+            recalled) else None
+        return recalled, proof
+
+    recalled, proof = store.read_or_write(collect)
     message = None
     if recalled:
         message = selection.add(HEADING, recalled["data"], recalled["event_ids"],
                       priority=RELATED, required=True, module="memory",
-                      proofs=[{"kind": "memory", "proof": memory_context.pin(
-                          clock(), event_ids=set(recalled["event_ids"]))}])
+                      proofs=[{"kind": "memory", "proof": proof}])
     return recalled, message
