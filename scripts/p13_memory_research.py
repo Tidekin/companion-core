@@ -1,6 +1,6 @@
 """Offline candidate experiment; no production retrieval hook or persistent graph.
 
-All candidates come from the same native Memory/SQLite evidence pool. An alias
+All candidates come from the same native Memory/PostgreSQL evidence pool. An alias
 annotation is a synthetic human-labelled assertion, not automatically proven
 semantics. Its exact owner source and quote must still be present at query time.
 """
@@ -12,6 +12,7 @@ import unicodedata
 
 from companion import live_text
 from companion.contracts import CoreError
+from companion.memory_candidates import terms
 from companion.observation import expired_sources
 from companion.privacy import epoch
 from companion.store import after
@@ -41,7 +42,7 @@ def evidence_pool(memory, now):
         "SELECT e.* FROM events e JOIN conversations c USING(conversation_id) "
         "WHERE e.redacted=0 AND e.actor_id='owner' AND e.source='qq.onebot' "
         "AND e.privacy_scope='private' AND c.scope='private' AND c.owner_actor_id='owner' "
-        "AND e.ingested_at>=? AND e.occurred_at<=?", (cutoff, now),
+        "AND e.ingested_at>=%s AND e.occurred_at<=%s", (cutoff, now),
     )
     valid = {}
     for source in sources:
@@ -62,19 +63,15 @@ def lexical_ids(store, query, rows):
     """The native lexical branch before BGE filtering/fusion; same six-candidate cap."""
     if len(query) < 3:
         return [row["memory_id"] for row in rows if query in row["content"]][:LIMIT]
-    grams = []
-    for term in re.findall(r"[A-Za-z0-9_\u4e00-\u9fff]+", query):
-        if re.search(r"[\u4e00-\u9fff]", term):
-            grams.extend(term[index:index + 3] for index in range(len(term) - 2))
-        else:
-            grams.append(term)
-    grams = [term for term in dict.fromkeys(grams) if len(term) >= 3][:40]
-    match = " OR ".join('"' + term.replace('"', '""') + '"' for term in grams)
-    allowed = {row["memory_id"] for row in rows}
+    patterns = ["%" + term.replace("\\", "\\\\").replace("%", "\\%").replace(
+        "_", "\\_") + "%" for term in terms(query)]
+    allowed = [row["memory_id"] for row in rows]
     return [row["memory_id"] for row in store.rows(
-        "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts)",
-        (match,),
-    ) if row["memory_id"] in allowed][:LIMIT] if match else []
+        "SELECT memory_id FROM memories WHERE memory_id=ANY(%s::text[]) "
+        "AND content ILIKE ANY(%s::text[]) "
+        "ORDER BY public.word_similarity(%s,content) DESC,updated_at DESC,memory_id LIMIT %s",
+        (allowed, patterns, query, LIMIT),
+    )] if patterns and allowed else []
 
 
 def active_annotations(annotations, rows, sources):
