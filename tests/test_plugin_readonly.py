@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import closing
 from datetime import datetime
 
 import httpx
@@ -11,9 +12,11 @@ import pytest
 from cryptography.fernet import Fernet
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.backup import backup, restore
 from companion.contracts import DeliveryResult, LeaseRequest
 from companion.exploration import ReadResult
+from companion.postgres import Database
 from companion.source_grants import SourceGrantRegistration
 from companion.store import Store
 from companion.transport import begin_send, delivery_result, lease_deliveries
@@ -291,12 +294,13 @@ def test_bilibili_revoked_json_does_not_fall_back_to_anonymous_l1(tmp_path):
     run(scenario())
 
 
-def test_native_reader_http_core_chat_and_erasure_replay(core, tmp_path):
+def test_native_reader_http_core_chat_and_erasure_replay(empty_database, core, tmp_path):
     configure(core)
     core.settings.content_enabled = True
     ingest(core, text=URL)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     async def scenario():
         pool, backend = mock_pool(response(native_post()))
@@ -329,16 +333,21 @@ def test_native_reader_http_core_chat_and_erasure_replay(core, tmp_path):
     assert run(core.run_once())
     key, archive = Fernet.generate_key(), tmp_path / "before.enc"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    restore(archive, tmp_path / "restored.db", key, core.settings.erasure_ledger)
-    restored = Store(str(tmp_path / "restored.db"))
-    try:
+    restored_state = tmp_path / "restored-state"
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as restored,
+    ):
         assert restored.one("SELECT evidence_json FROM observations")["evidence_json"] == "{}"
         assert all(row["redacted"] for row in restored.rows("SELECT * FROM content_items"))
-        assert not restored.rows("PRAGMA foreign_key_check")
-    finally:
-        restored.close()
+        assert not restored.one(
+            "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+            "AND NOT convalidated"
+        )
 
 
 def test_account_file_is_bounded_and_permission_checked(tmp_path):

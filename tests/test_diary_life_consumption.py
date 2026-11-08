@@ -146,14 +146,14 @@ def test_private_diary_consumer_rejects_changed_or_unproven_result(core, tmp_pat
     elif change == "revision":
         activate(core, policy, revision=1, operation="revise-diary-consumption")
     elif change == "source":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
     elif change == "expired":
         core.clock.advance(4 * 86400)
     else:
         core.store.execute((
             'UPDATE life_activity_results SET '
-            "proposal_json=json_set(proposal_json,'$.fiction',json('true')) "
+            "proposal_json=jsonb_set(proposal_json::jsonb,'{fiction}','true')::text "
             'WHERE job_id=%s'
         ),
                            (job,))
@@ -168,11 +168,11 @@ def test_native_source_erasure_scrubs_saved_life_diary_but_not_unrelated_erasure
     job, _, ref, source = draft(core, tmp_path)
     saved = consume(core, job, ref)
     day = date.fromisoformat(saved["local_date"])
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_99"], core.clock())
     assert core.diary.get_day(day, core.settings.owner_qq_id) is not None
     usage = core.store.rows("SELECT * FROM model_usage")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [source], core.clock())
     assert core.diary.get_day(day, core.settings.owner_qq_id) is None
     assert core.store.rows("SELECT * FROM diary_evidence") == []
@@ -181,16 +181,19 @@ def test_native_source_erasure_scrubs_saved_life_diary_but_not_unrelated_erasure
     assert core.store.rows("SELECT * FROM model_usage") == usage
 
 
-def test_day_deletion_replays_into_backup_taken_before_life_save(core, tmp_path):
+def test_day_deletion_replays_into_backup_taken_before_life_save(empty_database, core, tmp_path):
     job, _, ref, _ = draft(core, tmp_path)
     path, key = tmp_path / "before-save.enc", Fernet.generate_key()
     backup(core.settings.database, path, key)
     saved = consume(core, job, ref)
     day = date.fromisoformat(saved["local_date"])
     core.diary.forget(day, core.settings.owner_qq_id)
-    target = tmp_path / "restored.db"
-    restore(path, target, key, core.settings.erasure_ledger)
-    settings = core.settings.model_copy(update={"database": str(target)})
+    restored_state = tmp_path / "restored-state"
+    restore(path, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    settings = core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    })
     with Core(settings, core.model, core.clock) as reopened:
         assert reopened.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
             ("diary_deleted:" + saved["timezone"] + ":" + saved["local_date"],))

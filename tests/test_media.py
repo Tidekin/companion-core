@@ -287,10 +287,10 @@ def test_media_commit_is_atomic_with_actual_erasure_on_another_connection(core):
     futures, committed = [], []
 
     def erase_after_lock(event_id):
-        other = Store(core.settings.database)
+        other = Store(core.store.database, core.settings.state_directory)
         try:
             attempted.set()
-            with other.transaction():
+            with other.transaction(control_write=True):
                 committed.append(other.one("SELECT state,event_id FROM media_requests"))
                 core.ledger.expire_events(other, [event_id], core.clock())
                 erase_media_links(other, [event_id])
@@ -304,7 +304,7 @@ def test_media_commit_is_atomic_with_actual_erasure_on_another_connection(core):
             result = append(adapter_id, observation)
             futures.append(pool.submit(erase_after_lock, observation.event_id))
             assert attempted.wait(2)
-            # The actual second SQLite writer waits for evidence AND its request link to commit.
+            # The independent writer waits for evidence AND its request link to commit.
             assert not erased.wait(0.05)
             return result
 
@@ -325,9 +325,9 @@ def test_actual_erasure_before_final_media_transaction_suppresses_result(core):
     ingest(core, 90, "待遗忘的主人消息")
 
     async def erase_while_provider_runs():
-        other = Store(core.settings.database)
+        other = Store(core.store.database, core.settings.state_directory)
         try:
-            with other.transaction():
+            with other.transaction(control_write=True):
                 core.ledger.expire_events(other, ["evt_test_90"], core.clock())
         finally:
             other.close()
@@ -345,7 +345,7 @@ def test_request_settlement_failure_rolls_back_media_observation(core, monkeypat
     execute = core.store.execute
 
     def fail_settlement(sql, params=()):
-        if "UPDATE media_requests SET state='SUCCEEDED'" in sql:
+        if "UPDATE media_requests SET state = 'SUCCEEDED'" in sql:
             raise RuntimeError("simulated commit failure")
         return execute(sql, params)
 
@@ -359,18 +359,21 @@ def test_request_settlement_failure_rolls_back_media_observation(core, monkeypat
     }
 
 
-def test_restore_cannot_reauthorize_old_media_session(core, tmp_path):
+def test_restore_cannot_reauthorize_old_media_session(empty_database, core, tmp_path):
     media = service(core)
     session = start(media)
-    key, archive, restored_path = (
+    key, archive, restored_state = (
         Fernet.generate_key(),
         tmp_path / "media.enc",
-        tmp_path / "restore.db",
+        tmp_path / "restored-state",
     )
     backup(core.settings.database, archive, key)
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(restored_path)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         recovered = MediaService(
@@ -385,7 +388,7 @@ def test_restore_cannot_reauthorize_old_media_session(core, tmp_path):
             recovered.status(session["session_id"], session["session_token"])
         assert not recovered.provider.calls
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_provider_oversize_response_and_fake_media_signature_fail_closed(core):

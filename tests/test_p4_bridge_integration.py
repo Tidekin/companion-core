@@ -7,6 +7,7 @@ Every source socket is an in-memory httpcore backend, never a real account.
 
 import copy
 import json
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,8 +19,10 @@ from cryptography.fernet import Fernet
 
 from astrbot_plugin_companion_bridge.bridge import Spool, normalize
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.backup import backup, restore
 from companion.model import ModelResponse
+from companion.postgres import Database
 from companion.store import Store
 from source_reader.bili_tools import BilibiliToolReader
 from source_reader.heybox import HeyboxReader
@@ -64,6 +67,7 @@ def rehearsal(core, tmp_path):
     bridge = SimpleNamespace(spool=Spool(str(tmp_path / "spool.db")))
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     yield core, bridge, app
     bridge.spool.close()
 
@@ -140,7 +144,9 @@ async def read_source(core, app, tmp_path, *rows, before=None):
 
 
 @pytest.mark.parametrize("sample", SAMPLES, ids=lambda s: s["url"].rsplit("/", 1)[1])
-def test_p4_ten_redacted_source_samples_reach_bridge_reply(rehearsal, tmp_path, sample):
+def test_p4_ten_redacted_source_samples_reach_bridge_reply(
+    empty_database, rehearsal, tmp_path, sample,
+):
     core, bridge, app = rehearsal
 
     async def scenario():
@@ -160,16 +166,21 @@ def test_p4_ten_redacted_source_samples_reach_bridge_reply(rehearsal, tmp_path, 
             # Latest independent ledger must erase observations and generated delivery text.
             key, archive = Fernet.generate_key(), tmp_path / "before.enc"
             backup(core.settings.database, archive, key)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [root], core.clock())
-            restore(archive, tmp_path / "restored.db", key, core.settings.erasure_ledger)
-            restored = Store(str(tmp_path / "restored.db"))
-            try:
+            restored_state = tmp_path / "restored-state"
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
+            with (
+                Database(empty_database) as database,
+                closing(Store(database, restored_state)) as restored,
+            ):
                 assert all(r["redacted"] for r in restored.rows("SELECT * FROM observations"))
                 assert all(r["content_json"] == "{}" for r in restored.rows("SELECT * FROM outbox"))
-                assert not restored.rows("PRAGMA foreign_key_check")
-            finally:
-                restored.close()
+                assert not restored.one(
+                    "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+                    "AND NOT convalidated"
+                )
 
     run(scenario())
 
@@ -316,6 +327,7 @@ def test_p4_historical_image_manifests_remain_readable_in_core(rehearsal, slots)
     _, vision = enable(core)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     async def scenario():
         async with client(app, core.settings.bridge_token.get_secret_value()) as http:
             root = await submit(bridge, http, "看看这些图片", manifest=[
@@ -438,7 +450,7 @@ def test_p4_external_instructions_stay_data_and_erased_receipt_is_refused(rehear
                 r["action_type"] == "qq.private.reply"
                 for r in core.store.rows("SELECT * FROM outbox")
             )
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [root], core.clock())
             async with client(
                 app, core.settings.observation_adapters["heybox"].token.get_secret_value()

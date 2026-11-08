@@ -38,14 +38,18 @@ def test_multiple_erasures_handle_appraisals_correctly(core):
     ]
 
 
-def test_erasure_replay_removes_appraisal_from_an_old_backup(core, tmp_path):
+def test_erasure_replay_removes_appraisal_from_an_old_backup(empty_database, core, tmp_path):
     key = appraise(core, 1, "请记得我")
     secret = Fernet.generate_key()
-    archive, restored_db = tmp_path / "before.fernet", tmp_path / "restored.db"
+    archive = tmp_path / "before.fernet"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, secret)
     erase(core, [key])
-    restore(archive, restored_db, secret, core.settings.erasure_ledger)
-    with Core(core.settings.model_copy(update={"database": str(restored_db)}),
+    restore(archive, empty_database, secret, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }),
               core.model, core.clock) as restored:
         assert restored.store.rows("SELECT * FROM mood_appraisals") == []
         assert restored.mood.snapshot()["signals"] == []

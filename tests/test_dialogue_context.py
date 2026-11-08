@@ -122,7 +122,7 @@ def test_history_stays_within_session_and_eligible_owner_events(core, excluded):
         table = "events" if excluded == "other_session" else "outbox"
         key = "event_id" if table == "events" else "origin_event_id"
         core.store.execute(
-            f"UPDATE {table} SET conversation_id=? WHERE {key}='evt_test_1'",
+            f"UPDATE {table} SET conversation_id=%s WHERE {key}='evt_test_1'",
             (other["conversation_id"],),
         )
     elif excluded == "redacted":
@@ -134,13 +134,14 @@ def test_history_stays_within_session_and_eligible_owner_events(core, excluded):
             "privacy_scope": "internal",
         }[excluded]
         core.store.execute(
-            f"UPDATE events SET {excluded}=? WHERE event_id='evt_test_1'",
+            f"UPDATE events SET {excluded}=%s WHERE event_id='evt_test_1'",
             (replacement,),
         )
     else:
         core.store.execute(
-            "UPDATE events SET body_json=json_set(body_json,%s,1) WHERE event_id='evt_test_1'",
-            (f"$.{excluded}_command",),
+            "UPDATE events SET body_json=jsonb_set(body_json::jsonb,%s,'1')::text "
+            "WHERE event_id='evt_test_1'",
+            ([f"{excluded}_command"],),
         )
     assert len(core.context(current_job(core))) == 2
     assert core.model.calls == []
@@ -271,7 +272,7 @@ def test_sent_history_does_not_revive_after_memory_decision_and_reopen(core, dec
         reopened.close()
 
 
-def test_old_sent_turn_is_erased_when_restoring_an_old_backup(core, tmp_path):
+def test_old_sent_turn_is_erased_when_restoring_an_old_backup(empty_database, core, tmp_path):
     core.settings.memory_enabled = True
     sent_history(core, 1, "要遗忘的送达事实", "要遗忘的回复")
     memory_id = core.memory.add(
@@ -291,10 +292,14 @@ def test_old_sent_turn_is_erased_when_restoring_an_old_backup(core, tmp_path):
     archive = tmp_path / "before.enc"
     backup(core.settings.database, archive, key)
     core.memory.decide(memory_id, "forget", core.clock())
-    restored = tmp_path / "restored.db"
-    restore(archive, restored, key, core.settings.erasure_ledger)
+    restored_state = tmp_path / "restored-state"
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     reopened = Core(
-        core.settings.model_copy(update={"database": str(restored), "memory_enabled": False}),
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+            'memory_enabled': False,
+        }),
         core.model,
         core.clock,
     )

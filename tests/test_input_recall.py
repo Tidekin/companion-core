@@ -16,6 +16,7 @@ from companion.input_recall import (
     require_not_recalled,
 )
 from companion.memory import Memory
+from companion.postgres import Database
 from companion.privacy import epoch
 from companion.store import Store, after, encode
 from companion.transport import enqueue
@@ -25,7 +26,7 @@ from tests.support.onebot_events import normalized
 
 def remember(core, event_id, text="我喜欢绿茶"):
     core.settings.memory_enabled = True
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         return core.memory.add(
             Candidate(
                 subject="user",
@@ -41,12 +42,12 @@ def remember(core, event_id, text="我喜欢绿茶"):
 
 
 def test_before_input_marker_is_idempotent_scoped_and_replayed_from_pre_notice_backup(
-    core,
+    empty_database, core,
     tmp_path,
 ):
-    archive, destination, key = (
+    archive, restored_state, key = (
         tmp_path / "before.enc",
-        tmp_path / "restore.db",
+        tmp_path / "restored-state",
         Fernet.generate_key(),
     )
     backup(core.settings.database, archive, key)
@@ -57,8 +58,12 @@ def test_before_input_marker_is_idempotent_scoped_and_replayed_from_pre_notice_b
     assert recall(core, verified=False) == {**first, "duplicate": True}
     assert len(core.ledger.read()) == 2
     assert epoch(core.store) == previous_epoch
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    with closing(Store(str(destination))) as restored:
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as restored,
+    ):
         for store in (core.store, restored):
             require_not_recalled(store, source()["source_event_id"])
             assert not is_recalled(store, source()["source_event_id"])
@@ -77,13 +82,13 @@ def test_before_input_marker_is_idempotent_scoped_and_replayed_from_pre_notice_b
 
 
 def test_verified_before_input_recall_and_pending_projection_never_downgrade_after_restore(
-    core,
+    empty_database, core,
     tmp_path,
 ):
     recall(core, verified=False)
-    archive, destination, key = (
+    archive, restored_state, key = (
         tmp_path / "pending.enc",
-        tmp_path / "restore.db",
+        tmp_path / "restored-state",
         Fernet.generate_key(),
     )
     backup(core.settings.database, archive, key)
@@ -92,14 +97,18 @@ def test_verified_before_input_recall_and_pending_projection_never_downgrade_aft
     assert expected["event_ids"] == [normalized()["event_id"]]
     assert recall(core, verified=False) == {**expected, "duplicate": True}
     assert len(core.ledger.read()) == 3
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    with closing(Store(str(destination))) as restored:
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as restored,
+    ):
         for store in (core.store, restored):
             with pytest.raises(CoreError, match="EVENT_ERASED"):
                 require_not_recalled(store, source()["source_event_id"])
             assert is_recalled(store, normalized()["event_id"])
             store.execute(
-                "DELETE FROM runtime_meta WHERE key=?", (marker_key(source()["source_event_id"]),)
+                "DELETE FROM runtime_meta WHERE key=%s", (marker_key(source()["source_event_id"]),)
             )
             core.ledger.replay(store)
             assert is_recalled(store, source()["source_event_id"])
@@ -159,7 +168,9 @@ def test_source_only_or_wrong_event_id_cannot_confirm_recall(core):
     )
 
 
-def test_recall_preserves_independent_positive_support_and_removes_unsupported_fact(core, tmp_path):
+def test_recall_preserves_independent_positive_support_and_removes_unsupported_fact(
+    empty_database, core, tmp_path,
+):
     first, second = incoming(core), incoming(core, 43)
     supported = remember(core, first)
     assert remember(core, second) == supported
@@ -185,23 +196,28 @@ def test_recall_preserves_independent_positive_support_and_removes_unsupported_f
         polarity=1,
         created_at=core.clock(),
     )
-    archive, destination, key = (
+    archive, restored_state, key = (
         tmp_path / "before.enc",
-        tmp_path / "restore.db",
+        tmp_path / "restored-state",
         Fernet.generate_key(),
     )
     backup(core.settings.database, archive, key)
     recall(core)
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    for store in (core.store,):
-        assert store.one("SELECT content,status FROM memories WHERE memory_id=?", (supported,)) == {
-            "content": "我喜欢绿茶",
-            "status": "CONFIRMED",
-        }
-    with closing(Store(str(destination))) as restored:
-        for store in (core.store, restored):
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored_settings = core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    })
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as restored,
+    ):
+        for store, settings in ((core.store, core.settings), (restored, restored_settings)):
+            assert store.one(
+                "SELECT content,status FROM memories WHERE memory_id=%s", (supported,)
+            ) == {"content": "我喜欢绿茶", "status": "CONFIRMED"}
             assert store.rows(
-                "SELECT event_id FROM memory_evidence WHERE memory_id=?", (supported,)
+                "SELECT event_id FROM memory_evidence WHERE memory_id=%s", (supported,)
             ) == [{"event_id": second}]
             assert store.one(
                 "SELECT content,fact_key,status FROM memories WHERE memory_id='mem_only_recalled'"
@@ -210,9 +226,9 @@ def test_recall_preserves_independent_positive_support_and_removes_unsupported_f
                 "fact_key": "",
                 "status": "FORGOTTEN",
             }
-            assert Memory(store, core.settings, core.ledger).search("仅此来源") == []
+            assert Memory(store, settings, core.ledger).search("仅此来源") == []
             assert (
-                store.one("SELECT redacted FROM events WHERE event_id=?", (second,))["redacted"]
+                store.one("SELECT redacted FROM events WHERE event_id=%s", (second,))["redacted"]
                 == 0
             )
             before = epoch(store)
@@ -236,7 +252,7 @@ def test_nonindependent_or_ineligible_evidence_does_not_keep_recalled_fact(core,
         )
     else:
         core.store.execute(
-            'INSERT INTO runtime_meta VALUES (%s,%s)', ("erased_event:" + second, "old")
+            'INSERT INTO runtime_meta (key,value) VALUES (%s,%s)', ("erased_event:" + second, "old")
         )
     recall(core)
     assert core.store.one(
