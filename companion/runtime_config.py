@@ -246,6 +246,10 @@ def _read(store, settings, key):
         'operator_runtime_snapshots.expression_json AS expression_json FROM '
         'operator_runtime_snapshots AS operator_runtime_snapshots WHERE '
         'operator_runtime_snapshots.snapshot_id = %s', (key,))
+    return _validated_snapshot(store, settings, row)
+
+
+def _validated_snapshot(store, settings, row):
     return validate_record(settings, row, lookup=lambda version: store.one(
         'SELECT operator_configuration.version AS version, operator_configuration.request_id AS '
         'request_id, operator_configuration.request_sha256 AS request_sha256, '
@@ -435,18 +439,24 @@ def workers(store, settings):
 
 
 def get(store, settings, task_key):
-    row = store.one('SELECT operator_task_configuration.task_key AS task_key, '
-        'operator_task_configuration.snapshot_id AS snapshot_id, '
-        'operator_task_configuration.binding_sha256 AS binding_sha256, '
-        'operator_task_configuration.created_at AS created_at FROM operator_task_configuration AS '
-        'operator_task_configuration WHERE operator_task_configuration.task_key = %s', (task_key,))
+    row = store.one(
+        'SELECT to_jsonb(binding) AS binding, to_jsonb(snapshot) AS snapshot '
+        'FROM operator_task_configuration AS binding '
+        'LEFT JOIN operator_runtime_snapshots AS snapshot '
+        'ON snapshot.snapshot_id = binding.snapshot_id WHERE binding.task_key = %s', (task_key,))
+    if row is None:
+        return None
+    return _bound_snapshot(store, settings, task_key, row["binding"], row["snapshot"])
+
+
+def _bound_snapshot(store, settings, task_key, row, snapshot):
     if row is None:
         return None
     if not isinstance(row["binding_sha256"], str) or not hmac.compare_digest(
         row["binding_sha256"], _digest(settings, [task_key, row["snapshot_id"]]),
     ):
         raise CoreError("CONFIGURATION_TASK_BINDING_INVALID", 409)
-    return _read(store, settings, row["snapshot_id"])
+    return _validated_snapshot(store, settings, snapshot)
 
 
 def bind(store, settings, clock, task_key, *, snapshot=None):
@@ -513,10 +523,25 @@ def video_settings(store, settings, task_key, scenario, *, clock=None):
 
 
 def check_request(store, settings, request_id):
-    row = store.one('SELECT job_id FROM model_usage WHERE request_id = %s', (request_id,))
+    row = store.one(
+        'SELECT usage.job_id, to_jsonb(task) AS task, to_jsonb(task_snapshot) AS task_snapshot, '
+        'to_jsonb(request) AS request, to_jsonb(request_snapshot) AS request_snapshot '
+        'FROM model_usage AS usage '
+        'LEFT JOIN operator_task_configuration AS task ON task.task_key = \'job:\' || usage.job_id '
+        'LEFT JOIN operator_runtime_snapshots AS task_snapshot '
+        'ON task_snapshot.snapshot_id = task.snapshot_id '
+        'LEFT JOIN operator_task_configuration AS request ON request.task_key = \'model:\' || %s '
+        'LEFT JOIN operator_runtime_snapshots AS request_snapshot '
+        'ON request_snapshot.snapshot_id = request.snapshot_id WHERE usage.request_id = %s',
+        (request_id, request_id))
     if row is None or row["job_id"] is None:
         return
-    task = check(store, settings, "job:" + row["job_id"])
-    request = check(store, settings, "model:" + request_id)
+    snapshots = []
+    for name, key in (("task", "job:" + row["job_id"]), ("request", "model:" + request_id)):
+        snapshot = _bound_snapshot(store, settings, key, row[name], row[name + "_snapshot"])
+        if snapshot is None and settings.operator_hot_reload:
+            raise CoreError("CONFIGURATION_TASK_BINDING_REQUIRED", 409)
+        snapshots.append(snapshot)
+    task, request = snapshots
     if task != request:
         raise CoreError("CONFIGURATION_REQUEST_CHANGED", 409)

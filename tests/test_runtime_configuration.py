@@ -2,11 +2,12 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 
 import pytest
 from pydantic import ValidationError
 
-from companion import operator_config, owner_authority, paid_budget, runtime_config
+from companion import budget, operator_config, owner_authority, paid_budget, runtime_config
 from companion.config import Settings
 from companion.contracts import CoreError
 from companion.core import Core
@@ -26,7 +27,8 @@ def labels(messages):
 
 
 def test_default_is_enabled_but_the_switch_is_deployment_custody():
-    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="t" * 40)
+    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="t" * 40,
+                        database="dbname=synthetic")
     assert settings.operator_hot_reload
     assert "operator_hot_reload" in operator_config.EXCLUDED
 
@@ -234,6 +236,46 @@ def test_snapshot_tampering_and_cold_changes_are_fenced(hot):
     hot.store.execute("UPDATE operator_runtime_snapshots SET chat_time_labels=1")
     with pytest.raises(CoreError, match="CONFIGURATION_SNAPSHOT_INVALID"):
         hot.context(job)
+
+
+@pytest.mark.parametrize("hot_reload", [True, False])
+@pytest.mark.parametrize("target", ["task_binding", "request_binding", "snapshot"])
+def test_request_rechecks_committed_binding_and_snapshot_changes(hot, hot_reload, target):
+    job = task(hot)
+    request = budget.reserve(hot.store, hot.settings, job["job_id"], "chat",
+                             [{"role": "user", "content": "hello"}], hot.clock())
+    hot.settings.operator_hot_reload = hot_reload
+    runtime_config.check_request(hot.store, hot.settings, request)
+    with closing(Store(hot.store.database, hot.store.state_directory)) as other:
+        if target == "snapshot":
+            other.execute("UPDATE operator_runtime_snapshots SET chat_time_labels=1")
+            code = "CONFIGURATION_SNAPSHOT_INVALID"
+        else:
+            key = "job:" + job["job_id"] if target == "task_binding" else "model:" + request
+            other.execute("UPDATE operator_task_configuration SET binding_sha256=%s "
+                          "WHERE task_key=%s", ("0" * 64, key))
+            code = "CONFIGURATION_TASK_BINDING_INVALID"
+    with pytest.raises(CoreError, match=code):
+        runtime_config.check_request(hot.store, hot.settings, request)
+    if target != "request_binding":
+        with pytest.raises(CoreError, match=code):
+            runtime_config.check(hot.store, hot.settings, "job:" + job["job_id"])
+
+
+@pytest.mark.parametrize("target", ["task", "request"])
+def test_request_requires_each_binding_before_comparing_versions(hot, target):
+    job = task(hot)
+    request = budget.reserve(hot.store, hot.settings, job["job_id"], "chat",
+                             [{"role": "user", "content": "hello"}], hot.clock())
+    runtime_config.check_request(hot.store, hot.settings, request)
+    key = "job:" + job["job_id"] if target == "task" else "model:" + request
+    with closing(Store(hot.store.database, hot.store.state_directory)) as other:
+        other.execute("DELETE FROM operator_task_configuration WHERE task_key=%s", (key,))
+    with pytest.raises(CoreError, match="CONFIGURATION_TASK_BINDING_REQUIRED"):
+        runtime_config.check_request(hot.store, hot.settings, request)
+    hot.settings.operator_hot_reload = False
+    with pytest.raises(CoreError, match="CONFIGURATION_REQUEST_CHANGED"):
+        runtime_config.check_request(hot.store, hot.settings, request)
 
 
 def test_pre_gallery_default_snapshot_survives_restart(hot, monkeypatch):
