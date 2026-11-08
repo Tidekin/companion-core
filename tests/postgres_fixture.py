@@ -10,6 +10,7 @@ import os
 import re
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import psycopg
@@ -18,6 +19,7 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from pydantic import SecretStr
 
+from companion.backup import _client, _run
 from companion.postgres import Database, migrate
 
 
@@ -71,6 +73,29 @@ def isolated_database(*, template=None):
         assert re.fullmatch("fixture_[a-f0-9]{32}", name)
         with psycopg.connect(**connection, autocommit=True) as admin:
             admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+def copy_database(source, destination, scratch_directory):
+    """Copy a pre-event test snapshot without running application recovery or ledger replay."""
+    for info in (source, destination):
+        if not re.fullmatch(
+            "fixture_[a-f0-9]{32}", conninfo_to_dict(info.get_secret_value())["dbname"]
+        ):
+            raise ValueError("Expected an isolated fixture database")
+    with psycopg.connect(destination.get_secret_value()) as db:
+        if db.execute(
+            "SELECT 1 FROM pg_tables WHERE schemaname=current_schema() LIMIT 1"
+        ).fetchone():
+            raise ValueError("Expected an empty fixture database")
+    with TemporaryDirectory(dir=scratch_directory) as scratch:
+        dump = str(Path(scratch) / "pre-event.dump")
+        with TemporaryDirectory(dir=scratch) as client, _client(source, client) as (_, env):
+            _run(
+                "pg_dump", ["--format=custom", "--no-owner", "--no-privileges", "--file", dump], env
+            )
+        with TemporaryDirectory(dir=scratch) as client, _client(destination, client) as (_, env):
+            _run("pg_restore", ["--clean", "--if-exists", "--no-owner", "--no-privileges",
+                                "--single-transaction", dump], env)
 
 
 @contextmanager
