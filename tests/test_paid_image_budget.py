@@ -409,7 +409,7 @@ def test_final_image_stage_identity_is_not_mutable(core, tmp_path, column, value
 
     async def change(req):
         table = "model_admissions" if column == "logical_request_id" else "model_usage"
-        core.store.execute(f"UPDATE {table} SET {column}=? WHERE request_id=?", (value, request))
+        core.store.execute(f"UPDATE {table} SET {column}=%s WHERE request_id=%s", (value, request))
 
     code = ("COMPANION_BACKGROUND_SCOPE_REQUIRED" if column == "job_id"
             else "ADMISSION_LEASE_EXPIRED")
@@ -442,7 +442,7 @@ def test_image_unknown_survives_reopen_without_fresh_concurrency_or_attempt(core
     budget.settle(core.store, core.settings, request)
     before = core.store.one("SELECT * FROM model_usage")
     old_custody = paid_budget.journal(core.store, approval, allow_settlement=True)
-    reopened = Store(core.settings.database)
+    reopened = Store(core.database, core.settings.state_directory)
     try:
         assert reopened.one("SELECT * FROM model_usage") == before
         assert paid_budget.journal(reopened, approval, allow_settlement=True) == old_custody

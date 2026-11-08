@@ -89,7 +89,7 @@ def test_atomic_admission_across_independent_connections_never_exceeds_ten(core,
     job = approved(core, tmp_path)
 
     def reserve(index):
-        with closing(Store(core.settings.database)) as store:
+        with closing(Store(core.database, core.settings.state_directory)) as store:
             try:
                 return budget.reserve(store, core.settings, job, "chat", MESSAGES, core.clock(),
                                       clock=core.clock, logical_request_id=f"contender-{index}")

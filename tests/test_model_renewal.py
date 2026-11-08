@@ -7,7 +7,9 @@ import copy
 import json
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
+import psycopg
 import pytest
 
 from companion import (
@@ -113,20 +115,19 @@ def test_renewal_replay_batches_windows_at_each_original_cutoff(core, tmp_path):
         core.authorized_model_test_jobs = {}
     before = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
     assert len(before) == 3
-    queries = []
     paid_budget.forget_views(core.store)
-    core.store.db.set_trace_callback(queries.append)
-    try:
+    with patch.object(psycopg.Cursor, "execute", autospec=True,
+                      side_effect=psycopg.Cursor.execute) as executions:
         with core.store.transaction():
             view = paid_budget.journal(core.store, core.settings.paid_model)
-    finally:
-        core.store.db.set_trace_callback(None)
+    queries = [call.args[1] for call in executions.call_args_list
+               if isinstance(call.args[1], str)]
     # Each historical cutoff retains its original baseline despite newer admissions.
     assert len(view["model_carries"]) == 3
     assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == before
     baseline_reads = [query for query in queries if query.startswith((
         "SELECT window_id FROM model_admissions",
-        "SELECT request_id,window_id FROM model_admissions",
+        "SELECT request_id, window_id FROM model_admissions",
     ))]
     assert len(baseline_reads) == 2  # One current table read per historical renewal.
 
@@ -264,7 +265,7 @@ def test_renewal_fsync_replay_requires_the_exact_reviewed_request(
     execute = core.store.execute
 
     def crash(query, values=()):
-        if query == "INSERT INTO runtime_meta VALUES (?,?)" and values[0].startswith(
+        if query == "INSERT INTO runtime_meta VALUES (%s, %s)" and values[0].startswith(
             "model_control:"
         ):
             raise RuntimeError("crash after renewal fsync")
@@ -405,7 +406,7 @@ def test_renewal_keeps_closed_unknown_from_an_earlier_same_approval_revision(
                              operation=f"history-resume-{number}")
         case.successor = active
     if erased:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
     current = None
     if with_current:
