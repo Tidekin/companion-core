@@ -185,7 +185,7 @@ def test_native_stop_and_core_erasure_keep_unknown_fee_without_rewriting_local_s
                     assert response.status_code == 200, response.text
                     c.owner.stop()
                 else:
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [c.context["event_id"]], core.clock())
                 raise ValueError("Synthetic response loss after real dispatch")
 
