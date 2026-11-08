@@ -162,7 +162,7 @@ def test_each_send_boundary_rechecks_current_state(core, tmp_path, monkeypatch, 
             usage = core.store.rows("SELECT * FROM model_usage")
             if change == "runtime":
                 core.settings.paid_model = core.settings.paid_model.model_copy(
-                    update={})
+                    update={"window_calls": core.settings.paid_model.window_calls + 1})
             elif change == "stop":
                 owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                     operation_id="stop-native-validation-reuse", authority=ref))

@@ -34,7 +34,33 @@ def native(core, tmp_path, **options):
     must never be written and then dropped while copying that historical schema.
     Financial reservation, settlement, signature and reconciliation stay real.
     """
+    from companion_onebot_bridge import cumulative as bridge_cumulative
+    from tests.support import cumulative_window
+
     insert, journal = core.store.insert, paid_budget.journal
+    current_policy, bridge_validate = cumulative_window.policy, bridge_cumulative.validate
+
+    def historical_policy(core, **changes):
+        scope = current_policy(core, **changes)
+        value = scope.model_dump(mode="json")
+        value["version"] = 1
+        for period in ("request", "window", "day", "month", "account"):
+            value[period]["micro_usd"] = 1_000_000
+        # Explicit pre-v2 fixture material is validated before any hashes are made.
+        # Current deployment configuration continues to reject this retired shape.
+        cumulative._recorded_policy(value)
+        legacy = cumulative.CumulativeApproval.model_construct(**value)
+        core.settings.paid_model = core.settings.paid_model.model_copy(
+            update={"cumulative": legacy})
+        return legacy
+
+    def validate_historical_scope(value, config, start, end):
+        if value.get("version") == 1:
+            cumulative._recorded_policy(value)
+            value = {**value, "version": 2}
+            for period in ("request", "window", "day", "month", "account"):
+                value[period] = {k: v for k, v in value[period].items() if k != "micro_usd"}
+        return bridge_validate(value, config, start, end)
 
     def historical_insert(table, **values):
         if table == "model_admissions":
@@ -49,6 +75,8 @@ def native(core, tmp_path, **options):
     with pytest.MonkeyPatch.context() as frozen_schema:
         frozen_schema.setattr(core.store, "insert", historical_insert)
         frozen_schema.setattr(paid_budget, "journal", historical_journal)
+        frozen_schema.setattr(cumulative_window, "policy", historical_policy)
+        frozen_schema.setattr(bridge_cumulative, "validate", validate_historical_scope)
         return current_fixture(core, tmp_path, **options)
 
 

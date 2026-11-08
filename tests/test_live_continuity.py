@@ -195,20 +195,19 @@ async def selected_history_changed_in_final_preflight(core, tmp_path, kind, *, c
             {"role": "user", "content": "选了茉莉绿茶"},
             {"role": "assistant", "content": "合成回答1"},
         ]]
-        if kind == "UNKNOWN":
-            assert len(calls) == 2 and len(sends) == 1
-            assert changed == [kind]
-            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 2
-            assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE state='UNKNOWN'") == {
-                "n": 1}
-            return
         assert len(calls) == len(sends) == 1
         assert changed == [kind]
-        assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
         job = core.store.one(
-            'SELECT state,last_error_code FROM jobs ORDER BY record_sequence DESC LIMIT 1',
+            'SELECT event_id,state,last_error_code FROM jobs ORDER BY record_sequence DESC LIMIT 1',
         )
         assert job["state"] in {"CANCELLED", "FAILED"}, job
+        if kind == "UNKNOWN":
+            # Tampering with a settled row still blocks new provider I/O. The
+            # normal failed-job notice carries no invented model response.
+            assert_failure_notice(core, job["event_id"])
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 2
+        else:
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
         assert len(history_snapshot(core)) == 1
 
 
