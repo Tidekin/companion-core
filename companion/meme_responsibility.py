@@ -143,7 +143,7 @@ def read(store, settings, job_id):
     if not isinstance(job_id, str) or not JOB.fullmatch(job_id):
         raise CoreError("MEME_RESPONSIBILITY_JOB_INVALID", 400)
     try:
-        with store.transaction():
+        with store.read_snapshot():
             if store.one('SELECT 1 FROM runtime_meta WHERE key IN '
                 "('model_budget_restore_required', 'cloud_budget_restore_required')"):
                 raise CoreError("OWNER_AUTHORITY_RESTORE_RECONCILIATION_REQUIRED", 503)
