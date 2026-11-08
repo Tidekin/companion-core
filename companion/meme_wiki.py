@@ -96,6 +96,11 @@ def _connection():
         return _db["connection"]
 
 
+def warmup():
+    """Load the pinned, query-only local glossary before the first chat lookup."""
+    return _connection()
+
+
 def normalize(query):
     """「杂鱼杂鱼」→「杂鱼」, 「666666」→「666」."""
     size = len(query)

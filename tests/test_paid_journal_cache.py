@@ -207,7 +207,9 @@ def test_large_source_reuses_only_a_small_verified_view(core, tmp_path, monkeypa
         return original(*args, **kwargs)
 
     monkeypatch.setattr(paid_budget, "_journal", replay)
-    with core.store.transaction():
+    # Reuse is guaranteed in one immutable snapshot. READ COMMITTED may see
+    # unrelated concurrent transactions and conservatively rebuild its view.
+    with core.store.read_snapshot():
         first = paid_budget.journal(core.store, approval)
         assert len(marshal.dumps(first)) < paid_budget.CACHE_MAX_BYTES < path.stat().st_size
         first["model_latest"][request]["minimum_micro_usd"] = 0
@@ -347,6 +349,9 @@ def test_preflight_failure_clears_cache_without_reclassifying_error(
     approval, _ = settled(core, tmp_path)
     with core.store.read_snapshot():
         paid_budget.journal(core.store, approval)
+    # A new native snapshot must read the database identity again. The previous
+    # immutable scope may reuse the identity it already read with its summary.
+    with core.store.read_snapshot():
         if failure == "path":
             approval = SimpleNamespace(journal_path=object())
             expected = TypeError

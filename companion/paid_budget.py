@@ -342,12 +342,17 @@ def _live_record(row, digest, current, seen):
             "head_sha256": digest}
 
 
-IDENTITY = "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
 SUMMARY = (
     "SELECT meta.metadata_count, meta.metadata_size, "
+    "meta.journal_id, "
     "(SELECT count(*) FROM model_admissions) AS admission_count, "
-    "usage.usage_count, usage.usage_size FROM "
+    "usage.usage_count, usage.usage_size, pg_current_snapshot()::text AS snapshot, "
+    "current_schema() AS schema, pg_postmaster_start_time()::text AS instance, "
+    "CASE WHEN current_setting('transaction_read_only')='on' THEN '0' ELSE "
+    "COALESCE((SELECT sum(n_tup_ins+n_tup_upd+n_tup_del) FROM pg_stat_xact_user_tables "
+    "WHERE schemaname=current_schema()),0)::text END AS writes FROM "
     "(SELECT count(*) AS metadata_count, "
+    "max(value) FILTER (WHERE key='model_budget_journal_id') AS journal_id, "
     "COALESCE(sum(length(key)+length(value)),0)::double precision AS metadata_size "
     "FROM runtime_meta) AS meta CROSS JOIN "
     "(SELECT count(*) AS usage_count, "
@@ -369,9 +374,12 @@ def _view_key(store, path, raw):
     ):
         return memo[1]
     digest = hashlib.sha256(raw).hexdigest() if isinstance(identity, bytes) else identity
-    summary = tuple(store.one(SUMMARY).values())
-    token = tuple(store.change_token().values())
-    key = (str(path), digest, store.database.cache_identity, token, summary)
+    state = store.one(SUMMARY)
+    summary = tuple(state[name] for name in (
+        "metadata_count", "metadata_size", "admission_count", "usage_count", "usage_size",
+    ))
+    token = tuple(state[name] for name in ("snapshot", "schema", "instance", "writes"))
+    key = (str(path), digest, store.database.cache_identity, token, summary, state['journal_id'])
     if scope is not None:
         store._view_key_memo = ((scope, store.database.cache_identity, str(path), identity), key)
     return key
@@ -458,7 +466,7 @@ def _read_journal(store, approval, *, allow_settlement, initialize):
                     entry = _SHARED.get(key[0])
                 saved = (key, *entry[1:]) if (
                     shared is not None and entry is not None and entry[0] == shared) else None
-            identity = store.one(IDENTITY) if saved is not None else None
+            identity = key[-1]
     except BaseException:
         _clear_codec()
         raise
@@ -495,7 +503,7 @@ def _read_journal(store, approval, *, allow_settlement, initialize):
         # Publish only under the key that was checked before the fold.
         if _view_key(store, path, raw) != key:
             return view
-        entry = (key, blob, store.one(IDENTITY), marshal.loads(blob))
+        entry = (key, blob, key[-1], marshal.loads(blob))
         store._journal_view = entry
         if shared is not None:
             with _SHARED_LOCK:
@@ -635,25 +643,37 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
         from companion.gateway_admission import validate_clients
 
         gateway_clients = validate_clients(store, gateway_clients, record)
-        model_carry.validate_projection(store, model_controls, replay=model_control_replay)
-        accounting_pending = model_accounting.validate_projection(store, accounting,
+        # These control projections are validated together under the native
+        # budget ledger lock. Fetch their original values once, without retaining
+        # them beyond this fold or reading unrelated owner input/capture records.
+        prefixes = ("model_control:", model_accounting.PROJECTION, model_accounting.PENDING,
+                    delivery_reconciliation.PROJECTION, "model_budget_stop:")
+        bounds = tuple(value for prefix in prefixes for value in (prefix, prefix[:-1] + ";"))
+        metadata = {row["key"]: row["value"] for row in store.rows(
+            "SELECT key,value FROM runtime_meta WHERE key=ANY(%s) OR "
+            + " OR ".join("(key >= %s AND key < %s)" for _ in prefixes),
+            ([cumulative.PROJECTION, LIVE_LIFECYCLE, "model_budget_blocked"], *bounds),
+        )}
+        model_carry.validate_projection(model_controls, metadata, replay=model_control_replay)
+        accounting_pending = model_accounting.validate_projection(store, accounting, metadata,
                                                                    accounting_replay)
-        projection = store.one('SELECT value FROM runtime_meta WHERE key = %s',
-                               (cumulative.PROJECTION,))
+        projection = metadata.get(cumulative.PROJECTION)
         expected = cumulative.binding(account, path)
-        saved = json.loads(projection["value"]) if projection else None
+        saved = json.loads(projection) if projection is not None else None
         witness = saved.pop("control_head_sha256", None) if saved else None
         if saved != expected or (expected and witness not in heads):
             raise ValueError("cumulative policy projection behind journal or DB")
-        for stop in store.rows('SELECT key, value FROM runtime_meta WHERE key LIKE '
-            "'model_budget_stop:%%'"):
-            if (not identity or stop["value"] != identity["value"]
-                or stop["key"].removeprefix("model_budget_stop:") not in heads):
+        for key, value in metadata.items():
+            if not key.startswith("model_budget_stop:"):
+                continue
+            if (not identity or value != identity["value"]
+                or key.removeprefix("model_budget_stop:") not in heads):
                 raise ValueError("durable cumulative stop missing from journal")
-        stored_lifecycle = live_lifecycle(store)
+        stored_lifecycle = (json.loads(metadata[LIVE_LIFECYCLE])
+                            if LIVE_LIFECYCLE in metadata else None)
         if (managed or stored_lifecycle) and stored_lifecycle != lifecycle:
             raise ValueError("live lifecycle behind journal or DB")
-        delivery_reconciliation.validate_projection(store, resolutions, resolution_replay)
+        delivery_reconciliation.validate_projection(store, resolutions, metadata, resolution_replay)
         owner_authority.validate_projection(store, authorities, identity["value"], path)
         authority_record = record and record.get("kind") == owner_authority.RECORD_KIND
         lifecycle_record = record and record.get("kind") in {

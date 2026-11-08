@@ -1,5 +1,6 @@
 """Native status shares admission rules and never creates execution custody."""
 
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from companion import owner_authority, paid_budget
 from companion.file_evidence import PrivateFilesConfig
 from companion.image_input import ImageInputPolicy
 from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy
+from companion.store import Store
 from tests.postgres_fixture import logical_state
 from tests.support.owner_authority import activate
 from tests.support.owner_authority_setup import prepare
@@ -48,6 +50,31 @@ def test_native_media_readiness_needs_no_execution_window_and_is_read_only(core,
     for name in ("memory.manage", "memory.recall", "diary"):
         assert current[name]["state"] == "UNAVAILABLE"
         assert "OWNER_AUTHORITY_PURPOSE_REQUIRED" in current[name]["reason_codes"]
+
+
+def test_inventory_keeps_one_read_only_snapshot_across_an_independent_commit(
+    core, tmp_path, monkeypatch,
+):
+    native(core, tmp_path)
+    current = owner_authority.current
+    scopes = []
+    marker = "capability-projection-concurrent-commit"
+    with closing(Store(core.database, core.settings.state_directory)) as writer:
+        def inspect(store, *args, **kwargs):
+            assert store.one("SHOW transaction_read_only") == {"transaction_read_only": "on"}
+            scopes.append(store.frozen_scope)
+            assert store.one("SELECT value FROM runtime_meta WHERE key=%s", (marker,)) is None
+            if len(scopes) == 1:
+                writer.insert("runtime_meta", key=marker, value="committed")
+            assert store.one("SELECT value FROM runtime_meta WHERE key=%s", (marker,)) is None
+            return current(store, *args, **kwargs)
+
+        monkeypatch.setattr(owner_authority, "current", inspect)
+        assert rows(core)["qq.images"]["state"] == "READY"
+    assert len(scopes) > 1 and len(set(scopes)) == 1 and scopes[0] is not None
+    assert core.store.one("SELECT value FROM runtime_meta WHERE key=%s", (marker,)) == {
+        "value": "committed",
+    }
 
 
 @pytest.mark.parametrize("change,reason", [

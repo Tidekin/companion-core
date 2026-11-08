@@ -47,8 +47,8 @@ def test_revision_guard_reads_one_source_state_and_rejects_later_revocation(
         return getattr(reply_revision, guard)(core.store, first["event_id"], 1)
 
     assert check() is (True if guard == "current" else None)
-    # The job adds its own persisted state and consumed-source checks.
-    assert len(calls) == (3 if guard == "job" else 1)
+    # Job state, both revisions and consumed-source revocation share one snapshot.
+    assert len(calls) == 1
     core.store.execute("INSERT INTO runtime_meta (key,value) VALUES (%s,'1')",
                        ("erased_event:" + first["event_id"],))
     if guard == "current":

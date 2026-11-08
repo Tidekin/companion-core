@@ -109,6 +109,7 @@ class Session:
     def __init__(self, connection):
         self._connection = connection
         self._closed = False
+        self._ledger_locks = None
 
     @property
     def backend_pid(self):
@@ -178,9 +179,13 @@ class Session:
         if self._connection.info.transaction_status != TransactionStatus.IDLE:
             raise RuntimeError("POSTGRES_TRANSACTION_ALREADY_ACTIVE")
         with self._connection.transaction(force_rollback=rollback):
-            if readonly:
-                self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            yield self
+            self._ledger_locks = {}
+            try:
+                if readonly:
+                    self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                yield self
+            finally:
+                self._ledger_locks = None
 
     def custody_lock(self, key, *, shared=False):
         if self._connection.info.transaction_status != TransactionStatus.INTRANS:
@@ -201,6 +206,14 @@ class Session:
             raise RuntimeError("POSTGRES_TRANSACTION_REQUIRED")
         if type(domain) is not int or not 1 <= domain <= 16:
             raise ValueError("invalid ledger lock domain")
+        # A managed session keeps its configured schema for this finite scope.
+        # PostgreSQL retains these locks until commit/rollback; an exclusive
+        # acquisition also covers later shared requests. Upgrades still acquire.
+        held = self._ledger_locks.get(domain) if self._ledger_locks is not None else None
+        if held is False or held is True and shared:
+            return
         function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
         self.execute(sql.SQL("SELECT {}(hashtext(current_schema()),%s)").format(
             sql.Identifier(function)), (domain,))
+        if self._ledger_locks is not None:
+            self._ledger_locks[domain] = bool(shared)

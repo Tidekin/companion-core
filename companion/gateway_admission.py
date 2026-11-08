@@ -37,12 +37,6 @@ def validate_clients(store, clients, record=None):
     if record and record.get("kind") == "gateway_client":
         proof = record["client"]
         expected[proof["client_id"]] = proof
-    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
-        "relnamespace=current_schema()::regnamespace AND relname='gateway_clients' AND relkind IN "
-        "('r','p')"):
-        if expected:
-            raise ValueError("missing gateway authority projection")
-        return expected
     actual = {row["client_id"]: client_binding(row) for row in store.rows(
         'SELECT gateway_clients.client_id AS client_id, gateway_clients.key_sha256 AS key_sha256, '
         'gateway_clients.key_id AS key_id, gateway_clients.grant_json AS grant_json, '

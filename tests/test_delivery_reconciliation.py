@@ -88,7 +88,7 @@ def test_account_original_binding_drift_rejects_without_append(core, tmp_path, c
 def test_account_resolution_after_source_erasure_keeps_original_hashes(core, tmp_path):
     env = native(core, tmp_path, action="qzone.publish")
     event_id = core.store.one("SELECT event_id FROM events")["event_id"]
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.store.execute('UPDATE outbox SET origin_event_id=%s', (event_id,))
         core.store.insert("social_autonomy_sources", plan_id=env.proof["account_plan_id"],
                           event_id=event_id, role="content", source_sha256="d" * 64)
@@ -161,7 +161,7 @@ def test_account_capacity_rejects_forged_owner_projection_without_original_journ
 def test_voice_resolution_keeps_frozen_result_and_original_costs(core, tmp_path, outcome, erased):
     env = native(core, tmp_path, action="qq.private.reply", voice=True)
     if erased:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             ErasureLedger(core.settings.erasure_ledger).expire_events(
                 core.store, [env.proof["event_id"]], core.clock())
     before = deepcopy(view(core))
@@ -251,6 +251,7 @@ def rows(env):
 def sibling(env, *, state="SENDING", attempted=True):
     core = env.core
     row = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (env.message_id,))
+    row.pop("record_sequence")
     message_id, token = uid("msg"), uid("lease")
     row.update(message_id=message_id, lease_token=token if attempted else None,
                delivery_key="synthetic-sibling:" + message_id, state=state,
@@ -371,7 +372,7 @@ def test_no_prepared_proof_or_conflicting_owner_decision_can_resolve(core, tmp_p
 @pytest.mark.parametrize("action", ["qq.private.reply", "qq.private.proactive", "qq.private.poke"])
 def test_erased_payload_uses_retained_authority_and_historical_public_key(core, tmp_path, action):
     env = native(core, tmp_path, action=action)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         ErasureLedger(core.settings.erasure_ledger).expire_events(
             core.store, [env.proof["event_id"]], core.clock())
     core.settings.live_text_window = core.settings.live_text_window.model_copy(update={
@@ -403,7 +404,7 @@ def test_legacy_erased_text_receipt_keeps_payload_hash_without_inventing_content
     core, tmp_path,
 ):
     env = native(core, tmp_path, action="qq.private.reply", legacy=True)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         ErasureLedger(core.settings.erasure_ledger).expire_events(
             core.store, [env.proof["event_id"]], core.clock())
     prepare(env)
@@ -738,7 +739,7 @@ def test_terminal_input_recovery_does_not_close_an_old_database_with_active_work
 @pytest.mark.parametrize("change", ["token", "job", "message", "signature", "body", "missing"])
 def test_retired_voice_proof_is_bound_to_original_signed_message(core, tmp_path, change):
     env = native(core, tmp_path, action="qq.private.reply", voice=True)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         ErasureLedger(core.settings.erasure_ledger).expire_events(
             core.store, [env.proof["event_id"]], core.clock())
     if change == "token":

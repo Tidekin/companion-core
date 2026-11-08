@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import hashlib
+import importlib
 import ipaddress
 import json
 import logging
@@ -31,6 +32,21 @@ from companion.worker_wakeup import Maintenance, Wakeup
 async def worker(settings):
     from companion.core import Core
 
+    if settings.owner_runtime.mode == "ENABLED":
+        from pydantic_ai.conversation import ConversationTypeAdapter
+        from pydantic_ai.messages import ModelMessagesTypeAdapter
+        from pydantic_ai.models import preload_pricing_data
+
+        # Import and build local SDK types before accepting the first job.
+        importlib.import_module("companion.agent_chat")
+        importlib.import_module("companion.agent_output")
+        preload_pricing_data()
+        ConversationTypeAdapter.rebuild()
+        ModelMessagesTypeAdapter.rebuild()
+        if settings.meme_wiki.enabled:
+            from companion import meme_wiki
+
+            meme_wiki.warmup()
     async with httpx.AsyncClient(timeout=settings.timeout_seconds, trust_env=False) as client:
         core = Core(settings, ModelClient(settings, client))
         worker_id = uid("worker")

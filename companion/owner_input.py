@@ -189,6 +189,21 @@ def source(
     view = owner_authority.current(
         store, settings, lambda: now, purpose=purpose, authority=view.authority
     )
+    return _checked_source(store, settings, view, event_id, now,
+                           allow_commands=allow_commands, history=history, purpose=purpose)
+
+
+def _checked_source(store, settings, view, event_id, now, *, allow_commands=False, history=False,
+                    purpose="chat"):
+    """Use the caller's freshly checked view within this synchronous transaction."""
+    if not store.in_transaction:
+        raise RuntimeError("OWNER_SOURCE_CHECKED_TRANSACTION_REQUIRED")
+    if settings.owner_runtime.mode != "ENABLED":
+        raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
+    if purpose not in view.policy.purposes:
+        raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
+    if view.policy.expires_at is not None and datetime.fromisoformat(now) >= view.policy.expires_at:
+        raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
     if history and "history" not in view.policy.purposes:
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
 

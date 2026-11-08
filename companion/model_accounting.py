@@ -199,10 +199,9 @@ def fold(store, row, record_sha, journal_id, latest, closures, blocked, records)
         blocked.setdefault(request.request_id, record_sha)
 
 
-def validate_projection(store, records, replay=None):
-    saved = {row["key"].removeprefix(PROJECTION): row["value"] for row in store.rows(
-        'SELECT key, value FROM runtime_meta WHERE key >= %s AND key < %s',
-        (PROJECTION, "model_accounting;"))}
+def validate_projection(store, records, metadata, replay=None):
+    saved = {key.removeprefix(PROJECTION): value for key, value in metadata.items()
+             if key.startswith(PROJECTION)}
     if saved.keys() - records.keys():
         raise ValueError("accounting journal behind database")
     for operation, record in records.items():
@@ -214,17 +213,17 @@ def validate_projection(store, records, replay=None):
             continue
         if (saved.get(operation) != record["sha256"] or not usage
             or usage["billed_micro_usd"] < record["accounted_micro_usd"]
-            or record["request"]["budget_limit_codes"] and not store.one(
-                "SELECT 1 FROM runtime_meta WHERE key = 'model_budget_blocked'")):
+            or record["request"]["budget_limit_codes"] and "model_budget_blocked" not in metadata):
             raise ValueError("accounting database behind journal")
     pending = {}
-    for row in store.rows('SELECT key, value FROM runtime_meta WHERE key >= %s AND key < %s',
-                          (PENDING, "model_accounting_pending;")):
-        item = Pending.model_validate_json(row["value"])
+    for key, value in metadata.items():
+        if not key.startswith(PENDING):
+            continue
+        item = Pending.model_validate_json(value)
         request = item.request
         admission, usage, binding = _original(store, request.request_id)
         amount, _ = _priced(request, admission, usage)
-        if (row["key"] != PENDING + request.operation_id
+        if (key != PENDING + request.operation_id
             or not isinstance(request.basis, Statement) or binding != request.binding_sha256
             or item.accounted_micro_usd != max(amount, request.previous_accounted_micro_usd)
             or usage["billed_micro_usd"] < item.accounted_micro_usd

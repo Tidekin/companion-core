@@ -407,7 +407,9 @@ def test_real_handoff_preserves_complete_input_send_and_model_history(core, tmp_
     run(scenario())
 
 
-def test_forgotten_content_and_old_backup_keep_latest_cumulative_responsibility(core, tmp_path):
+def test_forgotten_content_and_old_backup_keep_latest_cumulative_responsibility(
+    core, tmp_path, empty_database,
+):
     from cryptography.fernet import Fernet
 
     from companion import owner_authority
@@ -416,7 +418,8 @@ def test_forgotten_content_and_old_backup_keep_latest_cumulative_responsibility(
     from tests.conftest import FakeModel
 
     key = Fernet.generate_key()
-    archive, destination = tmp_path / "old.enc", tmp_path / "restored.db"
+    archive, destination = tmp_path / "old.enc", empty_database
+    state = tmp_path / "restored-state"
     async def scenario():
         async with native_quota(core, tmp_path) as (bridge, _, sends, models):
             await asyncio.to_thread(backup, core.settings.database, archive, key)
@@ -424,12 +427,14 @@ def test_forgotten_content_and_old_backup_keep_latest_cumulative_responsibility(
             assert await bridge.pump()
             event_id = core.store.one("SELECT event_id FROM events")["event_id"]
             before = cumulative.status(core.store, core.settings, core.clock())["used"]
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [event_id], core.clock())
             assert cumulative.status(core.store, core.settings, core.clock())["used"] == before
             await asyncio.to_thread(restore, archive, destination, key,
-                                    core.settings.erasure_ledger)
-            settings = core.settings.model_copy(update={"database": str(destination)})
+                                    core.settings.erasure_ledger, state_directory=state)
+            settings = core.settings.model_copy(update={
+                "database": destination, "state_directory": str(state),
+            })
             with Core(settings, FakeModel(), core.clock) as restored:
                 assert restored.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                                           ("erased_event:" + event_id,))

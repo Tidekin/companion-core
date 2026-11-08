@@ -655,11 +655,9 @@ def replay_matches(row, selector):
         and row["outcome"] == selector["outcome"])
 
 
-def validate_projection(store, resolutions, selector=None):
-    projected = {row["key"].removeprefix(PROJECTION): json.loads(row["value"])
-                 for row in store.rows('SELECT key, value FROM runtime_meta WHERE SUBSTRING(key '
-                     'FROM 1 FOR %s) = %s',
-                                       (len(PROJECTION), PROJECTION))}
+def validate_projection(store, resolutions, metadata, selector=None):
+    projected = {key.removeprefix(PROJECTION): json.loads(value)
+                 for key, value in metadata.items() if key.startswith(PROJECTION)}
     if set(projected) - set(resolutions):
         raise ValueError("owner resolution journal behind database")
     for message_id, row in resolutions.items():

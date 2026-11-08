@@ -47,18 +47,20 @@ def control_job(store, job):
     )
 
 
+_REPLY_STATE = (
+    "SELECT e.reply_revision, c.reply_revision AS current_revision, "
+    "e.redacted=0 AND NOT EXISTS(SELECT 1 FROM runtime_meta "
+    "WHERE key='erased_event:'||e.event_id) AS source_active, "
+    f"({OWNER_INPUT}) AS owner_input, "
+    "((body_json::json->'control_command')::text IN ('true','1') OR "
+    "(body_json::json->'diary_command')::text IN ('true','1')) AS is_control "
+    "FROM events AS e JOIN conversations AS c USING (conversation_id) "
+)
+
+
 def _reply_state(store, event_id):
     """Read revocation, owner kind and both revisions at the same native boundary."""
-    return store.one(
-        "SELECT e.reply_revision, c.reply_revision AS current_revision, "
-        "e.redacted=0 AND NOT EXISTS(SELECT 1 FROM runtime_meta "
-        "WHERE key='erased_event:'||e.event_id) AS source_active, "
-        f"({OWNER_INPUT}) AS owner_input, "
-        "((body_json::json->'control_command')::text IN ('true','1') OR "
-        "(body_json::json->'diary_command')::text IN ('true','1')) AS is_control "
-        "FROM events AS e JOIN conversations AS c USING (conversation_id) "
-        "WHERE e.event_id=%s", (event_id,),
-    )
+    return store.one(_REPLY_STATE + "WHERE e.event_id=%s", (event_id,))
 
 
 def _current(row, expected_revision):
@@ -111,16 +113,25 @@ def check_sources(store, job_id):
 
 
 def check_job(store, job):
-    persisted = store.one("SELECT state, lease_token FROM jobs WHERE job_id = %s", (job["job_id"],))
+    persisted = store.one(
+        "SELECT j.state, r.*, EXISTS(SELECT 1 FROM job_sources AS s "
+        "JOIN events AS e USING (event_id) WHERE s.job_id=j.job_id AND "
+        "(e.redacted=1 OR EXISTS(SELECT 1 FROM runtime_meta WHERE "
+        "key='erased_event:'||e.event_id))) AS sources_recalled "
+        "FROM jobs AS j LEFT JOIN LATERAL (" + _REPLY_STATE +
+        "WHERE e.event_id=%s) AS r ON true WHERE j.job_id=%s",
+        (job["event_id"], job["job_id"]),
+    )
     if not persisted or persisted["state"] == "CANCELLED":
         raise CoreError(CANCELLED, 409)
     if job["kind"] == "chat":
-        state = _reply_state(store, job["event_id"])
+        state = persisted
         if state and state["owner_input"] and state["is_control"]:
             _require_active(state)
         else:
             _require_reply_state(state, job.get("reply_revision"))
-    check_sources(store, job["job_id"])
+    if persisted["sources_recalled"]:
+        raise CoreError(SOURCE_RECALLED, 409)
 
 
 def check_delivery(store, message_id):

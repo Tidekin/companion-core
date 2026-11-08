@@ -267,9 +267,9 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
     carries[row["carry_sha256"]] = {**row, "record_sha256": record_sha}
 
 
-def validate_projection(store, controls, *, replay=None):
-    rows = store.rows("SELECT key, value FROM runtime_meta WHERE key LIKE 'model_control:%%'")
-    saved = {row["key"].removeprefix("model_control:"): row["value"] for row in rows}
+def validate_projection(controls, metadata, *, replay=None):
+    saved = {key.removeprefix("model_control:"): value for key, value in metadata.items()
+             if key.startswith("model_control:")}
     if (
         any(key != value for key, value in saved.items())
         or set(saved) - set(controls)

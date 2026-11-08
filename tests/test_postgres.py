@@ -13,7 +13,7 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 
-from companion.postgres import WAKE_CHANNEL, Database
+from companion.postgres import BUDGET_LEDGER, WAKE_CHANNEL, Database
 
 
 @pytest.fixture
@@ -80,6 +80,29 @@ def test_custody_lock_is_transaction_scoped_without_locking_other_rows(database)
         with second.transaction():
             assert second.one("SELECT pg_try_advisory_xact_lock(%s) AS held", (key,)) == {
                 "held": True}
+
+
+def test_repeated_ledger_locks_upgrade_and_reacquire_after_rollback(database):
+    def available(session, *, shared=False):
+        function = "pg_try_advisory_xact_lock_shared" if shared else "pg_try_advisory_xact_lock"
+        with session.transaction():
+            return session.one(sql.SQL("SELECT {}(hashtext(current_schema()),%s) AS held").format(
+                sql.Identifier(function)), (BUDGET_LEDGER,))["held"]
+
+    with database.session() as first, database.session() as second:
+        with first.transaction(rollback=True):
+            first.ledger_lock(BUDGET_LEDGER, shared=True)
+            first.ledger_lock(BUDGET_LEDGER, shared=True)
+            assert available(second, shared=True)
+            assert not available(second)
+            first.ledger_lock(BUDGET_LEDGER)
+            first.ledger_lock(BUDGET_LEDGER, shared=True)
+            assert not available(second, shared=True)
+        assert available(second)
+        with first.transaction():
+            first.ledger_lock(BUDGET_LEDGER)
+            assert not available(second)
+        assert available(second)
 
 
 def test_rolled_back_transaction_does_not_publish_wakeup(database):

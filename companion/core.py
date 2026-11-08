@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
@@ -570,10 +571,16 @@ class Core(Runtime):
             from companion.capabilities import prompt_parts as capability_prompt
             from companion.capabilities import snapshot as capability_snapshot
 
-            capability_rules, capability_data = capability_prompt(
-                capability_snapshot(s, cfg, self.clock, model_tools=model_tools),
-                compact=cfg.context_soft_tokens < 8000,
-            )
+            with nullcontext() if s.in_transaction else s.read_snapshot():
+                # Feature rows share only this freshly validated read snapshot.
+                # Every later model/tool boundary still obtains its own view.
+                view = owner_authority.current(s, cfg, self.clock,
+                    authority=authority.authority) if authority and s.in_read_snapshot else None
+                capability_rules, capability_data = capability_prompt(
+                    capability_snapshot(s, cfg, self.clock, model_tools=model_tools,
+                                        owner_view=view),
+                    compact=cfg.context_soft_tokens < 8000,
+                )
             rules += capability_rules
             dynamic_rules.append(capability_data)
         style = style_observation.reply_reference(
@@ -716,7 +723,8 @@ class Core(Runtime):
                 # It explains the current message: older history is pruned before it.
                 selection.messages.append(glossary)
                 selection.priorities[id(glossary)] = context_selection.TOPIC
-        if authority and job["kind"] == "chat":
+        if (authority and job["kind"] == "chat"
+                and {"history", "social", "account_actions"} <= set(authority.policy.purposes)):
             from companion import account_action_context
 
             if actions := account_action_context.reference(self, job):
@@ -1286,7 +1294,6 @@ class Core(Runtime):
             # Revalidate the actual prompt sources. An unrelated recall must not
             # turn a current independent reply into a global window failure.
             reply_revision.check_job(self.store, job)
-            reply_revision.check_sources(self.store, job["job_id"])
             return
         raise CoreError("PRIVACY_CHANGED", 503)
 

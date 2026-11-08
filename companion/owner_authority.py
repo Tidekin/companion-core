@@ -146,39 +146,15 @@ def fold(records, row, digest):
 
 
 def validate_projection(store, records, journal_id, journal_path):
-    exists = store.one(
-        "SELECT 1 FROM pg_catalog.pg_class WHERE "
-        "relnamespace=current_schema()::regnamespace AND relname='owner_authority_revisions' AND "
-        "relkind IN ('r','p')"
+    # The native baseline requires this projection, including for an empty grant
+    # history. Its pointer and rows must be read at the same statement boundary.
+    projection = store.rows(
+        f"SELECT {_REVISION_FIELDS}, pointer.value AS current_head FROM (VALUES (1)) AS anchor(v) "
+        "LEFT JOIN owner_authority_revisions AS r ON true "
+        "LEFT JOIN runtime_meta AS pointer ON pointer.key=%s ORDER BY r.revision NULLS FIRST",
+        (CURRENT,),
     )
-    rows = (
-        store.rows(
-
-                'SELECT owner_authority_revisions.grant_id AS grant_id, '
-                'owner_authority_revisions.revision AS revision, '
-                'owner_authority_revisions.operation_id AS operation_id,'
-                ' owner_authority_revisions.request_sha256 AS '
-                'request_sha256, owner_authority_revisions.state AS '
-                'state, owner_authority_revisions.policy_json AS '
-                'policy_json, owner_authority_revisions.policy_sha256 '
-                'AS policy_sha256, owner_authority_revisions.policy_reda'
-                'cted AS policy_redacted, '
-                'owner_authority_revisions.restore_generation AS '
-                'restore_generation, '
-                'owner_authority_revisions.predecessor_sha256 AS '
-                'predecessor_sha256, '
-                'owner_authority_revisions.record_sha256 AS '
-                'record_sha256, owner_authority_revisions.journal_id AS '
-                'journal_id, owner_authority_revisions.journal_path AS '
-                'journal_path, owner_authority_revisions.created_at AS '
-                'created_at FROM owner_authority_revisions AS '
-                'owner_authority_revisions ORDER BY '
-                'owner_authority_revisions.revision NULLS FIRST'
-
-        )
-        if exists
-        else []
-    )
+    rows = [row for row in projection if row["grant_id"] is not None]
     if len(rows) != len(records):
         raise ValueError("authority DB behind journal")
     paths, policies = {}, {}
@@ -223,7 +199,7 @@ def validate_projection(store, records, journal_id, journal_path):
     if any(Path(value).resolve() != path for value, path in paths.items()):
         raise ValueError("authority projection mismatch")
     expected = records[-1]["record_sha256"] if records else None
-    if _meta(store, CURRENT) != expected:
+    if projection[0]["current_head"] != expected:
         raise ValueError("authority pointer behind journal")
 
 
@@ -342,24 +318,36 @@ def bind_job(store, settings, clock, job_id, *, purpose):
 
 def check_job(store, settings, clock, job, *, purpose, executing=False):
     """Re-read native state and permission; a durable grant is never a native lease."""
+    if not store.in_transaction:
+        return store.read_or_write(lambda: check_job(
+            store, settings, clock, job, purpose=purpose, executing=executing,
+        ))
     row = store.one(
-        "SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, "
-        "jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS attempts, "
-        "jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS "
-        "lease_until, jobs.next_attempt_at AS next_attempt_at, jobs.last_error_code AS "
-        "last_error_code, jobs.created_at AS created_at, jobs.updated_at AS updated_at, "
-        "jobs.lease_token AS lease_token, jobs.context_tracked AS context_tracked, "
-        "jobs.authority_json AS authority_json FROM jobs AS jobs WHERE jobs.job_id = "
-        "%s",
+        "SELECT state,lease_token,lease_until,authority_json FROM jobs WHERE job_id=%s",
         (job["job_id"],),
     )
+    ref = _job_reference(row)
+    view = current(store, settings, clock, purpose=purpose, authority=ref)
+    return _checked_job(row, job, view, clock, executing=executing)
+
+
+def _job_reference(row):
     try:
         ref = AuthorityRef.from_dict(json.loads(row["authority_json"])) if row else None
     except (ValueError, TypeError):
         ref = None
     if ref is None:
         raise CoreError("OWNER_AUTHORITY_JOB_BINDING_REQUIRED", 403)
-    view = current(store, settings, clock, purpose=purpose, authority=ref)
+    return ref
+
+
+def _checked_job(row, job, view, clock, *, executing):
+    """Match the native row and lease to this batch's freshly checked authority."""
+    if _job_reference(row) != view.authority:
+        raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
+    if (view.policy.expires_at is not None
+            and datetime.fromisoformat(clock()) >= view.policy.expires_at):
+        raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
     if executing and (
         row["state"] != "RUNNING"
         or not row["lease_token"]
@@ -458,11 +446,23 @@ def admit_model(store, settings, clock, job_id, scenario, *, yield_to_chat=True)
     where the model client can prove the request was never sent. The intermediate
     recheck (`yield_to_chat=False`) has no such proof; yielding there left calls UNKNOWN.
     """
+    if not store.in_transaction:
+        return store.read_or_write(lambda: admit_model(
+            store, settings, clock, job_id, scenario, yield_to_chat=yield_to_chat,
+        ))
+    purpose = model_purpose(store, scenario, job_id)
+    view = current(store, settings, clock, purpose=purpose)
+    return _admit_model(store, settings, clock, job_id, scenario, view,
+                        yield_to_chat=yield_to_chat)
+
+
+def _admit_model(store, settings, clock, job_id, scenario, view, *, yield_to_chat):
+    """Finish one synchronous admission with the authority this transaction just checked."""
     from companion import owner_input, reply_revision
     from companion.budget import is_background
 
-    purpose = model_purpose(store, scenario, job_id)
-    view = current(store, settings, clock, purpose=purpose)
+    if not store.in_transaction:
+        raise RuntimeError("OWNER_MODEL_CHECKED_TRANSACTION_REQUIRED")
     background = is_background(scenario, job_id)
     if (
         background
@@ -484,18 +484,14 @@ def admit_model(store, settings, clock, job_id, scenario, *, yield_to_chat=True)
         )
         if job is None:
             raise CoreError("OWNER_AUTHORITY_JOB_BINDING_REQUIRED", 403)
-        check_job(
-            store,
-            settings,
-            clock,
-            job,
-            purpose=purpose,
+        _checked_job(
+            job, job, view, clock,
             executing=scenario not in {"content_vision", "content_video", "content_video_preview"},
         )
         reply_revision.check_job(store, job)
-        reply_revision.check_sources(store, job_id)
         if job["kind"] == "chat":
-            owner_input.source(store, settings, view, job["event_id"], clock(), allow_commands=True)
+            owner_input._checked_source(store, settings, view, job["event_id"], clock(),
+                                        allow_commands=True)
         allowed = {
             "chat": {
                 "chat",
@@ -529,6 +525,10 @@ def admit_model(store, settings, clock, job_id, scenario, *, yield_to_chat=True)
 
 def check_model(store, settings, clock, request_id, *, yield_to_chat=True):
     """Recheck a reserved admission; historical references never renew an execution lease."""
+    if not store.in_transaction:
+        return store.read_or_write(lambda: check_model(
+            store, settings, clock, request_id, yield_to_chat=yield_to_chat,
+        ))
     row = store.one(
         "SELECT a.request_id AS request_id, a.logical_request_id AS "
         "logical_request_id, a.attempt_id AS attempt_id, a.attempt_number AS attempt_number, "
@@ -552,7 +552,8 @@ def check_model(store, settings, clock, request_id, *, yield_to_chat=True):
         purpose=model_purpose(store, row["scenario"], row["job_id"]),
         authority=json.loads(row["authority_json"]),
     )
-    admit_model(store, settings, clock, row["job_id"], row["scenario"], yield_to_chat=yield_to_chat)
+    _admit_model(store, settings, clock, row["job_id"], row["scenario"], view,
+                  yield_to_chat=yield_to_chat)
     deadlines = [datetime.fromisoformat(row["lease_until"])]
     if view.policy.expires_at:
         deadlines.append(view.policy.expires_at)

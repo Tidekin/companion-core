@@ -79,7 +79,7 @@ def check_conversation(core, job, snapshots=(), *, current_request=None, purpose
     )
     if purpose not in view.policy.purposes:
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
-    owner_input.source(core.store, core.settings, view, job["event_id"], core.clock())
+    owner_input._checked_source(core.store, core.settings, view, job["event_id"], core.clock())
     core._check_context_snapshots(job, snapshots, current_request=current_request,
                                   owner_view=view)
     from companion import agent_images, agent_reading

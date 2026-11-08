@@ -68,11 +68,11 @@ def open_unknown(store, settings):
     )
 
 
-def _live_blocks(store, settings, now, *, cumulative_state=None, carry_view=None):
+def _live_blocks(store, settings, now, *, cumulative_state=None, carry_view=None, owner_view=None):
     approval = settings.live_text_window
     reasons = []
     if owner_authority.required(store, settings):
-        reasons += _owner_blocks(store, settings, now)
+        reasons += _owner_blocks(store, settings, now, view=owner_view)
     elif live_text.active(store, settings):
         if approval is None:
             reasons.append("LIVE_APPROVAL_REQUIRED")
@@ -109,10 +109,20 @@ def _live_blocks(store, settings, now, *, cumulative_state=None, carry_view=None
     return reasons + _cumulative_blocks(store, settings, now, state=cumulative_state)
 
 
-def _owner_blocks(store, settings, now, purpose=None):
+def _owner_blocks(store, settings, now, purpose=None, *, view=None):
     """Project current native admission without creating work or a source lease."""
     try:
-        owner_authority.current(store, settings, lambda: now, purpose=purpose)
+        if view is None:
+            owner_authority.current(store, settings, lambda: now, purpose=purpose)
+        else:
+            if not store.in_read_snapshot:
+                raise RuntimeError("CAPABILITY_VIEW_REQUIRES_READ_SNAPSHOT")
+            if purpose is not None and purpose not in view.policy.purposes:
+                raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
+            if view.policy.expires_at is not None and datetime.fromisoformat(now) >= (
+                view.policy.expires_at
+            ):
+                raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
     except CoreError as error:
         return [error.code]
     return []
@@ -296,7 +306,8 @@ def _reflection_blocks(store, settings, now):
 
 
 def public_source_readiness(
-    store, settings, clock, adapter_id, *, integration=None, operation="read", live_blocks=None
+    store, settings, clock, adapter_id, *, integration=None, operation="read", live_blocks=None,
+    owner_view=None,
 ):
     """Use native adapter/grant and reservation accounting without exposing custody."""
     now = clock()
@@ -306,7 +317,8 @@ def public_source_readiness(
     paused = list(live_blocks) if live_blocks is not None else _live_blocks(store, settings, now)
     if owner_authority.required(store, settings):
         unavailable += _owner_blocks(
-            store, settings, now, "exploration" if operation == "discover" else "content"
+            store, settings, now, "exploration" if operation == "discover" else "content",
+            view=owner_view,
         )
     limits = {}
     source = policy.source if policy else None
@@ -380,7 +392,7 @@ def public_source_readiness(
     }
 
 
-def _file_facts(store, settings, now, live_blocks):
+def _file_facts(store, settings, now, live_blocks, *, owner_view=None):
     from companion import qq_files
     from companion.file_evidence import PrivateFilesConfig
 
@@ -390,7 +402,7 @@ def _file_facts(store, settings, now, live_blocks):
         return {"unavailable": ["PRIVATE_FILE_CONFIG_INVALID"]}
     native = owner_authority.required(store, settings)
     unavailable = (
-        _owner_blocks(store, settings, now, "file")
+        _owner_blocks(store, settings, now, "file", view=owner_view)
         if native
         else _private_scope(settings, "file_scope", "owner_file_v1", "PRIVATE_FILE_SCOPE_REQUIRED")
     )
@@ -438,14 +450,14 @@ def _file_facts(store, settings, now, live_blocks):
     }
 
 
-def _bili_video_facts(store, settings, now, readers, model_blocks):
+def _bili_video_facts(store, settings, now, readers, model_blocks, *, owner_view=None):
     from companion.bili_video_protocol import CAPABILITY, MAX_METADATA_BYTES
 
     config, approval = settings.bili_video, settings.paid_model
     native = owner_authority.required(store, settings)
     unavailable = (
-        _owner_blocks(store, settings, now, "bili_video")
-        + _owner_blocks(store, settings, now, "content")
+        _owner_blocks(store, settings, now, "bili_video", view=owner_view)
+        + _owner_blocks(store, settings, now, "content", view=owner_view)
         if native
         else _private_scope(
             settings,
@@ -699,13 +711,14 @@ def _poke_facts(store, settings, now, model_blocks, send_blocks, *, native=False
     }
 
 
-def _account_facts(store, settings, now, field, live_blocks, model_blocks, send_blocks):
+def _account_facts(store, settings, now, field, live_blocks, model_blocks, send_blocks, *,
+                   owner_view=None):
     from companion.social_autonomy import SocialAutonomy
 
     module = SocialAutonomy(store, settings, clock=lambda: now)
     config = module.config
     unavailable = (
-        _owner_blocks(store, settings, now, "social")
+        _owner_blocks(store, settings, now, "social", view=owner_view)
         if owner_authority.required(store, settings)
         else _private_scope(
             settings,
@@ -717,7 +730,7 @@ def _account_facts(store, settings, now, field, live_blocks, model_blocks, send_
         )
     )
     if field != "observe" and owner_authority.required(store, settings):
-        unavailable += _owner_blocks(store, settings, now, "account_actions")
+        unavailable += _owner_blocks(store, settings, now, "account_actions", view=owner_view)
     paused = []
     observation = "UNOBSERVED"
     try:
@@ -784,8 +797,16 @@ def _account_facts(store, settings, now, field, live_blocks, model_blocks, send_
     }
 
 
-def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
+def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner_view=None):
     """Return a closed, credential-free projection; integration data is never echoed."""
+    if owner_view is not None and not store.in_read_snapshot:
+        raise RuntimeError("CAPABILITY_VIEW_REQUIRES_READ_SNAPSHOT")
+    if not store.in_transaction:
+        # A capability inventory is one synchronous read. Reuse the existing
+        # immutable custody scope while deriving its individual feature rows.
+        with store.read_snapshot():
+            return snapshot(store, settings, clock, model_tools=model_tools,
+                            integrations=integrations)
     now, cfg = clock(), settings
     integrations = integrations if isinstance(integrations, dict) else {}
     readers = integrations.get("readers", {})
@@ -793,7 +814,8 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
     rows = []
     quota = cumulative.status(store, cfg, now)
     carry_view = _carry_view(store, cfg)
-    live_blocks = _live_blocks(store, cfg, now, cumulative_state=quota, carry_view=carry_view)
+    live_blocks = _live_blocks(store, cfg, now, cumulative_state=quota, carry_view=carry_view,
+                                owner_view=owner_view)
     model_blocks = _model_blocks(
         store, cfg, now, live_blocks=live_blocks, cumulative_state=quota, carry_view=carry_view
     )
@@ -845,9 +867,10 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
     ):
         unavailable = list(unavailable) + ([] if enabled else ["FEATURE_DISABLED"])
         if native and identifier in purpose_by_feature:
-            unavailable += _owner_blocks(store, cfg, now, purpose_by_feature[identifier])
+            unavailable += _owner_blocks(store, cfg, now, purpose_by_feature[identifier],
+                                          view=owner_view)
         if native and identifier == "tool.analyze_shared_video":
-            unavailable += _owner_blocks(store, cfg, now, "content")
+            unavailable += _owner_blocks(store, cfg, now, "content", view=owner_view)
         custody_blocks = [
             code for code in unavailable if code == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
         ]
@@ -962,6 +985,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
             adapter_id,
             integration=readers.get(adapter_id),
             live_blocks=live_blocks,
+            owner_view=owner_view,
         )
         readable.append(ready)
         discoverable.append(
@@ -973,6 +997,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
                 integration=readers.get(adapter_id),
                 operation="discover",
                 live_blocks=live_blocks,
+                owner_view=owner_view,
             )
         )
         summaries = {
@@ -1018,13 +1043,13 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         "bilibili.video",
         "分析已读取B站视频的受限预览帧及按需短片段；"
         "结论仅覆盖回执列出的采样范围，字幕不代表看过完整视频。",
-        **_bili_video_facts(store, cfg, now, readable, model_blocks),
+        **_bili_video_facts(store, cfg, now, readable, model_blocks, owner_view=owner_view),
     )
     add(
         "qq.files",
         "解析主人本次发送的DOCX、PDF、DOC、TXT和Markdown；"
         "只依据解析回执中的文本、表格与页码，扫描件或截断不能假称完整读取。",
-        **_file_facts(store, cfg, now, live_blocks),
+        **_file_facts(store, cfg, now, live_blocks, owner_view=owner_view),
     )
     add(
         "qq.voice.asr",
@@ -1061,12 +1086,14 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         add(
             "qq.account." + ("qzone_publish" if field == "qzone" else field),
             "在独立授权、原配额和冷却期内" + label + "；实际结果须有原生回执。",
-            **_account_facts(store, cfg, now, field, live_blocks, model_blocks, send_blocks),
+            **_account_facts(store, cfg, now, field, live_blocks, model_blocks, send_blocks,
+                              owner_view=owner_view),
         )
     add(
         "qq.profile.observe",
         "读取账号资料的API观测可能来自缓存；观测时刻不证明网络刷新，也不证明资料修改成功。",
-        **_account_facts(store, cfg, now, "observe", live_blocks, model_blocks, send_blocks),
+        **_account_facts(store, cfg, now, "observe", live_blocks, model_blocks, send_blocks,
+                          owner_view=owner_view),
     )
 
     image_errors = []
@@ -1074,7 +1101,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         if owner_authority.required(store, cfg):
             from companion import agent_images
 
-            image_errors += _owner_blocks(store, cfg, now, "image")
+            image_errors += _owner_blocks(store, cfg, now, "image", view=owner_view)
             if not agent_images.enabled(cfg):
                 image_errors.append("OWNER_IMAGE_SOURCE_CHANGED")
         else:
@@ -1089,7 +1116,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         unavailable=image_errors,
         paused=model_blocks,
     )
-    video_errors = _owner_blocks(store, cfg, now, "content") if native else []
+    video_errors = _owner_blocks(store, cfg, now, "content", view=owner_view) if native else []
     if native and not cfg.content_enabled:
         video_errors.append("CONTENT_DISABLED")
     try:
@@ -1165,7 +1192,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
 
     bridge_observation, bridge = _observation(integrations.get("bridge_memes"), now)
     private_errors = (
-        _owner_blocks(store, cfg, now, "meme")
+        _owner_blocks(store, cfg, now, "meme", view=owner_view)
         if native
         else []
         if private_life.enabled(cfg)

@@ -8,7 +8,6 @@ import hashlib
 import hmac
 import json
 import re
-from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -515,23 +514,24 @@ def preflight(store, settings, clock):
     """Record expiry/rollback before a narrower window validator can return early."""
     from companion import paid_budget
 
+    if not store.in_transaction:
+        return store.read_or_write(lambda: preflight(store, settings, clock))
     if not store.one('SELECT 1 FROM runtime_meta WHERE key = %s', (PROJECTION,)):
         return
-    with nullcontext() if store.in_transaction else store.transaction():
-        now = clock() if callable(clock) else clock
-        projection = store.one('SELECT value FROM runtime_meta WHERE key = %s', (PROJECTION,))
-        custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
-        view = paid_budget.journal(store, custody, allow_settlement=True)
-        scope = _scope(settings)
-        if scope and digest(scope.model_dump(mode="json")) != view["cumulative"]["policy_sha256"]:
-            # Explicit new approvals still pass activate() at the reviewed cutoff.
-            return
-        check(store, settings, now, custody=view)
-        paid = settings.paid_model
-        # Cumulative scopes reject open-ended approvals at configuration time.
-        if paid and not instant(paid.starts_at) <= instant(now) < instant(paid.expires_at):
-            pause(store, custody, now, "EXPIRED")
-            raise CoreError("CUMULATIVE_WINDOW_EXPIRED", 403)
+    now = clock() if callable(clock) else clock
+    projection = store.one('SELECT value FROM runtime_meta WHERE key = %s', (PROJECTION,))
+    custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
+    view = paid_budget.journal(store, custody, allow_settlement=True)
+    scope = _scope(settings)
+    if scope and digest(scope.model_dump(mode="json")) != view["cumulative"]["policy_sha256"]:
+        # Explicit new approvals still pass activate() at the reviewed cutoff.
+        return
+    check(store, settings, now, custody=view)
+    paid = settings.paid_model
+    # Cumulative scopes reject open-ended approvals at configuration time.
+    if paid and not instant(paid.starts_at) <= instant(now) < instant(paid.expires_at):
+        pause(store, custody, now, "EXPIRED")
+        raise CoreError("CUMULATIVE_WINDOW_EXPIRED", 403)
 
 
 def violations(state, item, *, replacing=None):
