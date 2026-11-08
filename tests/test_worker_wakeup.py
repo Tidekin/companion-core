@@ -8,11 +8,13 @@ from time import monotonic
 import pytest
 
 from companion import worker_deadlines, worker_wakeup
+from companion.postgres import Database
 from companion.store import Store, after, utcnow
 from companion.worker_loop import Recorder, project_public, snapshot
 from companion.worker_schedule import UnitResult
 from companion.worker_wakeup import Maintenance, Wakeup
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 
 
 @pytest.mark.parametrize("kind", list(worker_deadlines.PROVIDERS))
@@ -22,8 +24,11 @@ def test_each_worker_can_subscribe_scan_and_wake_on_foreign_commit(core, kind):
             scan = wake.before_scan()
             pending = asyncio.create_task(wake.wait(scan, UnitResult(False)))
             await asyncio.sleep(0.04)
-            with closing(Store(core.settings.database)) as other:
-                other.execute("INSERT INTO runtime_meta VALUES ('foreign-write','1')")
+            with closing(Store(core.store.database, core.store.state_directory)) as other:
+                with other.transaction():
+                    other.execute(
+                        "INSERT INTO runtime_meta (key,value) VALUES ('foreign-write','1')"
+                    )
             assert await asyncio.wait_for(pending, 2) == "commit"
     run(scenario())
 
@@ -32,18 +37,21 @@ def test_each_worker_can_subscribe_scan_and_wake_on_foreign_commit(core, kind):
 def test_commit_around_subscription_and_scan_is_not_lost(core, timing):
     async def scenario():
         with Wakeup(core.store, core.settings, "worker", utcnow) as wake:
-            with closing(Store(core.settings.database)) as other:
+            with closing(Store(core.store.database, core.store.state_directory)) as other:
                 if timing == "after_subscribe":
-                    other.execute("INSERT INTO runtime_meta VALUES ('race','1')")
+                    with other.transaction():
+                        other.execute("INSERT INTO runtime_meta (key,value) VALUES ('race','1')")
                 scan = wake.before_scan()
                 if timing == "after_subscribe":
                     assert core.store.one("SELECT value FROM runtime_meta WHERE key='race'")
                     return
                 if timing == "after_snapshot":
-                    other.execute("INSERT INTO runtime_meta VALUES ('race','1')")
+                    with other.transaction():
+                        other.execute("INSERT INTO runtime_meta (key,value) VALUES ('race','1')")
                 core.store.one("SELECT COUNT(*) FROM jobs")
                 if timing == "after_scan":
-                    other.execute("INSERT INTO runtime_meta VALUES ('race','1')")
+                    with other.transaction():
+                        other.execute("INSERT INTO runtime_meta (key,value) VALUES ('race','1')")
             assert await asyncio.wait_for(wake.wait(scan, UnitResult(False)), 1) == "commit"
     run(scenario())
 
@@ -87,47 +95,39 @@ def test_due_retry_wakes_without_a_writer_and_native_claim_succeeds(core, before
 def test_missed_notification_is_reconciled_without_repeated_business_scans(
     core, monkeypatch, kind, timeout,
 ):
-    if kind == "executive-worker":
-        monkeypatch.setattr(worker_wakeup, "MAINTENANCE_SECONDS", timeout)
+    monkeypatch.setattr(worker_wakeup, "MAINTENANCE_SECONDS", timeout)
 
     async def scenario():
         with Wakeup(core.store, core.settings, kind, utcnow) as wake:
-            real = wake.watcher
+            receive = wake._receive
 
-            class Missed:
-                def watch(self, debounce, step, timeout_ms, stop):
-                    # Simulate a backend losing hints while keeping native timeout semantics.
-                    # Monotonic deadline subtraction is rounded up to a whole millisecond.
-                    assert 0 < timeout_ms <= round(timeout * 1000) + 1
-                    wake.stop.wait(timeout_ms / 1000)
-                    return "timeout"
+            def lose_hint(delay):
+                receive(delay)
+                return []
 
-                def close(self):
-                    real.close()
-
-            wake.watcher = Missed()
+            monkeypatch.setattr(wake, "_receive", lose_hint)
             scan = wake.before_scan()
             pending = asyncio.create_task(wake.wait(scan, UnitResult(False)))
             await asyncio.sleep(0.02)
-            with closing(Store(core.settings.database)) as other:
-                other.execute("INSERT INTO runtime_meta VALUES ('missed','1')")
-            assert await asyncio.wait_for(pending, timeout + 1) == "commit"
-            assert wake.version_checks <= 4
+            with closing(Store(core.store.database, core.store.state_directory)) as other:
+                with other.transaction():
+                    other.execute("INSERT INTO runtime_meta (key,value) VALUES ('missed','1')")
+            assert await asyncio.wait_for(pending, timeout + 1) == "reconcile"
+            assert wake.notification_checks <= 2 + timeout / worker_wakeup.LISTENER_WAIT_SECONDS
     run(scenario())
 
 
 def test_cancel_joins_watch_before_releasing_native_watcher(core):
     async def scenario():
         with Wakeup(core.store, core.settings, "worker", utcnow) as wake:
-            watcher = wake.watcher
+            listener = wake.listener
             scan = wake.before_scan()
             pending = asyncio.create_task(wake.wait(scan, UnitResult(False)))
             await asyncio.sleep(0.03)
             pending.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(pending, 1)
-        with pytest.raises(RuntimeError):
-            watcher.watch(50, 10, 1, None)
+        assert listener.closed
     run(scenario())
 
 
@@ -183,7 +183,7 @@ def test_all_deadline_queries_use_existing_schema(core):
 ])
 @pytest.mark.parametrize("crossed_during_scan", [True, False])
 def test_scan_deadline_race_rescans_once_without_spinning_on_fenced_work(
-    core, monkeypatch, kind, table, field, state, crossed_during_scan,
+    core, monkeypatch, kind, table, field, state, crossed_during_scan, empty_database,
 ):
     # Isolate the actual deadline SQL and wait loop from unrelated fixture clocks,
     # filesystem events and provider work. Both workers wait without maintenance_at.
@@ -194,7 +194,8 @@ def test_scan_deadline_race_rescans_once_without_spinning_on_fenced_work(
     def clock():
         return (start + timedelta(seconds=elapsed[0])).isoformat()
 
-    with closing(Store(":memory:")) as store:
+    with (Database(empty_database) as database,
+          closing(Store(database, core.store.state_directory)) as store):
         store.execute("CREATE TABLE runtime_meta (key TEXT PRIMARY KEY,value TEXT)")
         fields = {"lease_until", "deadline"} if kind == "content-worker" else {"lease_until"}
         store.execute(f"CREATE TABLE {table} (state TEXT, "
@@ -202,57 +203,50 @@ def test_scan_deadline_race_rescans_once_without_spinning_on_fenced_work(
         store.execute("CREATE TABLE model_admissions (request_id TEXT,lease_until TEXT)")
         store.execute("CREATE TABLE model_usage (request_id TEXT,state TEXT)")
         due = start + timedelta(seconds=0.1 if crossed_during_scan else -1)
-        store.execute(f"INSERT INTO {table} (state,{field}) VALUES (?,?)",
+        store.execute(f"INSERT INTO {table} (state,{field}) VALUES (%s,%s)",
                       (state, due.isoformat()))
         wake = Wakeup(store, core.settings, kind, clock)
 
-        class TimeoutOnly:
-            calls = 0
+        waits = []
 
-            def watch(self, _debounce, _step, timeout, _stop):
-                self.calls += 1
-                elapsed[0] += timeout / 1000
-                if self.calls == 3:
-                    return "stop"
-                return "timeout"
+        def receive(delay):
+            if delay:
+                waits.append(delay)
+                elapsed[0] += delay
+            return []
 
-        wake.watcher = watcher = TimeoutOnly()
-
+        monkeypatch.setattr(wake, "_receive", receive)
         async def scenario():
             scan = wake.before_scan()
             # Native recovery sees no eligible lease before the boundary.
             if crossed_during_scan:
-                assert store.one(f"SELECT state FROM {table} WHERE {field}<=?",
+                assert store.one(f"SELECT state FROM {table} WHERE {field}<=%s",
                                  (clock(),)) is None
             elapsed[0] = 0.2
             if crossed_during_scan:
                 assert await wake.wait(scan, UnitResult(False)) == "deadline"
-                assert watcher.calls == 0
-                assert store.one(f"SELECT state FROM {table} WHERE {field}<=?", (clock(),))
+                assert not waits
+                assert store.one(f"SELECT state FROM {table} WHERE {field}<=%s", (clock(),))
                 # A subsequent scan can leave this row fenced. It must not cause
                 # repeated immediate wakeups simply because its lease is past due.
                 scan = wake.before_scan()
-            with pytest.raises(asyncio.CancelledError):
-                await wake.wait(scan, UnitResult(False))
-            assert watcher.calls == 3
-            assert elapsed[0] >= 180
+            assert await wake.wait(scan, UnitResult(False)) == "reconcile"
+            assert sum(waits) >= worker_wakeup.MAINTENANCE_SECONDS
+            assert all(delay > 0 for delay in waits)
+
 
         run(scenario())
 
 
-@pytest.mark.parametrize("force_polling", ["true", "false"])
-def test_watchfiles_supported_backend_selection_still_wakes_on_commit(
-    core, monkeypatch, force_polling,
-):
-    if force_polling == "true":
-        # Polling metadata can miss open-WAL writes on Windows. Exercise the bounded
-        # authoritative reconciliation, using a shortened maintenance horizon.
-        monkeypatch.setattr(worker_wakeup, "MAINTENANCE_SECONDS", 0.1)
-    monkeypatch.setenv("WATCHFILES_FORCE_POLLING", force_polling)
-    monkeypatch.setenv("WATCHFILES_POLL_DELAY_MS", "50")
-    run_backend = test_each_worker_can_subscribe_scan_and_wake_on_foreign_commit
-    run_backend(core, "content-worker")
+def test_wakeup_listens_on_a_dedicated_postgres_session(core):
+    from companion.postgres import WAKE_CHANNEL
 
+    with Wakeup(core.store, core.settings, "content-worker", utcnow) as wake:
+        assert wake.listener.info.backend_pid != core.store.backend_pid
+        assert wake.listener.execute(
+            "SELECT pg_listening_channels() AS channel"
+        ).fetchall() == [(WAKE_CHANNEL,)]
+    assert wake.listener.closed
 
 
 def test_waiting_record_cannot_prove_activity_or_console_health(core):
@@ -281,10 +275,10 @@ def test_waiting_chat_job_bounds_chat_rescan_to_former_polling_cadence(core, mon
     assert run(core.run_once("wait-test")) is False
     job = core.store.one("SELECT state FROM jobs WHERE kind='chat'")
     assert job["state"] == "QUEUED"
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     deadline = worker_deadlines.chat(core.store, core.settings, start)
     assert deadline == start + timedelta(seconds=worker_deadlines.CHAT_WAIT_RESCAN_SECONDS)
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     future = start + timedelta(hours=1)
     core.store.execute("UPDATE jobs SET next_attempt_at=%s WHERE kind='chat'",
                        (future.isoformat(),))

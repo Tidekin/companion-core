@@ -1,7 +1,6 @@
 """Bili media keeps original Reader authority, immutable phases and native costs."""
 
 import json
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
@@ -10,14 +9,15 @@ from threading import Barrier
 from types import SimpleNamespace
 
 import httpx
+import psycopg
 import pytest
 from alembic import command
 from alembic.config import Config
 
 from companion import budget
 from companion.bili_video import (
-    BiliVideoService,
     _model_room,
+    _policy,
     erase_bili_video,
     model_binding,
     restore_bili_video,
@@ -31,6 +31,7 @@ from companion.contracts import CoreError
 from companion.source_grants import SourceGrantSnapshot
 from companion.store import Store, encode
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.bili_video import (
     final_result,
     metadata,
@@ -44,6 +45,7 @@ from tests.support.bili_video import (
 )
 from tests.support.historical_schema import historical_database
 from tests.support.native_consumer import admit, select_tools
+from tests.support.release_migration import one, open_historical, rows
 
 
 def leased(core, **changes):
@@ -106,15 +108,16 @@ def test_model_room_counts_calls_once_and_preserves_foreground_slots(
                          lease_token="lease-" + request, lease_until=now,
                          journal_path="synthetic-not-opened", journal_id="synthetic")
         admission = s.one("SELECT * FROM model_admissions WHERE request_id='overlap'")
-        # SQLite permits a NULL TEXT primary key; neither it nor a missing usage
-        # parent can add a call through the logical-request branch.
+    admission.pop("record_sequence")
+    with pytest.raises(psycopg.errors.NotNullViolation):
         s.insert("model_admissions", **{**admission, "request_id": None, "attempt_id": "null"})
-        with pytest.raises(sqlite3.IntegrityError):
-            s.insert("model_admissions", **{**admission, "request_id": "absent",
-                                             "attempt_id": "absent"})
-    before = {table: s.rows(f"SELECT rowid,* FROM {table} ORDER BY rowid")
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        s.insert(
+            "model_admissions", **{**admission, "request_id": "absent", "attempt_id": "absent"}
+        )
+    before = {table: s.rows(f"SELECT * FROM {table} ORDER BY record_sequence")
               for table in ("model_usage", "model_admissions", "model_budget_windows")}
-    changes = s.db.total_changes
+    changes = logical_state(s)
     for limit in range(1, 11):
         settings = SimpleNamespace(paid_model=SimpleNamespace(per_request_calls=limit))
         if limit < required_calls:
@@ -122,24 +125,25 @@ def test_model_room_counts_calls_once_and_preserves_foreground_slots(
                 _model_room(s, settings, "target", current)
         else:
             _model_room(s, settings, "target", current)
-    assert s.db.total_changes == changes
-    assert {table: s.rows(f"SELECT rowid,* FROM {table} ORDER BY rowid")
+    assert logical_state(s) == changes
+    assert {table: s.rows(f"SELECT * FROM {table} ORDER BY record_sequence")
             for table in before} == before
-    assert s.rows("PRAGMA foreign_key_check") == []
+    assert s.rows(
+        "SELECT conname FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+        "AND contype='f' AND NOT convalidated") == []
 
 
-def test_model_room_keeps_concurrent_reserved_call_visible_to_the_next_writer(core):
+def test_model_room_keeps_concurrent_reserved_call_visible_to_the_next_writer(core, tmp_path):
     now, ready = core.clock(), Barrier(2)
-    core.store.insert("jobs", job_id="target", kind="chat", state="RUNNING",
-                      idempotency_key="headroom-target", created_at=now, updated_at=now)
-    settings = SimpleNamespace(paid_model=SimpleNamespace(per_request_calls=3))
 
     def reserve(request):
-        with closing(Store(core.settings.database)) as store:
+        with closing(Store(core.store.database, core.store.state_directory)) as store:
             ready.wait(timeout=10)
             try:
                 with store.transaction():
-                    _model_room(store, settings, "target", request)
+                    # model_binding rechecks this paid window under its native ledger lock.
+                    _policy(store, core.settings, core.clock)
+                    _model_room(store, core.settings, "target", request)
                     store.insert("model_usage", usage_id=request, request_id=request,
                                  job_id="target", scenario="content_video_preview",
                                  provider="synthetic", model="synthetic", state="RESERVED",
@@ -149,14 +153,27 @@ def test_model_room_keeps_concurrent_reserved_call_visible_to_the_next_writer(co
                 return "denied"
             return "reserved"
 
-    with ThreadPoolExecutor(max_workers=2) as workers:
-        assert sorted(workers.map(reserve, ("first", "second"))) == ["denied", "reserved"]
-    assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage") == [
-        {"state": "RESERVED", "billed_micro_usd": 123},
-    ]
+    async def scenario():
+        async with paid_media(core, tmp_path, lambda _: pytest.fail("unexpected provider call"),
+                              call_limit=4):
+            core.store.insert("jobs", job_id="target", kind="chat", state="RUNNING",
+                              idempotency_key="headroom-target", created_at=now, updated_at=now)
+            core.store.insert("model_usage", usage_id="prior", request_id="prior", job_id="target",
+                              scenario="content_video_preview", provider="synthetic",
+                              model="synthetic", state="UNKNOWN", billed_micro_usd=123,
+                              occurred_at=now)
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                assert sorted(workers.map(reserve, ("first", "second"))) == ["denied", "reserved"]
+            assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage "
+                                   "WHERE job_id='target' ORDER BY record_sequence") == [
+                {"state": "UNKNOWN", "billed_micro_usd": 123},
+                {"state": "RESERVED", "billed_micro_usd": 123},
+            ]
+
+    run(scenario())
 
 
-def test_model_room_vm_work_does_not_grow_with_unrelated_history(core):
+def test_model_room_work_does_not_grow_with_unrelated_history(core, monkeypatch):
     s, now = core.store, core.clock()
     settings = SimpleNamespace(paid_model=SimpleNamespace(per_request_calls=4))
     with s.transaction():
@@ -167,36 +184,35 @@ def test_model_room_vm_work_does_not_grow_with_unrelated_history(core):
                  scenario="content_video_preview", provider="synthetic", model="synthetic",
                  state="RESERVED", billed_micro_usd=123, occurred_at=now)
 
-    def steps():
-        _model_room(s, settings, "target")
-        count = 0
+    def scanned_rows():
+        visited = []
+        query_rows = s.rows
 
-        def progress():
-            nonlocal count
-            count += 1
-            return 0
+        def inspect(query, parameters):
+            plan = s.one("EXPLAIN (ANALYZE, FORMAT JSON) " + query, parameters)["QUERY PLAN"]
+            nodes = [plan[0]["Plan"]]
+            while nodes:
+                node = nodes.pop()
+                visited.append((node["Actual Rows"] + node.get("Rows Removed by Filter", 0))
+                               * node["Actual Loops"])
+                nodes.extend(node.get("Plans", []))
+            return query_rows(query, parameters)
 
-        changes = s.db.total_changes
-        s.db.set_progress_handler(progress, 1)
-        try:
+        with monkeypatch.context() as patch, s.read_snapshot():
+            patch.setattr(s, "rows", inspect)
             _model_room(s, settings, "target")
-        finally:
-            s.db.set_progress_handler(None, 0)
-        assert s.db.total_changes == changes
-        return count
+        return sum(visited)
 
-    initial = steps()
-    with s.transaction():
-        s.db.executemany(
-            "INSERT INTO model_usage(usage_id,request_id,job_id,scenario,provider,model,"
-            "state,billed_micro_usd,occurred_at) VALUES (?,?,'other','chat','synthetic',"
-            "'synthetic',?,123,?)",
-            ((f"history-{index}", f"history-{index}",
-              ("SETTLED", "RESERVED", "UNKNOWN")[index % 3], now) for index in range(1000)),
-        )
-    # A wide deterministic bound catches a history scan without timing assertions
-    # or depending on a particular SQLite query-plan rendering.
-    assert steps() <= initial + 100
+    initial = scanned_rows()
+    s.execute(
+        "INSERT INTO model_usage(usage_id, request_id, job_id, scenario, provider, model, "
+        "state, billed_micro_usd, occurred_at) SELECT 'history-'||i, 'history-'||i, "
+        "'other','chat','synthetic','synthetic', "
+        "(ARRAY['SETTLED','RESERVED','UNKNOWN'])[1+mod(i,3)],123,%s FROM generate_series(1,1000) i",
+        (now,),
+    )
+    s.execute("ANALYZE model_usage")
+    assert scanned_rows() <= initial + 100
 
 
 def test_disabled_video_requires_explicit_configuration_without_changing_metadata(core):
@@ -403,9 +419,10 @@ def test_restore_fences_pending_native_work_without_clearing_its_reservations(co
 
 
 def test_migration_preserves_existing_data_and_refuses_downgrade_with_media_history(core, tmp_path):
-    module, item, _, _ = prepared(core)
-    before = core.store.rows("SELECT * FROM reading_attempts")
+    _, item, _, _ = prepared(core)
     database = historical_database(core.store, tmp_path / "bili.db", "0032_bili_video")
+    with closing(open_historical(database)) as prior:
+        before = rows(prior, "SELECT * FROM reading_attempts")
     config = Config()
     config.set_main_option(
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
@@ -415,10 +432,10 @@ def test_migration_preserves_existing_data_and_refuses_downgrade_with_media_hist
     )
     with pytest.raises(RuntimeError, match="BILI_VIDEO_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"):
         command.downgrade(config, "0031_voice_nodes")
-    with closing(Store(database)) as store:
-        assert store.rows("SELECT * FROM reading_attempts") == before
-        historical = BiliVideoService(store, core.settings, module.exploration, clock=core.clock)
-        assert historical.context(item["media"]["content_item_id"])["state"] == "PREPARED"
+    with closing(open_historical(database)) as store:
+        assert rows(store, "SELECT * FROM reading_attempts") == before
+        assert one(store, "SELECT state FROM bili_video_items WHERE item_id=?",
+                   (item["media"]["content_item_id"],))["state"] == "PREPARED"
 
 
 @pytest.mark.parametrize("need_clips", [False, True])
@@ -594,7 +611,7 @@ def test_lost_model_response_retains_unknown_cost_and_forbids_upload_repayment(c
 def test_source_erased_during_paid_await_keeps_fee_and_cannot_resurrect_analysis(core, tmp_path):
     def provider(_):
         source = core.store.one("SELECT source_event_id FROM bili_video_items")["source_event_id"]
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
         return model_response({"analysis": "这段结果必须因擦除丢弃", "need_clips": False})
 
@@ -828,7 +845,7 @@ def test_exact_followup_binds_only_new_phases_to_current_consumer(core, tmp_path
             with pytest.raises(CoreError):
                 await module.upload("bili", item["request_id"], preview_body)
             assert len(calls) == len(usage)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [consumer["event_id"]], core.clock())
             assert module.context(root["item_id"]) is None
             assert core.store.one(
@@ -920,7 +937,7 @@ def test_erasing_new_consumer_during_await_scrubs_its_phase_without_erasing_orig
     controls = {}
 
     def provider(_):
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [controls["consumer_id"]], core.clock())
         return model_response({"analysis": "消费者已经擦除的结果", "need_clips": False})
 

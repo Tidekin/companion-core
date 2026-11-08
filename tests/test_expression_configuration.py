@@ -12,9 +12,13 @@ from companion import budget, operator_config, runtime_config
 from companion.contracts import CoreError
 from companion.conversation_policy import PARTICIPATION_V1, PARTICIPATION_V2
 from companion.core import Core
+from companion.legacy_import import import_sqlite_backup, migrate_sqlite
 from companion.model import ModelResponse
-from companion.store import encode
+from companion.postgres import Database, migrate
+from companion.store import Store, encode
 from tests.conftest import ingest
+from tests.support.historical_schema import historical_database
+from tests.support.release_migration import open_historical, rows
 from tests.support.runtime_configuration import hot as hot
 from tests.support.runtime_configuration import save, task
 
@@ -214,36 +218,40 @@ def test_legacy_task_and_model_identity_survive_upgrade_save_and_restart(hot, ve
             resumed.context(retry)
 
 
-def test_populated_snapshot_migration_preserves_legacy_evidence_and_fences_downgrade(hot, tmp_path):
+def test_populated_snapshot_migration_preserves_legacy_evidence_and_fences_downgrade(
+    hot, tmp_path, empty_database
+):
     from contextlib import closing
-    from types import SimpleNamespace
 
     from alembic import command
     from alembic.config import Config
 
-    from companion.store import Store, migrate
 
     path = tmp_path / "legacy-snapshots.db"
-    settings = hot.settings.model_copy(update={"database": str(path)})
-    migrate(str(path), "0056_watch_ledger_goal_reads")
-    with closing(Store(str(path))) as store:
-        old = SimpleNamespace(store=store, settings=settings, clock=hot.clock)
-        key = legacy_binding(old, {"job_id": "migration"})
-        store.insert("operator_task_configuration", task_key="job:migration", snapshot_id=key,
-            binding_sha256=runtime_config._digest(settings, ["job:migration", key]),
-            created_at=hot.clock())
-        before = store.rows("SELECT * FROM operator_task_configuration")
-    migrate(str(path), "0057_expression_configuration")
+    settings = hot.settings
+    key = legacy_binding(hot, {"job_id": "migration"})
+    hot.store.insert("operator_task_configuration", task_key="job:migration", snapshot_id=key,
+        binding_sha256=runtime_config._digest(settings, ["job:migration", key]),
+        created_at=hot.clock())
+    historical_database(hot.store, path, "0056_watch_ledger_goal_reads")
+    with closing(open_historical(path)) as db:
+        before = rows(db, "SELECT * FROM operator_task_configuration")
+    migrate_sqlite(path, "0057_expression_configuration")
     cfg = Config()
     cfg.set_main_option("script_location", "migrations")
     cfg.set_main_option("sqlalchemy.url", "sqlite:///" + path.resolve().as_posix())
-    with closing(Store(str(path))) as store:
-        legacy = runtime_config.get(store, settings, "job:migration")
-        assert runtime_config.identity(settings, legacy) == key and legacy.format_version == 1
-        assert store.rows("SELECT * FROM operator_task_configuration") == before
+    with closing(open_historical(path)) as db:
+        assert rows(db, "SELECT * FROM operator_task_configuration") == before
     command.downgrade(cfg, "0056_watch_ledger_goal_reads")
-    migrate(str(path), "0057_expression_configuration")
-    with closing(Store(str(path))) as store:
-        runtime_config.boundary(store, settings, hot.clock)
+    migrate_sqlite(path)
+    migrate(empty_database)
+    import_sqlite_backup(path, empty_database)
+    with Database(empty_database) as database, closing(Store(database, tmp_path)) as imported:
+        legacy = runtime_config.get(imported, settings, "job:migration")
+        assert runtime_config.identity(settings, legacy) == key and legacy.format_version == 1
+        runtime_config.boundary(imported, settings, hot.clock)
+        guarded = historical_database(imported, tmp_path / "retained.db",
+                                      "0057_expression_configuration")
+    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + guarded.resolve().as_posix())
     with pytest.raises(RuntimeError, match="CONFIGURATION_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"):
         command.downgrade(cfg, "0056_watch_ledger_goal_reads")

@@ -51,7 +51,7 @@ def test_image_estimates_count_each_original_in_both_stages(count):
 
 def test_originals_are_shared_by_new_store_without_entering_db_or_history(core):
     row, data = staged_original(core)
-    reopened = Store(core.store.path)
+    reopened = Store(core.store.database, core.store.state_directory)
     try:
         assert image_spool.get(reopened, row, core.clock(), 50000) == (data, "image/png")
         assert image_spool.deadline(reopened, row) == after(core.clock(), 300)
@@ -77,12 +77,16 @@ def test_separate_worker_process_can_read_the_same_bounded_original(core):
             "import hashlib,json,sys",
             "from companion import image_spool",
             "from companion.store import Store",
-            "store=Store(sys.argv[1])",
-            "data,mime=image_spool.get(store,json.loads(sys.argv[2]),sys.argv[3],50000)",
-            "print(hashlib.sha256(data).hexdigest())",
-            "store.close()",
-        ]), str(core.store.path), encode(row), core.clock()],
+            "from companion.postgres import Database",
+            "from contextlib import closing",
+            "from pydantic import SecretStr",
+            "with Database(SecretStr(sys.stdin.readline().rstrip())) as db, "
+            "closing(Store(db, sys.argv[1])) as store:",
+            "    data,mime=image_spool.get(store,json.loads(sys.argv[2]),sys.argv[3],50000)",
+            "    print(hashlib.sha256(data).hexdigest())",
+        ]), str(core.store.state_directory), encode(row), core.clock()],
         capture_output=True, text=True, timeout=15,
+        input=core.settings.database.get_secret_value(),
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
     assert result.returncode == 0, result.stderr
@@ -96,7 +100,7 @@ def test_startup_cleanup_waits_for_upload_transaction_before_deciding_file_is_or
     started, finished, failures = threading.Event(), threading.Event(), []
 
     def startup_cleanup():
-        other = Store(core.store.path)
+        other = Store(core.store.database, core.store.state_directory)
         try:
             started.set()
             image_spool.cleanup(other, core.clock())
@@ -172,9 +176,10 @@ def test_recovery_removes_abandoned_or_finished_originals(core, reason):
     elif reason == "expired":
         core.clock.advance(301)
     elif reason == "global_epoch":
-        advance_epoch(core.store)
+        with core.store.transaction(control_write=True):
+            advance_epoch(core.store)
     else:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [row["owner_event_id"]], core.clock())
     image_spool.cleanup(core.store, core.clock())
     assert list(image_spool.directory(core.store).glob("*.raw")) == []
@@ -196,21 +201,25 @@ def test_stop_discards_only_images_from_the_matching_window(core):
     )
 
 
-def test_erasure_replay_also_removes_copied_originals_from_restored_database(core, tmp_path):
+def test_erasure_replay_also_removes_copied_originals_from_restored_database(
+    core, tmp_path, empty_database
+):
     row, _ = staged_original(core)
     key = Fernet.generate_key()
-    archive, destination = tmp_path / "original.enc", tmp_path / "restore.db"
+    archive, destination = tmp_path / "original.enc", empty_database
     backup(core.settings.database, archive, key)
     cached = image_spool.directory(core.store)
-    restored_cache = destination.parent / (destination.name + ".owner-images")
+    restored_cache = tmp_path / "restored-state" / "owner-images"
     shutil.copytree(cached, restored_cache)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [row["owner_event_id"]], core.clock())
     assert list(cached.glob("*.raw")) == []
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restore(archive, destination, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
     assert list(restored_cache.glob("*.raw")) == []
     restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock,
+        core.settings.model_copy(update={"database": destination,
+            "state_directory": str(tmp_path / "restored-state")}), clock=core.clock,
     )
     try:
         assert restored.store.one("SELECT state FROM content_items")["state"] == "ERASED"

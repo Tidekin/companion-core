@@ -1,10 +1,9 @@
 """Upgrade real v1 rows only after validating the original signed delivery proof."""
 
 import hashlib
-import importlib.util
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
@@ -14,11 +13,14 @@ import companion_delivery_protocol as wire
 from companion import cumulative, paid_budget
 from companion import delivery_reconciliation as reconciliation
 from companion.contracts import CoreError
+from companion.legacy_import import import_sqlite_backup, migrate_sqlite
+from companion.postgres import Database
 from companion.store import Store, encode, migrate
 from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import VoiceLeaseRef
 from tests.support.delivery_reconciliation import decide, prepare, put, signed
 from tests.support.delivery_reconciliation import native as current_fixture
+from tests.support.release_migration import one, open_historical, rows
 from tests.support.voice_jobs import claim, create_tts, prepared
 
 OLD = "0033_model_usage_job_index"
@@ -52,8 +54,8 @@ def native(core, tmp_path, **options):
 
 def old_database(core, tmp_path):
     path = tmp_path / "v1.sqlite3"
-    migrate(path, OLD)
-    with sqlite3.connect(path) as dest:
+    migrate_sqlite(path, OLD)
+    with closing(sqlite3.connect(path)) as dest, dest:
         tables = [
             r[0]
             for r in dest.execute(
@@ -65,7 +67,7 @@ def old_database(core, tmp_path):
             if table == "voice_claims" or table.startswith("memories_fts"):
                 continue
             columns = [r[1] for r in dest.execute(f'PRAGMA table_info("{table}")')]
-            for row in core.store.rows(f'SELECT * FROM "{table}"'):
+            for row in core.store.rows(f'SELECT * FROM "{table}" ORDER BY record_sequence'):
                 if table == "runtime_meta" and row["key"] in {
                     "voice_incarnation", "voice_restore_required"}:
                     continue
@@ -84,33 +86,43 @@ def old_database(core, tmp_path):
     return path
 
 
+@contextmanager
+def imported_database(path, destination, state_directory):
+    migrate_sqlite(path)
+    migrate(destination)
+    import_sqlite_backup(path, destination)
+    with Database(destination) as database, closing(Store(database, state_directory)) as store:
+        yield store
+
+
 def dump(path):
     with closing(sqlite3.connect(path)) as connection:
         return list(connection.iterdump())
 
 
 def test_v1_running_job_becomes_content_free_unknown_with_original_stop_capability(
-    core, tmp_path, monkeypatch,
+    core, tmp_path, monkeypatch, empty_database,
 ):
     jobs, message_id, _, _ = prepared(core, monkeypatch)
     create_tts(core, jobs, message_id)
     _, response = claim(jobs)
     jobs.input("local", VoiceLeaseRef.from_lease(response.lease))
     path = old_database(core, tmp_path)
-    migrate(path, NEW)
-    with closing(Store(path)) as upgraded:
-        row = upgraded.one("SELECT * FROM voice_jobs")
-        assert upgraded.one("SELECT version_num FROM alembic_version")["version_num"] == NEW
+    migrate_sqlite(path, NEW)
+    with closing(open_historical(path)) as upgraded:
+        row = one(upgraded, "SELECT * FROM voice_jobs")
+        assert one(upgraded, "SELECT version_num FROM alembic_version")["version_num"] == NEW
         assert row["state"] == "UNKNOWN" and row["content_retired"] == 1
         assert (
             row["stop_token_sha256"]
             == hashlib.sha256(response.lease.lease_token.encode()).hexdigest()
         )
         assert row["input_sha256"] is None and row["lease_json"] is None
-        state = upgraded.one("SELECT * FROM voice_node_state")
+        state = one(upgraded, "SELECT * FROM voice_node_state")
         assert state["active_job_id"] == row["job_id"] and state["recovery_required"] == 1
         assert row["cleanup_state"] == "PENDING"
-        assert upgraded.rows("PRAGMA foreign_key_check") == []
+        assert rows(upgraded, "PRAGMA foreign_key_check") == []
+    with imported_database(path, empty_database, core.store.state_directory) as upgraded:
         assert VoiceJobs(upgraded, core.settings, core.clock).session("local").recovery_required
 
 
@@ -141,20 +153,22 @@ def test_v1_unknown_preflight_failure_leaves_old_revision_and_all_data_untouched
     path = old_database(core, tmp_path)
     before = dump(path)
     with pytest.raises((RuntimeError, ValueError, InvalidSignature, CoreError)):
-        migrate(path, NEW)
+        migrate_sqlite(path, NEW)
     assert dump(path) == before
-    with closing(Store(path)) as unchanged:
-        assert unchanged.one("SELECT version_num FROM alembic_version")["version_num"] == OLD
-        assert unchanged.one("SELECT input_sha256 FROM voice_jobs")["input_sha256"]
+    with closing(open_historical(path)) as unchanged:
+        assert one(unchanged, "SELECT version_num FROM alembic_version")["version_num"] == OLD
+        assert one(unchanged, "SELECT input_sha256 FROM voice_jobs")["input_sha256"]
 
 
-def test_v1_signed_unknown_converts_once_and_original_owner_resolution_still_works(core, tmp_path):
+def test_v1_signed_unknown_converts_once_and_original_owner_resolution_still_works(
+    core, tmp_path, empty_database
+):
     env = native(core, tmp_path, action="qq.private.reply", voice=True, voice_v1=True)
     put(core.store, reconciliation.PREPARED + env.message_id, env.proof)
     path = old_database(core, tmp_path)
-    migrate(path, NEW)
+    migrate_sqlite(path, NEW)
     original_store = core.store
-    with closing(Store(path)) as upgraded:
+    with imported_database(path, empty_database, core.store.state_directory) as upgraded:
         core.store = upgraded
         try:
             value = reconciliation._meta(upgraded, "voice_reply:" + env.message_id)
@@ -174,20 +188,33 @@ def test_v1_signed_unknown_converts_once_and_original_owner_resolution_still_wor
             core.store = original_store
 
 
-def historical_migration():
-    path = Path(__file__).parents[1] / "migrations/versions/0034_voice_retention_v2.py"
-    spec = importlib.util.spec_from_file_location("historical_voice_v1", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def close_historical_resolution(env, tmp_path):
+    # Let the frozen SQLite migration verify the signed v1 proof and retire its binding.
+    # Use that verified receipt to close the original journal on the native runtime.
+    key = "voice_reply:" + env.message_id
+    path = old_database(env.core, tmp_path / "preflight")
+    with closing(open_historical(path)) as prior:
+        prior.execute("INSERT INTO runtime_meta(key,value) VALUES (?,?) "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                      (reconciliation.PREPARED + env.message_id, encode(env.proof)))
+    migrate_sqlite(path, NEW)
+    with closing(open_historical(path)) as upgraded:
+        verified = one(upgraded, "SELECT value FROM runtime_meta WHERE key=?", (key,))
+    original = env.core.store.one("SELECT value FROM runtime_meta WHERE key=%s", (key,))
+    env.core.store.execute(
+        "UPDATE runtime_meta SET value=%s WHERE key=%s", (verified["value"], key)
+    )
+    try:
+        prepare(env)
+        return decide(env, "CANCELLED")
+    finally:
+        env.core.store.execute("UPDATE runtime_meta SET value=%s WHERE key=%s",
+                               (original["value"], key))
 
 
 def test_v1_migration_independent_of_current_dto_and_service(core, tmp_path, monkeypatch):
     env = native(core, tmp_path, action="qq.private.reply", voice=True, voice_v1=True)
-    with monkeypatch.context() as old_runtime:
-        old_runtime.setattr(reconciliation, "_voice_binding", historical_migration()._voice_binding)
-        prepare(env)
-        decide(env, "CANCELLED")
+    close_historical_resolution(env, tmp_path)
     path = old_database(core, tmp_path)
 
     def unavailable(*args, **kwargs):
@@ -199,26 +226,26 @@ def test_v1_migration_independent_of_current_dto_and_service(core, tmp_path, mon
         "companion.voice_protocol.LegacyVoiceDeliveryBinding.model_validate", unavailable)
     monkeypatch.setattr(cumulative, "fold", unavailable)
     monkeypatch.setattr(wire, "validate_receipt", unavailable)
-    migrate(path, NEW)
-    with closing(Store(path)) as upgraded:
-        assert upgraded.one("SELECT version_num FROM alembic_version")["version_num"] == NEW
-        assert reconciliation._meta(upgraded, "voice_reply:" + env.message_id)["retired"]
+    migrate_sqlite(path, NEW)
+    with closing(open_historical(path)) as upgraded:
+        assert one(upgraded, "SELECT version_num FROM alembic_version")["version_num"] == NEW
+        value = one(upgraded, "SELECT value FROM runtime_meta WHERE key=?",
+                    ("voice_reply:" + env.message_id,))
+        assert json.loads(value["value"])["retired"]
 
 
 @pytest.mark.parametrize("quota", [False, True])
-def test_v1_closed_resolution_keeps_original_financial_record(core, tmp_path, monkeypatch, quota):
+def test_v1_closed_resolution_keeps_original_financial_record(
+    core, tmp_path, quota, empty_database
+):
     env = native(core, tmp_path, quota=quota, action="qq.private.reply", voice=True, voice_v1=True)
-    # Build a real native v1 owner resolution using its frozen historical voice validator.
-    with monkeypatch.context() as old_runtime:
-        old_runtime.setattr(reconciliation, "_voice_binding", historical_migration()._voice_binding)
-        prepare(env)
-        original_receipt = decide(env, "CANCELLED")
+    original_receipt = close_historical_resolution(env, tmp_path)
     assert core.store.one('SELECT lease_token FROM outbox WHERE message_id=%s',
                           (env.message_id,))["lease_token"] is None
     path = old_database(core, tmp_path)
-    migrate(path, NEW)
+    migrate_sqlite(path, NEW)
     original_store = core.store
-    with closing(Store(path)) as upgraded:
+    with imported_database(path, empty_database, core.store.state_directory) as upgraded:
         core.store = upgraded
         try:
             assert decide(env, "CANCELLED") == original_receipt
@@ -236,13 +263,10 @@ def test_v1_closed_resolution_keeps_original_financial_record(core, tmp_path, mo
     ("prior_quota_state", "unbound owner send resolution"),
 ])
 def test_v1_rehashed_invalid_financial_record_fails_before_writes(
-    core, tmp_path, monkeypatch, field, error,
+    core, tmp_path, field, error,
 ):
     env = native(core, tmp_path, action="qq.private.reply", voice=True, voice_v1=True)
-    with monkeypatch.context() as old_runtime:
-        old_runtime.setattr(reconciliation, "_voice_binding", historical_migration()._voice_binding)
-        prepare(env)
-        original = decide(env, "CANCELLED")["receipt"]
+    original = close_historical_resolution(env, tmp_path)["receipt"]
     journal = Path(core.settings.paid_model.journal_path)
     rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
     previous, replacement = "0" * 64, None
@@ -262,7 +286,7 @@ def test_v1_rehashed_invalid_financial_record_fails_before_writes(
     path = old_database(core, tmp_path)
     before = dump(path)
     with pytest.raises(ValueError, match=error):
-        migrate(path, NEW)
+        migrate_sqlite(path, NEW)
     assert dump(path) == before
 
 
@@ -272,12 +296,12 @@ def test_v1_upgrade_preserves_json_constraints_and_allows_retired_null_lease(
     jobs, message_id, _, _ = prepared(core, monkeypatch)
     create_tts(core, jobs, message_id)
     path = old_database(core, tmp_path)
-    migrate(path, NEW)
-    with closing(Store(path)) as upgraded:
+    migrate_sqlite(path, NEW)
+    with closing(open_historical(path)) as upgraded:
         for column in ("config_json", "lease_json"):
             with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
                 upgraded.execute(f"UPDATE voice_jobs SET {column}=?", ("invalid-json",))
         upgraded.execute("UPDATE voice_jobs SET config_json='{}',lease_json=NULL")
-        assert upgraded.one("SELECT lease_json,content_retired FROM voice_jobs") == {
+        assert one(upgraded, "SELECT lease_json,content_retired FROM voice_jobs") == {
             "lease_json": None, "content_retired": 1,
         }

@@ -8,13 +8,16 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-from companion.legacy_import import migrate_sqlite
-from companion.store import encode
+from companion.legacy_import import import_sqlite_backup, migrate_sqlite
+from companion.postgres import Database, migrate
+from companion.store import Store, encode
 from tests.support.release_migration import insert, one, open_historical, rows
 
 
 @pytest.mark.parametrize("state", ["RUNNING", "EXECUTION_UNCERTAIN"])
-def test_goal_plan_migration_retains_original_step_promise_and_evidence(tmp_path, state):
+def test_goal_plan_migration_retains_original_step_promise_and_evidence(
+    tmp_path, state, empty_database
+):
     path = tmp_path / "goals.sqlite3"
     migrate_sqlite(path, "0044_voice_owner_authority")
     now = "2026-10-25T00:00:00+00:00"
@@ -84,7 +87,7 @@ def test_goal_plan_migration_retains_original_step_promise_and_evidence(tmp_path
         with store:
             store.execute("BEGIN")
             store.execute("UPDATE goal_steps SET position=position+3")
-            assert [r["position"] for r in rows(store, 
+            assert [r["position"] for r in rows(store,
                 "SELECT position FROM goal_steps ORDER BY position")] == [4, 5, 6]
             with pytest.raises(sqlite3.IntegrityError, match="GOAL_STEP_LIMIT"):
                 insert(store, "goal_steps", step_id="fourth-step", goal_id="original-goal",
@@ -116,3 +119,10 @@ def test_goal_plan_migration_retains_original_step_promise_and_evidence(tmp_path
     with closing(open_historical(path)) as store:
         assert one(store, "SELECT COUNT(*) n FROM goal_steps")["n"] == 4
         assert rows(store, "PRAGMA foreign_key_check") == []
+    migrate_sqlite(path)
+    migrate(empty_database)
+    import_sqlite_backup(path, empty_database)
+    with Database(empty_database) as database, closing(Store(database, tmp_path)) as native:
+        assert native.schema_capabilities()
+        restored = native.one("SELECT * FROM goal_steps WHERE step_id='original-step'")
+        assert {key: restored[key] for key in old_step} == old_step
