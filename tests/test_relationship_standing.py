@@ -81,10 +81,9 @@ def test_standing_skips_missing_evidence_without_mutating_the_fact(core):
     key = _add(core, 1, '长期约定叫你小鱼', kind='fact', confirmed=True)
     core.store.execute('DELETE FROM memory_evidence WHERE memory_id=%s', (key,))
     before = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (key,))
-    changes = core.store.db.total_changes
-    assert core.memory.standing_relationship(now=core.clock()) == []
-    assert core.store.one('SELECT * FROM memories WHERE memory_id=%s', (key,)) == before
-    assert core.store.db.total_changes == changes
+    with core.store.read_snapshot():
+        assert core.memory.standing_relationship(now=core.clock()) == []
+        assert core.store.one('SELECT * FROM memories WHERE memory_id=%s', (key,)) == before
 
 
 def test_older_important_relationship_survives_newer_candidate_overflow(core, monkeypatch):
@@ -94,25 +93,35 @@ def test_older_important_relationship_survives_newer_candidate_overflow(core, mo
     for number in range(2, retrieval_work.FACT_CANDIDATES + 8):
         core.clock.advance(1)
         _add(core, number, f'相处约定第{number}条', kind='preference', confirmed=True)
+    # Fill the rest of the catalog with old, ineligible facts so a full-table scan
+    # is expensive even for PostgreSQL's small LIMIT. The eligible facts above
+    # retain their real owner evidence and compete for the original bounded head.
+    core.store.execute(
+        "INSERT INTO memories(memory_id,subject,kind,content,status,origin,confidence,"
+        "importance,privacy_scope,created_at,updated_at) "
+        "SELECT 'unrelated_' || n,'user','fact','','FORGOTTEN','user_confirmed',0,0,"
+        "'private',%s,%s FROM generate_series(1,10000) n",
+        (core.clock(), core.clock()),
+    )
     plans = []
     original = retrieval_work.Work.rows
 
     def rows(work, store, sql, params=(), *, limit):
-        plans.extend(store.rows('EXPLAIN QUERY PLAN ' + sql, params))
+        if 'FROM memories' in sql:
+            plans.extend(row['QUERY PLAN'] for row in store.rows('EXPLAIN ' + sql, params))
         return original(work, store, sql, params, limit=limit)
 
     monkeypatch.setattr(retrieval_work.Work, 'rows', rows)
-    changes = core.store.db.total_changes
-    with retrieval_work.scope() as work:
+    core.store.execute("ANALYZE memories")
+    with core.store.read_snapshot(), retrieval_work.scope() as work:
         selected = core.memory.standing_relationship(now=core.clock())
         receipt = work.receipt()
     assert selected[0]['memory_id'] == important
     assert len(selected) == 3 and sum(len(row['content']) for row in selected) <= 300
-    assert core.store.db.total_changes == changes
     assert all(value <= retrieval_work.LIMITS[name]
                for name, value in receipt['counts'].items())
-    assert any('idx_memories_relationship_standing' in row['detail'] for row in plans)
-    assert not any('TEMP B-TREE' in row['detail'] for row in plans)
+    assert any('idx_memories_relationship_standing' in node for node in plans), plans
+    assert not any('Sort' in node for node in plans), plans
     core.settings.context_soft_tokens = 16000
     messages = core.context(current_job(core, number=999, text='我回来了'), memories=[])
     assert _standing(messages)[0]['content'] == '我们约定了彼此的家人称呼'

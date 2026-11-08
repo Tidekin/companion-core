@@ -2221,7 +2221,7 @@ CREATE INDEX idx_memories_fact_key ON memories (lower(fact_key));
 
 CREATE INDEX idx_memories_nomination ON memories (needs_review, (status='CONFIRMED') DESC, updated_at DESC, memory_id) WHERE status IN ('CONFIRMED','HYPOTHESIS') AND privacy_scope='private' AND confidence>0;
 
-CREATE INDEX idx_memories_relationship_standing ON memories (importance, updated_at, memory_id) WHERE subject='relationship' AND status='CONFIRMED' AND needs_review=0 AND kind<>'episode' AND origin<>'event_observed' AND privacy_scope='private' AND confidence>0;
+CREATE INDEX idx_memories_relationship_standing ON memories (importance DESC, updated_at DESC, memory_id) WHERE subject='relationship' AND status='CONFIRMED' AND needs_review=0 AND kind<>'episode' AND origin<>'event_observed' AND privacy_scope='private' AND confidence>0;
 
 CREATE INDEX idx_memories_search ON memories (subject, status, privacy_scope, updated_at);
 

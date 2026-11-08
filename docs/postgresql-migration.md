@@ -5,7 +5,8 @@
 
 ## 原生结构
 
-PostgreSQL 16 及以上版本使用独立 Alembic 修订 `pg0001_core`，对应原 SQLite
+PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 升级到
+`pg0002_relationship_standing`，按重要性降序、更新时间降序和记忆 ID 升序索引关系候选。业务结构对应原 SQLite
 `0068_image_review_target` 的 103 张业务表。SQLite 的旧迁移历史仅用于读取原备份，
 不参与 PostgreSQL 运行时查询，也不形成另一套 Core 主库。
 

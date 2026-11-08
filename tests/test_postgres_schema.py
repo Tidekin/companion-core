@@ -12,7 +12,7 @@ import pytest
 from companion.legacy_import import import_sqlite_backup
 from companion.legacy_import import migrate_sqlite as migrate_legacy
 from companion.postgres import migrate
-from tests.postgres_fixture import isolated_native
+from tests.postgres_fixture import isolated_database, isolated_native
 
 
 @pytest.fixture(scope="module")
@@ -61,7 +61,33 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
             "WHERE constraint_schema=current_schema() AND constraint_type='FOREIGN KEY'"
         )["n"] == foreign_keys
         assert session.one("SELECT version_num FROM alembic_version") == {
-            "version_num": "pg0001_core"}
+            "version_num": "pg0002_relationship_standing"}
+
+
+def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_index():
+    def directions(db):
+        return db.execute(
+            "SELECT pg_index_column_has_property('idx_memories_relationship_standing'::regclass, "
+            "position, 'desc') FROM generate_series(1,3) AS position ORDER BY position"
+        ).fetchall()
+
+    expected = [(True,), (True,), (False,)]
+    with isolated_database() as info:
+        migrate(info, revision="pg0001_core")
+        with psycopg.connect(info.get_secret_value()) as db:
+            assert directions(db) == expected
+            # Recreate the index definition shipped before pg0002.
+            db.execute("DROP INDEX idx_memories_relationship_standing")
+            db.execute("CREATE INDEX idx_memories_relationship_standing ON memories "
+                       "(importance,updated_at,memory_id) WHERE subject='relationship' "
+                       "AND status='CONFIRMED' AND needs_review=0 AND kind<>'episode' "
+                       "AND origin<>'event_observed' AND privacy_scope='private' AND confidence>0")
+            assert directions(db) == [(False,), (False,), (False,)]
+        migrate(info)
+        with psycopg.connect(info.get_secret_value()) as db:
+            assert directions(db) == expected
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
+                "pg0002_relationship_standing",)
 
 
 def audit(session, document):
