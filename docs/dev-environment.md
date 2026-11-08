@@ -104,14 +104,15 @@ PostgreSQL 容器保持运行，Core 写入者在这段时间内保持停止。�
 
 恢复 CLI 读取目标 TOML，并拒绝已含业务表的目标库。下面使用预建的空库 `dev_restore_after`。
 归档角色从容器环境读取密码。
+执行前将两个身份占位符替换为当前 Demo 配置中的合成身份值。
 
 ```powershell
 @'
 database = "host=dev-postgres dbname=dev_restore_after user=dev_archive"
 state_directory = "/data/dev_restore_after"
 erasure_ledger = "/privacy/erasures.jsonl"
-owner_qq_id = "10001"
-bot_qq_id = "10002"
+owner_qq_id = "<Demo配置中的合成owner>"
+bot_qq_id = "<Demo配置中的合成bot>"
 bridge_token = "offline-dev-restore-config-only"
 '@ | docker @devCompose run --rm --no-deps --pull never -T --entrypoint /bin/sh dev-backup -c 'umask 077; cat > /data/restore.toml'
 docker @devCompose run --rm --no-deps --pull never dev-backup restore $devSnapshot /data/restore.toml

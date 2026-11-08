@@ -2,6 +2,7 @@
 # Supply identities/tokens through the existing private environment mechanism.
 # Enable an approved capability only in a separately reviewed, pinned window config.
 mode = "demo"
+database = "host=postgres dbname=companion_beta user=companion"
 timezone = "Asia/Shanghai"
 max_recent_messages = 0
 proactive_enabled = false

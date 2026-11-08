@@ -3,7 +3,8 @@ mode = "live"
 # Optional replacement for the selected conversation policy's expression guidance.
 # Only used for ENABLED chat policy; blank restores the built-in strategy (max 2000 chars).
 # conversation_guidance = "Respond to one concrete detail in your own words."
-database = "data/companion.sqlite3"
+# Supply the complete private connection information through COMPANION_DATABASE.
+database = "host=postgres dbname=companion user=companion"
 erasure_ledger = "privacy/erasures.jsonl"
 timezone = "Asia/Shanghai"
 provider = "deepseek"
