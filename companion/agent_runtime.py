@@ -127,16 +127,16 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
         def check_request():
             nonlocal registered
             with phase("request_sources", job["trace_id"]):
-                check(current_request=request_id)
-                from companion.agent_images import check_payload
+                if not registered and persistence is not None:
+                    persistence.admitted(request_id, wire)
+                else:
+                    check(current_request=request_id)
+                    from companion.agent_images import check_payload
 
-                check_payload(core.store, core.settings, core.clock, job, wire)
-                if not registered:
-                    if persistence is not None:
-                        persistence.admitted(request_id)
-                    else:
+                    check_payload(core.store, core.settings, core.clock, job, wire)
+                    if not registered:
                         context_planner.admitted(core, job, snapshots, request_id)
-                    registered = True
+                registered = True
 
         model_started = perf_counter_ns()
         emit("t_model_request", job["trace_id"], at_ns=model_started)

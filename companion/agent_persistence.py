@@ -142,9 +142,13 @@ class ConversationStore:
                                (self.job["job_id"],))
         return request_context
 
-    def admitted(self, request_id):
+    def admitted(self, request_id, messages):
+        """Validate sources and wire bytes with registration in one native transaction."""
+        from companion.agent_images import check_payload
+
         with self.store.transaction():
             self.check(current_request=request_id)
+            check_payload(self.store, self.core.settings, self.core.clock, self.job, messages)
             context_planner.admitted(self.core, self.job, self.snapshots, request_id)
             self.store.execute('UPDATE agent_conversations SET request_id = %s, snapshots_json = '
                 "%s WHERE job_id = %s AND phase = 'MODEL_PENDING'",
