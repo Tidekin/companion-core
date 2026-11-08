@@ -103,7 +103,7 @@ PostgreSQL 容器保持运行，Core 写入者在这段时间内保持停止。�
 服务停止，不能跳过失败继续启动。
 
 恢复 CLI 读取目标 TOML，并拒绝已含业务表的目标库。下面使用预建的空库 `dev_restore_after`。
-归档角色从容器环境读取密码。
+归档角色从容器环境读取密码，并以 `CREATEDB` 权限创建仅供本次恢复的暂存库。已有 dev 卷由数据库管理员一次执行 `ALTER ROLE dev_archive CREATEDB`。日常 API 和 worker 继续使用 `dev_core`。
 执行前将两个身份占位符替换为当前 Demo 配置中的合成身份值。
 
 ```powershell

@@ -74,9 +74,16 @@ def test_native_restore_replays_newer_erasure_and_preserves_unknown_responsibili
         key = Fernet.generate_key()
         with Core(source_settings, FakeModel(), Clock()) as core:
             core.settings.memory_enabled = True
-            target, _ = add_fact(core, 1, "测试行李放在青色柜子")
+            target, original_event = add_fact(core, 1, "测试行李放在青色柜子")
             independent, event = add_fact(core, 2, "独立收纳盒放在三楼")
             with core.store.transaction():
+                erased_file = "content_" + "a" * 32
+                core.store.insert(
+                    "content_items", item_id=erased_file, owner_event_id=original_event["event_id"],
+                    kind="qq_file", slot=0, state="ERASED", captured_privacy_epoch=0,
+                    redacted=1, deadline=core.clock(), created_at=core.clock(),
+                    updated_at=core.clock(),
+                )
                 core.store.insert(
                     "model_usage",
                     usage_id="usage",
@@ -107,9 +114,17 @@ def test_native_restore_replays_newer_erasure_and_preserves_unknown_responsibili
             core.memory.decide(target, "forget", core.clock())
         with empty_restore_database(source_info) as destination:
             target_settings = settings(destination, tmp_path / "target-state", ledger)
+            originals = tmp_path / "target-state" / "owner-images"
+            originals.mkdir(mode=0o700, parents=True)
+            forgotten = originals / (erased_file + ".raw")
+            forgotten.write_bytes(b"synthetic earlier attachment")
+            unrelated = originals / ("content_" + "b" * 32 + ".raw")
+            unrelated.write_bytes(b"synthetic independent attachment")
             restore(
                 archive, destination, key, ledger, state_directory=target_settings.state_directory
             )
+            assert not forgotten.exists()
+            assert unrelated.read_bytes() == b"synthetic independent attachment"
             with Core(target_settings, FakeModel(), Clock()) as core:
                 core.settings.memory_enabled = True
                 assert [row["memory_id"] for row in core.memory.search("*", now=core.clock())] == [
@@ -153,3 +168,55 @@ def test_restore_refuses_existing_native_database_and_bad_key(tmp_path):
                     ledger,
                     state_directory=tmp_path / "target",
                 )
+
+
+def test_restore_keeps_target_private_until_fenced_and_retries_atomically(
+    core, tmp_path, empty_database, monkeypatch,
+):
+    from companion import backup as native
+
+    archive = tmp_path / "before.enc"
+    key = Fernet.generate_key()
+    ledger = core.settings.erasure_ledger
+    state = tmp_path / "restored-state"
+    ingest(core, text="独立恢复测试")
+    backup(core.settings.database, archive, key)
+    original = native._fence_restored
+    stages = []
+
+    with psycopg.connect(empty_database.get_secret_value(), autocommit=True) as observer:
+        # An existing view conflicts only at the final pg_restore, after staging succeeds.
+        observer.execute("CREATE VIEW events AS SELECT 17 AS sentinel")
+
+        def observe(store, current_ledger):
+            assert store.one("SELECT count(*) AS n FROM events")["n"] == 1
+            stage = store.one("SELECT current_database() AS name")["name"]
+            assert re.fullmatch(r"companion_restore_[0-9a-f]{32}", stage)
+            stages.append(stage)
+            assert not store.one(
+                "SELECT 1 FROM pg_database d, aclexplode(d.datacl) a "
+                "WHERE d.datname=current_database() AND a.grantee=0 AND a.privilege_type='CONNECT'"
+            )
+            assert observer.execute("SELECT sentinel FROM events").fetchone() == (17,)
+            assert observer.execute("SELECT to_regclass('jobs')").fetchone() == (None,)
+            with pytest.raises(CoreError, match="RESTORE_TARGET_BUSY"):
+                restore(archive, empty_database, key, ledger, state_directory=state)
+            original(store, current_ledger)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(native, "_fence_restored", observe)
+            with pytest.raises(CoreError, match="POSTGRES_BACKUP_TOOL_FAILED"):
+                restore(archive, empty_database, key, ledger, state_directory=state)
+        assert len(stages) == 1
+        assert not observer.execute(
+            "SELECT 1 FROM pg_database WHERE datname=%s", (stages[0],)
+        ).fetchone()
+        assert observer.execute("SELECT sentinel FROM events").fetchone() == (17,)
+        assert observer.execute("SELECT to_regclass('jobs')").fetchone() == (None,)
+        assert not observer.execute(
+            "SELECT 1 FROM pg_extension WHERE extname='pg_trgm'"
+        ).fetchone()
+        assert list(state.iterdir()) == []
+        observer.execute("DROP VIEW events")
+        restore(archive, empty_database, key, ledger, state_directory=state)
+        assert observer.execute("SELECT event_id FROM events").fetchone() == ("evt_test_1",)

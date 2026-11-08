@@ -6,9 +6,12 @@ import subprocess
 import tempfile
 from contextlib import closing, contextmanager
 from pathlib import Path
+from uuid import uuid4
 
 import psycopg
 from cryptography.fernet import Fernet
+from psycopg import sql
+from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 
 from companion.contracts import CoreError
@@ -81,54 +84,99 @@ def backup(database, destination, key):
             os.fsync(stream.fileno())
 
 
-def restore(source, destination, key, ledger_path, *, state_directory):
-    """Restore offline into an empty database, then replay newest erasures and revoke authority.
+def _require_empty(db):
+    if db.execute("SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                  "WHERE c.relkind IN ('r','p') AND n.nspname NOT IN "
+                  "('pg_catalog','information_schema') LIMIT 1").fetchone():
+        raise CoreError("RESTORE_REQUIRES_EMPTY_DATABASE")
 
-    The operator keeps the target disconnected from API/workers until this completes.
-    pg_restore recreates data before constraints in one transaction; existing databases
-    with user tables are refused. No provider request or delivery is replayed.
-    """
+
+@contextmanager
+def _staging_database(target, destination):
+    name = "companion_restore_" + uuid4().hex
+    identifier = sql.Identifier(name)
+    # Pin staging to the connected host even for a multi-host target DSN.
+    info = SecretStr(make_conninfo(
+        destination.get_secret_value(), dbname=name, host=target.info.host,
+        hostaddr=target.info.hostaddr or "", port=target.info.port, user=target.info.user,
+        password=target.info.password,
+    ))
+    target.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0 ALLOW_CONNECTIONS false")
+                   .format(identifier))
+    try:
+        with target.transaction():
+            target.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(identifier))
+            target.execute(sql.SQL("ALTER DATABASE {} ALLOW_CONNECTIONS true").format(identifier))
+        yield info
+    finally:
+        target.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(identifier))
+
+
+def _load_archive(snapshot, environment):
+    # template0 already contains public. Keep every other TOC entry in the transaction.
+    listing = _run("pg_restore", ["--list", str(snapshot)], environment)
+    selection = snapshot.with_suffix(".list")
+    selection.write_bytes(b"\n".join(
+        line for line in listing.splitlines()
+        if not re.match(rb"^\d+; \d+ \d+ SCHEMA - public(?:\s|$)", line)
+    ) + b"\n")
+    _run("pg_restore", ["--exit-on-error", "--single-transaction", "--no-owner",
+                        "--no-privileges", "--use-list=" + str(selection),
+                        str(snapshot)], environment)
+
+
+def _seal_archive(staging, snapshot, sealed, ledger):
+    service = snapshot.parent / "staging"
+    service.mkdir()
+    with _client(staging, service) as (stage, environment):
+        # Schema-filtered source archives omit dependencies outside their schema.
+        stage.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public")
+        _load_archive(snapshot, environment)
+        migrate(staging)
+        with Database(staging) as database, closing(Store(database, service)) as store:
+            _fence_restored(store, ledger)
+            if not store.schema_capabilities() or store.one(
+                "SELECT 1 FROM pg_constraint WHERE "
+                "connamespace=current_schema()::regnamespace AND NOT convalidated"
+            ):
+                raise CoreError("BACKUP_INTEGRITY_FAILED")
+            erased = store.rows(
+                "SELECT item_id FROM content_items WHERE kind IN ('qq_image','qq_file') "
+                "AND (redacted=1 OR state='ERASED')"
+            )
+            # Include the extension in the sealed archive. Its creation and all
+            # business data then commit together on the destination.
+            _run("pg_dump", ["--format=custom", "--no-owner", "--no-privileges",
+                             "--file=" + str(sealed)], environment)
+            return [row["item_id"] for row in erased]
+
+
+def restore(source, destination, key, ledger_path, *, state_directory):
+    """Fence a private staging database, then atomically publish into an offline empty target."""
+    from companion import image_spool
+
     ledger = ErasureLedger(ledger_path)
     ledger.read()
     payload = Fernet(key).decrypt(Path(source).read_bytes())
     root = Path(state_directory)
     root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=root) as directory:
-        snapshot = Path(directory) / "restored.dump"
+        scratch = Path(directory)
+        snapshot = scratch / "original.dump"
+        sealed = scratch / "sealed.dump"
         snapshot.write_bytes(payload)
-        with _client(destination, directory) as (db, environment):
-            if db.execute("SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-                          "WHERE c.relkind IN ('r','p') AND n.nspname NOT IN "
-                          "('pg_catalog','information_schema') LIMIT 1").fetchone():
-                raise CoreError("RESTORE_REQUIRES_EMPTY_DATABASE")
-            # Schema-filtered dumps omit extension dependencies; this is the native baseline's
-            # sole extension. Index definitions and original data are restored unchanged.
-            db.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public")
-            # template0 already contains public, and the extension needs that schema.
-            # Native pg_restore's TOC selection skips only its duplicate CREATE SCHEMA;
-            # every table, index, datum and constraint remains in the atomic restore.
-            listing = _run("pg_restore", ["--list", str(snapshot)], environment)
-            selection = Path(directory) / "restore.list"
-            selection.write_bytes(b"\n".join(
-                line for line in listing.splitlines()
-                if not re.match(rb"^\d+; \d+ \d+ SCHEMA - public(?:\s|$)", line)
-            ) + b"\n")
-            _run("pg_restore", ["--exit-on-error", "--single-transaction", "--no-owner",
-                                "--no-privileges", "--use-list=" + str(selection),
-                                str(snapshot)], environment)
-    migrate(destination)
-    with Database(destination) as database, closing(Store(database, root)) as store:
-        _fence_restored(store, ledger)
-        if not store.schema_capabilities() or store.one(
-            "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
-            "AND NOT convalidated LIMIT 1"
-        ):
-            raise CoreError("BACKUP_INTEGRITY_FAILED")
-        from companion import image_spool
-
-        image_spool.discard(store, (row["item_id"] for row in store.rows(
-            "SELECT item_id FROM content_items WHERE kind IN ('qq_image','qq_file') "
-            "AND (redacted=1 OR state='ERASED')")))
+        with _client(destination, scratch) as (target, target_environment):
+            # A second restore must not inspect an empty target and race this publication.
+            locked, = target.execute("SELECT pg_try_advisory_lock("
+                                     "hashtextextended('companion.restore',0))").fetchone()
+            if not locked:
+                raise CoreError("RESTORE_TARGET_BUSY", 409)
+            _require_empty(target)
+            with _staging_database(target, destination) as staging:
+                erased = _seal_archive(staging, snapshot, sealed, ledger)
+            _require_empty(target)
+            image_spool.discard(None, erased, state_directory=root)
+            _load_archive(sealed, target_environment)
 
 
 def _fence_restored(store, ledger):

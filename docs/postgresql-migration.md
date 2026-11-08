@@ -54,16 +54,29 @@ worker 的合成验证及 QQ 验收，仍是生产切换的必要条件。
 ## 运行迁移中的备份恢复（尚未完成生产验收）
 
 运行入口正在改用原生 PostgreSQL。备份沿用 Fernet 加密，明文载荷改为原生
-`pg_dump --format=custom`，独立费用、删除日志仍需另外保留。`pg_restore` 只向
-没有用户表的目标数据库写入，并以单笔事务恢复表、数据、序列及约束；随后执行原有
-删除回放、授权撤销、费用恢复核对及未知投递保护。目标在验证完成前须与 API、worker
-保持断开。恢复入口读取显式目标配置文件，不沿用源进程的数据库环境覆盖值。
+`pg_dump --format=custom`。独立费用和删除日志须另外保留。恢复入口从显式目标配置
+读取连接信息。在整个恢复期间，源和目标应保持离线，停止 API、worker 和独立日志写入。
+
+离线恢复账户需要目标库的连接及建对象权限、安装可信扩展 `pg_trgm` 所需的数据库
+`CREATE` 权限，以及同集群的 `CREATEDB` 权限。日常 Core 账户无需 `CREATEDB`。
+目标库必须没有用户表。恢复进程在目标库持有会话级咨询锁，同一目标上的并发恢复会
+返回 `RESTORE_TARGET_BUSY`。它从 `template0` 创建随机命名的暂存数据库，仅授予
+该库所有者连接权限。先在暂存库恢复表及约束、执行迁移、重放当前删除日志、撤销
+旧授权、保留未知费用与投递状态并校验结构，然后才用一次 `pg_restore --single-transaction`
+发布校验后的数据。重放或校验失败时，目标库保留原状，可修正原因后重试。
+
+封存完成后，恢复流程从目标工作目录清除已删除的原图和附件。暂存库在发布前移除，
+临时明文归档位于目标工作目录的私有临时目录中。若恢复进程被强制终止，操作员应核实
+进程已经退出，确认残留的 `companion_restore_<32位十六进制标识>` 暂存库的所有者和
+运行时间，再清理该次暂存库和临时目录。
 
 客户端连接采用 libpq 原生 service/password 文件，临时文件位于目标工作目录且权限
 为私有；凭据不进入命令参数。发布镜像仍需纳入匹配的 PostgreSQL 客户端工具并通过
 恢复用例；本节不代表生产已经切换。
 
 - [PostgreSQL pg_dump 一致快照及自定义归档](https://www.postgresql.org/docs/16/app-pgdump.html)
+- [PostgreSQL CREATE DATABASE 与 template0](https://www.postgresql.org/docs/16/sql-createdatabase.html)
+- [PostgreSQL 会话级咨询锁](https://www.postgresql.org/docs/16/explicit-locking.html#ADVISORY-LOCKS)
 - [PostgreSQL pg_restore 单笔事务恢复](https://www.postgresql.org/docs/16/app-pgrestore.html)
 - [libpq 原生连接服务文件](https://www.postgresql.org/docs/16/libpq-pgservice.html)
 - [libpq 密码文件及权限](https://www.postgresql.org/docs/16/libpq-pgpass.html)
