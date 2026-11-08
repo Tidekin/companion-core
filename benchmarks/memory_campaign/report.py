@@ -81,7 +81,8 @@ def load(*, allow_failed_gate=False):
         overridden.add(row["key"])
         final[row["key"]] = {**grades[row["key"]], "pass": row["pass"],
                              "review_reason": row["reason"]}
-    unresolved = {k for k, g in grades.items() if g.get("judge_unresolved") or g.get("anchor_failed")}
+    unresolved = {k for k, g in grades.items() if any(g.get(flag) for flag in (
+        "judge_unresolved", "anchor_failed", "interrupted_review_required"))}
     assert allow_failed_gate or not unresolved - overridden, "Unresolved judgments need explicit review overrides"
     reverse = {(m["arm"], m["id"]): m for m in mapping}
     assert set(reverse) == {(a, q["id"]) for a in R.graded_arms for q in R.questions}, "Mapping mismatch"
@@ -266,7 +267,8 @@ def prepare_review(rows, grades):
                 selected.append((r, a, "exact_check_disagrees"))
         for a in R.graded_arms:
             g = r["arms"][a]["auto_grade"]
-            if g.get("judge_unresolved") or g.get("anchor_failed"):
+            if any(g.get(flag) for flag in (
+        "judge_unresolved", "anchor_failed", "interrupted_review_required")):
                 selected.append((r, a, "unresolved_judgment"))
             if g.get("agreement", 1) < 1:
                 selected.append((r, a, "split_judge_vote"))
