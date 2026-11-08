@@ -16,6 +16,7 @@ from companion.conversation_policy import ConversationPolicyConfig
 from companion.owner_authority_protocol import OwnerCapture, OwnerGrantPolicy
 from companion.qq_rich import input_digest
 from companion_delivery_protocol.authority import capture_signing_payload
+from tests.conftest import ingest
 from tests.support.core_http import real_core_http
 from tests.support.evaluation_process import process_config
 from tests.support.owner_authority import activate
@@ -65,6 +66,26 @@ def prepare(core, tmp_path):
     assert core.affect.snapshot()["evidence"]
     core.clock.advance(1)
     return template, key
+
+
+def test_inbox_only_requests_exclusive_control_for_the_owner_reset_command(core, monkeypatch):
+    lock = core.store._control_lock
+    observed = []
+
+    def record(exclusive):
+        observed.append(exclusive)
+        return lock(exclusive)
+
+    monkeypatch.setattr(core.store, "_control_lock", record)
+    for number, (text, exclusive) in enumerate((
+        ("普通问候", False),
+        ("/重置互动 附加参数", False),
+        ("/重置互动", True),
+    ), 1):
+        observed.clear()
+        accepted = ingest(core, number, text)
+        assert accepted["state"] == "QUEUED"
+        assert observed == [exclusive]
 
 
 def test_owner_reset_after_context_before_dispatch_across_processes(core, tmp_path):

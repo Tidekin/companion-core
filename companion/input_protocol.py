@@ -289,11 +289,19 @@ def receive_recall(store, settings, ledger, clock, body):
 
 
 @contextmanager
-def admit_unrecalled(store, settings, ledger, clock, event):
+def admit_unrecalled(store, settings, ledger, clock, event, *, control_write=False):
     """Hold the write lock from recall reconciliation through inbox acceptance."""
-    with store.transaction():
-        _apply_pending_input(store, settings, ledger, clock, event)
-        if not input_recall.is_recalled(store, event.source_event_id):
+    while True:
+        with store.transaction(control_write=control_write):
+            marker = live_text._meta(store, input_recall.marker_key(event.source_event_id))
+            if marker and marker.get("state") == "PENDING_TARGET":
+                if not control_write:
+                    # Release the shared lock before taking the erasure lock, then recheck.
+                    control_write = True
+                    continue
+                _apply_pending_input(store, settings, ledger, clock, event)
+            if input_recall.is_recalled(store, event.source_event_id):
+                break
             yield
             return
     # A verified recall must commit before the Spool receives its terminal 410.

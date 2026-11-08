@@ -55,8 +55,13 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
         raise CoreError("INVALID_IDEMPOTENCY_KEY", 400)
     raw = event.model_dump(mode="json", exclude={"event_id", "trace_id"})
     fingerprint = digest(raw)
+    text = redact(event.payload.text, cfg)
+    command, arguments = command_parts(text)
+    reset_affect = command == "重置互动" and not arguments
     try:
-        with input_protocol.admit_unrecalled(s, cfg, ledger, clock, event):
+        with input_protocol.admit_unrecalled(
+            s, cfg, ledger, clock, event, control_write=reset_affect,
+        ):
             now = clock()
             authority = owner_input.check_input(s, cfg, clock, event) if (
                 owner_authority.required(s, cfg)) else None
@@ -131,7 +136,7 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 (now, conversation_id),
             )
             body = event.payload.model_dump()
-            body["text"] = redact(body["text"], cfg)
+            body["text"] = text
             if body.get("rich"):
                 for segment in body["rich"]["segments"]:
                     for field in segment.get("fields", []):
@@ -144,12 +149,11 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                     qq_rich.validate(body["rich"])
                 except ValueError:
                     raise CoreError("INVALID_RICH_INPUT", 400) from None
-            command, arguments = command_parts(body["text"])
             diary_command = native_controls and is_diary_command(body["text"])
             control_command = native_controls and (
                 is_life_command(body["text"]) or is_memory_command(body["text"])
                 or command in {"发送状态", "核对发送", "暂停主动分享", "恢复主动分享"}
-                or (command == "重置互动" and not arguments)
+                or reset_affect
             )
             if control_command:
                 body["control_command"] = True
@@ -210,7 +214,7 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 and not body["text"].lstrip().startswith("/")):
                 if not authority or "content" in authority.policy.purposes:
                     content.schedule(event.event_id)
-            if native_controls and command == "重置互动" and not arguments:
+            if native_controls and reset_affect:
                 affect.reset(cfg.owner_qq_id, event.event_id, ledger)
             if not authority or "affect" in authority.policy.purposes:
                 affect.observe(event.event_id)
