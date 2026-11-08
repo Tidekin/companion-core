@@ -117,7 +117,7 @@ async def rotation_case(core, tmp_path, monkeypatch, *, changed, responsibility,
         core.store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL WHERE job_id=%s",
                            (job["job_id"],))
         if erase:
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [c.event["event_id"]], core.clock())
             assert core.store.one("SELECT asset_data FROM meme_captions")["asset_data"] is None
         original_fees = core.store.rows("SELECT * FROM model_usage")

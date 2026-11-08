@@ -107,7 +107,7 @@ def test_native_caption_final_boundary_preserves_dispatch_knowledge(
                     owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                         operation_id="stop-caption-boundary", authority=grant.authority))
                 elif fence == "source":
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
 
             def provider(request):

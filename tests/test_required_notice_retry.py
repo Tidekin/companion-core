@@ -197,7 +197,7 @@ def test_retry_stays_bounded_by_native_attempt_budget_and_source_contracts(core,
             assert await run_notice(core)
             before = core.store.one("SELECT * FROM model_usage")
             if cap == "forget":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
             elif cap == "source_expiry":
                 core.clock.advance(core.settings.raw_event_retention_days * 86400 + 1)

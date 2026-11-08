@@ -22,7 +22,7 @@ def owner_message(core, number=7, text=OWNER_TEXT):
 
 
 def erase(core, event_id):
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
 
 

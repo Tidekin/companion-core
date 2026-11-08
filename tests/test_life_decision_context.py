@@ -175,7 +175,7 @@ def test_native_read_receipt_supplies_interest_or_blocks_continuation(
     assert core.life_topics.retained_result(second)["result"]["text"]
     if autonomy:
         assert context["autonomy_guidance"]["depth_control"][0]["independent_sessions"] == 1
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     saved = core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (second,))
     assert saved["state"] == "INVALIDATED" and saved["text"] == ""

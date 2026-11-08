@@ -27,7 +27,7 @@ def test_consumed_history_recall_preserves_genuine_not_sent_proof(environment, k
     message_id = poke.finish(env.store, env.settings, env.approval, job, choice, env.clock())[0]
     original = env.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
     token = uid("lease")
-    with env.store.transaction():
+    with env.store.transaction(control_write=True):
         env.store.execute((
             'UPDATE outbox SET '
             "state='SENDING',lease_token=%s,lease_until=%s,attempt_count=1 "

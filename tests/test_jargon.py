@@ -73,12 +73,12 @@ def test_erasure_removes_sources_meaning_and_finally_the_term(core, tmp_path):
     for number in (5, 6, 7):
         say(core, number, f"摸鱼王第{number}次")
     step(core)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_5"], core.clock())
     row = terms(core)["摸鱼王"]
     assert row["state"] == "CANDIDATE" and row["meaning"] is None
     assert "evt_test_5" not in json.loads(row["refs_json"])
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_2", "evt_test_6", "evt_test_7"],
                                   core.clock())
     assert terms(core) == {}

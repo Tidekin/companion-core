@@ -85,7 +85,7 @@ def test_mixed_group_tail_cannot_escape_failure_interruption_or_erasure(core, ou
     elif outcome == "interrupted":
         cancel_interrupted_replies(core.store, items[0]["conversation_id"], core.clock())
     else:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [items[0]["origin_event_id"]], core.clock())
     core.clock.advance(10)
     assert not lease(core)

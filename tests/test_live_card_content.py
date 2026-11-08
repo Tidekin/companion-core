@@ -204,7 +204,7 @@ def test_card_source_drift_or_erasure_prevents_actual_read_and_result(core, tmp_
                 ),
                                    (event["event_id"],))
             else:
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
             with pytest.raises(CoreError):
                 core.reading.validate_read("reader", work["request_id"],

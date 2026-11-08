@@ -106,7 +106,7 @@ def test_waiting_reflection_never_reuses_changed_or_erased_sources(core, change)
     waiting = run(core.reflections.run_day(second))
     assert waiting["state"] == "RETRY_WAIT"
     if change == "erasure":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_20"], core.clock())
     else:
         core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_20'",

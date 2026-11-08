@@ -107,7 +107,7 @@ def test_late_success_settles_usage_without_committing_revoked_content(core, cha
     if change == "new_input":
         accept(core, 2, text="先聊别的")
     elif change == "epoch":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             advance_epoch(core.store)
     elif change == "expired":
         core.clock.advance(31)
@@ -214,7 +214,7 @@ def test_accepted_goal_read_survives_new_turn_but_source_erasure_revokes_it(core
     assert item["context"]["root_task_id"] == goal_id
     accept(core, 2, "我们先聊别的，继续原任务")
     assert core.reading.validate_read("web", item["request_id"], validation(item))["valid"]
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     with pytest.raises(CoreError):
         core.reading.validate_read("web", item["request_id"], validation(item))

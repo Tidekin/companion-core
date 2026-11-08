@@ -88,7 +88,7 @@ def test_followup_uses_ten_turns_and_eligible_episodes_under_native_custody(core
             core.clock.advance(900)
 
             async def erase():
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [sources[0]], core.clock())
 
             observed = await process_worker(core, tmp_path, "followup", sources[-1],

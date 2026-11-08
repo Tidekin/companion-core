@@ -92,7 +92,7 @@ def test_unfinished_text_prefix_never_releases_the_meme_tail(core, outcome):
 
         cancel_interrupted_replies(core.store, job["conversation_id"], core.clock())
     else:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
     core.clock.advance(10)
     assert not lease(core)

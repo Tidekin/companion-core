@@ -49,7 +49,7 @@ def test_unproven_quote_never_becomes_self(core, fault):
     original = core.store.one('SELECT origin_event_id FROM outbox WHERE message_id=%s',
                               (message_id,))
     if fault == "erased_source":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [original["origin_event_id"]], core.clock())
     elif fault == "changed_stored_text":
         changed = {"text": "与捕获引用不同的文字"}

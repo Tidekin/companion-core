@@ -167,7 +167,7 @@ def test_real_http_independent_migration_cli_reconciles_without_image_or_deliver
             if mode in {"erased", "lost_ack", "result_unknown"}:
                 core.ingest(InboundEvent.model_validate(payload), key)
             if mode == "erased":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [payload["event_id"]], core.clock())
             if mode == "result_unknown":
                 from companion.contracts import LeaseRequest

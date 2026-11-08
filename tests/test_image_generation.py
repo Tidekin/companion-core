@@ -168,7 +168,7 @@ def test_generated_image_reaches_reply_lease_bridge_and_erasure(core, tmp_path):
                         "content_sha256": item["content_sha256"]}
                 denied = await client.post(path, json={**body, "lease_token": "lease_" + "b" * 32})
                 assert denied.status_code == 409 and "data_base64" not in denied.text
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
                 erased = await client.post(path, json=body)
                 assert erased.status_code in {403, 409, 410} and "data_base64" not in erased.text

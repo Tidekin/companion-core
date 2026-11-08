@@ -122,7 +122,7 @@ def test_no_chat_interest_read_can_become_a_private_diary(core, tmp_path, worthy
     if worthy:
         assert quote in entry["body_md"] and take in entry["body_md"]
         source = core.store.one("SELECT result_event_id FROM goals WHERE state='DONE'")
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source["result_event_id"]], core.clock())
         assert core.diary.get_day(day, cfg.owner_qq_id) is None
     else:

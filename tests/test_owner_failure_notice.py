@@ -93,7 +93,7 @@ def test_failure_notice_rechecks_job_wording_source_and_authority(core, tmp_path
         owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
             operation_id="stop-failure-notice", authority=json.loads(job["authority_json"])))
     else:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
     with pytest.raises(CoreError):
         owner_delivery.check_delivery(core.store, core.settings, core.clock, row["message_id"])
