@@ -115,9 +115,19 @@ def signed_input(core, template, key, number):
 
 async def state(core, job_id, wanted="SUCCEEDED", seconds=3):
     started = monotonic()
-    async with asyncio.timeout(seconds):
-        while core.store.one((  # noqa: ASYNC110 - observes an independent process
-            'SELECT state FROM jobs WHERE job_id=%s'
-        ), (job_id,))["state"] != wanted:
-            await asyncio.sleep(0.01)
+    try:
+        async with asyncio.timeout(seconds):
+            while core.store.one(  # noqa: ASYNC110 - observes an independent process
+                "SELECT state FROM jobs WHERE job_id=%s", (job_id,),
+            )["state"] != wanted:
+                await asyncio.sleep(0.01)
+    except TimeoutError as error:
+        job = core.store.one(
+            "SELECT state,attempts,last_error_code,next_attempt_at FROM jobs WHERE job_id=%s",
+            (job_id,),
+        )
+        usage = core.store.rows(
+            "SELECT state,scenario FROM model_usage WHERE job_id=%s", (job_id,),
+        )
+        raise AssertionError({"expected": wanted, "job": job, "usage": usage}) from error
     return monotonic() - started

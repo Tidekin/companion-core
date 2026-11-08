@@ -220,8 +220,9 @@ def test_independent_retry_due_without_new_write(core, tmp_path):
             assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (item["job_id"],))[
                 "state"
             ] == ("RETRY_WAIT")
-            core.store.execute('UPDATE jobs SET next_attempt_at=%s WHERE job_id=%s',
-                               (after(utcnow(), 1), item["job_id"]))
+            with core.store.transaction():
+                core.store.execute("UPDATE jobs SET next_attempt_at=%s WHERE job_id=%s",
+                                   (after(utcnow(), 1), item["job_id"]))
             # No writes after scheduling: only the native deadline can make it due.
             await state(core, item["job_id"], seconds=5)
             result = await finish(child)

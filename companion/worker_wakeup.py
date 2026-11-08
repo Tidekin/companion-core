@@ -5,7 +5,7 @@ from datetime import datetime
 from time import monotonic
 
 from companion import shutdown
-from companion.worker_deadlines import CHAT_WAIT_RESCAN_SECONDS, PROVIDERS
+from companion.worker_deadlines import PROVIDERS
 from companion.worker_schedule import ScanContext, UnitResult
 
 MAINTENANCE_SECONDS = 60
@@ -71,9 +71,9 @@ class Wakeup:
         if result.next_deadline is not None and result.next_deadline >= scan.started_at:
             deadline = min(deadline, result.next_deadline)
         started = monotonic()
-        interval = (min(CHAT_WAIT_RESCAN_SECONDS, MAINTENANCE_SECONDS)
-                    if self.kind == "worker" else MAINTENANCE_SECONDS)
-        reconcile_at = started + interval
+        # LISTEN and persisted job deadlines wake earlier; an idle queue only
+        # needs a full rescan at the regular maintenance boundary.
+        reconcile_at = started + MAINTENANCE_SECONDS
         while True:
             if shutdown.requested():
                 return "shutdown"
