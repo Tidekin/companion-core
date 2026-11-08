@@ -255,7 +255,7 @@ def test_restart_download_waits_original_lease_without_replaying_get(core, tmp_p
                 core.clock.advance(61)
                 await core.content.run_once()
             elif recovery == "erased":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [row["event_id"]], core.clock())
             window.restart()
             resumed = pending_media.MediaPump(window.runtime, client,
@@ -385,7 +385,7 @@ def test_media_source_erasure_keeps_original_unknown_model_reservation(core, tmp
             assert await core.run_once()
             assert len(calls) == len(downloads) == 1
             assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [media_row(window)["event_id"]], core.clock())
             usage = core.store.rows("SELECT * FROM model_usage")
             await pump.execute(media_row(window))

@@ -95,7 +95,7 @@ def test_plan_continuation_rejects_stale_or_expanded_proposals(core, tmp_path, c
 def test_plan_unknown_or_erasure_blocks_new_life_model_admission(core, tmp_path, change):
     goal_id, result = first_read(core, tmp_path, unknown=change == "UNKNOWN")
     if change == "ERASE":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, result["event_ids"], core.clock())
     else:
         assert core.goals.plan(goal_id)["unknown"]

@@ -76,7 +76,7 @@ def test_native_cancel_preserves_original_pre_dispatch_proof(core, tmp_path, evi
         core.clock())["items"][0]
     begin_send(core.store, message_id, item["lease_token"], core.clock(),
                core.settings, clock=core.clock)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
         if evidence == "observed":
             core.store.audit("delivery.result", message_id, "delivery", core.clock(),

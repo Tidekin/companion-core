@@ -95,7 +95,7 @@ def test_mixed_review_drops_rejected_claim_and_commits_corrected_fact(core, repe
 
 def test_guarded_failure_erasure_clears_feedback_but_preserves_accounting(core):
     record = failed_semantic_batch(core)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, record["source_event_ids"], core.clock())
     assert failures(core.store) == [] and checkpoint_state(core.store) is None
     assert all(r["state"] == "SETTLED" for r in core.store.rows("SELECT * FROM model_usage"))

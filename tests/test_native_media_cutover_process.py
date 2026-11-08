@@ -127,7 +127,7 @@ def test_migrated_native_media_real_http_and_independent_workers(core, tmp_path,
                         "SELECT event_id FROM automatic_media").fetchone()[0]
                     assert core.store.one("SELECT COUNT(*) n FROM events")["n"] == 1
                 if mode == "erase_before_download":
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [event_id], core.clock())
                 packet = {"config": asdict(cfg), "clock": core.clock(),
                           "settings": core.settings.model_dump(mode="python"), "mode": mode,

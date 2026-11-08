@@ -192,7 +192,7 @@ def test_owner_bound_source_erasure_during_model_keeps_cost_and_removes_draft(co
     authorize(core, tmp_path, module=module)
 
     def erase():
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
 
     module.model.callback = erase

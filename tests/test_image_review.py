@@ -128,7 +128,7 @@ def test_review_replays_objection_and_actual_reply_without_overwriting_receipts(
             assert "owner_objection" in replayed and "later_machine_reply" in replayed
             assert "evidence_verified_correction" in replayed
             # Erasure of either source invalidates/removes the derived association.
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [correction["event_id"]], core.clock())
             assert memory_references.image_reviews(core.store, context.job["event_id"]) == []
             with pytest.raises(CoreError, match="MEMORY_REFERENCE_CHANGED"):

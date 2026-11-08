@@ -49,7 +49,7 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
         if body["model"] == "synthetic-bili-video":
             if erase_during_model:
                 owner = core.store.one("SELECT owner_event_id FROM bili_video_items")
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [owner["owner_event_id"]], core.clock())
             count = sum(row["model"] == "synthetic-bili-video" for row in calls)
             return model_response({"analysis": "采样帧有蓝色区域", "need_clips": True}

@@ -47,7 +47,7 @@ def test_original_root_withdrawal_at_actual_model_boundary_never_calls_provider(
                 _, error = await child.communicate()
                 raise AssertionError(error.decode(errors="replace"))
             assert marker.strip() == b"BEFORE_DISPATCH", marker
-            with c.core.store.transaction():
+            with c.core.store.transaction(control_write=True):
                 c.core.ledger.expire_events(c.core.store, [c.source["event_id"]], c.core.clock())
             child.stdin.write(b"continue\n")
             await child.stdin.drain()

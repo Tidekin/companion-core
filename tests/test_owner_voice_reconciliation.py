@@ -38,7 +38,7 @@ def test_native_voice_unknown_uses_original_full_or_retired_proof(core, tmp_path
     proof = delivery_proof(core, capture, key, item, check, result, stopped)
     before = core.store.rows("SELECT * FROM model_usage")
     if erase:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [capture.event_id], core.clock())
     prepared = reconciliation.prepare(core.store, core.settings, proof, core.clock())
     assert prepared["state"] == "READY"

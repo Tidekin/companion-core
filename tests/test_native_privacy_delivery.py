@@ -19,7 +19,7 @@ def test_frozen_reply_privacy_revision_blocks_without_rebilling(core, tmp_path, 
             def change():
                 with Core(core.settings, clock=core.clock) as independent:
                     assert independent.store is not core.store
-                    with independent.store.transaction():
+                    with independent.store.transaction(control_write=True):
                         advance_epoch(independent.store)
 
             if boundary == "restart":

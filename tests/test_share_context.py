@@ -159,7 +159,7 @@ def test_native_new_picture_keeps_relationship_but_not_an_unrelated_sent_guess(
             owner_text = "你是我女儿，我是爸爸。另一个话题：我们一起研究采购预算。"
             old = await context.entry.admit(2, owner_text)
             await reply(core, context.entry, "我猜你晚点还会发图提醒采购预算。", [])
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.memory.add(Candidate(subject="relationship", kind="fact",
                     fact_key="family", content="你是我女儿，我是爸爸。",
                     evidence_event_id=old["event_id"], evidence_quote="你是我女儿，我是爸爸。"),

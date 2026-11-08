@@ -17,7 +17,7 @@ def test_history_replays_read_media_and_erasure_removes_it(core):
     assert [message["role"] for message in turn] == ["user", "user", "assistant"]
     # Without a store (legacy callers) history stays unchanged.
     assert len(turn_messages(source)) == 2
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert refs.replay(core.store, "evt_test_1") == []
 

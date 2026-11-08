@@ -132,7 +132,7 @@ def test_http_rem_revision_reaches_independent_native_worker(
         core.authorized_model_test_jobs = {}
     source_job = authorized_job(core, number=3 if renew_closed_history else 2)
     source = core.store.one('SELECT event_id FROM jobs WHERE job_id=%s', (source_job,))["event_id"]
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.memory.add(Candidate(subject="user", kind="fact", fact_key="private-rem-material",
             content="synthetic model boundary source",
             evidence_quote="synthetic model boundary source",

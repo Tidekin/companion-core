@@ -125,7 +125,7 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
         if failure == "source_after_dispatch":
             source_id = core.store.one("SELECT event_id FROM events WHERE source='qq.onebot'")[
                 "event_id"]
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [source_id], core.clock())
         value = {"choices": [{"message": {"content": "合成图片分析"}}]}
         if failure != "unknown_usage":
@@ -174,7 +174,7 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
                 with monkeypatch.context() as patch:
                     patch.setattr(core.ledger, "apply", crash)
                     with pytest.raises(RuntimeError):
-                        with core.store.transaction():
+                        with core.store.transaction(control_write=True):
                             core.ledger.expire_events(core.store, [event_id], core.clock())
 
             async def mutate_upload(request):

@@ -180,7 +180,7 @@ def test_native_source_erasure_keeps_revision_finance_and_blocks_new_authority(
     case.policy, case.successor = policy, active
     stop(core, case, "erase-authority-stop")
     before = core.store.rows("SELECT * FROM model_usage")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [source], core.clock())
     assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (source,)) == {
         "redacted": 1}

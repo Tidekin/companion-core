@@ -78,7 +78,7 @@ def test_segmented_life_draft_actual_http_and_independent_worker(core, tmp_path,
                     "result": "DELIVERY_UNCERTAIN" if outcome == "UNKNOWN" else "SENT"})
                 assert ack.status_code == 200, ack.text
                 if outcome == "ERASE":
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [source], core.clock())
                 if index < 2:
                     waiting = await client.post("/internal/v1/deliveries/lease", json=lease_body)
@@ -161,7 +161,7 @@ def test_native_life_result_consumed_once_over_actual_http(core, tmp_path, actio
                 if outcome == "STOP":
                     stop(core, authority)
                 elif outcome == "ERASE":
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [source], core.clock())
                 begun = await client.post(delivery_path + "/begin-send",
                                           json={"lease_token": item["lease_token"]})
@@ -252,7 +252,7 @@ def test_native_life_diary_save_over_http_preserves_original_custody(core, tmp_p
                     deleted = await client.post(diary_path + "/forget", headers=diary_headers)
                     assert deleted.status_code == 200, deleted.text
                 elif change == "erase":
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [source], core.clock())
                 elif change == "stop":
                     stop(core, authority)

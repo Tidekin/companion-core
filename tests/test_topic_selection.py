@@ -43,7 +43,7 @@ def test_interest_topics_decay_and_dislikes_drop_out(core):
 def test_erased_sources_leave_the_interest_projection(core):
     configure(core)
     event_id = judged(core, 5, ["独立游戏"], 2)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
     assert ts.interest_topics(core.store, core.clock()) == []
 

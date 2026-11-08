@@ -101,7 +101,7 @@ def test_configuration_is_versioned_encrypted_idempotent_and_requires_restart(cl
 
 def test_memory_correction_and_erasure_keep_receipts_without_private_copies(client, core):
     source = ingest(core, text="我喜欢龙井茶")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         memory_id = core.memory.add(Candidate(subject="user", kind="preference", fact_key="tea",
             content="主人喜欢龙井茶", evidence_event_id=source["event_id"],
             evidence_quote="我喜欢龙井茶"), core.clock(), confirmed=True)
