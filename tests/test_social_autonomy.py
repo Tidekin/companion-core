@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
+from companion.legacy_import import migrate_sqlite
 from companion.social_autonomy import (
     SocialAutonomy,
     erase_social_autonomy,
@@ -27,9 +28,11 @@ from companion.social_autonomy_protocol import (
     SocialAutonomyConfig,
     proposal_adapter,
 )
-from companion.store import Store, after, encode, migrate, uid
+from companion.store import Store, after, encode, uid
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.social_profile_support import confirmed_profile_material
+from tests.support.release_migration import insert, one, open_historical, rows
 from tests.support.social_autonomy import (
     avatar,
     background,
@@ -129,10 +132,10 @@ def test_public_reader_evidence_is_reused_without_copying_private_trigger_text(c
     core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_1'",
                        (encode({"text": private}),))
     module = service(core)
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     context = module.context([event_id])
     messages, allowed = module._messages(context, module.config)
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     assert context["sources"][0]["ref"] == event_id
     assert "qzone_publish" in allowed
     assert private not in encode(context) and private not in encode(messages)
@@ -255,34 +258,34 @@ def test_timeout_receipt_has_no_manufactured_native_response_hash():
 
 def test_0029_preserves_populated_outbox_and_refuses_to_drop_new_evidence(tmp_path):
     database = tmp_path / "migration.db"
-    migrate(str(database), "0028_private_files")
-    store = Store(str(database))
+    migrate_sqlite(str(database), "0028_private_files")
+    store = open_historical(database)
     try:
-        store.insert("principals", actor_id="owner", kind="owner",
+        insert(store, "principals", actor_id="owner", kind="owner",
                      created_at="2026-10-19T04:00:00+00:00")
-        store.insert("conversations", conversation_id="conv_one", platform="qq.onebot",
+        insert(store, "conversations", conversation_id="conv_one", platform="qq.onebot",
                      platform_session_key="qq:FriendMessage:10001", scope="private",
                      owner_actor_id="owner", created_at="2026-10-19T04:00:00+00:00")
-        store.insert("outbox", message_id="msg_old", conversation_id="conv_one",
+        insert(store, "outbox", message_id="msg_old", conversation_id="conv_one",
                      action_type="qq.private.reply", content_json=encode({"text": "保留"}),
                      content_sha256="a" * 64, state="SENT", delivery_key="old-delivery",
                      created_at="2026-10-19T04:00:00+00:00", updated_at="2026-10-19T04:00:00+00:00")
-        before = store.one("SELECT * FROM outbox")
-        indexes = store.rows("SELECT name FROM sqlite_master WHERE type='index' "
+        before = one(store, "SELECT * FROM outbox")
+        indexes = rows(store, "SELECT name FROM sqlite_master WHERE type='index' "
                              "AND tbl_name='outbox' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     finally:
         store.close()
-    migrate(str(database), "0029_social_autonomy")
-    store = Store(str(database))
+    migrate_sqlite(str(database), "0029_social_autonomy")
+    store = open_historical(database)
     try:
-        assert store.one("SELECT * FROM outbox") == {**before, "delivery_lane": "owner_private"}
-        assert store.rows("SELECT name FROM sqlite_master WHERE type='index' "
+        assert one(store, "SELECT * FROM outbox") == {**before, "delivery_lane": "owner_private"}
+        assert rows(store, "SELECT name FROM sqlite_master WHERE type='index' "
                           "AND tbl_name='outbox' AND name NOT LIKE 'sqlite_%' "
                           "ORDER BY name") == indexes
-        assert store.rows("PRAGMA foreign_key_check") == []
+        assert rows(store, "PRAGMA foreign_key_check") == []
         with pytest.raises(sqlite3.IntegrityError):
             store.execute("UPDATE outbox SET action_type='arbitrary.action'")
-        store.insert("social_autonomy_assets", asset_id="retained", asset_sha256="a" * 64,
+        insert(store, "social_autonomy_assets", asset_id="retained", asset_sha256="a" * 64,
                      provenance_json="{}", provenance_sha256="b" * 64,
                      created_at="2026-10-19T04:00:00+00:00", expires_at="2026-10-20T04:00:00+00:00")
     finally:
@@ -397,7 +400,7 @@ def test_two_connections_cannot_reserve_the_same_daily_publish_slot(core):
     barrier = Barrier(2)
 
     def attempt(result):
-        store = Store(core.settings.database)
+        store = Store(core.store.database, core.store.state_directory)
         other = SocialAutonomy(store, core.settings, clock=core.clock)
         try:
             barrier.wait(timeout=5)

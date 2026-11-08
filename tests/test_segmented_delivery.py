@@ -11,8 +11,10 @@ from cryptography.fernet import Fernet
 
 from companion.backup import backup, restore
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
+from companion.legacy_import import migrate_sqlite
+from companion.postgres import Database
 from companion.reply_segments import SegmentedReplyConfig
-from companion.store import Store, migrate
+from companion.store import Store
 from companion.transport import (
     begin_send,
     check_segment_ready,
@@ -24,7 +26,9 @@ from companion.transport import (
     reply_group,
 )
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.historical_schema import historical_database
+from tests.support.release_migration import one, open_historical, rows
 from tests.support.segmented_delivery import PARTS, acknowledge, freeze, lease
 
 
@@ -55,33 +59,43 @@ def test_group_is_atomic_idempotent_and_content_is_not_duplicated(core, monkeypa
     assert group["text"] == "".join(PARTS)
     assert [json.loads(row["content_json"])["text"] for row in group["rows"]] == PARTS
     assert all(set(json.loads(row["content_json"])) == {"text"} for row in group["rows"])
-    assert core.store.rows("PRAGMA foreign_key_check") == []
+    assert core.store.rows(
+        "SELECT conname FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+        "AND contype='f' AND NOT convalidated") == []
+
+
+def historical_parts(store, ids):
+    parts = rows(store, "SELECT message_id,content_json FROM outbox "
+                        "WHERE reply_group_id=(SELECT reply_group_id FROM outbox "
+                        "WHERE message_id=?) ORDER BY segment_index", (ids[0],))
+    assert [row["message_id"] for row in parts] == ids
+    return [json.loads(row["content_json"])["text"] for row in parts]
 
 
 def test_capacity_upgrade_preserves_existing_groups_indexes_and_foreign_keys(core, tmp_path):
     def index_definitions(store):
         # Batch recreation can reformat DDL without changing index semantics.
         return {row["name"]: "".join(row["sql"].split()) if row["sql"] else None
-                for row in store.rows("SELECT name,sql FROM sqlite_master WHERE type='index' "
+                for row in rows(store, "SELECT name,sql FROM sqlite_master WHERE type='index' "
                                       "AND tbl_name='outbox'")}
 
     _, ids = freeze(core)
     database = historical_database(core.store, tmp_path / "capacity.db", "0019_segmented_replies")
-    with closing(Store(database)) as store:
-        before = store.rows("SELECT * FROM outbox ORDER BY rowid")
+    with closing(open_historical(database)) as store:
+        before = rows(store, "SELECT * FROM outbox ORDER BY rowid")
         indexes = index_definitions(store)
-    migrate(database, "0020_reply_segment_capacity")
+    migrate_sqlite(database, "0020_reply_segment_capacity")
     migration = Config()
     migration.set_main_option("script_location", str(Path("migrations").resolve()))
     migration.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
-    with closing(Store(database)) as store:
-        assert store.rows("SELECT * FROM outbox ORDER BY rowid") == before
+    with closing(open_historical(database)) as store:
+        assert rows(store, "SELECT * FROM outbox ORDER BY rowid") == before
         assert index_definitions(store) == indexes
-        assert store.rows("PRAGMA foreign_key_check") == []
-        assert reply_group(store, ids[0])["text"] == "".join(PARTS)
+        assert rows(store, "PRAGMA foreign_key_check") == []
+        assert historical_parts(store, ids) == PARTS
     command.downgrade(migration, "0019_segmented_replies")
-    with closing(Store(database)) as store:
-        assert store.rows("SELECT * FROM outbox ORDER BY rowid") == before
+    with closing(open_historical(database)) as store:
+        assert rows(store, "SELECT * FROM outbox ORDER BY rowid") == before
     ingest(core, 2)
     job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
                          "WHERE j.event_id='evt_test_2'")
@@ -94,9 +108,9 @@ def test_capacity_upgrade_preserves_existing_groups_indexes_and_foreign_keys(cor
         RuntimeError, match="REPLY_CAPACITY_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW",
     ):
         command.downgrade(migration, "0019_segmented_replies")
-    with closing(Store(expanded_database)) as store:
-        assert reply_group(store, expanded[0])["text"] == "".join(PARTS + PARTS[:2])
-        assert store.rows("PRAGMA foreign_key_check") == []
+    with closing(open_historical(expanded_database)) as store:
+        assert historical_parts(store, expanded) == PARTS + PARTS[:2]
+        assert rows(store, "PRAGMA foreign_key_check") == []
 
 
 def test_two_workers_cannot_lease_later_parts_and_ack_starts_the_gap(core):
@@ -244,7 +258,7 @@ def test_corrupt_group_cannot_be_leased_or_sent(core, mutation):
             "manifest": ("reply_group_sha256", "0" * 64),
             "interval": ("segment_interval_ms", 0),
         }[mutation]
-        core.store.execute(f"UPDATE outbox SET {field}=? WHERE message_id=?", (value, ids[1]))
+        core.store.execute(f"UPDATE outbox SET {field}=%s WHERE message_id=%s", (value, ids[1]))
     with pytest.raises(CoreError, match="REPLY_GROUP"):
         check_segment_ready(core.store, ids[0], core.clock())
     with pytest.raises(CoreError, match="REPLY_GROUP"):
@@ -283,26 +297,32 @@ def test_new_input_accepted_during_generation_prevents_stale_segment_group(core)
     }
 
 
-def test_all_parts_are_erased_and_old_encrypted_backup_cannot_restore_them(core, tmp_path):
+def test_all_parts_are_erased_and_old_encrypted_backup_cannot_restore_them(
+    core, tmp_path, empty_database
+):
     job, ids = freeze(core)
     acknowledge(core, lease(core)[0])
     core.clock.advance(1.5)
     second = lease(core)[0]
     begin_send(core.store, ids[1], second["lease_token"], core.clock(), core.settings)
-    archive, restored_path = tmp_path / "before-erasure.enc", tmp_path / "restored.db"
+    archive, restored_path = tmp_path / "before-erasure.enc", empty_database
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     assert PARTS[0].encode() not in archive.read_bytes()
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
-    with closing(Store(str(restored_path))) as restored:
+    restore(archive, restored_path, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with (
+        Database(restored_path) as database,
+        closing(Store(database, tmp_path / "restored-state")) as restored,
+    ):
         for store in (core.store, restored):
             rows = store.rows("SELECT * FROM outbox ORDER BY segment_index")
             assert [row["message_id"] for row in rows] == ids
             assert [row["state"] for row in rows] == ["SENT", "DELIVERY_UNCERTAIN", "CANCELLED"]
             assert all(row["content_json"] == "{}" and row["content_sha256"] == "" for row in rows)
-            assert store.one("SELECT body_json,redacted FROM events WHERE event_id=?", (
+            assert store.one("SELECT body_json,redacted FROM events WHERE event_id=%s", (
                 job["event_id"],
             )) == {"body_json": "{}", "redacted": 1}
             with pytest.raises(CoreError, match="REPLY_GROUP_CHANGED"):
@@ -310,8 +330,14 @@ def test_all_parts_are_erased_and_old_encrypted_backup_cannot_restore_them(core,
             assert lease_deliveries(store, core.settings, LeaseRequest(
                 worker_id="restored-test", limit=5,
             ), core.clock())["items"] == []
-            assert store.rows("PRAGMA foreign_key_check") == []
-    assert all(part.encode() not in restored_path.read_bytes() for part in PARTS)
+            assert not store.rows(
+                "SELECT conname FROM pg_constraint "
+                "WHERE connamespace=current_schema()::regnamespace "
+                "AND contype='f' AND NOT convalidated"
+            )
+        assert all(
+            part not in json.dumps(logical_state(restored), ensure_ascii=False) for part in PARTS
+        )
 
 
 def test_downgrade_refuses_to_discard_existing_segment_group(core, tmp_path):
@@ -321,13 +347,13 @@ def test_downgrade_refuses_to_discard_existing_segment_group(core, tmp_path):
     config.set_main_option(
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
     config.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
-    with closing(Store(database)) as store:
-        before = store.rows("SELECT * FROM outbox ORDER BY rowid")
+    with closing(open_historical(database)) as store:
+        before = rows(store, "SELECT * FROM outbox ORDER BY rowid")
     with pytest.raises(RuntimeError, match="SEGMENTED_REPLIES_DOWNGRADE_REQUIRES_EXPLICIT_REVIEW"):
         command.downgrade(config, "0018_reflection_goal_lineage")
-    with closing(Store(database)) as store:
-        assert store.rows("SELECT * FROM outbox ORDER BY rowid") == before
-        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == (
+    with closing(open_historical(database)) as store:
+        assert rows(store, "SELECT * FROM outbox ORDER BY rowid") == before
+        assert one(store, "SELECT version_num FROM alembic_version")["version_num"] == (
             "0019_segmented_replies")
-        assert reply_group(store, ids[0])["text"] == "".join(PARTS)
-        assert not store.rows("PRAGMA foreign_key_check")
+        assert historical_parts(store, ids) == PARTS
+        assert not rows(store, "PRAGMA foreign_key_check")

@@ -13,9 +13,9 @@ from pydantic import SecretStr, ValidationError
 
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
+from companion.legacy_import import migrate_sqlite
 from companion.reading_protocol import ReadObservation
 from companion.source_grants import SourceGrantSnapshot
-from companion.store import Store, migrate
 from source_reader.accounts import source_grant
 from source_reader.bili_tools import BilibiliAccountHTTP, BilibiliToolReader
 from source_reader.bilibili import BilibiliReader
@@ -29,6 +29,7 @@ from tests.support.exploration import configure
 from tests.support.heybox_reader import mock_pool
 from tests.support.next_reading_worker import lease
 from tests.support.plugin_readonly import SECRET, grant, registered_grant
+from tests.support.release_migration import insert, open_historical, rows
 from tests.support.source_reader import NOW, response
 
 NOW_DT = datetime.fromisoformat(NOW)
@@ -278,16 +279,27 @@ def test_core_binds_discovery_evidence_to_original_request_and_rejects_late_conf
 
 def test_migration_preserves_prior_discovery_source_and_query(tmp_path):
     path = tmp_path / "discovery.sqlite3"
-    migrate(path, "0057_expression_configuration")
-    with closing(Store(path)) as store:
+    migrate_sqlite(path, "0057_expression_configuration")
+    with closing(open_historical(path)) as store:
         for key, query in (("popular", None), ("search", "恒星光谱")):
-            store.insert("exploration_requests", request_id=key, request_key=key, adapter_id="bili",
-                operation="discover", query=query, url="", state="QUEUED", captured_privacy_epoch=0,
-                created_at=NOW, updated_at=NOW)
-        before = store.rows("SELECT * FROM exploration_requests ORDER BY request_id")
-    migrate(path)
-    migrate(path)
-    with closing(Store(path)) as store:
-        after = store.rows("SELECT * FROM exploration_requests ORDER BY request_id")
+            insert(
+                store,
+                "exploration_requests",
+                request_id=key,
+                request_key=key,
+                adapter_id="bili",
+                operation="discover",
+                query=query,
+                url="",
+                state="QUEUED",
+                captured_privacy_epoch=0,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        before = rows(store, "SELECT * FROM exploration_requests ORDER BY request_id")
+    migrate_sqlite(path)
+    migrate_sqlite(path)
+    with closing(open_historical(path)) as store:
+        after = rows(store, "SELECT * FROM exploration_requests ORDER BY request_id")
         assert all(row["discovery_mode"] == "default" for row in after)
         assert [{k: v for k, v in row.items() if k != "discovery_mode"} for row in after] == before
