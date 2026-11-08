@@ -537,7 +537,7 @@ def test_forged_native_outbox_fields_cannot_pass_final_dispatch(core, column, va
     with core.store.transaction():
         core.store.execute("UPDATE outbox SET state='LEASED',lease_token=%s,lease_until=%s",
                            (token, after(core.clock(), 60)))
-        core.store.execute("UPDATE outbox SET " + column + "=?", (value,))
+        core.store.execute("UPDATE outbox SET " + column + "=%s", (value,))
     with pytest.raises(CoreError, match="SOCIAL_DELIVERY_CHANGED"):
         with core.store.transaction():
             module.validate_delivery(frozen.message_id, token)

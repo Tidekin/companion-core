@@ -8,6 +8,7 @@ from cryptography.fernet import Fernet
 
 from companion import meme_assets
 from companion.backup import backup, restore
+from companion.postgres import Database
 from companion.store import Store
 from tests.conftest import run
 from tests.support.meme_core import worker
@@ -66,7 +67,7 @@ def test_identical_bytes_distinct_sources_count_both_blobs_and_reuse_one_origina
 
 @pytest.mark.parametrize("responsibility", ["SETTLED", "UNKNOWN"])
 def test_native_old_backup_replays_newest_erasure_without_rewriting_accounting(
-    core, tmp_path, monkeypatch, responsibility
+    core, tmp_path, monkeypatch, responsibility, empty_database,
 ):
     async def scenario():
         async with native_case(core, tmp_path, monkeypatch) as c:
@@ -85,10 +86,10 @@ def test_native_old_backup_replays_newest_erasure_without_rewriting_accounting(
             original = {t: core.store.rows("SELECT * FROM " + t) for t in tables}
             assert original["model_usage"][0]["state"] == responsibility
             links = core.store.rows("SELECT * FROM meme_asset_sources")
-            archive, restored = tmp_path / "native.enc", tmp_path / "restored.sqlite3"
+            archive, restored = tmp_path / "native.enc", empty_database
             key = Fernet.generate_key()
             backup(core.settings.database, archive, key)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [c.event["event_id"]], core.clock())
             ledger = core.ledger.path.read_bytes()
 
@@ -103,8 +104,12 @@ def test_native_old_backup_replays_newest_erasure_without_rewriting_accounting(
                 assert {t: store.rows("SELECT * FROM " + t) for t in tables} == original
 
             erased(core.store)
-            restore(archive, restored, key, core.settings.erasure_ledger)
-            with closing(Store(str(restored))) as store:
+            restore(archive, restored, key, core.settings.erasure_ledger,
+                    state_directory=tmp_path / "restored-state")
+            with (
+                Database(restored) as database,
+                closing(Store(database, tmp_path / "restored-state")) as store,
+            ):
                 erased(store)
                 core.ledger.replay(store)
                 erased(store)

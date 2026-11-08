@@ -98,7 +98,7 @@ async def image_memory_window(
                 event_id = core.store.one(
                     "SELECT owner_event_id FROM content_items",
                 )["owner_event_id"]
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event_id], core.clock())
         else:
             content = reply or (
@@ -154,7 +154,7 @@ def test_originals_and_image_topic_retrieval_share_paid_job_and_verified_reply(
     async def scenario():
         async with native_image_memory(core, tmp_path, no_candidates=no_candidates) as value:
             assert not value.calls and len(value.downloads) == 2
-            reopened = Store(core.store.path)
+            reopened = Store(core.store.database, core.store.state_directory)
             try:
                 rows = reopened.rows("SELECT * FROM content_items WHERE kind='qq_image' "
                                      "ORDER BY slot")

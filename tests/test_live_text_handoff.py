@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import sqlite3
 from contextlib import closing
 from pathlib import Path
 
@@ -12,9 +11,11 @@ from cryptography.fernet import Fernet
 from companion import live_text, ops_status, paid_budget
 from companion.backup import backup, restore
 from companion.contracts import CoreError
+from companion.postgres import Database
 from companion.privacy import epoch
 from companion.store import Store, encode
 from tests.conftest import event, run
+from tests.postgres_fixture import copy_database, logical_state
 from tests.support.live_text_handoff import (
     bridge_receipt,
     configure,
@@ -118,7 +119,7 @@ def test_fsync_then_db_failure_never_reopens_or_replenishes(core, tmp_path, monk
         if stage == "handoff"
         else live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))
     )
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     original = live_text._put
 
     def fail_after_fsync(store, key, value):
@@ -134,25 +135,24 @@ def test_fsync_then_db_failure_never_reopens_or_replenishes(core, tmp_path, monk
             live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))
         else:
             open_successor(core, new, prepared)
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert not live_text.status(core.store, core.settings, core.clock)["approved"]
     with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
         live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))
     assert core.model.calls == []
 
 
-def test_zero_call_old_database_and_missing_lifecycle_are_rejected(core, tmp_path):
+def test_zero_call_old_database_and_missing_lifecycle_are_rejected(core, tmp_path, empty_database):
     initial(core, tmp_path)
     _, new = stop_and_successor(core, tmp_path)
-    with closing(sqlite3.connect(tmp_path / "synthetic-old.db")) as old_db:
-        core.store.db.backup(old_db)
-        prepared = live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))
-        assert open_successor(core, new, prepared)["approved"]
-        old_db.backup(core.store.db)
-    assert (
-        live_text.status(core.store, core.settings, core.clock)["code"]
-        == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
-    )
+    copy_database(core.settings.database, empty_database, tmp_path)
+    prepared = live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))
+    assert open_successor(core, new, prepared)["approved"]
+    with Database(empty_database) as db, closing(Store(db, core.store.state_directory)) as prior:
+        assert (
+            live_text.status(prior, core.settings, core.clock)["code"]
+            == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
+        )
     assert core.model.calls == []
 
 
@@ -285,12 +285,12 @@ def test_handoff_refuses_unresolved_or_changed_custody_without_writing_journal(
         )
     else:
         core.store.execute("UPDATE runtime_meta SET value='10009' WHERE key='owner_qq_id'")
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     journal = Path(core.settings.paid_model.journal_path)
     original = journal.read_bytes()
     with pytest.raises(CoreError):
         live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))
-    assert list(core.store.db.iterdump()) == before and journal.read_bytes() == original
+    assert logical_state(core.store) == before and journal.read_bytes() == original
     assert core.model.calls == []
 
 
@@ -357,7 +357,7 @@ def test_old_approved_inputs_do_not_consume_or_authorize_successor_inputs(core, 
 def test_zero_call_restore_cannot_keep_authority_at_the_same_logical_config_path(
     core,
     tmp_path,
-    phase,
+    phase, empty_database,
 ):
     approval = initial(core, tmp_path)
     prepared = None
@@ -368,11 +368,14 @@ def test_zero_call_restore_cannot_keep_authority_at_the_same_logical_config_path
         )
     assert core.store.rows("SELECT * FROM model_admissions") == []
     key = Fernet.generate_key()
-    archive, destination = tmp_path / "synthetic.enc", tmp_path / "restored.db"
+    archive, destination = tmp_path / "synthetic.enc", empty_database
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    restored = Store(destination)
-    try:
+    restore(archive, destination, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with (
+        Database(destination) as database,
+        closing(Store(database, tmp_path / "restored-state")) as restored,
+    ):
         # A fresh volume can appear at the original container's same /data path.
         # Keep the approved logical settings and inspect the restored durable state.
         assert not live_text.status(restored, core.settings, core.clock)["approved"]
@@ -388,6 +391,4 @@ def test_zero_call_restore_cannot_keep_authority_at_the_same_logical_config_path
                     ),
                 )
         assert restored.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_restore_required'")
-    finally:
-        restored.close()
     assert core.model.calls == []

@@ -6,6 +6,7 @@ import json
 import httpx
 
 from companion.core import Core
+from companion.postgres import Database
 from companion_meme_protocol import digest
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
@@ -135,7 +136,7 @@ def test_root_erasure_refuses_asset_under_old_lease_and_preserves_fees(runtime_c
                 path = "/internal/v1/memes/deliveries/" + item["message_id"] + "/asset"
                 assert (await client.post(path, json=body)).status_code == 200
                 usage = c.core.store.rows("SELECT * FROM model_usage")
-                with c.core.store.transaction():
+                with c.core.store.transaction(control_write=True):
                     c.core.ledger.expire_events(
                         c.core.store, [c.source["event_id"]], c.core.clock()
                     )
@@ -148,7 +149,7 @@ def test_root_erasure_refuses_asset_under_old_lease_and_preserves_fees(runtime_c
 
 
 def test_old_frozen_delivery_backup_replays_newest_ledger_before_any_asset_read(
-    runtime_case, tmp_path
+    runtime_case, tmp_path, empty_database,
 ):
     from contextlib import closing
 
@@ -160,7 +161,7 @@ def test_old_frozen_delivery_backup_replays_newest_ledger_before_any_asset_read(
     from companion.store import Store
 
     c = runtime_case
-    archive, restored = tmp_path / "frozen.enc", tmp_path / "restored.db"
+    archive, restored = tmp_path / "frozen.enc", empty_database
     key = Fernet.generate_key()
 
     async def scenario():
@@ -179,29 +180,34 @@ def test_old_frozen_delivery_backup_replays_newest_ledger_before_any_asset_read(
                 assert (await client.post(path, json=body)).status_code == 200
                 before = c.core.store.rows("SELECT * FROM model_usage")
                 backup(c.core.settings.database, archive, key)
-                with c.core.store.transaction():
+                with c.core.store.transaction(control_write=True):
                     c.core.ledger.expire_events(
                         c.core.store, [c.source["event_id"]], c.core.clock()
                     )
-                restore(archive, restored, key, c.core.settings.erasure_ledger)
-                with closing(Store(str(restored))) as store:
+                restore(archive, restored, key, c.core.settings.erasure_ledger,
+                        state_directory=tmp_path / "restored-state")
+                with (
+                    Database(restored) as database,
+                    closing(Store(database, tmp_path / "restored-state")) as store,
+                ):
                     asset = store.one("SELECT * FROM meme_assets")
                     assert (
                         asset["state"] == "ERASED"
                         and asset["data"] is asset["metadata_json"] is None
                     )
                     assert not store.one(
-                        "SELECT 1 FROM runtime_meta WHERE key=?",
+                        "SELECT 1 FROM runtime_meta WHERE key=%s",
                         ("meme_offer:" + c.job["event_id"],),
                     )
                     assert (
                         store.one(
-                            "SELECT state FROM outbox WHERE message_id=?", (item["message_id"],)
+                            "SELECT state FROM outbox WHERE message_id=%s", (item["message_id"],)
                         )["state"]
                         == "CANCELLED"
                     )
                     assert store.rows("SELECT * FROM model_usage") == before
-                    settings = c.core.settings.model_copy(update={"database": str(restored)})
+                    settings = c.core.settings.model_copy(update={"database": restored,
+            "state_directory": str(tmp_path / "restored-state")})
                     import pytest
 
                     with pytest.raises(CoreError):

@@ -14,6 +14,7 @@ from companion.model import ModelResponse
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import Store
 from tests.conftest import ingest
+from tests.postgres_fixture import logical_state
 from tests.support.owner_console import PASSWORD, client, login  # noqa: F401
 from tests.support.owner_input import captured
 from tests.support.runtime_configuration import hot as hot
@@ -119,7 +120,7 @@ def test_workers_switch_independently_and_idle_observation_does_not_write(hot):
 
     # Store is deliberately owned/closed by each independent connection.
     def run(kind):
-        store = Store(hot.settings.database)
+        store = Store(hot.store.database, hot.store.state_directory)
         try:
             return runtime_config.boundary(store, hot.settings, hot.clock, worker=kind)
         finally:
@@ -133,10 +134,10 @@ def test_workers_switch_independently_and_idle_observation_does_not_write(hot):
     assert {w["worker"]: w["active_version"] for w in view["workers"]} == {
         "worker": 0, "life-worker": 1, "content-worker": 1}
     runtime_config.boundary(hot.store, hot.settings, hot.clock)
-    changes = hot.store.db.total_changes
+    changes = logical_state(hot.store)
     hot.clock.advance(60)
     runtime_config.boundary(hot.store, hot.settings, hot.clock)
-    assert hot.store.db.total_changes == changes
+    assert logical_state(hot.store) == changes
     assert not operator_config.view(hot.store, hot.settings)["pending_reload"]
 
 

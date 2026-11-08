@@ -12,6 +12,7 @@ from companion import meme_service
 from companion.backup import backup, restore
 from companion.core import Core
 from companion.model import EXTRACT_RULES, ModelClient
+from companion.postgres import Database
 from companion.store import Store
 from tests.conftest import run
 from tests.meme_authority_fixture import admit
@@ -19,7 +20,7 @@ from tests.support.meme_service import claim, discovery_environment, reservation
 
 
 def test_restored_discovery_reservation_cannot_refund_unknown_post_snapshot_io(
-    core, tmp_path, monkeypatch,
+    core, tmp_path, monkeypatch, empty_database,
 ):
     async def prepare():
         async with discovery_environment(core, tmp_path, monkeypatch) as (event, _, _):
@@ -29,12 +30,16 @@ def test_restored_discovery_reservation_cannot_refund_unknown_post_snapshot_io(
             return item
 
     item = run(prepare())
-    archive, restored_path = tmp_path / "reserved.enc", tmp_path / "restored.sqlite3"
+    archive, restored_path = tmp_path / "reserved.enc", empty_database
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     assert result(core, item, "UNKNOWN")["state"] == "UNKNOWN"
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
-    with closing(Store(str(restored_path))) as restored:
+    restore(archive, restored_path, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with (
+        Database(restored_path) as database,
+        closing(Store(database, tmp_path / "restored-state")) as restored,
+    ):
         assert restored.one(
             "SELECT 1 FROM runtime_meta WHERE key='cloud_budget_restore_required'",
         )

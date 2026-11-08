@@ -55,8 +55,8 @@ def test_idle_node_preserves_selected_audio_for_safe_native_delivery_retry(
     original = core.store.one("SELECT * FROM voice_jobs")
     model_usage = core.store.rows("SELECT * FROM model_usage")
     charges = core.store.rows("SELECT * FROM cloud_cost_snapshots")
-    with closing(Store(core.settings.database)) as other_store:
-        assert other_store.db is not core.store.db
+    with closing(Store(core.store.database, core.store.state_directory)) as other_store:
+        assert other_store.backend_pid != core.store.backend_pid
         idle = VoiceJobs(other_store, core.settings, core.clock)
         assert claim(idle)[1].lease is None
     assert core.store.one("SELECT * FROM voice_jobs") == original

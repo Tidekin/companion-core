@@ -89,7 +89,7 @@ def test_new_source_requires_both_bindings_and_probability_is_stable(core):
         ImageIntent(category="happy", candidate_id="a" * 64, offer_key="meme:evt_test_1")
     engine = expression(core, probability=0.35)
     selected = engine.intent("evt_test_1", "完整文字。⬡" + "a" * 64 + "⬡").image
-    with closing(Store(core.settings.database)) as reopened:
+    with closing(Store(core.store.database, core.store.state_directory)) as reopened:
         restarted = ExpressionEngine(reopened, engine.settings, core.clock)
         assert restarted.intent("evt_test_1", "完整文字。⬡" + "a" * 64 + "⬡").image == selected
 
@@ -167,7 +167,7 @@ def test_expired_reserved_lease_survives_restart_as_unknown_without_replay(
             item = claim(core)
             reservation(core, item)
             core.clock.advance(core.settings.lease_seconds + 1)
-            reopened = Store(core.settings.database)
+            reopened = Store(core.store.database, core.store.state_directory)
             try:
                 meme_service.recover(reopened, core.settings, core.clock())
                 assert reopened.one("SELECT state FROM meme_discovery_reservations") == {

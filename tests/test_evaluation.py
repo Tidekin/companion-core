@@ -218,20 +218,24 @@ def test_expired_lease_keeps_unknown_in_original_journal(core, tmp_path):
                             initialize=False)
 
 
-def test_erasure_and_old_backup_replay_remove_inputs_results_keep_cost(core, tmp_path):
+def test_erasure_and_old_backup_replay_remove_inputs_results_keep_cost(
+    core, tmp_path, empty_database
+):
     manifest = prepare(core, tmp_path)
     submitted = evaluation.submit(core, authorize(core, manifest))
     work(core)
-    archived, restored = tmp_path / "old.bin", tmp_path / "restored.sqlite3"
+    archived, restored = tmp_path / "old.bin", empty_database
     key = Fernet.generate_key()
     backup(core.settings.database, archived, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, manifest.source_event_ids, core.clock())
     assert core.store.one("SELECT manifest_json FROM evaluation_runs")["manifest_json"] == "{}"
     assert core.store.rows("SELECT * FROM evaluation_results") == []
     assert core.store.one("SELECT SUM(billed_micro_usd) n FROM model_usage")["n"] == 72
-    restore(archived, restored, key, core.settings.erasure_ledger)
-    restored_settings = core.settings.model_copy(update={"database": str(restored)})
+    restore(archived, restored, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    restored_settings = core.settings.model_copy(update={"database": restored,
+            "state_directory": str(tmp_path / "restored-state")})
     with Runtime(restored_settings, core.clock) as runtime:
         assert runtime.store.one("SELECT redacted FROM evaluation_runs")["redacted"] == 1
         assert runtime.store.rows("SELECT * FROM evaluation_results") == []

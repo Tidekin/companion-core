@@ -11,9 +11,11 @@ from companion.contracts import CoreError
 from companion.life_context import decision_context
 from companion.memory import Memory
 from companion.mood import RESET_KEY, MoodService, reset_record, validate_reset_record
+from companion.postgres import Database
 from companion.store import Store, encode
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.cognition_goal_steps import finish_record, retained_plan
 from tests.support.consolidation import enable_nightly
 from tests.support.diary import generate
@@ -108,13 +110,13 @@ def test_feedback_requires_actual_private_interaction_and_live_ancestry(core, da
 def test_snapshot_is_readonly_rebuilds_across_day_and_checks_pinned_sources(core):
     key = feedback(core)
     view = core.mood.snapshot()
-    changes = core.store.db.total_changes
+    changes = logical_state(core.store)
     core.clock.advance(29 * 3600)
     core.mood.revalidate(view)  # a frozen prompt remains valid as time advances
     current = core.mood.snapshot()
     assert current["expression"] != view["expression"]
-    assert core.store.db.total_changes == changes and core.model.calls == []
-    with closing(Store(core.settings.database)) as reopened:
+    assert logical_state(core.store) == changes and core.model.calls == []
+    with closing(Store(core.store.database, core.store.state_directory)) as reopened:
         assert (
             MoodService(Memory(reopened, core.settings, core.ledger), core.clock).snapshot()
             == current
@@ -178,11 +180,13 @@ def test_uncertain_new_reply_cannot_retarget_feedback_to_an_older_sent_reply(cor
 
 
 @pytest.mark.parametrize("action", ["forget", "clear"])
-def test_latest_ledger_blocks_old_backup_and_recompute_cannot_undo_clear(core, tmp_path, action):
+def test_latest_ledger_blocks_old_backup_and_recompute_cannot_undo_clear(
+    core, tmp_path, action, empty_database
+):
     key = feedback(core)
     archive, restored, secret = (
         tmp_path / "before.enc",
-        tmp_path / "restored.db",
+        empty_database,
         Fernet.generate_key(),
     )
     backup(core.settings.database, archive, secret)
@@ -190,13 +194,17 @@ def test_latest_ledger_blocks_old_backup_and_recompute_cannot_undo_clear(core, t
         erase(core, [key])
     else:
         core.mood.control("clear", core.settings.owner_qq_id, request_id="clear-once")
-    restore(archive, restored, secret, core.settings.erasure_ledger)
-    with closing(Store(str(restored))) as store:
+    restore(archive, restored, secret, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with (
+        Database(restored) as database,
+        closing(Store(database, tmp_path / "restored-state")) as store,
+    ):
         service = MoodService(Memory(store, core.settings, core.ledger), core.clock)
         assert service.snapshot()["signals"] == []
         assert service.control("recompute", core.settings.owner_qq_id)["mood"]["signals"] == []
         if action == "clear":
-            assert store.one("SELECT value FROM runtime_meta WHERE key=?", (RESET_KEY,))
+            assert store.one("SELECT value FROM runtime_meta WHERE key=%s", (RESET_KEY,))
 
 
 def test_pause_clear_new_sources_and_affect_are_independent(core):

@@ -27,18 +27,21 @@ def test_idle_projection_does_not_block_an_independent_writer(core, monkeypatch)
         return sources(topic_id)
 
     monkeypatch.setattr(core.life_topics, "sources", inspect_source)
-    with closing(Store(core.settings.database)) as writer, ThreadPoolExecutor(1) as executor:
-        writer.execute("PRAGMA busy_timeout=50")
+    with (
+        closing(Store(core.store.database, core.store.state_directory)) as writer,
+        ThreadPoolExecutor(1) as executor,
+    ):
+        writer.execute("SET lock_timeout='50ms'")
         projection = executor.submit(core.life_topics.synchronize)
         try:
             assert entered.wait(10), "Life did not reach the idle source inspection"
             with writer.transaction():
-                writer.execute("INSERT INTO runtime_meta VALUES (?,?)",
+                writer.execute("INSERT INTO runtime_meta VALUES (%s,%s)",
                                ("independent_chat_write", "committed"))
         finally:
             release.set()
             projection.result(timeout=10)
-        assert writer.one("SELECT value FROM runtime_meta WHERE key=?",
+        assert writer.one("SELECT value FROM runtime_meta WHERE key=%s",
                           ("independent_chat_write",))["value"] == "committed"
 
 
