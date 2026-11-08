@@ -220,15 +220,19 @@ class Session:
             if readonly and settings["readonly"] != "on":
                 raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
             timeout_ms = min(timeout_ms, settings["timeout"] or timeout_ms)
-            self.execute("SELECT set_config('statement_timeout',%s,true)", (f"{timeout_ms}ms",))
             with self._connection.cursor() as cursor:
-                self._execute(cursor, sql.SQL(
-                    "SELECT * FROM ({}) AS bounded_result LIMIT %s").format(
-                    statement if isinstance(statement, sql.Composable) else sql.SQL(statement)),
-                    (*parameters, limit), timeout_ms=timeout_ms)
+                # Ordered native commands share one round trip. A failed SELECT
+                # aborts this pipeline; the enclosing savepoint restores its settings.
+                with self._connection.pipeline():
+                    self.execute("SELECT set_config('statement_timeout',%s,true)",
+                                 (f"{timeout_ms}ms",))
+                    self._execute(cursor, sql.SQL(
+                        "SELECT * FROM ({}) AS bounded_result LIMIT %s").format(
+                        statement if isinstance(statement, sql.Composable) else sql.SQL(statement)),
+                        (*parameters, limit), timeout_ms=timeout_ms)
+                    self.execute("SELECT set_config('statement_timeout',%s,true)",
+                                 (f"{settings['timeout']}ms",))
                 result = cursor.fetchmany(limit)
-            self.execute("SELECT set_config('statement_timeout',%s,true)",
-                         (f"{settings['timeout']}ms",))
             return result
 
     @contextmanager
