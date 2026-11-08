@@ -33,8 +33,12 @@ Each tool requires its current purpose on the original owner-authorized job.
     if not isinstance(snapshots, list):
         raise TypeError("context snapshots must be a shared list")
 
-    def check(purpose="chat"):
+    def check(purpose="chat", *, also=()):
+        if not core.store.in_transaction:
+            return core.store.read_or_write(lambda: check(purpose, also=also))
         view = check_conversation(core, job, snapshots, purpose=purpose)
+        if any(required not in view.policy.purposes for required in also):
+            raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
         if (not reply_revision.owner_input(core.store, job["event_id"])
             or not core.store.one(
                 "SELECT 1 FROM conversations WHERE conversation_id = %s AND scope = 'private' AND "
@@ -128,6 +132,9 @@ Each tool requires its current purpose on the original owner-authorized job.
         from companion.memory_authority import sources_allowed
         from companion.memory_context import MemorySources
 
+        ids = tuple(ids)
+        if not ids:
+            return True
         sources = MemorySources(core.memory, core.clock(), bounded=True)
         try:
             lineage = sources.lineages(ids)
@@ -145,9 +152,8 @@ Each tool requires its current purpose on the original owner-authorized job.
         policy = check("memory").policy
         if "history" not in policy.purposes or not turn_recall.enabled(core.settings, query):
             return None
-        check("history")
         ranking = await turn_recall.prefetch(core.store, core.settings, job, query)
-        policy = check("history").policy
+        policy = check("memory", also=("history",)).policy
         if not ranking:
             return None
         def collect():
@@ -168,8 +174,7 @@ Each tool requires its current purpose on the original owner-authorized job.
         snapshot = {"kind": "memory", "proof": proof}
         if snapshot not in snapshots:
             snapshots.append(snapshot)
-        check("memory")
-        check("history")
+        check("memory", also=("history",))
         return result["data"]
 
     async def memory_recall(query: Annotated[str, Field(min_length=1, max_length=2000)]) -> dict:
