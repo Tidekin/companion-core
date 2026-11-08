@@ -194,7 +194,7 @@ def source(
 
 
 def _checked_source(store, settings, view, event_id, now, *, allow_commands=False, history=False,
-                    purpose="chat"):
+                    purpose="chat", _loaded=None):
     """Use the caller's freshly checked view within this synchronous transaction."""
     if not store.in_transaction:
         raise RuntimeError("OWNER_SOURCE_CHECKED_TRANSACTION_REQUIRED")
@@ -223,36 +223,43 @@ def _checked_source(store, settings, view, event_id, now, *, allow_commands=Fals
         allow_commands=allow_commands,
         history=history,
         verify_capture=lambda value: _verify(store, settings, value, evidence),
+        _loaded=_loaded,
     )
 
 
+_SOURCE_SQL = (
+    "SELECT e.event_id AS event_id, e.schema_version AS "
+    "schema_version, e.source AS source, e.source_event_id AS "
+    "source_event_id, e.conversation_id AS conversation_id, "
+    "e.actor_id AS actor_id, e.event_type AS event_type, "
+    "e.occurred_at AS occurred_at, e.ingested_at AS ingested_at, "
+    "e.privacy_scope AS privacy_scope, e.body_json AS body_json, "
+    "e.trace_id AS trace_id, e.idempotency_key AS "
+    "idempotency_key, e.fingerprint AS fingerprint, e.redacted AS"
+    " redacted, e.memory_processed AS memory_processed, "
+    "e.reply_revision AS reply_revision, c.scope AS scope, "
+    "c.owner_actor_id AS owner_actor_id, receipt.value AS capture_receipt, "
+    "privacy.value AS source_epoch, bindings.jobs AS source_jobs "
+    "FROM (VALUES (%s::text)) AS target(event_id) "
+    "LEFT JOIN events AS e ON e.event_id=target.event_id "
+    "LEFT JOIN conversations AS c ON e.conversation_id=c.conversation_id "
+    "LEFT JOIN runtime_meta AS receipt ON receipt.key='owner_input:'||target.event_id "
+    "LEFT JOIN runtime_meta AS privacy ON privacy.key='privacy_epoch' "
+    "LEFT JOIN LATERAL (SELECT jsonb_agg(bound) AS jobs FROM ("
+    "SELECT job_id,event_id,kind,state,idempotency_key,attempts,max_attempts,"
+    "lease_owner,lease_until,next_attempt_at,last_error_code,created_at,updated_at,"
+    "lease_token,context_tracked,authority_json FROM jobs "
+    "WHERE event_id=target.event_id AND kind='chat') AS bound) AS bindings ON true"
+)
+
+
 def _source(
-    store, settings, view, event_id, now, *, allow_commands=False, history=False, verify_capture
+    store, settings, view, event_id, now, *, allow_commands=False, history=False, verify_capture,
+    _loaded=None,
 ):
-    loaded = store.one(
+    loaded = dict(_loaded) if _loaded is not None else store.one(
         (
-            "SELECT e.event_id AS event_id, e.schema_version AS "
-            "schema_version, e.source AS source, e.source_event_id AS "
-            "source_event_id, e.conversation_id AS conversation_id, "
-            "e.actor_id AS actor_id, e.event_type AS event_type, "
-            "e.occurred_at AS occurred_at, e.ingested_at AS ingested_at, "
-            "e.privacy_scope AS privacy_scope, e.body_json AS body_json, "
-            "e.trace_id AS trace_id, e.idempotency_key AS "
-            "idempotency_key, e.fingerprint AS fingerprint, e.redacted AS"
-            " redacted, e.memory_processed AS memory_processed, "
-            "e.reply_revision AS reply_revision, c.scope AS scope, "
-            "c.owner_actor_id AS owner_actor_id, receipt.value AS capture_receipt, "
-            "privacy.value AS source_epoch, bindings.jobs AS source_jobs "
-            "FROM (VALUES (%s::text)) AS target(event_id) "
-            "LEFT JOIN events AS e ON e.event_id=target.event_id "
-            "LEFT JOIN conversations AS c ON e.conversation_id=c.conversation_id "
-            "LEFT JOIN runtime_meta AS receipt ON receipt.key='owner_input:'||target.event_id "
-            "LEFT JOIN runtime_meta AS privacy ON privacy.key='privacy_epoch' "
-            "LEFT JOIN LATERAL (SELECT jsonb_agg(bound) AS jobs FROM ("
-            "SELECT job_id,event_id,kind,state,idempotency_key,attempts,max_attempts,"
-            "lease_owner,lease_until,next_attempt_at,last_error_code,created_at,updated_at,"
-            "lease_token,context_tracked,authority_json FROM jobs "
-            "WHERE event_id=target.event_id AND kind='chat') AS bound) AS bindings ON true"
+            _SOURCE_SQL
         ),
         (event_id,),
     )

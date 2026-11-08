@@ -8,7 +8,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from companion_voice_node import (
+from companion_voice_node.providers import (
     FasterWhisperConfig,
     FasterWhisperProvider,
     GPTSoVITSConfig,

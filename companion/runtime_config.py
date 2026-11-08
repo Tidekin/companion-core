@@ -436,12 +436,17 @@ def workers(store, settings):
     return result
 
 
+_TASK_SQL = (
+    'SELECT to_jsonb(binding) AS binding, to_jsonb(snapshot) AS snapshot '
+    'FROM operator_task_configuration AS binding '
+    'LEFT JOIN operator_runtime_snapshots AS snapshot '
+    'ON snapshot.snapshot_id = binding.snapshot_id WHERE binding.task_key = %s'
+)
+
+
 def get(store, settings, task_key):
     row = store.one(
-        'SELECT to_jsonb(binding) AS binding, to_jsonb(snapshot) AS snapshot '
-        'FROM operator_task_configuration AS binding '
-        'LEFT JOIN operator_runtime_snapshots AS snapshot '
-        'ON snapshot.snapshot_id = binding.snapshot_id WHERE binding.task_key = %s', (task_key,))
+        _TASK_SQL, (task_key,))
     if row is None:
         return None
     return _bound_snapshot(store, settings, task_key, row["binding"], row["snapshot"])
@@ -480,7 +485,13 @@ def bind(store, settings, clock, task_key, *, snapshot=None):
 
 
 def check(store, settings, task_key):
-    snapshot = get(store, settings, task_key)
+    return _checked_task(store, settings, task_key, store.one(_TASK_SQL, (task_key,)))
+
+
+def _checked_task(store, settings, task_key, loaded):
+    """Validate a binding and its signed snapshot loaded at the current guard boundary."""
+    snapshot = (_bound_snapshot(store, settings, task_key, loaded["binding"], loaded["snapshot"])
+                if loaded is not None else None)
     if snapshot is None and settings.operator_hot_reload:
         raise CoreError("CONFIGURATION_TASK_BINDING_REQUIRED", 409)
     return snapshot
