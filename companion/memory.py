@@ -210,20 +210,13 @@ class Memory:
             def revalidate():
                 if source_check:
                     source_check()
-                check_version(self, version)
-                context.revalidate(proof, clock() if clock else now)
-                for row in rows:
-                    if self.store.one('SELECT memories.memory_id AS memory_id, memories.subject AS '
-                        'subject, memories.kind AS kind, memories.content AS content, '
-                        'memories.status AS status, memories.origin AS origin, memories.confidence '
-                        'AS confidence, memories.importance AS importance, memories.privacy_scope '
-                        'AS privacy_scope, memories.supersedes_memory_id AS supersedes_memory_id, '
-                        'memories.created_at AS created_at, memories.updated_at AS updated_at, '
-                        'memories.valid_from AS valid_from, memories.valid_to AS valid_to, '
-                        'memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS '
-                        'fact_key, memories.needs_review AS needs_review FROM memories AS memories '
-                        'WHERE memories.memory_id = %s',
-                                      (row["memory_id"],)) != row:
+                with self.store.read_snapshot():
+                    check_version(self, version)
+                    fresh = MemorySources(self, clock() if clock else now, bounded=True,
+                                          work=retrieval_work.current())
+                    fresh.prefetch_facts(rows)
+                    context.revalidate(proof, fresh.now, work=fresh.work, source_view=fresh)
+                    if any(fresh.fact(row) != row for row in rows):
                         raise CoreError("PRIVACY_CHANGED", 409)
 
             try:
@@ -297,7 +290,12 @@ class Memory:
             sources = MemorySources(self, now, bounded=True, work=work)
             rows, parts = [], []
             try:
-                sources.prefetch([row["memory_id"] for row in repaired])
+                sources.prefetch_facts(repaired)
+                # Async scoring must freshly revalidate after its await, then read
+                # selected evidence again. Admit a source prefix that leaves room
+                # for those reads in this same Work; only actual bytes are charged.
+                sources.prefetch([row["memory_id"] for row in repaired],
+                    max_bytes=work.remaining("text_bytes") // 3 if pin else None)
             except retrieval_work.WorkLimit as error:
                 work.mark(error.reason)
             for row in repaired:
@@ -419,23 +417,26 @@ class Memory:
     def _complete_search(self, rows, ranks, eligible, lexical_raw, lexical_count,
                          semantic_count, matched, limit, version, sources, *,
                          explain=None, trace=None):
-        s = self.store
+        return self.store.read_or_write(lambda: self._complete_search_snapshot(
+            rows, ranks, eligible, lexical_raw, lexical_count, semantic_count,
+            matched, limit, version, sources, explain=explain, trace=trace))
+
+    def _complete_search_snapshot(self, rows, ranks, eligible, lexical_raw, lexical_count,
+                                  semantic_count, matched, limit, version, sources, *,
+                                  explain, trace):
         rows = rows[:limit]
         check_version(self, version)
+        try:
+            sources.prefetch_facts(rows)
+            sources.prefetch([row["memory_id"] for row in rows])
+        except retrieval_work.WorkLimit as error:
+            retrieval_work.current().mark(error.reason)
         current = []
         for row in rows:
-            # Embedding may yield to a concurrent writer. Never publish its stale snapshot.
-            if s.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
-                'memories.kind AS kind, memories.content AS content, memories.status AS status, '
-                'memories.origin AS origin, memories.confidence AS confidence, memories.importance '
-                'AS importance, memories.privacy_scope AS privacy_scope, '
-                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
-                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
-                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
-                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
-                'memories AS memories WHERE memories.memory_id = %s', (row["memory_id"],)) != row:
-                raise CoreError("PRIVACY_CHANGED", 409)
             try:
+                # Embedding may yield to a concurrent writer. Never publish its stale snapshot.
+                if sources.fact(row) != row:
+                    raise CoreError("PRIVACY_CHANGED", 409)
                 row["evidence_ids"] = [e["event_id"] for e in sources.evidence(row["memory_id"])]
             except retrieval_work.WorkLimit as error:
                 retrieval_work.current().mark(error.reason)

@@ -548,19 +548,11 @@ class MemoryContext:
         ):
             raise RuntimeError("MEMORY_SOURCE_SNAPSHOT_REQUIRED")
         sources = source_view or MemorySources(self.memory, now, bounded=True, work=work)
+        sources.prefetch_facts(rows)
         sources.prefetch([row["memory_id"] for row in rows])
         roots, memories = set(event_ids), []
         for expected in rows:
-            row = sources._one('SELECT memories.memory_id AS memory_id, memories.subject AS '
-                'subject, memories.kind AS kind, memories.content AS content, memories.status AS '
-                'status, memories.origin AS origin, memories.confidence AS confidence, '
-                'memories.importance AS importance, memories.privacy_scope AS privacy_scope, '
-                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
-                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
-                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
-                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
-                'memories AS memories WHERE memories.memory_id = %s',
-                                 (expected["memory_id"],))
+            row = sources.fact(expected)
             if (not row or row["privacy_scope"] != "private" or row["confidence"] <= 0
                 or row["status"] not in (
                     {"CONFIRMED", "HYPOTHESIS", "SUPERSEDED"} if historical
@@ -594,9 +586,9 @@ class MemoryContext:
         return {"rows": memories, "event_ids": sorted(event_ids), "historical": historical,
                 "source_event_ids": sorted(fingerprints), "sources": fingerprints}
 
-    def revalidate(self, proof, now, *, work=None):
+    def revalidate(self, proof, now, *, work=None, source_view=None):
         actual = self.pin(now, rows=proof["rows"], event_ids=proof["event_ids"],
-                          historical=proof["historical"], work=work)
+                          historical=proof["historical"], work=work, source_view=source_view)
         if actual != proof:
             raise CoreError("PRIVACY_CHANGED", 409)
 
