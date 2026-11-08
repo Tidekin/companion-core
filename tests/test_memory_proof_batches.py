@@ -1,6 +1,7 @@
 """Native provenance batches, snapshot lifetime and partial verified candidates."""
 
 import asyncio
+import time
 
 import pytest
 
@@ -96,6 +97,63 @@ def test_writer_source_reads_combine_edges_and_recheck_own_changes(core, monkeyp
                            "VALUES ('proof_1','proof_2')")
         with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
             core.memory_context.revalidate(proof, core.clock())
+
+
+def test_writer_proof_batches_roots_and_reads_shared_ancestors_once(core, monkeypatch):
+    facts(core, count=12, chars=40)
+    core.store.execute("INSERT INTO event_dependencies(event_id,source_event_id) "
+        "SELECT 'proof_'||n,'evt_test_1' FROM generate_series(1,12) n")
+    reads = []
+    original = core.store.bounded_source_read
+
+    def read(statement, parameters, **kwargs):
+        reads.append(str(statement))
+        return original(statement, parameters, **kwargs)
+
+    monkeypatch.setattr(core.store, "bounded_source_read", read)
+    keys = {f"proof_{number}" for number in range(1, 13)}
+    with core.store.transaction():
+        proof = core.memory_context.pin(core.clock(), event_ids=keys)
+        assert set(proof["source_event_ids"]) == keys | {"evt_test_1"}
+        assert len(reads) == 3
+        core.store.execute("UPDATE events SET body_json='{}' WHERE event_id='evt_test_1'")
+        with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
+            core.memory_context.revalidate(proof, core.clock())
+
+
+def test_dense_cyclic_proof_at_node_limit_finishes_with_bounded_cpu(core, monkeypatch):
+    count = retrieval_work.SOURCE_NODES
+    facts(core, count=count, chars=20)
+    core.store.execute("INSERT INTO event_dependencies(event_id,source_event_id) "
+        "SELECT 'proof_'||a,'proof_'||b FROM generate_series(1,%s) a "
+        "CROSS JOIN generate_series(1,%s) b WHERE a<>b", (count, count))
+    monkeypatch.setitem(retrieval_work.LIMITS, "sql_milliseconds", 10000)
+    started = time.process_time()
+    proof = core.memory_context.pin(core.clock(),
+                                    event_ids={f"proof_{i}" for i in range(1, count + 1)})
+    assert len(proof["sources"]) == count
+    assert time.process_time() - started < 5
+
+
+def test_writer_batch_rejects_body_changed_after_size_measurement(core, monkeypatch):
+    facts(core, count=2, chars=20)
+    original = core.store.bounded_source_read
+    bodies = []
+
+    def read(statement, parameters, **kwargs):
+        rows = original(statement, parameters, **kwargs)
+        if "AS size FROM unnest" in str(statement):
+            core.store.execute("UPDATE events SET body_json=%s WHERE event_id='proof_1'",
+                               (encode({"text": "changed" * 1000}),))
+        if ",e.body_json," in str(statement):
+            bodies.extend(dict(row) for row in rows)
+        return rows
+
+    monkeypatch.setattr(core.store, "bounded_source_read", read)
+    with core.store.transaction(), pytest.raises(CoreError, match="PRIVACY_CHANGED"):
+        core.memory_context.pin(core.clock(), event_ids={"proof_1", "proof_2"})
+    changed = next(row for row in bodies if row["source_id"] == "proof_1")
+    assert changed["event_id"] is None and changed["body_json"] is None
 
 
 def test_writer_size_bound_is_applied_before_transmitting_source_body(core, monkeypatch):

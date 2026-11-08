@@ -98,11 +98,14 @@ class MemorySources:
             if len(row["roots"]) <= retrieval_work.EVIDENCE_ROOTS for key in row["roots"]))
         self._load_events(keys)
 
-    def _load_events(self, keys):
+    def _load_events(self, keys, *, loaded=None, edges=None, blocked=None):
         """Read finite source bodies in a batch after admitting their measured sizes."""
         from companion.retrieval_work import LIMITS, SOURCE_NODES, WorkLimit
 
-        keys = [key for key in keys if key not in self._loaded and key not in self._blocked]
+        loaded = self._loaded if loaded is None else loaded
+        edges = self._edges if edges is None else edges
+        blocked = self._blocked if blocked is None else blocked
+        keys = [key for key in keys if key not in loaded and key not in blocked]
         if not keys:
             return
         headers = self._rows("SELECT s.event_id,COALESCE(octet_length(e.body_json),0) AS size "
@@ -110,39 +113,41 @@ class MemorySources:
             "LEFT JOIN events e USING(event_id) ORDER BY s.position",
             (keys[:SOURCE_NODES],), limit=SOURCE_NODES)
         for key in keys[SOURCE_NODES:]:
-            self._blocked[key] = "source_nodes"
+            blocked[key] = "source_nodes"
             self.work.mark("source_nodes")
         admitted = []
         for header in headers:
             key, size = header["event_id"], header["size"]
             if len(self._source_ids | {key}) > SOURCE_NODES or not self.work.take("source_nodes"):
-                self._blocked[key] = "source_nodes"
+                blocked[key] = "source_nodes"
             elif (self._source_bytes + size > min(
                     LIMITS["text_bytes"], self._source_end if self._source_end is not None
                     else LIMITS["text_bytes"])
                   or not self.work.take("text_bytes", size)):
-                self._blocked[key] = "source_text_bytes"
+                blocked[key] = "source_text_bytes"
             else:
                 self._source_ids.add(key)
                 self._source_bytes += size
-                admitted.append(key)
-            if key in self._blocked:
-                self.work.mark(self._blocked[key])
+                admitted.append((key, size))
+            if key in blocked:
+                self.work.mark(blocked[key])
         if admitted:
             rows = self._rows("SELECT s.event_id AS source_id,"
                 + ",".join("e." + field for field in EVENT_COLUMNS)
                 + ",c.scope,c.owner_actor_id,r.key AS erased,ARRAY(SELECT d.source_event_id "
                 "FROM event_dependencies d WHERE d.event_id=s.event_id LIMIT "
-                + str(SOURCE_NODES + 1) + ") AS source_edges FROM unnest(%s::text[]) s(event_id) "
-                "LEFT JOIN events e USING(event_id) "
+                + str(SOURCE_NODES + 1) + ") AS source_edges "
+                "FROM unnest(%s::text[],%s::bigint[]) s(event_id,text_bytes) "
+                "LEFT JOIN events e ON e.event_id=s.event_id "
+                "AND COALESCE(octet_length(e.body_json),0)=s.text_bytes "
                 "LEFT JOIN conversations c USING(conversation_id) "
                 "LEFT JOIN runtime_meta r ON r.key='erased_event:'||s.event_id",
-                (admitted,), limit=len(admitted))
-            self._loaded.update((row["source_id"], row) for row in rows)
-            self._edges.update((row["source_id"], [{"source_event_id": key}
+                ([key for key, _ in admitted], [size for _, size in admitted]), limit=len(admitted))
+            loaded.update((row["source_id"], row) for row in rows)
+            edges.update((row["source_id"], [{"source_event_id": key}
                 for key in row["source_edges"]]) for row in rows)
         for key in keys:
-            if key not in self._loaded and key not in self._blocked:
+            if key not in loaded and key not in blocked:
                 raise WorkLimit("source_nodes")
 
     def prefetch_facts(self, expected):
@@ -188,11 +193,14 @@ class MemorySources:
         return rows[0] if rows else None
 
     def _lineage(self, event_id):
+        return self._lineages([event_id])
+
+    def _lineages(self, event_ids):
         """Follow native edges and the exact legacy correction relation used by erasure."""
         if self.bounded:
             def read():
                 try:
-                    return self._bounded_lineage(event_id)
+                    return self._bounded_lineages(event_ids)
                 except retrieval_work.WorkLimit as error:
                     return error  # A work limit is not a snapshot-write retry.
 
@@ -203,7 +211,7 @@ class MemorySources:
         lineage = ('SELECT value COLLATE "C" FROM json_array_elements_text(%s::json) AS ids(value) '
                    "UNION SELECT d.source_event_id FROM event_dependencies d "
                    "JOIN sources s ON d.event_id=s.event_id")
-        pending, found = {event_id}, {}
+        pending, found = set(event_ids), {}
         while pending:
             rows = self.store.rows(
                 "WITH RECURSIVE sources(event_id) AS (" + lineage + ") "
@@ -237,7 +245,7 @@ class MemorySources:
                         pending.add(source)
         return found.values()
 
-    def _bounded_lineage(self, event_id):
+    def _bounded_lineages(self, event_ids):
         """Read complete indexed adjacency, or refuse the candidate; never cut its proof."""
         from companion.retrieval_work import EVIDENCE_ROOTS, LIMITS, SOURCE_NODES, WorkLimit
 
@@ -247,11 +255,13 @@ class MemorySources:
             raise WorkLimit(reason)
 
         cached = self._snapshot_cache()
-        pending, found = [event_id], {}
+        pending, found = dict.fromkeys(event_ids), {}
         loaded = self._loaded if cached else {}
-        local_edges = {}
+        local_edges, blocked = ({}, {}) if not cached else (self._edges, self._blocked)
 
         def read(key):
+            if key in blocked:
+                refuse(blocked[key])
             if key in loaded:
                 return loaded[key]
             if cached:
@@ -293,7 +303,10 @@ class MemorySources:
             return row
 
         while pending:
-            key = pending.pop()
+            fresh = [key for key in pending if key not in loaded and key not in blocked]
+            if len(fresh) > 1:
+                self._load_events(fresh, loaded=loaded, edges=local_edges, blocked=blocked)
+            key, _ = pending.popitem()
             if key in found:
                 continue
             row = read(key)
@@ -306,7 +319,8 @@ class MemorySources:
                     self._edges[key] = edges
             if len(edges) > SOURCE_NODES:
                 refuse("source_nodes")
-            pending.extend(edge["source_event_id"] for edge in edges)
+            pending.update((edge["source_event_id"], None) for edge in edges
+                           if edge["source_event_id"] not in found)
             if row["source"] != "owner.decision" or row["event_type"] != "memory.corrected":
                 continue
             memories = self._rows(
@@ -330,12 +344,27 @@ class MemorySources:
                     if source not in found and legacy_correction_matches(
                         memory, read(source)["body_json"],
                     ):
-                        pending.append(source)
+                        pending[source] = None
         return found.values()
 
     def lineage(self, event_id):
+        return self._checked_lineage(self._lineage(event_id))
+
+    def lineages(self, event_ids):
+        # Preserve specialized per-root scopes such as ConversationSources.
+        if type(self)._lineage is not MemorySources._lineage:
+            found = {}
+            for event_id in event_ids:
+                rows = self.lineage(event_id)
+                if not rows:
+                    return []
+                found.update((row["source_id"], row) for row in rows)
+            return list(found.values())
+        return self._checked_lineage(self._lineages(event_ids))
+
+    def _checked_lineage(self, values):
         """Live private provenance for owner facts and non-owner reference sources."""
-        rows = list(self._lineage(event_id))
+        rows = list(values)
         for row in rows:
             if (row["source_id"] in self.excluded or row["event_id"] is None
                 or row["redacted"] or row["erased"] or row["privacy_scope"] != "private"
@@ -574,22 +603,19 @@ class MemoryContext:
             reference = sources.reference(row)
             if reference:
                 roots.update(reference["proof"]["source_event_ids"])
-        if sources._snapshot_cache():
-            sources._load_events(sorted(roots))
         fingerprints = {}
-        for event_id in sorted(roots):
-            lineage = sources.lineage(event_id)
-            if not lineage:
-                raise CoreError("PRIVACY_CHANGED", 409)
-            for source in lineage:
-                material = {key: source[key] for key in (
-                    "event_id", "source_event_id", "source", "event_type", "conversation_id",
-                    "actor_id", "privacy_scope", "occurred_at", "ingested_at", "body_json",
-                    "redacted", "scope", "owner_actor_id",
-                )}
-                fingerprints[source["event_id"]] = hashlib.sha256(
-                    encode(material).encode(),
-                ).hexdigest()
+        lineage = sources.lineages(sorted(roots)) if roots else []
+        if roots and not lineage:
+            raise CoreError("PRIVACY_CHANGED", 409)
+        for source in lineage:
+            material = {key: source[key] for key in (
+                "event_id", "source_event_id", "source", "event_type", "conversation_id",
+                "actor_id", "privacy_scope", "occurred_at", "ingested_at", "body_json",
+                "redacted", "scope", "owner_actor_id",
+            )}
+            fingerprints[source["event_id"]] = hashlib.sha256(
+                encode(material).encode(),
+            ).hexdigest()
         check_version(self.memory, version)
         return {"rows": memories, "event_ids": sorted(event_ids), "historical": historical,
                 "source_event_ids": sorted(fingerprints), "sources": fingerprints}
