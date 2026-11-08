@@ -17,6 +17,7 @@ chat_thinking = "high"
 chat_thinking_tokens = 3072
 # Includes system instructions and resolved tool definitions; hard paid limits still apply.
 context_soft_tokens = 8000
+chat_restore_timeout_seconds = 5.0 # checkpoint restore only; SQL and contention share this deadline
 max_recent_messages = 12
 # Integer micro-USD per million tokens, upper-bound peak rates verified 2026-10-19.
 # https://api-docs.deepseek.com/quick_start/pricing/

@@ -651,6 +651,8 @@ class Settings(BaseModel):
     turn_recall_second_hop: int = Field(default=2, ge=0, le=4)
     # Upper bound on waiting for off-loop ranking; on expiry the reply proceeds without it.
     recall_compute_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    # Total checkpoint-restore time, including contention and SQL; model I/O is outside it.
+    chat_restore_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     # Local ONNX cross-encoder directory (tokenizer.json, onnx/*.onnx). "auto" uses
     # <embedding_cache_dir>/local-bge-reranker-v2-m3-int8 when present; "" turns it off.
     reranker_model_dir: str = "auto"
