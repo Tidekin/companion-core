@@ -225,10 +225,16 @@ def _persist(store, settings, snapshot, now):
         if image is not None else None,
         encrypted_video_models=operator_config._cipher(settings).encrypt(
             encode(operator_config._raw(videos)).encode()).decode() if videos is not None else None)
-    store.insert("operator_runtime_snapshots", snapshot_id=key, version=snapshot.version,
-        base_sha256=snapshot.base_sha256, chat_time_labels=int(snapshot.chat_time_labels),
-        created_at=now, expression_json=stored.model_dump_json()
-        if snapshot.format_version >= 2 else None)
+    store.execute(
+        "INSERT INTO operator_runtime_snapshots "
+        "(snapshot_id,version,base_sha256,chat_time_labels,created_at,expression_json) "
+        "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(snapshot_id) DO NOTHING",
+        (key, snapshot.version, snapshot.base_sha256, int(snapshot.chat_time_labels), now,
+         stored.model_dump_json() if snapshot.format_version >= 2 else None),
+    )
+    # Another worker may have committed this exact identity after our first read.
+    # Validate its signed record and retain its original encryption and timestamp.
+    _read(store, settings, key)
     return key
 
 

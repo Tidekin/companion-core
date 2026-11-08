@@ -179,6 +179,11 @@ class ErasureLedger:
 
     def initialize(self, store):
         if not store.in_transaction:
+            from companion.erasure import contract_signature
+
+            # Cold handler discovery imports the domain modules. Do that before
+            # holding the erasure control row, as replay's own entry point does.
+            contract_signature()
             with store.transaction(control_write=True):
                 return self.initialize(store)
         self._write_lock(store)

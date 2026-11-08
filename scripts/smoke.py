@@ -12,13 +12,17 @@ from pathlib import Path
 
 import httpx
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from tests.postgres_fixture import isolated_database  # noqa: E402
 
-def main():
+
+def main(*, scratch=None):
     root = Path(__file__).resolve().parents[1]
-    scratch = root / ".local"
-    scratch.mkdir(exist_ok=True)
+    scratch = Path(scratch) if scratch is not None else root / ".local/test-temp"
+    scratch.mkdir(parents=True, exist_ok=True)
     temporary = tempfile.TemporaryDirectory(dir=scratch, prefix="smoke-")
-    with temporary as directory:
+    with isolated_database() as database, temporary as directory:
         env = {
             **os.environ,
             "COMPANION_CONFIG": directory + "/absent.toml",
@@ -26,7 +30,11 @@ def main():
             "COMPANION_BOT_QQ_ID": "10002",
             "COMPANION_BRIDGE_TOKEN": secrets.token_urlsafe(32),
             "COMPANION_MODE": "demo",
-            "COMPANION_DATABASE": directory + "/core.db",
+            "COMPANION_DATABASE": database.get_secret_value(),
+            "COMPANION_STATE_DIRECTORY": directory + "/state",
+            "COMPANION_EMBEDDING_CACHE_DIR": os.environ.get(
+                "COMPANION_TEST_EMBEDDING_CACHE", str(root / "data/embedding-cache"),
+            ),
             "COMPANION_ERASURE_LEDGER": directory + "/privacy.jsonl",
             "COMPANION_PROACTIVE_ENABLED": "false",
             "COMPANION_DIARY_ENABLED": "true",
