@@ -246,6 +246,11 @@ def _candidates(store, settings, job, event_ids=None):
     from companion.dialogue_history import recent_sent_sources
     from companion.memory_references import replay_many
 
+    if not store.in_transaction:
+        # Candidate and attachment nomination is synchronous and read-only. The
+        # snapshot ends before ranking awaits; consumers re-read live sources.
+        with store.read_snapshot():
+            return _candidates(store, settings, job, event_ids)
     work = retrieval_work.current()
     if event_ids is None and work is not None:
         ceiling = min(settings.turn_recall_scan_turns, retrieval_work.TURN_CANDIDATES,
