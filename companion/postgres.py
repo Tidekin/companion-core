@@ -214,7 +214,8 @@ class Session:
                 self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             settings = self.one(
                 "SELECT current_setting('transaction_read_only') AS readonly, "
-                "setting::integer AS timeout FROM pg_settings WHERE name='statement_timeout'"
+                "(EXTRACT(EPOCH FROM current_setting('statement_timeout')::interval)*1000)"
+                "::bigint AS timeout"
             )
             if readonly and settings["readonly"] != "on":
                 raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
