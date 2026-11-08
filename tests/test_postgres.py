@@ -205,3 +205,15 @@ def test_bounded_read_cannot_extend_an_existing_shorter_server_timeout(database,
                 reader.bounded_read("SELECT pg_sleep(.1)", (), limit=1, timeout_ms=500)
             assert reader.one("SHOW statement_timeout") == {"statement_timeout": "20ms"}
             assert reader.one("SELECT 1 AS ready") == {"ready": 1}
+
+
+def test_bounded_read_preserves_parameter_bytes_arrays_and_the_result_limit(database):
+    value = "'; SELECT pg_sleep(100); -- %s \\ 中文"
+    blob = b"\x00\xff';--"
+    with database.session() as reader, reader.transaction(readonly=True):
+        assert reader.bounded_read(
+            "SELECT value,%s::bytea AS blob FROM unnest(%s::text[]) WITH ORDINALITY "
+            "AS source(value,position) ORDER BY position", (blob, [value, None, "tail"]),
+            limit=2, timeout_ms=500) == [{"value": value, "blob": blob},
+                                       {"value": None, "blob": blob}]
+        assert reader.one("SHOW statement_timeout") == {"statement_timeout": "0"}

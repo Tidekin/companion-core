@@ -39,12 +39,8 @@ Each tool requires its current purpose on the original owner-authorized job.
         view = check_conversation(core, job, snapshots, purpose=purpose)
         if any(required not in view.policy.purposes for required in also):
             raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
-        if (not reply_revision.owner_input(core.store, job["event_id"])
-            or not core.store.one(
-                "SELECT 1 FROM conversations WHERE conversation_id = %s AND scope = 'private' AND "
-                "owner_actor_id = 'owner'", (job["conversation_id"],),
-            )):
-            raise CoreError("CONVERSATION_OWNER_SCOPE_REQUIRED", 403)
+        # check_conversation has just checked the signed owner input, private
+        # conversation and current lease in this same immutable read scope.
         return view
 
     view = check()

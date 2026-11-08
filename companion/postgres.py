@@ -220,19 +220,23 @@ class Session:
             if readonly and settings["readonly"] != "on":
                 raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
             timeout_ms = min(timeout_ms, settings["timeout"] or timeout_ms)
-            with self._connection.cursor() as cursor:
-                # Ordered native commands share one round trip. A failed SELECT
-                # aborts this pipeline; the enclosing savepoint restores its settings.
-                with self._connection.pipeline():
-                    self.execute("SELECT set_config('statement_timeout',%s,true)",
-                                 (f"{timeout_ms}ms",))
-                    self._execute(cursor, sql.SQL(
-                        "SELECT * FROM ({}) AS bounded_result LIMIT %s").format(
+            with psycopg.ClientCursor(self._connection) as cursor:
+                # Psycopg quotes every value and sends these native statements in
+                # one simple-Query message. A failed SELECT still rolls back this
+                # savepoint. Re-read the live timeout so the absolute deadline set
+                # by _execute cannot be widened by the first statement.
+                self._execute(cursor, sql.SQL(
+                    "SELECT set_config('statement_timeout',LEAST(%s,COALESCE(NULLIF("
+                    "(EXTRACT(EPOCH FROM current_setting('statement_timeout')::interval)*1000)"
+                    "::bigint,0),%s))::text||'ms',true);"
+                    "SELECT * FROM ({}) AS bounded_result LIMIT %s;"
+                    "SELECT set_config('statement_timeout',%s,true)").format(
                         statement if isinstance(statement, sql.Composable) else sql.SQL(statement)),
-                        (*parameters, limit), timeout_ms=timeout_ms)
-                    self.execute("SELECT set_config('statement_timeout',%s,true)",
-                                 (f"{settings['timeout']}ms",))
+                    (timeout_ms, timeout_ms, *parameters, limit, f"{settings['timeout']}ms"),
+                    timeout_ms=timeout_ms)
+                cursor.nextset()
                 result = cursor.fetchmany(limit)
+                cursor.nextset()
             return result
 
     @contextmanager

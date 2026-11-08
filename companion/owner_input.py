@@ -370,7 +370,8 @@ def history_batch(store, settings, clock, job, *, purpose):
     def frozen():
         return scope is not None and store.frozen_scope == scope
 
-    batched, changes = frozen(), store.change_token()
+    batched = frozen()
+    changes = None if batched else store.change_token()
     originals = {encode(view.authority.as_dict()): view}
 
     def evidence(ref):
@@ -471,10 +472,12 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
                 "SELECT message_id,sent_at FROM outbox WHERE message_id=ANY(%s::text[])",
                 (message_ids,),
             )}
-        receipts = {row["key"] for row in store.rows(
-            "SELECT key FROM runtime_meta WHERE key=ANY(%s::text[])",
-            ([INPUT + item["event_id"] for item in candidates],),
-        )}
+        receipts = ({INPUT + key for key, row in source_rows.items()
+                     if row["capture_receipt"] is not None} if source_rows is not None else
+                    {row["key"] for row in store.rows(
+                        "SELECT key FROM runtime_meta WHERE key=ANY(%s::text[])",
+                        ([INPUT + item["event_id"] for item in candidates],),
+                    )})
     for item in candidates:
         try:
             if source_rows is not None and store.frozen_scope == frozen:
