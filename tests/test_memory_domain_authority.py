@@ -1,8 +1,12 @@
 """Domain switches never substitute for independent native owner purposes."""
 
 import json
+from pathlib import Path
+
+import pytest
 
 from companion import memory_work, owner_authority, owner_input
+from companion.contracts import CoreError
 from companion.memory_authority import source_allowed
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import after, encode
@@ -22,6 +26,24 @@ def grant(core, tmp_path, purposes):
     })
     result, _ = activate(core, policy)
     return policy, result
+
+
+def test_reply_source_check_rereads_external_custody_even_in_the_same_snapshot(core, tmp_path):
+    capture, _ = captured(core, tmp_path)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    core.ingest(inbound(core, capture), "reply-source-custody")
+    authority = owner_authority.current(core.store, core.settings, core.clock)
+    check = core.memory_context.reply_source_check(core.settings, core.clock, authority)
+    path = Path(core.settings.paid_model.journal_path)
+    saved = path.read_bytes()
+    try:
+        with core.store.read_snapshot():
+            assert check([capture.event_id], "chat")
+            path.write_bytes(saved + b"\n")
+            with pytest.raises(CoreError, match="OWNER_AUTHORITY_CUSTODY_REQUIRED"):
+                check([capture.event_id], "chat")
+    finally:
+        path.write_bytes(saved)
 
 
 def test_unrelated_purpose_does_not_start_memory_domains(core, tmp_path):

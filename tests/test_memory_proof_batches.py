@@ -35,6 +35,26 @@ def facts(core, count=96, chars=6000):
     return core.store.rows("SELECT * FROM memories ORDER BY memory_id")
 
 
+def test_reply_source_group_batches_lineage_and_rechecks_the_next_scope(core, monkeypatch):
+    facts(core, count=6, chars=40)
+    check = core.memory_context.reply_source_check(core.settings, core.clock, None)
+    bodies = []
+    original = core.store.bounded_source_read
+
+    def read(statement, parameters, **kwargs):
+        if ",e.body_json," in str(statement):
+            bodies.append(len(parameters[0]))
+        return original(statement, parameters, **kwargs)
+
+    monkeypatch.setattr(core.store, "bounded_source_read", read)
+    ids = [f"proof_{number}" for number in range(1, 7)]
+    assert check(iter(ids), "memory")
+    assert bodies == [6]
+    core.store.execute("UPDATE events SET redacted=1 WHERE event_id='proof_1'")
+    assert not check(ids, "memory")
+    assert bodies == [6, 6]
+
+
 def test_96_large_roots_are_read_once_for_preparation_and_pin(core, monkeypatch):
     rows = facts(core)
     bodies = []

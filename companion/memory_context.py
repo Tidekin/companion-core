@@ -492,25 +492,27 @@ class MemoryContext:
         from companion.memory_authority import source_allowed
 
         source_view = MemorySources(self.memory, clock(), bounded=True)
-        availability = {}
 
         def available(ids, purpose):
-            for key in ids:
-                cache_key = (key, purpose)
-                if cache_key not in availability:
-                    try:
-                        lineage = source_view.lineage(key)
-                    except retrieval_work.WorkLimit as error:
-                        if (work := retrieval_work.current()) is not None:
-                            work.mark(error.reason)
-                        return False
-                    availability[cache_key] = bool(lineage) and all(
-                        not authority or row["source"] != "qq.onebot" or source_allowed(
-                            self.store, settings, clock, row["event_id"], purpose)
-                        for row in lineage)
-                if not availability[cache_key]:
+            ids = tuple(dict.fromkeys(ids))
+            if not ids:
+                return True
+
+            def check():
+                try:
+                    lineage = source_view.lineages(ids)
+                except retrieval_work.WorkLimit as error:
+                    if (work := retrieval_work.current()) is not None:
+                        work.mark(error.reason)
                     return False
-            return True
+                # Group synchronous reads in one existing native snapshot. Only
+                # SourceView's DB rows are reusable; each permission/file check is live.
+                return bool(lineage) and all(
+                    not authority or row["source"] != "qq.onebot" or source_allowed(
+                        self.store, settings, clock, row["event_id"], purpose)
+                    for row in lineage)
+
+            return self.store.read_or_write(check)
         return available
 
     def add_reply_facts(self, selection, facts, settings, clock, *, chat, paused):
