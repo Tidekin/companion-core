@@ -206,9 +206,10 @@ def test_transaction_history_still_checks_every_selected_source(
 def test_full_history_batches_without_the_journal_byte_cache(core, tmp_path, monkeypatch):
     def check(job, expected):
         monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", 1)
-        calls, per_turn_reads = [], []
+        calls, per_turn_reads, source_reads = [], [], []
         native = authority_custody.check
         native_one = core.store.one
+        native_rows = core.store.rows
 
         def custody(*args, **kwargs):
             calls.append(1)
@@ -222,11 +223,18 @@ def test_full_history_batches_without_the_journal_byte_cache(core, tmp_path, mon
                 per_turn_reads.append(statement)
             return native_one(statement, parameters)
 
+        def rows(statement, parameters=()):
+            if "AS capture_receipt" in statement and "AS source_jobs" in statement:
+                source_reads.append(len(parameters[0]))
+            return native_rows(statement, parameters)
+
         monkeypatch.setattr(authority_custody, "check", custody)
         monkeypatch.setattr(core.store, "one", one)
+        monkeypatch.setattr(core.store, "rows", rows)
         assert owner_input.history_sources(core.store, core.settings, core.clock, job) == expected
         assert len(calls) == 2
         assert per_turn_reads == []
+        assert source_reads == [len(expected)]
         assert not core.store.in_transaction
 
     run(native_history(core, tmp_path, check, turns=15))

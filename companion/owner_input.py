@@ -226,12 +226,11 @@ def _checked_source(store, settings, view, event_id, now, *, allow_commands=Fals
     )
 
 
-def _source(
-    store, settings, view, event_id, now, *, allow_commands=False, history=False, verify_capture
-):
-    loaded = store.one(
+def _load_sources(store, event_ids):
+    """Materialize native source bindings for one finite set in the caller's snapshot."""
+    rows = store.rows(
         (
-            "SELECT e.event_id AS event_id, e.schema_version AS "
+            "SELECT target.event_id AS source_id,e.event_id AS event_id, e.schema_version AS "
             "schema_version, e.source AS source, e.source_event_id AS "
             "source_event_id, e.conversation_id AS conversation_id, "
             "e.actor_id AS actor_id, e.event_type AS event_type, "
@@ -243,7 +242,7 @@ def _source(
             "e.reply_revision AS reply_revision, c.scope AS scope, "
             "c.owner_actor_id AS owner_actor_id, receipt.value AS capture_receipt, "
             "privacy.value AS source_epoch, bindings.jobs AS source_jobs "
-            "FROM (VALUES (%s::text)) AS target(event_id) "
+            "FROM unnest(%s::text[]) AS target(event_id) "
             "LEFT JOIN events AS e ON e.event_id=target.event_id "
             "LEFT JOIN conversations AS c ON e.conversation_id=c.conversation_id "
             "LEFT JOIN runtime_meta AS receipt ON receipt.key='owner_input:'||target.event_id "
@@ -254,8 +253,18 @@ def _source(
             "lease_token,context_tracked,authority_json FROM jobs "
             "WHERE event_id=target.event_id AND kind='chat') AS bound) AS bindings ON true"
         ),
-        (event_id,),
+        (list(dict.fromkeys(event_ids)),),
     )
+    return {row.pop("source_id"): row for row in rows}
+
+
+def _source(
+    store, settings, view, event_id, now, *, allow_commands=False, history=False, verify_capture,
+    loaded=None,
+):
+    if loaded is not None and store.frozen_scope is None:
+        raise RuntimeError("OWNER_SOURCE_SNAPSHOT_REQUIRED")
+    loaded = dict(loaded) if loaded is not None else _load_sources(store, [event_id])[event_id]
     receipt_value = loaded.pop("capture_receipt")
     source_epoch = loaded.pop("source_epoch")
     jobs = loaded.pop("source_jobs") or []
@@ -372,7 +381,7 @@ def history_batch(store, settings, clock, job, *, purpose):
     def verify_capture(value):
         return _verify(store, settings, value, evidence)
 
-    def check(event_id):
+    def check(event_id, *, loaded=None):
         if batched and frozen():
             if settings.owner_runtime.mode != "ENABLED":
                 raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
@@ -385,7 +394,8 @@ def history_batch(store, settings, clock, job, *, purpose):
             ):
                 raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
             return _source(
-                store, settings, view, event_id, now, history=True, verify_capture=verify_capture
+                store, settings, view, event_id, now, history=True, verify_capture=verify_capture,
+                loaded=loaded,
             )
         return source(store, settings, view, event_id, clock(), purpose=purpose, history=True)
 
@@ -405,7 +415,8 @@ def history_batch(store, settings, clock, job, *, purpose):
 
 def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
     view, check, finish = history_batch(store, settings, clock, job, purpose=purpose)
-    return _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid)
+    return _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid,
+                            batch_sources=True)
 
 
 def history_for_owner(store, settings, clock, job, view):
@@ -431,7 +442,8 @@ def history_for_owner(store, settings, clock, job, view):
     )
 
 
-def _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid):
+def _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid, *,
+                     batch_sources=False):
     from companion.dialogue_history import recent_context_sources, turn_messages
 
     if "history" not in view.policy.purposes:
@@ -445,6 +457,8 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
         store, job["conversation_id"], job["event_id"], max_turns, cutoff_rowid=cutoff_rowid
     )
     frozen = store.frozen_scope
+    source_rows = _load_sources(store, [item["event_id"] for item in candidates]) if (
+        frozen is not None and batch_sources and candidates) else None
     deliveries, receipts = {}, set()
     if frozen is not None and candidates:
         message_ids = list(dict.fromkeys(
@@ -462,7 +476,10 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
         )}
     for item in candidates:
         try:
-            check(item["event_id"])
+            if source_rows is not None and store.frozen_scope == frozen:
+                check(item["event_id"], loaded=source_rows[item["event_id"]])
+            else:
+                check(item["event_id"])
             parts = item.get("reply_segments") or ([item] if item.get("message_id") else [])
             for part in parts:
                 sent = deliveries.get(part["message_id"]) if (
