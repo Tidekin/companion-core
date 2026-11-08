@@ -158,7 +158,7 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
         def apply(core, owner_check):
             from companion.mood import service_for_store
 
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 owner_check()
                 service = service_for_store(core.store, core.settings, core.clock, core.ledger)
                 return service.control(

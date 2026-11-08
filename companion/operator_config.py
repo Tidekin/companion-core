@@ -63,7 +63,8 @@ class ConfigurationChange(StrictModel):
 # Identity, ledger locations and signed approvals are deployment custody, not browser inputs.
 EXCLUDED = frozenset({
     "owner_qq_id", "bot_qq_id", "bridge_token", "diary_admin_token", "control_token",
-    "database", "erasure_ledger", "embedding_cache_dir", "paid_model", "live_text_window",
+    "database", "state_directory", "erasure_ledger", "embedding_cache_dir", "paid_model",
+    "live_text_window",
     "observation_adapters", "executive", "media", "cloud_budget", "timezone", "mode",
     "diary_auto_share", "reranker_model_dir",
     "operator_hot_reload",

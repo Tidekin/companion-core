@@ -288,6 +288,8 @@ def register_console_routes(app, settings):
         def issue(s):
             invalid = False
             with s.transaction():
+                # Include absent attempt/session rows in the owner's login limit.
+                s.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id' FOR UPDATE")
                 enabled()
                 _origin(captured, settings)
                 now = clock()

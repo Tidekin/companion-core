@@ -381,11 +381,11 @@ class AffectEngine:
                 (
                     'DELETE FROM affect_evidence WHERE identity_id = '
                     "'companion' AND NOT record_sequence IN (SELECT "
-                    'record_sequence FROM (SELECT record_sequence AS rowid, '
+                    'retained.record_sequence FROM (SELECT record_sequence, '
                     'ROW_NUMBER() OVER (PARTITION BY dimension ORDER BY '
                     'record_sequence DESC NULLS LAST) AS rank FROM '
-                    "affect_evidence WHERE identity_id = 'companion') WHERE "
-                    'rank <= %s)'
+                    "affect_evidence WHERE identity_id = 'companion') AS retained WHERE "
+                    'retained.rank <= %s)'
                 ),
                 (self.settings.affect_max_evidence,),
             )

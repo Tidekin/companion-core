@@ -62,6 +62,9 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
         with input_protocol.admit_unrecalled(
             s, cfg, ledger, clock, event, control_write=reset_affect,
         ):
+            # The owner row exists before the first conversation. Lock it before
+            # checking duplicate keys so concurrent first admissions also replay.
+            s.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id' FOR UPDATE")
             now = clock()
             authority = owner_input.check_input(s, cfg, clock, event) if (
                 owner_authority.required(s, cfg)) else None
