@@ -13,7 +13,7 @@ from tests.test_memory_campaign_integrity import campaign as campaign
 
 
 @pytest.fixture
-def judge(tmp_path, monkeypatch):
+def judge(tmp_path, monkeypatch, campaign_runner):
     tools = Path(__file__).resolve().parents[1] / "benchmarks/memory_campaign"
     monkeypatch.syspath_prepend(str(tools))
     for name in ("grade", "roundcfg", "integrity", "rubrics"):

@@ -20,12 +20,9 @@ from tests.support.owner_authority import activate
 from tests.support.paid_model import approved_live
 
 
-def test_campaign_native_approval_preserves_its_independent_cny_cap(core, tmp_path, monkeypatch):
-    root = Path(__file__).resolve().parents[1]
-    runner = root / "benchmarks/memory_campaign/runner"
-    sys.path.insert(0, str(runner))
-    if "scripts" in sys.modules:
-        sys.modules["scripts"].__path__.append(str(runner / "scripts"))
+def test_campaign_native_approval_preserves_its_independent_cny_cap(
+    core, tmp_path, monkeypatch, campaign_runner,
+):
     from scripts.memory_benchmark import runtime
     from scripts.memory_benchmark.budget import Budget
 
@@ -57,11 +54,7 @@ def test_campaign_native_approval_preserves_its_independent_cny_cap(core, tmp_pa
     assert len(records) == 1
 
 
-def test_native_campaign_exam_keeps_memory_and_settled_liability(core, tmp_path):
-    runner = Path(__file__).resolve().parents[1] / "benchmarks/memory_campaign/runner"
-    sys.path.insert(0, str(runner))
-    if "scripts" in sys.modules:
-        sys.modules["scripts"].__path__.append(str(runner / "scripts"))
+def test_native_campaign_exam_keeps_memory_and_settled_liability(core, tmp_path, campaign_runner):
     from scripts.memory_benchmark.native import Harness, execution_audit
 
     core.settings.memory_enabled = True
@@ -132,3 +125,10 @@ def test_native_campaign_exam_keeps_memory_and_settled_liability(core, tmp_path)
                 ).hexdigest()
                 json.dumps(observed)
     run(scenario())
+
+
+def test_campaign_imports_leave_the_native_sdk_probe_available():
+    from scripts import benchmark_qq_beta
+
+    assert Path(benchmark_qq_beta.__file__).resolve() == (
+        Path(__file__).resolve().parents[1] / "scripts/benchmark_qq_beta.py")

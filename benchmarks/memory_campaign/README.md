@@ -119,6 +119,19 @@ python diagnose.py --round R                  # evidence chain by required field
 `grade.py --rubric v2 --out grading-v2` regrades a finished round into a new directory;
 `report.py --grading grading-v2` and `diagnose.py --grading grading-v2` read it.
 
+An attempted judge batch without a saved response stops ordinary resume before any new
+provider request. After inspecting the original request, response and usage files,
+`grade.py --round R --close-interrupted` can continue only never-attempted keys. It preserves
+all original usage and UNKNOWN holds, records recovery hashes, and marks every incomplete
+key for explicit review. A missing minority vote still requires review when the other votes
+determine the majority. Reporting requires an override for each such key, including a
+reviewed failure. This option neither repeats an attempted key nor creates budget authority.
+
+Native Core approval uses the current resource policy. The campaign transport retains its
+separate cumulative CNY cap and UNKNOWN liabilities; `campaign_budget_cny` records that
+outer limit. Before synthetic question erasure, `context-plans.jsonl` exports the original
+planner receipt by case and event. Actual provider payloads remain in `requests.jsonl`.
+
 ### Frozen scoring and denominators
 
 Before judging or reporting, the toolkit checks the answer-file inventory and hashes,

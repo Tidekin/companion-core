@@ -268,7 +268,7 @@ def prepare_review(rows, grades):
         for a in R.graded_arms:
             g = r["arms"][a]["auto_grade"]
             if any(g.get(flag) for flag in (
-        "judge_unresolved", "anchor_failed", "interrupted_review_required")):
+                "judge_unresolved", "anchor_failed", "interrupted_review_required")):
                 selected.append((r, a, "unresolved_judgment"))
             if g.get("agreement", 1) < 1:
                 selected.append((r, a, "split_judge_vote"))
