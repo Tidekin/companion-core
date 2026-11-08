@@ -47,36 +47,54 @@ def control_job(store, job):
     )
 
 
-def current(store, event_id, expected_revision=None):
-    row = store.one(
-        (
-            "SELECT e.reply_revision, c.reply_revision AS "
-            "current_revision FROM events AS e JOIN conversations AS c "
-            "USING (conversation_id) WHERE e.event_id = %s"
-        ),
-        (event_id,),
+def _reply_state(store, event_id):
+    """Read revocation, owner kind and both revisions at the same native boundary."""
+    return store.one(
+        "SELECT e.reply_revision, c.reply_revision AS current_revision, "
+        "e.redacted=0 AND NOT EXISTS(SELECT 1 FROM runtime_meta "
+        "WHERE key='erased_event:'||e.event_id) AS source_active, "
+        f"({OWNER_INPUT}) AS owner_input, "
+        "((body_json::json->'control_command')::text IN ('true','1') OR "
+        "(body_json::json->'diary_command')::text IN ('true','1')) AS is_control "
+        "FROM events AS e JOIN conversations AS c USING (conversation_id) "
+        "WHERE e.event_id=%s", (event_id,),
     )
+
+
+def _current(row, expected_revision):
     return bool(
         row
-        and source_active(store, event_id)
+        and row["source_active"]
         and row["reply_revision"] == row["current_revision"]
         and (expected_revision is None or expected_revision == row["reply_revision"])
     )
 
 
-def require_current(store, event_id, expected_revision=None):
-    if not source_active(store, event_id):
+def current(store, event_id, expected_revision=None):
+    return _current(_reply_state(store, event_id), expected_revision)
+
+
+def _require_active(row):
+    if not row or not row["source_active"]:
         raise CoreError(SOURCE_RECALLED, 409)
-    if not current(store, event_id, expected_revision):
+
+
+def require_current(store, event_id, expected_revision=None):
+    row = _reply_state(store, event_id)
+    _require_active(row)
+    if not _current(row, expected_revision):
+        raise CoreError(SUPERSEDED, 409)
+
+
+def _require_reply_state(row, expected_revision):
+    _require_active(row)
+    if row["owner_input"] and not _current(row, expected_revision):
         raise CoreError(SUPERSEDED, 409)
 
 
 def require_reply_source(store, event_id, expected_revision=None):
     """Keep source revocation universal; only owner input replies have a revision."""
-    if not source_active(store, event_id):
-        raise CoreError(SOURCE_RECALLED, 409)
-    if owner_input(store, event_id):
-        require_current(store, event_id, expected_revision)
+    _require_reply_state(_reply_state(store, event_id), expected_revision)
 
 
 def check_sources(store, job_id):
@@ -97,11 +115,11 @@ def check_job(store, job):
     if not persisted or persisted["state"] == "CANCELLED":
         raise CoreError(CANCELLED, 409)
     if job["kind"] == "chat":
-        if control_job(store, job):
-            if not source_active(store, job["event_id"]):
-                raise CoreError(SOURCE_RECALLED, 409)
+        state = _reply_state(store, job["event_id"])
+        if state and state["owner_input"] and state["is_control"]:
+            _require_active(state)
         else:
-            require_reply_source(store, job["event_id"], job.get("reply_revision"))
+            _require_reply_state(state, job.get("reply_revision"))
     check_sources(store, job["job_id"])
 
 

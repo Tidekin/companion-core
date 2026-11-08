@@ -148,3 +148,25 @@ def test_only_materialized_results_outlive_their_session(database):
         assert type(changed) is int and changed == 1
         with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
             session.execute("UPDATE items SET value=6 WHERE id=1")
+
+
+def test_bounded_read_retains_timeout_and_snapshot_after_optional_error(database):
+    with database.session() as reader, database.session() as writer:
+        reader.execute("SET statement_timeout='3s'")
+        with reader.transaction(readonly=True):
+            assert reader.one("SELECT value FROM items WHERE id=1") == {"value": 0}
+            writer.execute("UPDATE items SET value=7 WHERE id=1")
+            for statement, problem in (
+                ("SELECT pg_sleep(1)", psycopg.errors.QueryCanceled),
+                ("SELECT * FROM absent_bounded_table", psycopg.errors.UndefinedTable),
+                ("SELECT nextval('absent_sequence')", psycopg.errors.UndefinedTable),
+            ):
+                with pytest.raises(problem):
+                    reader.bounded_read(statement, (), limit=1, timeout_ms=5)
+                assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}
+                assert reader.one("SELECT value FROM items WHERE id=1") == {"value": 0}
+            assert reader.bounded_read("SELECT id,value FROM items ORDER BY id", (),
+                                       limit=1, timeout_ms=50) == [{"id": 1, "value": 0}]
+            assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}
+        assert reader.one("SELECT value FROM items WHERE id=1") == {"value": 7}
+        assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}

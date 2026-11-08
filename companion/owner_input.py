@@ -214,7 +214,7 @@ def source(
 def _source(
     store, settings, view, event_id, now, *, allow_commands=False, history=False, verify_capture
 ):
-    event = store.one(
+    loaded = store.one(
         (
             "SELECT e.event_id AS event_id, e.schema_version AS "
             "schema_version, e.source AS source, e.source_event_id AS "
@@ -226,13 +226,19 @@ def _source(
             "idempotency_key, e.fingerprint AS fingerprint, e.redacted AS"
             " redacted, e.memory_processed AS memory_processed, "
             "e.reply_revision AS reply_revision, c.scope AS scope, "
-            "c.owner_actor_id AS owner_actor_id FROM events AS e JOIN "
-            "conversations AS c ON e.conversation_id = c.conversation_id "
-            "WHERE e.event_id = %s"
+            "c.owner_actor_id AS owner_actor_id, receipt.value AS capture_receipt, "
+            "privacy.value AS source_epoch FROM (VALUES (%s::text)) AS target(event_id) "
+            "LEFT JOIN events AS e ON e.event_id=target.event_id "
+            "LEFT JOIN conversations AS c ON e.conversation_id=c.conversation_id "
+            "LEFT JOIN runtime_meta AS receipt ON receipt.key='owner_input:'||target.event_id "
+            "LEFT JOIN runtime_meta AS privacy ON privacy.key='privacy_epoch'"
         ),
         (event_id,),
     )
-    receipt = store.one("SELECT value FROM runtime_meta WHERE key = %s", (INPUT + event_id,))
+    receipt_value = loaded.pop("capture_receipt")
+    source_epoch = loaded.pop("source_epoch")
+    receipt = {"value": receipt_value} if receipt_value is not None else None
+    event = loaded if loaded["event_id"] is not None and loaded["scope"] is not None else None
     if (
         history
         and receipt is None
@@ -265,7 +271,9 @@ def _source(
             or value.get("event_id") != event_id
             or value.get("input_sha256") != input_digest(body)
             or type(value.get("privacy_epoch")) is not int
-            or not 0 <= value["privacy_epoch"] <= epoch(store)
+            or not 0 <= value["privacy_epoch"] <= (
+                int(source_epoch) if source_epoch is not None else 0
+            )
         ):
             raise ValueError("source changed")
         capture, original = verify_capture(value["capture"])

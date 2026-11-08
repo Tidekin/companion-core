@@ -111,7 +111,7 @@ class MemorySources:
                 self.work.mark(reason)
             raise WorkLimit(reason)
 
-        pending, found, loaded = [event_id], {}, {}
+        pending, found, loaded, neighbors = [event_id], {}, {}, {}
 
         def read(key):
             if key in loaded:
@@ -138,9 +138,13 @@ class MemorySources:
                 'trace_id, e.idempotency_key AS idempotency_key, e.fingerprint AS fingerprint, '
                 'e.redacted AS redacted, e.memory_processed AS memory_processed, e.reply_revision '
                 'AS reply_revision, c.scope AS scope, c.owner_actor_id AS owner_actor_id, r.key AS '
-                'erased FROM (SELECT %s AS event_id) AS s LEFT JOIN events AS e ON s.event_id = '
+                'erased, ARRAY(SELECT d.source_event_id FROM event_dependencies AS d '
+                'WHERE d.event_id=s.event_id LIMIT %s) AS source_edges '
+                'FROM (SELECT %s AS event_id) AS s LEFT JOIN events AS e ON s.event_id = '
                 'e.event_id LEFT JOIN conversations AS c ON e.conversation_id = c.conversation_id '
-                "LEFT JOIN runtime_meta AS r ON r.key = 'erased_event:' || s.event_id", (key,))
+                "LEFT JOIN runtime_meta AS r ON r.key = 'erased_event:' || s.event_id",
+                (SOURCE_NODES + 1, key))
+            neighbors[key] = row.pop("source_edges")
             loaded[key] = row
             return row
 
@@ -150,11 +154,10 @@ class MemorySources:
                 continue
             row = read(key)
             found[key] = row
-            edges = self.store.rows('SELECT source_event_id FROM event_dependencies WHERE '
-                'event_id = %s LIMIT %s', (key, SOURCE_NODES + 1))
+            edges = neighbors[key]
             if len(edges) > SOURCE_NODES:
                 refuse("source_nodes")
-            pending.extend(edge["source_event_id"] for edge in edges)
+            pending.extend(edges)
             if row["source"] != "owner.decision" or row["event_type"] != "memory.corrected":
                 continue
             memories = self.store.rows(

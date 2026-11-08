@@ -52,14 +52,14 @@ def test_v1_unprovable_history_is_rejected(core, tmp_path, damage):
         core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (key,))
     elif damage == "approval":
         core.store.execute((
-            'UPDATE runtime_meta SET value=json_set(value,'
-            "'$.binding.approval_sha256',%s) WHERE key=%s"
+            "UPDATE runtime_meta SET value=jsonb_set(value::jsonb,"
+            "'{binding,approval_sha256}',to_jsonb(%s::text))::text WHERE key=%s"
         ),
             ("f" * 64, "live_text_window:" + policy.plan_sha256))
     elif damage == "signature":
         core.store.execute((
-            'UPDATE runtime_meta SET value=json_set(value,'
-            "'$.capture.signature',%s) WHERE key=%s"
+            "UPDATE runtime_meta SET value=jsonb_set(value::jsonb,"
+            "'{capture,signature}',to_jsonb(%s::text))::text WHERE key=%s"
         ), ("0" * 128, "live_text_input:" + job["event_id"]))
     elif damage == "ack":
         core.store.execute("UPDATE outbox SET provider_message_id=NULL")

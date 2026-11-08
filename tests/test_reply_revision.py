@@ -27,6 +27,37 @@ def frozen(core, parts=PARTS):
     return first, job, ids
 
 
+@pytest.mark.parametrize("guard", ["current", "require_current", "require_reply_source", "job"])
+def test_revision_guard_reads_one_source_state_and_rejects_later_revocation(
+    core, monkeypatch, guard,
+):
+    first = accept(core)
+    job = core.claim_job("revision-query-count")
+    original, calls = core.store.one, []
+
+    def observed(statement, parameters=()):
+        calls.append(statement)
+        return original(statement, parameters)
+
+    monkeypatch.setattr(core.store, "one", observed)
+
+    def check():
+        if guard == "job":
+            return reply_revision.check_job(core.store, job)
+        return getattr(reply_revision, guard)(core.store, first["event_id"], 1)
+
+    assert check() is (True if guard == "current" else None)
+    # The job adds its own persisted state and consumed-source checks.
+    assert len(calls) == (3 if guard == "job" else 1)
+    core.store.execute("INSERT INTO runtime_meta (key,value) VALUES (%s,'1')",
+                       ("erased_event:" + first["event_id"],))
+    if guard == "current":
+        assert not check()
+    else:
+        with pytest.raises(CoreError, match=reply_revision.SOURCE_RECALLED):
+            check()
+
+
 @pytest.mark.parametrize("state", ["QUEUED", "RUNNING", "RETRY_WAIT"])
 def test_new_input_cancels_only_same_conversation_pending_job(core, state):
     first = accept(core)
