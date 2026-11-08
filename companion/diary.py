@@ -892,6 +892,8 @@ class DiaryService:
     def save_life_expression(self, job_id, *, expected_content_sha256, authority):
         from companion.diary_life import save
 
+        if self.store.in_transaction and not self.store.control_write:
+            raise RuntimeError("ERASURE_CONTROL_WRITE_REQUIRED")
         return save(
             self, job_id, expected_content_sha256=expected_content_sha256, authority=authority
         )

@@ -76,8 +76,8 @@ def interest_shift_supported(decision, context):
     )
 
 
-def _transaction(store):
-    return nullcontext() if store.in_transaction else store.transaction()
+def _transaction(store, *, control_write=False):
+    return nullcontext() if store.in_transaction else store.transaction(control_write=control_write)
 
 
 def _paused(store, settings, now):
@@ -786,7 +786,7 @@ class LifeTopics:
             "qzone.publish": "QZONE_DRAFT",
             "rem.save": "PRIVATE_CREATION",
         }
-        with _transaction(s):
+        with _transaction(s, control_write=body.action == "diary.save"):
             owner_authority.current(
                 s, self.settings, self.clock, purpose="life", authority=body.authority
             )

@@ -25,6 +25,18 @@ from tests.support.owner_authority import activate
 from tests.support.social_owner_authority import stop
 
 
+def test_diary_save_refuses_an_ordinary_transaction_before_writing(core, tmp_path):
+    core.settings.diary_enabled = True
+    job, _, authority, _ = prepared(core, tmp_path, destination="PRIVATE_DIARY", purposes=["diary"])
+    body = request(core, job, authority, "diary.save")
+    with core.store.transaction():
+        writes = core.store.change_token()["writes"]
+        with pytest.raises(RuntimeError, match="ERASURE_CONTROL_WRITE_REQUIRED"):
+            core.life_topics.consume(job, body, diary=core.diary)
+        assert core.store.change_token()["writes"] == writes
+    assert not core.store.rows("SELECT * FROM diary_entries")
+
+
 def test_private_life_segments_preserve_the_retained_draft_and_recheck_every_part(core, tmp_path):
     from companion import notices
 
