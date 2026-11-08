@@ -227,6 +227,19 @@ CLI 在创建工作循环前完成这些同步初始化，随后才开始领取�
 [DSH 22ddee3 的作用域身份和 dispose 边界](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/core/tools/src/index.ts#L1434-L1509)
 限制临时对象生命周期；没有引入 DSH 执行路径或保存授权结论。
 
+聊天校验进一步在原费用与删除日志锁下，用一条 SELECT 读取当前授权、原任务租约、
+签名输入来源、配置绑定、回复修订和有序图片绑定。SQL 子查询复用各模块的原查询，
+取回的原行仍交给原校验器检查签名、哈希链、生命周期、来源、配置 HMAC、租约和修订。
+临时行对象只存在于一次同步 `check_conversation` 调用中；每次边界重新查询，同一写事务
+内的后续修改也必须重新检查。该对象不保存授权结论，不跨 `await` 或多次边界复用。
+历史来源及图片原始字节仍走原来源、凭证和有效期校验，未知费用不取代来源或结果证据。
+
+复用既有 `to_jsonb` 行投影与原生事务，不新增存储或依赖；DSH 已核验的文档存储实现
+仍不提供可替代 Core 业务校验的 PostgreSQL 事务接口，见 ADR 0002。
+[PostgreSQL 的语句快照](https://www.postgresql.org/docs/16/transaction-iso.html#XACT-READ-COMMITTED)
+保证一次 SELECT 的已提交读取一致；[原生 JSON 行转换](https://www.postgresql.org/docs/16/functions-json.html)
+保留复合行的字段名、空值和数值类型，转换后的行不构成执行许可。
+
 滚动更新脚本使用 `--state-directory` 指向宿主机的 Core 状态目录，按 Worker 原生名称
 核对锁文件。授权修订、UNKNOWN 数量及在途任务和投递在仍运行的 API 容器内通过原生
 只读快照读取，复用该容器的部署连接配置。操作员命令参数不携带数据库凭据；首次

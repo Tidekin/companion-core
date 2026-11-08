@@ -113,16 +113,25 @@ def check_sources(store, job_id):
         raise CoreError(SOURCE_RECALLED, 409)
 
 
+_JOB_SQL = (
+    "SELECT j.state, r.*, EXISTS(SELECT 1 FROM job_sources AS s "
+    "JOIN events AS e USING (event_id) WHERE s.job_id=j.job_id AND "
+    "(e.redacted=1 OR EXISTS(SELECT 1 FROM runtime_meta WHERE "
+    "key='erased_event:'||e.event_id))) AS sources_recalled "
+    "FROM jobs AS j LEFT JOIN LATERAL (" + _REPLY_STATE +
+    "WHERE e.event_id=%s) AS r ON true WHERE j.job_id=%s"
+)
+
+
 def check_job(store, job):
     persisted = store.one(
-        "SELECT j.state, r.*, EXISTS(SELECT 1 FROM job_sources AS s "
-        "JOIN events AS e USING (event_id) WHERE s.job_id=j.job_id AND "
-        "(e.redacted=1 OR EXISTS(SELECT 1 FROM runtime_meta WHERE "
-        "key='erased_event:'||e.event_id))) AS sources_recalled "
-        "FROM jobs AS j LEFT JOIN LATERAL (" + _REPLY_STATE +
-        "WHERE e.event_id=%s) AS r ON true WHERE j.job_id=%s",
+        _JOB_SQL,
         (job["event_id"], job["job_id"]),
     )
+    _checked_job(job, persisted)
+
+
+def _checked_job(job, persisted):
     if not persisted or persisted["state"] == "CANCELLED":
         raise CoreError(CANCELLED, 409)
     if job["kind"] == "chat":

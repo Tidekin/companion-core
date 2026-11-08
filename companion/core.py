@@ -360,13 +360,19 @@ class Core(Runtime):
         return {**row, "lease_token": token, "attempts": row["attempts"] + 1}
 
     def _check_context_snapshots(self, job, snapshots, *, current_request=None, owner_view=None,
-                                 read=None):
+                                 read=None, reads=None):
         if not self.store.in_transaction:
             return self.store.read_or_write(lambda: self._check_context_snapshots(
                 job, snapshots, current_request=current_request, owner_view=owner_view))
-        reply_revision.check_job(self.store, job)
+        if reads is None:
+            reply_revision.check_job(self.store, job)
+        else:
+            reply_revision._checked_job(job, reads.reply)
         authority = owner_view if owner_view is not None else self._owner_job_view(job)
-        configuration = runtime_config.check(self.store, self.settings, "job:" + job["job_id"])
+        task_key = "job:" + job["job_id"]
+        configuration = (runtime_config.check(self.store, self.settings, task_key)
+                         if reads is None else runtime_config._checked_task(
+                             self.store, self.settings, task_key, reads.configuration))
         task_settings = runtime_config.effective(self.settings, configuration)
         markers = [item for item in snapshots if item["kind"] == "runtime_configuration"]
         if markers and (configuration is None or markers != [{"kind": "runtime_configuration",
@@ -452,13 +458,17 @@ class Core(Runtime):
                     owner_input.check_history(self.store, self.settings, self.clock,
                                               job, snapshot["proof"], read=read)
                 elif snapshot["kind"] == "context_plan":
-                    from companion.context_planner import check
+                    from companion.context_planner import check, check_bound
 
-                    check(self, job, snapshots)
+                    if reads is None:
+                        check(self, job, snapshots)
+                    else:
+                        check_bound(self.store, job, snapshots, reads.privacy_epoch)
                 elif snapshot["kind"] == "images":
                     from companion import agent_images
 
-                    ids = agent_images.context_item_ids(self.store, self.settings, self.clock, job)
+                    ids = agent_images.context_item_ids(self.store, self.settings, self.clock, job,
+                        _item_ids=reads.image_item_ids if reads is not None else None)
                     if ids != snapshot["item_ids"]:
                         raise CoreError("PRIVACY_CHANGED", 409)
             except CoreError as error:

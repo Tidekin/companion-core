@@ -40,6 +40,20 @@ class ConversationRead:
             self._values[key] = self.store.one(statement, parameters)
         return deepcopy(self._values[key])
 
+    def seed(self, job, reads):
+        """Use this guard's fresh native projections for the same snapshot's rechecks."""
+        from companion import owner_authority
+
+        self._check()
+        self._values[(owner_authority._current_query(), (
+            owner_authority.CURRENT, owner_authority.GENERATION, owner_authority.MODE,
+        ))] = deepcopy(reads.authority)
+        self._values[(
+            "SELECT state,lease_token,lease_until,authority_json FROM jobs WHERE job_id=%s",
+            (job["job_id"],),
+        )] = deepcopy(reads.job)
+        self._sources[job["event_id"]] = deepcopy(reads.source)
+
     def sources(self, event_ids):
         from companion.owner_input import _load_sources
 

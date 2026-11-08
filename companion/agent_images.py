@@ -319,19 +319,20 @@ def _source(store, settings, clock, job, item_id, *, executing=True):
     return row, image
 
 
-def input_sources(store, settings, clock, job, *, executing=True):
+def input_sources(store, settings, clock, job, *, executing=True, _item_ids=None):
     """Revalidate signed provenance without reopening short-lived original bytes."""
-    rows = store.rows('SELECT item_id FROM agent_image_inputs WHERE job_id = %s ORDER BY position '
-        'NULLS FIRST',
-                      (job["job_id"],))
-    return [_source(store, settings, clock, job, row["item_id"], executing=executing)
-            for row in rows]
+    if _item_ids is None:
+        _item_ids = [row["item_id"] for row in store.rows(
+            'SELECT item_id FROM agent_image_inputs WHERE job_id = %s ORDER BY position '
+            'NULLS FIRST', (job["job_id"],))]
+    return [_source(store, settings, clock, job, item_id, executing=executing)
+            for item_id in _item_ids]
 
 
-def context_item_ids(store, settings, clock, job, *, executing=True):
+def context_item_ids(store, settings, clock, job, *, executing=True, _item_ids=None):
     """Revalidate original image custody and return the ordered evidence identity."""
     return [row["item_id"] for row, _ in input_sources(
-        store, settings, clock, job, executing=executing,
+        store, settings, clock, job, executing=executing, _item_ids=_item_ids,
     )]
 
 

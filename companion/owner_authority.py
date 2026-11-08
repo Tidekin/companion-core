@@ -236,11 +236,29 @@ def _journal_custody(store, settings, row, *, settlement=False):
     return paid_budget.journal(store, approval, allow_settlement=settlement)
 
 
-def current(store, settings, clock, *, purpose=None, authority=None, read=None):
-    """Current policy plus original journal custody; never returns a synthetic window."""
-    from companion.live_text import ERASURE_PROJECTION_SQL, _ledger_custody
+def _lock_current(store):
     from companion.postgres import BUDGET_LEDGER, ERASURE_LEDGER
 
+    store.ledger_lock(BUDGET_LEDGER, shared=store.in_read_snapshot)
+    store.ledger_lock(ERASURE_LEDGER, shared=True)
+
+
+def _current_query():
+    from companion.live_text import ERASURE_PROJECTION_SQL
+
+    return (
+        f"SELECT {_REVISION_FIELDS}, mode.value AS runtime_mode, "
+        f"generation.value AS runtime_generation, {_CUSTODY_FIELDS}, "
+        f"(SELECT jsonb_agg(erasure) FROM ({ERASURE_PROJECTION_SQL}) erasure) AS custody_erasure "
+        f"FROM runtime_meta mode {_CUSTODY_JOINS}"
+        "LEFT JOIN owner_authority_revisions r ON r.record_sha256 = NULLIF(pointer.value, '') "
+        "LEFT JOIN runtime_meta generation ON generation.key = %s "
+        "WHERE mode.key = %s"
+    )
+
+
+def current(store, settings, clock, *, purpose=None, authority=None, read=None):
+    """Current policy plus original journal custody; never returns a synthetic window."""
     if read is not None:
         read.require(store)
     if settings.owner_runtime.mode != "ENABLED":
@@ -248,17 +266,20 @@ def current(store, settings, clock, *, purpose=None, authority=None, read=None):
     if not store.in_transaction:
         return store.read_or_write(lambda: current(
             store, settings, clock, purpose=purpose, authority=authority))
-    store.ledger_lock(BUDGET_LEDGER, shared=store.in_read_snapshot)
-    store.ledger_lock(ERASURE_LEDGER, shared=True)
+    _lock_current(store)
     row = (read.one if read is not None else store.one)(
-        f"SELECT {_REVISION_FIELDS}, mode.value AS runtime_mode, "
-        f"generation.value AS runtime_generation, {_CUSTODY_FIELDS}, "
-        f"(SELECT jsonb_agg(erasure) FROM ({ERASURE_PROJECTION_SQL}) erasure) AS custody_erasure "
-        f"FROM runtime_meta mode {_CUSTODY_JOINS}"
-        "LEFT JOIN owner_authority_revisions r ON r.record_sha256 = NULLIF(pointer.value, '') "
-        "LEFT JOIN runtime_meta generation ON generation.key = %s "
-        "WHERE mode.key = %s", (CURRENT, GENERATION, MODE),
-    )
+        _current_query(), (CURRENT, GENERATION, MODE))
+    return _checked_current(store, settings, clock, row, purpose=purpose, authority=authority)
+
+
+def _checked_current(store, settings, clock, row, *, purpose=None, authority=None):
+    """Apply original policy, custody and time checks to this boundary's native rows."""
+    from companion.live_text import _ledger_custody
+
+    if not store.in_transaction:
+        raise RuntimeError("OWNER_AUTHORITY_CHECKED_TRANSACTION_REQUIRED")
+    if settings.owner_runtime.mode != "ENABLED":
+        raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
     if not row or row["runtime_mode"] != "ENABLED":
         raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
     if (
