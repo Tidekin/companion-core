@@ -145,15 +145,21 @@ def fold(records, row, digest):
     records.append({**row, "record_sha256": digest})
 
 
+PROJECTION_SQL = (
+    f"SELECT {_REVISION_FIELDS}, pointer.value AS current_head FROM (VALUES (1)) AS anchor(v) "
+    "LEFT JOIN owner_authority_revisions AS r ON true "
+    "LEFT JOIN runtime_meta AS pointer ON pointer.key=%s ORDER BY r.revision NULLS FIRST"
+)
+
+
 def validate_projection(store, records, journal_id, journal_path):
     # The native baseline requires this projection, including for an empty grant
     # history. Its pointer and rows must be read at the same statement boundary.
-    projection = store.rows(
-        f"SELECT {_REVISION_FIELDS}, pointer.value AS current_head FROM (VALUES (1)) AS anchor(v) "
-        "LEFT JOIN owner_authority_revisions AS r ON true "
-        "LEFT JOIN runtime_meta AS pointer ON pointer.key=%s ORDER BY r.revision NULLS FIRST",
-        (CURRENT,),
-    )
+    return _validate_projection(records, journal_id, journal_path,
+                                store.rows(PROJECTION_SQL, (CURRENT,)))
+
+
+def _validate_projection(records, journal_id, journal_path, projection):
     rows = [row for row in projection if row["grant_id"] is not None]
     if len(rows) != len(records):
         raise ValueError("authority DB behind journal")
