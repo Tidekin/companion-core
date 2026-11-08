@@ -2,12 +2,14 @@
 
 import asyncio
 import time
+from pathlib import Path
 
 import pytest
 
 from companion import reply_revision, retrieval_work
 from companion.contracts import CoreError
-from companion.memory_context import MemorySources
+from companion.memory_context import MemorySources, read_version
+from companion.privacy import advance_epoch
 from companion.store import encode
 from tests.conftest import ingest, run
 
@@ -78,6 +80,40 @@ def test_source_only_pin_batches_all_requested_roots(core, monkeypatch):
     proof = core.memory_context.pin(core.clock(), event_ids=keys)
     assert set(proof["source_event_ids"]) == keys
     assert len(batches) == 1 and set(batches[0]) == keys
+
+
+def test_custody_rows_reuse_only_one_immutable_scope_but_external_bytes_are_live(core, monkeypatch):
+    facts(core, count=1, chars=40)
+    sources = MemorySources(core.memory, core.clock(), bounded=True)
+    reads = []
+    original = core.store.rows
+
+    def rows(statement, parameters=()):
+        if "AS privacy_epoch" in statement:
+            reads.append(1)
+        return original(statement, parameters)
+
+    monkeypatch.setattr(core.store, "rows", rows)
+    path = Path(core.settings.erasure_ledger)
+    saved = path.read_bytes()
+    with core.store.read_snapshot():
+        sources._snapshot_cache()
+        proof = core.memory_context.pin(core.clock(), event_ids={"proof_1"}, source_view=sources)
+        core.memory_context.revalidate(proof, core.clock(), source_view=sources)
+        assert len(reads) == 1
+        try:
+            path.write_bytes(saved + b"invalid-erasure-record\n")
+            with pytest.raises(CoreError):
+                core.memory_context.revalidate(proof, core.clock(), source_view=sources)
+        finally:
+            path.write_bytes(saved)
+        core.memory_context.revalidate(proof, core.clock(), source_view=sources)
+    with core.store.transaction(control_write=True):
+        advance_epoch(core.store)
+        assert read_version(core.memory, source_view=sources)[0] == 1
+        advance_epoch(core.store)
+        assert read_version(core.memory, source_view=sources)[0] == 2
+    assert len(reads) == 3
 
 
 def test_writer_source_reads_combine_edges_and_recheck_own_changes(core, monkeypatch):

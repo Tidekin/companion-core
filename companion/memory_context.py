@@ -25,15 +25,32 @@ EVENT_COLUMNS = (
 )
 
 
-def read_version(memory):
+def read_version(memory, *, source_view=None):
     # Reuse the same Ledger/DB custody check as the real private context boundary.
-    from companion.live_text import _ledger_custody
+    from companion.live_text import ERASURE_PROJECTION_SQL, _ledger_custody
+    from companion.postgres import ERASURE_LEDGER
 
-    return epoch(memory.store), _ledger_custody(memory.store, memory.settings)
+    store = memory.store
+    if source_view is not None and source_view.store is not store:
+        raise RuntimeError("MEMORY_SOURCE_SNAPSHOT_REQUIRED")
+    if not store.in_transaction:
+        return store.read_or_write(lambda: read_version(memory, source_view=source_view))
+    store.ledger_lock(ERASURE_LEDGER, shared=True)
+    cached = source_view is not None and source_view._snapshot_cache()
+    metadata = source_view._custody if cached else {}
+    if not metadata:
+        projection = store.rows(
+            "SELECT erasure.*,(SELECT value FROM runtime_meta WHERE key='privacy_epoch') "
+            "AS privacy_epoch FROM (" + ERASURE_PROJECTION_SQL + ") erasure")
+        value = projection[0]["privacy_epoch"]
+        metadata.update(epoch=int(value) if value is not None else 0, projection=projection)
+    # Only immutable DB rows are reused. Re-read and validate external bytes each time.
+    digest = _ledger_custody(store, memory.settings, projection=metadata["projection"])
+    return metadata["epoch"], digest
 
 
-def check_version(memory, version):
-    if read_version(memory) != version:
+def check_version(memory, version, *, source_view=None):
+    if read_version(memory, source_view=source_view) != version:
         raise CoreError("PRIVACY_CHANGED", 409)
 
 
@@ -53,6 +70,7 @@ class MemorySources:
         self._references, self._current, self._blocked = {}, {}, {}
         self._reference_values = {}
         self._facts, self._fact_blocked = {}, {}
+        self._custody = {}
         self._source_end = None
         self.cutoff = (datetime.fromisoformat(after(
             now, -86400 * self.settings.raw_event_retention_days,
@@ -63,7 +81,7 @@ class MemorySources:
         if scope is None or scope != self._cache_scope:
             for cache in (self._loaded, self._edges, self._evidence,
                           self._references, self._current, self._blocked, self._reference_values,
-                          self._facts, self._fact_blocked):
+                          self._facts, self._fact_blocked, self._custody):
                 cache.clear()
             self._cache_scope = scope
             self._source_end = None
@@ -576,13 +594,15 @@ class MemoryContext:
         """
         # Source-only pins are also used by independently authorized expression /
         # exploration consumers. They cannot read facts; Core checks their purpose.
-        version = self._begin("owner") if rows else read_version(self.memory)
+        if rows:
+            self.memory.require_owner("owner")
         if source_view is not None and (
             source_view.store is not self.store or not self.store.in_read_snapshot
             or source_view._cache_scope != self.store.frozen_scope or source_view.now != now
         ):
             raise RuntimeError("MEMORY_SOURCE_SNAPSHOT_REQUIRED")
         sources = source_view or MemorySources(self.memory, now, bounded=True, work=work)
+        version = read_version(self.memory, source_view=sources)
         sources.prefetch_facts(rows)
         sources.prefetch([row["memory_id"] for row in rows])
         roots, memories = set(event_ids), []
@@ -616,7 +636,7 @@ class MemoryContext:
             fingerprints[source["event_id"]] = hashlib.sha256(
                 encode(material).encode(),
             ).hexdigest()
-        check_version(self.memory, version)
+        check_version(self.memory, version, source_view=sources)
         return {"rows": memories, "event_ids": sorted(event_ids), "historical": historical,
                 "source_event_ids": sorted(fingerprints), "sources": fingerprints}
 
