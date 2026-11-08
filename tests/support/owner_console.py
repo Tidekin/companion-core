@@ -39,7 +39,7 @@ def stored_memory(core, number=1, *, source=None, content="主人喜欢龙井茶
                   confirmed=True):
     if source is None:
         source = ingest(core, number, "这是主人确认的项目目录")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         memory_id = core.memory.add(Candidate(
             subject="project", kind="fact", fact_key=f"console_{number}", content=content,
             evidence_event_id=source["event_id"], evidence_quote="项目目录",

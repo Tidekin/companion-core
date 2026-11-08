@@ -1,8 +1,6 @@
-"""Empty native polls remain authenticated without contending for the SQLite writer."""
+"""Empty native polls remain authenticated while another worker holds the privacy row."""
 import asyncio
 import json
-import sys
-from pathlib import Path
 from time import perf_counter
 
 import pytest
@@ -10,8 +8,10 @@ import pytest
 from companion import meme_service, owner_input
 from companion.contracts import LeaseRequest
 from companion.transport import lease_deliveries
+from tests.api_store_lock_worker import start as start_lock_worker
 from tests.conftest import ingest, run
 from tests.meme_authority_fixture import stop
+from tests.postgres_fixture import logical_state
 from tests.support.api_store import PREFIX, child_done
 from tests.support.meme_service import claim, discovery_environment, reservation, submit
 
@@ -27,12 +27,8 @@ def test_empty_polls_and_input_state_finish_while_independent_writer_is_held(
             input_path = PREFIX + "/owner-authority/inputs/state"
             expected = await client.post(input_path, json=capture)
             assert expected.status_code == 200
-            before = list(core.store.db.iterdump())
-            process = await asyncio.create_subprocess_exec(
-                sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-                core.settings.database, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
+            before = logical_state(core.store)
+            process = await start_lock_worker(core)
             try:
                 assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
                 started = perf_counter()
@@ -50,7 +46,7 @@ def test_empty_polls_and_input_state_finish_while_independent_writer_is_held(
                     expected.json(), {"items": []}, {"item": None}]
                 assert (await client.get(PREFIX + "/health/live")).status_code == 200
                 assert process.returncode is None
-                assert list(core.store.db.iterdump()) == before
+                assert logical_state(core.store) == before
             finally:
                 if process.returncode is None:
                     process.stdin.write(b"release\n")

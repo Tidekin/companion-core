@@ -1,17 +1,16 @@
 """A real node claim waiting on another process must not block the HTTP loop."""
 
 import asyncio
-import sqlite3
-import sys
 import threading
-from pathlib import Path
 from time import perf_counter
 
 import httpx
 import pytest
 
+from companion.store import Store
 from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import ROUTE_PREFIX
+from tests.api_store_lock_worker import start as start_lock_worker
 from tests.support.api_store import child_done, event_wait
 from tests.support.core_http import real_core_http
 from tests.support.voice_jobs import TOKEN, prepared
@@ -24,21 +23,24 @@ def test_node_claim_write_wait_keeps_http_responsive(core, monkeypatch, record_p
     entered = threading.Event()
     original = VoiceJobs.claim
     owner_thread = threading.get_ident()
-    connections = []
+    connections, closed = [], {}
+    close = Store.close
+
+    def observe_close(store):
+        closed[store] = threading.get_ident()
+        return close(store)
+
+    monkeypatch.setattr(Store, "close", observe_close)
 
     def observed(service, *args, **kwargs):
-        connections.append((service.store.db, threading.get_ident()))
+        connections.append((service.store, service.store.backend_pid, threading.get_ident()))
         entered.set()
         return original(service, *args, **kwargs)
 
     monkeypatch.setattr(VoiceJobs, "claim", observed)
 
     async def scenario():
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-            core.settings.database, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+        process = await start_lock_worker(core)
         requests = []
         try:
             assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
@@ -83,10 +85,13 @@ def test_node_claim_write_wait_keeps_http_responsive(core, monkeypatch, record_p
 
     asyncio.run(scenario())
     assert len(connections) == 2
-    assert all(db is not core.store.db and thread != owner_thread for db, thread in connections)
+    assert all(pid != core.store.backend_pid and thread != owner_thread
+               for _, pid, thread in connections)
+    # A sequential replay acquires a fresh Store lease; the pool may reuse its backend.
     assert connections[0][0] is not connections[1][0]
-    for connection, _ in connections:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+    for connection, _, thread in connections:
+        assert closed[connection] == thread
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
             connection.execute("SELECT 1")
     assert VoiceJobs(core.store, core.settings, core.clock).session("local").last_sequence == (
         body["sequence"]

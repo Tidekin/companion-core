@@ -1,9 +1,7 @@
 """Real HTTP Reader receipts and native status execute outside the API loop."""
 
 import asyncio
-import sys
 import threading
-from pathlib import Path
 from time import perf_counter
 
 import httpx
@@ -16,6 +14,8 @@ from companion.exploration import ReadItem, ReadResult
 from companion.reading import service_for_store
 from companion.retrieval import SemanticIndex
 from companion.store import Store
+from tests.api_store_lock_worker import start as start_lock_worker
+from tests.postgres_fixture import logical_state
 from tests.support.core_http import real_core_http
 from tests.support.exploration import URL, configure
 from tests.support.reading_service import queued
@@ -32,11 +32,12 @@ def forbid_bootstrap(monkeypatch):
 
 def test_reader_composition_has_no_startup_writes_or_shared_connection(core, monkeypatch):
     forbid_bootstrap(monkeypatch)
-    store = Store(core.settings.database)
+    store = Store(core.database, core.settings.state_directory)
     try:
-        changes = store.db.total_changes
-        service = service_for_store(store, core.settings, core.clock)
-        assert store.db.total_changes == changes
+        before = logical_state(core.store)
+        with store.read_snapshot():
+            service = service_for_store(store, core.settings, core.clock)
+        assert logical_state(core.store) == before
         for native in (service, service.video, service.exploration,
                        service.exploration.observations, service.exploration.goals,
                        service.exploration.social):
@@ -65,21 +66,18 @@ def test_reader_receipt_lock_wait_keeps_health_and_rechecks_lease(
     entered, connections = threading.Event(), []
 
     class ObservedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             connections.append((self, threading.get_ident()))
-            self.db.set_trace_callback(
-                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
-            )
+
+        def _control_lock(self, exclusive):
+            entered.set()
+            return super()._control_lock(exclusive)
 
     monkeypatch.setattr(api_store, "Store", ObservedStore)
 
     async def scenario():
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-            core.settings.database, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+        process = await start_lock_worker(core)
         pending = None
         try:
             assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
@@ -132,7 +130,7 @@ def test_reader_receipt_lock_wait_keeps_health_and_rechecks_lease(
 @pytest.mark.parametrize("summary", [False, True])
 def test_status_native_snapshot_wait_keeps_health_responsive(core, monkeypatch, summary):
     before_status = core.status()
-    before_rows = list(core.store.db.iterdump())
+    before_rows = logical_state(core.store)
     before_ledger = core.ledger.path.read_bytes()
     forbid_bootstrap(monkeypatch)
     entered, release = threading.Event(), threading.Event()
@@ -176,5 +174,5 @@ def test_status_native_snapshot_wait_keeps_health_responsive(core, monkeypatch, 
 
     asyncio.run(scenario())
     assert threads and all(t != threading.get_ident() for t in threads)
-    assert list(core.store.db.iterdump()) == before_rows
+    assert logical_state(core.store) == before_rows
     assert core.ledger.path.read_bytes() == before_ledger

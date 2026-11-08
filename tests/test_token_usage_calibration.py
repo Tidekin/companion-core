@@ -1,14 +1,15 @@
 """Local estimates are calibrated with usage without claiming a provider cost guarantee."""
 
 import json
-import sqlite3
 from contextlib import closing
 
 import pytest
 
-from companion import budget, paid_budget
+from companion import budget, ops_status, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelResponse
+from companion.postgres import Database
+from companion.store import Store
 from tests.owner_model_fixtures import authorized_job
 from tests.support.paid_model import approved_live
 
@@ -68,7 +69,7 @@ def test_large_input_deviation_is_diagnosed_but_settles_within_local_amount_limi
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 1000, 2))
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
     assert diagnostic(core, request)["code"] == "INPUT_USAGE_SPIKE"
-    assert budget.usage_diagnostics(core.store.db)["anomaly_calls"] == 1
+    assert budget.usage_diagnostics(core.store)["anomaly_calls"] == 1
     assert reserve(core)[0] != request
 
 
@@ -140,7 +141,7 @@ def test_transport_unknown_keeps_liability_and_limits_new_native_work(core, tmp_
     with pytest.raises(CoreError, match="CONCURRENCY"):
         budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
     assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,)) == original
-    summary = budget.usage_diagnostics(core.store.db)
+    summary = budget.usage_diagnostics(core.store)
     assert summary["calibrated_calls"] == summary["input_actual_tokens"] == 0
     assert summary["currency"] is None
 
@@ -149,7 +150,7 @@ def test_calibration_accepts_a_read_only_connection_and_preserves_cached_usage(c
     approved_live(core, tmp_path)
     request, admission = reserve(core)
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 80, 3, 40))
-    with closing(sqlite3.connect(f"file:{core.settings.database}?mode=ro", uri=True)) as readonly:
+    with ops_status.read_view(core.settings) as readonly:
         summary = budget.usage_diagnostics(readonly)
     assert summary == {
         "calibrated_calls": 1,
@@ -167,42 +168,32 @@ def test_calibration_accepts_a_read_only_connection_and_preserves_cached_usage(c
     }
 
 
-def test_calibration_stays_within_the_status_read_budget_with_a_large_audit_log(tmp_path):
-    path = tmp_path / "calibration.db"
-    with closing(sqlite3.connect(path)) as db:
-        db.executescript("""
-            CREATE TABLE model_usage (request_id TEXT PRIMARY KEY, state TEXT,
-                input_tokens INTEGER, output_tokens INTEGER, cached_input_tokens INTEGER,
-                billed_micro_usd INTEGER);
-            CREATE TABLE model_admissions (request_id TEXT PRIMARY KEY, input_bound INTEGER,
-                reserved_micro_usd INTEGER);
-            CREATE TABLE audit_log (action TEXT, entity_id TEXT, safe_detail_json TEXT);
-        """)
-        db.executemany("INSERT INTO model_usage VALUES (?,?,?,?,?,?)", [
-            (str(i), "SETTLED" if i < 512 else ("UNKNOWN" if i == 512 else "RESERVED"),
-             110 + i, 3, 2, 11) for i in range(514)])
-        db.executemany("INSERT INTO model_admissions VALUES (?,?,?)", [
-            (str(i), 100 + i, 10) for i in range(514)])
-        db.executemany("INSERT INTO audit_log VALUES (?,?,?)", [
-            ("event.accepted", str(i), "{}") for i in range(50000)])
-        db.executemany("INSERT INTO audit_log VALUES (?,?,?)", [
-            ("model.video_rate_correction", key, "{}") for key in ("0", "0", "1", None)])
-        db.commit()
+def test_calibration_stays_within_the_status_read_budget_with_a_large_audit_log(core):
+    from tests.postgres_fixture import isolated_database
 
-    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as readonly:
-        readonly.execute("PRAGMA query_only=ON")
-        ticks = 0
-
-        def progress():
-            nonlocal ticks
-            ticks += 1
-            return ticks >= 2000  # Same bounded VM budget as ops_status.snapshot.
-
-        readonly.set_progress_handler(progress, 10000)
-        try:
+    with isolated_database() as info, Database(info) as database:
+        cfg = core.settings.model_copy(update={"database": info})
+        with closing(Store(database, cfg.state_directory)) as store:
+            store.execute("CREATE TABLE model_usage (request_id TEXT PRIMARY KEY, state TEXT, "
+                          "input_tokens INTEGER, output_tokens INTEGER, "
+                          "cached_input_tokens INTEGER, billed_micro_usd INTEGER)")
+            store.execute("CREATE TABLE model_admissions (request_id TEXT PRIMARY KEY, "
+                          "input_bound INTEGER, reserved_micro_usd INTEGER)")
+            store.execute("CREATE TABLE audit_log (action TEXT, entity_id TEXT, "
+                          "safe_detail_json TEXT)")
+            store.execute("INSERT INTO model_usage SELECT i::text,CASE WHEN i<512 THEN 'SETTLED' "
+                          "WHEN i=512 THEN 'UNKNOWN' ELSE 'RESERVED' END,110+i,3,2,11 "
+                          "FROM generate_series(0,513) AS i")
+            store.execute("INSERT INTO model_admissions SELECT i::text,100+i,10 "
+                          "FROM generate_series(0,513) AS i")
+            store.execute("INSERT INTO audit_log SELECT 'event.accepted',i::text,'{}' "
+                          "FROM generate_series(0,49999) AS i")
+            store.execute("INSERT INTO audit_log SELECT 'model.video_rate_correction',k,'{}' "
+                          "FROM (VALUES ('0'),('0'),('1'),(NULL)) AS corrections(k)")
+        with ops_status.read_view(cfg) as readonly:
+            assert readonly.one("SHOW transaction_read_only")["transaction_read_only"] == "on"
+            assert readonly.one("SHOW statement_timeout")["statement_timeout"] == "2s"
             summary = budget.usage_diagnostics(readonly)
-        finally:
-            readonly.set_progress_handler(None, 0)
     assert summary == {
         "calibrated_calls": 510,
         "input_estimated_tokens": sum(100 + i for i in range(2, 512)),

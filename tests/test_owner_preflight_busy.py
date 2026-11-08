@@ -1,9 +1,9 @@
-"""Both production pre-dispatch boundaries with a second SQLite writer and real HTTP."""
+"""Both pre-dispatch checks contend on the native privacy row over real HTTP."""
 
 import json
-import sqlite3
 
 import httpx
+import psycopg
 import pytest
 from pydantic import SecretStr
 
@@ -62,13 +62,14 @@ def test_busy_preflight_preserves_single_dispatch_and_next_input(core, tmp_path,
             await active.capture()
             await active.flush()
             await run_worker()
-            writer = sqlite3.connect(core.settings.database, isolation_level=None)
+            writer = psycopg.connect(core.settings.database.get_secret_value())
             calls, busy, proofs = [], [], []
 
             async def lock(request):
                 if request.url.path.endswith("/" + stage):
                     if not calls:
-                        writer.execute("BEGIN IMMEDIATE")
+                        writer.execute(
+                            "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
                     calls.append(json.loads(request.content))
 
             async def observe(response):

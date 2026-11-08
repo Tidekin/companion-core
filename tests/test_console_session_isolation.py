@@ -1,9 +1,7 @@
 """Owner session writes stay responsive and decide against post-wait state."""
 
 import asyncio
-import sys
 import threading
-from pathlib import Path
 from time import perf_counter
 
 import httpx
@@ -12,6 +10,7 @@ from pydantic import SecretStr
 
 from companion import api_store
 from companion.store import Store, after
+from tests.api_store_lock_worker import start as start_lock_worker
 from tests.support.console_reset_isolation import ORIGIN, PASSWORD, configure, login
 from tests.support.core_http import real_core_http
 
@@ -24,12 +23,13 @@ def test_session_write_wait_keeps_health_responsive(core, monkeypatch, record_pr
     entered, opened, closed = threading.Event(), [], []
 
     class ObservedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             opened.append((self, threading.get_ident()))
-            self.db.set_trace_callback(
-                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
-            )
+
+        def _control_lock(self, exclusive):
+            entered.set()
+            return super()._control_lock(exclusive)
 
         def close(self):
             closed.append((self, threading.get_ident()))
@@ -43,11 +43,7 @@ def test_session_write_wait_keeps_health_responsive(core, monkeypatch, record_pr
         ):
             headers = await login(client) if method == "DELETE" else {"Origin": ORIGIN}
             monkeypatch.setattr(api_store, "Store", ObservedStore)
-            process = await asyncio.create_subprocess_exec(
-                sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-                core.settings.database, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
+            process = await start_lock_worker(core)
             pending = None
             try:
                 assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
@@ -102,8 +98,8 @@ def test_session_write_rechecks_authority_after_queue(core, monkeypatch, method,
     entered, release = threading.Event(), threading.Event()
 
     class GatedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             entered.set()
             assert release.wait(5)
 

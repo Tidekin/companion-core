@@ -403,18 +403,20 @@ def test_onebot_ack_loss_is_one_external_attempt_across_restart(core, tmp_path):
     run(scenario())
 
 
-def test_sqlite_lock_wait_cannot_authorize_send_after_deadline(core, tmp_path):
-    import sqlite3
+def test_native_lock_wait_cannot_authorize_send_after_deadline(core, tmp_path):
     import threading
     import time
+
+    import psycopg
 
     async def scenario():
         async with native_clients(core, tmp_path) as ctx:
             locked = threading.Event()
             def hold():
-                connection = sqlite3.connect(core.settings.database)
+                connection = psycopg.connect(core.settings.database.get_secret_value())
                 try:
-                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
                     locked.set()
                     time.sleep(0.1)
                     core.clock.now = ctx.policy.expires_at
@@ -530,23 +532,47 @@ def test_owner_stop_entrypoint_fences_core_before_new_model_io(core, tmp_path, s
 
 
 def test_core_stop_survives_old_db_without_its_native_projection(core, tmp_path):
-    import sqlite3
-    from contextlib import closing
+    from tempfile import TemporaryDirectory
+
+    from companion.backup import _client, _run
+    from companion.core import Core
+    from tests.postgres_fixture import isolated_database
+    from tests.support.core_http import real_core_http
+
+    def native_database_tool(dsn, tool, *args):
+        with TemporaryDirectory(dir=tmp_path) as directory, _client(dsn, directory) as (_, env):
+            _run(tool, args, env)
 
     async def scenario():
         async with native_clients(core, tmp_path) as ctx:
             await native_admit(ctx)
-            with closing(sqlite3.connect(tmp_path / "before-stop.db")) as old_db:
-                core.store.db.backup(old_db)
-                await native_stop(ctx)
-                old_db.backup(core.store.db)
-            await ctx.worker.run_once()
-            assert ctx.calls == ctx.sends == []
-            assert not core.store.rows("SELECT * FROM outbox")
-            assert not core.store.rows("SELECT * FROM model_usage")
-            response = await ctx.client.post("/internal/v1/owner-authority/check",
-                json={"authority": ctx.authority, "purpose": "chat"})
-            assert response.status_code != 200
+            dump = str(tmp_path / "before-stop.dump")
+            await asyncio.to_thread(native_database_tool, core.settings.database, "pg_dump",
+                                    "--format=custom", "--no-owner", "--no-privileges",
+                                    "--file", dump)
+            await native_stop(ctx)
+            with isolated_database() as target:
+                # Simulate a DB-only rewind. The original independent authority journal stays ahead.
+                await asyncio.to_thread(native_database_tool, target, "pg_restore",
+                                        "--clean", "--if-exists", "--no-owner", "--no-privileges",
+                                        "--single-transaction", dump)
+                cfg = core.settings.model_copy(update={"database": target})
+                with Core(cfg, ctx.worker.model, core.clock) as rewound:
+                    assert not rewound.store.one(
+                        "SELECT 1 FROM owner_authority_revisions WHERE state='STOPPED'"
+                    )
+                    await rewound.run_once()
+                    assert ctx.calls == ctx.sends == []
+                    assert not rewound.store.rows("SELECT * FROM outbox")
+                    assert not rewound.store.rows("SELECT * FROM model_usage")
+                    async with real_core_http(rewound) as port, httpx.AsyncClient(
+                        base_url=f"http://127.0.0.1:{port}", trust_env=False,
+                        headers={"Authorization": "Bearer " + cfg.bridge_token.get_secret_value()},
+                    ) as client:
+                        response = await client.post("/internal/v1/owner-authority/check",
+                            json={"authority": ctx.authority, "purpose": "chat"})
+                        assert response.status_code == 503, response.text
+                        assert response.json()["error"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
     run(scenario())
 
 

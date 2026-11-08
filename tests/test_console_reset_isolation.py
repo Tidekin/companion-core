@@ -1,10 +1,7 @@
 """Console reset keeps HTTP responsive and rechecks the queued owner session."""
 
 import asyncio
-import sqlite3
-import sys
 import threading
-from pathlib import Path
 from time import perf_counter
 
 import httpx
@@ -14,6 +11,7 @@ from pydantic import SecretStr
 from companion import api_store, console_api
 from companion.privacy import epoch
 from companion.store import Store
+from tests.api_store_lock_worker import start as start_lock_worker
 from tests.support.console_reset_isolation import configure, login
 from tests.support.core_http import real_core_http
 
@@ -29,12 +27,13 @@ def test_console_reset_wait_keeps_health_responsive_and_retry_idempotent(
     initial_epoch = epoch(core.store)
 
     class ObservedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             opened.append((self, threading.get_ident()))
-            self.db.set_trace_callback(
-                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
-            )
+
+        def _control_lock(self, exclusive):
+            entered.set()
+            return super()._control_lock(exclusive)
 
         def close(self):
             closed.append((self, threading.get_ident()))
@@ -48,11 +47,7 @@ def test_console_reset_wait_keeps_health_responsive_and_retry_idempotent(
         ):
             headers = await login(client)
             monkeypatch.setattr(api_store, "Store", ObservedStore)
-            process = await asyncio.create_subprocess_exec(
-                sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-                core.settings.database, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
+            process = await start_lock_worker(core)
             pending = None
             try:
                 assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
@@ -95,7 +90,7 @@ def test_console_reset_wait_keeps_health_responsive_and_retry_idempotent(
     assert {id(s): t for s, t in opened} == {id(s): t for s, t in closed}
     for store, thread in opened:
         assert store is not core.store and thread != threading.get_ident()
-        with pytest.raises(sqlite3.ProgrammingError):
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
             store.one("SELECT 1")
     assert epoch(core.store) == initial_epoch + 1
     records = [row for row in core.ledger.read() if row.get("target_type") == "affect_reset"]
@@ -111,8 +106,8 @@ def test_console_reset_rechecks_session_after_queue_wait(core, monkeypatch, chan
     initial_ledger = core.ledger.path.read_bytes()
 
     class GatedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             entered.set()
             assert release.wait(5)
 
@@ -156,7 +151,7 @@ def test_console_reset_rechecks_logout_between_receipt_and_effect(core, monkeypa
     def operation(context, request, key, body, apply, **kwargs):
         def revoke_before_apply():
             # A separate connection commits revocation after STARTED was recorded.
-            store = Store(core.settings.database)
+            store = Store(core.database, core.settings.state_directory)
             try:
                 with store.transaction():
                     store.execute("DELETE FROM console_sessions")

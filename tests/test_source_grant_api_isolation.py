@@ -1,10 +1,8 @@
 """Source-grant writes preserve custody and owner authority off the API loop."""
 
 import asyncio
-import sys
 import threading
 from contextlib import closing
-from pathlib import Path
 from time import perf_counter
 
 import httpx
@@ -13,8 +11,11 @@ from cryptography.fernet import Fernet
 
 from companion import api_store, console_api
 from companion.backup import backup, restore
+from companion.postgres import Database
 from companion.source_grants import grant_tombstone
 from companion.store import Store
+from tests.api_store_lock_worker import start as start_lock_worker
+from tests.postgres_fixture import isolated_database
 from tests.support.console_reset_isolation import configure as console_configure
 from tests.support.console_reset_isolation import login
 from tests.support.core_http import real_core_http
@@ -38,18 +39,19 @@ def test_source_grant_write_wait_keeps_health_and_original_semantics(
         derived_records(core, root)
         pending = lease(core, grant, key="pending-read")
     console_configure(core)
-    key, archive, restored = Fernet.generate_key(), tmp_path / "before.enc", tmp_path / "restore.db"
+    key, archive = Fernet.generate_key(), tmp_path / "before.enc"
     if action == "forget":
         backup(core.settings.database, archive, key)
     entered, opened, closed = threading.Event(), [], []
 
     class ObservedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             opened.append((self, threading.get_ident()))
-            self.db.set_trace_callback(
-                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
-            )
+
+        def _control_lock(self, exclusive):
+            entered.set()
+            return super()._control_lock(exclusive)
 
         def close(self):
             closed.append((self, threading.get_ident()))
@@ -72,11 +74,7 @@ def test_source_grant_write_wait_keeps_health_and_original_semantics(
                 if action != "register":
                     path += "/" + grant.grant_id + "/" + action
             monkeypatch.setattr(api_store, "Store", ObservedStore)
-            process = await asyncio.create_subprocess_exec(
-                sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-                core.settings.database, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
+            process = await start_lock_worker(core)
             task = None
             try:
                 assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
@@ -129,12 +127,14 @@ def test_source_grant_write_wait_keeps_health_and_original_semantics(
     if action == "forget":
         assert core.store.one("SELECT status FROM memories WHERE memory_id='mem_grant_fixture'")[
             "status"] == "FORGOTTEN"
-        restore(archive, restored, key, core.settings.erasure_ledger)
-        with closing(Store(str(restored))) as store:
-            state = store.one("SELECT redacted FROM events WHERE event_id=?", (root,))
-            assert state["redacted"] == 1
-            assert store.one("SELECT value FROM runtime_meta WHERE key=?",
-                             (grant_tombstone(grant.grant_id),))
+        state_dir = tmp_path / "restored-state"
+        with isolated_database() as restored, Database(restored) as database:
+            restore(archive, restored, key, core.settings.erasure_ledger, state_directory=state_dir)
+            with closing(Store(database, state_dir)) as store:
+                state = store.one("SELECT redacted FROM events WHERE event_id=%s", (root,))
+                assert state["redacted"] == 1
+                assert store.one("SELECT value FROM runtime_meta WHERE key=%s",
+                                 (grant_tombstone(grant.grant_id),))
 
 
 def test_source_grant_registration_rechecks_expiry_after_write_lock(core, monkeypatch):
@@ -144,11 +144,10 @@ def test_source_grant_registration_rechecks_expiry_after_write_lock(core, monkey
     entered, release = threading.Event(), threading.Event()
 
     class GatedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
-            self.db.set_trace_callback(lambda sql: (
-                entered.set(), release.wait(5)
-            ) if sql == "BEGIN IMMEDIATE" else None)
+        def _control_lock(self, exclusive):
+            entered.set()
+            assert release.wait(5)
+            return super()._control_lock(exclusive)
 
     monkeypatch.setattr(api_store, "Store", GatedStore)
 
@@ -186,7 +185,7 @@ def test_console_grant_action_rechecks_logout_before_native_effect(core, monkeyp
 
     def operation(context, request, key, body, apply, **kwargs):
         def revoke_session():
-            with closing(Store(core.settings.database)) as store:
+            with closing(Store(core.database, core.settings.state_directory)) as store:
                 with store.transaction():
                     store.execute("DELETE FROM console_sessions")
             return apply()

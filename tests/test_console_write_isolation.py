@@ -1,10 +1,8 @@
 """Native Console effects use independent connections and recheck queued authorization."""
 
 import asyncio
-import sys
 import threading
 from contextlib import closing
-from pathlib import Path
 from time import perf_counter
 
 import httpx
@@ -14,6 +12,7 @@ from pydantic import SecretStr
 from companion import api_store, console_api
 from companion.store import Store, after
 from companion.transport import enqueue
+from tests.api_store_lock_worker import start as start_lock_worker
 from tests.conftest import ingest, run
 from tests.support.cognition_goal_steps import retained_plan
 from tests.support.console_reset_isolation import configure, login
@@ -98,12 +97,13 @@ def test_native_write_wait_keeps_http_responsive_and_retry_idempotent(
     entered, opened, closed = threading.Event(), [], []
 
     class ObservedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             opened.append((self, threading.get_ident()))
-            self.db.set_trace_callback(
-                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
-            )
+
+        def _control_lock(self, exclusive):
+            entered.set()
+            return super()._control_lock(exclusive)
 
         def close(self):
             closed.append((self, threading.get_ident()))
@@ -117,10 +117,7 @@ def test_native_write_wait_keeps_http_responsive_and_retry_idempotent(
         ):
             headers = await login(client)
             monkeypatch.setattr(api_store, "Store", ObservedStore)
-            process = await asyncio.create_subprocess_exec(
-                sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-                core.settings.database, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            process = await start_lock_worker(core)
             task = None
             try:
                 assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
@@ -172,8 +169,8 @@ def test_revoked_session_cannot_apply_queued_native_write(core, monkeypatch, cas
     original_operation = console_api._operation
 
     class GatedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             if when == "queue":
                 entered.set()
                 assert release.wait(5)
@@ -196,7 +193,7 @@ def test_revoked_session_cannot_apply_queued_native_write(core, monkeypatch, cas
             task = asyncio.create_task(client.request(method, path, json=body, headers=headers))
             try:
                 assert await asyncio.to_thread(entered.wait, 3)
-                with closing(Store(core.settings.database)) as other:
+                with closing(Store(core.database, core.settings.state_directory)) as other:
                     other.execute("DELETE FROM console_sessions")
                 release.set()
                 response = await asyncio.wait_for(task, 8)

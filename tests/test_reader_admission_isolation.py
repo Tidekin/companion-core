@@ -1,9 +1,7 @@
 """Reader lease and pre-I/O validation retain authority after API queue waits."""
 
 import asyncio
-import sys
 import threading
-from pathlib import Path
 from time import perf_counter
 
 import httpx
@@ -11,6 +9,7 @@ import pytest
 
 from companion import api_store
 from companion.store import Store, after
+from tests.api_store_lock_worker import start as start_lock_worker
 from tests.conftest import ingest
 from tests.support.core_http import real_core_http
 from tests.support.exploration import configure
@@ -46,12 +45,13 @@ def test_reader_admission_wait_keeps_health_and_uses_current_time(
     entered, opened, closed = threading.Event(), [], []
 
     class ObservedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             opened.append((self, threading.get_ident()))
-            self.db.set_trace_callback(
-                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
-            )
+
+        def _control_lock(self, exclusive):
+            entered.set()
+            return super()._control_lock(exclusive)
 
         def close(self):
             closed.append((self, threading.get_ident()))
@@ -60,11 +60,7 @@ def test_reader_admission_wait_keeps_health_and_uses_current_time(
     monkeypatch.setattr(api_store, "Store", ObservedStore)
 
     async def scenario():
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-            core.settings.database, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+        process = await start_lock_worker(core)
         task = None
         try:
             assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
@@ -132,8 +128,8 @@ def test_reader_queue_rechecks_source_grant(core, monkeypatch, version, operatio
     entered, release = threading.Event(), threading.Event()
 
     class GatedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             entered.set()
             assert release.wait(5)
 

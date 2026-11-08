@@ -1,11 +1,11 @@
 """Native inbox admission must remain atomic while other HTTP requests can progress."""
 
 import asyncio
-import sqlite3
 import threading
 from contextlib import closing
 
 import httpx
+import psycopg
 import pytest
 
 from companion import api_store
@@ -18,11 +18,9 @@ def test_inbox_waiting_for_writer_keeps_health_live_and_deduplicates(core, monke
     entered = threading.Event()
 
     class TracedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
-            self.db.set_trace_callback(
-                lambda sql: entered.set() if sql.startswith("BEGIN IMMEDIATE") else None
-            )
+        def _control_lock(self, exclusive):
+            entered.set()
+            return super()._control_lock(exclusive)
 
     monkeypatch.setattr(api_store, "Store", TracedStore)
     body = event(core).model_dump(mode="json")
@@ -33,8 +31,9 @@ def test_inbox_waiting_for_writer_keeps_health_live_and_deduplicates(core, monke
         async with real_core_http(core) as port, httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}", trust_env=False,
         ) as client:
-            with closing(sqlite3.connect(core.settings.database)) as writer:
-                writer.execute("BEGIN IMMEDIATE")
+            with closing(psycopg.connect(core.settings.database.get_secret_value())) as writer:
+                writer.execute(
+                    "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
                 requests = [asyncio.create_task(client.post(
                     "/internal/v1/inbox/events", json=body, headers=headers,
                 )) for _ in range(2)]
@@ -69,11 +68,9 @@ def test_recall_waiting_for_writer_keeps_http_live_and_commits_once(
     entered = threading.Event()
 
     class TracedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
-            self.db.set_trace_callback(
-                lambda sql: entered.set() if sql.startswith("BEGIN IMMEDIATE") else None
-            )
+        def _control_lock(self, exclusive):
+            entered.set()
+            return super()._control_lock(exclusive)
 
     async def verify(body):
         monkeypatch.setattr(api_store, "Store", TracedStore)
@@ -82,8 +79,9 @@ def test_recall_waiting_for_writer_keeps_http_live_and_commits_once(
         async with real_core_http(core) as port, httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}", trust_env=False, headers=headers,
         ) as client, httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as probe:
-            with closing(sqlite3.connect(core.settings.database)) as writer:
-                writer.execute("BEGIN IMMEDIATE")
+            with closing(psycopg.connect(core.settings.database.get_secret_value())) as writer:
+                writer.execute(
+                    "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
                 request = asyncio.create_task(client.post(path, json=body))
                 try:
                     assert await asyncio.to_thread(entered.wait, 3)

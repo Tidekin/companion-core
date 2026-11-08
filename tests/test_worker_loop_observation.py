@@ -2,11 +2,11 @@
 
 import asyncio
 import json
-import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import psycopg
 import pytest
 from cryptography.fernet import Fernet
 
@@ -184,9 +184,9 @@ def test_actual_worker_failed_maintenance_preserves_previous_loop_record(core, m
     with pytest.raises(RuntimeError, match="synthetic maintenance failure"):
         run(__main__.worker(core.settings))
     # The worker closes its connection even when maintenance fails.
-    with closing(sqlite3.connect(core.settings.database)) as database:
+    with closing(psycopg.connect(core.settings.database.get_secret_value())) as database:
         persisted = database.execute(
-            "SELECT value FROM runtime_meta WHERE key=?", (worker_loop.KEY,),
+            "SELECT value FROM runtime_meta WHERE key=%s", (worker_loop.KEY,),
         ).fetchone()
     assert persisted == (previous,)
 
@@ -384,5 +384,5 @@ def test_real_http_observation_records_safe_loop_metadata_only(core, tmp_path):
     assert result["failures"] == 0
     assert value["worker_loop_activity"]["reasons"] == ["LOOP_BASELINE_REQUIRED"]
     assert value["snapshot"]["worker_loop"]["state"] == "RECORDED"
-    assert core.settings.database not in output.read_text("utf-8")
+    assert core.settings.database.get_secret_value() not in output.read_text("utf-8")
     assert core.settings.bridge_token.get_secret_value() not in output.read_text("utf-8")
