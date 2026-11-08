@@ -1,17 +1,18 @@
 """Print the live style segment that approved candidates WOULD add, offline and read-only.
 
-Opens the Core SQLite database with `mode=ro`, reads approved, unexpired style candidates and
+Opens a read-only PostgreSQL snapshot, reads approved, unexpired style candidates and
 whether their sources are still live, then prints the system-prompt segment `style_live`
 would append for a few synthetic owner messages. It ignores the `style_live` switch and owner
 authority purposes on purpose, makes no model call and sends nothing.
 """
 
 import argparse
-import sqlite3
 import sys
-from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
+
+import psycopg
+from psycopg.rows import dict_row
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -43,26 +44,24 @@ class ReadOnlyStore:
         return dict(row) if row else None
 
 
-def database_path(value):
+def database_connection(value):
     if value:
-        return Path(value)
+        return value
     from companion.config import Settings
 
-    return Path(Settings.load(apply_operator_config=False).database)
+    return Settings.load(apply_operator_config=False).database.get_secret_value()
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--db", help="Core SQLite path; default: database from COMPANION_CONFIG")
+    parser.add_argument("--db", help="Core PostgreSQL DSN; default: database from COMPANION_CONFIG")
     parser.add_argument("--now", help="ISO time; default: current UTC time")
     parser.add_argument("--text", action="append", help="message to try (repeatable)")
     args = parser.parse_args(argv)
-    path = database_path(args.db).resolve()
-    if not path.exists():
-        parser.error(f"database not found: {path}")
     now = args.now or datetime.now(UTC).isoformat(timespec="microseconds")
-    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
-        db.row_factory = sqlite3.Row
+    with psycopg.connect(database_connection(args.db), row_factory=dict_row,
+                         options="-c default_transaction_read_only=on") as db:
+        db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         store = ReadOnlyStore(db)
         for text in args.text or SAMPLES:
             added, used, decision = style_observation.live_segment(store, now, text)

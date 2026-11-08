@@ -297,7 +297,8 @@ def test_memory_proof_drift_after_model_receive_prevents_reply(core, tmp_path, m
             core.store.execute('UPDATE memories SET needs_review=1 WHERE memory_id=%s',
                                (value.memory_id,))
         elif mutation == "epoch":
-            advance_epoch(core.store)
+            with core.store.transaction(control_write=True):
+                advance_epoch(core.store)
         else:
             core.store.execute('DELETE FROM memory_evidence WHERE memory_id=%s', (value.memory_id,))
         return httpx.Response(200, json=answer("旧事实不能发送。"))
@@ -427,7 +428,8 @@ def test_final_native_send_check_rechecks_memory_and_history_proofs(core, tmp_pa
                 core.store.execute("UPDATE memories SET content='变更事实' WHERE memory_id=%s",
                                    (value.memory_id,))
             elif mutation == "epoch":
-                advance_epoch(core.store)
+                with core.store.transaction(control_write=True):
+                    advance_epoch(core.store)
             else:
                 saved = core.store.one('SELECT * FROM agent_conversations WHERE job_id=%s',
                                        (job["job_id"],))

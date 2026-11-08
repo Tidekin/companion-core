@@ -61,18 +61,23 @@ UI 也加载本次已验证的原归档；运行时不重新构建。其依赖�
 镜像加载后、停写前，在部署主机上运行只读预检：
 
 ```bash
-python3 scripts/release_plan.py --project companion-main --target core=<镜像ID> --target bridge=<镜像ID> --output <私有目录>
+python3 scripts/release_plan.py --project companion-main \
+  --target core=<镜像ID> --target bridge=<镜像ID> \
+  --probe-config <隔离副本.toml> --probe-network <内部网络> --output <私有目录>
 ```
 
 预检不会停止、启动、迁移或写入运行中的服务和数据。流程如下：
 
-1. 读取运行中的容器，找出 API 可写挂载的目录。
-2. 把这些目录复制到 `/dev/shm` 下的私有临时目录。SQLite 文件用 backup API 复制，已提交的 WAL 一并带上。
-3. 用目标 Core 镜像在无网络容器中运行 `companion.release_probe`，检查副本：
+1. 先复用[原生备份/恢复流程](postgresql-migration.md)准备独立 PostgreSQL 副本、最新账本和遗忘日志副本。
+   私有配置仅指向该副本，内部网络仅连接副本数据库和预检容器。配置中的文件路径对应下列复制后的挂载位置。
+2. 读取运行中的容器，把 API 可写挂载复制到 `/dev/shm` 下的私有临时目录。
+   边缘 SQLite 文件仍用 backup API 复制已提交 WAL；Core 数据库由上述独立原生副本提供。
+3. 用目标 Core 镜像在指定的内部网络运行 `companion.release_probe`，显式加载副本配置，检查副本：
    - 需要迁移时，在副本上执行并计时；
    - 判断当前 OwnerAuthority policy 在新代码和现有配置下是否仍然有效；
    - 统计未结任务、待发送消息和 UNKNOWN 模型调用。
-4. 删除副本，输出 `plan.json` 和 `plan.md`。输出只含代码、计数和镜像 ID，不含消息内容或配置值。
+4. 删除临时挂载副本，输出 `plan.json` 和 `plan.md`。输出只含代码、计数和镜像 ID，不含消息内容或配置值。
+   操作员随后清理独立数据库副本。预检拒绝包含生产 API 的网络，也不继承生产容器的环境覆盖值。
 
 预检结论分为以下几类：
 

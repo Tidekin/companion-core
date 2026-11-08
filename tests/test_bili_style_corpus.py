@@ -7,6 +7,24 @@ from companion import style_corpus
 from tests.support.bili_style_corpus import NOW, OTHER, VIDEO, comment, row
 
 
+def test_corpus_cli_reads_native_observations_without_changing_them(core, tmp_path, monkeypatch):
+    from scripts import bili_style_corpus
+    from tests.postgres_fixture import logical_state
+    from tests.support.exploration import configure
+    from tests.support.style_distill import thread
+
+    configure(core)
+    event_id = thread(core, 1, [comment("1", "这一段配乐与画面配合得很好")])
+    before = logical_state(core.store)
+    monkeypatch.setattr(bili_style_corpus, "ROOT", tmp_path)
+    output = tmp_path / ".local" / "corpus"
+    bili_style_corpus.main(["--database", core.settings.database.get_secret_value(),
+                            "--output", str(output)])
+    corpus = json.loads((output / "corpus.private.json").read_text("utf8"))
+    assert {record["event_id"] for record in corpus["records"]} == {event_id}
+    assert logical_state(core.store) == before
+
+
 def test_pairs_need_a_parent_in_the_same_sample():
     corpus, report = style_corpus.build([row("evt_a", VIDEO, [
         comment("1", "这只猫睡觉的姿势也太离谱了"),

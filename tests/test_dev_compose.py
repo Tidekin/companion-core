@@ -161,13 +161,13 @@ def test_native_probe_capture_preserves_failure_and_separates_exit_states(
 
 
 def test_native_probe_watch_forwards_original_native_call_and_close():
-    result, stop = object(), object()
+    result = object()
     calls = []
 
     class Native:
-        def watch(self, *args):
-            calls.append(args)
-            return result
+        def notifies(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            yield result
 
         def close(self):
             calls.append("close")
@@ -176,41 +176,41 @@ def test_native_probe_watch_forwards_original_native_call_and_close():
     native = Native()
     watch = NativeWatch(native)
     assert watch.native is native
-    assert watch.watch(50, 50, 60000, stop) is result
+    assert list(watch.notifies(timeout=60, stop_after=1)) == [result]
     assert watch.close() is result
-    assert calls == [(50, 50, 60000, stop), "close"]
+    assert calls == [((), {"timeout": 60, "stop_after": 1}), "close"]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Native SIGUSR1 capture requires Linux")
 def test_native_probe_linux_signal_captures_named_watch_and_reaps_own_child(tmp_path):
-    async def run():
-        watched = tmp_path / "watched"
-        watched.mkdir()
+    async def run(connection):
         log = tmp_path / "worker.log"
-        code = '''import faulthandler, signal, sys, threading
-from watchfiles._rust_notify import RustNotify
+        code = '''import faulthandler, os, signal, threading
+import psycopg
 from tests.native_probe_worker import NativeWatch
-from tests.postgres_fixture import isolated_database
 signal.signal(signal.SIGUSR1, signal.SIG_DFL)
 faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
-native = RustNotify([sys.argv[1]], False, False, 300, False, False)
+native = psycopg.connect(os.environ["COMPANION_NATIVE_PROBE_DSN"], autocommit=True)
+native.execute("LISTEN native_probe_test")
 entered = threading.Event()
 class EnteredNative:
-    def watch(self, *args):
+    def notifies(self, *args, **kwargs):
         entered.set()
-        return native.watch(*args)
+        yield from native.notifies(*args, **kwargs)
     def close(self):
         return native.close()
 watch = NativeWatch(EnteredNative())
-thread = threading.Thread(target=watch.watch, args=(50, 50, 60000, threading.Event()))
+thread = threading.Thread(target=lambda: list(watch.notifies()))
 thread.start()
 assert entered.wait(5)
 print("READY", flush=True)
 thread.join()
 '''
         with log.open("wb") as output:
+            child_env = environment()
+            child_env["COMPANION_NATIVE_PROBE_DSN"] = connection.get_secret_value()
             child = await asyncio.create_subprocess_exec(
-                sys.executable, "-B", "-c", code, str(watched), cwd=ROOT, env=environment(),
+                sys.executable, "-B", "-c", code, cwd=ROOT, env=child_env,
                 stdout=asyncio.subprocess.PIPE, stderr=output,
             )
         try:
@@ -235,7 +235,8 @@ thread.join()
                 child.kill()
             await asyncio.wait_for(child.communicate(), 5)
 
-    asyncio.run(run())
+    with isolated_database() as connection:
+        asyncio.run(run(connection))
 
 
 @pytest.fixture(scope="module")

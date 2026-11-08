@@ -1,5 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 from cryptography.fernet import Fernet
@@ -117,13 +118,18 @@ def test_observation_discovery_and_complete_video_evidence(core):
     assert {row["result_status"] for row in core.observations.recent()} == {"DISCOVERED", "WATCHED"}
 
 
-def test_observation_replay_concurrent_idempotency_and_conflict(core):
+@pytest.mark.parametrize("conversation_exists", [False, True])
+def test_observation_replay_concurrent_idempotency_and_conflict(core, conversation_exists):
     enable_observations(core)
+    if conversation_exists:
+        core.observations.append("reader", observation(core, 2))
     item = observation(core)
+    barrier = Barrier(4)
 
     def append_once(_):
         instance = Core(core.settings, clock=core.clock)
         try:
+            barrier.wait(timeout=20)
             return instance.observations.append("reader", item)
         finally:
             instance.close()

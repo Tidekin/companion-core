@@ -76,7 +76,7 @@ def test_endpoint_change_stays_fenced_in_real_api_and_independent_worker(
             _, accepted = await native.admit(http, bridge, grant, now)
             assert accepted.status_code == 202, accepted.text
             base = core.settings.model_dump(mode="json")
-            for name in ("model_key", "bridge_token", "control_token"):
+            for name in ("database", "model_key", "bridge_token", "control_token"):
                 base[name] = getattr(core.settings, name).get_secret_value()
             assert base["model_key"] == "synthetic-key"
             config.write_text(json.dumps(base), encoding="utf-8")
@@ -113,7 +113,7 @@ async def run():
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
         with Core(settings, ModelClient(settings,http), clock=lambda:sys.argv[2]) as core:
             await core.run_once("independent-console-check")
-            row=core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+            row=core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=%s",
                                (sys.argv[3],))
             usage=len(core.store.rows("SELECT 1 FROM model_usage"))
             print(json.dumps({"job":row,"calls":len(calls),"usage":usage}))

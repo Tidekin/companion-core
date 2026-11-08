@@ -205,7 +205,7 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
                 from companion.privacy import ErasureLedger
 
                 if interrupt == "erase":
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         ErasureLedger(core.settings.erasure_ledger).expire_events(
                             core.store, [originals[0]["origin_event_id"]], core.clock()
                         )
