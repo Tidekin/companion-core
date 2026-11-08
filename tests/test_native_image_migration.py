@@ -10,7 +10,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from companion import agent_images, image_spool, qq_images
 from companion.contracts import CoreError
-from companion.core import Core
+from companion.legacy_import import import_sqlite_backup, migrate_sqlite
+from companion.postgres import Database
 from companion.store import Store, after, encode, migrate, uid
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
@@ -20,13 +21,14 @@ from tests.support.native_image_pipeline import pixels
 from tests.support.onebot_capture import pinned_plan
 from tests.support.onebot_events import raw_event
 from tests.support.prepare_owner_input import window
+from tests.support.release_migration import insert, one, open_historical
 
 
 @pytest.mark.parametrize("retire", ["expiry", "recall"])
-def test_signed_v1_image_copy_preserves_bytes_and_never_upgrades_permission(core, tmp_path, retire):
-    settings = core.settings.model_copy(update={"database": str(tmp_path / "fixture-current.db")})
-    migrate(settings.database)
-    with Core(settings, clock=core.clock) as legacy, ExitStack() as cleanup:
+def test_signed_v1_image_copy_preserves_bytes_and_never_upgrades_permission(
+    core, tmp_path, retire, core_factory, empty_database,
+):
+    with core_factory(tmp_path / "legacy") as legacy, ExitStack() as cleanup:
         plan_directory = tmp_path / "legacy-plan"
         plan_directory.mkdir(mode=0o700)
         plan_directory.chmod(0o700)
@@ -42,17 +44,17 @@ def test_signed_v1_image_copy_preserves_bytes_and_never_upgrades_permission(core
         event = normalize(frame, config, now=legacy.clock.now.timestamp(),
                           rich_input_scope="references_v1", image_scope="owner_image_v1")
         image = event["payload"]["rich"]["segments"][0]
-        store = cleanup.enter_context(closing(Store(database)))
+        store = cleanup.enter_context(closing(open_historical(database)))
         conversation = uid("conversation")
-        store.insert("conversations", conversation_id=conversation, platform="qq",
+        insert(store, "conversations", conversation_id=conversation, platform="qq",
             platform_session_key=config.origin, scope="private", owner_actor_id="owner",
             created_at=now)
-        store.insert("events", event_id=event["event_id"], schema_version=1, source="qq.onebot",
+        insert(store, "events", event_id=event["event_id"], schema_version=1, source="qq.onebot",
             source_event_id=event["source_event_id"], conversation_id=conversation,
             actor_id="owner", event_type="message.received", occurred_at=event["occurred_at"],
             ingested_at=now, privacy_scope="private", body_json=encode(event["payload"]),
             trace_id=event["trace_id"])
-        store.insert("jobs", job_id=job_id, event_id=event["event_id"], kind="chat",
+        insert(store, "jobs", job_id=job_id, event_id=event["event_id"], kind="chat",
             state="SUCCEEDED", idempotency_key=job_id, created_at=now, updated_at=now)
         data, token = pixels(), uid("content_lease")
         media_hash = hashlib.sha256(data).hexdigest()
@@ -64,35 +66,35 @@ def test_signed_v1_image_copy_preserves_bytes_and_never_upgrades_permission(core
         assert qq_images.upload_proof(approval, event["event_id"], image, token,
                                       media_hash, "image/png", proof) == proof
         expiry = after(now, 30)
-        store.insert("content_items", item_id=item_id, owner_event_id=event["event_id"],
+        insert(store, "content_items", item_id=item_id, owner_event_id=event["event_id"],
             kind="qq_image", slot=0, state="SUCCEEDED", captured_privacy_epoch=0,
             media_sha256=media_hash,
             fingerprint=hashlib.sha256(b"image/png\0" + data).hexdigest(),
             lease_token=token, deadline=after(now, 15), created_at=now, updated_at=now)
-        row = store.one("SELECT * FROM content_items WHERE item_id=?", (item_id,))
-        image_spool.put(store, row, data, "image/png", expiry)
-        path = image_spool.directory(store) / (item_id + ".raw")
+        row = one(store, "SELECT * FROM content_items WHERE item_id=?", (item_id,))
+        image_spool.put(legacy.store, row, data, "image/png", expiry)
+        path = image_spool.directory(legacy.store) / (item_id + ".raw")
         original_bytes = path.read_bytes()
         frozen = encode({"images": [{"item_id": item_id, "upload_proof": proof}],
                          "original_expires_at": expiry})
-        store.insert("runtime_meta", key="live_text_image:" + job_id, value=frozen)
+        insert(store, "runtime_meta", key="live_text_image:" + job_id, value=frozen)
         journal = Path(legacy.settings.paid_model.journal_path).read_bytes()
-        migrate(str(database), "0041_agent_conversations")
-        migrate(str(database), "0041_agent_conversations")
-        assert store.one("SELECT * FROM captured_images") == {
+        migrate_sqlite(database, "0041_agent_conversations")
+        migrate_sqlite(database, "0041_agent_conversations")
+        assert one(store, "SELECT * FROM captured_images") == {
             "item_id": item_id, "proof_json": encode(proof), "mime": "image/png",
             "expires_at": expiry}
-        assert store.one("SELECT value FROM runtime_meta WHERE key=?",
+        assert one(store, "SELECT value FROM runtime_meta WHERE key=?",
                          ("live_text_image:" + job_id,))["value"] == frozen
         assert path.read_bytes() == original_bytes
         assert Path(legacy.settings.paid_model.journal_path).read_bytes() == journal
-        assert not store.one("SELECT 1 FROM owner_authority_revisions")
-        assert not store.one("SELECT 1 FROM agent_image_inputs")
+        assert not one(store, "SELECT 1 FROM owner_authority_revisions")
+        assert not one(store, "SELECT 1 FROM agent_image_inputs")
 
         async def native_rejects_original_proof():
             async with window(core, tmp_path / "native", media=True, content=True) as values:
                 _, _, native = values
-                saved_proof = json.loads(store.one(
+                saved_proof = json.loads(one(store,
                     "SELECT proof_json FROM captured_images")["proof_json"])
                 with pytest.raises(CoreError, match="OWNER_IMAGE_UPLOAD_INVALID"):
                     agent_images.upload_proof(core.store, core.settings, native.authority,
@@ -100,9 +102,14 @@ def test_signed_v1_image_copy_preserves_bytes_and_never_upgrades_permission(core
                         saved_proof)
                 assert not core.store.one("SELECT 1 FROM model_usage")
         run(native_rejects_original_proof())
+        migrate_sqlite(database)
+        migrate(empty_database)
+        import_sqlite_backup(database, empty_database)
+        target = cleanup.enter_context(Database(empty_database))
+        restored = cleanup.enter_context(closing(Store(target, legacy.store.state_directory)))
         if retire == "recall":
-            store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (event["event_id"],))
-            agent_images.erase_images(store, [event["event_id"]])
-        image_spool.cleanup(store, after(expiry, 1) if retire == "expiry" else now,
+            restored.execute("UPDATE events SET redacted=1 WHERE event_id=%s", (event["event_id"],))
+            agent_images.erase_images(restored, [event["event_id"]])
+        image_spool.cleanup(restored, after(expiry, 1) if retire == "expiry" else now,
                             retain_completed=True)
         assert not path.exists()

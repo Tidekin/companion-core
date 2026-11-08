@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import sqlite3
 from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
@@ -15,11 +14,13 @@ from pydantic import ValidationError
 
 from companion import qq_rich
 from companion.contracts import Candidate, CoreError, InboundEvent
+from companion.postgres import Database
 from companion.store import Store
 from companion_onebot_bridge import reference_reader as reader
 from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.rich_input import MAX_RICH_BYTES, input_digest
 from tests.conftest import run
+from tests.postgres_fixture import copy_database
 from tests.support.onebot_events import config
 from tests.support.onebot_reference_reader import (
     Protocol,
@@ -316,7 +317,7 @@ def test_published_event_schema_accepts_projection_and_rejects_untrusted_extensi
 
 
 def test_retrieved_body_is_context_but_not_owner_memory_evidence_and_erases_with_source(
-    core, tmp_path,
+    core, tmp_path, empty_database,
 ):
     event, _ = enriched([reply(), text("请解释")], {
         ("reply", "-42"): node("A", text("我喜欢耳机")),
@@ -334,12 +335,11 @@ def test_retrieved_body_is_context_but_not_owner_memory_evidence_and_erases_with
     messages, _ = core.model.calls[0]
     assert "我喜欢耳机" in messages[-2]["content"]
     assert messages[-1] == {"role": "user", "content": "请解释"}
-    backup = tmp_path / "before-erasure.db"
-    with closing(sqlite3.connect(backup)) as restored:
-        core.store.db.backup(restored)
-    with core.store.transaction():
+    copy_database(core.settings.database, empty_database, tmp_path)
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [incoming.event_id], core.clock())
     assert core.store.one("SELECT body_json FROM events")["body_json"] == "{}"
-    with closing(Store(backup)) as restored:
+    with (Database(empty_database) as db,
+          closing(Store(db, core.store.state_directory)) as restored):
         core.ledger.replay(restored)
         assert restored.one("SELECT body_json FROM events")["body_json"] == "{}"
