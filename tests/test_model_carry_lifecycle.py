@@ -62,15 +62,19 @@ def test_authority_chain_batches_rows_and_equal_policy_bodies_per_call(core, tmp
         return original(value, *args, **kwargs)
 
     monkeypatch.setattr(OwnerGrantPolicy, "model_validate_json", parse)
-    core.store.db.set_trace_callback(queries.append)
-    try:
-        for _ in range(2):
-            with core.store.transaction():
-                model_carry.authority_chain(core.store, saved, revisions)
-    finally:
-        core.store.db.set_trace_callback(None)
-    assert len([query for query in queries if query.startswith(
-        "SELECT * FROM owner_authority_revisions")]) == 2
+    fetch = core.store.rows
+
+    def observed(statement, params=()):
+        if "FROM owner_authority_revisions" in statement:
+            queries.append(params)
+        return fetch(statement, params)
+
+    monkeypatch.setattr(core.store, "rows", observed)
+    for _ in range(2):
+        with core.store.transaction():
+            model_carry.authority_chain(core.store, saved, revisions)
+    expected = (saved["manifest"]["authority"]["grant_id"], 3, 7)
+    assert queries == [expected, expected]
     assert len(parsed) == 2  # No parsed policy is retained across calls.
     assert digest([saved, revisions]) == before
 

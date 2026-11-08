@@ -54,11 +54,17 @@ def test_profile_material_requires_owner_decision_and_every_source(core, change)
                           polarity=1, created_at=core.clock())
     elif change == "missing_parent":
         # Dependency corruption cannot silently drop a missing source.
-        core.store.db.execute("PRAGMA foreign_keys=OFF")
-        core.store.insert("event_dependencies", event_id="evt_test_800", source_event_id="missing")
-        core.store.db.execute("PRAGMA foreign_keys=ON")
-    elif change == "revoked_confirmation":
         with core.store.transaction():
+            core.store.execute("ALTER TABLE event_dependencies DROP CONSTRAINT "
+                               "fk_event_dependencies_source_event_id")
+            core.store.insert("event_dependencies", event_id="evt_test_800",
+                              source_event_id="missing")
+            core.store.execute("ALTER TABLE event_dependencies ADD CONSTRAINT "
+                               "fk_event_dependencies_source_event_id FOREIGN KEY(source_event_id) "
+                               "REFERENCES events(event_id) DEFERRABLE INITIALLY IMMEDIATE "
+                               "NOT VALID")
+    elif change == "revoked_confirmation":
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_801"], core.clock())
     elif change == "needs_review":
         core.store.execute('UPDATE memories SET needs_review=1 WHERE memory_id=%s', (memory_id,))
@@ -94,7 +100,7 @@ def test_profile_material_is_revalidated_at_freeze_and_dispatch(core, boundary, 
     module, memory_id, public, conversation = setup(core)
 
     def invalidate():
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             if revoke == "forget":
                 core.memory.decide(memory_id, "forget", core.clock())
             elif revoke == "recall_confirmation":

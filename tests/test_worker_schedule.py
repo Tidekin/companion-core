@@ -15,26 +15,25 @@ from tests.support.executive import FakeExecutor, configured, proposal
 
 
 def test_scan_context_is_immutable_and_cannot_be_reused_after_another_scan(core):
-    wake = Wakeup(core.store, core.settings, "worker", core.clock)
-    scan = wake.before_scan()
-    assert scan.started_at == datetime.fromisoformat(core.clock())
-    assert scan.data_version == wake.data_version()
-    with pytest.raises(FrozenInstanceError):
-        scan.data_version = -1
-    core.clock.advance(1)
-    wake.before_scan()
-    with pytest.raises(ValueError, match="STALE_WORKER_SCAN"):
-        run(wake.wait(scan, UnitResult(False)))
+    with Wakeup(core.store, core.settings, "worker", core.clock) as wake:
+        scan = wake.before_scan()
+        assert scan.started_at == datetime.fromisoformat(core.clock())
+        assert scan.notification_sequence == wake.notifications
+        with pytest.raises(FrozenInstanceError):
+            scan.notification_sequence = -1
+        core.clock.advance(1)
+        wake.before_scan()
+        with pytest.raises(ValueError, match="STALE_WORKER_SCAN"):
+            run(wake.wait(scan, UnitResult(False)))
 
 
 @pytest.mark.parametrize("kind", worker_deadlines.PROVIDERS)
 def test_domain_deadline_projection_never_performs_recovery_or_accounting(core, kind):
-    before = core.store.db.total_changes
-    deadline = worker_deadlines.PROVIDERS[kind](
-        core.store, core.settings, datetime.fromisoformat(core.clock()),
-    )
-    assert deadline > datetime.fromisoformat(core.clock())
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        deadline = worker_deadlines.PROVIDERS[kind](
+            core.store, core.settings, datetime.fromisoformat(core.clock()),
+        )
+        assert deadline > datetime.fromisoformat(core.clock())
     assert core.store.rows("SELECT * FROM model_usage") == []
 
 
@@ -42,18 +41,17 @@ def test_domain_deadline_projection_never_performs_recovery_or_accounting(core, 
 def test_native_result_deadline_keeps_scan_race_but_ignores_past_fenced_hint(
     core, offset, expected,
 ):
-    wake = Wakeup(core.store, core.settings, "executive-worker", core.clock)
-    scan = wake.before_scan()
-    hint = datetime.fromisoformat(after(core.clock(), offset))
-    core.clock.advance(1)
+    with Wakeup(core.store, core.settings, "executive-worker", core.clock) as wake:
+        scan = wake.before_scan()
+        hint = datetime.fromisoformat(after(core.clock(), offset))
+        core.clock.advance(1)
 
-    async def idle():
-        return UnitResult(False, next_deadline=hint)
+        async def idle():
+            return UnitResult(False, next_deadline=hint)
 
-    # Neither outcome needs a watcher or real time to pass. A hint crossed after
-    # the scan wins; an already-past hint cannot spin ahead of maintenance.
-    result = run(run_native_unit(idle))
-    assert run(wake.wait(scan, result, maintenance_at=0)) == expected
+        # A hint crossed after the scan wins; a past hint yields to maintenance.
+        result = run(run_native_unit(idle))
+        assert run(wake.wait(scan, result, maintenance_at=0)) == expected
 
 
 @pytest.mark.parametrize("started", [False, True])

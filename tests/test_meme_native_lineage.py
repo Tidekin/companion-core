@@ -103,10 +103,12 @@ def test_source_link_failure_rolls_back_graph_and_links_before_any_paid_work(
             before = core.store.rows("SELECT * FROM meme_asset_sources ORDER BY asset_id,"
                                      "event_id,caption_job_id")
             execute = Store.execute
+            rejected = []
 
             def fail_new_tuple(store, sql, params=()):
-                if (sql.startswith("INSERT OR IGNORE INTO meme_asset_sources")
+                if (isinstance(sql, str) and sql.startswith("INSERT INTO meme_asset_sources")
                     and params[0] == assets[1][0] and params[2] == ids[1]):
+                    rejected.append(params)
                     raise ValueError("Synthetic attribution write failure")
                 return execute(store, sql, params)
 
@@ -114,6 +116,7 @@ def test_source_link_failure_rolls_back_graph_and_links_before_any_paid_work(
             with monkeypatch.context() as patch:
                 patch.setattr(Store, "execute", fail_new_tuple)
                 assert await worker(core, calls)
+            assert len(rejected) == 1
             assert not calls and not core.store.rows("SELECT * FROM model_usage")
             assert core.store.one('SELECT reuse_job_id FROM meme_captions WHERE job_id=%s',
                                   (ids[1],))["reuse_job_id"] == ids[0]
@@ -208,16 +211,23 @@ def test_settled_ancestor_without_caption_result_cannot_be_cut_through_a_missing
 def test_unknown_deeper_ancestor_cannot_be_cut_or_rebilled(core, tmp_path, monkeypatch):
     run(blocked_paid_ancestor(core, tmp_path, monkeypatch, tokens=False))
 
+def set_missing_reuse_parent(core, job_id):
+    with core.store.transaction():
+        core.store.execute("ALTER TABLE meme_captions DROP CONSTRAINT "
+                           "fk_meme_captions_reuse_job_id")
+        core.store.execute("UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s",
+                           ("job_" + "f" * 32, job_id))
+        # Retain the historical orphan while enforcing all subsequent writes.
+        core.store.execute("ALTER TABLE meme_captions ADD CONSTRAINT fk_meme_captions_reuse_job_id "
+                           "FOREIGN KEY(reuse_job_id) REFERENCES meme_captions(job_id) "
+                           "DEFERRABLE INITIALLY IMMEDIATE NOT VALID")
+
+
 def test_missing_old_parent_is_a_closed_failure_before_model_admission(core, tmp_path, monkeypatch):
     async def scenario():
         async with lineage_case(core, tmp_path, monkeypatch) as (_, ids, _, _):
             await reject_original(core, monkeypatch)
-            core.store.db.execute("PRAGMA foreign_keys=OFF")
-            try:
-                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
-                                   ("job_" + "f" * 32, ids[1]))
-            finally:
-                core.store.db.execute("PRAGMA foreign_keys=ON")
+            set_missing_reuse_parent(core, ids[1])
             calls = []
             assert await worker(core, calls)
             assert not calls and not core.store.rows("SELECT * FROM model_usage")
@@ -236,31 +246,26 @@ def test_damaged_old_ancestry_never_reaches_a_model_reservation(
     async def scenario():
         async with lineage_case(core, tmp_path, monkeypatch) as (_, ids, _, _):
             await reject_original(core, monkeypatch)
-            core.store.db.execute("PRAGMA foreign_keys=OFF")
-            try:
-                if damage == "cycle":
-                    core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
-                                       (ids[0], ids[0]))
-                elif damage == "deep_cycle":
-                    core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
-                                       (ids[3], ids[0]))
-                elif damage == "missing_deep":
-                    core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
-                                       ("job_" + "f" * 32, ids[0]))
-                elif damage == "bound":
-                    core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
-                                       (ids[3], ids[0]))
-                    core.store.execute('UPDATE meme_captions SET reuse_job_id=NULL WHERE job_id=%s',
-                                       (ids[2],))
-                    monkeypatch.setattr("companion.meme_core.MAX_ROWS", 2)
-                elif damage == "wrong_image":
-                    core.store.execute('UPDATE meme_captions SET asset_sha256=%s WHERE job_id=%s',
-                                       ("a" * 64, ids[0]))
-                else:
-                    core.store.execute("UPDATE meme_captions SET source_json='{}' WHERE job_id=%s",
-                                       (ids[0],))
-            finally:
-                core.store.db.execute("PRAGMA foreign_keys=ON")
+            if damage == "cycle":
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
+                                   (ids[0], ids[0]))
+            elif damage == "deep_cycle":
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
+                                   (ids[3], ids[0]))
+            elif damage == "missing_deep":
+                set_missing_reuse_parent(core, ids[0])
+            elif damage == "bound":
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
+                                   (ids[3], ids[0]))
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=NULL WHERE job_id=%s',
+                                   (ids[2],))
+                monkeypatch.setattr("companion.meme_core.MAX_ROWS", 2)
+            elif damage == "wrong_image":
+                core.store.execute('UPDATE meme_captions SET asset_sha256=%s WHERE job_id=%s',
+                                   ("a" * 64, ids[0]))
+            else:
+                core.store.execute("UPDATE meme_captions SET source_json='{}' WHERE job_id=%s",
+                                   (ids[0],))
             graph = core.store.rows("SELECT * FROM meme_captions ORDER BY job_id")
             links = core.store.rows("SELECT * FROM meme_asset_sources ORDER BY asset_id,"
                                    "event_id,caption_job_id")

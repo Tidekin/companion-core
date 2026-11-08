@@ -41,9 +41,8 @@ def test_automatic_choice_never_substitutes_for_independent_channel_purpose(
 ):
     core.settings.diary_enabled = True
     prepared(core, tmp_path, destination=destination, purposes=[], automatic_actions=[action])
-    before = core.store.db.total_changes
-    assert not core.life_topics.consume_due(diary=core.diary)
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        assert not core.life_topics.consume_due(diary=core.diary)
     assert core.store.rows("SELECT * FROM outbox") == []
     assert core.store.rows("SELECT * FROM diary_entries") == []
 
@@ -61,7 +60,7 @@ def test_automatic_private_expression_preserves_original_fences(core, tmp_path, 
     elif fence == "stop":
         stop(core, authority)
     elif fence == "erase":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
     else:
         core.settings.proactive_daily_limit = 0
@@ -98,7 +97,6 @@ def test_new_automatic_consent_cannot_rebind_a_prior_manual_draft(core, tmp_path
     scope = policy.life_shadow.model_copy(update={"automatic_actions": ["qq.private.proactive"]})
     activate(core, policy.model_copy(update={"life_shadow": scope}), revision=1,
              operation="explicit-automatic-consent")
-    before = core.store.db.total_changes
-    assert not core.life_topics.consume_due(diary=core.diary)
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        assert not core.life_topics.consume_due(diary=core.diary)
     assert core.store.rows("SELECT * FROM outbox") == []
