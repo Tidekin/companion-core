@@ -7,6 +7,8 @@
 
 Answers must be frozen (run.py). Keys are SHA256(freeze + arm + id), so every rubric
 grades the same keys. A sent batch without a saved response is never replayed.
+After inspection, --close-interrupted retains attempted keys for explicit review and
+continues only previously unattempted keys, without changing usage ledgers.
 
 Anchors (grading.anchors): answers with known verdicts, built from an earlier round's
 review by make_anchors.py. Each batch carries a few under random keys; a batch that
@@ -180,14 +182,40 @@ async def judge(config, cases, failures, lookup, out, seed, name="deepseek"):
 
     for response in read_rows(out / "responses.jsonl"):
         recover(response)
-    sent = {r["batch_id"] for r in read_rows(out / "requests.jsonl")}
+    requests = read_rows(out / "requests.jsonl")
+    sent = {r["batch_id"] for r in requests}
     answered = {r["batch_id"] for r in read_rows(out / "responses.jsonl")}
-    assert sent <= answered, "Attempted batch lacks a saved response; inspect, never replay"
+    if "--close-interrupted" in ARGS:
+        done = {r["key"] for r in read_rows(out / "grades.jsonl")}
+        attempted = {key for request in requests for key in request["keys"]}
+        left = sorted(attempted - done)
+        if left:
+            append(out / "recovery.jsonl", dict(
+                at=datetime.now(UTC).isoformat(), method="ATTEMPTED_KEYS_NOT_REPLAYED",
+                keys=left, missing_response_batches=sorted(sent - answered),
+                requests_sha256=sha(out / "requests.jsonl"),
+                responses_sha256=sha(out / "responses.jsonl")
+                if (out / "responses.jsonl").exists() else None,
+                fees_unchanged=True))
+        for key in left:
+            assert key in lookup, "Attempted key is outside the frozen candidates"
+            if key in pending:
+                row = {**pending[key], "anchor_failed": True}
+            else:
+                row = dict(key=key, **{"pass": False}, missing=[], violations=[],
+                           judge_unresolved=True, rubric=VERSION)
+            append(out / "grades.jsonl", {**row, "interrupted_review_required": True})
+    else:
+        assert sent <= answered, "Attempted batch lacks a saved response; inspect, never replay"
     done = {r["key"] for r in read_rows(out / "grades.jsonl")}
     for row in failures:
         if row["key"] not in done:
             append(out / "grades.jsonl", {**row, "rubric": VERSION})
     rows = [r for r in cases if r["key"] not in done]
+    if not rows:
+        grades = read_rows(out / "grades.jsonl")
+        assert len(grades) == len({r["key"] for r in grades}) == R.answers_total
+        return {r["key"]: r for r in grades}
     random.Random(seed).shuffle(rows)
     base, headers, transport, extra, model = judge_client(config, name)
     async with httpx.AsyncClient(timeout=120, trust_env=False, follow_redirects=False,
@@ -292,6 +320,14 @@ def majority(passes):
         chosen = next(v for v in votes if v["pass"] == verdict)
         final.append({**chosen, "pass": verdict, "votes": [v["pass"] for v in votes],
                       "agreement": sum(v["pass"] == verdict for v in votes) / len(votes)})
+        # A missing vote is not a semantic failure; publication requires an explicit
+        # review even when the other two votes already determine the majority.
+        if any(v.get("judge_unresolved") for v in votes):
+            final[-1]["judge_unresolved"] = True
+            final[-1]["votes"] = [None if v.get("judge_unresolved") else v["pass"] for v in votes]
+        for flag in ("anchor_failed", "interrupted_review_required"):
+            if any(v.get(flag) for v in votes):
+                final[-1][flag] = True
     return final
 
 

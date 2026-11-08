@@ -44,7 +44,7 @@ def latency(answer):
     return None
 
 
-def load():
+def load(*, allow_unresolved=False):
     frozen = json.loads((ROOT / "all-answers-frozen.json").read_text("utf-8"))
     for name, digest in frozen["files_sha256"].items():
         assert sha(ROOT / name) == digest, name
@@ -53,10 +53,16 @@ def load():
     grades = {r["key"]: r for r in read_rows(GRADING / "grades.jsonl")}
     assert len(grades) == len(mapping) == R.answers_total, "grading incomplete"
     final = {k: dict(v) for k, v in grades.items()}
+    overridden = set()
     for row in read_rows(GRADING / "overrides.jsonl"):
         assert row["original_grade"] == grades[row["key"]] and type(row["pass"]) is bool
+        overridden.add(row["key"])
         final[row["key"]] = {**grades[row["key"]], "pass": row["pass"],
                              "review_reason": row["reason"]}
+    unresolved = {k for k, g in grades.items() if any(g.get(flag) for flag in (
+        "judge_unresolved", "anchor_failed", "interrupted_review_required"))}
+    assert allow_unresolved or not unresolved - overridden, \
+        "Unresolved judgments need explicit review overrides"
     reverse = {(m["arm"], m["id"]): m for m in mapping}
     inputs = {r["id"]: r for p in (R.suite / "inputs").glob("*.jsonl") for r in read_rows(p)}
     rows = []
@@ -221,6 +227,10 @@ def prepare_review(rows, grades):
                 selected.append((r, a, "exact_check_disagrees"))
         for a in ARMS:
             g = r["arms"][a]["auto_grade"]
+            if any(g.get(flag) for flag in (
+                "judge_unresolved", "anchor_failed", "interrupted_review_required",
+            )):
+                selected.append((r, a, "unresolved_judgment"))
             if g.get("agreement", 1) < 1:
                 selected.append((r, a, "split_judge_vote"))
             if g.get("index_annotation_errors") or (not g["pass"] and not g.get("missing")
@@ -385,7 +395,7 @@ def render(rows, summary, figures):
            f'判卷 {e(GRADING.name)}</p><div class="kpis">'
            f'{cards}</div><p>{comparison}DeepSeek ¥{ds["charged_or_held_cny"]:.2f}/'
            f'¥{ds["cap_cny"]}，千问 ¥{qw["charged_or_held_cny"]:.2f}/¥{qw["cap_cny"]}（保守估算）。'
-           f'复核 {summary["review_count"]} 份，改判 {summary["override_count"]} 份，非独立人工。</p>'
+           f'复核 {summary["review_count"]} 份，显式判定 {summary["override_count"]} 份，非独立人工。</p>'
            + extras(summary, e)
            + figs + "<h2>逐题</h2>" + "".join(cards_q) + "<h2>局限</h2>"
            + "".join(f"<p>{e(x)}</p>" for x in summary["limitations"]) + "</main></html>")
@@ -393,7 +403,7 @@ def render(rows, summary, figures):
 
 
 def main():
-    rows, grades = load()
+    rows, grades = load(allow_unresolved="--prepare-review" in ARGS)
     selection = prepare_review(rows, grades)
     if "--prepare-review" in ARGS:
         print("review_selection", len(selection))
