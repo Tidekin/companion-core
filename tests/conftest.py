@@ -119,6 +119,15 @@ def migrated_database():
         yield info
 
 
+@pytest.fixture
+def empty_database():
+    """An empty native database for tests that install or restore their own schema."""
+    from tests.postgres_fixture import isolated_database
+
+    with isolated_database() as info:
+        yield info
+
+
 @pytest.fixture(scope="session", autouse=True)
 def worker_scratch(tmp_path_factory):
     """Children inherit their worker's scratch; the caller owns the enclosing round."""
