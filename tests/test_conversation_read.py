@@ -100,3 +100,26 @@ def test_writer_guard_observes_its_own_changed_source(core, tmp_path):
                            (job["event_id"],))
         with pytest.raises(CoreError):
             check_conversation(core, job)
+
+
+@pytest.mark.parametrize("ceiling", [6, 96])
+def test_guard_read_keeps_individual_proof_allowances_when_the_union_is_too_large(
+    core, monkeypatch, ceiling,
+):
+    from companion import retrieval_work
+    from tests.conftest import ingest
+    from tests.test_memory_proof_batches import facts
+
+    facts(core, count=9, chars=40)
+    proofs = [core.memory_context.pin(core.clock(), event_ids={
+        f"proof_{number}" for number in range(start, start + 6)}) for start in (1, 4)]
+    admitted = ingest(core, 2, "核对两组来源")
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=%s", (admitted["job_id"],))
+    snapshots = [{"kind": "memory", "proof": proof} for proof in proofs]
+    monkeypatch.setattr(retrieval_work, "SOURCE_NODES", ceiling)
+    with core.store.read_snapshot():
+        read = ConversationRead(core.store)
+        try:
+            core._check_context_snapshots(job, snapshots, read=read)
+        finally:
+            read.close()
