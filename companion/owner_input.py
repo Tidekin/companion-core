@@ -343,7 +343,7 @@ def _source(
     return event, body, jobs[0]
 
 
-def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid=None):
+def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid=None, read=None):
     """Apply explicit current history bounds to native source-bound dialogue turns."""
     if not store.in_transaction:
         # Own one synchronous batch on one DB state; never retain custody across the
@@ -353,10 +353,11 @@ def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid
                 store, settings, clock, job, purpose=purpose, cutoff_rowid=cutoff_rowid
             )
         )
-    return _history_sources(store, settings, clock, job, purpose=purpose, cutoff_rowid=cutoff_rowid)
+    return _history_sources(store, settings, clock, job, purpose=purpose,
+                            cutoff_rowid=cutoff_rowid, read=read)
 
 
-def history_batch(store, settings, clock, job, *, purpose):
+def history_batch(store, settings, clock, job, *, purpose, read=None):
     """One job authority view for many history sources read from one DB state.
 
     Inside a repeatable read-only snapshot no other writer's commit is visible,
@@ -364,7 +365,7 @@ def history_batch(store, settings, clock, job, *, purpose):
     not written. Outside them, or after any own write, each source takes the full check.
     `finish` rechecks live authority and independent files for the whole batch.
     """
-    view = owner_authority.check_job(store, settings, clock, job, purpose=purpose)
+    view = owner_authority.check_job(store, settings, clock, job, purpose=purpose, read=read)
     scope = store.frozen_scope
 
     def frozen():
@@ -403,7 +404,7 @@ def history_batch(store, settings, clock, job, *, purpose):
 
     def finish():
         # A source exclusion must never swallow a changed batch-wide boundary.
-        owner_authority.check_job(store, settings, clock, job, purpose=purpose)
+        owner_authority.check_job(store, settings, clock, job, purpose=purpose, read=read)
         if batched:
             if not frozen():
                 raise CoreError(reply_revision.CANCELLED, 409)
@@ -415,10 +416,10 @@ def history_batch(store, settings, clock, job, *, purpose):
     return view, check, finish
 
 
-def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
-    view, check, finish = history_batch(store, settings, clock, job, purpose=purpose)
+def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid, read=None):
+    view, check, finish = history_batch(store, settings, clock, job, purpose=purpose, read=read)
     return _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid,
-                            batch_sources=True)
+                            batch_sources=True, read=read)
 
 
 def history_for_owner(store, settings, clock, job, view):
@@ -445,7 +446,7 @@ def history_for_owner(store, settings, clock, job, view):
 
 
 def _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid, *,
-                     batch_sources=False):
+                     batch_sources=False, read=None):
     from companion.dialogue_history import recent_context_sources, turn_messages
 
     if "history" not in view.policy.purposes:
@@ -455,11 +456,13 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
     # The signed scope is an authority ceiling; the existing presentation setting
     # may select fewer recent pairs and leave room for episodic continuation.
     max_turns = min(scope.max_turns, settings.max_recent_messages // 2)
-    candidates = recent_context_sources(
+    candidates = read.history if (read is not None and read.history is not None
+                                  and cutoff_rowid is None) else recent_context_sources(
         store, job["conversation_id"], job["event_id"], max_turns, cutoff_rowid=cutoff_rowid
     )
     frozen = store.frozen_scope
-    source_rows = _load_sources(store, [item["event_id"] for item in candidates]) if (
+    source_rows = (read.sources if read is not None else lambda keys: _load_sources(store, keys))(
+        [item["event_id"] for item in candidates]) if (
         frozen is not None and batch_sources and candidates) else None
     deliveries, receipts = {}, set()
     if frozen is not None and candidates:
@@ -533,7 +536,7 @@ def history_proof(sources):
     ]
 
 
-def check_history(store, settings, clock, job, proof):
+def check_history(store, settings, clock, job, proof, *, read=None):
     """Recheck selected history, including its original signed input and sent text."""
     try:
         if (
@@ -560,6 +563,7 @@ def check_history(store, settings, clock, job, proof):
                 clock,
                 job,
                 purpose=owner_authority.model_purpose(store, job["kind"], job["job_id"]),
+                read=read,
             )
         }
         actual = history_proof([current[item["event_id"]] for item in proof])

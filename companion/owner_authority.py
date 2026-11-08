@@ -236,11 +236,13 @@ def _journal_custody(store, settings, row, *, settlement=False):
     return paid_budget.journal(store, approval, allow_settlement=settlement)
 
 
-def current(store, settings, clock, *, purpose=None, authority=None):
+def current(store, settings, clock, *, purpose=None, authority=None, read=None):
     """Current policy plus original journal custody; never returns a synthetic window."""
     from companion.live_text import ERASURE_PROJECTION_SQL, _ledger_custody
     from companion.postgres import BUDGET_LEDGER, ERASURE_LEDGER
 
+    if read is not None:
+        read.require(store)
     if settings.owner_runtime.mode != "ENABLED":
         raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
     if not store.in_transaction:
@@ -248,7 +250,7 @@ def current(store, settings, clock, *, purpose=None, authority=None):
             store, settings, clock, purpose=purpose, authority=authority))
     store.ledger_lock(BUDGET_LEDGER, shared=store.in_read_snapshot)
     store.ledger_lock(ERASURE_LEDGER, shared=True)
-    row = store.one(
+    row = (read.one if read is not None else store.one)(
         f"SELECT {_REVISION_FIELDS}, mode.value AS runtime_mode, "
         f"generation.value AS runtime_generation, {_CUSTODY_FIELDS}, "
         f"(SELECT jsonb_agg(erasure) FROM ({ERASURE_PROJECTION_SQL}) erasure) AS custody_erasure "
@@ -333,18 +335,20 @@ def bind_job(store, settings, clock, job_id, *, purpose):
     return view
 
 
-def check_job(store, settings, clock, job, *, purpose, executing=False):
+def check_job(store, settings, clock, job, *, purpose, executing=False, read=None):
     """Re-read native state and permission; a durable grant is never a native lease."""
+    if read is not None:
+        read.require(store)
     if not store.in_transaction:
         return store.read_or_write(lambda: check_job(
             store, settings, clock, job, purpose=purpose, executing=executing,
         ))
-    row = store.one(
+    row = (read.one if read is not None else store.one)(
         "SELECT state,lease_token,lease_until,authority_json FROM jobs WHERE job_id=%s",
         (job["job_id"],),
     )
     ref = _job_reference(row)
-    view = current(store, settings, clock, purpose=purpose, authority=ref)
+    view = current(store, settings, clock, purpose=purpose, authority=ref, read=read)
     return _checked_job(row, job, view, clock, executing=executing)
 
 

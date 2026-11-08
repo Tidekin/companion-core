@@ -359,7 +359,8 @@ class Core(Runtime):
                         now)
         return {**row, "lease_token": token, "attempts": row["attempts"] + 1}
 
-    def _check_context_snapshots(self, job, snapshots, *, current_request=None, owner_view=None):
+    def _check_context_snapshots(self, job, snapshots, *, current_request=None, owner_view=None,
+                                 read=None):
         if not self.store.in_transaction:
             return self.store.read_or_write(lambda: self._check_context_snapshots(
                 job, snapshots, current_request=current_request, owner_view=owner_view))
@@ -376,6 +377,7 @@ class Core(Runtime):
             live_text.check_job(self.store, self.settings, self.clock, job,
                                 current_request=current_request)
         memory_sources = None
+        memory_prepared = False
         for snapshot in snapshots:
             try:
                 purpose = {"memory": "memory", "growth": "expression", "affect": "affect",
@@ -388,12 +390,16 @@ class Core(Runtime):
                 if snapshot["kind"] == "memory":
                     now = self.clock()
                     if self.store.in_read_snapshot:
-                        if memory_sources is None:
+                        if read is not None and not memory_prepared:
+                            memory_sources = read.proof_sources(self, snapshots, now)
+                            memory_prepared = True
+                        elif read is None and memory_sources is None:
                             from companion.memory_context import MemorySources
 
                             memory_sources = MemorySources(self.memory, now, bounded=True)
                             memory_sources._snapshot_cache()
-                        now = memory_sources.now
+                        if memory_sources is not None:
+                            now = memory_sources.now
                     else:
                         memory_sources = None
                     try:
@@ -444,7 +450,7 @@ class Core(Runtime):
                     self.goals.validate_sources(snapshot["event_ids"])
                 elif snapshot["kind"] == "history":
                     owner_input.check_history(self.store, self.settings, self.clock,
-                                              job, snapshot["proof"])
+                                              job, snapshot["proof"], read=read)
                 elif snapshot["kind"] == "context_plan":
                     from companion.context_planner import check
 

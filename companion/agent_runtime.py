@@ -74,18 +74,36 @@ def check_conversation(core, job, snapshots=(), *, current_request=None, purpose
         ))
     if job["kind"] != "chat":
         raise CoreError("CONVERSATION_CHAT_JOB_REQUIRED", 403)
+    if core.store.frozen_scope is not None:
+        from companion.conversation_read import ConversationRead
+
+        read = ConversationRead(core.store)
+        try:
+            return _check_conversation(core, job, snapshots, current_request, purpose, read)
+        finally:
+            read.close()
+    return _check_conversation(core, job, snapshots, current_request, purpose, None)
+
+
+def _check_conversation(core, job, snapshots, current_request, purpose, read):
     view = owner_authority.check_job(
-        core.store, core.settings, core.clock, job, purpose="chat", executing=True,
+        core.store, core.settings, core.clock, job, purpose="chat", executing=True, read=read,
     )
     if purpose not in view.policy.purposes:
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
-    owner_input._checked_source(core.store, core.settings, view, job["event_id"], core.clock())
+    if read is not None:
+        read.prepare(core, job, snapshots, view)
+    owner_input._checked_source(core.store, core.settings, view, job["event_id"], core.clock(),
+        loaded=read.sources([job["event_id"]])[job["event_id"]] if read is not None else None)
     core._check_context_snapshots(job, snapshots, current_request=current_request,
-                                  owner_view=view)
+                                  owner_view=view, read=read)
     from companion import agent_images, agent_reading
 
     agent_reading.check_results(core, job, snapshots)
     agent_images.input_sources(core.store, core.settings, core.clock, job)
+    if read is not None:
+        owner_authority.check_job(core.store, core.settings, core.clock, job,
+                                  purpose=purpose, executing=True, read=read)
     return view
 
 
