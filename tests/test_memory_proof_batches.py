@@ -79,6 +79,25 @@ def test_source_only_pin_batches_all_requested_roots(core, monkeypatch):
     assert len(batches) == 1 and set(batches[0]) == keys
 
 
+def test_writer_source_reads_combine_edges_and_recheck_own_changes(core, monkeypatch):
+    facts(core, count=2, chars=40)
+    reads = []
+    original = core.store.bounded_source_read
+
+    def read(statement, parameters, **kwargs):
+        reads.append(str(statement))
+        return original(statement, parameters, **kwargs)
+
+    monkeypatch.setattr(core.store, "bounded_source_read", read)
+    with core.store.transaction():
+        proof = core.memory_context.pin(core.clock(), event_ids={"proof_1"})
+        assert len(reads) == 2 and "AS source_edges" in reads[-1]
+        core.store.execute("INSERT INTO event_dependencies(event_id,source_event_id) "
+                           "VALUES ('proof_1','proof_2')")
+        with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
+            core.memory_context.revalidate(proof, core.clock())
+
+
 @pytest.mark.parametrize("mutation", ["body", "redact", "edge", "owner", "fact", "evidence"])
 def test_source_cache_expires_at_snapshot_boundary(core, mutation):
     rows = facts(core, count=1, chars=20)

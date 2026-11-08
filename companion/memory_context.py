@@ -249,6 +249,7 @@ class MemorySources:
         cached = self._snapshot_cache()
         pending, found = [event_id], {}
         loaded = self._loaded if cached else {}
+        local_edges = {}
 
         def read(key):
             if key in loaded:
@@ -280,9 +281,12 @@ class MemorySources:
                 'trace_id, e.idempotency_key AS idempotency_key, e.fingerprint AS fingerprint, '
                 'e.redacted AS redacted, e.memory_processed AS memory_processed, e.reply_revision '
                 'AS reply_revision, c.scope AS scope, c.owner_actor_id AS owner_actor_id, r.key AS '
-                'erased FROM (SELECT %s AS event_id) AS s LEFT JOIN events AS e ON s.event_id = '
+                'erased, ARRAY(SELECT d.source_event_id FROM event_dependencies d '
+                'WHERE d.event_id=s.event_id LIMIT ' + str(SOURCE_NODES + 1) + ') AS source_edges '
+                'FROM (SELECT %s AS event_id) AS s LEFT JOIN events AS e ON s.event_id = '
                 'e.event_id LEFT JOIN conversations AS c ON e.conversation_id = c.conversation_id '
                 "LEFT JOIN runtime_meta AS r ON r.key = 'erased_event:' || s.event_id", (key,))
+            local_edges[key] = [{"source_event_id": value} for value in row.pop("source_edges")]
             loaded[key] = row
             return row
 
@@ -292,7 +296,7 @@ class MemorySources:
                 continue
             row = read(key)
             found[key] = row
-            edges = self._edges.get(key) if cached else None
+            edges = self._edges.get(key) if cached else local_edges.get(key)
             if edges is None:
                 edges = self._rows('SELECT source_event_id FROM event_dependencies WHERE '
                     'event_id = %s LIMIT %s', (key, SOURCE_NODES + 1), limit=SOURCE_NODES + 1)
