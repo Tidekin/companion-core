@@ -2,17 +2,20 @@
 
 import hashlib
 import json
-import sqlite3
-from contextlib import closing
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+import psycopg
 import pytest
+from psycopg import sql
 
 from companion import budget, input_recall, live_text, paid_budget
+from companion.backup import _client, _run
 from companion.config import LiveTextHandoff
 from companion.model import ModelResponse
 from companion.privacy import epoch
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.handoff_recall_recovery import approve_only
 from tests.support.input_protocol import environment, notice
 from tests.support.live_text_handoff import initial, journal_bytes, reference, stop_and_successor
@@ -53,7 +56,7 @@ async def successor(client, core, config):
 
 def snapshot(core):
     journal = Path(core.settings.paid_model.journal_path)
-    return (list(core.store.db.iterdump()), journal.read_bytes() if journal.exists() else None,
+    return (logical_state(core.store), journal.read_bytes() if journal.exists() else None,
             core.ledger.path.read_bytes() if core.ledger.path.exists() else None)
 
 
@@ -147,7 +150,7 @@ def test_missing_inbox_requires_complete_exact_independent_recall_proof(
                 receipt["capture"][field] = value
                 live_text._put(core.store, live_text.INPUT + event["event_id"], receipt)
             elif case == "nonrecall_erasure":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
                 erased = core.ledger.read()[-1]
                 source = input_recall.canonical_source(
@@ -259,7 +262,7 @@ def test_abort_rejects_missing_changed_or_used_custody_without_writes(core, tmp_
     elif case == "missing_journal":
         Path(core.settings.paid_model.journal_path).unlink()
     elif case == "changed_ledger":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [], core.clock())
     elif case == "prepared":
         live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))
@@ -293,21 +296,21 @@ def test_abort_fsync_survives_failed_database_receipt_and_cannot_be_blindly_retr
     initial(core, tmp_path)
     _, new = stop_and_successor(core, tmp_path)
     core.store.execute(
-        "CREATE TRIGGER reject_abort_receipt BEFORE INSERT ON runtime_meta "
-        "WHEN NEW.key='live_text_window:" + new.plan_sha256 + "' "
-        "BEGIN SELECT RAISE(ABORT,'synthetic abort receipt failure'); END",
+        sql.SQL("ALTER TABLE runtime_meta ADD CONSTRAINT reject_abort_receipt "
+                "CHECK (key <> {}) NOT VALID").format(
+                    sql.Literal("live_text_window:" + new.plan_sha256))
     )
 
     async def scenario():
         async with core_client(core) as client:
             before = snapshot(core)
-            with pytest.raises(sqlite3.IntegrityError, match="synthetic abort receipt failure"):
+            with pytest.raises(psycopg.errors.CheckViolation, match="reject_abort_receipt"):
                 await client.post(ABORT, json=abort_body(new))
-            assert list(core.store.db.iterdump()) == before[0]
+            assert logical_state(core.store) == before[0]
             assert core.ledger.path.read_bytes() == before[2]
             assert journal_bytes(core).splitlines()[:-1] == before[1].splitlines()
             assert json.loads(journal_bytes(core).splitlines()[-1])["kind"] == "window_stop"
-            core.store.execute("DROP TRIGGER reject_abort_receipt")
+            core.store.execute("ALTER TABLE runtime_meta DROP CONSTRAINT reject_abort_receipt")
             fenced = snapshot(core)
             for endpoint, body in (
                 (ABORT, abort_body(new)), (HANDOFF, reference(new).model_dump()),
@@ -363,21 +366,30 @@ def test_abort_independent_stop_fence_survives_loss_of_database_abort_marker(
 
     async def scenario():
         async with core_client(core) as client:
-            with closing(sqlite3.connect(tmp_path / "before-abort.db")) as previous:
-                core.store.db.backup(previous)
-                aborted = await client.post(ABORT, json=abort_body(new))
-                assert aborted.status_code == 200, aborted.text
-                fenced_journal = journal_bytes(core)
-                if rollback == "database":
-                    previous.backup(core.store.db)
-                else:
-                    core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
-                                       (live_text.HISTORY + new.plan_sha256,))
-                before = snapshot(core)
-                rejected = await client.post(HANDOFF, json=reference(new).model_dump())
-                assert rejected.status_code in {409, 503}, rejected.text
-                assert rejected.json()["error"] in {
-                    "MODEL_BUDGET_RECONCILIATION_REQUIRED", "LIVE_TEXT_HANDOFF_STOP_REQUIRED",
-                }
-                assert snapshot(core) == before and journal_bytes(core) == fenced_journal
+            previous = logical_state(core.store)
+            dump = str(tmp_path / "before-abort.dump")
+            if rollback == "database":
+                with TemporaryDirectory(dir=tmp_path) as directory:
+                    with _client(core.settings.database, directory) as (_, environment):
+                        _run("pg_dump", ["--format=custom", "--no-owner", "--no-privileges",
+                                         "--file", dump], environment)
+            aborted = await client.post(ABORT, json=abort_body(new))
+            assert aborted.status_code == 200, aborted.text
+            fenced_journal = journal_bytes(core)
+            if rollback == "database":
+                with TemporaryDirectory(dir=tmp_path) as directory:
+                    with _client(core.settings.database, directory) as (_, environment):
+                        _run("pg_restore", ["--clean", "--if-exists", "--single-transaction",
+                                            "--no-owner", "--no-privileges", dump], environment)
+                assert logical_state(core.store) == previous
+            else:
+                core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
+                                   (live_text.HISTORY + new.plan_sha256,))
+            before = snapshot(core)
+            rejected = await client.post(HANDOFF, json=reference(new).model_dump())
+            assert rejected.status_code in {409, 503}, rejected.text
+            assert rejected.json()["error"] in {
+                "MODEL_BUDGET_RECONCILIATION_REQUIRED", "LIVE_TEXT_HANDOFF_STOP_REQUIRED",
+            }
+            assert snapshot(core) == before and journal_bytes(core) == fenced_journal
     run(scenario())

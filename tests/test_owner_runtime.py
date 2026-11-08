@@ -77,14 +77,20 @@ def test_native_chat_admission_rechecks_authority_after_http_hooks(core, tmp_pat
         assert state["billed_micro_usd"] == 0
 
 
-def test_native_chat_outbox_requires_same_reference_and_live_send_lease(core, tmp_path):
+def test_native_chat_outbox_requires_same_reference_and_live_send_lease(
+    core, tmp_path, monkeypatch,
+):
     snapshot_reads = []
 
-    def trace(sql):
-        if sql.startswith("SELECT phase,snapshots_json FROM agent_conversations"):
-            snapshot_reads.append(core.store.frozen_scope)
+    fetch = core.store.one
 
-    core.store.db.set_trace_callback(trace)
+    def observe(statement, params=()):
+        if isinstance(statement, str) and "SELECT phase, snapshots_json" in statement:
+            assert core.store.in_transaction
+            snapshot_reads.append(fetch("SELECT pg_current_xact_id()::text AS xid")["xid"])
+        return fetch(statement, params)
+
+    monkeypatch.setattr(core.store, "one", observe)
     capture, _ = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
     source = core.ingest(inbound(core, capture), "full-native-chat")
@@ -110,7 +116,7 @@ def test_native_chat_outbox_requires_same_reference_and_live_send_lease(core, tm
                        (job["job_id"],))
     with pytest.raises(CoreError, match="REPLY_CANCELLED"):
         owner_delivery.send_check(core.store, core.settings, core.clock, check)
-    assert len(snapshot_reads) >= 5 and None not in snapshot_reads
+    assert len(snapshot_reads) >= 5
     assert len(set(snapshot_reads)) == len(snapshot_reads)
     owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
         operation_id="operation-stop-native-send", authority=capture.authority))

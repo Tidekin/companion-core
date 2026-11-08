@@ -16,10 +16,10 @@ def test_image_memory_proof_revalidates_inside_checkpoint_transaction(core):
     rows = core.memory.search(TEXT, now=core.clock())
     assert memory_id in {row["memory_id"] for row in rows}
     proof = core.memory_context.pin(core.clock(), rows=rows)
-    before = core.store.db.total_changes
     with core.store.transaction():
+        before = core.store.change_token()["writes"]
         core.memory_context.revalidate(proof, core.clock())
-    assert core.store.db.total_changes == before
+        assert core.store.change_token()["writes"] == before
 
 
 def test_new_dispute_in_same_transaction_invalidates_image_proof(core):
@@ -41,23 +41,29 @@ def test_new_dispute_in_same_transaction_invalidates_image_proof(core):
             core.memory_context.revalidate(proof, core.clock())
 
 
-def test_review_adjacency_work_does_not_grow_with_unrelated_references(core):
+def test_review_adjacency_work_does_not_grow_with_unrelated_references(core, monkeypatch):
     counts = []
+    fetch = core.store.rows
+
+    def observed(statement, params=()):
+        plan = fetch("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + statement,
+                     params)[0]["QUERY PLAN"][0]["Plan"]
+        counts.append(plan["Shared Hit Blocks"] + plan["Shared Read Blocks"])
+        return fetch(statement, params)
+
     for start, stop in ((0, 100), (100, 1000)):
         with core.store.transaction():
             for number in range(start, stop):
                 core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                     (refs.INPUT + str(number), encode({"kind": "image_review",
                      "receipt": {"target_event_id": f"unrelated-{number}"}})))
-        ticks = []
-        core.store.db.set_progress_handler(lambda ticks=ticks: ticks.append(1) and 0, 10)
-        try:
-            with core.store.transaction():
-                assert refs.image_reviews(core.store, "target", work=retrieval_work.Work()) == []
-        finally:
-            core.store.db.set_progress_handler(None, 0)
-        counts.append(len(ticks))
-    assert counts[1] <= counts[0] + 2 and counts[1] < 20
+        core.store.execute("ANALYZE runtime_meta")
+        with monkeypatch.context() as patch, core.store.transaction():
+            patch.setattr(core.store, "rows", observed)
+            assert refs.image_reviews(core.store, "target", work=retrieval_work.Work()) == []
+    assert len(counts) == 2
+    assert 0 < counts[1] <= counts[0] + 2 and counts[1] < 20
+
 
 
 @pytest.mark.parametrize("limit", ["attachment_rows", "text_bytes"])
