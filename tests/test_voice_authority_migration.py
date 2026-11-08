@@ -8,8 +8,9 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-from companion.store import Store, migrate
+from companion.legacy_import import migrate_sqlite as migrate
 from companion.voice_protocol import VoiceLeaseRef
+from tests.support.release_migration import open_historical, rows
 from tests.support.voice_jobs import claim, create_tts, prepared
 
 
@@ -34,12 +35,12 @@ def test_0044_preserves_old_job_and_stop_custody_without_backfilling(core, tmp_p
             for row in core.store.rows(f'SELECT * FROM "{table}"'):
                 destination.execute(f'INSERT OR REPLACE INTO "{table}" ({",".join(columns)}) '
                     f'VALUES ({",".join("?" for _ in columns)})', tuple(row[c] for c in columns))
-    with closing(Store(path)) as prior:
-        before = {table: prior.rows(f"SELECT * FROM {table} ORDER BY rowid") for table in (
+    with closing(open_historical(path)) as prior:
+        before = {table: rows(prior, f"SELECT * FROM {table} ORDER BY rowid") for table in (
             "voice_jobs", "voice_node_state", "outbox", "model_usage", "runtime_meta")}
     migrate(path, "0044_voice_owner_authority")
-    with closing(Store(path)) as migrated:
-        after = {table: migrated.rows(f"SELECT * FROM {table} ORDER BY rowid") for table in before}
+    with closing(open_historical(path)) as migrated:
+        after = {table: rows(migrated, f"SELECT * FROM {table} ORDER BY rowid") for table in before}
         for row in after["voice_jobs"]:
             assert row.pop("authority_json") == "{}"
         assert after == before
