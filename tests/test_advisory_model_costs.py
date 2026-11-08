@@ -3,7 +3,6 @@
 import httpx
 
 from companion import ops_status, owner_input
-from companion.cloud_budget import CloudBudgetConfig
 from companion.model import ModelClient
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, worker_for
@@ -22,21 +21,13 @@ def response(*, usage=True):
     return httpx.Response(200, json=body)
 
 
-def configure(core, tmp_path, monkeypatch, *, tiny=False):
+def configure(core, tmp_path, monkeypatch):
     approved = owner_authority_setup.approved_live
 
     def approval(core, path):
-        changes = {"concurrency": 1}
-        if tiny:
-            changes.update(per_attempt_micro_usd=1, per_request_micro_usd=1,
-                           daily_micro_usd=1, monthly_micro_usd=1, window_micro_usd=1,
-                           )
-        return approved(core, path, **changes)
+        return approved(core, path, concurrency=1)
 
     monkeypatch.setattr(owner_authority_setup, "approved_live", approval)
-    if tiny:
-        core.settings.monthly_limit_micro_usd = 1
-        core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
     return captured(core, tmp_path)
 
 
@@ -46,10 +37,10 @@ def admit(core, template, key, number):
     return core.ingest(message, "advisory-cost-" + str(number))["job_id"]
 
 
-def test_amount_ceilings_do_not_refuse_and_original_actual_charges_are_recorded(
+def test_actual_charges_are_recorded_without_a_money_policy(
     core, tmp_path, monkeypatch,
 ):
-    template, key = configure(core, tmp_path, monkeypatch, tiny=True)
+    template, key = configure(core, tmp_path, monkeypatch)
     calls = []
 
     def provider(request):
@@ -146,17 +137,13 @@ def test_missing_response_is_not_fabricated_or_replayed_and_does_not_block_a_fre
     assert len(calls) == 2
 
 
-def test_real_http_and_independent_worker_continue_after_cost_unknown_and_money_overrun(
+def test_real_http_and_independent_worker_continue_with_original_cost_unknown(
     core, tmp_path,
 ):
-    core.settings.monthly_limit_micro_usd = 1
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
     provider = Provider(response(usage=False).json(), response().json())
 
     async def scenario():
         async with environment(core, tmp_path, purposes=("chat",), paid_options={
-            "per_attempt_micro_usd": 1, "per_request_micro_usd": 1,
-            "daily_micro_usd": 1, "monthly_micro_usd": 1, "window_micro_usd": 1,
             "concurrency": 1,
         }) as (entry, _), worker_for(core, provider) as worker:
             first = await entry.admit(1, "合成费用未知回复")

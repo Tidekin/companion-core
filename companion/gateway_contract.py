@@ -76,9 +76,7 @@ class ClientBudget(Contract):
     paid_contract_sha256: Sha256
     max_input_tokens: Positive
     max_output_tokens: Positive
-    max_request_micro_usd: Count
     daily_calls: Count
-    daily_micro_usd: Count
     concurrency: int = Field(ge=1, le=64, strict=True)
 
 

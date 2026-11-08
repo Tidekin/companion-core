@@ -171,6 +171,8 @@ def test_same_bytes_cannot_borrow_another_licensed_sources_vector(runtime_case, 
 @pytest.mark.parametrize(
     "change", ["epoch", "erasure", "usage", "caption", "stop", "lease", "revision"]
 )
+
+
 def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypatch, change):
     c, release = runtime_case, threading.Event()
     before = c.core.store.rows("SELECT * FROM model_usage")
@@ -248,7 +250,7 @@ def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypat
 
     run(scenario())
     if change == "usage":
-        assert c.retrieval.check(c.job)["offer"]["candidates"]
+        assert c.retrieval.check(c.job)["offer"]["candidates"] == []
         assert c.core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
         assert len(c.core.store.rows("SELECT * FROM model_usage")) == len(before)
         return
@@ -279,6 +281,8 @@ def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypat
         "outer_size",
     ],
 )
+
+
 def test_corrupt_frozen_proof_is_fenced_even_with_rehashed_binding(
     runtime_case, monkeypatch, field
 ):

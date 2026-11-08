@@ -144,10 +144,11 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
     assert all(entry["state"] == "SETTLED" for entry in video)
     costs = phase_costs(core)
     assert {entry["task_id"] for entry in costs} == {"content:" + row["item_id"]}
-    assert sum(entry["amount_micro_cny"] for entry in costs) <= 1_000_000
+    assert sum(entry["amount_micro_cny"] for entry in costs) == sum(
+        entry["billed_micro_usd"] for entry in video) * 8
     policies = [json.loads(entry["snapshot_json"])["config"] for entry in costs]
-    assert all(policy["video_per_item_micro_cny"] == 1_000_000 for policy in policies)
-    assert all(policy["daily_micro_cny"] == 20_000_000 for policy in policies)
+    assert all(policy["usd_to_cny_micro"] == 8_000_000 for policy in policies)
+    assert all("video_per_item_micro_cny" not in policy for policy in policies)
     if erase_during_model:
         assert row["redacted"] == 1 and row["output_event_id"] is None
         assert row["lease_json"] == row["target_json"] == row["plan_json"] == "{}"

@@ -103,7 +103,6 @@ def test_current_catalog_meme_is_sent_between_voice_and_text(core, tmp_path, mon
         meme_discovery_enabled=True,
         meme_discovery_daily_download_bytes=32 * 1024 * 1024,
         meme_discovery_daily_storage_bytes=8 * 1024 * 1024,
-        meme_caption_daily_micro_usd=50000,
         expression_selection_probability=1.0,
         voice=voice_config(reply={"mode": "model"}),
         segmented_reply=SegmentedReplyConfig(max_segments="unlimited", interval_ms=0),

@@ -21,7 +21,7 @@ def request(core, target):
     policy = cloud_budget.policy(core.store, core.settings, core.clock())
     return ({"expected_version": 0, "changes": {"max_output_tokens": 1024}}
             if target == "configuration" else
-            {"expected_version": policy["version"], "changes": {"daily_micro_cny": 18_000_000}})
+            {"expected_version": policy["version"], "changes": {}})
 
 
 @pytest.mark.parametrize("target", ["configuration", "cloud-budget"])

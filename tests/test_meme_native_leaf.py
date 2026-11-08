@@ -41,7 +41,6 @@ async def native(core, tmp_path, *, public=None, caption=False):
     core.settings.expression_enabled = True
     core.settings.meme_discovery_enabled = True
     core.settings.meme_semantics_enabled = caption
-    core.settings.meme_caption_daily_micro_usd = 50000
     key = Ed25519PrivateKey.generate()
     policy = OwnerGrantPolicy(owner_qq_id=core.settings.owner_qq_id,
         purposes=["chat", "expression", "meme"], authorization_sha256="d" * 64,

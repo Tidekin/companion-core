@@ -102,6 +102,8 @@ def test_preexisting_cumulative_liability_blocks_evaluation(core, tmp_path):
 
 @pytest.mark.parametrize("condition", ["revoked", "expired", "source", "window", "disabled",
                                        "new_owner"])
+
+
 def test_changes_block_execution_without_io(core, tmp_path, condition):
     manifest = prepare(core, tmp_path, chat=condition == "new_owner")
     request = authorize(core, manifest)
@@ -161,7 +163,7 @@ def test_result_checkpoint_controls_continuation(core, tmp_path, failure):
 
 def test_normal_task_and_evaluation_preserve_shared_advisory_cloud_ledger(core, tmp_path):
     manifest = prepare(core, tmp_path, chat=True)
-    cap = core.settings.cloud_budget.model_copy(update={"daily_micro_cny": 30000})
+    cap = core.settings.cloud_budget.model_copy(update={})
     core.settings.cloud_budget = cap
     # Native preceding charge; no evaluation-local balance can discard this liability.
     normal = admitted_chat(core)

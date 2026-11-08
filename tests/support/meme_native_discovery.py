@@ -18,7 +18,7 @@ async def native_case(core, tmp_path, monkeypatch, *, text="太棒了，成功�
     core.settings = core.settings.model_copy(update={
         "meme_catalog_owner": "core", "meme_discovery_enabled": discovery,
         "meme_semantics_enabled": True, "meme_trusted_sources": [meme_policy.TrustedSource(**RULE)],
-        "meme_caption_daily_micro_usd": 50000, "expression_selection_probability": 1.0,
+         "expression_selection_probability": 1.0,
         **changes,
     })
     paid = {"max_output_tokens": 4096, "meme_input": ImageInputPolicy(

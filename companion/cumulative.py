@@ -1,7 +1,7 @@
 """Cumulative admission in the original Budget Journal, never a second wallet.
 
-Account ownership is an owner-approved anonymous assertion. These are local
-liability limits, not a verified provider account balance or external hard cap.
+Account ownership is an owner-approved anonymous assertion. The policy limits
+calls and token usage; original monetary records remain accounting evidence.
 """
 
 import hashlib
@@ -34,7 +34,6 @@ LEGACY_DOMAIN = b"companion-core/cumulative-window-inventory/v1\x00"
 
 class ModelCaps(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    micro_usd: int = Field(strict=True, ge=0, le=2**63 - 1)
     model_attempts: int = Field(strict=True, ge=0, le=2**31 - 1)
     input_tokens: int = Field(strict=True, ge=0, le=2**63 - 1)
     output_tokens: int = Field(strict=True, ge=0, le=2**63 - 1)
@@ -66,7 +65,7 @@ class LegacyWindowInventory(BaseModel):
 
 class CumulativeApproval(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    version: Literal[1]
+    version: Literal[2]
     account_ref: str = Field(pattern=SHA)
     policy_id: str = Field(pattern=r"^quota_[a-f0-9]{32}$")
     approval_sha256: str = Field(pattern=SHA)
@@ -163,6 +162,22 @@ def blocking_pause(state):
     }
 
 
+def _recorded_policy(value):
+    """Validate retained v1 bytes without reinstating their monetary admission caps."""
+    if value.get("version") != 1:
+        return CumulativeApproval.model_validate(value).model_dump(mode="json")
+    current = {**value, "version": 2}
+    for period in ("request", "window", "day", "month", "account"):
+        limits = dict(value[period])
+        amount = limits.pop("micro_usd")
+        if type(amount) is not int or not 0 <= amount <= 2**63 - 1:
+            raise ValueError("invalid historical monetary cap")
+        current[period] = limits
+    if CumulativeApproval.model_validate(current).model_dump(mode="json") != current:
+        raise ValueError("historical cumulative policy")
+    return value
+
+
 def fold(state, row):
     """Pure projection of versioned records in the existing hash-chained journal."""
     kind = row["kind"]
@@ -177,7 +192,7 @@ def fold(state, row):
             expected.add("legacy")
         if set(row) != expected or row["version"] != 1:
             raise ValueError("invalid cumulative policy record")
-        policy = CumulativeApproval.model_validate(row["policy"]).model_dump(mode="json")
+        policy = _recorded_policy(row["policy"])
         if policy != row["policy"] or digest(policy) != row["policy_sha256"]:
             raise ValueError("cumulative policy hash")
         at = instant(row["at"])

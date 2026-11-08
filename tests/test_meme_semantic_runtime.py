@@ -301,14 +301,16 @@ def test_lost_caption_response_never_repeats_submission_or_enters_index(make_run
         async with core.client() as client:
             await runtime.run_once(client)
             assert (await runtime.run_once(client))["status"] == "CAPTION_PENDING"
-            assert (await runtime.run_once(client))["status"] == "DEFERRED"
+            assert (await runtime.run_once(client))["status"] == "CAPTION_QUARANTINED"
             binding = runtime.db.execute(
                 "SELECT state,usage_json FROM meme_caption_bindings").fetchone()
             assert binding[0] == "UNKNOWN" and json.loads(binding[1])["state"] == "UNKNOWN"
             assert runtime.db.execute("SELECT state FROM meme_semantic_assets").fetchone()[0] == (
                 "QUARANTINED")
             await runtime.run_once(client)
-            assert (await runtime.run_once(client))["status"] == "DEFERRED"
+            await runtime.run_once(client)
+            assert runtime.db.execute("SELECT state FROM meme_semantic_assets").fetchone()[0] == (
+                "QUARANTINED")
 
     run(scenario())
     assert len(core.caption.submissions) == len(core.caption.polls) == 1
@@ -517,13 +519,12 @@ def test_profile_refresh_after_restart_keeps_unknown_caption_receipt_without_res
         async with core.client() as client:
             await runtime.run_once(client)
             await runtime.run_once(client)
-            assert (await runtime.run_once(client))["status"] == "DEFERRED"
+            assert (await runtime.run_once(client))["status"] == "CAPTION_QUARANTINED"
             assert json.loads(runtime.db.execute(
                 "SELECT usage_json FROM meme_caption_bindings").fetchone()[0])["state"] == "UNKNOWN"
             original = tuple(runtime.db.execute("SELECT * FROM meme_caption_bindings").fetchone())
             core.identity = core.original_identity.model_copy(update={
                 "model_version": "approved-model-v2"})
-            original_embedding = core.embedding
             core.embedding = core.embedding.model_copy(update={
                 "model_version": "local-embedding-v2"})
             cfg, fixture = runtime.config, case(runtime)
@@ -533,14 +534,14 @@ def test_profile_refresh_after_restart_keeps_unknown_caption_receipt_without_res
                 owner = OwnerRuntime(spool, clock=lambda: fixture.core.clock.now)
                 CASES[owner] = fixture
                 restarted = MemeRuntime(owner)
-                assert (await restarted.run_once(client))["status"] == "DEFERRED"
-                assert (await restarted.run_once(client))["status"] == "DEFERRED"
-                assert restarted.semantics.identity == core.original_identity
-                assert restarted.semantics.embedding_spec == original_embedding
+                await restarted.run_once(client)
+                await restarted.run_once(client)
+                assert restarted.semantics.identity == core.identity
+                assert restarted.semantics.embedding_spec == core.embedding
                 assert tuple(spool.db.execute(
                     "SELECT * FROM meme_caption_bindings").fetchone()) == original
 
     run(scenario())
     assert len(core.caption.submissions) == len(core.caption.polls) == 1
     assert not any(path.endswith("/embeddings") for path, _ in core.semantic_calls)
-    assert len([path for path, _ in core.semantic_calls if path.endswith("/profile")]) == 1
+    assert len([path for path, _ in core.semantic_calls if path.endswith("/profile")]) == 2

@@ -46,8 +46,8 @@ def test_http_image_and_independent_reply_worker_share_the_cny_ledger(core):
         assert total > 80
         policy = cloud_budget.policy(worker.store, worker.settings, worker.clock())
         cloud_budget.configure(worker.store, worker.settings, {
-            "expected_version": policy["version"], "changes": {"daily_micro_cny": total},
-        }, idempotency_key="reduce-to-consumed", now=worker.clock())
+            "expected_version": policy["version"], "changes": {"usd_to_cny_micro": 9_000_000},
+        }, idempotency_key="update-fx", now=worker.clock())
         next_id = owner_share(worker, 2, manifest=[{"kind": "image", "slot": 0}])
         worker.content.provider = vision
         run(worker.content.analyze_image(next_id, "image:0", png(), "image/png"))
@@ -67,7 +67,7 @@ def test_unknown_image_keeps_original_fx_and_blocks_replay_after_reconfiguration
     policy = cloud_budget.policy(core.store, core.settings, core.clock())
     cloud_budget.configure(core.store, core.settings, {
         "expected_version": policy["version"],
-        "changes": {"usd_to_cny_micro": 7_000_000, "daily_micro_cny": 30_000_000},
+        "changes": {"usd_to_cny_micro": 7_000_000},
     }, idempotency_key="new-price-policy", now=core.clock())
     with pytest.raises(CoreError, match="CONTENT_IMAGE_ALREADY_UNKNOWN"):
         run(service.analyze_image(event_id, "image:0", png(), "image/png"))
@@ -78,7 +78,6 @@ def test_unknown_image_keeps_original_fx_and_blocks_replay_after_reconfiguration
 
 
 def test_runtime_capability_snapshot_treats_cloud_currency_as_advisory(core):
-    core.settings.cloud_budget.daily_micro_cny = 0
     before = logical_state(core.store)
     with core.store.read_snapshot():
         value = snapshot(core.store, core.settings, core.clock)

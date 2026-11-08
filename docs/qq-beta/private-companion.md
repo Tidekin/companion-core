@@ -20,9 +20,8 @@ Core 与 Bridge 同一冻结计划须显式声明 `companion_approval_sha256`、
 Reader、Executive 和 Voice 执行路径继续服务已绑定的前台依赖。完整切换要求 Core 路由与
 原生单步接口同时接入，见 [原生调度边界](p10-operations-observation.md#原生调度边界)。
 
-以上能力须启用对应配置。反思默认费用配置为零，部署时须提供正的
-`reflection_daily_micro_usd` 与 `reflection_monthly_micro_usd`；无限周期费用批准仍保留
-单次费用、模型次数、Token、租约与未结算停止规则。聊天优先，后台任务使用同一个付费
+以上能力须启用对应配置，保留模型次数、Token、租约与缺失回复防重放规则。
+真实费用与用量照实记录，单纯费用 UNKNOWN 只提示待核对。聊天优先，后台任务使用同一个付费
 并发槽；新图片输入等待已在途的后台调用结算后再识图。
 
 在 `local_active_attempts_v2` 模式下，Life 判断未决模型责任时复核原付费 Journal。

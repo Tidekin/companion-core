@@ -64,7 +64,6 @@ class SocialAutonomyConfig(Strict):
     qzone_cooldown_seconds: int = Field(default=3600, ge=0, le=366 * 86400)
     profile_cooldown_seconds: int = Field(default=7 * 86400, ge=0, le=366 * 86400)
     model_daily_calls: int = Field(default=4, ge=0, le=100)
-    model_daily_micro_usd: int = Field(default=100_000, ge=0, le=10**9)
     decision_interval_seconds: int = Field(default=3600, ge=0, le=366 * 86400)
     max_publish_chars: int = Field(default=500, ge=1, le=5000)
     max_nickname_chars: int = Field(default=24, ge=1, le=128)

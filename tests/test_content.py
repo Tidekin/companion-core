@@ -202,7 +202,7 @@ def test_screenshot_download_is_reserved_and_can_only_be_claimed_once(core):
 @pytest.mark.parametrize("failure", ["bytes", "count", "invalid", "dimension"])
 def test_image_validation_and_budgets_precede_provider_calls(core, failure):
     limits = {
-        "price": {"image_daily_micro_usd": 0},
+        "price": {},
         "bytes": {"max_daily_image_bytes": 0},
         "count": {"max_daily_images": 0},
     }
@@ -238,7 +238,6 @@ def test_vision_failure_keeps_reservation_and_cannot_be_replayed(core):
 
 def test_vision_preserves_unknown_tool_cost_without_global_refusal(core):
     service, vision = enable(core)
-    core.settings.monthly_limit_micro_usd = 10
     core.store.insert(
         "tool_tasks",
         task_id="tool_budget",
@@ -443,8 +442,7 @@ def test_content_erasure_and_backup_replay_clear_every_derived_image(
 
 
 def test_zero_vision_currency_amount_keeps_actual_charge(core):
-    service, vision = enable(core, image_daily_micro_usd=0, article_image_micro_usd=0)
-    core.settings.monthly_limit_micro_usd = 0
+    service, vision = enable(core, )
     event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
     run(service.analyze_image(event_id, "image:0", png(), "image/png"))
     assert len(vision.calls) == 1

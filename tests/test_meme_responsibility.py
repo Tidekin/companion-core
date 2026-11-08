@@ -108,7 +108,7 @@ def test_call_quota_refusal_has_terminal_no_admission_despite_a_preallocated_uid
     core, tmp_path, monkeypatch
 ):
     async def scenario():
-        async with liability_case(core, tmp_path, monkeypatch, daily_calls=0) as c:
+        async with liability_case(core, tmp_path, monkeypatch, max_input_tokens=1) as c:
             calls = []
             assert await worker(core, calls) and not calls
             assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (c.job_id,)) == {
@@ -152,6 +152,8 @@ async def add_reuse(core, c):
 
 @pytest.mark.parametrize("damage", ["none", "root_pointer", "cycle", "missing", "identity",
                                      "limit", "admission", "empty_parent"])
+
+
 def test_original_fee_and_complete_reuse_ancestry_are_required(core, tmp_path, monkeypatch, damage):
     async def scenario():
         async with liability_case(core, tmp_path, monkeypatch) as c:
@@ -198,7 +200,7 @@ def test_original_fee_and_complete_reuse_ancestry_are_required(core, tmp_path, m
 
 def test_terminal_target_cannot_hide_a_nonterminal_no_fee_ancestor(core, tmp_path, monkeypatch):
     async def scenario():
-        async with liability_case(core, tmp_path, monkeypatch, daily_calls=0) as c:
+        async with liability_case(core, tmp_path, monkeypatch, max_input_tokens=1) as c:
             child = await add_reuse(core, c)
             assert await worker(core, [])
             core.store.execute("UPDATE jobs SET state='FAILED' WHERE job_id=%s", (child,))
@@ -212,6 +214,8 @@ def test_terminal_target_cannot_hide_a_nonterminal_no_fee_ancestor(core, tmp_pat
 
 @pytest.mark.parametrize("case", ["settings_path", "missing_journal", "authority_ref",
                                   "journal_identity", "model_restore", "cloud_restore"])
+
+
 def test_original_custody_never_initializes_or_substitutes_evidence(
     core, tmp_path, monkeypatch, case
 ):
@@ -578,7 +582,7 @@ def test_bounded_three_node_reuse_preserves_the_original_fee_or_complete_no_admi
 ):
     async def scenario():
         async with liability_case(core, tmp_path, monkeypatch,
-                                  daily_calls=0 if state == "NO_ADMISSION" else 30) as c:
+                                  max_input_tokens=1 if state == "NO_ADMISSION" else 20000) as c:
             import copy
 
             root = c.job_id
@@ -622,6 +626,8 @@ def test_bounded_three_node_reuse_preserves_the_original_fee_or_complete_no_admi
     {"usage_owner_job_id": "job_" + "b" * 32}, {"liability_kind": "USAGE"},
     {"result": "Synthetic rejected body"},
 ])
+
+
 def test_shared_responsibility_contract_is_strict_and_cannot_invent_terminal_no_admission(patch):
     from pydantic import ValidationError
 
@@ -644,7 +650,7 @@ def test_unused_preallocated_pointers_still_require_a_consistent_original_chain(
     core, tmp_path, monkeypatch, damage
 ):
     async def scenario():
-        async with liability_case(core, tmp_path, monkeypatch, daily_calls=0) as c:
+        async with liability_case(core, tmp_path, monkeypatch, max_input_tokens=1) as c:
             root = c.job_id
             child = await add_reuse(core, c)
             assert await worker(core, [])

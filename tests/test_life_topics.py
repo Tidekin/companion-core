@@ -139,7 +139,6 @@ def test_duplicate_workers_claim_original_job_once(core):
 def test_zero_currency_keeps_native_life_generation_available(core):
     bug(core)
     proposal(core)
-    core.settings.autonomous_daily_micro_usd = 0
     job = due(core)
     assert run(core.run_once(job_id=job))
     assert core.model.calls

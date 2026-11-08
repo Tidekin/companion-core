@@ -108,7 +108,7 @@ def test_atomic_admission_across_independent_connections_never_exceeds_ten(core,
 
 def test_background_leaves_a_slot_for_chat(core, tmp_path):
     core.settings.watch_ledger = core.settings.watch_ledger.model_copy(
-        update={"enabled": True, "daily_micro_usd": 100000})
+        update={"enabled": True})
     job = approved(core, tmp_path)
     # Use the current native policy with its independently granted exploration scope.
     core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (job,))

@@ -35,7 +35,7 @@ CAPTION = {
 async def caption_environment(core, tmp_path, monkeypatch):
     monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
     async with discovery_environment(core, tmp_path, monkeypatch,
-        meme_semantics_enabled=True, meme_caption_daily_micro_usd=50000,
+        meme_semantics_enabled=True,
         paid={"max_output_tokens": 4096, "meme_input": ImageInputPolicy(
             approval_sha256="e" * 64, estimated_tokens_per_image=100,
             max_bytes_per_image=4000000, max_pixels_per_image=16000000,

@@ -109,7 +109,7 @@ def test_provider_record_and_operation_cannot_be_reused_for_different_material(c
 def test_confirmed_over_budget_bill_is_retained_and_fresh_work_continues(core, tmp_path):
     case = migrated(core, tmp_path)
     job = authorized_job(core, number=2)
-    actual = core.settings.paid_model.per_attempt_micro_usd + 1
+    actual = 30001
     bill = {"kind": "provider_statement", "provider": "offline-fixture", "model": "offline-text",
             "currency": "USD", "actual_micro_usd": actual, "provider_record_sha256": "b" * 64}
     request, private = prepared(core, tmp_path, case.request_id, basis=bill)
@@ -229,6 +229,8 @@ def test_duplicate_evidence_does_not_create_another_operation(core, tmp_path):
 @pytest.mark.parametrize("change", ["evidence", "head", "binding", "amount", "provider",
                                     "closure", "version", "extra", "restore", "cumulative",
                                     "currency", "boolean_price"])
+
+
 def test_invalid_accounting_material_cannot_mutate_state(core, tmp_path, change):
     case = migrated(core, tmp_path)
     request, private = prepared(core, tmp_path, case.request_id)
@@ -367,6 +369,8 @@ def test_rehashed_receipt_cannot_change_native_amount_formula(core, tmp_path):
                        model_accounting.PROJECTION + request["operation_id"]))
     with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
         custody(core)
+
+
 def test_accounting_retains_erasure_and_owner_stop_semantics(core, tmp_path):
     case = migrated(core, tmp_path)
     request, private = prepared(core, tmp_path, case.request_id)

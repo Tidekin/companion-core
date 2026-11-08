@@ -44,6 +44,8 @@ from tests.support.owner_recall_bridge import recall_frame
         "recall",
     ],
 )
+
+
 def test_original_visual_result_checked_at_final_model_boundary(
     core,
     tmp_path,
@@ -213,7 +215,7 @@ def test_original_paid_preview_remains_readable_with_limited_model_call_room(
     async def scenario():
         async with paid_media(core, tmp_path,
             media_provider,
-            cloud=CloudBudgetConfig(video_per_item_micro_cny=1), call_limit=4,
+            cloud=CloudBudgetConfig(), call_limit=4,
         ) as (module, item, prepared):
             preview = await module.upload("bili", item["request_id"], upload_body(item, prepared))
             assert preview["next_selection"] is None
@@ -238,6 +240,8 @@ def test_original_paid_preview_remains_readable_with_limited_model_call_room(
 @pytest.mark.parametrize("drift", [
     "body", "phase", "ttl", "source", "receipt", "result_ids", "binding",
 ])
+
+
 def test_completed_job_reader_proof_revalidates_readonly_before_delivery(core, tmp_path, drift):
     async def scenario():
         async with paid_media(core, tmp_path,

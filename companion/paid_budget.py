@@ -105,24 +105,13 @@ def sha(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
-def daily_limits(settings):
-    """Configured local spend caps, including groups that share the same allowance."""
+def scenarios():
+    """Local execution scenarios admitted by the existing authority contract."""
     from companion.video_input import SCENARIOS
 
-    return {
-        "memory_extract": settings.memory_daily_micro_usd,
-        "memory_review": settings.memory_daily_micro_usd,
-        "diary": settings.diary_daily_micro_usd,
-        "reflection": settings.reflection_daily_micro_usd,
-        "activity": settings.autonomous_daily_micro_usd,
-        "rem": settings.rem.daily_micro_usd,
-        "style_distill": settings.style_distill.daily_micro_usd,
-        "jargon": settings.jargon.daily_micro_usd,
-        "watch_review": settings.watch_ledger.daily_micro_usd,
-        "social_autonomy": settings.social_autonomy.model_daily_micro_usd,
-        "meme_caption": settings.meme_caption_daily_micro_usd,
-        **dict.fromkeys(("content_vision", *SCENARIOS), settings.content.image_daily_micro_usd),
-    }
+    return {"memory_extract", "memory_review", "diary", "reflection", "activity", "rem",
+            "style_distill", "jargon", "watch_review", "social_autonomy", "meme_caption",
+            "content_vision", *SCENARIOS}
 
 
 def snapshot(settings):
@@ -136,21 +125,10 @@ def snapshot(settings):
     value["estimator"] = "utf8-third-v1"
     if counting := count_contract(settings):
         value["token_measurement"] = counting
-    value["local_monthly_micro_usd"] = settings.monthly_limit_micro_usd
-    caps = daily_limits(settings)
-    frozen = ["memory_extract", "memory_review", "diary", "reflection", "activity"]
     if approval.image_input is not None:
         value["image_estimator"] = "approved-fixed-image-plus-utf8-third-v1"
-        frozen.append("content_vision")
     if approval.meme_input is not None:
         value["image_estimator"] = "approved-fixed-image-plus-utf8-third-v1"
-        frozen.append("meme_caption")
-    if settings.social_autonomy.enabled:
-        frozen.append("social_autonomy")
-    value["scenario_daily_micro_usd"] = {name: caps[name] for name in frozen}
-    # watch_review, style_distill and jargon stay out, like rem: their own daily caps apply at
-    # reservation inside the approved window, and enabling them keeps the policy valid.
-    value["reflection_monthly_micro_usd"] = settings.reflection_monthly_micro_usd
     # Private per-window credential binding, never the raw key or a public account identifier.
     value["credential_tag"] = hmac.new(
         settings.model_key.get_secret_value().encode(),

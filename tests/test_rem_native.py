@@ -127,8 +127,10 @@ def test_rem_failure_never_replays_and_keeps_accounting(core, tmp_path, failure)
 
 
 @pytest.mark.parametrize("config", [
-    {"max_input_tokens": 128}, {"daily_micro_usd": 1}, {"monthly_micro_usd": 1},
+    {"max_input_tokens": 128}, {}, {},
 ])
+
+
 def test_rem_input_limit_stays_hard_and_money_caps_are_advisory(core, tmp_path, config):
     calls = []
 

@@ -83,6 +83,8 @@ def test_native_passthrough_one_charge_and_lost_http_response_recovery(harness, 
     {"model": "unauthorized-model"}, {"stream": True}, {"tools": []},
     {"client_id": "owner"}, {"memory_scope": "owner_private"}, {"max_tokens": 129},
 ])
+
+
 def test_rejected_requests_never_reserve_or_dispatch(harness, changes):
     result = api(harness, "POST", "/v1/chat/completions", json=body(**changes))
     assert result.status_code in (400, 403, 404, 429)
@@ -240,7 +242,7 @@ def test_native_client_quota_serializes_independent_workers(harness):
 
 
 def test_actual_client_currency_overrun_preserves_actual_charge(harness):
-    rotate(harness, budget={**harness.grant.budget.model_dump(), "max_request_micro_usd": 1000})
+    rotate(harness, budget={**harness.grant.budget.model_dump()})
     harness.submit()
 
     def overspend(request):

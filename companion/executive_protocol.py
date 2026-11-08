@@ -46,7 +46,6 @@ class ExecutorEndpoint(Strict):
     token: SecretStr
     workspace: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     capabilities: list[Literal["windows.read_text", "windows.write_text", "dsh.run"]]
-    max_cost_micro_usd: int = Field(default=0, ge=0, le=1000000)
     max_model_calls: int = Field(default=1, ge=1, le=10)
     max_input_bytes: int = Field(default=16000, ge=1024, le=100000)
     max_output_tokens: int = Field(default=1024, ge=128, le=4096)
@@ -68,8 +67,6 @@ class ExecutorEndpoint(Strict):
                 raise ValueError("HTTP executor requires a private IP")
         if len(self.token.get_secret_value()) < 24:
             raise ValueError("executor token must be at least 24 characters")
-        if "dsh.run" in self.capabilities and not self.max_cost_micro_usd:
-            raise ValueError("DSH requires a known nonzero upper cost bound")
         return self
 
 
@@ -77,8 +74,6 @@ class ExecutiveConfig(Strict):
     enabled: bool = False
     allow_changes: bool = False
     daily_calls: int = Field(default=0, ge=0, le=100)
-    daily_micro_usd: int = Field(default=0, ge=0)
-    monthly_micro_usd: int = Field(default=0, ge=0)
     timeout_seconds: int = Field(default=45, ge=5, le=180)
     endpoints: dict[str, ExecutorEndpoint] = Field(default_factory=dict)
 
@@ -91,7 +86,6 @@ class ExecutionEnvelope(Strict):
     capability: Literal["windows.read_text", "windows.write_text", "dsh.run"]
     workspace: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
     arguments: ToolArguments
-    max_cost_micro_usd: int = Field(ge=0, le=1000000)
     max_model_calls: int = Field(ge=1, le=10)
     max_input_bytes: int = Field(ge=1024, le=100000)
     max_output_tokens: int = Field(ge=128, le=4096)
@@ -107,10 +101,15 @@ class ToolReceipt(Strict):
     evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     billed_micro_usd: int = Field(ge=0)
     model_calls: int = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    unknown_model_calls: int = Field(default=0, ge=0)
     error_code: str | None = Field(default=None, pattern=r"^[A-Z0-9_]{1,64}$")
 
     @model_validator(mode="after")
     def evidence_matches(self):
+        if self.unknown_model_calls > self.model_calls:
+            raise ValueError("unknown usage must belong to a dispatched model call")
         if hashlib.sha256(self.text.encode()).hexdigest() != self.evidence_sha256:
             raise ValueError("receipt evidence digest mismatch")
         if self.status != "SUCCEEDED" and self.text:

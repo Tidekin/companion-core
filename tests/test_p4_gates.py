@@ -34,6 +34,8 @@ def test_incomplete_evidence_remains_a_valid_blocked_report():
         },
     ],
 )
+
+
 def test_gate_rejects_false_readiness_or_synthetic_human_acceptance(change):
     gates = copy.deepcopy(evidence())
     gates.update(change)
@@ -69,5 +71,5 @@ def test_rehearsal_configuration_is_valid_and_has_no_model_or_sending_authority(
     path = Path(__file__).resolve().parents[1] / "docs/design-v0.6/p4-rehearsal.example.toml"
     cfg = Settings.model_validate(tomllib.loads(path.read_text("utf-8")))
     assert cfg.mode == "demo" and not cfg.model_key.get_secret_value()
-    assert cfg.monthly_limit_micro_usd == cfg.autonomous_daily_micro_usd == 0
+    assert cfg.paid_model is None
     assert not cfg.proactive_enabled and not cfg.diary_auto_share

@@ -45,13 +45,11 @@
 [content]
 use_chat_model_for_vision = true
 max_images_per_article = 32
-article_image_micro_usd = 64000
-image_daily_micro_usd = 100000
 max_daily_images = 32
 max_daily_image_bytes = 32000000
 
 [content.vision]
-max_request_micro_usd = 2000
+estimated_request_micro_usd = 2000
 ```
 
 数值单位为微美元，1,000,000 等于 1 美元。运行 `python -m companion content-worker` 即使用现有队列分批读取；

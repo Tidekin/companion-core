@@ -5,6 +5,12 @@ from companion.store import uid
 MESSAGES = [{"role": "user", "content": "synthetic budget request"}]
 
 
+def currency_blocks(store, settings, now):
+    from companion.capabilities import snapshot
+    return [reason for item in snapshot(store, settings, lambda: now)["capabilities"]
+            for reason in item["reason_codes"] if reason.startswith("CLOUD_")]
+
+
 def options(core, **changes):
     config = CloudBudgetConfig(**changes)
     object.__setattr__(core.settings, "cloud_budget", config)

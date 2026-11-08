@@ -92,7 +92,6 @@ def test_unknown_price_blocks_autonomy_only(core):
 
 
 def test_monthly_currency_amount_does_not_refuse_a_valid_reply(core):
-    core.settings.monthly_limit_micro_usd = 1
     ingest(core)
     run(core.run_once())
     assert len(core.model.calls) == 1
@@ -106,7 +105,6 @@ def test_zero_extraction_currency_amount_does_not_disable_processing(core):
     core.settings.memory_enabled = True
     core.settings.extraction_min_events = 1
     core.settings.extraction_idle_seconds = 0
-    core.settings.memory_daily_micro_usd = 0
     ingest(core)
     run(core.run_once())
     assert run(core.extract_once())

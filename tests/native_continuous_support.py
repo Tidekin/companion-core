@@ -195,8 +195,7 @@ async def host(core, tmp_path, source, *, policy=None, protocol_reply=None, mode
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     for name, value in (core_options or {}).items():
         setattr(core.settings, name, value)
-    approved_live(core, tmp_path, **{"max_output_tokens": 4096,
-        "per_attempt_micro_usd": 100000, "per_request_micro_usd": 200000, **(paid_options or {})})
+    approved_live(core, tmp_path, **{"max_output_tokens": 4096, **(paid_options or {})})
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
     if policy is not None:
         core.settings.segmented_reply = policy

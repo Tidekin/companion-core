@@ -47,7 +47,7 @@ async def window(core, tmp_path, *, media=False, content=False, history=False, v
                              for name, candidate in (video_candidates or {}).items()},
             "video_input": video_config or video_policy()})
         core.settings.content = core.settings.content.model_copy(update={
-            "image_daily_micro_usd": 10000})
+            })
     if bili:
         from companion.bili_video_config import BiliVideoConfig
         from companion.config import ObservationAdapterConfig
@@ -63,7 +63,7 @@ async def window(core, tmp_path, *, media=False, content=False, history=False, v
         core.settings.exploration_daily_deep_reads = 20
         core.settings.exploration_max_response_bytes = 1_000_000
         core.settings.content = core.settings.content.model_copy(update={
-            "image_daily_micro_usd": 1000000})
+            })
         core.settings.paid_model = core.settings.paid_model.model_copy(update={
             "per_request_calls": 6,
             "image_input": core.settings.paid_model.image_input.model_copy(update={

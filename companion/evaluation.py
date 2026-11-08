@@ -30,13 +30,11 @@ from companion.store import after, encode
 CAPABILITY = "model.evaluate"
 DEVICE = "core.evaluation"
 CALLS = 6
-COST = 50000
-ATTEMPT_MICRO_USD = 5000
 SHA = r"^[a-f0-9]{64}$"
 # A pilot replays owner turns; a synthetic plan carries only prepared SYNTHETIC cases.
 LIMITS = {
-    "owner_pilot": {"calls": CALLS, "cost": COST, "cases": 1, "bytes": 120000, "input": 2400},
-    "synthetic": {"calls": 216, "cost": 1000000, "cases": 36, "bytes": 1500000, "input": 8000},
+    "owner_pilot": {"calls": CALLS, "cases": 1, "bytes": 120000, "input": 2400},
+    "synthetic": {"calls": 216, "cases": 36, "bytes": 1500000, "input": 8000},
 }
 MAX_HTTP_BODY_BYTES = max(value["bytes"] for value in LIMITS.values()) + 1024
 # Requests per worker claim; later batches queue behind ordinary chat.
@@ -243,7 +241,7 @@ def preview(store, settings, clock, manifest):
     _authority(store, settings, clock)
     digest = paid_budget.sha(data)
     return {"manifest_sha256": digest, "request_count": len(rows),
-            "max_cost_micro_usd": _limits(data)["cost"], "consent_scope": {
+            "consent_scope": {
                 "capabilities": [CAPABILITY], "device_id": DEVICE, "session_id": digest}}
 
 

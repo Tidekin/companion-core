@@ -43,7 +43,6 @@ class NativeCase:
         core.settings.expression_selection_probability = 1.0
         core.settings.meme_discovery_enabled = True
         core.settings.meme_semantics_enabled = semantic
-        core.settings.meme_caption_daily_micro_usd = 50000
         self.key = Ed25519PrivateKey.generate()
         policy = OwnerGrantPolicy(owner_qq_id=core.settings.owner_qq_id,
             purposes=["chat", "expression", "meme"], authorization_sha256="d" * 64,

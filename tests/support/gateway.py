@@ -50,8 +50,8 @@ def gateway_harness(core, tmp_path, monkeypatch):
         "modes": [{"mode": "passthrough"}],
         "model_aliases": ["xiaofeiyuv1", "xiaofeiyuv2", "xiaofeiyuv3"],
         "budget": {**reference, "max_input_tokens": 4000, "max_output_tokens": 128,
-                   "max_request_micro_usd": 20000, "daily_calls": 5,
-                   "daily_micro_usd": 100000, "concurrency": 1},
+                    "daily_calls": 5,
+                    "concurrency": 1},
     })
     key = gateway.put_client(core.store, core.settings, grant, core.clock())
     return Harness(core, path, grant, key)

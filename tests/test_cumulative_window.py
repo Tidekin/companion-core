@@ -33,8 +33,7 @@ async def native_quota(core, tmp_path, **changes):
         await ws.send(frame(number, text="这次讨论读书安排。"))
         await ws.wait_closed()
 
-    approved_live(core, tmp_path, max_output_tokens=4096, per_attempt_micro_usd=100000,
-                  per_request_micro_usd=200000)
+    approved_live(core, tmp_path, max_output_tokens=4096, )
     scope = policy(core, **changes)
     async with host(core, tmp_path, source, paid_options={"cumulative": scope}) as values:
         yield values

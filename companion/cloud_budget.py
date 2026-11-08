@@ -1,4 +1,4 @@
-"""One atomic CNY ceiling over native USD charges, with frozen conversion snapshots.
+"""Native charges and frozen currency conversion snapshots.
 
 Amounts are configured planning estimates, not provider-guaranteed upper bounds.
 Native model_usage/tool_tasks remain the accounting authority. These small attached
@@ -22,9 +22,6 @@ from companion.store import encode, utcnow
 
 
 class CloudBudgetConfig(StrictModel):
-    daily_micro_cny: int = Field(default=20_000_000, strict=True, ge=0, le=10**12)
-    video_per_item_micro_cny: int = Field(default=1_000_000, strict=True, ge=0, le=10**12)
-    asr_per_item_micro_cny: int = Field(default=500_000, strict=True, ge=0, le=10**12)
     usd_to_cny_micro: int = Field(default=8_000_000, strict=True, ge=1, le=100_000_000)
     fx_source: str = Field(default="operator_planning_estimate", min_length=1, max_length=256)
     fx_validity_seconds: int = Field(default=30 * 86400, strict=True, ge=60, le=366 * 86400)
@@ -202,7 +199,7 @@ def _native(store, kind, reference_id):
         return None
     state = (
         "UNKNOWN"
-        if row["state"] == "UNKNOWN"
+        if row["state"] == "UNKNOWN" or row["last_error_code"] == "MODEL_COST_UNKNOWN"
         else "RESERVED"
         if row["state"] in {"LEASED", "RUNNING"}
         else "SETTLED"
@@ -218,7 +215,9 @@ def _native(store, kind, reference_id):
                     "(action='tool.finished' AND (CASE WHEN "
                     'safe_detail_json IS JSON THEN '
                     "(safe_detail_json::json#>>'{status}') END) IN "
-                    "('SUCCEEDED','FAILED'))) LIMIT 1"
+                    "('SUCCEEDED','FAILED') AND COALESCE((CASE WHEN "
+                    "safe_detail_json IS JSON THEN "
+                    "(safe_detail_json::json#>>'{unknown_model_calls}') END),'0')='0')) LIMIT 1"
                 )
             ),
             (reference_id,),
@@ -233,7 +232,7 @@ def _native(store, kind, reference_id):
         "scenario": "tool",
         "task_kind": "tool",
         "task_id": row["task_id"],
-        "pricing_known": True,
+        "pricing_known": state != "UNKNOWN",
     }
 
 
@@ -439,14 +438,16 @@ def _sync(store, settings, now):
             't.reserved_micro_usd>c.accounted_micro_usd) OR '
             '(c.legacy=1 AND c.dispatched_at IS NULL AND '
             "t.dispatched_at IS NOT NULL) OR (c.state<>'UNKNOWN' "
-            "AND (CASE WHEN t.state='UNKNOWN' OR "
+            "AND (CASE WHEN t.state='UNKNOWN' OR t.last_error_code='MODEL_COST_UNKNOWN' OR "
             "(t.state='CANCELLED' AND NOT EXISTS (SELECT 1 FROM "
             'audit_log a WHERE a.entity_id=t.task_id AND '
             "(a.action='tool.cancelled_before_dispatch' OR "
             "(a.action='tool.finished' AND (CASE WHEN "
             'a.safe_detail_json IS JSON THEN '
             "(a.safe_detail_json::json#>>'{status}') END) IN "
-            "('SUCCEEDED','FAILED'))))) THEN 'UNKNOWN' WHEN t.state "
+            "('SUCCEEDED','FAILED') AND COALESCE((CASE WHEN a.safe_detail_json IS JSON THEN "
+            "(a.safe_detail_json::json#>>'{unknown_model_calls}') END),'0')='0')))) "
+            "THEN 'UNKNOWN' WHEN t.state "
             "IN ('LEASED','RUNNING') THEN 'RESERVED' ELSE 'SETTLED' "
             'END)<>c.state)'
         ),
@@ -590,7 +591,8 @@ def configure(
         if changes is not None:
             try:
                 config = CloudBudgetConfig.model_validate(
-                    {**json.loads(current["config_json"]), **changes}
+                    {**{key: value for key, value in json.loads(current["config_json"]).items()
+                        if key in CloudBudgetConfig.model_fields}, **changes}
                 )
             except ValidationError as error:
                 raise CoreError("CLOUD_BUDGET_CONFIG_INVALID", 400) from error
@@ -628,18 +630,12 @@ def configure(
         return _view(changed)
 
 
-def _task_cap(config, kind):
-    return config.get(
-        {"video": "video_per_item_micro_cny", "asr": "asr_per_item_micro_cny"}.get(kind, "")
-    )
-
-
 def _unpriced_unknown(store):
     return store.one(
         (
             'SELECT COUNT(*) n FROM cloud_cost_snapshots WHERE '
             "state='UNKNOWN' AND amount_micro_cny=0 AND "
-            "reference_type='model' AND COALESCE((CASE WHEN "
+            "COALESCE((CASE WHEN "
             'snapshot_json IS JSON THEN CASE '
             "(snapshot_json::json#>>'{pricing,pricing_known}') WHEN "
             "'true' THEN 1 WHEN 'false' THEN 0 WHEN '1' THEN 1 WHEN "
@@ -763,11 +759,6 @@ def model_pricing(store, request_id, fallback):
 
 
 
-def capacity_blocks(store, settings, now):
-    """Cost estimates and unknown charges are warnings, never capability gates."""
-    return []
-
-
 def summary(store, settings, now=None):
     now = now or utcnow()
     with _transaction(store):
@@ -799,20 +790,6 @@ def summary(store, settings, now=None):
         carried = int(carried)
         unpriced = _unpriced_unknown(store)
         restore_required = _restore_required(store)
-        task_overruns = store.one(
-            (
-                'SELECT COUNT(*) n FROM (SELECT task_kind,task_id FROM '
-                "cloud_cost_snapshots WHERE task_kind IN ('video',"
-                "'asr') GROUP BY task_kind,task_id HAVING "
-                "SUM(amount_micro_cny)>MIN(CASE task_kind WHEN 'video' "
-                'THEN (CASE WHEN snapshot_json IS JSON THEN '
-                "((snapshot_json::json#>>'{config,"
-                "video_per_item_micro_cny}'))::numeric END) ELSE (CASE "
-                'WHEN snapshot_json IS JSON THEN '
-                "((snapshot_json::json#>>'{config,"
-                "asr_per_item_micro_cny}'))::numeric END) END))"
-            ),
-        )["n"]
         return {
             **view,
             "currency": "CNY",
@@ -821,10 +798,6 @@ def summary(store, settings, now=None):
             "reserved_micro_cny": amounts["RESERVED"],
             "settled_micro_cny": amounts["SETTLED"],
             "unknown_micro_cny": amounts["UNKNOWN"],
-            "remaining_micro_cny": (
-                0 if restore_required else max(0, view["config"]["daily_micro_cny"] - used)
-            ),
-            "over_limit": used > view["config"]["daily_micro_cny"],
             "carried_micro_cny": carried,
             "unpriced_unknown_count": unpriced,
             "restore_reconciliation_required": restore_required,
@@ -833,8 +806,6 @@ def summary(store, settings, now=None):
                 ["CLOUD_BUDGET_RESTORE_RECONCILIATION_REQUIRED"] if restore_required else []
             ),
             "restored_history_may_be_incomplete": restore_required,
-            "task_over_limit_count": task_overruns,
-            "admission_blocked": False,
             "fx_expired": _time(now) >= _time(current["fx_valid_until"]),
             "charge_count": sum(row["n"] for row in rows),
         }

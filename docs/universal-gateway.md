@@ -41,7 +41,7 @@ GatewayContract 是纯结构的 Schema 目录；route_intent() 仍不产生执�
 | `world_id` | RP 中稳定的世界身份，来自明确的世界白名单；世界改名不产生新世界 |
 | `memory_scope` | 当前模式授权中的范围及独立 read/write 位；请求正文不能声明该权限 |
 | `permissions` | 工具、主动消息、外部操作；本版三项均固定 false，后续 G4 单独扩展 |
-| `budget` | 同一 client 的调用、金额、输入/输出和并发上限，并引用原付费合同与 Budget Journal |
+| `budget` | 同一 client 的调用、输入/输出和并发上限，并引用原付费合同与 Budget Journal |
 
 Key 只用于受控 Gateway 入口，不复用 owner-control、Bridge、Reader、执行器或模型供应商凭据。
 G1a 由已认证的凭据查询提供 ClientGrant；客户端正文或普通 `X-Client-Id` 不能提供该对象。
@@ -109,7 +109,7 @@ G2/G3 的正文、摘要、向量、观察、反思和日记派生必须进入�
 
 ## 费用、幂等与结果责任
 
-客户端预算是原付费审批、全局上限和累计限额之上的附加限制，不是新的付款授权。
+客户端资源限制叠加在原授权的调用次数、Token 和并发限制上，不授予新的付款或来源权限。
 预算字段引用原 budget_journal_id 和 paid_contract_sha256，不携带提供者密钥。
 输入限制覆盖最终实际发送的全部上下文，Companion 内部注入内容也须计入该请求。
 价格未知、批准路由不符、额度不足或账本状态不明时不派发。
@@ -215,8 +215,7 @@ ClientGrant 示例中的三个占位值必须替换；expires_at 是带时区的
     "budget_journal_id": "<budget_journal_id>",
     "paid_contract_sha256": "<paid_contract_sha256>",
     "max_input_tokens": 4000, "max_output_tokens": 128,
-    "max_request_micro_usd": 20000, "daily_calls": 5,
-    "daily_micro_usd": 100000, "concurrency": 1
+    "daily_calls": 5, "concurrency": 1
   }
 }
 ```
@@ -241,8 +240,8 @@ UNKNOWN 只提供状态与费用责任，不重发；SETTLED 后、回执保存�
 不能续接旧授权下尚未执行的尝试。同幂等键改变授权/别名修订或请求内容时返回 409。
 模型列表的 created=0 表示未维护别名创建时间。
 
-客户端每日限额使用 Core 时区；并发计入 RESERVED/UNKNOWN 的原 model_usage，Key 轮换不重置。
-实际费用超过客户端请求/日金额上限时，沿用原生 UNKNOWN/阻塞机制保留完整责任。
+客户端每日调用次数使用 Core 时区；并发计入仍在执行的 RESERVED，Key 轮换不重置。
+费用 UNKNOWN 不占用执行并发槽，也不阻碍新独立请求；缺少原回复的请求不能自动重放。
 客户端 Key 修订、撤销和原请求归属也受原 Budget Journal 的投影检查，旧数据库不能恢复已撤销 Key。
 备份恢复会更换 Gateway 恢复代际、清除正文并禁用旧 Key；费用仍须通过原恢复/核对流程。
 
@@ -261,7 +260,7 @@ UNKNOWN 只提供状态与费用责任，不重发；SETTLED 后、回执保存�
   G1a 为外部文本补齐客户端消费者身份，不套用 `chat`、`evaluation` 或 QQ 来源证明。
 - Budget Journal 会检查数据库投影是否落后于账本。客户端与请求的关联也必须纳入这项核对，
   否则旧备份可能丢失客户端用量和幂等归属，而费用记录仍然存在。
-- 客户端认证、预算引用和回执读取使用现有 SQLite 写事务屏障，与原生 worker 的
+- 客户端认证、预算引用和回执读取使用原生 PostgreSQL 账本锁，与原生 worker 的
   journal 追加及 SQL 投影提交串行核对。journal 已落盘但 SQL 尚未提交时，读取等待
   当前事务完成；持久的账本损坏或投影缺失仍然拒绝访问。事务只覆盖同步核对，
   不跨 HTTP 上传或供应商等待；不增加费用余额、调用重放或另一套锁协议。

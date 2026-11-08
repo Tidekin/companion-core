@@ -31,9 +31,9 @@ Bridge `live_text.cumulative` 批准范围；三者使用相同规范 JSON。没
 | `predecessor_policy_sha256` | 首次登记为 null，续签必须指向当前完整 policy 摘要 |
 | `legacy_liabilities_sha256` | 首次登记时准确旧责任库存摘要；续签保留原已折叠责任，不重新导入 |
 | `legacy_adoption_evidence_sha256`、`legacy_window_inventory` | 旧责任归属批准与原 Window Journal 时间库存，见下文 |
-| `request` | 逻辑请求级金额、模型尝试、输入 Token、输出 Token 上限 |
-| `window`、`day`、`month`、`account` | 各范围同时限制上述四项，以及主人输入、发送尝试数 |
-| `concurrency` | 模型 RESERVED/UNKNOWN 共同占用的并发上限；原更严并发限制仍有效 |
+| `request` | 逻辑请求级模型尝试、输入 Token、输出 Token 上限 |
+| `window`、`day`、`month`、`account` | 各范围同时限制上述三项，以及主人输入、发送尝试数 |
+| `concurrency` | 仍在执行的 RESERVED 占用的并发上限；原更严并发限制仍有效 |
 
 单次模型原上限、逻辑请求、窗口、自然日、自然月、账户、并发和输入输出同时检查，最严者生效。
 Vision、memory review 和 chat 在各自原批准允许时共用这些计数。不存在累计范围自动开启功能的路径。
@@ -86,8 +86,8 @@ Core 的影子计数不授权 Bridge 发信，也不替代任何原签名、单�
 只读状态显式禁止初始化账本，缺文件/身份时仅报告缺失，不生成新 header。
 跨账本中断不退还次数或估算上界。
 
-UNKNOWN 保留金额、输入/输出 Token 和并发责任，不因廉价迟到 usage、Key 轮换、新窗口或新周期退款。
-确认的较大费用仍可在暂停后记录。超过累计 Token/金额上限的实际 usage 导致 UNKNOWN 和停止。
+UNKNOWN 保留原金额和已知输入/输出 Token，不因迟到 usage、Key 轮换、新窗口或新周期退款。
+确认的较大费用仍可在暂停后记录。实际 Token 超出批准范围仍触发原资源保护，费用金额不阻断运行。
 发送未知保留原尝试数并暂停；本包没有清除 UNKNOWN 或发送不确定的自动恢复接口。
 
 以下入口沿用原内部 HTTP v1 鉴权：

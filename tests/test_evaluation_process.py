@@ -79,7 +79,7 @@ def test_process_death_after_dispatch_preserves_unknown_and_no_repayment(core, t
 def test_two_workers_account_for_chat_and_experiment_above_old_money_cap(core, tmp_path):
     manifest = prepare(core, tmp_path, chat=True)
     core.settings.cloud_budget = core.settings.cloud_budget.model_copy(
-        update={"daily_micro_cny": 30000})
+        update={})
     normal = admitted_chat(core)
     submitted = evaluation.submit(core, authorize(core, manifest))
     hashes = asyncio.run(processes(core, tmp_path / "competing", drain=True))

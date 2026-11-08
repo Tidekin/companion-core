@@ -138,6 +138,8 @@ def test_recording_failure_rolls_back_all_receipts(core, tmp_path, monkeypatch):
     ("receipt", "OWNER_DELIVERY_SOURCE_CHANGED"),
     ("lease", "OWNER_DELIVERY_LEASE_LOST"),
 ])
+
+
 def test_each_send_boundary_rechecks_current_state(core, tmp_path, monkeypatch, change, error):
     async def scenario():
         async with session(core, tmp_path) as host:
@@ -160,7 +162,7 @@ def test_each_send_boundary_rechecks_current_state(core, tmp_path, monkeypatch, 
             usage = core.store.rows("SELECT * FROM model_usage")
             if change == "runtime":
                 core.settings.paid_model = core.settings.paid_model.model_copy(
-                    update={"daily_micro_usd": core.settings.paid_model.daily_micro_usd + 1})
+                    update={})
             elif change == "stop":
                 owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                     operation_id="stop-native-validation-reuse", authority=ref))

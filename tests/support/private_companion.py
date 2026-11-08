@@ -24,10 +24,6 @@ def companion_options(core):
         "paid_options": {
             "per_request_calls": 3,
             "window_calls": 100,
-            "unlimited_period_spend": True,
-            "daily_micro_usd": None,
-            "monthly_micro_usd": None,
-            "window_micro_usd": None,
             "expires_at": (core.clock.now + timedelta(days=2)).isoformat(),
             "rates_valid_until": (core.clock.now + timedelta(days=2)).isoformat(),
         },
@@ -40,8 +36,6 @@ def companion_options(core):
             "quiet_end": 0,
             "diary_min_source_events": 1,
             "reflection_min_sources": 1,
-            "reflection_daily_micro_usd": 50000,
-            "reflection_monthly_micro_usd": 100000,
             "context_soft_tokens": 16000,
         },
     }

@@ -39,7 +39,7 @@ def next_local_midnight(settings, now):
 
 
 def total_monthly(store, month, before=None):
-    """Shared cost ceiling includes unknown/reserved model and isolated tool charges."""
+    """Recorded model and isolated tool charges, including pending estimates."""
     total = store.one(
         "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage WHERE occurred_at>=%s"
         + (" AND occurred_at<%s" if before else ""),
@@ -185,7 +185,7 @@ def _check_period_limits(store, settings, approval, scenario, estimate, day, mon
     """Financial totals are informational; feature and scheduler limits remain explicit."""
     if not autonomous:
         return
-    if scenario not in paid_budget.daily_limits(settings):
+    if scenario not in paid_budget.scenarios():
         raise CoreError("UNKNOWN_BUDGET_SCENARIO", 400)
     feature = {
         "style_distill": settings.style_distill, "jargon": settings.jargon,
@@ -298,8 +298,7 @@ def reserve(
             },
         )
         if approval:
-            # All monetary admission checks precede any journal initialization;
-            # rejecting the CNY limit must not leave an orphaned fsynced header.
+            # Resource admission precedes the independent reservation record.
             if activate_cumulative:
                 cumulative.activate(store, settings, now)
             quota = cumulative.admit_model(store, settings, request_id, logical_request_id, now,
@@ -656,7 +655,7 @@ def _settle_paid(store, settings, admission, response, *, transport_failure=None
         # A reservation is an estimate. Small estimation errors settle normally;
         # Actual amounts are advisory; output and cumulative resource bounds remain hard.
         amount, state, blocked = actual, "SETTLED", False
-        limits = _actual_limit_violations(store, admission, snapshot, usage, actual)
+        limits = []
         if snapshot.get("cumulative") or store.one(
             "SELECT 1 FROM runtime_meta WHERE key = %s", (cumulative.PROJECTION,)
         ):
@@ -751,11 +750,6 @@ def _settle_paid(store, settings, admission, response, *, transport_failure=None
     )
     return diagnostic
 
-
-
-def _actual_limit_violations(store, admission, snapshot, usage, actual):
-    """Actual charges are recorded in full; financial ceilings no longer reject them."""
-    return []
 
 
 def usage_diagnostics(store):

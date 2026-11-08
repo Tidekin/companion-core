@@ -17,14 +17,14 @@ def snapshot(core):
 
 
 @asynccontextmanager
-async def liability_case(core, tmp_path, monkeypatch, *, cap=50000, daily_calls=30):
-    paid = {"max_output_tokens": 4096, "daily_calls": daily_calls,
+async def liability_case(core, tmp_path, monkeypatch, *, max_input_tokens=20000):
+    paid = {"max_output_tokens": 4096, "max_input_tokens": max_input_tokens,
         "meme_input": ImageInputPolicy(
         approval_sha256="e" * 64, estimated_tokens_per_image=100,
         max_bytes_per_image=4000000, max_pixels_per_image=16000000,
         max_images_per_request=5)}
     async with discovery_environment(core, tmp_path, monkeypatch, paid=paid,
-        meme_semantics_enabled=True, meme_caption_daily_micro_usd=cap) as values:
+        meme_semantics_enabled=True) as values:
         event, _, (client, config, grant, now) = values
         submit(core, event)
         attempt = claim(core)

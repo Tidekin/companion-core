@@ -33,7 +33,7 @@ GOAL_FIELDS = ("goal_id", "kind", "topic", "state", "priority", "next_due_at", "
                "reflection_suggestion_id", "steps")
 REFLECTION_FIELDS = ("suggestion_id", "run_id", "kind", "content", "state", "created_at",
                      "updated_at", "local_date")
-TOOL_LIMITS = ("max_cost_micro_usd", "max_model_calls", "max_input_bytes", "max_output_tokens",
+TOOL_LIMITS = ("max_model_calls", "max_input_bytes", "max_output_tokens",
                "timeout_seconds")
 TOOL_FIELDS = ("task_id", "executor_id", "capability", "risk_level", "state", "scope_sha256",
                "reserved_micro_usd", "billed_micro_usd", "dispatched_at", "last_error_code",
@@ -380,4 +380,3 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
     async def source_grant_action(grant_id: str, body: SourceGrantAction, request: Request,
                                   idempotency_key: str = Header(default="")):
         return await grant_action(request, idempotency_key, body.model_dump(), grant_id)
-

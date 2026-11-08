@@ -62,9 +62,8 @@ def enable(core, **options):
             url="https://vision.example/v1/chat/completions",
             key=SecretStr("test-vision-secret"),
             model="fixture",
-            max_request_micro_usd=10,
+            estimated_request_micro_usd=10,
         ),
-        image_daily_micro_usd=100,
     ).model_copy(update=options)
     core.exploration = ExplorationService(
         core.store, core.settings, core.observations, core.goals, core.social, core.clock,

@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "account_ref": null,
   "policy_id": null,
   "approval_sha256": null,
@@ -18,13 +18,11 @@
   "legacy_adoption_evidence_sha256": null,
   "legacy_window_inventory": null,
   "request": {
-    "micro_usd": 0,
     "model_attempts": 0,
     "input_tokens": 0,
     "output_tokens": 0
   },
   "window": {
-    "micro_usd": 0,
     "model_attempts": 0,
     "input_tokens": 0,
     "output_tokens": 0,
@@ -32,7 +30,6 @@
     "send_attempts": 0
   },
   "day": {
-    "micro_usd": 0,
     "model_attempts": 0,
     "input_tokens": 0,
     "output_tokens": 0,
@@ -40,7 +37,6 @@
     "send_attempts": 0
   },
   "month": {
-    "micro_usd": 0,
     "model_attempts": 0,
     "input_tokens": 0,
     "output_tokens": 0,
@@ -48,7 +44,6 @@
     "send_attempts": 0
   },
   "account": {
-    "micro_usd": 0,
     "model_attempts": 0,
     "input_tokens": 0,
     "output_tokens": 0,

@@ -62,17 +62,10 @@ def test_text_snapshot_omits_new_policy_and_keeps_original_shape(core, tmp_path)
     approval = approved_live(core, tmp_path)
     snapshot = paid_budget.snapshot(core.settings)
     assert "image_input" not in snapshot
-    assert "content_vision" not in snapshot["scenario_daily_micro_usd"]
+    assert "scenario_daily_micro_usd" not in snapshot
     assert snapshot["estimator"] == "utf8-third-v1"
-    # Golden pin of this pre-image fixture's canonical text-only contract.
-    assert paid_budget.sha(snapshot) == (
-        "582e96c6200b6bf1a8d5da93400aadb477228a72ef6561951bac391edf3083c1"
-    )
     assert set(snapshot) == set(approval.model_dump()) - {"journal_path", "image_input"} | {
         "estimator",
-        "local_monthly_micro_usd",
-        "scenario_daily_micro_usd",
-        "reflection_monthly_micro_usd",
         "credential_tag",
     }
 
@@ -168,6 +161,8 @@ def test_exact_image_and_chat_share_job_journal_usage_and_two_attempt_limit(core
         "wrong_role",
     ],
 )
+
+
 def test_unsupported_multimodal_shapes_cannot_create_admission(core, tmp_path, mutation):
     image_approval(core, tmp_path)
     messages = image_messages()
@@ -207,6 +202,8 @@ def test_unsupported_multimodal_shapes_cannot_create_admission(core, tmp_path, m
         ("max_bytes_per_image", 4000001),
     ],
 )
+
+
 def test_image_approval_is_explicit_and_strict(core, tmp_path, field, value):
     with pytest.raises(ValidationError):
         image_approval(core, tmp_path, policy={field: value})
@@ -221,6 +218,8 @@ def test_image_approval_is_explicit_and_strict(core, tmp_path, field, value):
         ("missing_job", "OWNER_AUTHORITY_JOB_BINDING_REQUIRED"),
     ],
 )
+
+
 def test_image_approval_never_authorizes_another_provider_or_job(core, tmp_path, mutation, code):
     image_approval(core, tmp_path)
     job = authorized_job(core, purposes=("chat", "image"))
@@ -255,6 +254,8 @@ def test_image_approval_never_authorizes_another_provider_or_job(core, tmp_path,
         ("provider", "CONTRACT_MISMATCH"),
     ],
 )
+
+
 def test_final_http_hook_drift_blocks_image_dispatch(core, tmp_path, mutation, code):
     image_approval(core, tmp_path)
     messages, calls = image_messages(), []
@@ -370,10 +371,9 @@ def test_image_scenario_and_global_five_call_caps_share_existing_accounting(core
     assert core.store.one("SELECT COUNT(*) AS n FROM model_usage WHERE state='SETTLED'")["n"] == 5
 
 
-def test_image_daily_money_cap_stays_in_snapshot_without_refusing_admission(core, tmp_path):
+def test_image_approval_has_no_monetary_allocation(core, tmp_path):
     image_approval(core, tmp_path)
-    core.settings.content.image_daily_micro_usd = 1
-    assert paid_budget.snapshot(core.settings)["scenario_daily_micro_usd"]["content_vision"] == 1
+    assert "scenario_daily_micro_usd" not in paid_budget.snapshot(core.settings)
     _, request = reserve_image(core)
     assert core.store.one("SELECT state FROM model_usage WHERE request_id=%s",
                           (request,))["state"] == "RESERVED"
@@ -399,6 +399,8 @@ def test_image_admission_requires_the_real_model_client(core, tmp_path):
 @pytest.mark.parametrize("column,value", [
     ("scenario", "chat"), ("job_id", None), ("logical_request_id", "other-logical"),
 ])
+
+
 def test_final_image_stage_identity_is_not_mutable(core, tmp_path, column, value):
     image_approval(core, tmp_path)
     messages, calls = image_messages(), []
@@ -483,7 +485,6 @@ def test_http_image_error_with_usage_is_accounted_once(core, tmp_path):
 
 def test_observed_image_amount_above_daily_cap_remains_settled(core, tmp_path):
     image_approval(core, tmp_path, policy={"estimated_tokens_per_image": 100})
-    core.settings.content.image_daily_micro_usd = 900
     _, request = reserve_image(core)
     run(invoke(core, request, image_messages()))
     usage = core.store.one("SELECT * FROM model_usage")

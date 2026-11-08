@@ -24,6 +24,8 @@ from tests.support.turn_taking import enable, history_messages
 
 @pytest.mark.parametrize("change", ["none", "erase_during", "erase_before_delivery",
                                   "without_history"])
+
+
 def test_followup_uses_ten_turns_and_eligible_episodes_under_native_custody(core, tmp_path, change):
     enable(core)
     core.settings.max_recent_messages = 20
@@ -32,8 +34,7 @@ def test_followup_uses_ten_turns_and_eligible_episodes_under_native_custody(core
     first_at = core.clock()
     marker = "那次望远镜项目里讨论过的光学问题"
     approved_live(core, tmp_path,
-                  max_output_tokens=4096, per_attempt_micro_usd=100000,
-                  per_request_micro_usd=200000)
+                  max_output_tokens=4096, )
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
     key = Ed25519PrivateKey.generate()
     config = BridgeConfig(owner_qq_id=core.settings.owner_qq_id,

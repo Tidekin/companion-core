@@ -14,8 +14,8 @@ KEY_A, KEY_B = "synthetic-image-key-aaaaaaaa", "synthetic-image-key-bbbbbbbb"
 
 
 def provider(url, key=None, **endpoint):
-    value = {"enabled": True, "daily_micro_usd": 200000,
-             "endpoint": {"url": url, "model": "gpt-image-1", "max_request_micro_usd": 40000,
+    value = {"enabled": True,
+             "endpoint": {"url": url, "model": "gpt-image-1",
                           **({"key": key} if key is not None else {}), **endpoint}}
     return {"image_generation": value}
 

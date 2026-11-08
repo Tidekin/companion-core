@@ -91,7 +91,6 @@ def check_signed_caption_and_delivery(
         meme_discovery_enabled=True,
         meme_discovery_daily_download_bytes=32 * 1024 * 1024,
         meme_discovery_daily_storage_bytes=8 * 1024 * 1024,
-        meme_caption_daily_micro_usd=50000,
         expression_selection_probability=0.0 if explicit else 1.0,
     )
     options["paid_options"].update(

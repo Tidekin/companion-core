@@ -18,7 +18,7 @@ from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
 from tests.postgres_fixture import logical_state
 from tests.sdk_reader_fixture import Provider, answer, worker_for
-from tests.support.cloud_budget import MESSAGES, change, charge, native, options
+from tests.support.cloud_budget import MESSAGES, change, charge, currency_blocks, native, options
 from tests.support.cumulative_budget import policy as cumulative_policy
 from tests.support.executive import FakeExecutor, configured, proposal
 from tests.support.media import chunk, process, service, start
@@ -29,34 +29,37 @@ from tests.support.video_accounting import correct, failed_video
 
 __all__ = ["failed_video", "historical_video_core"]
 
+
 def test_defaults_and_versioned_patch_are_idempotent_without_resetting_usage(core):
     original = cloud_budget.policy(core.store, core.settings, core.clock())
     assert original["config"] == CloudBudgetConfig().model_dump()
     assert original["config"]["usd_to_cny_micro"] == 8_000_000
     assert original["fx_valid_until"] == after(core.clock(), 30 * 86400)
     charge(core, "paid-one", 100)
-    request = {"expected_version": 1, "changes": {"daily_micro_cny": 1000}}
+    request = {"expected_version": 1, "changes": {"usd_to_cny_micro": 9_000_000}}
     first = cloud_budget.configure(core.store, core.settings, request,
                                    idempotency_key="set-budget-1", now=core.clock())
     repeated = cloud_budget.configure(core.store, core.settings, request,
                                       idempotency_key="set-budget-1", now=core.clock())
     assert first == repeated and first["version"] == 2
-    assert first["config"]["video_per_item_micro_cny"] == 1_000_000
+    assert first["config"]["usd_to_cny_micro"] == 9_000_000
     assert cloud_budget.summary(core.store, core.settings, core.clock())["used_micro_cny"] == 800
     with pytest.raises(CoreError, match="VERSION_CONFLICT"):
         cloud_budget.configure(core.store, core.settings, request,
                                idempotency_key="set-budget-2", now=core.clock())
     with pytest.raises(CoreError, match="IDEMPOTENCY_CONFLICT"):
         cloud_budget.configure(core.store, core.settings,
-                               {"expected_version": 1, "changes": {"daily_micro_cny": 999}},
+                               {"expected_version": 1, "changes": {"usd_to_cny_micro": 7_000_000}},
                                idempotency_key="set-budget-1", now=core.clock())
     assert len(core.store.rows("SELECT * FROM cloud_budget_policies")) == 2
 
 
-@pytest.mark.parametrize("patch", [{"usd_to_cny_micro": 0}, {"daily_micro_cny": True},
+@pytest.mark.parametrize("patch", [{"usd_to_cny_micro": 0},
                                     {"fx_source": ""}, {"fx_source": "  "},
                                     {"fx_validity_seconds": 0},
                                     {"unlimited": True}])
+
+
 def test_invalid_cloud_configuration_never_changes_policy(core, patch):
     original = cloud_budget.policy(core.store, core.settings, core.clock())
     with pytest.raises(CoreError, match="CLOUD_BUDGET_CONFIG_INVALID"):
@@ -65,7 +68,7 @@ def test_invalid_cloud_configuration_never_changes_policy(core, patch):
 
 
 def test_two_independent_connections_record_charges_beyond_advisory_daily_amount(core):
-    options(core, daily_micro_cny=1_000_000)
+    options(core)
     barrier = Barrier(2)
 
     def attempt(number):
@@ -86,33 +89,38 @@ def test_two_independent_connections_record_charges_beyond_advisory_daily_amount
     assert len(core.store.rows("SELECT * FROM model_usage")) == 2
     assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 2
     view = cloud_budget.summary(core.store, core.settings, core.clock())
-    assert view["used_micro_cny"] == 1_120_000 and view["over_limit"]
+    assert view["used_micro_cny"] == 1_120_000
+    assert "over_limit" not in view
 
 
-@pytest.mark.parametrize("kind,limit", [("video", 500_000), ("asr", 300_000)])
-def test_task_and_daily_caps_commit_together_and_cover_all_rounds(core, kind, limit):
-    options(core, daily_micro_cny=1_000_000, **{kind + "_per_item_micro_cny": limit})
-    first = limit // 16
+@pytest.mark.parametrize("kind", ["video", "asr"])
+def test_task_identity_and_original_fx_cover_all_rounds(core, kind):
+    options(core)
+    first = 31_250
     charge(core, "round-one", first, task_kind=kind, task_id="trusted-item-one")
     charge(core, "round-two", first + 1, task_kind=kind, task_id="trusted-item-one")
     assert {row["request_id"] for row in core.store.rows("SELECT request_id FROM model_usage")} == {
         "round-one", "round-two",
     }
     assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 2
-    # A larger future limit does not enlarge the original item's captured cap.
-    change(core, **{kind + "_per_item_micro_cny": limit * 10})
+    change(core, usd_to_cny_micro=9_000_000)
     charge(core, "round-three", first + 1, task_kind=kind, task_id="trusted-item-one")
 
 
+    rows = core.store.rows("SELECT * FROM cloud_cost_snapshots ORDER BY reference_id")
+    assert len(rows) == 3 and {row["task_id"] for row in rows} == {"trusted-item-one"}
+    assert sorted(row["amount_micro_cny"] for row in rows) == [250_000, 250_008, 281_259]
+
+
 def test_fractional_fx_is_rounded_up_for_each_atomic_reservation(core):
-    options(core, daily_micro_cny=3, usd_to_cny_micro=1_000_001)
+    options(core,  usd_to_cny_micro=1_000_001)
     first = charge(core, "fraction-one", 1)
     assert first["reserved_micro_cny"] == 2
     charge(core, "fraction-two", 1)
 
 
 def test_legacy_models_and_dispatched_tools_are_included_before_fx_changes(core):
-    options(core, daily_micro_cny=1_000_000)
+    options(core)
     native(core.store, "old-model", 60_000, core.clock(), state="SETTLED")
     executive = configured(core)
     task = executive.submit(proposal())
@@ -163,7 +171,7 @@ def test_legacy_native_reservation_is_not_lost_when_billed_projection_lags(core,
 
 
 def test_unknown_liability_is_retained_while_new_explicit_charge_continues(core):
-    options(core, daily_micro_cny=2000)
+    options(core)
     charge(core, "uncertain", 80, task_kind="video", task_id="same-video")
     core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id='uncertain'")
     assert cloud_budget.summary(core.store, core.settings, core.clock())["unknown_micro_cny"] == 640
@@ -191,9 +199,8 @@ def test_native_settlement_uses_reserved_usd_rates_and_fx_snapshot(core):
 
 
 def test_cloud_currency_cap_is_advisory_for_original_paid_reservation(core, tmp_path):
-    approved_live(core, tmp_path, unlimited_period_spend=True, daily_micro_usd=None,
-                  monthly_micro_usd=None, window_micro_usd=None)
-    options(core, daily_micro_cny=1)
+    approved_live(core, tmp_path)
+    options(core)
     job_id = authorized_job(core)
     path = Path(core.settings.paid_model.journal_path)
     before = path.read_bytes()
@@ -201,12 +208,12 @@ def test_cloud_currency_cap_is_advisory_for_original_paid_reservation(core, tmp_
     assert core.store.one("SELECT request_id FROM model_usage")["request_id"] == request_id
     assert core.store.one("SELECT request_id FROM model_admissions")["request_id"] == request_id
     assert path.read_bytes() != before
-    assert cloud_budget.summary(core.store, core.settings, core.clock())["over_limit"]
+    assert cloud_budget.summary(core.store, core.settings, core.clock())["reserved_micro_cny"] > 0
 
 
 def test_advisory_cloud_cap_commits_original_cumulative_reservation_atomically(core, tmp_path):
     approved_live(core, tmp_path)
-    options(core, daily_micro_cny=1)
+    options(core)
     cumulative_policy(core)
     job_id = authorized_job(core)
     request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
@@ -220,7 +227,7 @@ def test_advisory_cloud_cap_commits_original_cumulative_reservation_atomically(c
 
 def test_midnight_settlement_stays_in_original_day_and_timezone_is_not_reset(core):
     core.clock.now = datetime.fromisoformat("2026-10-19T15:59:59+00:00")
-    options(core, daily_micro_cny=1000)
+    options(core)
     charge(core, "before-midnight", 80)
     with core.store.transaction():
         cloud_budget.mark_dispatched(core.store, "model", "before-midnight", core.clock())
@@ -242,7 +249,7 @@ def test_midnight_settlement_stays_in_original_day_and_timezone_is_not_reset(cor
 
 def test_reservation_from_yesterday_counts_today_until_late_dispatch_and_settlement(core):
     core.clock.now = datetime.fromisoformat("2026-10-19T15:59:59+00:00")
-    options(core, daily_micro_cny=1000)
+    options(core)
     charge(core, "pending", 80)
     core.clock.advance(2)
     charge(core, "midnight-bypass", 80)
@@ -267,11 +274,11 @@ def test_fx_expiry_is_visible_while_new_reservations_and_old_settlement_continue
     assert view["fx_expired"] and view["settled_micro_cny"] > 0
 
 
-def test_limit_edit_does_not_silently_renew_the_fx_validity_period(core):
+def test_recorded_fx_window_is_unchanged_until_explicit_fx_review(core):
     options(core, fx_validity_seconds=60)
     original = cloud_budget.policy(core.store, core.settings, core.clock())
     core.clock.advance(30)
-    updated = change(core, daily_micro_cny=10_000_000)
+    updated = cloud_budget.policy(core.store, core.settings, core.clock())
     assert updated["fx_valid_from"] == original["fx_valid_from"]
     assert updated["fx_valid_until"] == original["fx_valid_until"]
     core.clock.advance(31)
@@ -284,12 +291,13 @@ def test_unpriced_legacy_unknown_remains_visible_without_blocking_new_charge(cor
     native(core.store, "legacy-unpriced", 0, core.clock(), state="UNKNOWN")
     core.store.execute("UPDATE model_usage SET pricing_known=0")
     summary = cloud_budget.summary(core.store, core.settings, core.clock())
-    assert summary["unpriced_unknown_count"] == 1 and not summary["admission_blocked"]
+    assert summary["unpriced_unknown_count"] == 1
+    assert "admission_blocked" not in summary
     charge(core, "new-spend", 1)
 
 
 def test_cloud_asr_and_tool_paths_use_the_same_daily_pool(core):
-    options(core, daily_micro_cny=1000)
+    options(core)
     media = service(core)
     session = start(media)
     process(media, session, chunk())
@@ -297,7 +305,6 @@ def test_cloud_asr_and_tool_paths_use_the_same_daily_pool(core):
     process(media, session, chunk(key="second-chunk"))
     assert len(media.provider.calls) == 2
     executive = configured(core)
-    executive.settings.executive.endpoints["windows"].max_cost_micro_usd = 1000
     executive.submit(proposal())
     task = executive.claim()
     executive.begin(task)
@@ -305,12 +312,12 @@ def test_cloud_asr_and_tool_paths_use_the_same_daily_pool(core):
 
 
 def test_observed_cost_overrun_is_retained_and_reported_instead_of_rolled_back(core):
-    options(core, daily_micro_cny=1000, video_per_item_micro_cny=800)
+    options(core)
     charge(core, "estimate", 80, task_kind="video", task_id="video-one")
     core.store.execute("UPDATE model_usage SET billed_micro_usd=200,state='SETTLED'")
     summary = cloud_budget.summary(core.store, core.settings, core.clock())
-    assert summary["used_micro_cny"] == 1600 and summary["over_limit"]
-    assert summary["task_over_limit_count"] == 1
+    assert summary["used_micro_cny"] == summary["settled_micro_cny"] == 1600
+    assert "task_over_limit_count" not in summary
     assert core.store.one("SELECT billed_micro_usd FROM model_usage")["billed_micro_usd"] == 200
     charge(core, "next-estimate", 1)
 
@@ -341,14 +348,13 @@ class TestHistoricalCorrection:
 
 
 def test_http_and_independent_model_worker_continue_beyond_advisory_cloud_amount(core, tmp_path):
-    options(core, daily_micro_cny=100_000)
+    options(core)
     provider = Provider(answer("合成预算回复一"), answer("合成预算回复二"))
 
     async def scenario():
-        async with environment(core, tmp_path, purposes=("chat",), paid_options={
-            "unlimited_period_spend": True, "daily_micro_usd": None,
-            "monthly_micro_usd": None, "window_micro_usd": None,
-        }) as (entry, _), worker_for(core, provider) as worker:
+        async with environment(core, tmp_path, purposes=("chat",)) as (entry, _), worker_for(
+            core, provider,
+        ) as worker:
             first = await entry.admit(1, "第一条预算测试")
             assert await worker.run_once("independent-cloud-worker")
             first_usage = core.store.one("SELECT * FROM model_usage")
@@ -357,9 +363,9 @@ def test_http_and_independent_model_worker_continue_beyond_advisory_cloud_amount
             current = cloud_budget.summary(core.store, core.settings, core.clock())
             assert all(type(current[field]) is int for field in (
                 "used_micro_cny", "reserved_micro_cny", "settled_micro_cny",
-                "unknown_micro_cny", "remaining_micro_cny", "carried_micro_cny",
+                "unknown_micro_cny", "carried_micro_cny",
             ))
-            change(core, daily_micro_cny=current["used_micro_cny"])
+            change(core, usd_to_cny_micro=9_000_000)
             second = await entry.admit(2, "第二条超额仍运行并记录原费用")
             assert await worker.run_once("independent-cloud-worker")
             job_id = entry.accepted[second["event_id"]]["job_id"]
@@ -373,53 +379,53 @@ def test_http_and_independent_model_worker_continue_beyond_advisory_cloud_amount
 
 
 def test_capacity_read_is_pure_before_binding_and_reports_known_legacy_exhaustion(core):
-    options(core, daily_micro_cny=800)
+    options(core)
     native(core.store, "legacy-paid", 100, core.clock(), state="SETTLED")
     with core.store.read_snapshot():
         before = logical_state(core.store)
-        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
+        assert currency_blocks(core.store, core.settings, core.clock()) == []
         assert logical_state(core.store) == before
     assert not core.store.rows("SELECT * FROM cloud_budget_policies")
     assert not core.store.rows("SELECT * FROM cloud_cost_snapshots")
 
 
 def test_capacity_read_uses_frozen_fx_and_observed_usage_without_writing(core):
-    options(core, daily_micro_cny=800, fx_validity_seconds=60)
+    options(core,  fx_validity_seconds=60)
     charge(core, "one-hold", 100)
     with core.store.read_snapshot():
         before = logical_state(core.store)
-        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
+        assert currency_blocks(core.store, core.settings, core.clock()) == []
         assert logical_state(core.store) == before
     core.store.execute("UPDATE model_usage SET billed_micro_usd=50,state='SETTLED'")
     with core.store.read_snapshot():
         before = logical_state(core.store)
-        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
+        assert currency_blocks(core.store, core.settings, core.clock()) == []
         assert logical_state(core.store) == before
         # This diagnostic neither settles the snapshot nor renews an expiring rate.
         assert core.store.one("SELECT state FROM cloud_cost_snapshots")["state"] == "RESERVED"
         core.clock.advance(61)
-        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
+        assert currency_blocks(core.store, core.settings, core.clock()) == []
         assert logical_state(core.store) == before
 
 
 def test_erasing_a_dispatched_tool_keeps_unknown_cost_across_midnight(core):
-    options(core, daily_micro_cny=8000)
+    options(core)
     fake = FakeExecutor()
     executive = configured(core, fake)
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     task = executive.submit(proposal())
     fake.callback = lambda: erase_executive(core.store, ["evt_test_1"])
     assert run(executive.run_one())
     native_row = core.store.one('SELECT * FROM tool_tasks WHERE task_id=%s', (task["task_id"],))
-    assert native_row["state"] == "CANCELLED" and native_row["billed_micro_usd"] == 1000
+    assert native_row["state"] == "CANCELLED" and native_row["billed_micro_usd"] == 0
     assert len(fake.calls) == 1
     core.clock.advance(86400)
     with core.store.read_snapshot():
         before = logical_state(core.store)
-        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
+        assert currency_blocks(core.store, core.settings, core.clock()) == []
         assert logical_state(core.store) == before
     view = cloud_budget.summary(core.store, core.settings, core.clock())
-    assert view["unknown_micro_cny"] == view["carried_micro_cny"] == 8000
+    assert view["unknown_micro_cny"] == view["carried_micro_cny"] == 0
+    assert view["unpriced_unknown_count"] == 1
     charge(core, "post-erase-midnight", 1)
 
 
@@ -427,7 +433,6 @@ def test_erasing_a_dispatched_tool_keeps_unknown_cost_across_midnight(core):
 @pytest.mark.parametrize("status", ["SUCCEEDED", "FAILED"])
 def test_erasing_a_completed_tool_keeps_validated_fee_and_settlement(core, legacy, status):
     executive = configured(core)
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     task = executive.submit(proposal())
     leased = executive.claim()
     _, request = executive.begin(leased)
@@ -448,7 +453,6 @@ def test_erasing_a_completed_tool_keeps_validated_fee_and_settlement(core, legac
 
 def test_erasing_a_reserved_but_unattempted_tool_releases_only_the_unused_charge(core):
     executive = configured(core)
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     task = executive.submit(proposal())
     executive.begin(executive.claim())
     # A diagnostic sync between begin and dispatch must not invent an I/O attempt.
@@ -456,7 +460,7 @@ def test_erasing_a_reserved_but_unattempted_tool_releases_only_the_unused_charge
     assert core.store.one("SELECT dispatched_at FROM cloud_cost_snapshots")["dispatched_at"] is None
     erase_executive(core.store, ["evt_test_1"])
     native_row = core.store.one("SELECT * FROM tool_tasks")
-    assert native_row["state"] == "CANCELLED" and native_row["reserved_micro_usd"] == 1000
+    assert native_row["state"] == "CANCELLED" and native_row["reserved_micro_usd"] == 0
     assert native_row["billed_micro_usd"] == 0
     view = cloud_budget.summary(core.store, core.settings, core.clock())
     assert view["used_micro_cny"] == view["unknown_micro_cny"] == 0
@@ -466,11 +470,12 @@ def test_erasing_a_reserved_but_unattempted_tool_releases_only_the_unused_charge
 
 
 def test_legacy_tool_cancellation_without_a_completion_receipt_stays_unknown(core):
-    options(core, daily_micro_cny=8000)
+    options(core)
     executive = configured(core)
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     executive.submit(proposal())
     executive.begin(executive.claim())
+    # Reproduce an original pre-upgrade tool estimate, without changing current admission.
+    core.store.execute("UPDATE tool_tasks SET reserved_micro_usd=1000,billed_micro_usd=1000")
     core.store.execute("DELETE FROM cloud_cost_snapshots")
     erase_executive(core.store, ["evt_test_1"])
     core.clock.advance(86400)

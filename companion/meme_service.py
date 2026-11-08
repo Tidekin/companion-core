@@ -119,7 +119,7 @@ def policy_hash(settings):
         "caption_input": paid.meme_input.model_dump(mode="json")
         if paid and paid.meme_input else None,
         **{key: getattr(settings, key) for key in (
-            "meme_caption_daily_micro_usd", "meme_discovery_daily_queries",
+            "meme_discovery_daily_queries",
             "meme_discovery_daily_download_bytes", "meme_discovery_daily_storage_bytes",
             "expression_selection_probability", "expression_cooldown_minutes",
             "expression_meme_categories",

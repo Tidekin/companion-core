@@ -75,7 +75,6 @@ def test_native_unknown_stays_charged_and_is_not_retried_by_shared_runner(core):
     fake = FakeExecutor()
     fake.fail = True
     executive = configured(core, fake)
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     task = executive.submit(proposal())
     assert run(run_native_unit(executive.run_one)).progressed
     assert not run(run_native_unit(executive.run_one)).progressed

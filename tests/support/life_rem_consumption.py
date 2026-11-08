@@ -19,7 +19,7 @@ from tests.support.rem_native import response
 async def prepared(core, tmp_path, *, automatic=False, purposes=("rem", "memory"),
                    creation=True, enabled=True, capture_key=None):
     core.settings.rem = RemConfig(enabled=enabled, local_hour=0,
-                                  daily_micro_usd=50000, monthly_micro_usd=200000)
+                                  )
     core.settings.life_loop = LifeLoopConfig(mode="SHADOW", follow_up_delay_seconds=60)
     core.settings.wake_enabled = True
     core.settings.quiet_start = core.settings.quiet_end = 0

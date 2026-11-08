@@ -13,7 +13,7 @@ from tests.support.native_consumer_entry import environment
 
 
 @pytest.mark.parametrize("output_overrun", [False, True])
-def test_zero_currency_allows_io_but_keeps_actual_output_bound(core, tmp_path, output_overrun):
+def test_native_accounting_keeps_the_actual_output_bound(core, tmp_path, output_overrun):
     text = "合成响应的原始内容"
     body = {"choices": [{"message": {"role": "assistant", "content": text},
                          "finish_reason": "stop"}],
@@ -22,10 +22,8 @@ def test_zero_currency_allows_io_but_keeps_actual_output_bound(core, tmp_path, o
     provider = Provider(body)
 
     async def scenario():
-        async with environment(core, tmp_path, purposes=("chat",), paid_options={
-            "per_attempt_micro_usd": 0, "per_request_micro_usd": 0,
-            "daily_micro_usd": 0, "monthly_micro_usd": 0, "window_micro_usd": 0,
-        }) as (entry, _), worker_for(core, provider) as worker:
+        async with environment(core, tmp_path, purposes=("chat",)) as (entry, _), \
+            worker_for(core, provider) as worker:
             admitted = await entry.admit(1, "合成资源边界检查")
             job_id = entry.accepted[admitted["event_id"]]["job_id"]
             assert await worker.run_once("native-cost-resource-controls")

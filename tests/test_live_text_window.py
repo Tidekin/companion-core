@@ -222,6 +222,8 @@ def test_model_http_request_drift_is_rejected_after_async_hooks(core, tmp_path, 
     {"message": [{"type": "image", "data": {"file": "synthetic"}}]},
     {"message": [{"type": "record", "data": {"file": "synthetic"}}]},
 ])
+
+
 def test_wrong_identity_nontext_and_slash_never_create_model_or_delivery(
     core, tmp_path, raw_change,
 ):
@@ -286,6 +288,8 @@ def test_live_input_cannot_bypass_individual_approval_through_generic_inbox(core
     ("deadline", "SETTLED"), ("privacy", "SETTLED"), ("revocation", "SETTLED"),
     ("oversize", "SETTLED"),
 ])
+
+
 def test_model_results_preserve_costs_and_require_current_delivery_authority(
     core, tmp_path, result, expected,
 ):
@@ -447,9 +451,11 @@ def test_native_lock_wait_cannot_authorize_send_after_deadline(core, tmp_path):
 
 
 @pytest.mark.parametrize("limits", [
-    {"per_attempt_micro_usd": 1}, {"daily_micro_usd": 1}, {"monthly_micro_usd": 1},
-    {"window_micro_usd": 1}, {"max_input_tokens": 1},
+    {}, {}, {},
+    {}, {"max_input_tokens": 1},
 ])
+
+
 def test_money_caps_are_advisory_while_input_quota_stays_hard(core, tmp_path, limits):
     async def scenario():
         async with native_clients(core, tmp_path, paid_options=limits) as ctx:

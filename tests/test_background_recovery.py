@@ -34,6 +34,8 @@ def test_bilibili_discovery_reads_the_bounded_public_feed_once():
 @pytest.mark.parametrize("status,code", [(302, "UPSTREAM_HTTP_ERROR"),
                                         (403, "UPSTREAM_ACCESS_LIMIT"),
                                         (412, "UPSTREAM_ACCESS_LIMIT")])
+
+
 def test_discovery_access_failure_does_not_switch_targets(status, code):
     result, backend = run(read(response(status=status),
                                item={**ITEM, "operation": "discover", "url": ""}))
@@ -119,6 +121,8 @@ def test_waiting_reflection_never_reuses_changed_or_erased_sources(core, change)
 
 @pytest.mark.parametrize("code", ["MODEL_RETRYABLE", "SCENARIO_CALL_LIMIT",
                                  "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"])
+
+
 def test_unknown_reflection_is_not_replayed_as_an_admission_retry(core, code):
     from companion.contracts import CoreError
 
@@ -152,6 +156,8 @@ def test_stop_cancels_an_unadmitted_reflection_wait(core):
 @pytest.mark.parametrize("payload", [{"code": 0, "data": {}},
                                      {"code": 0, "data": {"list": ["invalid"]}},
                                      {"code": -101}])
+
+
 def test_discovery_invalid_feed_never_falls_back_to_a_page(payload):
     result, backend = run(read(response(payload),
                                item={**ITEM, "operation": "discover", "url": ""}))
@@ -204,8 +210,8 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
     async def scenario():
         options = dict(diary_enabled=True, consolidation_enabled=True, reflection_enabled=True,
             goals_enabled=True, exploration_enabled=True, reflection_max_daily_calls=1,
-            reflection_min_sources=1, reflection_daily_micro_usd=50000,
-            reflection_monthly_micro_usd=100000, extraction_min_events=40,
+            reflection_min_sources=1,
+             extraction_min_events=40,
             wake_max_daily_runs=0, content_enabled=True, observation_enabled=True,
             exploration_daily_requests=8, exploration_monthly_requests=30,
             exploration_daily_bytes=4_194_304,

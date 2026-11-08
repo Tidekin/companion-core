@@ -7,7 +7,6 @@ from companion.contracts import StrictModel
 
 class StyleDistillConfig(StrictModel):
     enabled: bool = False
-    daily_micro_usd: int = Field(default=20000, ge=0, le=1000000, strict=True)
     daily_pairs: int = Field(default=50, ge=1, le=500, strict=True)
     max_output_tokens: int = Field(default=300, ge=64, le=1024, strict=True)
     max_attempts: int = Field(default=2, ge=1, le=5, strict=True)

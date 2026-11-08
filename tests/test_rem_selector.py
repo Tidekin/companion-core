@@ -25,7 +25,7 @@ def prepare(core, tmp_path, *, cap=50000, purposes=("memory", "rem")):
     core.store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL")
     core.settings.memory_enabled = True
     core.settings.rem = RemConfig(enabled=True, local_hour=0, max_output_tokens=128,
-                                  daily_micro_usd=cap, monthly_micro_usd=100000)
+                                  )
     original = owner_authority.current(core.store, core.settings, core.clock).policy
     policy = OwnerGrantPolicy.model_validate({
         **original.model_dump(), "purposes": list(purposes),

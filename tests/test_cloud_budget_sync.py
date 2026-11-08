@@ -11,7 +11,6 @@ from tests.support.executive import configured, proposal
 
 def tool(core, status=None):
     executive = configured(core)
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     task = executive.submit(proposal())
     leased = executive.claim()
     _, request = executive.begin(leased)
@@ -52,6 +51,7 @@ def test_converged_cancelled_tools_do_not_sync_reference_or_write(core, monkeypa
 
 def test_cancelled_without_completion_proof_still_becomes_unknown(core):
     task_id = tool(core)
+    core.store.execute("UPDATE tool_tasks SET reserved_micro_usd=1000,billed_micro_usd=1000")
     # Recovery/native projection change without the ordinary erasure sync hook.
     core.store.execute("UPDATE tool_tasks SET state='CANCELLED' WHERE task_id=%s", (task_id,))
     assert snapshot(core)["state"] == "RESERVED"
@@ -94,6 +94,7 @@ def test_native_dispatch_day_change_uses_frozen_snapshot_then_converges(core):
     core.settings.timezone = "America/Los_Angeles"
     task_id = tool(core)
     # Exercise the original tool dispatch fallback with its original frozen policy.
+    core.store.execute("UPDATE tool_tasks SET reserved_micro_usd=1000,billed_micro_usd=1000")
     core.store.execute("DELETE FROM cloud_cost_snapshots WHERE reference_id='legacy-dispatch'")
     core.store.execute('UPDATE cloud_cost_snapshots SET legacy=1,dispatched_at=NULL,local_day=%s',
                        (original["local_day"],))
@@ -131,7 +132,7 @@ def test_cancelled_selection_matches_direct_native_reconciliation(
     assert snapshot(core) == expected
     if snapshot_state == "UNKNOWN":
         assert expected["state"] == "UNKNOWN"
-        assert expected["accounted_micro_usd"] == original["accounted_micro_usd"]
+        assert expected["accounted_micro_usd"] == max(original["accounted_micro_usd"], billed)
 
 
 

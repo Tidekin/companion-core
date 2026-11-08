@@ -294,7 +294,7 @@ async def generate(core, job, call_id, arguments, check):
     ):
         return _refused("IMAGE_GENERATION_LEASE_TOO_SHORT")
     image_id, usage_id = uid("gimg"), uid("image_cost")
-    price = cfg.endpoint.max_request_micro_usd
+    price = cfg.endpoint.estimated_request_micro_usd
     try:
         with store.transaction():
             check("expression")

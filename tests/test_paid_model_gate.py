@@ -128,16 +128,13 @@ def test_approved_call_requires_durable_admission_and_uses_shared_window(core, t
 @pytest.mark.parametrize(
     "changes,code",
     [
-        ({"per_attempt_micro_usd": 1}, "ATTEMPT"),
-        ({"daily_micro_usd": 1}, "DAILY"),
-        ({"monthly_micro_usd": 1}, "MONTHLY"),
-        ({"window_micro_usd": 1}, "WINDOW"),
-        ({"per_request_micro_usd": 1}, "REQUEST"),
         ({"max_output_tokens": 128}, "OUTPUT"),
         ({"live_approved": False}, "LIVE_OPT_IN_REQUIRED"),
     ],
 )
-def test_money_is_advisory_and_other_limits_refuse_before_io(core, tmp_path, changes, code):
+
+
+def test_resource_and_live_approval_limits_refuse_before_io(core, tmp_path, changes, code):
     from companion import budget
 
     approved_live(core, tmp_path, **changes)
@@ -145,27 +142,22 @@ def test_money_is_advisory_and_other_limits_refuse_before_io(core, tmp_path, cha
         return budget.reserve(core.store, core.settings, authorized_job(core), "chat",
                               [{"role": "user", "content": "hello"}], core.clock())
 
-    if any(name.endswith("micro_usd") for name in changes):
-        request = reserve()
-        assert core.store.one("SELECT request_id,state FROM model_usage") == {
-            "request_id": request, "state": "RESERVED"}
-    else:
-        with pytest.raises(CoreError, match=code):
-            reserve()
-        assert core.store.rows("SELECT * FROM model_usage") == []
+    with pytest.raises(CoreError, match=code):
+        reserve()
+    assert core.store.rows("SELECT * FROM model_usage") == []
     assert core.model.calls == []
 
 
 @pytest.mark.parametrize(
     "scenario", ["chat", "memory_review", "memory_extract", "diary", "reflection", "activity"]
 )
+
+
 def test_all_scenarios_share_daily_call_limit(core, tmp_path, scenario):
     from companion import budget, owner_authority
     from companion.model import ModelResponse
 
     core.settings.proactive_enabled = True
-    core.settings.reflection_daily_micro_usd = 50000
-    core.settings.reflection_monthly_micro_usd = 50000
     approved_live(core, tmp_path, daily_calls=1)
     job_id = authorized_job(core, purposes=("chat", "memory", "diary", "reflection", "proactive"))
     messages = [{"role": "user", "content": "hello"}]
@@ -317,6 +309,8 @@ def test_window_total_survives_month_boundary_and_daily_timezone_rollover(core, 
 @pytest.mark.parametrize(
     "bad_usage", [None, (999999, 1, 0), (30, 9999, 0), (30, 1, 40), (True, 2, 0)]
 )
+
+
 def test_missing_or_anomalous_usage_never_refunds_unknown(core, tmp_path, bad_usage):
     from companion import budget
     from companion.model import ModelResponse
@@ -503,6 +497,8 @@ def test_http_failures_retain_upper_reservations_without_automatic_retry(core, t
         ("payload", "PAYLOAD_CHANGED"),
     ],
 )
+
+
 def test_after_reserve_changes_fail_before_http(core, tmp_path, change, code):
     from datetime import timedelta
 
@@ -1009,13 +1005,15 @@ def test_open_ended_approval_keeps_hash_shape_and_caps(core, tmp_path):
     later = datetime.fromisoformat("2036-10-01T00:00:00+08:00")
     assert paid_budget.active(approval, later) and paid_budget.rates_valid(approval, later)
     assert not paid_budget.active(approval, approval.starts_at - timedelta(seconds=1))
-    assert approval.daily_micro_usd == 200000 and approval.window_calls == 20
+    assert approval.daily_calls == 10 and approval.window_calls == 20
 
 
 @pytest.mark.parametrize("changes", [
     {"rates_valid_until": None},
     {"expires_at": None, "rates_valid_until": "2026-09-01T00:00:00+08:00"},
 ])
+
+
 def test_finite_approval_needs_rate_validity_and_open_rates_follow_start(core, tmp_path, changes):
     with pytest.raises(ValueError):
         approved_live(core, tmp_path, **changes)

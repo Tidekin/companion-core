@@ -53,7 +53,7 @@ def capture(core, cfg, plan, *, second=0):
 @asynccontextmanager
 async def environment(core, tmp_path, model, *, daily_budget=20_000_000):
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=daily_budget)
+    core.settings.cloud_budget = CloudBudgetConfig()
     env = native_environment(core, tmp_path)
     core.settings.poke_policy = PokePolicy(enabled=True, allow_native=True, coalesce_seconds=0)
     refresh(env)

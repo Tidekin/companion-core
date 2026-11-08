@@ -33,7 +33,7 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
     core.settings = core.settings.model_copy(update={
         "meme_catalog_owner": "core", "meme_discovery_enabled": True,
         "meme_semantics_enabled": True, "meme_trusted_sources": [meme_policy.TrustedSource(**RULE)],
-        "meme_caption_daily_micro_usd": 50000, "expression_selection_probability": 1.0,
+         "expression_selection_probability": 1.0,
         "embedding_cache_dir": str(tmp_path / "empty-local-weights"),
         **({"meme_gallery_source": meme_policy.GallerySource(**SELECTION),
             "meme_trusted_sources": []} if gallery else {}),

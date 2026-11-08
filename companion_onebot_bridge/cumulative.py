@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from .spool import encode
 
 SHA = re.compile(r"[a-f0-9]{64}")
-DIMENSIONS = {"micro_usd", "model_attempts", "input_tokens", "output_tokens",
+DIMENSIONS = {"model_attempts", "input_tokens", "output_tokens",
               "owner_inputs", "send_attempts"}
 IDENTITY = ("account_ref", "provider", "currency", "timezone", "owner_identity_sha256")
 LEGACY_DOMAIN = b"companion-core/cumulative-window-inventory/v1\x00"
@@ -50,7 +50,7 @@ def validate(value, config, start, end):
     optional = {"predecessor_policy_sha256", "legacy_liabilities_sha256",
                 "legacy_adoption_evidence_sha256"}
     if (not isinstance(value, dict) or set(value) != fields or type(value["version"]) is not int
-        or value["version"] != 1 or value["currency"] != "USD"
+        or value["version"] != 2 or value["currency"] != "USD"
         or not isinstance(value["policy_id"], str)
         or not re.fullmatch(r"quota_[a-f0-9]{32}", value["policy_id"])
         or not isinstance(value["provider"], str) or not 1 <= len(value["provider"]) <= 64
