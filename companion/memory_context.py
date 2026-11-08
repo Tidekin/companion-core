@@ -52,6 +52,8 @@ class MemorySources:
         self._loaded, self._edges, self._evidence = {}, {}, {}
         self._references, self._current, self._blocked = {}, {}, {}
         self._reference_values = {}
+        self._facts, self._fact_blocked = {}, {}
+        self._source_end = None
         self.cutoff = (datetime.fromisoformat(after(
             now, -86400 * self.settings.raw_event_retention_days,
         )) if now else None)
@@ -60,15 +62,21 @@ class MemorySources:
         scope = self.store.frozen_scope
         if scope is None or scope != self._cache_scope:
             for cache in (self._loaded, self._edges, self._evidence,
-                          self._references, self._current, self._blocked, self._reference_values):
+                          self._references, self._current, self._blocked, self._reference_values,
+                          self._facts, self._fact_blocked):
                 cache.clear()
             self._cache_scope = scope
+            self._source_end = None
         return scope is not None
 
-    def prefetch(self, memory_ids):
+    def prefetch(self, memory_ids, *, max_bytes=None):
         """Batch proof roots and bodies only inside the current immutable DB snapshot."""
         if not self.bounded or not self._snapshot_cache() or not memory_ids:
             return
+        if max_bytes is not None:
+            self._source_end = min(self._source_end if self._source_end is not None
+                                   else float("inf"),
+                                   self._source_bytes + max_bytes)
         memory_ids = [key for key in memory_ids if key not in self._evidence]
         if not memory_ids:
             return
@@ -109,7 +117,9 @@ class MemorySources:
             key, size = header["event_id"], header["size"]
             if len(self._source_ids | {key}) > SOURCE_NODES or not self.work.take("source_nodes"):
                 self._blocked[key] = "source_nodes"
-            elif (self._source_bytes + size > LIMITS["text_bytes"]
+            elif (self._source_bytes + size > min(
+                    LIMITS["text_bytes"], self._source_end if self._source_end is not None
+                    else LIMITS["text_bytes"])
                   or not self.work.take("text_bytes", size)):
                 self._blocked[key] = "source_text_bytes"
             else:
@@ -121,15 +131,52 @@ class MemorySources:
         if admitted:
             rows = self._rows("SELECT s.event_id AS source_id,"
                 + ",".join("e." + field for field in EVENT_COLUMNS)
-                + ",c.scope,c.owner_actor_id,r.key AS erased FROM unnest(%s::text[]) s(event_id) "
+                + ",c.scope,c.owner_actor_id,r.key AS erased,ARRAY(SELECT d.source_event_id "
+                "FROM event_dependencies d WHERE d.event_id=s.event_id LIMIT "
+                + str(SOURCE_NODES + 1) + ") AS source_edges FROM unnest(%s::text[]) s(event_id) "
                 "LEFT JOIN events e USING(event_id) "
                 "LEFT JOIN conversations c USING(conversation_id) "
                 "LEFT JOIN runtime_meta r ON r.key='erased_event:'||s.event_id",
                 (admitted,), limit=len(admitted))
             self._loaded.update((row["source_id"], row) for row in rows)
+            self._edges.update((row["source_id"], [{"source_event_id": key}
+                for key in row["source_edges"]]) for row in rows)
         for key in keys:
             if key not in self._loaded and key not in self._blocked:
                 raise WorkLimit("source_nodes")
+
+    def prefetch_facts(self, expected):
+        """Re-read finite fact bodies once, retaining only this snapshot's values."""
+        if not self.bounded or not self._snapshot_cache():
+            return
+        admitted = []
+        for row in expected:
+            key = row["memory_id"]
+            if key in self._facts or key in self._fact_blocked:
+                continue
+            size = len(row["content"].encode())
+            if self.work.take("text_bytes", size):
+                admitted.append((key, size))
+            else:
+                self._fact_blocked[key] = "text_bytes"
+        if admitted:
+            rows = self._rows("SELECT " + ",".join("m." + key for key in MEMORY_COLUMNS)
+                + " FROM memories m JOIN unnest(%s::text[],%s::bigint[]) "
+                "AS expected(memory_id,text_bytes) USING(memory_id) "
+                "WHERE octet_length(m.content)=expected.text_bytes",
+                ([key for key, _ in admitted], [size for _, size in admitted]),
+                limit=len(admitted))
+            self._facts.update((key, None) for key, _ in admitted)
+            self._facts.update((row["memory_id"], row) for row in rows)
+
+    def fact(self, expected):
+        if self.bounded and self._snapshot_cache():
+            self.prefetch_facts([expected])
+            if reason := self._fact_blocked.get(expected["memory_id"]):
+                raise retrieval_work.WorkLimit(reason)
+            return self._facts.get(expected["memory_id"])
+        return self._one("SELECT " + ",".join(MEMORY_COLUMNS)
+                         + " FROM memories WHERE memory_id=%s", (expected["memory_id"],))
 
     def _rows(self, statement, parameters=(), *, limit):
         if self.bounded:
@@ -408,19 +455,11 @@ class MemoryContext:
         ):
             raise RuntimeError("MEMORY_SOURCE_SNAPSHOT_REQUIRED")
         sources = source_view or MemorySources(self.memory, now, bounded=True, work=work)
+        sources.prefetch_facts(rows)
         sources.prefetch([row["memory_id"] for row in rows])
         roots, memories = set(event_ids), []
         for expected in rows:
-            row = sources._one('SELECT memories.memory_id AS memory_id, memories.subject AS '
-                'subject, memories.kind AS kind, memories.content AS content, memories.status AS '
-                'status, memories.origin AS origin, memories.confidence AS confidence, '
-                'memories.importance AS importance, memories.privacy_scope AS privacy_scope, '
-                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
-                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
-                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
-                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
-                'memories AS memories WHERE memories.memory_id = %s',
-                                 (expected["memory_id"],))
+            row = sources.fact(expected)
             if (not row or row["privacy_scope"] != "private" or row["confidence"] <= 0
                 or row["status"] not in (
                     {"CONFIRMED", "HYPOTHESIS", "SUPERSEDED"} if historical
@@ -454,9 +493,9 @@ class MemoryContext:
         return {"rows": memories, "event_ids": sorted(event_ids), "historical": historical,
                 "source_event_ids": sorted(fingerprints), "sources": fingerprints}
 
-    def revalidate(self, proof, now, *, work=None):
+    def revalidate(self, proof, now, *, work=None, source_view=None):
         actual = self.pin(now, rows=proof["rows"], event_ids=proof["event_ids"],
-                          historical=proof["historical"], work=work)
+                          historical=proof["historical"], work=work, source_view=source_view)
         if actual != proof:
             raise CoreError("PRIVACY_CHANGED", 409)
 

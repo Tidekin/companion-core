@@ -35,11 +35,16 @@ def facts(core, count=96, chars=6000):
 def test_96_large_roots_are_read_once_for_preparation_and_pin(core, monkeypatch):
     rows = facts(core)
     bodies = []
+    facts_read, edges_read = [], []
     original = core.store.bounded_source_read
 
     def read(statement, parameters, **kwargs):
         if ",e.body_json," in str(statement):
             bodies.extend(parameters[0] if isinstance(parameters[0], list) else parameters[:1])
+        if "FROM memories m JOIN unnest" in str(statement):
+            facts_read.append(1)
+        if "FROM event_dependencies" in str(statement):
+            edges_read.append(1)
         return original(statement, parameters, **kwargs)
 
     monkeypatch.setattr(core.store, "bounded_source_read", read)
@@ -54,9 +59,10 @@ def test_96_large_roots_are_read_once_for_preparation_and_pin(core, monkeypatch)
         assert 570000 < work.counts["text_bytes"] < 700000
         assert work.counts["sql_milliseconds"] > 0
         assert len(bodies) == len(set(bodies)) == 96
+        assert len(facts_read) == len(edges_read) == 1
 
 
-@pytest.mark.parametrize("mutation", ["body", "redact", "edge", "owner"])
+@pytest.mark.parametrize("mutation", ["body", "redact", "edge", "owner", "fact", "evidence"])
 def test_source_cache_expires_at_snapshot_boundary(core, mutation):
     rows = facts(core, count=1, chars=20)
     with retrieval_work.scope() as work:
@@ -74,8 +80,13 @@ def test_source_cache_expires_at_snapshot_boundary(core, mutation):
         elif mutation == "edge":
             core.store.execute("INSERT INTO event_dependencies(event_id,source_event_id) "
                                "VALUES ('proof_1','evt_test_1')")
-        else:
+        elif mutation == "owner":
             core.store.execute("UPDATE conversations SET owner_actor_id='system'")
+        elif mutation == "fact":
+            core.store.execute("UPDATE memories SET content='changed' WHERE memory_id='fact_1'")
+        else:
+            core.store.execute("UPDATE memory_evidence SET event_id='evt_test_1' "
+                               "WHERE memory_id='fact_1'")
         with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
             core.memory_context.revalidate(proof, core.clock())
         with pytest.raises(RuntimeError, match="MEMORY_SOURCE_SNAPSHOT_REQUIRED"):
@@ -84,6 +95,15 @@ def test_source_cache_expires_at_snapshot_boundary(core, mutation):
 
 def test_async_search_keeps_large_verified_pool(core, monkeypatch):
     facts(core)
+    batches = {"facts": 0, "edges": 0}
+    original = core.store.bounded_source_read
+
+    def read(statement, parameters, **kwargs):
+        batches["facts"] += "FROM memories m JOIN unnest" in str(statement)
+        batches["edges"] += "FROM event_dependencies" in str(statement)
+        return original(statement, parameters, **kwargs)
+
+    monkeypatch.setattr(core.store, "bounded_source_read", read)
 
     async def nominate(*_args, **_kwargs):
         return []
@@ -98,8 +118,9 @@ def test_async_search_keeps_large_verified_pool(core, monkeypatch):
     with retrieval_work.scope() as work:
         rows = run(core.memory.search_async("test_token", now=core.clock()))
         assert len(rows) == 6
-        assert work.counts["text_bytes"] < retrieval_work.LIMITS["text_bytes"]
-        assert "source_text_bytes" not in work.limited
+        assert 650000 < work.counts["text_bytes"] < retrieval_work.LIMITS["text_bytes"]
+        assert "source_text_bytes" in work.limited  # Explicit space for post-await reads.
+        assert batches == {"facts": 3, "edges": 3}
 
 
 def test_preparation_retains_only_fully_proven_prefix_on_later_exhaustion(core, monkeypatch):
