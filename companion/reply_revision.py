@@ -17,16 +17,17 @@ OWNER_INPUT = (
 
 
 def source_active(store, event_id):
-    return bool(
-        store.one(
-            (
-                "SELECT 1 FROM events AS e WHERE e.event_id = %s AND "
-                "e.redacted = 0 AND NOT EXISTS(SELECT 1 FROM runtime_meta "
-                "WHERE key = 'erased_event:' || e.event_id)"
-            ),
-            (event_id,),
-        )
-    )
+    return event_id in active_sources(store, [event_id])
+
+
+def active_sources(store, event_ids):
+    keys = list(dict.fromkeys(event_ids))
+    if not keys:
+        return set()
+    return {row["event_id"] for row in store.rows(
+        "SELECT e.event_id FROM events AS e WHERE e.event_id=ANY(%s::text[]) AND "
+        "e.redacted=0 AND NOT EXISTS(SELECT 1 FROM runtime_meta "
+        "WHERE key='erased_event:'||e.event_id)", (keys,))}
 
 
 def owner_input(store, event_id):
@@ -234,7 +235,7 @@ def remember_sources(store, job, event_ids):
 
     def remember():
         check_job(store, job)
-        if any(not source_active(store, event_id) for event_id in sources):
+        if active_sources(store, sources) != sources:
             raise CoreError(SOURCE_RECALLED, 409)
         recorded = {
             row["event_id"]
@@ -245,14 +246,11 @@ def remember_sources(store, job, event_ids):
         }
         missing = sources - recorded
         if missing:
-            for event_id in sorted(missing):
-                store.execute(
-                    (
-                        "INSERT INTO job_sources (job_id,event_id) VALUES (%s,%s) ON "
-                        "CONFLICT DO NOTHING"
-                    ),
-                    (job["job_id"], event_id),
-                )
+            store.execute(
+                "INSERT INTO job_sources (job_id,event_id) SELECT %s,source.event_id "
+                "FROM unnest(%s::text[]) WITH ORDINALITY AS source(event_id,position) "
+                "ORDER BY source.position ON CONFLICT DO NOTHING",
+                (job["job_id"], sorted(missing)))
 
     # A restored checkpoint usually already owns every source. Revalidate it on
     # a WAL snapshot; only new provenance needs the authoritative writer scope.

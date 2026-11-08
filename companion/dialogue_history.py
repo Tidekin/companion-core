@@ -229,11 +229,12 @@ def recent_sent_sources(
     )
     if _nominate is not None:
         return rows  # Identity/size nominations only; callers must read and validate live sources.
+    active = reply_revision.active_sources(store, [row["event_id"] for row in rows])
     sources = []
     for row in rows:
         # This operational column is outside historical input and context fingerprints.
         row.pop("reply_revision", None)
-        if not reply_revision.source_active(store, row["event_id"]):
+        if row["event_id"] not in active:
             continue
         if row.pop("reply_group_id") is not None:
             try:
@@ -374,7 +375,8 @@ def pending_owner_sources(
     for row in rows:
         row.pop("reply_revision", None)
         row["reply_complete"] = False
-    return [row for row in reversed(rows) if reply_revision.source_active(store, row["event_id"])]
+    active = reply_revision.active_sources(store, [row["event_id"] for row in rows])
+    return [row for row in reversed(rows) if row["event_id"] in active]
 
 
 def recent_context_sources(
