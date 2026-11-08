@@ -110,9 +110,6 @@ def config(directory):
     cfg.paid_model = cfg.paid_model.model_copy(
         update={
             "window_id": "custom-memory-" + directory.name,
-            "window_micro_usd": cfg.paid_model.window_micro_usd,
-            "daily_micro_usd": cfg.paid_model.daily_micro_usd,
-            "monthly_micro_usd": cfg.paid_model.monthly_micro_usd,
             "window_calls": 700,
             "daily_calls": 700,
             "image_input": ImageInputPolicy(
@@ -507,7 +504,6 @@ async def run_profile(directory, persona, max_questions):
         "short_term_turns": 6,
         "concurrency_basis": cfg.paid_model.concurrency_basis,
         "memory_extraction": "native default min5 idle900; native retry/checkpoint rules",
-        "budget_cap_micro_usd": cfg.paid_model.window_micro_usd,
         "fx_validity_days": 366,
         "fx_hold_cny_per_usd": 10,
         "actual_started_at": datetime.now(UTC).isoformat(),

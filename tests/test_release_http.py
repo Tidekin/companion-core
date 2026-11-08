@@ -218,5 +218,6 @@ def test_other_bounded_providers_reject_compression_before_reading(path):
             assert result.status_code == 502
             assert result.json()["detail"] == "MODEL_ENCODING_UNSUPPORTED"
             usage = client.get("/internal/v1/reservations/" + grant["token"], headers=auth).json()
-            assert usage["calls"] == 1 and usage["reserved_micro_usd"] > 0
+            assert usage["calls"] == usage["unknown_calls"] == 1
+            assert usage["billed_micro_usd"] == 0
     assert stream.read_chunks == 0

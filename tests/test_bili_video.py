@@ -678,7 +678,11 @@ def test_clip_keeps_preview_and_clip_charges_above_item_currency_amount(core, tm
                 "bili", item["request_id"], upload_body(item, prepared, preview["next_selection"]))
             assert len(calls) == 2
             assert len(phase_usage(core)) == 2
-            assert phase_costs(core)[0] == cost
+            # Physical update ordering is not part of the original fee evidence.
+            original = next(row for row in phase_costs(core)
+                            if row["reference_id"] == cost["reference_id"])
+            assert {k: v for k, v in original.items() if k != "record_sequence"} == {
+                k: v for k, v in cost.items() if k != "record_sequence"}
             assert sum(row["amount_micro_cny"] for row in phase_costs(core)) == 2 * 18040 * 8
             partial = module.context(item["media"]["content_item_id"])
             assert partial["result_status"] == "FETCHED"

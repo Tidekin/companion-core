@@ -263,7 +263,7 @@ def test_core_policy_binds_nondefault_rules_even_if_bridge_selected():
         database="dbname=synthetic", expression_enabled=True,
     )
     original = meme_service.policy_hash(settings)
-    assert original == "bc622473bb58029fc341e02be873ee24740eaf38f9721c8c5c461b693d04c43a"
+    assert original == "80469f135cbef6538f1d687b63aa1498953c1e7e33ad9e9d453cd6a5e550299c"
     explicit_defaults = settings.model_copy(
         update={
             "meme_catalog_owner": "bridge",

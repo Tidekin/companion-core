@@ -126,12 +126,7 @@ def test_rem_failure_never_replays_and_keeps_accounting(core, tmp_path, failure)
     run(scenario())
 
 
-@pytest.mark.parametrize("config", [
-    {"max_input_tokens": 128}, {}, {},
-])
-
-
-def test_rem_input_limit_stays_hard_and_money_caps_are_advisory(core, tmp_path, config):
+def test_rem_input_limit_stays_hard(core, tmp_path):
     calls = []
 
     def provider(request):
@@ -139,19 +134,14 @@ def test_rem_input_limit_stays_hard_and_money_caps_are_advisory(core, tmp_path, 
         return response(DREAM)
 
     async def scenario():
-        async with prepared(core, tmp_path, **config):
+        async with prepared(core, tmp_path, max_input_tokens=128):
             job = rem.schedule_due(core)
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
                 with Core(core.settings, ModelClient(core.settings, transport),
                           core.clock) as worker:
                     assert await worker.run_once(job_id=job)
-            if "max_input_tokens" in config:
-                assert not calls and not usage(core)
-                assert rem.records(core)[0]["state"] == "FAILED"
-            else:
-                assert len(calls) == 1
-                assert usage(core)[0]["state"] == "SETTLED"
-                assert rem.records(core)[0]["state"] == "COMMITTED"
+            assert not calls and not usage(core)
+            assert rem.records(core)[0]["state"] == "FAILED"
     run(scenario())
 
 

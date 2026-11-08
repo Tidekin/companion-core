@@ -336,10 +336,19 @@ def test_restore_invalidates_keys_and_clears_receipt_bodies(harness, tmp_path):
             row = restored.one("SELECT * FROM gateway_requests")
             assert row["state"] == "UNKNOWN"
             assert row["request_cipher"] is None and row["response_cipher"] is None
-            with pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
-                gateway.submit(restored, settings, harness.grant,
-                    ChatRequest.model_validate(body()), RequestContext(), "new-intent-123",
-                    harness.core.clock())
+            # UNKNOWN fees remain visible after restore. A fresh explicit grant
+            # can issue a new key; restored response bodies cannot be replayed.
+            grant = harness.grant.model_copy(update={"revision": harness.grant.revision + 1})
+            fresh_key = gateway.put_client(restored, settings, grant, harness.core.clock())
+            current = gateway.authenticate(restored, settings, fresh_key, harness.core.clock())
+            request_id = gateway.submit(restored, settings, current,
+                ChatRequest.model_validate(body()), RequestContext(), "new-intent-123",
+                harness.core.clock())
+            assert request_id != row["request_id"]
+            assert restored.one("SELECT * FROM gateway_requests WHERE request_id=%s",
+                                (row["request_id"],)) == row
+            with pytest.raises(CoreError, match="GATEWAY_INVALID_KEY"):
+                gateway.authenticate(restored, settings, harness.key, harness.core.clock())
 
 
 def test_worker_budget_error_is_returned_as_429_with_original_receipt_id(harness):

@@ -164,10 +164,7 @@ def test_failed_generation_keeps_one_fault_receipt_without_another_model_call(
             ), (accepted["job_id"],))
             assert len(receipts) == 1
             assert json.loads(receipts[0]["safe_detail_json"]) == {"code": code, "state": "FAILED"}
-            if failure == "budget":
-                assert_failure_notice(core)
-            else:
-                assert core.store.rows("SELECT * FROM outbox") == []
+            assert_failure_notice(core)
             usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
             if failure == "budget":
                 assert calls == [] and usage == []

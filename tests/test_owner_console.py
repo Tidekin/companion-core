@@ -60,7 +60,7 @@ def test_empty_views_report_real_empty_and_unobserved_states(client):
     value = overview.json()
     assert value["runtime"]["worker"]["state"] == "UNOBSERVED"
     assert value["runtime"]["state"] == "ATTENTION"
-    assert value["budget"]["daily_limit_micro_cny"] == 20_000_000
+    assert "daily_limit_micro_cny" not in value["budget"]
     assert value["budget"]["used_micro_cny"] == 0
     assert value["budget"]["settled_micro_cny"] == 0
 
@@ -130,11 +130,12 @@ def test_cloud_budget_change_uses_its_own_version_and_preserves_native_rows(clie
     headers = login(client)
     policy = client.get("/v1/console/configuration").json()["cloud_budget"]
     response = client.put("/v1/console/cloud-budget", json={
-        "expected_version": policy["version"], "changes": {},
+        "expected_version": policy["version"], "changes": {"usd_to_cny_micro": 9_000_000},
     }, headers=headers)
     assert response.status_code == 200, response.text
     overview = client.get("/v1/console/overview").json()
-    assert overview["budget"]["daily_limit_micro_cny"] == 18_000_000
+    assert overview["budget"]["config"]["usd_to_cny_micro"] == 9_000_000
+    assert overview["budget"]["version"] == policy["version"] + 1
     assert client.get("/v1/console/configuration").json()["version"] == 0
     assert not core.store.rows("SELECT * FROM model_usage")
 

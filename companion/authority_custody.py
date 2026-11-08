@@ -21,19 +21,23 @@ def check_admissions(store, view, admissions):
     try:
         raw = path.read_bytes()
         records, verified = paid_budget._journal_records(raw)
-        previous, reservations = "0" * 64, {}
+        previous, journal_id, reservations = "0" * 64, None, {}
         selected = {row["request_id"] for row in admissions}
-        for record in records:
+        for index, record in enumerate(records):
             digest = record.pop("sha256")
             if not verified and (record.get("previous") != previous
                                  or paid_budget.sha(record) != digest):
                 raise ValueError("journal chain")
             previous = digest
+            if index == 0:
+                if record.get("kind") != "header":
+                    raise ValueError("journal header required")
+                journal_id = record["journal_id"]
             if record.get("kind") == "reserve" and record["request_id"] in selected:
                 if record["request_id"] in reservations:
                     raise ValueError("duplicate original reservation")
                 reservations[record["request_id"]] = record
-        if not records or records[0].get("journal_id") != view.journal_id:
+        if journal_id != view.journal_id:
             raise ValueError("journal identity")
         for row in admissions:
             original = reservations[row["request_id"]]

@@ -79,7 +79,7 @@ def test_native_unknown_stays_charged_and_is_not_retried_by_shared_runner(core):
     assert run(run_native_unit(executive.run_one)).progressed
     assert not run(run_native_unit(executive.run_one)).progressed
     row = executive.get(task["task_id"])
-    assert row["state"] == "UNKNOWN" and row["billed_micro_usd"] == 1000
+    assert row["state"] == "UNKNOWN" and row["billed_micro_usd"] == 0
     assert len(fake.calls) == 1 and row["result_event_id"] is None
 
 

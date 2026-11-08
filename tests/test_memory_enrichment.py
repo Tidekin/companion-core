@@ -111,7 +111,7 @@ def test_invalid_model_summary_never_commits_facts_or_derived_text(core, invalid
     assert not run(core.extract_step()).progressed and len(model.calls) == 1
 
 
-@pytest.mark.parametrize("invalid", ["source", "summary", "usage", "ids", "expiry"])
+@pytest.mark.parametrize("invalid", ["source", "summary", "missing_usage", "ids", "expiry"])
 def test_summary_cannot_outlive_original_sources_content_or_usage(core, invalid):
     _, _, _, episode = committed(core)
     if invalid == "source":
@@ -119,8 +119,8 @@ def test_summary_cannot_outlive_original_sources_content_or_usage(core, invalid)
                            (encode({"text": "changed"}),))
     elif invalid == "summary":
         core.store.execute("UPDATE episodes SET summary='unproven summary'")
-    elif invalid == "usage":
-        core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
+    elif invalid == "missing_usage":
+        core.store.execute("DELETE FROM model_usage")
     elif invalid == "expiry":
         core.clock.advance((core.settings.raw_event_retention_days + 1) * 86400)
     before = logical_state(core.store)
@@ -129,7 +129,7 @@ def test_summary_cannot_outlive_original_sources_content_or_usage(core, invalid)
     assert logical_state(core.store) == before
 
 
-@pytest.mark.parametrize("invalid", ["negative_support", "changed_fact", "unknown_usage"])
+@pytest.mark.parametrize("invalid", ["negative_support", "changed_fact", "missing_usage"])
 def test_invalid_estimates_cannot_raise_a_still_supported_fact(core, invalid):
     model, draft, fact, _ = committed(core)
     add_support(core, model, draft)
@@ -138,7 +138,7 @@ def test_invalid_estimates_cannot_raise_a_still_supported_fact(core, invalid):
     elif invalid == "changed_fact":
         core.store.execute("UPDATE memories SET content='修改后的事实'")
     else:
-        core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=%s", (
+        core.store.execute("DELETE FROM model_usage WHERE request_id=%s", (
             json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                 (enrichment.IMPORTANCE + fact["memory_id"],))["value"])[0]["request_id"],))
     current = core.memory.search("*", now=core.clock())[0]
@@ -201,6 +201,11 @@ def test_enrichment_uses_received_result_with_unknown_cost_and_respects_erasure(
                               (original_usage["request_id"],)) == original_usage
         assert len(core.store.rows("SELECT * FROM memories")) == 1
         assert len(core.store.rows("SELECT * FROM episodes")) == 1
+        episode = core.store.one("SELECT * FROM episodes")
+        summary = core.memory.episode_summary(episode["episode_id"], IDS, core.clock())
+        assert summary["text"] == draft["episode_summaries"][0]["summary"]
+        fact = core.memory.search("*", now=core.clock())[0]
+        assert fact["importance"] == 0.8 and fact["status"] == "HYPOTHESIS"
     else:
         assert run(core.extract_step()).progressed
         state = checkpoint_state(core.store)["batch"]
