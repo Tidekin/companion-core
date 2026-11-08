@@ -6,6 +6,10 @@ Core 源码的运行存储调用已使用 PostgreSQL，同时提供原生结构�
 
 ## 原生结构
 
+当前新建与离线导入目标为 `pg0003_fact_key_ascii`。迁移链先应用既有的
+`pg0002_relationship_standing`，再将 fact-key 索引对齐查询使用的 ASCII
+`translate` 表达式；业务表列和值仍按冻结备份逐项核对。
+
 PostgreSQL 16 及以上版本从 Alembic 基线 `pg0001_core` 升级到
 `pg0002_relationship_standing`，按重要性降序、更新时间降序和记忆 ID 升序索引关系候选。业务结构对应原 SQLite
 `0068_image_review_target` 的 103 张业务表。SQLite 的旧迁移历史仅用于读取原备份，

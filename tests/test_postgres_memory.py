@@ -27,7 +27,9 @@ def memory_database():
                 "('literal','project','fact','令牌名为AUTH_TOKEN','CONFIRMED','user_confirmed',1,1,"
                 "'private','2026-01-01','2026-01-01',''),"
                 "('wildcard_trap','project','fact','令牌名为AUTHTTOKEN','CONFIRMED',"
-                "'user_confirmed',1,1,'private','2026-01-01','2026-01-01','')")
+                "'user_confirmed',1,1,'private','2026-01-01','2026-01-01',''),"
+                "('color','user','fact','台布是靛青','CONFIRMED','user_confirmed',1,1,"
+                "'private','2026-01-01','2026-01-01','COLOR_CASE')")
             session.execute(
                 "INSERT INTO memories (memory_id,subject,kind,content,status,origin,confidence,"
                 "importance,privacy_scope,created_at,updated_at) SELECT 'noise_'||n,'user','fact',"
@@ -38,7 +40,8 @@ def memory_database():
 
 @pytest.mark.parametrize(("query", "expected"), [("小鲸鱼", "whale"),
                                                 ("CAMERA_CASE", "camera"),
-                                                ("AUTH_TOKEN", "literal")])
+                                                ("AUTH_TOKEN", "literal"),
+                                                ("靛青", "color")])
 def test_old_lexical_facts_remain_nominated_after_recent_history_growth(
     memory_database, tmp_path, query, expected,
 ):
@@ -50,6 +53,40 @@ def test_old_lexical_facts_remain_nominated_after_recent_history_growth(
         assert len(rows) <= retrieval_work.FACT_CANDIDATES
         assert all("record_sequence" not in row for row in rows)
         assert not work.receipt()["coverage_limited"] or "candidate_pool" in work.limited
+
+
+def test_fact_key_index_uses_the_query_ascii_expression(memory_database, tmp_path):
+    with closing(Store(memory_database, tmp_path)) as store:
+        index = store.one("SELECT indexdef FROM pg_indexes WHERE schemaname=current_schema() "
+                          "AND indexname='idx_memories_fact_key'")["indexdef"]
+        assert "translate(fact_key" in index and "lower(fact_key" not in index
+        # Force the index option to validate expression compatibility independently
+        # of the planner's sensible small-fixture sequential-scan cost decision.
+        with store.read_snapshot():
+            store.execute("SET LOCAL enable_seqscan=off")
+            plan = store.rows("EXPLAIN SELECT memory_id FROM memories WHERE "
+                "translate(fact_key,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz') "
+                "= ANY(%s::text[])", (["color_case"],))
+            assert "idx_memories_fact_key" in str(plan)
+        assert memory_candidates.terms("靛青") == ["靛青"]
+
+
+def test_candidate_bodies_are_materialized_in_one_metered_batch(memory_database, tmp_path,
+                                                               monkeypatch):
+    with closing(Store(memory_database, tmp_path)) as store, retrieval_work.scope() as work:
+        reads = []
+        original = store.bounded_read
+
+        def capture(statement, parameters, **kwargs):
+            reads.append(str(statement))
+            return original(statement, parameters, **kwargs)
+
+        monkeypatch.setattr(store, "bounded_read", capture)
+        rows, _ = memory_candidates.nominate(SimpleNamespace(store=store), "纪念邮票", (), None)
+        assert len(rows) == retrieval_work.FACT_CANDIDATES
+        assert sum("JOIN unnest" in statement for statement in reads) == 1
+        assert len(reads) <= 5
+        assert work.counts["sql_milliseconds"] >= len(reads)
 
 
 def test_native_nomination_keeps_explicit_scope_and_empty_scope(memory_database, tmp_path):

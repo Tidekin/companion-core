@@ -10,9 +10,10 @@ def terms(query):
                         query[:4096])
     grams = []
     for value in values:
-        grams.extend(value[i:i + 3] for i in range(len(value) - 2)) if re.search(
+        grams.extend(value[i:i + min(3, len(value))]
+                     for i in range(max(1, len(value) - 2))) if re.search(
             r"[\u4e00-\u9fff]", value) else grams.append(value)
-    return [value for value in dict.fromkeys(grams) if len(value) >= 3][:40]
+    return [value for value in dict.fromkeys(grams) if len(value) >= 2][:40]
 
 
 def exact_terms(query):
@@ -94,6 +95,7 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
     if not selected:
         return [], []
     from companion.memory_context import MEMORY_COLUMNS
+    from companion.turn_recall import lexical as bm25
 
     try:
         rows = work.rows(memory.store, "SELECT " + ",".join("m." + key for key in MEMORY_COLUMNS)
@@ -108,4 +110,7 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
     positions = {h["memory_id"]: i for i, h in enumerate(selected)}
     rows.sort(key=lambda row: positions[row["memory_id"]])
     allowed = {row["memory_id"] for row in rows}
-    return rows, [mid for mid in lexical if mid in allowed]
+    lexical = list(dict.fromkeys(mid for mid in lexical if mid in allowed))
+    contents = {row["memory_id"]: row["content"] for row in rows}
+    scores = dict(zip(lexical, bm25(query, [contents[mid] for mid in lexical]), strict=True))
+    return rows, sorted(lexical, key=lambda mid: -scores[mid])
