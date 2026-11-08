@@ -32,7 +32,7 @@ def seeds(core, monkeypatch):
 
 
 def invariants(core):
-    return {table: core.store.rows(f"SELECT * FROM {table} ORDER BY rowid")
+    return {table: core.store.rows(f"SELECT * FROM {table} ORDER BY record_sequence")
             for table in ("outbox", "model_usage", "model_admissions", "cloud_cost_snapshots")}
 
 
@@ -44,7 +44,8 @@ def launch(core, tmp_path, maintenance, label):
         default=lambda value: value.get_secret_value() if isinstance(value, SecretStr)
         else str(value)), encoding="utf-8")
     # All fixture/config writes precede launch. Parent only waits/reads from this point.
-    child = subprocess.run([sys.executable, "-B", "-m", "tests.voice_wakeup_process", str(config)],
+    child = subprocess.run([sys.executable, "-B", "-c",
+        "import pydantic_ai; from tests.voice_wakeup_process import main; main()", str(config)],
         cwd=Path(__file__).parents[1], capture_output=True, text=True, encoding="utf-8", timeout=45,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     assert child.returncode == 0, child.stderr
@@ -81,13 +82,15 @@ def assert_retired(core, running, before):
 
 
 def test_more_than_two_thousand_expired_voice_rows_drain_across_real_maintenance_wait(
-    core, tmp_path, monkeypatch,
+    core, tmp_path, monkeypatch, record_property,
 ):
     completed, running = seeds(core, monkeypatch)
     original = core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s', (completed["job_id"],))
     outbox = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (original["message_id"],))
     # Bulk maintenance fixture copies a natively accepted/completed seed. Unique native
     # message and delivery keys preserve FK/uniqueness; no cloned work is ever dispatched.
+    original.pop("record_sequence")
+    outbox.pop("record_sequence")
     with core.store.transaction():
         for _ in range(2503):
             message = uid("msg")
@@ -100,13 +103,21 @@ def test_more_than_two_thousand_expired_voice_rows_drain_across_real_maintenance
             'deadline_at=%s,result_expires_at=%s,lease_until=%s'
         ),
                            (after(core.clock(), -1),) * 3)
-    assert core.store.rows("PRAGMA foreign_key_check") == []
+    linked = core.store.one(
+        "SELECT count(*) n FROM voice_jobs v JOIN outbox o USING(message_id) "
+        "WHERE v.operation='tts' AND v.outbox_delivery_key=o.delivery_key"
+    )
+    assert linked["n"] == 2504
     before = invariants(core)
-    evidence = launch(core, tmp_path, 3.0, "bulk")
+    # A thousand native retirements can take several seconds before the worker waits.
+    evidence = launch(core, tmp_path, 14.0, "bulk")
+    record_property("voice_maintenance_scans", json.dumps(evidence["scans"]))
+    record_property("voice_maintenance_waits", json.dumps(evidence["waits"]))
     batches = [row["before"] - row["remaining"] for row in evidence["scans"]]
     assert [count for count in batches if count] == [1000, 1000, 505]
     waits = [row for row in evidence["waits"] if row["reason"] == "maintenance"]
-    assert waits and waits[0]["returned"] - waits[0]["entered"] > 0.05
+    assert waits and waits[0]["returned"] - waits[0]["entered"] > 0.05, (
+        evidence["scans"], evidence["waits"])
     assert evidence["expiry_queries"] == len(evidence["scans"])
     assert_retired(core, running, before)
 

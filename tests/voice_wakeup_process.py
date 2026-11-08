@@ -35,14 +35,17 @@ def main():
         elapsed = 0 if start is None else monotonic() - start
         return (anchor + timedelta(seconds=elapsed)).isoformat()
 
-    def trace(sql):
-        if sql.startswith("SELECT * FROM voice_jobs WHERE content_retired=0"):
-            report["expiry_queries"] += 1
-            assert "LIMIT 1000" in sql
-
     def initialize(self, config, model, *a, **kw):
         native_init(self, config, model, clock=clock)
-        self.store.db.set_trace_callback(trace)
+        fetch = self.store.rows
+
+        def observed(statement, params=()):
+            if isinstance(statement, str) and "WHERE voice_jobs.content_retired = 0" in statement:
+                report["expiry_queries"] += 1
+                assert "LIMIT 1000" in statement
+            return fetch(statement, params)
+
+        self.store.rows = observed
 
     async def scan(self, *a, **kw):
         nonlocal start
