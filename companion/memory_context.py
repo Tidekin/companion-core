@@ -264,20 +264,17 @@ class MemorySources:
                 refuse("source_nodes")
             if self.work and not self.work.take("source_nodes"):
                 refuse("source_nodes")
-            size = self._one('SELECT OCTET_LENGTH(body_json) AS size FROM events WHERE '
-                'event_id = %s', (key,))
-            size = size["size"] if size else 0
-            self._source_bytes += size
-            if self._source_bytes > LIMITS["text_bytes"] or (
-                self.work and not self.work.take("text_bytes", size)
-            ):
-                refuse("source_text_bytes")
+            remaining = LIMITS["text_bytes"] - self._source_bytes
+            if self.work:
+                remaining = min(remaining, self.work.remaining("text_bytes"))
             row = self._one(
                 'SELECT s.event_id AS source_id, e.event_id AS event_id, e.schema_version AS '
                 'schema_version, e.source AS source, e.source_event_id AS source_event_id, '
                 'e.conversation_id AS conversation_id, e.actor_id AS actor_id, e.event_type AS '
                 'event_type, e.occurred_at AS occurred_at, e.ingested_at AS ingested_at, '
-                'e.privacy_scope AS privacy_scope, e.body_json AS body_json, e.trace_id AS '
+                'e.privacy_scope AS privacy_scope, OCTET_LENGTH(e.body_json) AS source_size, '
+                'CASE WHEN OCTET_LENGTH(e.body_json)<=%s THEN e.body_json END AS body_json, '
+                'e.trace_id AS '
                 'trace_id, e.idempotency_key AS idempotency_key, e.fingerprint AS fingerprint, '
                 'e.redacted AS redacted, e.memory_processed AS memory_processed, e.reply_revision '
                 'AS reply_revision, c.scope AS scope, c.owner_actor_id AS owner_actor_id, r.key AS '
@@ -285,7 +282,12 @@ class MemorySources:
                 'WHERE d.event_id=s.event_id LIMIT ' + str(SOURCE_NODES + 1) + ') AS source_edges '
                 'FROM (SELECT %s AS event_id) AS s LEFT JOIN events AS e ON s.event_id = '
                 'e.event_id LEFT JOIN conversations AS c ON e.conversation_id = c.conversation_id '
-                "LEFT JOIN runtime_meta AS r ON r.key = 'erased_event:' || s.event_id", (key,))
+                "LEFT JOIN runtime_meta AS r ON r.key = 'erased_event:' || s.event_id",
+                (remaining, key))
+            size = row.pop("source_size") or 0
+            if size > remaining or (self.work and not self.work.take("text_bytes", size)):
+                refuse("source_text_bytes")
+            self._source_bytes += size
             local_edges[key] = [{"source_event_id": value} for value in row.pop("source_edges")]
             loaded[key] = row
             return row

@@ -91,11 +91,30 @@ def test_writer_source_reads_combine_edges_and_recheck_own_changes(core, monkeyp
     monkeypatch.setattr(core.store, "bounded_source_read", read)
     with core.store.transaction():
         proof = core.memory_context.pin(core.clock(), event_ids={"proof_1"})
-        assert len(reads) == 2 and "AS source_edges" in reads[-1]
+        assert len(reads) == 1 and "AS source_edges" in reads[-1]
         core.store.execute("INSERT INTO event_dependencies(event_id,source_event_id) "
                            "VALUES ('proof_1','proof_2')")
         with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
             core.memory_context.revalidate(proof, core.clock())
+
+
+def test_writer_size_bound_is_applied_before_transmitting_source_body(core, monkeypatch):
+    facts(core, count=1, chars=100)
+    monkeypatch.setitem(retrieval_work.LIMITS, "text_bytes", 64)
+    returned = []
+    original = core.store.bounded_source_read
+
+    def read(statement, parameters, **kwargs):
+        rows = original(statement, parameters, **kwargs)
+        returned.extend(dict(row) for row in rows)
+        return rows
+
+    monkeypatch.setattr(core.store, "bounded_source_read", read)
+    with core.store.transaction(), pytest.raises(retrieval_work.WorkLimit) as failed:
+        core.memory_context.pin(core.clock(), event_ids={"proof_1"})
+    assert failed.value.reason == "source_text_bytes"
+    assert len(returned) == 1 and returned[0]["source_size"] > 64
+    assert returned[0]["body_json"] is None
 
 
 @pytest.mark.parametrize("mutation", ["body", "redact", "edge", "owner", "fact", "evidence"])
