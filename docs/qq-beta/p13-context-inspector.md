@@ -88,7 +88,42 @@ Console 的“思考与决策 → 模型调用”显示同一回执，并将有�
 规划 JSON 沿原 Conversation 擦除闭包删除，历史费用和 UNKNOWN 责任不变。
 
 原 assembler 仍先执行既有初始软容量选择，再登记实际选中的来源；未选入的候选不被 pin。
-初始 fit 的淘汰原因仍为未记录；逐请求原因只覆盖其后新 planner 实际执行的裁剪。
+v2 的初始 fit 原因记录在 `assembly_dropped`；逐请求原因覆盖其后 planner 实际执行的裁剪。
 请求时 planner 可继续裁剪已选入的可选区域，但不撤销既有来源责任；未完成的主人输入、
 原图及其完整 turn 保持必需。记录中的 epoch 是布局捕获代次；无关 epoch 前进时，执行仍由
 原授权、实际来源和最终输出核验决定，诊断继续把旧代次标为 `STALE_EPOCH`。
+
+## 近期来源、检索工作量与恢复边界
+
+明确问题下，近期保护依据已授权的主人原文及展开后的引用、附件内容；普通文本和富文本
+以完整来源组计量。完整规则、必需引用和未完成输入先占用请求预算，无关尾轮不因最近性
+获得必留或最高优先级。简短续聊继续沿已有主题继承规则处理。
+
+相关原文召回可选择近期来源。完整近期来源能放入必需请求时优先保留全文，否则选中并
+固定有界原文表示，替换同一来源的近期表示，随后再裁剪，
+因此去重依据实际选中内容。两种表示共用原历史轮数及 UTF-8 上限；摘录仍按完整回放成本
+准入，原文召回比例应用于其他历史组占用之后的剩余额度。后续 SDK 请求和保存恢复沿用
+同一必需来源组及有效性核对。
+
+候选正文、证据根和源正文按有界批次读取。验证缓存只在 Store 当前的 repeatable-read
+只读快照内复用；写入、离开快照或异步计算后重新验证。来源正文、依赖和引用的数据库
+读取计入 `sql_milliseconds`，包括原生超时及 savepoint 开销。字节、节点和候选上限继续生效；
+后续候选超限时只保留已经完成全部证明的候选。最终必要校验失败继续阻断使用。
+
+PostgreSQL 两字查询参与有限词法提名，候选内复用现有中文 bigram BM25；精确身份匹配
+继续使用 ASCII `translate`。`pg0002_fact_key_ascii` 将原 `lower(fact_key)` 索引替换为
+与查询相同的表达式，原基线迁移保持冻结。
+
+`chat_restore_timeout_seconds`（默认 5 秒）限制 checkpoint 恢复、来源复核及争用退让的
+总时间。每条 SQL 使用剩余绝对时间和原服务器超时中更小的值；内层不能延长外层。
+超限通过既有 RETRY_WAIT/lease 恢复让出 worker，保留请求 ID、工具结果、费用和 UNKNOWN
+责任。模型及外部工具执行位于恢复重试之外。
+
+v6 runner 在合成考题擦除之前，将既有 planner 回执写入人物目录的
+`context-plans.jsonl`；`requests.jsonl`/`responses.jsonl` 保留实际请求与响应。题目、判据
+和来源标签只用于离线核查；生产选择不读取它们。
+
+实现依据：已核对 DSH AgentLink 的 `src/file-lock.ts` 原始绝对截止时间循环及
+`src/dsh-client.ts` 取消组合；这里复用原生 PostgreSQL 会话和调度器。数据库行为依据
+[PostgreSQL statement_timeout](https://www.postgresql.org/docs/16/runtime-config-client.html)
+及[表达式索引](https://www.postgresql.org/docs/16/indexes-expressional.html)。

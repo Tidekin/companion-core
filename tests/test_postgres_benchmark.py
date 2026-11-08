@@ -68,6 +68,9 @@ def test_native_campaign_exam_keeps_memory_and_settled_liability(core, tmp_path)
                 await harness.exam({"id": "synthetic/d00", "question": "相机放在哪？",
                                     "cutoff_turn": 1})
                 record = json.loads((tmp_path / "answers.jsonl").read_text("utf8"))
+                plans = json.loads((tmp_path / "context-plans.jsonl").read_text("utf8"))
+                assert plans["case"] == "synthetic/d00" and plans["plans"]
+                assert len(plans["plans"][0]["requests"]) == 2
                 assert record["status"] == "SUCCEEDED", record
                 assert text in record["answer"]
                 assert worker.store.one("SELECT status FROM memories WHERE memory_id=%s",

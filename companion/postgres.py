@@ -6,6 +6,8 @@ parameters. This module neither translates SQLite SQL nor performs external work
 """
 
 import hashlib
+import math
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -109,6 +111,49 @@ class Session:
     def __init__(self, connection):
         self._connection = connection
         self._closed = False
+        self._deadline = None
+        self._timeout_limit = 0
+
+    def _execute(self, cursor, statement, parameters=(), *, timeout_ms=None):
+        if self._deadline is not None:
+            remaining = math.ceil((self._deadline - time.monotonic()) * 1000)
+            if remaining <= 0:
+                raise psycopg.errors.QueryCanceled("local SQL deadline exceeded")
+            if self._timeout_limit:
+                remaining = min(remaining, self._timeout_limit)
+            if timeout_ms is not None:
+                remaining = min(remaining, timeout_ms)
+            # SET TRANSACTION must precede every SELECT in a fresh transaction.
+            if not (isinstance(statement, str) and statement.startswith("SET TRANSACTION ")):
+                cursor.execute("SELECT set_config('statement_timeout',%s,false)",
+                               (f"{remaining}ms",))
+        cursor.execute(statement, parameters)
+
+    @contextmanager
+    def deadline(self, seconds):
+        """Apply one absolute operation deadline to each native SQL statement.
+
+        An inner scope cannot extend its parent or an existing server timeout.
+        Transaction owners still roll back cancellation; no query or effect is retried here.
+        """
+        if seconds <= 0:
+            raise psycopg.errors.QueryCanceled("local SQL deadline exceeded")
+        previous_deadline, previous_limit = self._deadline, self._timeout_limit
+        with self._connection.cursor() as cursor:
+            cursor.execute("SELECT setting FROM pg_settings WHERE name='statement_timeout'")
+            previous = int(cursor.fetchone()["setting"])
+        self._deadline = min(previous_deadline or float("inf"), time.monotonic() + seconds)
+        self._timeout_limit = previous
+        try:
+            yield
+        finally:
+            self._deadline, self._timeout_limit = previous_deadline, previous_limit
+            # An aborted enclosing transaction must roll back before further SQL;
+            # that rollback also restores any timeout set within the transaction.
+            if self._connection.info.transaction_status != TransactionStatus.INERROR:
+                with self._connection.cursor() as cursor:
+                    cursor.execute("SELECT set_config('statement_timeout',%s,false)",
+                                   (f"{previous}ms",))
 
     @property
     def backend_pid(self):
@@ -125,21 +170,21 @@ class Session:
         if self._closed:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
         with self._connection.cursor() as cursor:
-            cursor.execute(statement, parameters)
+            self._execute(cursor, statement, parameters)
             return cursor.rowcount
 
     def one(self, statement, parameters=()):
         if self._closed:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
         with self._connection.cursor() as cursor:
-            cursor.execute(statement, parameters)
+            self._execute(cursor, statement, parameters)
             return cursor.fetchone()
 
     def rows(self, statement, parameters=()):
         if self._closed:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
         with self._connection.cursor() as cursor:
-            cursor.execute(statement, parameters)
+            self._execute(cursor, statement, parameters)
             return cursor.fetchall()
 
     def bounded_read(self, statement, parameters, *, limit, timeout_ms, readonly=True):
@@ -162,10 +207,10 @@ class Session:
             previous = self.one("SHOW statement_timeout")["statement_timeout"]
             self.execute("SELECT set_config('statement_timeout',%s,true)", (f"{timeout_ms}ms",))
             with self._connection.cursor() as cursor:
-                cursor.execute(sql.SQL(
+                self._execute(cursor, sql.SQL(
                     "SELECT * FROM ({}) AS bounded_result LIMIT %s").format(
                     statement if isinstance(statement, sql.Composable) else sql.SQL(statement)),
-                    (*parameters, limit))
+                    (*parameters, limit), timeout_ms=timeout_ms)
                 result = cursor.fetchmany(limit)
             self.execute("SELECT set_config('statement_timeout',%s,true)", (previous,))
             return result

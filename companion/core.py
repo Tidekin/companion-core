@@ -4,6 +4,8 @@ import re
 import time
 from datetime import datetime
 
+import psycopg
+
 from companion import (
     budget,
     context_selection,
@@ -2229,6 +2231,21 @@ class Core(Runtime):
                     "%s WHERE job_id = %s AND state = 'RUNNING' AND lease_token = %s",
                     (code, after(now, 60), now, job["job_id"], job["lease_token"]),
                 )
+                return
+            if code == "CONVERSATION_RESTORE_BUSY":
+                # Restore has not dispatched a model/tool. Yield this same lease
+                # without touching saved requests, paid uncertainty or tool results.
+                # A blocked job row falls back to the existing lease-expiry recovery.
+                try:
+                    with self.store.deadline(.25):
+                        self.store.execute(
+                            "UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL,"
+                            "last_error_code=%s,next_attempt_at=%s,"
+                            "attempts=GREATEST(0,attempts-1),updated_at=%s "
+                            "WHERE job_id=%s AND state='RUNNING' AND lease_token=%s",
+                            (code, after(now, 1), now, job["job_id"], job["lease_token"]))
+                except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+                    pass
                 return
             checkpoint = self.store.one(
                 'SELECT phase FROM agent_conversations WHERE job_id = %s', (job["job_id"],))

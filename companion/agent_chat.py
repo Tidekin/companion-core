@@ -2,11 +2,13 @@
 
 import asyncio
 import json
+import random
+from time import monotonic
 
 import psycopg
 from pydantic_ai import DeferredToolRequests
 
-from companion import qq_video, reply_revision
+from companion import qq_video, reply_revision, retrieval_work
 from companion.agent_persistence import ConversationStore
 from companion.agent_reading import deferred_results, reader_tools
 from companion.agent_runtime import check_conversation, run_conversation
@@ -20,29 +22,42 @@ from companion.telemetry import emit, phase
 
 @query_scope()
 async def reply(core, job, snapshots):
-    with phase("context_guard", job["trace_id"]):
-        view = check_conversation(core, job, snapshots)
     with phase("context_restore", job["trace_id"]):
+        deadline = monotonic() + core.settings.chat_restore_timeout_seconds
+        attempt = 0
         while True:
             try:
-                persistence = ConversationStore(core, job, snapshots)
-                conversation = persistence.load()
-                saved = persistence.row()
-                if saved and saved["phase"] == "OUTPUT":
-                    return saved["output_text"], persistence
-                ready, answers = (deferred_results(core, job, snapshots, conversation)
-                                  if conversation else (True, None))
+                with core.store.deadline(deadline - monotonic()):
+                    with phase("context_guard", job["trace_id"]):
+                        view = check_conversation(core, job, snapshots)
+                    persistence = ConversationStore(core, job, snapshots)
+                    conversation = persistence.load()
+                    saved = persistence.row()
+                    if saved and saved["phase"] == "OUTPUT":
+                        return saved["output_text"], persistence
+                    ready, answers = (deferred_results(core, job, snapshots, conversation)
+                                      if conversation else (True, None))
                 if not ready:
                     wait(core, job, persistence)
                     return None, persistence
                 break
             except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected,
-                    psycopg.errors.SerializationFailure):
+                    psycopg.errors.SerializationFailure, psycopg.errors.QueryCanceled,
+                    retrieval_work.WorkLimit) as error:
+                if isinstance(error, retrieval_work.WorkLimit) and error.reason not in {
+                    "sql_milliseconds", "sql_busy",
+                }:
+                    raise
                 if core.store.in_transaction:
                     raise
                 # Restore only revalidates saved inputs and original Reader/voice
                 # results. Model requests and tool execution remain outside retry.
-                await asyncio.sleep(0.1)
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise CoreError("CONVERSATION_RESTORE_BUSY", 503) from error
+                await asyncio.sleep(min(remaining, random.uniform(
+                    .01, min(.25, .02 * 2 ** min(attempt, 4)))))
+                attempt += 1
     with phase("context_tools", job["trace_id"]):
         tools = [core_query_tools(core, job, snapshots)]
         from companion.agent_singing import toolset

@@ -120,6 +120,7 @@ LABELS = {
     "turn_recall_history_share": "历史消息召回占用比例",
     "turn_recall_second_hop": "历史消息二次检索条数",
     "recall_compute_timeout_seconds": "召回计算等待上限（秒）",
+    "chat_restore_timeout_seconds": "对话恢复总等待上限（秒）",
     "diary_generate_hour": "日记整理时刻（小时）",
     "diary_min_source_events": "日记最少来源事件数",
     "diary_max_source_events": "日记最多来源事件数",
