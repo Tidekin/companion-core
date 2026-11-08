@@ -150,10 +150,15 @@ CLI 在创建工作循环前完成这些同步初始化，随后才开始领取�
 实际事务写入计数直接调用 PostgreSQL 统计视图使用的原生计数函数，保留同样的用户
 模式与关系类型范围；不为仅需行变更数的检查重复连接所有索引并分组。触发器与 CTE
 写入仍计入其中，并与系统视图逐项对照验证。
+删除后的历史投递核对只接受有效且有限的删除时间。原始文本时间先经 PostgreSQL
+`pg_input_is_valid` 检查，再在 `CASE` 内转换并检查 `isfinite`；损坏或无穷时间不能
+作为覆盖投递的删除凭证，也不会使类型转换中断核对事务。
 
 - [Pydantic TypeAdapter 延迟构建与显式 rebuild](https://docs.pydantic.dev/latest/concepts/type_adapter/#rebuilding-a-typeadapters-schema)
 - [Pydantic AI 首次调用本地加载开销及原生预加载修复](https://github.com/pydantic/pydantic-ai/issues/7405)
 - [PostgreSQL 事务统计视图的原生定义](https://github.com/postgres/postgres/blob/REL_16_STABLE/src/backend/catalog/system_views.sql#L656-L693)
+- [PostgreSQL 输入有效性检查](https://www.postgresql.org/docs/16/functions-info.html#FUNCTIONS-INFO-VALIDITY)
+- [PostgreSQL 有限时间检查](https://www.postgresql.org/docs/16/functions-datetime.html)
 
 ## 有限检索读取的往返
 

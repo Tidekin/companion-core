@@ -42,7 +42,7 @@ def test_unrelated_memory_erasure_keeps_reconciled_journal_replayable(
     message_id, receipt = resolved(core, tmp_path, kind, outcome)
     original = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
     usage = deepcopy(core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence'))
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.append(core.store, memory_id, core.clock())
     assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                           (original["origin_event_id"],))["redacted"] == 0
@@ -60,18 +60,19 @@ def test_unrelated_memory_erasure_keeps_reconciled_journal_replayable(
 
 @pytest.mark.parametrize("kind", ["owner", "window"])
 @pytest.mark.parametrize("reason", [
-    "missing", "older", "incomplete", "wrong_type", "bad_timestamp", "nonempty",
+    "missing", "older", "incomplete", "wrong_type", "bad_timestamp", "infinite_timestamp",
+    "nonempty",
 ])
 def test_cleared_reply_requires_a_completed_covering_memory_erasure(
     core, tmp_path, kind, reason,
 ):
     memory_id = unrelated_memory(core)
     if reason == "older":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.append(core.store, memory_id, core.clock())
         core.clock.advance(1)
     message_id, _ = resolved(core, tmp_path, kind, "CANCELLED")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         if reason not in {"missing", "older"}:
             core.ledger.append(core.store, memory_id, core.clock())
         core.store.execute((
@@ -89,8 +90,9 @@ def test_cleared_reply_requires_a_completed_covering_memory_erasure(
             core.store.execute("UPDATE privacy_erasure_ledger SET state='PENDING'")
         elif reason == "wrong_type":
             core.store.execute("UPDATE privacy_erasure_ledger SET target_type='diary'")
-        elif reason == "bad_timestamp":
-            core.store.execute("UPDATE privacy_erasure_ledger SET erased_at='invalid'")
+        elif reason in {"bad_timestamp", "infinite_timestamp"}:
+            core.store.execute("UPDATE privacy_erasure_ledger SET erased_at=%s",
+                               ("invalid" if reason == "bad_timestamp" else "infinity",))
         elif reason == "nonempty":
             core.store.execute('UPDATE outbox SET content_json=%s WHERE message_id=%s',
                                ('{"text":"unproved replacement"}', message_id))

@@ -27,7 +27,9 @@ def reply_content_erased_by_memory(store, row):
     return bool(
         store.one(
             "SELECT 1 FROM privacy_erasure_ledger WHERE target_type='memory' "
-            "AND state='COMPLETE' AND erased_at::timestamptz>=%s::timestamptz LIMIT 1",
+            "AND state='COMPLETE' AND CASE WHEN pg_input_is_valid(erased_at,'timestamptz') "
+            "THEN isfinite(erased_at::timestamptz) AND erased_at::timestamptz>=%s::timestamptz "
+            "ELSE false END LIMIT 1",
             (row["created_at"],),
         )
     )
