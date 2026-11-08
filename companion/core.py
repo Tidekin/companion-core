@@ -258,8 +258,8 @@ class Core(Runtime):
 
     def claim_job(self, worker_id, *, job_id=None):
         s, now = self.store, self.clock()
-        # Keep native recovery before the retryable snapshot. A claim rechecks
-        # every fence under its writer lock; spool scans use idle maintenance.
+        # Recovery commits independently. Empty polls use a snapshot; an eligible
+        # candidate repeats its fences only under the native writer/row lock.
         with s.transaction():
             self.recover(now)
         return s.read_or_write(lambda: self._claim_job(worker_id, job_id, now))
@@ -303,6 +303,8 @@ class Core(Runtime):
         )
         if not row:
             return None
+        if not s.in_write_transaction:
+            raise RuntimeError("POSTGRES_CLAIM_REQUIRES_WRITE_TRANSACTION")
         if row["kind"] in {"activity", "rem"} and (
             budget.chat_pending(s, now) or private_life.enabled(self.settings)
             and private_life.owner_waiting(s, self.settings, now)
