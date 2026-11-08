@@ -167,7 +167,7 @@ class Memory:
                 nominated = self.index.nominate(query, subjects=subjects, memory_ids=memory_ids)
         except retrieval_work.WorkLimit as error:
             retrieval_work.current().mark(error.reason)
-        version, sources, rows, lexical = self._prepare_search(
+        version, sources, rows, lexical, proof = self._prepare_search(
             query, actor, subjects, limit, memory_ids=memory_ids, now=now, semantic_ids=nominated,
         )
         try:
@@ -199,21 +199,13 @@ class Memory:
             retrieval_work.current().mark(error.reason)
         if source_check:
             source_check()
-        version, sources, rows, lexical = self._prepare_search(
-            query, actor, subjects, limit, memory_ids=memory_ids, now=now, semantic_ids=nominated,
+        version, sources, rows, lexical, proof = self._prepare_search(
+            query, actor, subjects, limit, memory_ids=memory_ids, now=now,
+            semantic_ids=nominated, pin=True,
         )
         similarities = {}
         if query != "*" and rows:
             context = MemoryContext(self)
-            try:
-                proof = context.pin(now, rows=[
-                    {**row, "evidence_ids": [e["event_id"]
-                                           for e in sources.evidence(row["memory_id"])]}
-                    for row in rows
-                ])
-            except retrieval_work.WorkLimit as error:
-                retrieval_work.current().mark(error.reason)
-                rows, lexical = [], []
 
             def revalidate():
                 if source_check:
@@ -262,49 +254,80 @@ class Memory:
                                    fused=fused)
 
     def _prepare_search(self, query, actor="owner", subjects=(), limit=6, *,
-                        memory_ids=None, now=None, semantic_ids=()):
+                        memory_ids=None, now=None, semantic_ids=(), pin=False):
         from companion.memory_candidates import nominate
-        from companion.memory_enrichment import refresh_importance
+        from companion.memory_enrichment import IMPORTANCE, refresh_importance
 
         self.require_owner(actor)
-        version = read_version(self)
         work = retrieval_work.current()
-        sources = MemorySources(self, now, bounded=True, work=work)
-        if memory_ids is not None and not memory_ids:
-            return version, sources, [], []
         nominated, lexical = nominate(self, query, subjects, memory_ids, semantic_ids)
-        rows = []
+        metadata = work.source_rows(self.store,
+            "SELECT m.memory_id,r.key IS NOT NULL AS enriched,EXISTS(SELECT 1 "
+            "FROM memory_evidence v JOIN events e ON e.event_id=v.event_id "
+            "WHERE v.memory_id=m.memory_id AND e.redacted=0) AS live FROM memories m "
+            "LEFT JOIN runtime_meta r ON r.key=%s||m.memory_id "
+            "WHERE m.memory_id=ANY(%s::text[])",
+            (IMPORTANCE, [row["memory_id"] for row in nominated]),
+            limit=max(1, len(nominated))) if nominated else []
+        metadata = {row["memory_id"]: row for row in metadata}
+        # Existing repairs may write. Finish them before the short immutable proof
+        # snapshot, so reuse never crosses our own write or a model/encoder await.
+        repaired = []
         for row in nominated:
-            try:
-                evidence = sources.evidence(row["memory_id"])
-            except retrieval_work.WorkLimit as error:
-                work.mark(error.reason)
-                if error.reason == "evidence_roots":
-                    continue
-                break
-            # Repair only nominated stale rows, never sweep the full memory table.
-            if not self.store.one(
-                'SELECT 1 FROM memory_evidence AS v JOIN events AS e ON e.event_id = v.event_id '
-                'WHERE v.memory_id = %s AND e.redacted = 0 LIMIT 1', (row["memory_id"],),
-            ):
+            state = metadata.get(row["memory_id"])
+            if state is None:
+                continue
+            if not state["live"]:
                 self.store.execute(
-                    "UPDATE memories SET confidence = 0, needs_review = 1, status = 'HYPOTHESIS' "
-                    'WHERE memory_id = %s', (row["memory_id"],))
+                    "UPDATE memories SET confidence=0,needs_review=1,status='HYPOTHESIS' "
+                    "WHERE memory_id=%s AND NOT EXISTS(SELECT 1 FROM memory_evidence v "
+                    "JOIN events e ON e.event_id=v.event_id "
+                    "WHERE v.memory_id=memories.memory_id AND e.redacted=0)", (row["memory_id"],))
                 continue
             try:
-                if evidence and sources.current(row):
+                if state["enriched"] or row["importance"] != .5:
                     row["importance"] = refresh_importance(self, row, now)
-                    rows.append(row)
             except retrieval_work.WorkLimit as error:
                 work.mark(error.reason)
                 break
-        if query == "*":
-            rows.sort(key=lambda row: (not row["needs_review"], row["status"] == "CONFIRMED",
-                                      row["importance"], row["updated_at"]), reverse=True)
-        elif len(query) < 3:
-            lexical = [row["memory_id"] for row in rows if query in row["content"]]
-        allowed = {row["memory_id"] for row in rows}
-        return version, sources, rows, [mid for mid in lexical if mid in allowed]
+            repaired.append(row)
+
+        def collect():
+            version = read_version(self)
+            sources = MemorySources(self, now, bounded=True, work=work)
+            rows, parts = [], []
+            try:
+                sources.prefetch([row["memory_id"] for row in repaired])
+            except retrieval_work.WorkLimit as error:
+                work.mark(error.reason)
+            for row in repaired:
+                try:
+                    evidence = sources.evidence(row["memory_id"])
+                    if not evidence or not sources.current(row):
+                        continue
+                    if pin:
+                        part = MemoryContext(self).pin(now, rows=[{
+                            **row, "evidence_ids": [e["event_id"] for e in evidence]}],
+                            work=work, source_view=sources if self.store.in_read_snapshot else None)
+                        parts.append(part)
+                    rows.append(row)
+                except retrieval_work.WorkLimit as error:
+                    work.mark(error.reason)
+                    if error.reason == "evidence_roots":
+                        continue
+                    break
+            if query == "*":
+                rows.sort(key=lambda row: (not row["needs_review"], row["status"] == "CONFIRMED",
+                                          row["importance"], row["updated_at"]), reverse=True)
+            allowed = {row["memory_id"] for row in rows}
+            proof = {"rows": [row for part in parts for row in part["rows"]],
+                     "event_ids": [], "historical": False,
+                     "sources": {key: value for part in parts
+                                 for key, value in part["sources"].items()}}
+            proof["source_event_ids"] = sorted(proof["sources"])
+            return version, sources, rows, [mid for mid in lexical if mid in allowed], proof
+
+        return self.store.read_or_write(collect)
 
     def _rerank_pool(self, query, ordered, limit):
         """The fused-order rows a configured cross-encoder would rescore, and its model."""

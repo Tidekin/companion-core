@@ -123,6 +123,11 @@ class Store:
             raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
         return self._session.bounded_read(statement, parameters, limit=limit, timeout_ms=timeout_ms)
 
+    def bounded_source_read(self, statement, parameters, *, limit, timeout_ms):
+        """Finite internal provenance SELECTs may share the caller's write transaction."""
+        return self._session.bounded_read(statement, parameters, limit=limit,
+                                          timeout_ms=timeout_ms, readonly=False)
+
     def bootstrap(self, owner_qq_id, now):
         """Seed missing identity once; imports retain their original node incarnation."""
         with self._session.transaction():
