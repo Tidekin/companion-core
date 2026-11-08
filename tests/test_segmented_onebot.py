@@ -5,6 +5,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -17,6 +18,7 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.native_continuous_support import host
+from tests.postgres_fixture import logical_state
 from tests.support.live_text_window import live_fixture
 from tests.support.onebot import provider
 from tests.support.onebot_events import config, normalized, raw_event
@@ -275,10 +277,14 @@ async def native_fragments(core, tmp_path, *, parts=None, quota=None, period="ac
 
 async def original_input_state(active):
     capture = json.loads(active.db.execute("SELECT capture_json FROM window_inputs").fetchone()[0])
-    before = active.core.store.db.total_changes
-    response = await active.client.post("/internal/v1/owner-authority/inputs/state", json=capture)
+    before = logical_state(active.core.store)
+    # The request uses a separate ApiStore lease. The real read_or_write must succeed
+    # in its native read-only transaction, without falling back to a writer.
+    with patch("companion.store.Store.transaction", side_effect=AssertionError("write retry")):
+        response = await active.client.post(
+            "/internal/v1/owner-authority/inputs/state", json=capture)
     assert response.status_code == 200 and response.headers["Cache-Control"] == "no-store"
-    assert active.core.store.db.total_changes == before
+    assert logical_state(active.core.store) == before
     return response.json()
 
 

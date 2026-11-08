@@ -25,6 +25,7 @@ from companion.voice_protocol import (
     digest,
 )
 from tests.conftest import ingest, run
+from tests.support.unchanged_transactions import unchanged_transactions
 from tests.support.voice_flow import signed_input
 from tests.support.voice_jobs import TOKEN, result, voice_config
 from tests.support.voice_node_api import claim_body, tls_core
@@ -160,7 +161,7 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
             before_epoch = epoch(core.store)
             with Core(core.settings, clock=core.clock) as maintenance:
                 if voice_state == "source-erased":
-                    with maintenance.store.transaction():
+                    with maintenance.store.transaction(control_write=True):
                         maintenance.ledger.expire_events(maintenance.store,
                             [event["event_id"]], maintenance.clock())
                 else:
@@ -177,15 +178,14 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
             assert owner_authority.current(
                 core.store, core.settings, core.clock).authority.as_dict() == (
                 capture.authority)
-            before = core.store.db.total_changes
-            projected = await client.get(path + "/state")
+            with core.store.read_snapshot():
+                projected = await client.get(path + "/state")
             if voice_state == "source-erased":
                 assert projected.status_code in {403, 409}, projected.text
             else:
                 assert projected.status_code == 200, projected.text
                 assert projected.json()["state"] == "FALLBACK"
                 assert all(not row["upload_allowed"] for row in projected.json()["records"])
-            assert core.store.db.total_changes == before
             with Core(core.settings, ModelClient(core.settings, model_http),
                       core.clock) as worker:
                 active_worker = worker
@@ -234,8 +234,8 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
                     })
                 assert late.status_code == 410, late.text
                 assert late.json()["error"] == "VOICE_LEASE_RETIRED"
-                before_replay = core.store.db.total_changes
-                replayed = await client.post(path, content=audio, headers=upload_headers)
+                with unchanged_transactions(core):
+                    replayed = await client.post(path, content=audio, headers=upload_headers)
                 if voice_state == "source-erased":
                     assert replayed.status_code in {403, 409}, replayed.text
                 else:
@@ -243,7 +243,6 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
                     assert replayed.json()["error"] == "VOICE_JOB_RETIRED"
                     assert core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s',
                                            (ref.job_id,)) == saved
-                    assert core.store.db.total_changes == before_replay
                 if voice_state != "transcribed":
                     held = core.store.one("SELECT active_job_id FROM voice_node_state")
                     assert held["active_job_id"] == ref.job_id

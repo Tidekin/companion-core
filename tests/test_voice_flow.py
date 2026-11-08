@@ -402,14 +402,13 @@ def test_real_native_asr_context_tts_outbox_send_check_and_counter_chain(
                     "Content-Type": "audio/wav",
                     "x-voice-proof": base64.urlsafe_b64encode(canonical_bytes(proof)).decode()})
                 assert uploaded.status_code == 200, uploaded.text
-                before_state = core.store.db.total_changes
-                recovered = await client.get(path + "/state")
+                with core.store.read_snapshot():
+                    recovered = await client.get(path + "/state")
                 assert recovered.status_code == 200
                 assert recovered.json()["records"] == [{
                     "index": 0, "state": "QUEUED", "job_id": uploaded.json()["job_id"],
                     "input_sha256": proof.audio_sha256,
                     "source_proof_sha256": digest(proof), "upload_allowed": False}]
-                assert core.store.db.total_changes == before_state
                 assert "audio_base64" not in recovered.text and "transcript" not in recovered.text
                 await independent_node(node_config, certificate, counter, tmp_path,
                                        core.clock.now.timestamp())

@@ -41,8 +41,8 @@ def test_tts_only_node_projects_unavailable_asr_and_independent_worker_replies(c
                 httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http:
             original_body = event["body_json"]
             path = "/internal/v1/voice-inputs/" + event["event_id"]
-            before = core.store.db.total_changes
-            state = await client.get(path + "/state")
+            with core.store.read_snapshot():
+                state = await client.get(path + "/state")
             assert state.status_code == 200, state.text
             assert state.json()["state"] == "FALLBACK"
             assert state.json()["records"] == [{
@@ -50,7 +50,6 @@ def test_tts_only_node_projects_unavailable_asr_and_independent_worker_replies(c
                 "input_sha256": None, "source_proof_sha256": None,
                 "upload_allowed": False,
             }]
-            assert core.store.db.total_changes == before
             assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                 (INPUT_RECEIPT + event["event_id"],))
             assert "audio_base64" not in state.text and "transcript" not in state.text
@@ -89,12 +88,11 @@ def test_tts_only_node_projects_unavailable_asr_and_independent_worker_replies(c
             assert not core.store.rows("SELECT * FROM voice_jobs")
             assert core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                    (event["event_id"],))["body_json"] == original_body
-            before = core.store.db.total_changes
-            settled = await client.get(path + "/state")
+            with core.store.read_snapshot():
+                settled = await client.get(path + "/state")
             assert settled.status_code == 200, settled.text
             assert settled.json()["state"] == "FALLBACK"
             assert all(not item["upload_allowed"] for item in settled.json()["records"])
-            assert core.store.db.total_changes == before
             with Core(core.settings, ModelClient(core.settings, model_http),
                       core.clock) as restarted:
                 assert not await restarted.run_once("tts-only-restart")

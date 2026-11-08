@@ -30,22 +30,22 @@ def test_produced_life_creation_has_read_only_owner_cognition(core, tmp_path, ch
                 core.store.execute("UPDATE rem_records SET source_event_ids_json='[\"changed\"]'")
             elif change == "output":
                 core.store.execute("UPDATE rem_records SET output_json="
-                                   "json_set(output_json,'$.text','changed')")
+                                   "jsonb_set(output_json::jsonb,'{text}',to_jsonb('changed'::text))::text")
             elif change == "recall":
                 result = await recall(capture)
                 assert result.status_code == 200, result.text
             async with real_core_http(core) as port, httpx.AsyncClient(
                 base_url=f"http://127.0.0.1:{port}", trust_env=False,
             ) as client:
-                before = core.store.db.total_changes
-                query = {"kind": "rem", "record_id": record["rem_id"]}
-                for headers in ({}, {"Authorization": "Bearer "
-                                     + core.settings.bridge_token.get_secret_value()}):
+                with core.store.read_snapshot():
+                    query = {"kind": "rem", "record_id": record["rem_id"]}
+                    for headers in ({}, {"Authorization": "Bearer "
+                                         + core.settings.bridge_token.get_secret_value()}):
+                        response = await client.post("/internal/v2/cognition", json=query,
+                                                     headers=headers)
+                        assert response.status_code == 401
                     response = await client.post("/internal/v2/cognition", json=query,
-                                                 headers=headers)
-                    assert response.status_code == 401
-                response = await client.post("/internal/v2/cognition", json=query,
-                    headers={"Authorization": "Bearer synthetic-life-rem-control"})
+                        headers={"Authorization": "Bearer synthetic-life-rem-control"})
                 assert response.status_code == 200, response.text
                 assert response.headers["cache-control"] == "no-store"
                 item = response.json()["items"][0]
@@ -66,7 +66,6 @@ def test_produced_life_creation_has_read_only_owner_cognition(core, tmp_path, ch
                     assert item["source_event_ids"] == []
                     assert item["decision"] == "NOT_AVAILABLE"
                 assert retained["text"] not in response.text
-                assert core.store.db.total_changes == before
                 assert core.store.rows("SELECT * FROM model_usage") == usage
                 assert len(core.store.rows("SELECT * FROM rem_records")) == 1
 

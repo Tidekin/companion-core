@@ -11,6 +11,7 @@ from companion.life_protocol import LifeQZoneDraft
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.core_http import real_core_http
 from tests.support.life_worker_integration import check_independent_life_worker as produce
 
@@ -102,8 +103,9 @@ def test_tampered_or_revoked_artifacts_are_hidden_individually_without_readback_
             'UPDATE life_activity_results SET proposal_json=%s',
             ("{" if case == "malformed_json" else encode(value),),
         )
-        before = core.store.db.total_changes
-        response = await client.get("/internal/v2/life/topics", headers=headers)
+        before = logical_state(core.store)
+        with core.store.read_snapshot():
+            response = await client.get("/internal/v2/life/topics", headers=headers)
         visible = (
             []
             if response.status_code != 200
@@ -114,7 +116,7 @@ def test_tampered_or_revoked_artifacts_are_hidden_individually_without_readback_
                 "case": case,
                 "status": response.status_code,
                 "visible": bool(visible),
-                "read_only": before == core.store.db.total_changes,
+                "read_only": logical_state(core.store) == before,
             }
         )
         assert core.store.rows("SELECT * FROM outbox") == []
@@ -169,15 +171,17 @@ def test_native_revocation_and_unknown_preserve_readback_accounting(
                 assert activated.status_code == 200, activated.text
                 assert activated.json()["authority"]["revision"] > view.authority.revision
             elif change == "source_withdrawn":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [source_id], core.clock())
                 assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                       (source_id,))["redacted"]
             elif change == "natural_expiry":
                 core.clock.advance(86401)
             jobs = core.store.rows("SELECT * FROM jobs")
-            changes = core.store.db.total_changes
-            response = await client.get("/internal/v2/life/topics")
+            before = logical_state(core.store)
+            with core.store.read_snapshot():
+                response = await client.get("/internal/v2/life/topics")
+            assert logical_state(core.store) == before
             assert response.status_code == 200 and response.headers["Cache-Control"] == "no-store"
             visible = [row for topic in response.json()["items"] for row in topic["results"]]
             if change == "unknown":
@@ -187,7 +191,6 @@ def test_native_revocation_and_unknown_preserve_readback_accounting(
                            and row["billed_micro_usd"] > 0 for row in usage)
             else:
                 assert not visible
-            assert core.store.db.total_changes == changes
             assert core.store.rows("SELECT * FROM jobs") == jobs
             assert core.store.rows("SELECT * FROM model_usage") == usage
             assert core.store.rows("SELECT * FROM outbox") == []
