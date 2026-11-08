@@ -390,12 +390,16 @@ def test_real_chinese_embeddings_detect_paraphrased_shares(core):
     assert not semantic_duplicate(text, ["今天分享一道番茄炒蛋的家常菜做法。"], core.settings)
 
 
-@pytest.mark.parametrize("paraphrase", [False, True])
-def test_concurrent_shares_recheck_duplicates(core, monkeypatch, paraphrase):
+@pytest.mark.parametrize("relationship,expected", [
+    ("identical", 1), ("paraphrased", 1), ("distinct", 2),
+])
+def test_concurrent_shares_recheck_duplicates(core, monkeypatch, relationship, expected):
     configure(core, social=True)
-    monkeypatch.setattr("companion.social.semantic_duplicate", lambda *args: True)
-    for number in range(2):
-        text = "相同的实际读取内容" + ("另一种表述" if paraphrase and number else "")
+    monkeypatch.setattr("companion.social.semantic_duplicate",
+                        lambda *args: relationship != "distinct")
+    first = "相同的实际读取内容"
+    versions = {"identical": first, "paraphrased": "另一种表述", "distinct": "独立的新消息"}
+    for number, text in enumerate((first, versions[relationship])):
         core.observations.append(
             "bili",
             ObservationEvent(
@@ -426,22 +430,27 @@ def test_concurrent_shares_recheck_duplicates(core, monkeypatch, paraphrase):
         def query(sql, params=()):
             nonlocal synchronized
             result = original(sql, params)
-            if "AND (canonical_url=? OR content_sha256=?)" in sql and not synchronized:
+            if "AND (canonical_url = %s OR content_sha256 = %s)" in sql and not synchronized:
                 synchronized = True
                 barrier.wait(timeout=10)
             return result
 
         instance.store.one = query
         try:
-            return instance.social.consider(f"concurrent_share_{number}")
+            result = instance.social.consider(f"concurrent_share_{number}")
+            assert synchronized
+            return result
         finally:
-            instance.store.close()
+            instance.close()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(consider, (0, 1)))
-    assert (
-        core.store.one("SELECT COUNT(*) n FROM social_candidates WHERE state='CANDIDATE'")["n"] == 1
-    )
+    states = core.store.rows("SELECT state,reason_code FROM social_candidates")
+    assert len(states) == 2
+    assert sum(row["state"] == "CANDIDATE" for row in states) == expected
+    if expected == 1:
+        reason = "DUPLICATE_CONTENT" if relationship == "identical" else "SIMILAR_CONTENT"
+        assert {"state": "SKIPPED", "reason_code": reason} in states
 
 
 def test_unknown_zero_usage_cannot_release_reserved_traffic(core):

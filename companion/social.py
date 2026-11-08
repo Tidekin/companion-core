@@ -379,6 +379,8 @@ class SocialPlanner:
                     after(self.clock(), -86400 * self.settings.raw_event_retention_days),
                 ):
                     return None
+                # Serialize the generation recheck and insert, including the first candidate.
+                s.execute("LOCK TABLE social_candidates IN SHARE ROW EXCLUSIVE MODE")
                 if s.one("SELECT 1 FROM social_candidates WHERE event_id = %s", (event_id,)):
                     return None
                 latest = s.one(
