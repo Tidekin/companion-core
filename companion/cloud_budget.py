@@ -701,8 +701,6 @@ def reserve(
     if not store.in_transaction:
         raise RuntimeError("CLOUD_BUDGET_TRANSACTION_REQUIRED")
     store.ledger_lock(BUDGET_LEDGER)
-    if _restore_required(store):
-        raise CoreError("CLOUD_BUDGET_RESTORE_RECONCILIATION_REQUIRED", 503)
     if (
         reference_type not in {"model", "tool"}
         or not isinstance(reference_id, str)
@@ -724,54 +722,10 @@ def reserve(
         (reference_type, reference_id),
     ):
         raise CoreError("CLOUD_BUDGET_DUPLICATE_CHARGE", 409)
-    current = _sync(store, settings, now)
-    if store.one(
-        "SELECT 1 FROM cloud_cost_snapshots WHERE reference_type = %s AND reference_id = %s",
-        (reference_type, reference_id),
-    ):
-        raise CoreError("CLOUD_BUDGET_DUPLICATE_CHARGE", 409)
-    if not _time(current["effective_at"]) <= _time(now) < _time(current["fx_valid_until"]):
-        raise CoreError("CLOUD_BUDGET_FX_EXPIRED", 503)
-    if _unpriced_unknown(store):
-        raise CoreError("CLOUD_BUDGET_UNPRICED_USAGE", 503)
+    current = _policy(store, settings, now)
     view = _view(current)
     converted = _cny(estimated_micro_usd, view)
     day = _day(now, current["timezone"])
-    total = store.one(
-        (
-            "SELECT COALESCE(SUM(amount_micro_cny),0) n FROM "
-            "cloud_cost_snapshots WHERE local_day=%s OR state IN "
-            "('RESERVED','UNKNOWN')"
-        ),
-        (day,),
-    )["n"]
-    if total + converted > view["config"]["daily_micro_cny"]:
-        raise CoreError("CLOUD_DAILY_BUDGET_EXHAUSTED", 429)
-    prior = store.rows(
-        "SELECT cloud_cost_snapshots.reference_type AS reference_type, "
-        "cloud_cost_snapshots.reference_id AS reference_id, cloud_cost_snapshots.policy_version AS "
-        "policy_version, cloud_cost_snapshots.task_kind AS task_kind, cloud_cost_snapshots.task_id "
-        "AS task_id, cloud_cost_snapshots.local_day AS local_day, cloud_cost_snapshots.occurred_at "
-        "AS occurred_at, cloud_cost_snapshots.dispatched_at AS dispatched_at, "
-        "cloud_cost_snapshots.snapshot_json AS snapshot_json, "
-        "cloud_cost_snapshots.reserved_micro_usd AS reserved_micro_usd, "
-        "cloud_cost_snapshots.accounted_micro_usd AS accounted_micro_usd, "
-        "cloud_cost_snapshots.amount_micro_cny AS amount_micro_cny, cloud_cost_snapshots.state AS "
-        "state, cloud_cost_snapshots.legacy AS legacy, cloud_cost_snapshots.reconciliation_sha256 "
-        "AS reconciliation_sha256, cloud_cost_snapshots.updated_at AS updated_at FROM "
-        "cloud_cost_snapshots AS cloud_cost_snapshots WHERE cloud_cost_snapshots.task_kind = %s "
-        "AND cloud_cost_snapshots.task_id = %s ORDER BY cloud_cost_snapshots.occurred_at NULLS "
-        "FIRST, cloud_cost_snapshots.reference_id NULLS FIRST",
-        (task_kind, task_id),
-    )
-    if any(row["state"] == "UNKNOWN" for row in prior):
-        raise CoreError("CLOUD_TASK_USAGE_UNCERTAIN", 409)
-    cap = _task_cap(view["config"], task_kind)
-    if cap is not None:
-        if prior:
-            cap = min(cap, _task_cap(json.loads(prior[0]["snapshot_json"])["config"], task_kind))
-        if sum(row["amount_micro_cny"] for row in prior) + converted > cap:
-            raise CoreError("CLOUD_TASK_BUDGET_EXHAUSTED", 429)
     _record(
         store,
         current,
@@ -808,104 +762,10 @@ def model_pricing(store, request_id, fallback):
     )
 
 
-def capacity_blocks(store, settings, now):
-    """Pure read of known global blockers; [] is not an estimate or permission for a request.
 
-    An unbound database uses explicitly configured/default planning FX for existing
-    native liabilities. A normal runtime may call sync once after recovery to bind
-    the snapshots; this read never binds, reserves, audits, or probes a hypothetical fee.
-    """
-    if not store.one(
-        "SELECT 1 FROM pg_catalog.pg_class WHERE "
-        "relnamespace=current_schema()::regnamespace AND relname='cloud_budget_policies' AND "
-        "relkind IN ('r','p')"
-    ):
-        return ["CLOUD_BUDGET_SCHEMA_REQUIRED"]
-    current = store.one(
-        "SELECT cloud_budget_policies.version AS version, "
-        "cloud_budget_policies.config_json AS config_json, cloud_budget_policies.config_sha256 AS "
-        "config_sha256, cloud_budget_policies.timezone AS timezone, "
-        "cloud_budget_policies.effective_at AS effective_at, cloud_budget_policies.fx_valid_from "
-        "AS fx_valid_from, cloud_budget_policies.fx_valid_until AS fx_valid_until FROM "
-        "cloud_budget_policies AS cloud_budget_policies ORDER BY cloud_budget_policies.version "
-        "DESC NULLS LAST LIMIT 1"
-    )
-    config = json.loads(current["config_json"]) if current else _config(settings).model_dump()
-    timezone = current["timezone"] if current else settings.timezone
-    day = _day(now, timezone)
-    blocks = ["CLOUD_BUDGET_RESTORE_RECONCILIATION_REQUIRED"] if _restore_required(store) else []
-    if current and not (
-        _time(current["effective_at"]) <= _time(now) < _time(current["fx_valid_until"])
-    ):
-        blocks.append("CLOUD_BUDGET_FX_EXPIRED")
-    used, unpriced = 0, False
-    for row in store.rows(
-        "SELECT cloud_cost_snapshots.reference_type AS reference_type, "
-        "cloud_cost_snapshots.reference_id AS reference_id, cloud_cost_snapshots.policy_version AS "
-        "policy_version, cloud_cost_snapshots.task_kind AS task_kind, cloud_cost_snapshots.task_id "
-        "AS task_id, cloud_cost_snapshots.local_day AS local_day, cloud_cost_snapshots.occurred_at "
-        "AS occurred_at, cloud_cost_snapshots.dispatched_at AS dispatched_at, "
-        "cloud_cost_snapshots.snapshot_json AS snapshot_json, "
-        "cloud_cost_snapshots.reserved_micro_usd AS reserved_micro_usd, "
-        "cloud_cost_snapshots.accounted_micro_usd AS accounted_micro_usd, "
-        "cloud_cost_snapshots.amount_micro_cny AS amount_micro_cny, cloud_cost_snapshots.state AS "
-        "state, cloud_cost_snapshots.legacy AS legacy, cloud_cost_snapshots.reconciliation_sha256 "
-        "AS reconciliation_sha256, cloud_cost_snapshots.updated_at AS updated_at FROM "
-        "cloud_cost_snapshots AS cloud_cost_snapshots WHERE cloud_cost_snapshots.local_day = %s OR "
-        "cloud_cost_snapshots.state IN ('RESERVED', 'UNKNOWN')",
-        (day,),
-    ):
-        snapshot = json.loads(row["snapshot_json"])
-        native = _native(store, row["reference_type"], row["reference_id"])
-        amount, state = (
-            _liability(row, native) if native else (row["accounted_micro_usd"], row["state"])
-        )
-        at = row["dispatched_at"] or (native and native["dispatched_at"]) or row["occurred_at"]
-        if state in {"RESERVED", "UNKNOWN"} or _day(at, snapshot["timezone"]) == day:
-            used += _cny(amount, snapshot)
-        unpriced |= (
-            state == "UNKNOWN"
-            and not amount
-            and row["reference_type"] == "model"
-            and not (snapshot.get("pricing") or {}).get("pricing_known")
-        )
-    missing = [
-        ("model", row["request_id"])
-        for row in store.rows(
-            "SELECT request_id FROM model_usage AS m WHERE NOT EXISTS(SELECT 1 FROM "
-            "cloud_cost_snapshots AS c WHERE c.reference_type = 'model' AND c.reference_id = "
-            "m.request_id)",
-        )
-    ]
-    missing += [
-        ("tool", row["task_id"])
-        for row in store.rows(
-            (
-                'SELECT task_id FROM tool_tasks AS t WHERE NOT '
-                'dispatched_at IS NULL AND NOT EXISTS(SELECT 1 FROM '
-                'cloud_cost_snapshots AS c WHERE c.reference_type = '
-                "'tool' AND c.reference_id = t.task_id)"
-            ),
-        )
-    ]
-    for kind, reference_id in missing:
-        native = _native(store, kind, reference_id)
-        amount = (
-            max(native["amount"], native["reserved"])
-            if native["state"] in {"RESERVED", "UNKNOWN"}
-            else native["amount"]
-        )
-        if (
-            native["state"] in {"RESERVED", "UNKNOWN"}
-            or _day(native["dispatched_at"] or native["occurred_at"], timezone) == day
-        ):
-            used += _cny(amount, {"config": config})
-        unpriced |= native["state"] == "UNKNOWN" and not amount and not native["pricing_known"]
-    if unpriced:
-        blocks.append("CLOUD_BUDGET_UNPRICED_USAGE")
-    if used >= config["daily_micro_cny"]:
-        blocks.append("CLOUD_DAILY_BUDGET_EXHAUSTED")
-    return blocks
+def capacity_blocks(store, settings, now):
+    """Cost estimates and unknown charges are warnings, never capability gates."""
+    return []
 
 
 def summary(store, settings, now=None):
@@ -974,10 +834,7 @@ def summary(store, settings, now=None):
             ),
             "restored_history_may_be_incomplete": restore_required,
             "task_over_limit_count": task_overruns,
-            "admission_blocked": restore_required
-            or bool(unpriced)
-            or used >= view["config"]["daily_micro_cny"]
-            or _time(now) >= _time(current["fx_valid_until"]),
+            "admission_blocked": False,
             "fx_expired": _time(now) >= _time(current["fx_valid_until"]),
             "charge_count": sum(row["n"] for row in rows),
         }

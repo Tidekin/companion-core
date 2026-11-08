@@ -239,7 +239,7 @@ def test_native_client_quota_serializes_independent_workers(harness):
     assert len(harness.core.store.rows("SELECT * FROM model_usage")) == 1
 
 
-def test_actual_client_amount_violation_preserves_native_unknown(harness):
+def test_actual_client_currency_overrun_preserves_actual_charge(harness):
     rotate(harness, budget={**harness.grant.budget.model_dump(), "max_request_micro_usd": 1000})
     harness.submit()
 
@@ -250,10 +250,10 @@ def test_actual_client_amount_violation_preserves_native_unknown(harness):
 
     harness.process(overspend)
     usage = harness.core.store.one("SELECT * FROM model_usage")
-    assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] >= 2000
+    assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] >= 2000
     diagnostic = harness.core.store.rows(
         "SELECT * FROM audit_log WHERE action='model.usage_diagnostic'")
-    assert "GATEWAY_REQUEST_AMOUNT" in str(diagnostic)
+    assert "GATEWAY_REQUEST_AMOUNT" not in str(diagnostic)
 
 
 def test_native_daily_client_limit_survives_rotation(harness):
@@ -462,3 +462,24 @@ def test_concurrent_native_submission_keeps_one_original_request(harness, monkey
     assert len(harness.core.store.rows("SELECT * FROM gateway_requests")) == 1
     assert harness.core.store.rows("SELECT * FROM model_usage") == []
     assert journal.read_bytes() == before
+
+
+def test_actual_gateway_response_with_unknown_cost_is_available_without_replay(harness):
+    request_id = harness.submit()
+
+    def without_usage(request):
+        value = provider(request).json()
+        del value["usage"]
+        return httpx.Response(200, json=value)
+
+    assert harness.process(without_usage)
+    result = gateway.receipt(harness.core.store, harness.core.settings, "client-a", request_id,
+                             harness.core.clock())
+    assert result["status"] == "SUCCEEDED" and result["error_code"] is None
+    assert result["completion"]["choices"][0]["message"]["content"] == "paid reply"
+    assert result["completion"]["usage"] is None
+    original = harness.core.store.one("SELECT * FROM model_usage")
+    assert original["state"] == "UNKNOWN" and original["billed_micro_usd"] > 0
+    assert result["accounting"]["state"] == "UNKNOWN"
+    assert not harness.process(lambda req: pytest.fail("received response replayed"))
+    assert harness.core.store.one("SELECT * FROM model_usage") == original

@@ -265,7 +265,7 @@ def snapshot(settings, *, integrity=False):
                 "model_budget_blocked", "model_budget_restore_required",
             ):
                 if view.one('SELECT 1 FROM runtime_meta WHERE key = %s', (key,)):
-                    result["blockers"].append(key.upper())
+                    result.setdefault("warnings", []).append(key.upper())
             from companion.live_text import stopped
 
             lifecycle = paid_budget.live_lifecycle(view)
@@ -274,7 +274,9 @@ def snapshot(settings, *, integrity=False):
             ) else None
             if stopped(view, plan):
                 result["blockers"].append("LIVE_TEXT_STOPPED")
-            if result["budget"]["unsettled_calls"]:
+            if result["budget"]["unknown_calls"]:
+                result.setdefault("warnings", []).append("MODEL_COST_UNKNOWN")
+            if result["budget"]["unsettled_calls"] > result["budget"]["unknown_calls"]:
                 result["blockers"].append("MODEL_USAGE_UNSETTLED")
             if result["deliveries"]["states"].get("DELIVERY_UNCERTAIN"):
                 result["blockers"].append("DELIVERY_UNCERTAIN")

@@ -129,7 +129,7 @@ def test_changes_block_execution_without_io(core, tmp_path, condition):
 
 
 @pytest.mark.parametrize("failure", ["timeout", "usage_missing", "amount_overrun"])
-def test_unknown_stops_remaining_calls_and_never_retries(core, tmp_path, failure):
+def test_result_checkpoint_controls_continuation(core, tmp_path, failure):
     manifest = prepare(core, tmp_path)
     submitted = evaluation.submit(core, authorize(core, manifest))
     calls = []
@@ -144,14 +144,22 @@ def test_unknown_stops_remaining_calls_and_never_retries(core, tmp_path, failure
             body["usage"]["prompt_tokens"] = 17000  # $0.0051 exceeds experiment attempt bound.
         return httpx.Response(200, json=body)
     work(core, handler)
-    assert len(calls) == 1
-    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
-    assert all(r["state"] == "NOT_STARTED" for r in result(core, submitted)["requests"][1:])
+    expected = 1 if failure == "timeout" else 6
+    assert len(calls) == expected
+    states = core.store.rows("SELECT state FROM model_usage")
+    assert all(r["state"] == ("SETTLED" if failure == "amount_overrun" else "UNKNOWN")
+               for r in states)
+    if failure == "timeout":
+        assert all(r["state"] == "NOT_STARTED"
+                   for r in result(core, submitted)["requests"][1:])
+    else:
+        assert result(core, submitted)["state"] == "SUCCEEDED"
+        assert len(core.store.rows("SELECT * FROM evaluation_results")) == expected
     assert not work(core, handler)
-    assert len(calls) == 1
+    assert len(calls) == expected
 
 
-def test_normal_task_spend_competes_for_same_cloud_ceiling(core, tmp_path):
+def test_normal_task_and_evaluation_preserve_shared_advisory_cloud_ledger(core, tmp_path):
     manifest = prepare(core, tmp_path, chat=True)
     cap = core.settings.cloud_budget.model_copy(update={"daily_micro_cny": 30000})
     core.settings.cloud_budget = cap
@@ -165,9 +173,10 @@ def test_normal_task_spend_competes_for_same_cloud_ceiling(core, tmp_path):
     submitted = evaluation.submit(core, authorize(core, manifest))
     calls = []
     work(core, lambda req: (calls.append(1) or response(req)))
-    assert calls == []
-    assert result(core, submitted)["state"] == "FAILED"
-    assert result(core, submitted)["error_code"] == "CLOUD_DAILY_BUDGET_EXHAUSTED"
+    assert len(calls) == 6
+    assert result(core, submitted)["state"] == "SUCCEEDED"
+    assert core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=%s",
+                          (prior,))["billed_micro_usd"] > 0
 
 
 def test_source_revoke_during_transport_hook_fences_request(core, tmp_path):

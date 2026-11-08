@@ -30,9 +30,7 @@ def stop(core, case):
 def test_closure_frees_the_slot_and_lets_the_same_policy_resume(core, tmp_path):
     case = migrated(core, tmp_path)
     request_id = unstarted_unknown(core)
-    with pytest.raises(CoreError, match="MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"):
-        budget.reserve(core.store, core.settings, authorized_job(core, number=3), "chat",
-                       MESSAGES, core.clock())
+    assert budget.execution_counts(core.store)["total"] == 0
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_STOP_REQUIRED"):
         model_carry.close_unstarted(core.store, core.settings, request_id, core.clock(),
                                     commit=True)

@@ -175,7 +175,7 @@ def test_owner_stop_cancels_inflight_provider_and_retains_unknown_cost(core):
     assert media.inflight == {}
 
 
-@pytest.mark.parametrize("limit", ["session", "daily", "cost", "global"])
+@pytest.mark.parametrize("limit", ["session", "daily"])
 def test_reservation_limits_checked_before_any_provider_call(core, limit):
     media = service(core)
     session = start(media, max_bytes=1024)
@@ -220,7 +220,7 @@ def test_concurrent_requests_cannot_overspend_remaining_session_budget(core):
 
 
 @pytest.mark.parametrize("tool_state", ["RUNNING", "UNKNOWN"])
-def test_tool_reservations_and_unknown_cost_block_media_monthly_overspend(core, tool_state):
+def test_media_preserves_tool_liability_without_global_currency_refusal(core, tool_state):
     from tests.support.executive import FakeExecutor, configured, proposal
 
     executor = FakeExecutor()
@@ -238,11 +238,12 @@ def test_tool_reservations_and_unknown_cost_block_media_monthly_overspend(core, 
         "billed_micro_usd": 1000,
     }
     media = service(core)
-    with pytest.raises(CoreError, match="MEDIA_COST_BUDGET_EXHAUSTED"):
-        process(media, start(media), chunk())
-    assert not media.provider.calls
-    assert not core.store.rows("SELECT * FROM media_requests")
-    assert not core.store.rows("SELECT * FROM model_usage WHERE scenario='media'")
+    process(media, start(media), chunk())
+    assert len(media.provider.calls) == 1
+    assert core.store.rows("SELECT * FROM media_requests")
+    assert core.store.rows("SELECT * FROM model_usage WHERE scenario='media'")
+    assert core.store.one("SELECT state,billed_micro_usd FROM tool_tasks") == {
+        "state": tool_state, "billed_micro_usd": 1000}
 
 
 def test_credentials_rejected_before_speech_and_in_provider_output(core):
@@ -652,3 +653,13 @@ def test_settings_load_nested_media_configuration(core, monkeypatch, tmp_path):
     monkeypatch.setenv("COMPANION_MEDIA", '{"enabled":false,"max_session_seconds":60}')
     loaded = Settings.load()
     assert not loaded.media.enabled and loaded.media.max_session_seconds == 60
+
+
+def test_zero_media_currency_amount_keeps_native_charge(core):
+    media = service(core)
+    media.options.daily_micro_usd = 0
+    core.settings.monthly_limit_micro_usd = 0
+    process(media, start(media), chunk())
+    assert len(media.provider.calls) == 1
+    usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE scenario='media'")
+    assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0

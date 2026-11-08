@@ -6,7 +6,6 @@ import httpx
 import pytest
 
 from companion import owner_authority
-from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import REVIEW_RULES, ModelClient
 from companion.store import encode
@@ -168,7 +167,7 @@ def test_emoji_memory_candidates_are_evaluated_in_the_same_sdk_conversation(
 
 
 @pytest.mark.parametrize("prefetched", [False, True], ids=["empty-prefetch", "pinned-prefetch"])
-def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(
+def test_tool_response_with_unknown_cost_continues_without_repayment(
     core, tmp_path, monkeypatch, prefetched,
 ):
     async def scenario():
@@ -176,8 +175,9 @@ def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(
 
         def provider(request):
             calls.append(json.loads(request.content)["messages"])
-            assert len(calls) == 1
-            return tool_response(usage=False)
+            assert len(calls) <= 2
+            return (tool_response(usage=False) if len(calls) == 1
+                    else httpx.Response(200, json=answer("在想什么呢？")))
 
         async with environment(core, tmp_path) as (admit, _, _):
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
@@ -191,7 +191,7 @@ def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(
 
                     async def prefetch(query, *args, **kwargs):
                         queries.append(query)
-                        assert query == "🤔", "Unknown provider usage reached tool lookup"
+                        assert query in {"🤔", "*"}
                         return await lookup(query, *args, **kwargs) if prefetched else {"rows": []}
 
                     monkeypatch.setattr(worker.memory_context, "recall_async", prefetch)
@@ -199,24 +199,25 @@ def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(
                     assert await worker.run_once("unknown-tool-accounting")
                     assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=%s",
                         (accepted["job_id"],)) == {
-                            "state": "FAILED", "last_error_code": "MODEL_OUTCOME_UNKNOWN"}
+                            "state": "SUCCEEDED", "last_error_code": None}
                     usage = core.store.one("SELECT u.state,u.billed_micro_usd,a.reserved_micro_usd "
-                        "FROM model_usage u JOIN model_admissions a USING(request_id)")
+                        "FROM model_usage u JOIN model_admissions a USING(request_id) "
+                        "ORDER BY u.record_sequence LIMIT 1")
                     assert usage["state"] == "UNKNOWN"
                     assert usage["billed_micro_usd"] == usage["reserved_micro_usd"] > 0
-                    assert queries == ["🤔"]
+                    assert queries[0] == "🤔"
                     consumed = {row["event_id"] for row in core.store.rows(
                         "SELECT event_id FROM job_sources WHERE job_id=%s", (accepted["job_id"],))}
                     assert (seed.event_id in consumed) is prefetched
                     assert core.store.rows("SELECT * FROM memories") == before
-                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=%s",
+                    assert core.store.rows("SELECT * FROM outbox WHERE origin_event_id=%s",
                                                (source.event_id,))
-                    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
-                        owner_authority.current(core.store, core.settings, core.clock)
+                    assert owner_authority.current(core.store, core.settings, core.clock)
+                    assert len(core.store.rows("SELECT * FROM model_usage")) == 2
                 with Core(core.settings, ModelClient(core.settings, transport),
                           core.clock) as restarted:
                     assert not await restarted.run_once("no-unknown-replay")
-                assert len(calls) == 1
+                assert len(calls) == 2
     run(scenario())
 
 

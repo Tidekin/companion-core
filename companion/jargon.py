@@ -383,7 +383,7 @@ async def run_once(store, settings, model, clock):
             model, store, settings, request_id, messages, SCENARIO, clock, source_check=check_source
         )
         usage = store.one("SELECT state FROM model_usage WHERE request_id = %s", (request_id,))
-        if not usage or usage["state"] != "SETTLED":
+        if not usage or usage["state"] not in {"SETTLED", "UNKNOWN"}:
             raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
         raw = json.loads(response.text)
         with store.transaction():

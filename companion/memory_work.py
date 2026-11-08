@@ -220,9 +220,10 @@ def parse_extraction(text, mapping):
     return Extraction.model_validate(from_refs(value, mapping)), repaired
 
 
-def _settled(store, request_id):
+def _response_usage(store, request_id):
+    """Caller holds a received response or its validated extraction checkpoint."""
     usage = store.one("SELECT state FROM model_usage WHERE request_id = %s", (request_id,))
-    if not usage or usage["state"] != "SETTLED":
+    if not usage or usage["state"] not in {"SETTLED", "UNKNOWN"}:
         raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
 
 
@@ -430,7 +431,7 @@ async def prepare_memories(
         self.clock,
         source_check=check_review,
     )
-    _settled(s, request_id)
+    _response_usage(s, request_id)
     # Preserve the existing write-reconciliation failure contract. A real input
     # recall already cancelled the tracked job; a concurrent explicit forget
     # remains PRIVACY_CHANGED and cannot commit the old review result.
@@ -1081,7 +1082,7 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 core.clock,
                 source_check=lambda: _validate_batch(core, lease, batch),
             )
-            _settled(s, request_id)
+            _response_usage(s, request_id)
             if response.finish_reason == "length":
                 # The JSON is cut off and the batch will be retried; keep the evidence.
                 s.audit(
@@ -1098,7 +1099,7 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 s.audit("memory.output_repaired", events[0]["event_id"], "memory", now)
             with s.transaction():
                 _validate_batch(core, lease, batch)
-                _settled(s, request_id)
+                _response_usage(s, request_id)
                 rejected = {}
                 signals = mood_appraisals.validate(
                     s, extraction.interaction_signals, set(batch["event_ids"]), rejected
@@ -1198,7 +1199,7 @@ async def extraction_step(core, local_day, lease, batch, persist):
             with s.transaction():
                 _validate_batch(core, lease, batch)
                 extraction_id = batch["extraction_request_id"]
-                _settled(s, extraction_id)
+                _response_usage(s, extraction_id)
                 signals = [
                     item
                     for item in batch["interaction_signals"]

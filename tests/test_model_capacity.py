@@ -197,8 +197,7 @@ def test_unknown_retains_money_and_blocks_its_input_without_stopping_unrelated_w
     with core.store.transaction():
         view = paid_budget.journal(core.store, core.settings.paid_model)
     assert (request_id in view["model_closures"]) is transport_unwound
-    assert budget.execution_counts(core.store, view["model_closures"])["total"] == (
-        0 if transport_unwound else 1)
+    assert budget.execution_counts(core.store, view["model_closures"])["total"] == 0
     assert not life_topics._uncertain(core.store, core.settings)
     assert "MODEL_USAGE_UNKNOWN" not in capabilities._live_blocks(
         core.store, core.settings, core.clock())

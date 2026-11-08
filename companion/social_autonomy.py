@@ -656,8 +656,8 @@ class SocialAutonomy:
             raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
         unresolved = s.one(
             "SELECT 1 FROM social_autonomy_plans AS p LEFT JOIN model_usage AS m ON m.request_id = "
-            "p.model_request_id WHERE p.plan_id <> %s AND (p.state = 'PLANNING' OR m.state IN "
-            "('RESERVED', 'UNKNOWN')) LIMIT 1",
+            "p.model_request_id WHERE p.plan_id <> %s AND (p.state = 'PLANNING' OR "
+            "m.state = 'RESERVED') LIMIT 1",
             (excluding or "",),
         )
         if unresolved:

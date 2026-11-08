@@ -260,8 +260,8 @@ class Core(Runtime):
 
     def claim_job(self, worker_id, *, job_id=None):
         s, now = self.store, self.clock()
-        # Keep native recovery before the retryable snapshot. A claim rechecks
-        # every fence under its writer lock; spool scans use idle maintenance.
+        # Recovery commits independently. Empty polls use a snapshot; an eligible
+        # candidate repeats its fences only under the native writer/row lock.
         with s.transaction():
             self.recover(now)
         return s.read_or_write(lambda: self._claim_job(worker_id, job_id, now))
@@ -305,6 +305,8 @@ class Core(Runtime):
         )
         if not row:
             return None
+        if not s.in_write_transaction:
+            raise RuntimeError("POSTGRES_CLAIM_REQUIRES_WRITE_TRANSACTION")
         if row["kind"] in {"activity", "rem"} and (
             budget.chat_pending(s, now) or private_life.enabled(self.settings)
             and private_life.owner_waiting(s, self.settings, now)
@@ -1124,7 +1126,7 @@ class Core(Runtime):
             if (not bounded_text and private_life.enabled(self.settings) and job["kind"] == "chat"
                 and reply_revision.owner_input(self.store, job["event_id"])
                 and not reply_revision.control_job(self.store, job)
-                and usage and usage["state"] == "SETTLED"):
+                and usage and usage["state"] in {"SETTLED", "UNKNOWN"}):
                 # Recall selection is optional context, not a memory write. Drop
                 # every candidate and expose unavailability; never retry this paid
                 # review or report an invalid selection as a valid empty result.
@@ -1757,7 +1759,13 @@ class Core(Runtime):
                                       (job["job_id"],))
             resumable = (checkpoint and checkpoint["phase"] in {"READY", "WAITING"}
                          and not self.store.one(
-                             "SELECT 1 FROM model_usage WHERE job_id = %s AND state <> 'SETTLED'",
+                             "SELECT 1 FROM model_usage m WHERE m.job_id=%s "
+                             "AND (m.state='RESERVED' "
+                             "OR (m.state='UNKNOWN' AND NOT EXISTS(SELECT 1 FROM "
+                             "agent_conversations c, jsonb_array_elements("
+                             "c.conversation_json::jsonb->'messages') r(value) "
+                             "WHERE c.job_id=m.job_id AND r.value->>'kind'='response' "
+                             "AND r.value->'metadata'->>'core_request_id'=m.request_id)))",
                              (job["job_id"],))
                          and not self.store.one(
                              'SELECT 1 FROM agent_tool_calls WHERE job_id = %s AND state IN '

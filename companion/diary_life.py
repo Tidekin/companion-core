@@ -75,13 +75,14 @@ def save(service, job_id, *, expected_content_sha256, authority):
         if run:
             usage = store.one('SELECT state FROM model_usage WHERE request_id = %s',
                               (run["model_request_id"],))
-            if run["state"] == "RUNNING" or usage and usage["state"] != "SETTLED":
+            if run["state"] == "RUNNING" or usage and usage["state"] == "RESERVED":
                 raise CoreError("DIARY_DAY_BUSY", 409)
         body = entry["body_md"] + "\n\n## 自主随记\n\n" + text if entry else text
         if len(body) > cfg.diary_max_body_chars:
             raise CoreError("DIARY_BODY_LIMIT", 409)
         original_usage = store.one('SELECT request_id, model FROM model_usage WHERE job_id = %s '
-            "AND scenario = 'activity' AND state = 'SETTLED' ORDER BY record_sequence DESC NULLS "
+            "AND scenario = 'activity' AND state IN ('SETTLED','UNKNOWN') "
+            "ORDER BY record_sequence DESC NULLS "
             'LAST LIMIT 1', (job_id,))
         if original_usage is None:
             raise CoreError("LIFE_SETTLED_DRAFT_REQUIRED", 409)

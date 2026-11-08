@@ -50,11 +50,10 @@ def test_http_image_and_independent_reply_worker_share_the_cny_ledger(core):
         }, idempotency_key="reduce-to-consumed", now=worker.clock())
         next_id = owner_share(worker, 2, manifest=[{"kind": "image", "slot": 0}])
         worker.content.provider = vision
-        with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-            run(worker.content.analyze_image(next_id, "image:0", png(), "image/png"))
-        assert len(worker.store.rows("SELECT * FROM cloud_cost_snapshots")) == 2
-        assert len(worker.store.rows("SELECT * FROM model_usage")) == 2
-    assert len(vision.calls) == 1
+        run(worker.content.analyze_image(next_id, "image:0", png(), "image/png"))
+        assert len(worker.store.rows("SELECT * FROM cloud_cost_snapshots")) == 3
+        assert len(worker.store.rows("SELECT * FROM model_usage")) == 3
+    assert len(vision.calls) == 2
 
 
 def test_unknown_image_keeps_original_fx_and_blocks_replay_after_reconfiguration(core):
@@ -78,11 +77,11 @@ def test_unknown_image_keeps_original_fx_and_blocks_replay_after_reconfiguration
     assert len(vision.calls) == 1
 
 
-def test_runtime_capability_snapshot_reports_cloud_exhaustion_without_binding(core):
+def test_runtime_capability_snapshot_treats_cloud_currency_as_advisory(core):
     core.settings.cloud_budget.daily_micro_cny = 0
     before = logical_state(core.store)
     with core.store.read_snapshot():
         value = snapshot(core.store, core.settings, core.clock)
-    assert "CLOUD_DAILY_BUDGET_EXHAUSTED" in json.dumps(value)
+    assert "CLOUD_DAILY_BUDGET_EXHAUSTED" not in json.dumps(value)
     assert logical_state(core.store) == before
     assert not core.store.rows("SELECT * FROM cloud_budget_policies")

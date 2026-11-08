@@ -47,7 +47,7 @@ def test_revision_idempotency_and_current_policy(core, tmp_path):
 
 @pytest.mark.parametrize("snapshot", [True, False])
 @pytest.mark.parametrize(("ledger", "error"), [
-    ("paid", "MODEL_BUDGET_RECONCILIATION_REQUIRED"), ("erasure", "ERASURE_LEDGER_INVALID"),
+    ("paid", "OWNER_AUTHORITY_CUSTODY_REQUIRED"), ("erasure", "ERASURE_LEDGER_INVALID"),
 ])
 def test_every_current_check_reopens_the_original_ledgers(core, tmp_path, snapshot, ledger, error):
     policy = prepare(core, tmp_path)

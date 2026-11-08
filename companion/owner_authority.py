@@ -58,6 +58,18 @@ _REVISION_FIELDS = (
     "r.record_sha256, r.journal_id, r.journal_path, r.created_at"
 )
 
+_CUSTODY_FIELDS = (
+    "identity.value AS custody_journal_id, lifecycle.value AS custody_lifecycle, "
+    "(SELECT jsonb_agg(history ORDER BY history.revision) FROM "
+    f"(SELECT {_REVISION_FIELDS}, pointer.value AS current_head "
+    "FROM owner_authority_revisions r) history) AS custody_projection"
+)
+_CUSTODY_JOINS = (
+    "LEFT JOIN runtime_meta pointer ON pointer.key=%s "
+    "LEFT JOIN runtime_meta identity ON identity.key='model_budget_journal_id' "
+    "LEFT JOIN runtime_meta lifecycle ON lifecycle.key='model_budget_live_lifecycle' "
+)
+
 
 def _latest(store):
     return store.one(
@@ -226,14 +238,21 @@ def _journal_custody(store, settings, row, *, settlement=False):
 
 def current(store, settings, clock, *, purpose=None, authority=None):
     """Current policy plus original journal custody; never returns a synthetic window."""
-    from companion.live_text import _ledger_custody
+    from companion.live_text import ERASURE_PROJECTION_SQL, _ledger_custody
+    from companion.postgres import BUDGET_LEDGER, ERASURE_LEDGER
 
     if settings.owner_runtime.mode != "ENABLED":
         raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
+    if not store.in_transaction:
+        return store.read_or_write(lambda: current(
+            store, settings, clock, purpose=purpose, authority=authority))
+    store.ledger_lock(BUDGET_LEDGER, shared=store.in_read_snapshot)
+    store.ledger_lock(ERASURE_LEDGER, shared=True)
     row = store.one(
         f"SELECT {_REVISION_FIELDS}, mode.value AS runtime_mode, "
-        "generation.value AS runtime_generation FROM runtime_meta mode "
-        "LEFT JOIN runtime_meta pointer ON pointer.key = %s "
+        f"generation.value AS runtime_generation, {_CUSTODY_FIELDS}, "
+        f"(SELECT jsonb_agg(erasure) FROM ({ERASURE_PROJECTION_SQL}) erasure) AS custody_erasure "
+        f"FROM runtime_meta mode {_CUSTODY_JOINS}"
         "LEFT JOIN owner_authority_revisions r ON r.record_sha256 = NULLIF(pointer.value, '') "
         "LEFT JOIN runtime_meta generation ON generation.key = %s "
         "WHERE mode.key = %s", (CURRENT, GENERATION, MODE),
@@ -259,12 +278,10 @@ def current(store, settings, clock, *, purpose=None, authority=None):
         raise problem
     if purpose is not None and purpose not in policy.purposes:
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
-    if store.in_read_snapshot:
-        # The revision and its path remain visible in this one native snapshot.
-        _journal_custody(store, settings, row)
-    else:
-        custody(store, settings)
-    _ledger_custody(store, settings)
+    from companion import authority_custody
+
+    authority_custody.check(store, row)
+    _ledger_custody(store, settings, projection=row["custody_erasure"])
     if policy.expires_at is not None and datetime.fromisoformat(clock()) >= policy.expires_at:
         raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
     return OwnerAuthorityView(
@@ -274,30 +291,24 @@ def current(store, settings, clock, *, purpose=None, authority=None):
 
 def evidence(store, settings, authority):
     """Original policy for proof verification only; never grants execution permission."""
+    from companion import authority_custody
+    from companion.postgres import BUDGET_LEDGER
+
+    if not store.in_transaction:
+        return store.read_or_write(lambda: evidence(store, settings, authority))
+    store.ledger_lock(BUDGET_LEDGER, shared=store.in_read_snapshot)
     try:
         ref = AuthorityRef.from_dict(authority)
     except (ValueError, TypeError):
         raise CoreError("OWNER_AUTHORITY_REFERENCE_INVALID", 400) from None
     row = store.one(
-        "SELECT owner_authority_revisions.grant_id AS grant_id, "
-        "owner_authority_revisions.revision AS revision, owner_authority_revisions.operation_id AS "
-        "operation_id, owner_authority_revisions.request_sha256 AS request_sha256, "
-        "owner_authority_revisions.state AS state, owner_authority_revisions.policy_json AS "
-        "policy_json, owner_authority_revisions.policy_sha256 AS policy_sha256, "
-        "owner_authority_revisions.policy_redacted AS policy_redacted, "
-        "owner_authority_revisions.restore_generation AS restore_generation, "
-        "owner_authority_revisions.predecessor_sha256 AS predecessor_sha256, "
-        "owner_authority_revisions.record_sha256 AS record_sha256, "
-        "owner_authority_revisions.journal_id AS journal_id, "
-        "owner_authority_revisions.journal_path AS journal_path, "
-        "owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS "
-        "owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND "
-        "owner_authority_revisions.revision = %s",
-        (ref.grant_id, ref.revision),
+        f"SELECT {_REVISION_FIELDS}, {_CUSTODY_FIELDS} "
+        f"FROM owner_authority_revisions r {_CUSTODY_JOINS}"
+        "WHERE r.grant_id=%s AND r.revision=%s", (CURRENT, ref.grant_id, ref.revision),
     )
     if not row or reference(row) != ref or row["state"] != "ACTIVE" or row["policy_redacted"]:
         raise CoreError("OWNER_AUTHORITY_EVIDENCE_REQUIRED", 403)
-    custody(store, settings, settlement=True)
+    authority_custody.check(store, row, historical=True)
     return OwnerAuthorityView(
         ref,
         OwnerGrantPolicy.model_validate_json(row["policy_json"]),
@@ -817,12 +828,7 @@ def activate(store, settings, clock, request):
         expected = preview(store, settings, clock, request)
         if request.preview_sha256 != expected["preview_sha256"]:
             raise CoreError("OWNER_AUTHORITY_PREVIEW_CHANGED", 409)
-        if store.one(
-            "SELECT 1 FROM runtime_meta WHERE key IN ('cloud_budget_restore_required', "
-            "'model_budget_restore_required')"
-        ):
-            raise CoreError("OWNER_AUTHORITY_RESTORE_RECONCILIATION_REQUIRED", 503)
-        # Preserve the native quiescence inventory: neither UNKNOWN nor a pending send is idle.
+        # Active work and pending sends still require quiescence; cost UNKNOWN is advisory.
         from companion import model_carry
 
         if model_carry.active(settings) and request.policy.unknown_carry_sha256 is not None:

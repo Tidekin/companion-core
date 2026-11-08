@@ -134,6 +134,55 @@ def test_ledger_reads_native_rows_through_the_api_configuration(core, tmp_path, 
     assert logical_state(core.store) == before
 
 
+@pytest.mark.parametrize("exit_code,held", [(0, False), (1, False), (0, True)])
+def test_cost_unknown_warning_preserves_clean_stop_and_lock_requirements(
+    tmp_path, monkeypatch, exit_code, held,
+):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    current = rows()
+    before = {"authority": [1, "ACTIVE"], "unknown": 0, "jobs": {}, "deliveries": {}}
+    after = {**before, "unknown": 1}
+    snapshots = iter((before, after))
+    monkeypatch.setattr(rolling, "inspect", lambda project: current)
+    monkeypatch.setattr(rolling, "ledger", lambda api: next(snapshots))
+    monkeypatch.setattr(rolling, "lock_holders", lambda path, locks: [42] if held else [])
+    original_read = Path.read_text
+
+    def read(path, *args, **kwargs):
+        return "" if path == Path('/proc/locks') else original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    commands = []
+
+    def docker(*args, **kwargs):
+        commands.append(args)
+        stopped = {"Running": False, "ExitCode": exit_code, "FinishedAt": "synthetic-stop"}
+        return SimpleNamespace(stdout=json.dumps([{"State": stopped}]) if args[0] == "inspect"
+                               else "")
+
+    monkeypatch.setattr(rolling, "docker", docker)
+    replacement = row("companion-worker", NEW, StartedAt="synthetic-start")
+    replacement["Id"] = "synthetic-new-worker"
+    monkeypatch.setattr(rolling, "wait_started", lambda *args: replacement)
+    receipt, images = {"steps": []}, {}
+
+    def run():
+        rolling.roll("synthetic-project", "companion-worker", NEW, tmp_path,
+                     tmp_path / "override.json", images, receipt)
+
+    if exit_code or held:
+        with pytest.raises(RuntimeError, match="stop cleanly|worker lock"):
+            run()
+        assert images == {} and not any("up" in command for command in commands)
+    else:
+        run()
+        assert receipt["steps"][0]["warnings"] == ["MODEL_COST_UNKNOWN_CHANGED"]
+        assert receipt["steps"][0]["result"] == "ROLLED"
+        assert images == {"companion-worker": NEW}
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="/proc/locks device numbers are Linux")
 def test_lock_holders_match_the_exact_inode(tmp_path):
     path = tmp_path / "core.db.worker.lock"

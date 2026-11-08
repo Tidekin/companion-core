@@ -198,7 +198,7 @@ def still_valid(store, row):
     if (
         text is None
         or not usage
-        or usage["state"] != "SETTLED"
+        or usage["state"] not in {"SETTLED", "UNKNOWN"}
         or usage["scenario"] != "memory_extract"
         or row["reason"] not in REASONS
     ):

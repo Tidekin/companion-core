@@ -401,8 +401,7 @@ def _permit(view, approval, allow_settlement):
     """The read-only refusals of `_journal`, applied again to a reused view."""
     authority, lifecycle = view["owner_authority"], view["lifecycle"]
     if not allow_settlement and (
-        view["blocked_request_ids"]
-        or authority and authority["state"] != "ACTIVE"
+        authority and authority["state"] != "ACTIVE"
         or lifecycle and not authority and (
             lifecycle["state"] == "STOPPED"
             or getattr(approval, "window_id", lifecycle["window_id"]) != lifecycle["window_id"])
@@ -707,11 +706,7 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
         lifecycle_record = record and record.get("kind") in {
             "window_stop", "window_open", "window_handoff"
         }
-        if not heads or (blocked and (
-            not allow_settlement or (
-                record and record.get("kind") in {"window_open", "window_handoff"}
-            )
-        )):
+        if not heads:
             raise ValueError("journal reconciliation")
         if authorities and authorities[-1]["state"] != "ACTIVE" and not (
             allow_settlement or authority_record

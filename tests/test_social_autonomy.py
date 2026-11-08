@@ -348,17 +348,16 @@ def test_model_skip_retains_real_planning_cost_without_using_a_publish_slot(core
     assert not core.store.rows("SELECT * FROM social_autonomy_reservations")
 
 
-def test_global_cloud_limit_stops_new_planning_before_provider_and_native_charge(core):
+def test_global_cloud_amount_is_advisory_and_retains_native_charge(core):
     module, ref, _ = background(core)
     core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        planned(module, ref)
-    assert module.model.calls == []
-    assert not core.store.rows("SELECT * FROM model_usage")
-    assert not core.store.rows("SELECT * FROM cloud_cost_snapshots")
+    planned(module, ref)
+    assert len(module.model.calls) == 1
+    assert len(core.store.rows("SELECT * FROM model_usage")) == 1
+    assert core.store.rows("SELECT * FROM cloud_cost_snapshots")
 
 
-def test_unknown_model_attempt_blocks_another_candidate_without_repayment(core):
+def test_unknown_model_cost_allows_another_candidate_without_repayment(core):
     module, ref, _ = background(core)
     module.model.error = RuntimeError("synthetic lost response")
     with pytest.raises(RuntimeError, match="synthetic lost response"):
@@ -367,10 +366,10 @@ def test_unknown_model_attempt_blocks_another_candidate_without_repayment(core):
     assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
     second = extra_public(core)
     module.model.error = None
-    with pytest.raises(CoreError, match="SOCIAL_MODEL_RECONCILIATION_REQUIRED"):
-        planned(module, second, "social-plan-two")
-    assert core.store.rows("SELECT * FROM model_usage") == [usage]
-    assert len(module.model.calls) == 1
+    assert planned(module, second, "social-plan-two")["state"] == "READY"
+    assert core.store.one("SELECT * FROM model_usage WHERE request_id=%s",
+                          (usage["request_id"],)) == usage
+    assert len(module.model.calls) == 2
 
 
 def test_source_erasure_during_model_await_discards_plan_but_keeps_observed_cost(core):

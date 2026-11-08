@@ -161,14 +161,12 @@ def _plan(settings, manifest):
                 measured = _request_measurement(settings, payload)
                 if measured["budget_input_tokens"] is None or any(
                     row.get(key) != value for key, value in measured.items()
-                ) or measured["budget_input_tokens"] > limits["input"] or measured[
-                    "estimated_reservation_micro_usd"] > ATTEMPT_MICRO_USD:
+                ) or measured["budget_input_tokens"] > limits["input"]:
                     raise ValueError("unsupported, changed or over-limit measurement")
                 measured_costs.append(measured["estimated_reservation_micro_usd"])
             shared.setdefault(row["case"], set()).add(digest)
         if version == 2 and (plan.get("repetitions") != repetitions
-                             or plan.get("estimated_reservation_micro_usd") != sum(measured_costs)
-                             or sum(measured_costs) > limits["cost"]):
+                             or plan.get("estimated_reservation_micro_usd") != sum(measured_costs)):
             raise ValueError("measurement total or repetition count")
         if any(len(digests) != 1 for digests in shared.values()) or len(
             set(manifest["source_event_ids"])) != len(manifest["source_event_ids"]):
@@ -328,9 +326,8 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
         '%s ORDER BY record_sequence NULLS FIRST', (job_id,))
     limits = _limits(manifest)
     if (len(prior) >= min(limits["calls"], len(manifest["plan"]["requests"]))
-        or any(row["state"] != "SETTLED" for row in prior)
-        or sum(row["billed_micro_usd"] for row in prior) + estimate > limits["cost"]
-        or estimate > ATTEMPT_MICRO_USD or estimated_input > limits["input"]):
+        or any(row["state"] not in {"SETTLED", "UNKNOWN"} for row in prior)
+        or estimated_input > limits["input"]):
         raise CoreError("EVALUATION_SUBLIMIT_EXHAUSTED", 429)
     ordinal = len(prior)
     if (rid != request_id(run["manifest_sha256"], ordinal)
@@ -344,12 +341,6 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
 
 
 def actual_limits(store, usage, actual):
-    total = store.one((
-        'SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage WHERE '
-        'job_id=%s'
-    ), (usage["job_id"],))["n"]
-    if actual > ATTEMPT_MICRO_USD or total + actual - usage["billed_micro_usd"] > COST:
-        return ["EVALUATION_AMOUNT"]
     return []
 
 
@@ -413,8 +404,9 @@ async def run(core, job):
             prior = store.rows('SELECT state FROM model_usage WHERE job_id = %s', (job["job_id"],))
             stored = store.one('SELECT COUNT(*) AS n FROM evaluation_results WHERE evaluation_id = '
                 '%s', (row["evaluation_id"],))["n"]
-            # Only a cleanly settled prefix with all results continues; never repeat a call.
-            if any(usage["state"] != "SETTLED" for usage in prior) or stored != len(prior):
+            # Every prior call needs its original response checkpoint; cost can remain unknown.
+            if (any(usage["state"] not in {"SETTLED", "UNKNOWN"} for usage in prior)
+                or stored != len(prior)):
                 raise CoreError("EVALUATION_PREVIOUS_ATTEMPT_REVIEW_REQUIRED", 409)
         requests = manifest["plan"]["requests"]
         stop = min(len(prior) + BATCH, len(requests))
@@ -435,7 +427,7 @@ async def run(core, job):
             with store.transaction():
                 source_check()
                 usage = store.one('SELECT state FROM model_usage WHERE request_id = %s', (rid,))
-                if usage["state"] != "SETTLED":
+                if usage["state"] not in {"SETTLED", "UNKNOWN"}:
                     raise CoreError("EVALUATION_USAGE_UNCERTAIN", 409)
                 safe_text = redact(response.text, settings)
                 store.insert("evaluation_results", request_id=rid,
@@ -503,7 +495,7 @@ def results(store, settings, clock, evaluation_id):
                          "finish_reason": observed["finish_reason"] if observed else None,
                          "complete_response": bool(observed and observed["text"]
                                                    and not observed["text_redacted"] and usage
-                                                   and usage["state"] == "SETTLED"
+                                                   and usage["state"] in {"SETTLED", "UNKNOWN"}
                                                    and observed["finish_reason"] == "stop")})
     # As in other private views, fence the completed projection rather than
     # keeping an initial SQLite snapshot alive across an independent erasure.

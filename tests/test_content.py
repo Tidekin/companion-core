@@ -199,7 +199,7 @@ def test_screenshot_download_is_reserved_and_can_only_be_claimed_once(core):
     assert service.status(event_id)["items"][0]["state"] == "UNKNOWN"
 
 
-@pytest.mark.parametrize("failure", ["price", "bytes", "count", "invalid", "dimension"])
+@pytest.mark.parametrize("failure", ["bytes", "count", "invalid", "dimension"])
 def test_image_validation_and_budgets_precede_provider_calls(core, failure):
     limits = {
         "price": {"image_daily_micro_usd": 0},
@@ -236,7 +236,7 @@ def test_vision_failure_keeps_reservation_and_cannot_be_replayed(core):
     }
 
 
-def test_vision_budget_includes_unknown_tool_costs(core):
+def test_vision_preserves_unknown_tool_cost_without_global_refusal(core):
     service, vision = enable(core)
     core.settings.monthly_limit_micro_usd = 10
     core.store.insert(
@@ -257,9 +257,10 @@ def test_vision_budget_includes_unknown_tool_costs(core):
         updated_at=core.clock(),
     )
     event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
-    with pytest.raises(CoreError, match="CONTENT_VISION_BUDGET_EXHAUSTED"):
-        run(service.analyze_image(event_id, "image:0", png(), "image/png"))
-    assert vision.calls == []
+    run(service.analyze_image(event_id, "image:0", png(), "image/png"))
+    assert len(vision.calls) == 1
+    assert core.store.one("SELECT state,billed_micro_usd FROM tool_tasks") == {
+        "state": "UNKNOWN", "billed_micro_usd": 1}
 
 
 def test_link_images_have_get_only_origin_binding_and_separate_article_limit(core):
@@ -439,3 +440,13 @@ def test_content_erasure_and_backup_replay_clear_every_derived_image(
             )
     finally:
         restored.close()
+
+
+def test_zero_vision_currency_amount_keeps_actual_charge(core):
+    service, vision = enable(core, image_daily_micro_usd=0, article_image_micro_usd=0)
+    core.settings.monthly_limit_micro_usd = 0
+    event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
+    run(service.analyze_image(event_id, "image:0", png(), "image/png"))
+    assert len(vision.calls) == 1
+    usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
+    assert usage == {"state": "SETTLED", "billed_micro_usd": 10}

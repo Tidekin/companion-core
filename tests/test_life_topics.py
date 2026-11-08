@@ -136,15 +136,15 @@ def test_duplicate_workers_claim_original_job_once(core):
     assert_no_delivery(core)
 
 
-def test_budget_denial_defers_unadmitted_job_without_model_call(core):
+def test_zero_currency_keeps_native_life_generation_available(core):
     bug(core)
     proposal(core)
     core.settings.autonomous_daily_micro_usd = 0
     job = due(core)
     assert run(core.run_once(job_id=job))
-    assert not core.model.calls
-    assert not core.store.rows("SELECT * FROM model_usage")
-    assert not core.store.rows("SELECT * FROM life_activity_results WHERE text<>''")
+    assert core.model.calls
+    assert core.store.rows("SELECT * FROM model_usage")
+    assert core.store.rows("SELECT * FROM life_activity_results WHERE text<>''")
     assert_no_delivery(core)
 
 

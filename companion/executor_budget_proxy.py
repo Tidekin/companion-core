@@ -79,8 +79,6 @@ def create_budget_proxy(
         one_call = (
             body.max_input_bytes * input_rate + body.max_output_tokens * output_rate + 999999
         ) // 1000000
-        if one_call * body.max_model_calls > body.max_cost_micro_usd:
-            raise HTTPException(429, "PRICE_BOUND_EXCEEDS_APPROVED_BUDGET")
         async with lock:
             for key in list(grants):
                 if grants[key]["expires"] <= clock():

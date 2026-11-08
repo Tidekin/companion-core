@@ -90,8 +90,8 @@ class ConversationStore:
         for message in conversation.messages:
             request_id = (message.metadata or {}).get("core_request_id")
             if request_id and not self.store.one(
-                'SELECT 1 FROM model_usage WHERE request_id = %s AND job_id = %s AND state = '
-                "'SETTLED'",
+                'SELECT 1 FROM model_usage WHERE request_id = %s AND job_id = %s AND state '
+                "IN ('SETTLED','UNKNOWN')",
                 (request_id, self.job["job_id"]),
             ):
                 raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
@@ -173,8 +173,8 @@ class ConversationStore:
             row = self.row()
             request_id = row["request_id"] if row else None
             if not request_id or not self.store.one(
-                'SELECT 1 FROM model_usage WHERE request_id = %s AND job_id = %s AND state = '
-                "'SETTLED'",
+                'SELECT 1 FROM model_usage WHERE request_id = %s AND job_id = %s AND state '
+                "IN ('SETTLED','UNKNOWN')",
                 (request_id, self.job["job_id"]),
             ):
                 raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)

@@ -82,8 +82,6 @@ class ImageGenerationConfig(BaseModel):
                 raise ValueError("image generation needs endpoint url, model, key and price")
             if endpoint.protocol != "openai":
                 raise ValueError("image generation supports the openai protocol only")
-            if self.daily_micro_usd < endpoint.max_request_micro_usd:
-                raise ValueError("image generation daily_micro_usd is below one request")
         return self
 
 

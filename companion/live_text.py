@@ -549,7 +549,7 @@ def open_window(store, settings, clock, reference):
 
 
 def _idle(store):
-    if store.one("SELECT 1 FROM model_usage WHERE state <> 'SETTLED' LIMIT 1") or any(
+    if store.one("SELECT 1 FROM model_usage WHERE state = 'RESERVED' LIMIT 1") or any(
         store.one(f"SELECT 1 FROM {table} WHERE state NOT IN ({states}) LIMIT 1")
         for table, states in (
             ("jobs", "'SUCCEEDED','FAILED','CANCELLED'"),
@@ -560,11 +560,21 @@ def _idle(store):
         raise CoreError("LIVE_TEXT_INITIAL_WORK_MUST_BE_ZERO", 409)
 
 
-def _ledger_custody(store, settings, expected_sha256=None):
+ERASURE_PROJECTION_SQL = (
+    "SELECT identity.value AS ledger_id, applied.erasure_id, applied.state, "
+    "applied.restore_min_replay_version FROM (VALUES (1)) AS anchor(value) "
+    "LEFT JOIN runtime_meta AS identity ON identity.key='ledger_id' "
+    "LEFT JOIN privacy_erasure_ledger AS applied ON TRUE"
+)
+
+
+def _ledger_custody(store, settings, expected_sha256=None, *, projection=None):
     """Compare latest external erasures with applied DB state; never replay or repair here."""
     from companion.postgres import ERASURE_LEDGER
 
     if not store.in_transaction:
+        if projection is not None:
+            raise RuntimeError("ERASURE_PROJECTION_REQUIRES_TRANSACTION")
         return store.read_or_write(lambda: _ledger_custody(store, settings, expected_sha256))
     store.ledger_lock(ERASURE_LEDGER, shared=True)
     ledger = ErasureLedger(settings.erasure_ledger)
@@ -576,12 +586,8 @@ def _ledger_custody(store, settings, expected_sha256=None):
     if expected_sha256 is not None and digest != expected_sha256:
         raise CoreError("LIVE_TEXT_HANDOFF_LEDGER_CHANGED", 409)
     records = ledger.read()
-    projection = store.rows(
-        "SELECT identity.value AS ledger_id, applied.erasure_id, applied.state, "
-        "applied.restore_min_replay_version FROM (VALUES (1)) AS anchor(value) "
-        "LEFT JOIN runtime_meta AS identity ON identity.key='ledger_id' "
-        "LEFT JOIN privacy_erasure_ledger AS applied ON TRUE"
-    )
+    if projection is None:
+        projection = store.rows(ERASURE_PROJECTION_SQL)
     if projection[0]["ledger_id"] != records[0]["ledger_id"]:
         raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
     applied = {

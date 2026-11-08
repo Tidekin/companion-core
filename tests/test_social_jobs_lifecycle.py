@@ -8,7 +8,6 @@ from alembic import command
 from alembic.config import Config
 
 from companion import private_life, social_plan_jobs
-from companion.cloud_budget import CloudBudgetConfig
 from companion.console_media_views import _plans
 from companion.contracts import CoreError
 from companion.legacy_import import migrate_sqlite
@@ -16,15 +15,14 @@ from companion.social_autonomy import restore_social_autonomy
 from companion.social_autonomy_runtime import _expire, run_once
 from tests.conftest import run
 from tests.support.release_migration import TIMES, insert, one, open_historical, rows, seed_legacy
-from tests.support.social_autonomy import background, planned
+from tests.support.social_autonomy import background, deferred_admission, planned
 
 
 def deferred(core):
     module, ref, _ = background(core, plan_ttl_seconds=600)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        planned(module, ref)
-    core.settings.cloud_budget = CloudBudgetConfig()
+    with deferred_admission():
+        with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+            planned(module, ref)
     plan = core.store.one("SELECT * FROM social_autonomy_plans")
     return module, ref, social_plan_jobs.get(core.store, plan["plan_id"])
 
@@ -60,7 +58,7 @@ def test_reclaimed_job_fences_original_worker_before_native_reservation(core):
     with pytest.raises(CoreError, match="SOCIAL_RETRY_JOB_FENCED"):
         module.check_retry_job(stale)
     with core.store.transaction():
-        social_plan_jobs.fail(module, stale, "CLOUD_DAILY_BUDGET_EXHAUSTED")
+        social_plan_jobs.fail(module, stale, "MODEL_DAILY_BUDGET_EXHAUSTED")
     actual = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (current["job_id"],))
     assert {key: value for key, value in actual.items() if key != "record_sequence"} == current
     assert module.check_retry_job(current)

@@ -523,7 +523,7 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
 
 
 @pytest.mark.parametrize("kind", ["daily", "task"])
-def test_cloud_zero_limit_rejects_before_provider_and_native_charge(core, tmp_path, kind):
+def test_zero_cloud_currency_allows_analysis_and_keeps_native_charge(core, tmp_path, kind):
     calls = []
     cloud = CloudBudgetConfig(
         **{"daily_micro_cny" if kind == "daily" else "video_per_item_micro_cny": 0}
@@ -535,11 +535,10 @@ def test_cloud_zero_limit_rejects_before_provider_and_native_charge(core, tmp_pa
 
     async def scenario():
         async with paid_media(core, tmp_path, provider, cloud=cloud) as (module, item, prepared):
-            with pytest.raises(CoreError, match="CLOUD_.*BUDGET_EXHAUSTED"):
-                await module.upload("bili", item["request_id"], upload_body(item, prepared))
-            assert not calls
-            assert not phase_usage(core)
-            assert not phase_costs(core)
+            await module.upload("bili", item["request_id"], upload_body(item, prepared))
+            assert len(calls) == 1
+            assert len(phase_usage(core)) == 1
+            assert phase_costs(core)[0]["amount_micro_cny"] > 0
 
     run(scenario())
 
@@ -653,13 +652,14 @@ def test_offset_live_window_is_the_shortest_child_deadline(core, tmp_path):
     run(scenario())
 
 
-def test_clip_reservation_counts_the_preview_fee_against_the_same_item_limit(core, tmp_path):
+def test_clip_keeps_preview_and_clip_charges_above_item_currency_amount(core, tmp_path):
     calls = []
 
     def provider(request):
         calls.append(request)
         return model_response(
-            {"analysis": "需要检查预先定义的片段", "need_clips": True}, tokens=18000
+            {"analysis": "需要检查预先定义的片段", "need_clips": True}
+            if len(calls) == 1 else {"analysis": "选定片段的局部画面"}, tokens=18000
         )
 
     async def scenario():
@@ -671,18 +671,17 @@ def test_clip_reservation_counts_the_preview_fee_against_the_same_item_limit(cor
             assert cost["accounted_micro_usd"] == 18040
             assert cost["task_id"] == "content:" + item["media"]["content_item_id"]
             assert 18040 * 8 < cloud.video_per_item_micro_cny
-            with pytest.raises(CoreError, match="CLOUD_TASK_BUDGET_EXHAUSTED"):
-                await module.upload(
-                    "bili",
-                    item["request_id"],
-                    upload_body(item, prepared, preview["next_selection"]),
-                )
-            assert len(calls) == 1
-            assert len(phase_usage(core)) == 1
-            assert phase_costs(core) == [cost]
+            await module.upload(
+                "bili", item["request_id"], upload_body(item, prepared, preview["next_selection"]))
+            assert len(calls) == 2
+            assert len(phase_usage(core)) == 2
+            assert phase_costs(core)[0] == cost
+            assert sum(row["amount_micro_cny"] for row in phase_costs(core)) > (
+                cloud.video_per_item_micro_cny)
             partial = module.context(item["media"]["content_item_id"])
             assert partial["result_status"] == "FETCHED"
-            assert [phase["phase"] for phase in partial["evidence"]["phases"]] == ["preview"]
+            assert [phase["phase"] for phase in partial["evidence"]["phases"]] == [
+                "preview", "clips"]
 
     run(scenario())
 

@@ -156,6 +156,13 @@ def _liability(value):
     return dict(value)
 
 
+def blocking_pause(state):
+    """Cost uncertainty is advisory; owner and delivery controls remain hard fences."""
+    return state["paused"] and state["reason"] not in {
+        "UNKNOWN_MODEL_LIABILITY", "LOCAL_LIMIT_EXCEEDED",
+    }
+
+
 def fold(state, row):
     """Pure projection of versioned records in the existing hash-chained journal."""
     kind = row["kind"]
@@ -217,7 +224,7 @@ def fold(state, row):
                 policy["key_ownership_sha256"] == previous["key_ownership_sha256"]
             ):
                 raise ValueError("key rotation attribution required")
-            if any(v["state"] in {"RESERVED", "UNKNOWN", "DELIVERY_UNCERTAIN"}
+            if any(v["state"] in {"RESERVED", "DELIVERY_UNCERTAIN"}
                    for v in [*state["models"].values(), *state["operations"].values()]):
                 raise ValueError("unresolved responsibility cannot renew")
         state.update(policy=policy, policy_sha256=row["policy_sha256"], clock=at,
@@ -242,7 +249,7 @@ def fold(state, row):
             if set(row) != {"kind", "version", "account_ref", "at", "policy_sha256", "key",
                             "source_sha256", "liability", "previous"} or row[
                 "policy_sha256"
-            ] != state["policy_sha256"] or state["paused"]:
+            ] != state["policy_sha256"] or blocking_pause(state):
                 raise ValueError("invalid cumulative operation")
             liability = _liability(row["liability"])
             if (not re.fullmatch(r"(?:input|send):[a-f0-9]{64}", row["key"])
@@ -296,7 +303,7 @@ def fold(state, row):
             quota.update(micro_usd=row["minimum_micro_usd"], state=row["state"])
         if quota["model_attempts"] != 1 or quota["owner_inputs"] or quota["send_attempts"]:
             raise ValueError("invalid model attempt dimensions")
-        if kind == "reserve" and (prior or state["paused"]):
+        if kind == "reserve" and (prior or blocking_pause(state)):
             raise ValueError("cumulative model reservation replay or pause")
         if prior:
             if any(prior[k] != quota[k] for k in ("at", "window_id", "logical_request_id")):
@@ -311,7 +318,7 @@ def fold(state, row):
                 raise ValueError("cumulative model clock moved backwards")
             state["clock"] = checked_at
         state["models"][key] = quota
-        if row["state"] == "UNKNOWN" or kind == "blocked":
+        if (row["state"] == "UNKNOWN" or kind == "blocked") and not blocking_pause(state):
             state.update(paused=True, reason="UNKNOWN_MODEL_LIABILITY")
 
 
@@ -464,7 +471,7 @@ def pause(store, custody, now, reason="OWNER_PAUSE", evidence_sha256=None):
     from companion import paid_budget
 
     state = paid_budget.journal(store, custody, allow_settlement=True)["cumulative"]
-    if not state["policy"] or state["paused"]:
+    if not state["policy"] or blocking_pause(state):
         return
     observed = instant(now) if now is not None else state["clock"]
     paid_budget.journal(store, custody, {"kind": "quota_pause", "version": 1,
@@ -505,7 +512,7 @@ def check(store, settings, now, *, custody=None):
     if not instant(scope.starts_at) <= at < instant(scope.expires_at):
         pause(store, settings.paid_model, now, "EXPIRED")
         raise CoreError("CUMULATIVE_POLICY_EXPIRED", 403)
-    if state["paused"]:
+    if blocking_pause(state):
         raise CoreError("CUMULATIVE_PAUSED", 403)
     return state
 
@@ -551,9 +558,9 @@ def violations(state, item, *, replacing=None):
             or name == "month" and periods(v["at"], policy["timezone"])[1] == month
         )]
         for dimension, cap in policy[name].items():
-            if sum(v[dimension] for v in selected) > cap:
+            if dimension != "micro_usd" and sum(v[dimension] for v in selected) > cap:
                 result.append(name.upper() + "_" + dimension.upper())
-    concurrent = sum(v["model_attempts"] for v in values if v["state"] in {"RESERVED", "UNKNOWN"})
+    concurrent = sum(v["model_attempts"] for v in values if v["state"] == "RESERVED")
     if concurrent > policy["concurrency"]:
         result.append("CONCURRENCY")
     return result
@@ -597,7 +604,7 @@ def final_fence(settings, state, now, request_id=None):
         return
     at = instant(now)
     if (scope is None or digest(scope.model_dump(mode="json")) != state["policy_sha256"]
-        or state["paused"] or at < state["clock"]
+        or blocking_pause(state) or at < state["clock"]
         or not instant(scope.starts_at) <= at < instant(scope.expires_at)):
         raise CoreError("CUMULATIVE_DISPATCH_FENCED", 403)
     if request_id and periods(state["models"][request_id]["at"], scope.timezone) != periods(
@@ -678,7 +685,9 @@ def status(store, settings, now):
             or name == "month" and periods(v["at"], policy["timezone"])[1] == month)]
         totals[name] = {dimension: sum(v[dimension] for v in selected) for dimension in DIMENSIONS}
     return {"enrolled": True, "available": True, "account_ref": policy["account_ref"],
-            "policy_sha256": state["policy_sha256"], "paused": state["paused"],
+            "policy_sha256": state["policy_sha256"], "paused": blocking_pause(state),
+            "warnings": ["MODEL_COST_UNKNOWN"] if any(
+                value["state"] == "UNKNOWN" for value in state["models"].values()) else [],
             "reason": state["reason"], "expires_at": policy["expires_at"],
             "timezone": policy["timezone"], "currency": policy["currency"], "used": totals,
             "limits": {name: policy[name] for name in totals}}

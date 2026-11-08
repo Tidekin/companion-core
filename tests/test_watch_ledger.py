@@ -108,16 +108,16 @@ def test_unknown_call_is_never_replayed(core, tmp_path):
     assert entries(core)[0]["state"] == "UNKNOWN" and model.calls == []
 
 
-def test_daily_cap_waits_for_the_next_day_without_a_request(core, tmp_path):
+def test_daily_currency_amount_does_not_refuse_a_judgement(core, tmp_path):
     core.settings.watch_ledger = core.settings.watch_ledger.model_copy(
         update={"daily_micro_usd": 1})
-    model = ready(core, tmp_path)
+    model = ready(core, tmp_path, json.dumps(JUDGEMENT))
     observe(core, 8)
     step(core)
     row = entries(core)[0]
     assert (row["state"], row["error_code"], row["model_request_id"]) == (
-        "RETRY_WAIT", "DAILY_BUDGET_EXHAUSTED", None)
-    assert row["next_attempt_at"] > core.clock() and model.calls == []
+        "JUDGED", None, row["model_request_id"])
+    assert row["model_request_id"] and len(model.calls) == 1
 
 
 def test_disabled_ledger_does_nothing_and_keeps_the_paid_contract(core, tmp_path):

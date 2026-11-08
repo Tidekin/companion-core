@@ -168,13 +168,8 @@ def fold(store, row, record_sha, journal_id, latest, closures, blocked, records)
     amount, status = _priced(request, admission, usage)
     codes = request.budget_limit_codes
     inherited = set(previous["request"]["budget_limit_codes"]) if previous else set()
-    frozen = json.loads(admission["snapshot_json"])
     if (codes != sorted(set(codes)) or inherited - set(codes)
-        or isinstance(request.basis, Estimate) and codes
-        or isinstance(request.basis, Statement) and (
-            amount > frozen["per_attempt_micro_usd"] and "ATTEMPT_AMOUNT" not in codes
-            or usage["scenario"] == "evaluation" and amount > 5000
-            and "EVALUATION_AMOUNT" not in codes)):
+        or isinstance(request.basis, Estimate) and codes):
         raise ValueError("model accounting budget stop changed")
     if (row["basis_micro_usd"] != amount or type(row["basis_micro_usd"]) is not int
         or row["billing_status"] != status
