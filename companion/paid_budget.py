@@ -510,6 +510,45 @@ def _read_journal(store, approval, *, allow_settlement, initialize):
     return view
 
 
+def _journal_projection(store):
+    """Read the original projections together for this locked journal validation."""
+    from companion import (
+        cumulative,
+        delivery_reconciliation,
+        gateway_admission,
+        model_accounting,
+        owner_authority,
+    )
+
+    prefixes = ("model_control:", model_accounting.PROJECTION, model_accounting.PENDING,
+                delivery_reconciliation.PROJECTION, "model_budget_stop:")
+    bounds = tuple(value for prefix in prefixes for value in (prefix, prefix[:-1] + ";"))
+    return store.one(
+        "SELECT (SELECT jsonb_agg(metadata) FROM ("
+        "SELECT key,value FROM runtime_meta WHERE key=ANY(%s) OR "
+        + " OR ".join("(key >= %s AND key < %s)" for _ in prefixes)
+        + ") AS metadata) AS metadata, "
+        "EXISTS(SELECT 1 FROM model_usage WHERE scenario='gateway') AS gateway, "
+        "(SELECT jsonb_agg(client) FROM (" + gateway_admission.CLIENTS_SQL
+        + ") AS client) AS clients, "
+        "(SELECT jsonb_agg(authority ORDER BY authority.revision NULLS FIRST) FROM ("
+        + owner_authority.PROJECTION_SQL + ") AS authority) AS authority, "
+        "(SELECT jsonb_agg(admission) FROM ("
+        'SELECT a.request_id AS request_id, a.logical_request_id AS logical_request_id, '
+        'a.attempt_id AS attempt_id, a.attempt_number AS attempt_number, a.window_id AS '
+        'window_id, a.contract_sha256 AS contract_sha256, a.payload_sha256 AS payload_sha256, '
+        'a.snapshot_json AS snapshot_json, a.reserved_micro_usd AS reserved_micro_usd, '
+        'a.input_bound AS input_bound, a.output_bound AS output_bound, a.lease_token AS '
+        'lease_token, a.lease_until AS lease_until, a.io_started_at AS io_started_at, '
+        'a.journal_path AS journal_path, a.journal_id AS journal_id, a.measurement_json AS '
+        'measurement_json, a.authority_json AS authority_json, m.billed_micro_usd AS '
+        'billed_micro_usd, m.state AS state FROM model_admissions AS a LEFT JOIN model_usage '
+        'AS m ON a.request_id = m.request_id) AS admission) AS admissions',
+        ([cumulative.PROJECTION, LIVE_LIFECYCLE, "model_budget_blocked"], *bounds,
+         owner_authority.CURRENT),
+    )
+
+
 def _journal(store, approval, record=None, *, allow_settlement=False, initialize=True,
              resolution_replay=None, model_control_replay=None, accounting_replay=None,
              raw=None):
@@ -633,26 +672,15 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
                         raise ValueError("duplicate gateway attribution")
                     gateway_bindings[row["request_id"]] = row["gateway"]
                 latest[row["request_id"]] = row
-        if gateway_bindings or record and "gateway" in record or store.one(
-            "SELECT 1 FROM model_usage WHERE scenario = 'gateway' LIMIT 1"
-        ):
+        projections = _journal_projection(store)
+        if gateway_bindings or record and "gateway" in record or projections["gateway"]:
             from companion.gateway_admission import validate_projection
 
             gateway_bindings = validate_projection(store, gateway_bindings, record)
-        from companion.gateway_admission import validate_clients
+        from companion.gateway_admission import _validate_clients
 
-        gateway_clients = validate_clients(store, gateway_clients, record)
-        # These control projections are validated together under the native
-        # budget ledger lock. Fetch their original values once, without retaining
-        # them beyond this fold or reading unrelated owner input/capture records.
-        prefixes = ("model_control:", model_accounting.PROJECTION, model_accounting.PENDING,
-                    delivery_reconciliation.PROJECTION, "model_budget_stop:")
-        bounds = tuple(value for prefix in prefixes for value in (prefix, prefix[:-1] + ";"))
-        metadata = {row["key"]: row["value"] for row in store.rows(
-            "SELECT key,value FROM runtime_meta WHERE key=ANY(%s) OR "
-            + " OR ".join("(key >= %s AND key < %s)" for _ in prefixes),
-            ([cumulative.PROJECTION, LIVE_LIFECYCLE, "model_budget_blocked"], *bounds),
-        )}
+        gateway_clients = _validate_clients(gateway_clients, projections["clients"] or [], record)
+        metadata = {row["key"]: row["value"] for row in projections["metadata"] or []}
         model_carry.validate_projection(model_controls, metadata, replay=model_control_replay)
         accounting_pending = model_accounting.validate_projection(store, accounting, metadata,
                                                                    accounting_replay)
@@ -673,7 +701,8 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
         if (managed or stored_lifecycle) and stored_lifecycle != lifecycle:
             raise ValueError("live lifecycle behind journal or DB")
         delivery_reconciliation.validate_projection(store, resolutions, metadata, resolution_replay)
-        owner_authority.validate_projection(store, authorities, identity["value"], path)
+        owner_authority._validate_projection(authorities, identity["value"], path,
+                                             projections["authority"])
         authority_record = record and record.get("kind") == owner_authority.RECORD_KIND
         lifecycle_record = record and record.get("kind") in {
             "window_stop", "window_open", "window_handoff"
@@ -693,18 +722,7 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
             or getattr(approval, "window_id", lifecycle["window_id"]) != lifecycle["window_id"]
         ):
             raise ValueError("live window stopped or replaced")
-        admissions = {row["request_id"]: row for row in store.rows(
-            'SELECT a.request_id AS request_id, a.logical_request_id AS logical_request_id, '
-            'a.attempt_id AS attempt_id, a.attempt_number AS attempt_number, a.window_id AS '
-            'window_id, a.contract_sha256 AS contract_sha256, a.payload_sha256 AS payload_sha256, '
-            'a.snapshot_json AS snapshot_json, a.reserved_micro_usd AS reserved_micro_usd, '
-            'a.input_bound AS input_bound, a.output_bound AS output_bound, a.lease_token AS '
-            'lease_token, a.lease_until AS lease_until, a.io_started_at AS io_started_at, '
-            'a.journal_path AS journal_path, a.journal_id AS journal_id, a.measurement_json AS '
-            'measurement_json, a.authority_json AS authority_json, m.billed_micro_usd AS '
-            'billed_micro_usd, m.state AS state FROM model_admissions AS a LEFT JOIN model_usage '
-            'AS m ON a.request_id = m.request_id'
-        )}
+        admissions = {row["request_id"]: row for row in projections["admissions"] or []}
         for request_id, admission in admissions.items():
             receipt = json.loads(admission.get("measurement_json", "{}"))
             if not isinstance(receipt, dict):

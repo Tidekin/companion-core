@@ -32,17 +32,25 @@ def client_binding(row):
         "grant_sha256": paid_budget.sha(json.loads(row["grant_json"]))}
 
 
+CLIENTS_SQL = (
+    'SELECT gateway_clients.client_id AS client_id, gateway_clients.key_sha256 AS key_sha256, '
+    'gateway_clients.key_id AS key_id, gateway_clients.grant_json AS grant_json, '
+    'gateway_clients.revoked AS revoked, gateway_clients.updated_at AS updated_at, '
+    'gateway_clients.restore_generation AS restore_generation, gateway_clients.journal_path AS '
+    'journal_path FROM gateway_clients AS gateway_clients'
+)
+
+
 def validate_clients(store, clients, record=None):
+    return _validate_clients(clients, store.rows(CLIENTS_SQL), record)
+
+
+def _validate_clients(clients, rows, record=None):
     expected = dict(clients)
     if record and record.get("kind") == "gateway_client":
         proof = record["client"]
         expected[proof["client_id"]] = proof
-    actual = {row["client_id"]: client_binding(row) for row in store.rows(
-        'SELECT gateway_clients.client_id AS client_id, gateway_clients.key_sha256 AS key_sha256, '
-        'gateway_clients.key_id AS key_id, gateway_clients.grant_json AS grant_json, '
-        'gateway_clients.revoked AS revoked, gateway_clients.updated_at AS updated_at, '
-        'gateway_clients.restore_generation AS restore_generation, gateway_clients.journal_path AS '
-        'journal_path FROM gateway_clients AS gateway_clients')}
+    actual = {row["client_id"]: client_binding(row) for row in rows}
     if expected != actual:
         raise ValueError("gateway authority behind journal or DB")
     return expected
