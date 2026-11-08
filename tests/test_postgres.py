@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+from contextlib import nullcontext
 from pathlib import Path
 from uuid import uuid4
 
@@ -193,3 +194,14 @@ def test_bounded_read_retains_timeout_and_snapshot_after_optional_error(database
             assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}
         assert reader.one("SELECT value FROM items WHERE id=1") == {"value": 7}
         assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_bounded_read_cannot_extend_an_existing_shorter_server_timeout(database, active):
+    with database.session() as reader:
+        reader.execute("SET statement_timeout='20ms'")
+        with reader.transaction(readonly=True) if active else nullcontext():
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                reader.bounded_read("SELECT pg_sleep(.1)", (), limit=1, timeout_ms=500)
+            assert reader.one("SHOW statement_timeout") == {"statement_timeout": "20ms"}
+            assert reader.one("SELECT 1 AS ready") == {"ready": 1}

@@ -214,10 +214,11 @@ class Session:
                 self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             settings = self.one(
                 "SELECT current_setting('transaction_read_only') AS readonly, "
-                "current_setting('statement_timeout') AS timeout"
+                "setting::integer AS timeout FROM pg_settings WHERE name='statement_timeout'"
             )
             if readonly and settings["readonly"] != "on":
                 raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
+            timeout_ms = min(timeout_ms, settings["timeout"] or timeout_ms)
             self.execute("SELECT set_config('statement_timeout',%s,true)", (f"{timeout_ms}ms",))
             with self._connection.cursor() as cursor:
                 self._execute(cursor, sql.SQL(
@@ -225,7 +226,8 @@ class Session:
                     statement if isinstance(statement, sql.Composable) else sql.SQL(statement)),
                     (*parameters, limit), timeout_ms=timeout_ms)
                 result = cursor.fetchmany(limit)
-            self.execute("SELECT set_config('statement_timeout',%s,true)", (settings["timeout"],))
+            self.execute("SELECT set_config('statement_timeout',%s,true)",
+                         (f"{settings['timeout']}ms",))
             return result
 
     @contextmanager
