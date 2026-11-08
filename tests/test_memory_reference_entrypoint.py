@@ -33,7 +33,7 @@ def test_image_receipt_reaches_independent_extractor_and_final_request(core, tmp
             core.store.execute('UPDATE events SET memory_processed=1 WHERE event_id<>%s',
                                (value.job["event_id"],))
             config = core.settings.model_dump(mode="json")
-            for key in ("model_key", "bridge_token", "control_token"):
+            for key in ("database", "model_key", "bridge_token", "control_token"):
                 config[key] = getattr(core.settings, key).get_secret_value()
             config["observation_adapters"]["content_image"]["token"] = (
                 core.settings.observation_adapters["content_image"].token.get_secret_value())
@@ -64,7 +64,7 @@ def test_image_receipt_reaches_independent_extractor_and_final_request(core, tmp
             assert "十二月九日" in encode(value.calls[-1]["messages"])
             assert "event_observed" in encode(value.calls[-1]["messages"])
             assert not value.sends
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [value.job["event_id"]], core.clock())
             assert not core.memory.search("青栎资料卡")
 

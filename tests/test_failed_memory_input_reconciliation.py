@@ -25,7 +25,7 @@ def test_historical_failed_recall_retirement_preserves_original_accounting(
     if mutation == "contract_replay":
         seed = ingest(core, 900, "expired unrelated source",
                       origin=f"seed:FriendMessage:{core.settings.owner_qq_id}")
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                (seed["job_id"],))
             core.ledger.expire_events(core.store, [seed["event_id"]], core.clock())
@@ -40,7 +40,8 @@ def test_historical_failed_recall_retirement_preserves_original_accounting(
             usage = core.store.one("SELECT * FROM model_usage")
             assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
             if mutation == "new_privacy_epoch":
-                advance_epoch(core.store)
+                with core.store.transaction(control_write=True):
+                    advance_epoch(core.store)
             elif mutation == "contract_replay":
                 from companion.erasure import CONTRACT_KEY, contract_signature
 
@@ -83,7 +84,7 @@ def test_historical_failed_recall_retirement_preserves_original_accounting(
             elif mutation == "wrong_scenario":
                 core.store.execute("UPDATE model_usage SET scenario='chat'")
             elif mutation == "erased_source":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
             elif mutation == "not_stopped":
                 core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
