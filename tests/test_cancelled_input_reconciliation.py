@@ -41,10 +41,11 @@ def test_stopped_input_requires_original_native_materials(
             if mutation != "active":
                 await stop_host(active)
             if mutation in {"erased", "settled_recalled"}:
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event_id], core.clock())
             elif mutation == "privacy_epoch":
-                advance_epoch(core.store)
+                with core.store.transaction(control_write=True):
+                    advance_epoch(core.store)
             if mutation == "source":
                 core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                    (encode({"text": "changed"}), event_id))

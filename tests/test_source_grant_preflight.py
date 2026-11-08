@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.privacy import advance_epoch
 from companion.source_grants import SourceGrantRegistration, SourceGrantSnapshot
 from source_reader.bili_tools import BilibiliAccountHTTP
@@ -61,6 +62,7 @@ def setup_read(core, tmp_path, source="heybox", expires_in=3600):
         )
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     return adapter, path, data, app
 
 
@@ -270,7 +272,7 @@ def test_core_validation_is_bound_to_current_lease_and_adapter(core, tmp_path, c
     item = core.exploration.lease(adapter, snapshot)
     body = {"lease_token": item["lease_token"], "source_grant": item["source_grant"]}
     if change == "privacy":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             advance_epoch(core.store)
     elif change == "lease_expiry":
         core.clock.advance(31)

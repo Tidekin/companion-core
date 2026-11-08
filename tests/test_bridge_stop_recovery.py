@@ -97,7 +97,8 @@ def test_journal_failure_revokes_historical_custody_through_api_and_independent_
                                     scope_options=options, rich_input_scope="references_v1") as (
             window, client, job,
         ):
-            running, queued, reserved = pending_history(core, job)
+            with core.store.transaction():
+                running, queued, reserved = pending_history(core, job)
             async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as model, (
                 private_http_client(window.plan.config.onebot_http_url,
                     window.plan.config.onebot_token, transport=httpx.MockTransport(forbidden))

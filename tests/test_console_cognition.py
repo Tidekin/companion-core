@@ -196,9 +196,10 @@ def test_tool_scope_privacy_change_during_http_read_fails_closed(client, core, m
         result = project(view_core, row)
         assert result["text"]["value"] == text
         if change == "epoch":
-            advance_epoch(core.store)
+            with core.store.transaction(control_write=True):
+                advance_epoch(core.store)
         else:
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
         return result
 
