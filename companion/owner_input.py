@@ -194,7 +194,7 @@ def source(
 
 
 def _checked_source(store, settings, view, event_id, now, *, allow_commands=False, history=False,
-                    purpose="chat"):
+                    purpose="chat", loaded=None):
     """Use the caller's freshly checked view within this synchronous transaction."""
     if not store.in_transaction:
         raise RuntimeError("OWNER_SOURCE_CHECKED_TRANSACTION_REQUIRED")
@@ -223,6 +223,7 @@ def _checked_source(store, settings, view, event_id, now, *, allow_commands=Fals
         allow_commands=allow_commands,
         history=history,
         verify_capture=lambda value: _verify(store, settings, value, evidence),
+        loaded=loaded,
     )
 
 

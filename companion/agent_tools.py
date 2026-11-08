@@ -125,22 +125,18 @@ Each tool requires its current purpose on the original owner-authorized job.
     recall_state = {"seen": {}, "idle": 0, "raw_used": False}
 
     def source_ok(ids):
-        from companion.memory_authority import source_allowed
+        from companion.memory_authority import sources_allowed
         from companion.memory_context import MemorySources
 
         sources = MemorySources(core.memory, core.clock(), bounded=True)
-        for key in ids:
-            try:
-                lineage = sources.lineage(key)
-            except retrieval_work.WorkLimit as error:
-                if (work := retrieval_work.current()) is not None:
-                    work.mark(error.reason)
-                return False
-            if not lineage or not all(row["source"] != "qq.onebot" or source_allowed(
-                    core.store, core.settings, core.clock, row["event_id"], "memory")
-                    for row in lineage):
-                return False
-        return True
+        try:
+            lineage = sources.lineages(ids)
+        except retrieval_work.WorkLimit as error:
+            if (work := retrieval_work.current()) is not None:
+                work.mark(error.reason)
+            return False
+        return bool(lineage) and sources_allowed(core.store, core.settings, core.clock,
+            (row["event_id"] for row in lineage if row["source"] == "qq.onebot"), "memory")
 
     async def raw_turns(query):
         """One bounded search of delivered raw turns, for facts never summarized."""

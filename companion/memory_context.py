@@ -489,7 +489,7 @@ class MemoryContext:
 
     def reply_source_check(self, settings, clock, authority):
         """Return a purpose-specific lineage check for this one prompt build."""
-        from companion.memory_authority import source_allowed
+        from companion.memory_authority import sources_allowed
 
         source_view = MemorySources(self.memory, clock(), bounded=True)
 
@@ -507,10 +507,9 @@ class MemoryContext:
                     return False
                 # Group synchronous reads in one existing native snapshot. Only
                 # SourceView's DB rows are reusable; each permission/file check is live.
-                return bool(lineage) and all(
-                    not authority or row["source"] != "qq.onebot" or source_allowed(
-                        self.store, settings, clock, row["event_id"], purpose)
-                    for row in lineage)
+                return bool(lineage) and (not authority or sources_allowed(
+                    self.store, settings, clock,
+                    (row["event_id"] for row in lineage if row["source"] == "qq.onebot"), purpose))
 
             return self.store.read_or_write(check)
         return available

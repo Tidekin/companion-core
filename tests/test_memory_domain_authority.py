@@ -7,7 +7,7 @@ import pytest
 
 from companion import memory_work, owner_authority, owner_input
 from companion.contracts import CoreError
-from companion.memory_authority import source_allowed
+from companion.memory_authority import source_allowed, sources_allowed
 from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import after, encode
 from tests.conftest import run
@@ -128,6 +128,73 @@ def test_raw_source_reuses_one_checked_view_and_rechecks_next_read(core, tmp_pat
     core.store.execute("UPDATE events SET redacted=1 WHERE event_id=%s", (capture.event_id,))
     assert not source_allowed(core.store, core.settings, core.clock, capture.event_id, "chat")
     assert checked == [True, True]
+
+
+@pytest.mark.parametrize("writer", [False, True])
+def test_raw_source_batch_preserves_each_signature_and_fresh_writer_reads(
+    core, tmp_path, monkeypatch, writer,
+):
+    from contextlib import nullcontext
+
+    from tests.support.native_consumer_entry import environment
+
+    async def scenario():
+        async with environment(core, tmp_path) as (entry, _):
+            keys = [(await entry.admit(n, "合成来源"))["event_id"] for n in range(1, 7)]
+            reads, original = [], core.store.rows
+
+            def rows(statement, parameters=()):
+                if "AS capture_receipt" in statement and "AS source_jobs" in statement:
+                    reads.append(len(parameters[0]))
+                return original(statement, parameters)
+
+            monkeypatch.setattr(core.store, "rows", rows)
+            with core.store.transaction() if writer else nullcontext():
+                assert sources_allowed(core.store, core.settings, core.clock, keys, "memory")
+            assert reads == ([1] * 6 if writer else [6])
+            # The next validation observes a changed original signed capture.
+            row = core.store.one("SELECT value FROM runtime_meta WHERE key=%s",
+                                 (owner_input.INPUT + keys[-1],))
+            value = json.loads(row["value"])
+            value["capture"]["signature"] = "0" * 128
+            core.store.execute("UPDATE runtime_meta SET value=%s WHERE key=%s",
+                               (encode(value), owner_input.INPUT + keys[-1]))
+            with core.store.transaction() if writer else nullcontext():
+                assert not sources_allowed(core.store, core.settings, core.clock, keys, "memory")
+            # Own writes during the mutable path are visible to later sources.
+            core.store.execute("UPDATE runtime_meta SET value=%s WHERE key=%s",
+                               (row["value"], owner_input.INPUT + keys[-1]))
+            original_recall = owner_input.input_recall.require_not_recalled
+
+            def recall(*args, **kwargs):
+                original_recall(*args, **kwargs)
+                core.store.execute("UPDATE events SET redacted=1 WHERE event_id=%s", (keys[-1],))
+
+            monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
+            with core.store.transaction():
+                assert not sources_allowed(core.store, core.settings, core.clock, keys, "memory")
+
+    run(scenario())
+
+
+def test_raw_source_batch_rechecks_external_custody_before_return(core, tmp_path, monkeypatch):
+    capture, _ = captured(core, tmp_path)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    core.ingest(inbound(core, capture), "source-batch-custody")
+    path = Path(core.settings.paid_model.journal_path)
+    saved = path.read_bytes()
+    original = owner_input.input_recall.require_not_recalled
+
+    def recall(*args, **kwargs):
+        original(*args, **kwargs)
+        path.write_bytes(saved + b"\n")
+
+    monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
+    try:
+        with pytest.raises(CoreError, match="OWNER_AUTHORITY_CUSTODY_REQUIRED"):
+            sources_allowed(core.store, core.settings, core.clock, [capture.event_id], "chat")
+    finally:
+        path.write_bytes(saved)
 
 
 def test_legacy_memory_read_uses_original_archive_without_rebinding(core, tmp_path):
