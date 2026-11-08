@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import closing
 
 import httpx
 import pytest
@@ -6,7 +7,9 @@ from pydantic import SecretStr
 
 from companion.contracts import CoreError
 from companion.model import ModelClient
+from companion.postgres import Database
 from tests.owner_model_fixtures import authorized_job
+from tests.postgres_fixture import copy_database
 from tests.support.paid_model import approved_live
 
 
@@ -270,7 +273,7 @@ def test_multi_connection_reservations_are_atomic(core, tmp_path):
     job_id = authorized_job(core)
 
     def attempt(_):
-        store = Store(core.settings.database)
+        store = Store(core.database, core.settings.state_directory)
         try:
             return budget.reserve(
                 store,
@@ -411,7 +414,7 @@ def test_crash_after_fsync_before_db_commit_blocks_old_database(core, tmp_path, 
     assert core.model.calls == []
 
 
-def test_restored_database_cannot_start_new_paid_window(core, tmp_path):
+def test_restored_database_cannot_start_new_paid_window(empty_database, core, tmp_path):
     from cryptography.fernet import Fernet
 
     from companion import budget
@@ -421,11 +424,11 @@ def test_restored_database_cannot_start_new_paid_window(core, tmp_path):
     approved_live(core, tmp_path)
     messages = [{"role": "user", "content": "hello"}]
     budget.reserve(core.store, core.settings, authorized_job(core), "chat", messages, core.clock())
-    archive, dest, key = tmp_path / "core.enc", tmp_path / "restore.db", Fernet.generate_key()
+    archive, dest, key = tmp_path / "core.enc", empty_database, Fernet.generate_key()
+    state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    store = Store(str(dest))
-    try:
+    restore(archive, dest, key, core.settings.erasure_ledger, state_directory=state)
+    with Database(dest) as database, closing(Store(database, state)) as store:
         core.settings.paid_model = core.settings.paid_model.model_copy(
             update={"window_id": "new-after-restore"}
         )
@@ -435,8 +438,6 @@ def test_restored_database_cannot_start_new_paid_window(core, tmp_path):
         with pytest.raises(CoreError, match="RECONCILIATION"):
             budget.paid_budget.journal(store, core.settings.paid_model)
         assert store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
-    finally:
-        store.close()
 
 
 @pytest.mark.parametrize("failure", [401, 429, 503, "timeout", "missing", "invalid_cache"])
@@ -539,9 +540,9 @@ def test_after_reserve_changes_fail_before_http(core, tmp_path, change, code):
     assert calls == []
 
 
-def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(core, tmp_path):
-    import sqlite3
-
+def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(
+    empty_database, core, tmp_path,
+):
     from companion import budget
     from companion.store import Store
 
@@ -549,10 +550,8 @@ def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(core, tm
     messages = [{"role": "user", "content": "hello"}]
     request = budget.reserve(core.store, core.settings, authorized_job(core),
                            "chat", messages, core.clock())
-    snapshot = tmp_path / "before-io.db"
-    connection = sqlite3.connect(snapshot)
-    core.store.db.backup(connection)
-    connection.close()
+    snapshot = empty_database
+    copy_database(core.settings.database, snapshot, tmp_path)
     calls = []
 
     async def exercise():
@@ -573,8 +572,8 @@ def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(core, tm
                 "chat",
                 core.clock,
             )
-            old = Store(str(snapshot))
-            try:
+            with (Database(snapshot) as database,
+                  closing(Store(database, core.store.state_directory)) as old):
                 with pytest.raises(CoreError, match="RECONCILIATION"):
                     await budget.complete(
                         ModelClient(core.settings, client),
@@ -585,8 +584,6 @@ def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(core, tm
                         "chat",
                         core.clock,
                     )
-            finally:
-                old.close()
 
     asyncio.run(exercise())
     assert len(calls) == 1
@@ -955,9 +952,7 @@ def test_invoice_survives_disabled_live_approval(core, tmp_path):
     }
 
 
-def test_unknown_settlement_cannot_be_rolled_back_to_reserved(core, tmp_path):
-    import sqlite3
-
+def test_unknown_settlement_cannot_be_rolled_back_to_reserved(empty_database, core, tmp_path):
     from companion import budget
     from companion.store import Store
 
@@ -965,12 +960,9 @@ def test_unknown_settlement_cannot_be_rolled_back_to_reserved(core, tmp_path):
     messages = [{"role": "user", "content": "hello"}]
     request = budget.reserve(core.store, core.settings, authorized_job(core),
                            "chat", messages, core.clock())
-    path = tmp_path / "before-unknown.db"
-    connection = sqlite3.connect(path)
-    core.store.db.backup(connection)
-    connection.close()
+    path = empty_database
+    copy_database(core.settings.database, path, tmp_path)
     budget.settle(core.store, core.settings, request)
-    old = Store(str(path))
     calls = []
 
     async def exercise():
@@ -993,11 +985,10 @@ def test_unknown_settlement_cannot_be_rolled_back_to_reserved(core, tmp_path):
                     core.clock,
                 )
 
-    try:
+    with (Database(path) as database,
+          closing(Store(database, core.store.state_directory)) as old):
         asyncio.run(exercise())
         assert calls == []
-    finally:
-        old.close()
 
 
 def test_open_ended_approval_keeps_hash_shape_and_caps(core, tmp_path):
