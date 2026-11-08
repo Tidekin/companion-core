@@ -1089,7 +1089,7 @@ class Core(Runtime):
             if (not bounded_text and private_life.enabled(self.settings) and job["kind"] == "chat"
                 and reply_revision.owner_input(self.store, job["event_id"])
                 and not reply_revision.control_job(self.store, job)
-                and usage and usage["state"] == "SETTLED"):
+                and usage and usage["state"] in {"SETTLED", "UNKNOWN"}):
                 # Recall selection is optional context, not a memory write. Drop
                 # every candidate and expose unavailability; never retry this paid
                 # review or report an invalid selection as a valid empty result.
@@ -1707,7 +1707,13 @@ class Core(Runtime):
                                       (job["job_id"],))
             resumable = (checkpoint and checkpoint["phase"] in {"READY", "WAITING"}
                          and not self.store.one(
-                             "SELECT 1 FROM model_usage WHERE job_id = %s AND state <> 'SETTLED'",
+                             "SELECT 1 FROM model_usage m WHERE m.job_id=%s "
+                             "AND (m.state='RESERVED' "
+                             "OR (m.state='UNKNOWN' AND NOT EXISTS(SELECT 1 FROM "
+                             "agent_conversations c, jsonb_array_elements("
+                             "c.conversation_json::jsonb->'messages') r(value) "
+                             "WHERE c.job_id=m.job_id AND r.value->>'kind'='response' "
+                             "AND r.value->'metadata'->>'core_request_id'=m.request_id)))",
                              (job["job_id"],))
                          and not self.store.one(
                              'SELECT 1 FROM agent_tool_calls WHERE job_id = %s AND state IN '

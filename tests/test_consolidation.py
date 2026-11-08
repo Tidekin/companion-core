@@ -256,7 +256,7 @@ def test_reflection_invalid_evidence_and_unsupported_activity_rejected(core, def
 
 
 @pytest.mark.parametrize("limit", ["disabled", "day", "month", "calls", "unknown"])
-def test_reflection_budget_is_independent_and_hard_bounded(core, limit):
+def test_reflection_currency_is_advisory_and_call_count_is_bounded(core, limit):
     model = enable_nightly(core)
     if limit == "disabled":
         core.settings.reflection_daily_micro_usd = 0
@@ -271,9 +271,9 @@ def test_reflection_budget_is_independent_and_hard_bounded(core, limit):
 
         budget.reserve(core.store, core.settings, None, "reflection", [], core.clock())
     result = run(core.reflections.run_day(DAY))
-    expected = "RETRY_WAIT" if limit == "calls" else "FAILED"
+    expected = "RETRY_WAIT" if limit == "calls" else "COMMITTED"
     assert result["state"] == expected
-    assert not model.calls
+    assert len(model.calls) == (0 if limit == "calls" else 1)
     assert (
         run(core.reflections.run_day(DAY))["state"] == expected
     )  # Repeated ticks do not call again.

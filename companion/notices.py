@@ -569,12 +569,12 @@ def record(store, settings, job, message_ids, now):
 def _settled(store, job_id):
     return bool(
         store.one(
-            "SELECT 1 FROM model_usage WHERE job_id = %s AND scenario = 'activity' AND state = "
-            "'SETTLED'",
+            "SELECT 1 FROM model_usage WHERE job_id = %s AND scenario = 'activity' AND state IN "
+            "('SETTLED','UNKNOWN')",
             (job_id,),
         )
         and not store.one(
-            "SELECT 1 FROM model_usage WHERE job_id = %s AND state <> 'SETTLED'", (job_id,)
+            "SELECT 1 FROM model_usage WHERE job_id = %s AND state='RESERVED'", (job_id,)
         )
     )
 
@@ -611,7 +611,8 @@ def retry_required_wording(store, settings, job, code, now):
     )
     if (
         len(usages) != current["attempts"]
-        or any(row != {"scenario": "activity", "state": "SETTLED"} for row in usages)
+        or any(row["scenario"] != "activity" or row["state"] not in {"SETTLED", "UNKNOWN"}
+               for row in usages)
         or store.one(
             "SELECT 1 FROM outbox WHERE origin_event_id = %s OR reply_group_id = %s",
             (current["event_id"], job["job_id"]),

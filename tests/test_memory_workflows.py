@@ -297,15 +297,15 @@ def test_recall_selection_accepts_the_prompt_limit_and_rejects_overflow(core, mo
         assert core.store.one("SELECT 1 FROM outbox WHERE origin_event_id='evt_test_100'") is None
 
 
-def test_memory_review_daily_limit_does_not_block_normal_chat(core):
+def test_zero_memory_currency_keeps_recall_available(core):
     message(core, 1, "/记住这个：用户最喜欢的饮料是茉莉绿茶。")
     core.settings.memory_daily_micro_usd = 0
     core.settings.max_recent_messages = 0
     job = message(core, 2, "我平时最爱喝什么？", "new:FriendMessage:10001")
     assert job["state"] == "SUCCEEDED"
     messages, scenario = core.model.calls[-1]
-    assert scenario == "chat" and "核对暂不可用" in json.dumps(messages, ensure_ascii=False)
-    assert "茉莉绿茶" not in json.dumps(messages, ensure_ascii=False)
+    assert scenario == "chat" and "核对暂不可用" not in json.dumps(messages, ensure_ascii=False)
+    assert "茉莉绿茶" in json.dumps(messages, ensure_ascii=False)
 
 
 def test_unknown_recall_reference_is_rejected_before_chat(core):

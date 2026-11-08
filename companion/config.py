@@ -119,13 +119,13 @@ class PaidModelApproval(BaseModel):
     max_context_tokens: int | None = Field(
         default=None, strict=True, gt=0, le=1000000, exclude_if=lambda value: value is None,
     )
-    per_attempt_micro_usd: int = Field(strict=True, gt=0)
-    per_request_micro_usd: int = Field(strict=True, gt=0)
+    per_attempt_micro_usd: int = Field(strict=True, ge=0)
+    per_request_micro_usd: int = Field(strict=True, ge=0)
     per_request_calls: int = Field(strict=True, gt=0, le=10)
-    daily_micro_usd: int | None = Field(default=None, strict=True, gt=0)
+    daily_micro_usd: int | None = Field(default=None, strict=True, ge=0)
     daily_calls: int = Field(strict=True, gt=0)
-    monthly_micro_usd: int | None = Field(default=None, strict=True, gt=0)
-    window_micro_usd: int | None = Field(default=None, strict=True, gt=0)
+    monthly_micro_usd: int | None = Field(default=None, strict=True, ge=0)
+    window_micro_usd: int | None = Field(default=None, strict=True, ge=0)
     window_calls: int = Field(strict=True, gt=0)
     concurrency: int = Field(strict=True, gt=0, le=10)
     concurrency_basis: Literal["unresolved_liabilities_v1", "local_active_attempts_v2"] = Field(

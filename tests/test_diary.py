@@ -459,7 +459,7 @@ def test_d18_http_diary_requires_distinct_admin_authority(core):
 
 
 @pytest.mark.parametrize("failure", ["unknown", "diary", "month"])
-def test_d19_unknown_prices_and_budget_rejection_do_not_call_model(core, failure):
+def test_d19_currency_and_price_hints_do_not_refuse_a_valid_diary(core, failure):
     model = seed_day(core)
     if failure == "unknown":
         core.settings.input_rate = None
@@ -467,9 +467,9 @@ def test_d19_unknown_prices_and_budget_rejection_do_not_call_model(core, failure
         core.settings.diary_daily_micro_usd = 0
     else:
         core.settings.monthly_limit_micro_usd = 0
-    assert generate(core)["state"] == "FAILED"
-    assert model.calls == []
-    assert core.store.rows("SELECT * FROM model_usage") == []
+    assert generate(core)["state"] == "COMMITTED"
+    assert len(model.calls) == 1
+    assert len(core.store.rows("SELECT * FROM model_usage")) == 1
 
 
 def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):

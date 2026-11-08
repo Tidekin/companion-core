@@ -1068,7 +1068,7 @@ class DiaryService:
             usage = self.store.one(
                 "SELECT state FROM model_usage WHERE request_id = %s", (request_id,)
             )
-            if not usage or usage["state"] != "SETTLED":
+            if not usage or usage["state"] not in {"SETTLED", "UNKNOWN"}:
                 raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
             draft = resolve_sources(DiaryDraft.model_validate_json(response.text), aliases)
             draft, dropped = keep_cited_sections(draft, run["sources"])

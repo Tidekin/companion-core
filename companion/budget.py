@@ -470,8 +470,8 @@ def settle(store, settings, request_id, response=None, *, transport_failure=None
             (request_id,),
         )
         if admission:
-            _settle_paid(store, settings, admission, response, transport_failure=transport_failure)
-            return
+            return _settle_paid(
+                store, settings, admission, response, transport_failure=transport_failure)
         if response is None or response.input_tokens is None or response.output_tokens is None:
             store.execute(
                 "UPDATE model_usage SET state = 'UNKNOWN' WHERE request_id = %s", (request_id,)
@@ -654,7 +654,7 @@ def _settle_paid(store, settings, admission, response, *, transport_failure=None
             pricing, response.input_tokens, response.output_tokens, response.cached_tokens
         )
         # A reservation is an estimate. Small estimation errors settle normally;
-        # actual local amount limits and the requested output cap remain hard stops.
+        # Actual amounts are advisory; output and cumulative resource bounds remain hard.
         amount, state, blocked = actual, "SETTLED", False
         limits = _actual_limit_violations(store, admission, snapshot, usage, actual)
         if snapshot.get("cumulative") or store.one(
@@ -749,6 +749,7 @@ def _settle_paid(store, settings, admission, response, *, transport_failure=None
         usage["occurred_at"],
         **diagnostic,
     )
+    return diagnostic
 
 
 
@@ -916,6 +917,7 @@ async def complete(
     from companion.reply_revision import CANCELLED, SOURCE_RECALLED, SUPERSEDED
 
     response = None
+    usable_response = False
     transport_failure = None
     dispatch = {"dispatched": False}
     try:
@@ -933,6 +935,7 @@ async def complete(
             trace_id=trace_id,
             generation=generation,
         )
+        usable_response = True
         return response
     except ModelResponseError as error:
         # An unusable reply can still carry observed usage.
@@ -955,11 +958,27 @@ async def complete(
         raise
     finally:
         # Cancellation is an unknown outcome too; callers never refund a started attempt.
-        settle(store, settings, request_id, response, transport_failure=transport_failure)
+        accounting = None
+        if settings.mode == "live" and isinstance(model, ModelClient) and not dispatch.get("owned"):
+            from companion.postgres import BUDGET_LEDGER
+
+            # The ownership read and any unstarted settlement share the dispatch lock.
+            with store.transaction():
+                store.ledger_lock(BUDGET_LEDGER)
+                admission = store.one(
+                    "SELECT io_started_at FROM model_admissions WHERE request_id=%s", (request_id,))
+                if not admission or admission["io_started_at"] is None:
+                    accounting = settle(
+                        store, settings, request_id, response, transport_failure=transport_failure)
+        else:
+            accounting = settle(
+                store, settings, request_id, response, transport_failure=transport_failure)
         from companion import model_carry
 
         if model_carry.active(settings) and scenario != "gateway":
             model_carry.close_owned(store, settings, request_id, dispatch, clock())
+        if usable_response and accounting and accounting.get("limits"):
+            raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
 
 
 def _start_paid_attempt(store, settings, clock, approval, request_id, scenario, now, check_payload):

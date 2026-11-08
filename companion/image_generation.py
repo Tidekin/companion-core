@@ -221,7 +221,7 @@ def _binding(core, job, call_id, arguments):
         or row["state"] != "STARTED"
         or row["tool_name"] != "generate_image"
         or row["args_sha256"] != paid_budget.sha(arguments)
-        or row["primary_state"] != "SETTLED"
+        or row["primary_state"] not in {"SETTLED", "UNKNOWN"}
         or row["scenario"] != "chat"
         or row["primary_job"] != job["job_id"]
     ):

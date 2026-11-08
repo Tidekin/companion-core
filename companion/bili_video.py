@@ -576,7 +576,7 @@ def validate_model(store, settings, clock, request_id):
     if (
         not binding
         or not usage
-        or usage["state"] not in {"RESERVED", "SETTLED"}
+        or usage["state"] not in {"RESERVED", "SETTLED", "UNKNOWN"}
         or usage["job_id"] != binding["job_id"]
         or usage["scenario"] != binding["scenario"]
     ):
@@ -1379,7 +1379,7 @@ class BiliVideoService:
             with _tx(s):
                 self.validate_model(model_id)
                 usage = s.one("SELECT state FROM model_usage WHERE request_id = %s", (model_id,))
-                if usage != {"state": "SETTLED"}:
+                if not usage or usage["state"] not in {"SETTLED", "UNKNOWN"}:
                     raise CoreError("BILI_VIDEO_MODEL_RECONCILIATION_REQUIRED", 409)
                 following = None
                 plan = json.loads(row["plan_json"])
@@ -1955,7 +1955,7 @@ class BiliVideoService:
                 if (
                     phase["state"] != "SETTLED"
                     or not paid
-                    or paid["state"] != "SETTLED"
+                    or paid["state"] not in {"SETTLED", "UNKNOWN"}
                     or paid["job_id"] != phase["model_job_id"]
                     or paid["logical_request_id"] != phase["model_job_id"]
                     or paid["scenario"] != SCENARIOS[phase["phase"]]

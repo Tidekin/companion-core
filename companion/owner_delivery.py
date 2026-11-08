@@ -158,12 +158,18 @@ def _usage(store, job, view, snapshots, message_id, *, group=None):
         "jsonb_array_elements(c.conversation_json::jsonb->'messages') AS response(value) "
         "WHERE c.job_id=m.job_id AND c.phase IN ('OUTPUT','COMPLETE') "
         "AND response.value->>'kind'='response' "
-        "AND response.value->'metadata'->>'core_request_id'=m.request_id) ELSE false END "
+        "AND response.value->'metadata'->>'core_request_id'=m.request_id) "
+        "OR (m.scenario='activity' AND EXISTS(SELECT 1 FROM life_activity_results l "
+        "WHERE l.job_id=m.job_id AND l.state='SHADOW' AND l.text<>'')) "
+        "OR (m.scenario='qq_poke' AND EXISTS(SELECT 1 FROM poke_batches p "
+        "WHERE p.job_id=m.job_id AND p.decision_sha256 IS NOT NULL)) ELSE false END "
         'AS response_recorded FROM model_usage '
         'AS m LEFT JOIN model_admissions AS a USING (request_id) WHERE m.job_id = %s ORDER BY '
         'm.record_sequence NULLS FIRST', (job["job_id"],))
     if (any(not (row["state"] == "SETTLED" or (
-            row["state"] == "UNKNOWN" and (row["response_recorded"] or (
+            row["state"] == "UNKNOWN" and (row["response_recorded"]
+                or row["scenario"] != ("qq_poke" if job["kind"] == "poke" else job["kind"])
+                or (
                 row["scenario"] == "content_video" and row["request_id"] == unavailable))))
             or not row["authority_json"]
             or json.loads(row["authority_json"]) != view.authority.as_dict() for row in rows)

@@ -523,7 +523,7 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
 
 
 @pytest.mark.parametrize("kind", ["daily", "task"])
-def test_cloud_zero_limit_rejects_before_provider_and_native_charge(core, tmp_path, kind):
+def test_zero_cloud_currency_allows_analysis_and_keeps_native_charge(core, tmp_path, kind):
     calls = []
     cloud = CloudBudgetConfig(
         **{"daily_micro_cny" if kind == "daily" else "video_per_item_micro_cny": 0}
@@ -535,11 +535,10 @@ def test_cloud_zero_limit_rejects_before_provider_and_native_charge(core, tmp_pa
 
     async def scenario():
         async with paid_media(core, tmp_path, provider, cloud=cloud) as (module, item, prepared):
-            with pytest.raises(CoreError, match="CLOUD_.*BUDGET_EXHAUSTED"):
-                await module.upload("bili", item["request_id"], upload_body(item, prepared))
-            assert not calls
-            assert not phase_usage(core)
-            assert not phase_costs(core)
+            await module.upload("bili", item["request_id"], upload_body(item, prepared))
+            assert len(calls) == 1
+            assert len(phase_usage(core)) == 1
+            assert phase_costs(core)[0]["amount_micro_cny"] > 0
 
     run(scenario())
 

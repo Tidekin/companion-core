@@ -18,12 +18,6 @@ class RemConfig(StrictModel):
     daily_micro_usd: int = Field(default=10000, ge=0, le=1000000, strict=True)
     monthly_micro_usd: int = Field(default=100000, ge=0, le=10000000, strict=True)
 
-    @model_validator(mode="after")
-    def explicit_budget(self):
-        if self.enabled and (not self.daily_micro_usd or not self.monthly_micro_usd):
-            raise ValueError("REM requires explicit positive daily and monthly cost caps")
-        return self
-
 
 class RemDraft(StrictModel):
     decision: Literal["SKIP", "DREAM"]

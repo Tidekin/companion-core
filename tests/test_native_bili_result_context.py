@@ -199,11 +199,20 @@ def test_original_visual_result_checked_at_final_model_boundary(
     run(scenario())
 
 
-def test_original_paid_preview_remains_readable_with_limited_model_call_room(core, tmp_path):
+@pytest.mark.parametrize("unknown_cost", [False, True])
+def test_original_paid_preview_remains_readable_with_limited_model_call_room(
+    core, tmp_path, unknown_cost,
+):
+    def media_provider(_):
+        value = model_response({"analysis": "只观察到局部预览帧", "need_clips": True},
+                               tokens=18000).json()
+        if unknown_cost:
+            del value["usage"]
+        return httpx.Response(200, json=value)
+
     async def scenario():
         async with paid_media(core, tmp_path,
-            lambda _: model_response({"analysis": "只观察到局部预览帧", "need_clips": True},
-                                     tokens=18000),
+            media_provider,
             cloud=CloudBudgetConfig(video_per_item_micro_cny=1), call_limit=4,
         ) as (module, item, prepared):
             preview = await module.upload("bili", item["request_id"], upload_body(item, prepared))
@@ -211,7 +220,10 @@ def test_original_paid_preview_remains_readable_with_limited_model_call_room(cor
             module.result("bili", item["request_id"],
                           final_result(item, prepared, [preview], status="SUCCESS"))
             usage = phase_usage(core)
-            assert len(usage) == 1 and usage[0]["billed_micro_usd"] == 18040
+            assert len(usage) == 1 and usage[0]["billed_micro_usd"] > 0
+            assert usage[0]["state"] == ("UNKNOWN" if unknown_cost else "SETTLED")
+            if not unknown_cost:
+                assert usage[0]["billed_micro_usd"] == 18040
             provider = Provider(answer("只能根据有限的局部预览来回答。"))
             async with worker_for(core, provider) as worker:
                 assert await worker.run_once("partial-visual-read")

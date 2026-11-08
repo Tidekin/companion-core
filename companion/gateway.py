@@ -290,7 +290,7 @@ def _receipt_locked(store, settings, client_id, request_id, now):
         accounting = {"state": usage["state"], "micro_usd": usage["billed_micro_usd"],
                       "currency": "USD", "basis": "configured_rates_not_invoice"}
     if row["state"] == "SUCCEEDED" and row["response_cipher"]:
-        if usage is None or usage["state"] != "SETTLED":
+        if usage is None or usage["state"] not in {"SETTLED", "UNKNOWN"}:
             raise CoreError("GATEWAY_ACCOUNTING_UNAVAILABLE", 503)
         completion = _decrypt(settings, row["response_cipher"])
         if completion.get("id") != "chatcmpl-" + row["request_id"]:
@@ -359,10 +359,12 @@ async def run_once(store, settings, model, clock=utcnow):
             'model_usage.request_id = %s',
                           (row["model_request_id"],))
         state, encrypted = "FAILED", None
-        if usage and usage["state"] != "SETTLED":
+        if usage and (usage["state"] == "RESERVED"
+                      or usage["state"] == "UNKNOWN" and response is None):
             state, error = "UNKNOWN", "GATEWAY_OUTCOME_UNKNOWN"
             error_status = 503
-        elif response is not None and error is None and row["expires_at"] > clock():
+        elif (response is not None and error is None and row["expires_at"] > clock()
+              and usage and usage["state"] in {"SETTLED", "UNKNOWN"}):
             completion = {"id": "chatcmpl-" + row["request_id"], "object": "chat.completion",
                 "created": int(datetime.fromisoformat(row["created_at"]).timestamp()),
                 "model": body.model, "choices": [{"index": 0, "message": {
@@ -370,7 +372,9 @@ async def run_once(store, settings, model, clock=utcnow):
                     "finish_reason": response.finish_reason}], "usage": {
                     "prompt_tokens": response.input_tokens,
                     "completion_tokens": response.output_tokens,
-                    "total_tokens": response.input_tokens + response.output_tokens}}
+                    "total_tokens": response.input_tokens + response.output_tokens}
+                    if response.input_tokens is not None and response.output_tokens is not None
+                    else None}
             state, encrypted = "SUCCEEDED", _encrypt(settings, completion)
         store.execute('UPDATE gateway_requests SET state = %s, response_cipher = %s, '
             'request_cipher = NULL, error_code = %s, error_status = %s, lease_token = NULL, '
