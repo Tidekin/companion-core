@@ -157,9 +157,9 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
              elapsed_ms=(model_finished - model_started) / 1e6, at_ns=model_finished,
              budget_micro_usd=usage["billed_micro_usd"] if usage else None,
              model_usage_state=usage["state"] if usage else None)
-        if usage is None or usage["state"] != "SETTLED":
-            # An SDK usage counter cannot turn an unmeasured provider outcome into
-            # a settled one, nor authorize the next model or tool side effect.
+        if usage is None or usage["state"] not in {"SETTLED", "UNKNOWN"}:
+            # A received response still requires an original accounting row.
+            # UNKNOWN retains its original fee uncertainty and may continue.
             raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
         check()
         return response

@@ -153,12 +153,19 @@ def _usage(store, job, view, snapshots, message_id, *, group=None):
     preview = next((s for s in snapshots if s["kind"] == "video_preview_reply"), None)
     unavailable = (_preview_request(store, job, group or reply_group(store, message_id), preview)
                    if preview else None)
-    rows = store.rows('SELECT m.request_id, m.state, m.scenario, a.authority_json FROM model_usage '
+    rows = store.rows('SELECT m.request_id, m.state, m.scenario, a.authority_json, '
+        "CASE WHEN m.state='UNKNOWN' THEN EXISTS(SELECT 1 FROM agent_conversations AS c, "
+        "jsonb_array_elements(c.conversation_json::jsonb->'messages') AS response(value) "
+        "WHERE c.job_id=m.job_id AND c.phase IN ('OUTPUT','COMPLETE') "
+        "AND response.value->>'kind'='response' "
+        "AND response.value->'metadata'->>'core_request_id'=m.request_id) ELSE false END "
+        'AS response_recorded FROM model_usage '
         'AS m LEFT JOIN model_admissions AS a USING (request_id) WHERE m.job_id = %s ORDER BY '
         'm.record_sequence NULLS FIRST', (job["job_id"],))
     if (any(not (row["state"] == "SETTLED" or (
-            row["state"] == "UNKNOWN" and row["scenario"] == "content_video"
-            and row["request_id"] == unavailable)) or not row["authority_json"]
+            row["state"] == "UNKNOWN" and (row["response_recorded"] or (
+                row["scenario"] == "content_video" and row["request_id"] == unavailable))))
+            or not row["authority_json"]
             or json.loads(row["authority_json"]) != view.authority.as_dict() for row in rows)
         or not reply_revision.control_job(store, job)
         and not any(row["scenario"] == ("qq_poke" if job["kind"] == "poke" else job["kind"])
@@ -174,7 +181,7 @@ def _preview_request(store, job, group, proof):
         't.model_request_id AND m.job_id = t.job_id JOIN model_usage AS v ON v.job_id = t.job_id '
         "AND v.request_id = %s AND v.scenario = 'content_video' WHERE t.job_id = %s AND "
         "t.tool_call_id = %s AND t.tool_name = 'understand_video' AND t.state = 'RETURNED' AND "
-        "c.request_id = m.request_id AND m.state = 'SETTLED' AND m.scenario = "
+        "c.request_id = m.request_id AND m.state IN ('SETTLED','UNKNOWN') AND m.scenario = "
         "'chat'", (proof["request_id"], job["job_id"], proof["call_id"]))
     if not tool or not group:
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)

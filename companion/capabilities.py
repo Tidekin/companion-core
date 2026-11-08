@@ -20,7 +20,7 @@ from companion import (
     qq_images,
     video_input,
 )
-from companion.budget import capacity_exhausted, total_monthly
+from companion.budget import capacity_exhausted
 from companion.contracts import CoreError
 from companion.exploration import METERED_USAGE_SQL
 from companion.source_grants import SourceGrantService, SourceGrantSnapshot
@@ -83,20 +83,6 @@ def _live_blocks(store, settings, now, *, cumulative_state=None, carry_view=None
                 reasons.append("LIVE_APPROVAL_EXPIRED")
         if live_text.stopped(store, approval.plan_sha256 if approval else None):
             reasons.append("LIVE_WINDOW_STOPPED")
-    if store.one(
-        "SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked', "
-        "'model_budget_restore_required')"
-    ):
-        reasons.append("BUDGET_RECONCILIATION_REQUIRED")
-    carry_view = _carry_view(store, settings) if carry_view is None else carry_view
-    closed = sorted(carry_view.get("model_closures", {}))
-    if not model_carry.active(settings) and store.one(
-        "SELECT 1 FROM model_usage WHERE state='UNKNOWN'"
-        + (" AND request_id NOT IN (" + ",".join('%s' for _ in closed) + ")" if closed else "")
-        + " LIMIT 1",
-        closed,
-    ):
-        reasons.append("MODEL_USAGE_UNKNOWN")
     if store.one(
         "SELECT 1 FROM model_usage AS m LEFT JOIN model_admissions AS a USING "
         "(request_id) WHERE m.state = 'RESERVED' AND (a.request_id IS NULL OR a.lease_until <= %s) "
@@ -221,53 +207,10 @@ def _periods(settings, now):
     )
 
 
+
 def _paid_capacity_blocks(store, settings, approval, now, *, carry_view=None):
-    """Report exhausted native quotas without estimating or reserving another call."""
-    reasons = []
-    if store.one(
-        "SELECT 1 FROM model_usage AS m LEFT JOIN model_admissions AS a USING (request_id) WHERE "
-        "a.request_id IS NULL AND m.state IN ('RESERVED', 'UNKNOWN') LIMIT 1",
-    ):
-        reasons.append("MODEL_LEGACY_USAGE_RECONCILIATION_REQUIRED")
-    day, month = _periods(settings, now)
-    daily = store.one(
-        (
-            "SELECT COUNT(*) calls,COALESCE(SUM(billed_micro_usd),0)"
-            " amount FROM model_usage WHERE occurred_at>=%s"
-        ),
-        (day,),
-    )
-    unlimited = approval.unlimited_period_spend
-    if daily["calls"] >= approval.daily_calls or (
-        not unlimited and daily["amount"] >= approval.daily_micro_usd
-    ):
-        reasons.append("MODEL_DAILY_BUDGET_EXHAUSTED")
-    if not unlimited:
-        monthly = total_monthly(store, month)
-        if settings.pricing_known and monthly >= settings.monthly_limit_micro_usd:
-            reasons.append("MONTHLY_BUDGET_EXHAUSTED")
-        if monthly >= approval.monthly_micro_usd:
-            reasons.append("MODEL_MONTHLY_BUDGET_EXHAUSTED")
-    carry_view = _carry_view(store, settings) if carry_view is None else carry_view
-    windows = (
-        model_carry.scope_windows(carry_view, approval.window_id)
-        if carry_view
-        else [approval.window_id]
-    )
-    window = store.one(
-        "SELECT COUNT(*) calls,COALESCE(SUM(m.billed_micro_usd),0) amount "
-        "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE a.window_id IN ("
-        + ",".join('%s' for _ in windows)
-        + ")",
-        windows,
-    )
-    if window["calls"] >= approval.window_calls or (
-        not unlimited and window["amount"] >= approval.window_micro_usd
-    ):
-        reasons.append("MODEL_WINDOW_BUDGET_EXHAUSTED")
-    if capacity_exhausted(store, approval, carry_view.get("model_closures", ())):
-        reasons.append("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED")
-    return reasons
+    return (["MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"]
+            if capacity_exhausted(store, approval) else [])
 
 
 def _reflection_blocks(store, settings, now):

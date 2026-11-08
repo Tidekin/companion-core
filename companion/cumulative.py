@@ -505,8 +505,6 @@ def check(store, settings, now, *, custody=None):
     if not instant(scope.starts_at) <= at < instant(scope.expires_at):
         pause(store, settings.paid_model, now, "EXPIRED")
         raise CoreError("CUMULATIVE_POLICY_EXPIRED", 403)
-    if state["paused"]:
-        raise CoreError("CUMULATIVE_PAUSED", 403)
     return state
 
 
@@ -565,8 +563,6 @@ def admit_model(store, settings, request_id, logical, at, amount, input_tokens, 
         return None
     item = liability(at, settings.paid_model.window_id, logical, "RESERVED", micro_usd=amount,
                      model_attempts=1, input_tokens=input_tokens, output_tokens=output_tokens)
-    if violations(state, item):
-        raise CoreError("CUMULATIVE_LIMIT_EXHAUSTED", 429)
     if request_id in state["models"]:
         raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
     return item
@@ -597,7 +593,7 @@ def final_fence(settings, state, now, request_id=None):
         return
     at = instant(now)
     if (scope is None or digest(scope.model_dump(mode="json")) != state["policy_sha256"]
-        or state["paused"] or at < state["clock"]
+        or at < state["clock"]
         or not instant(scope.starts_at) <= at < instant(scope.expires_at)):
         raise CoreError("CUMULATIVE_DISPATCH_FENCED", 403)
     if request_id and periods(state["models"][request_id]["at"], scope.timezone) != periods(
@@ -625,7 +621,7 @@ def admit_operation(store, settings, now, kind, source_id, source_sha256, *, at=
     item = liability(at or now, settings.paid_model.window_id, logical or source_id,
         "ADMITTED" if kind == "input" else "RESERVED",
         **{"owner_inputs" if kind == "input" else "send_attempts": 1})
-    if item["at"] > instant(now) or violations(state, item):
+    if item["at"] > instant(now):
         raise CoreError("CUMULATIVE_LIMIT_EXHAUSTED", 429)
     paid_budget.journal(store, settings.paid_model, {
         "kind": "quota_operation", "version": 1, "at": instant(now),
