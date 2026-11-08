@@ -2,12 +2,14 @@
 
 import copy
 import json
+from unittest.mock import patch
 
 import httpx
 import pytest
 from pydantic import SecretStr
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.store import after
 from tests.conftest import ingest, run
 from tests.postgres_fixture import logical_state
@@ -60,7 +62,9 @@ def test_v3_reader_requires_its_own_adapter_token_before_writing(core, authority
             assert result.status_code == 401
 
     before = logical_state(core.store)
-    with core.store.read_snapshot():
+    with core.store.read_snapshot(), patch.object(
+        ApiStore, "run", side_effect=AssertionError("invalid reader request opened an API session")
+    ):
         run(scenario())
     assert logical_state(core.store) == before
     assert core.store.rows("SELECT * FROM reading_attempts") == []
@@ -87,7 +91,9 @@ def test_reader_versions_reject_other_contracts_without_echo_or_writes(core, ver
             assert "private-token-must-not-echo" not in result.text
 
     before = logical_state(core.store)
-    with core.store.read_snapshot():
+    with core.store.read_snapshot(), patch.object(
+        ApiStore, "run", side_effect=AssertionError("invalid reader request opened an API session")
+    ):
         run(scenario())
     assert logical_state(core.store) == before
 
