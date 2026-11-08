@@ -11,10 +11,6 @@ from companion_voice_node.supervisor import child_entry
 
 
 def fixture_provider(packet):
-    from companion.voice_protocol import VoiceAudioResult
-    from companion_voice_node.providers import validate_wav
-    from tests.voice_service_fixtures import wav_bytes
-
     fixture = packet.pop("_fixture")
     with Path(fixture["counter"]).open("a", encoding="utf-8") as output:
         output.write(
@@ -37,6 +33,10 @@ def fixture_provider(packet):
         return {"status": "SUCCEEDED", "payload": {"kind": "tts", "private": "do not echo"}}
     if fixture["scenario"] == "false-not-started":
         return {"status": "FAILED", "remote_state": "NOT_STARTED", "error_code": "UNPROVEN_FAILURE"}
+    from companion.voice_protocol import VoiceAudioResult
+    from companion_voice_node.providers import validate_wav
+    from tests.voice_service_fixtures import wav_bytes
+
     if packet["operation"] == "tts":
         audio = validate_wav(
             wav_bytes(45, rate=44100) if fixture["scenario"] == "large-result" else wav_bytes(0.125)
