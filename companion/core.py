@@ -217,10 +217,10 @@ class Core(Runtime):
         recover_deliveries(s, now)
 
     def cleanup_media(self):
-        """One bounded directory batch per spool in the existing maintenance cadence."""
+        """Return actual file removals from one bounded scan per spool."""
         from companion import agent_images, image_generation
 
-        processed = 0
+        removed = 0
         for module, kwargs in (
             (image_spool, {"max_bytes": self.settings.content.max_image_bytes,
                            "retain_completed": agent_images.enabled(self.settings)}),
@@ -235,17 +235,18 @@ class Core(Runtime):
                     continue
                 scan = self._media_scans[module] = os.scandir(root)
             try:
-                count = module.cleanup(self.store, self.clock(), entries=scan,
-                                       limit=MEDIA_CLEANUP_BATCH, **kwargs)
+                scanned, unlinked = module.cleanup(
+                    self.store, self.clock(), entries=scan, limit=MEDIA_CLEANUP_BATCH, **kwargs,
+                )
             except BaseException:
                 scan.close()
                 del self._media_scans[module]
                 raise
-            processed += count
-            if count < MEDIA_CLEANUP_BATCH:
+            removed += unlinked
+            if scanned < MEDIA_CLEANUP_BATCH:
                 scan.close()
                 del self._media_scans[module]
-        return processed
+        return removed
 
     def close(self):
         for scan in getattr(self, "_media_scans", {}).values():
