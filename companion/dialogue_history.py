@@ -152,6 +152,13 @@ def recent_sent_sources(
         if not include_partial
         else ""
     )
+    frozen = store.frozen_scope if include_partial and _nominate is None else None
+    delivery_projection = (
+        ",jsonb_build_object('sent_at',o.sent_at,'segment_index',o.segment_index,"
+        "'segment_count',o.segment_count,'reply_group_sha256',o.reply_group_sha256,"
+        "'segment_interval_ms',o.segment_interval_ms) AS history_delivery "
+        if frozen is not None else ""
+    )
     projection = (
         "SELECT e.event_id,octet_length(e.body_json)+octet_length(o.content_json) AS text_bytes "
         if _nominate is not None
@@ -172,7 +179,7 @@ def recent_sent_sources(
         else lambda sql, args: _nominate.rows(store, sql, args, limit=max_turns)
     )
     rows = read(
-        projection
+        projection + delivery_projection
         + (
 
                 'FROM events e JOIN outbox o ON '
@@ -232,6 +239,7 @@ def recent_sent_sources(
     active = reply_revision.active_sources(store, [row["event_id"] for row in rows])
     sources = []
     for row in rows:
+        delivery = row.pop("history_delivery", None)
         # This operational column is outside historical input and context fingerprints.
         row.pop("reply_revision", None)
         if row["event_id"] not in active:
@@ -282,7 +290,11 @@ def recent_sent_sources(
             except CoreError:
                 continue
         elif include_partial:
-            delivered = store.one(
+            # The same immutable snapshot already read these exact outbox fields.
+            # Writers and unowned transactions still take their fresh per-row read.
+            delivered = delivery if (
+                frozen is not None and store.frozen_scope == frozen
+            ) else store.one(
                 "SELECT outbox.message_id AS message_id, outbox.origin_event_id "
                 "AS origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type "
                 "AS action_type, outbox.content_json AS content_json, outbox.content_sha256 AS "
