@@ -28,6 +28,7 @@ def test_signed_entry_and_worker_keep_absent_cache_distinct_from_explicit_zero(c
             source = await entry.admit(1, "synthetic cache presence inspection")
             job_id = entry.accepted[source["event_id"]]["job_id"]
             settings = core.settings.model_dump(mode="json")
+            settings["database"] = core.settings.database.get_secret_value()
             for name in ("model_key", "bridge_token", "control_token"):
                 settings[name] = getattr(core.settings, name).get_secret_value()
             path, requests_path = tmp_path / "cache-worker.json", tmp_path / "requests.json"

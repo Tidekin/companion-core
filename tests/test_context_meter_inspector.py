@@ -216,6 +216,7 @@ def test_real_http_and_independent_worker_expose_both_sdk_attempts(core, tmp_pat
         }) as (entry, _):
             source = await entry.admit(1, "synthetic meter inspection")
             settings = core.settings.model_dump(mode="json")
+            settings["database"] = core.settings.database.get_secret_value()
             for name in ("model_key", "bridge_token", "control_token"):
                 settings[name] = getattr(core.settings, name).get_secret_value()
             job_id = entry.accepted[source["event_id"]]["job_id"]

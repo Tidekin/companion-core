@@ -12,6 +12,7 @@ from companion import budget, cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelClient, ModelResponse
 from tests.owner_model_fixtures import authorized_job
+from tests.postgres_fixture import logical_state
 from tests.support.cumulative_budget import enable, policy, view
 from tests.support.paid_model import approved_live
 
@@ -59,7 +60,8 @@ def test_rotation_and_new_window_do_not_reset_prior_account_calls(core, tmp_path
     first = reserve(core)
     budget.settle(core.store, core.settings, first, ModelResponse("ok", 30, 2))
     core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (authorized_job(core),))
-    cumulative.pause(core.store, core.settings.paid_model, core.clock())
+    with core.store.transaction():
+        cumulative.pause(core.store, core.settings.paid_model, core.clock())
     core.settings.model_key = SecretStr("synthetic-rotated-key")
     core.settings.paid_model = core.settings.paid_model.model_copy(update={"window_id": "second"})
     policy(core, account={"model_attempts": 1}, key_ownership_sha256="1" * 64)
@@ -167,7 +169,8 @@ def test_final_http_hook_observes_pause_before_transport(core, tmp_path):
     calls = []
 
     async def paused(_):
-        cumulative.pause(core.store, core.settings.paid_model, core.clock())
+        with core.store.transaction():
+            cumulative.pause(core.store, core.settings.paid_model, core.clock())
 
     async def exercise():
         async with httpx.AsyncClient(event_hooks={"request": [paused]},
@@ -213,7 +216,8 @@ def test_committed_pause_cannot_be_removed_by_a_valid_journal_prefix(core, tmp_p
     enable(core, tmp_path)
     path = Path(core.settings.paid_model.journal_path)
     prior = path.read_bytes()
-    cumulative.pause(core.store, core.settings.paid_model, core.clock())
+    with core.store.transaction():
+        cumulative.pause(core.store, core.settings.paid_model, core.clock())
     path.write_bytes(prior)
     with pytest.raises(CoreError, match="RECONCILIATION"):
         reserve(core)
@@ -253,27 +257,27 @@ def test_reserved_model_cannot_dispatch_in_another_natural_day(core, tmp_path):
 
 
 @pytest.mark.parametrize("missing", [False, True])
-def test_old_database_and_latest_or_missing_journal_never_replenish(core, tmp_path, missing):
-    import sqlite3
+def test_old_database_and_latest_or_missing_journal_never_replenish(
+    empty_database, core, tmp_path, missing,
+):
     from contextlib import closing
 
+    from companion.postgres import Database
     from companion.store import Store
+    from tests.postgres_fixture import copy_database
 
     enable(core, tmp_path)
-    old = tmp_path / "old.db"
-    with closing(sqlite3.connect(old)) as destination:
-        core.store.db.backup(destination)
+    old = empty_database
+    copy_database(core.settings.database, old, tmp_path)
     request = reserve(core)
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
     if missing:
         Path(core.settings.paid_model.journal_path).unlink()
-    restored = Store(str(old))
-    try:
+    with (Database(old) as database,
+          closing(Store(database, core.store.state_directory)) as restored):
         with pytest.raises(CoreError, match="RECONCILIATION"):
             budget.reserve(restored, core.settings, authorized_job(core),
                            "chat", MESSAGES, core.clock())
-    finally:
-        restored.close()
     assert core.model.calls == []
 
 
@@ -345,11 +349,12 @@ def test_missing_journal_and_identity_status_does_not_bootstrap_or_modify_anythi
     path = Path(core.settings.paid_model.journal_path)
     path.unlink()
     core.store.execute("DELETE FROM runtime_meta WHERE key='model_budget_journal_id'")
-    before = list(core.store.db.iterdump())
-    result = cumulative.status(core.store, core.settings, core.clock())
-    assert result == {"enrolled": True, "available": False,
-                      "code": "MODEL_BUDGET_RECONCILIATION_REQUIRED"}
-    assert list(core.store.db.iterdump()) == before
+    with core.store.read_snapshot():
+        before = logical_state(core.store)
+        result = cumulative.status(core.store, core.settings, core.clock())
+        assert result == {"enrolled": True, "available": False,
+                          "code": "MODEL_BUDGET_RECONCILIATION_REQUIRED"}
+        assert logical_state(core.store) == before
     assert not path.exists()
 
 
@@ -362,7 +367,7 @@ def test_pause_fsync_then_projection_failure_retains_only_the_stop_witness(
     execute = core.store.execute
 
     def fail_projection(sql, params=()):
-        if sql.startswith("INSERT OR REPLACE INTO runtime_meta") and params[0] == (
+        if sql.startswith("INSERT INTO runtime_meta") and params[0] == (
             cumulative.PROJECTION
         ):
             raise RuntimeError("synthetic pause projection failure after fsync")
@@ -388,11 +393,12 @@ def test_damaged_projection_status_remains_read_only_and_reports_unavailable(
     enable(core, tmp_path)
     core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                        (projection, cumulative.PROJECTION))
-    before = list(core.store.db.iterdump())
     journal = Path(core.settings.paid_model.journal_path).read_bytes()
-    result = cumulative.status(core.store, core.settings, core.clock())
-    assert not result["available"] and result["code"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
-    assert list(core.store.db.iterdump()) == before
+    with core.store.read_snapshot():
+        before = logical_state(core.store)
+        result = cumulative.status(core.store, core.settings, core.clock())
+        assert not result["available"] and result["code"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
+        assert logical_state(core.store) == before
     assert Path(core.settings.paid_model.journal_path).read_bytes() == journal
 
 
