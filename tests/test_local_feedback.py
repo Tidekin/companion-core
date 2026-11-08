@@ -52,10 +52,11 @@ def test_native_testmon_with_xdist_selects_changed_function_and_full_can_refresh
 def test_real_schema_is_prepared_once_per_worker_and_copies_stay_private(tmp_path):
     root = project(tmp_path)
     (root / "conftest.py").write_text(
-        "from pathlib import Path\nimport tests.conftest as shared\n"
+        "from pathlib import Path\nimport os\nimport tests.conftest as shared\n"
         "pytest_plugins = ['tests.conftest']\noriginal = shared.migrate\n"
         "def counted(path):\n"
-        "    with (Path(__file__).parent / '.local/preparations').open('a') as f:\n"
+        "    marker = Path(__file__).parent / f'.local/prepared-{os.getpid()}.txt'\n"
+        "    with marker.open('x') as f:\n"
         "        f.write('prepared\\n')\n"
         "    return original(path)\nshared.migrate = counted\n")
     for index in range(4):
@@ -90,9 +91,12 @@ def test_real_schema_is_prepared_once_per_worker_and_copies_stay_private(tmp_pat
                "--basetemp=" + str(root / ".local/pytest"), "-o", "cache_dir=.local/cache"]
     result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (root / ".local/preparations").read_text().splitlines() == ["prepared"] * 2
+    preparations = list((root / ".local").glob("prepared-*.txt"))
+    assert len(preparations) == 2
+    assert all(path.read_text() == "prepared\n" for path in preparations)
     records = [json.loads(path.read_text()) for path in (root / ".local").glob("worker-*.json")]
     assert len(records) == 4 and len({r["pid"] for r in records}) == 2
+    assert {int(path.stem.split("-")[1]) for path in preparations} == {r["pid"] for r in records}
     assert len({r["schema"] for r in records}) == 2
     assert len({r["tmp"] for r in records}) == 4
     assert len({r["child_tmp"] for r in records}) == 2
