@@ -150,7 +150,9 @@ def test_legacy_v1_plan_is_read_without_measurement_backfill(core, tmp_path):
 
 
 @pytest.mark.parametrize("boundary", ["normal", "stop", "restore"])
-def test_v2_real_tcp_and_independent_worker_preserve_owner_fences(core, tmp_path, boundary):
+def test_v2_real_tcp_and_independent_worker_preserve_owner_fences(
+    empty_database, core, tmp_path, boundary,
+):
     from companion import owner_authority
     from companion.backup import backup, restore
 
@@ -180,10 +182,14 @@ def test_v2_real_tcp_and_independent_worker_preserve_owner_fences(core, tmp_path
                 assert stopped.status_code == 200, stopped.text
             if boundary == "restore":
                 key = Fernet.generate_key()
-                archive, target = tmp_path / "prior.enc", tmp_path / "restored.db"
+                archive = tmp_path / "prior.enc"
+                restored_state = tmp_path / "restored-state"
                 backup(core.settings.database, archive, key)
-                restore(archive, target, key, core.settings.erasure_ledger)
-                settings = core.settings.model_copy(update={"database": str(target)})
+                restore(archive, empty_database, key, core.settings.erasure_ledger,
+                        state_directory=restored_state)
+                settings = core.settings.model_copy(update={
+                    "database": empty_database, "state_directory": str(restored_state),
+                })
                 with Core(settings, clock=core.clock) as restored:
                     assert await processes(restored, tmp_path / "v2-restored", count=1) == []
                     assert restored.store.rows("SELECT * FROM model_usage") == []

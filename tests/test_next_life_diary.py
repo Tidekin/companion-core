@@ -50,14 +50,20 @@ def test_withdrawn_source_recomputes_in_independent_worker_without_resetting_usa
     assert len(model.calls) == 1
 
 
-def test_recompute_after_old_backup_replay_uses_current_remaining_evidence(core, tmp_path):
+def test_recompute_after_old_backup_replay_uses_current_remaining_evidence(
+    empty_database, core, tmp_path,
+):
     seed(core)
-    archive, restored_path = tmp_path / "before.enc", tmp_path / "restore.db"
+    archive = tmp_path / "before.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     withdraw(core)
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
-    settings = core.settings.model_copy(update={"database": str(restored_path)})
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    settings = core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    })
     model = DiaryModel()
     with Core(settings, model, core.clock) as restored:
         assert restored.diary.get_day(DAY, settings.owner_qq_id) is None
@@ -154,16 +160,22 @@ def test_owner_correction_is_preserved_until_its_source_is_erased(core):
     assert "只保留主人已核对" not in current["body_md"]
 
 
-def test_day_deletion_during_recompute_fences_worker_and_survives_restore(core, tmp_path):
+def test_day_deletion_during_recompute_fences_worker_and_survives_restore(
+    empty_database, core, tmp_path,
+):
     seed(core)
     withdraw(core)
     assert recompute(core)
     key = Fernet.generate_key()
-    archive, restored_path = tmp_path / "pending.enc", tmp_path / "old.db"
+    archive = tmp_path / "pending.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     core.diary.forget(DAY, core.settings.owner_qq_id)
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
-    with Core(core.settings.model_copy(update={"database": str(restored_path)}),
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }),
               DiaryModel(), core.clock) as restored:
         for instance in (core, restored):
             assert recompute(instance) is None

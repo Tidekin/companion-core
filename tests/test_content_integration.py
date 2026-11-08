@@ -196,23 +196,26 @@ def test_image_only_chat_uses_image_evidence(core):
     assert len(vision.calls) == 1
 
 
-def test_restore_cannot_restart_pending_content(core, tmp_path):
+def test_restore_cannot_restart_pending_content(empty_database, core, tmp_path):
     content, _ = enable(core)
     core.settings.content = content.options
     share(core, manifest=[{"kind": "image", "slot": 0}])
-    key, archive, destination = (
+    key, archive, restored_state = (
         Fernet.generate_key(),
         tmp_path / "content.enc",
-        tmp_path / "restored.db",
+        tmp_path / "restored-state",
     )
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     recovered = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         assert not recovered.content.status("evt_test_1")["pending"]
         with pytest.raises(Exception, match="CONTENT_IMAGE_ALREADY_UNKNOWN"):
             recovered.content.claim_upload("evt_test_1", "image:0")
     finally:
-        recovered.store.close()
+        recovered.close()
