@@ -113,7 +113,7 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                             headers={"Authorization": "Bearer " + PASSWORD})
                         assert stopped.status_code == 200, stopped.text
                     elif change == "privacy":
-                        with core.store.transaction():
+                        with core.store.transaction(control_write=True):
                             core.ledger.expire_events(core.store, [capture.event_id], core.clock())
                     child.stdin.write(b"continue\n")
                     await child.stdin.drain()
@@ -125,7 +125,7 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                                 "UPDATE outbox SET state='SENT',sent_at=%s "
                                 "WHERE origin_event_id=%s AND state='PENDING'"
                             ),
-                                (core.clock(), capture.event_id)).rowcount == 1
+                                (core.clock(), capture.event_id)) == 1
                         proof = successor()
                         second = await accept(proof, second_text)
                         if change == "closing":

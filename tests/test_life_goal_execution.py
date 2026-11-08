@@ -238,37 +238,30 @@ def test_live_authority_full_loop_independent_workers(
                         "UPDATE observations SET evidence_json='{}'",
                         f"UPDATE observations SET source_sha256='{bad_sha}'",
                         "UPDATE observations SET result_status='DISCOVERED'",
-                        "UPDATE observations SET evidence_json=json_set(evidence_json,"
-                        "'$.read_observation.provenance.source','qzone')",
+                        "UPDATE observations SET evidence_json=jsonb_set(evidence_json::jsonb,"
+                        "'{read_observation,provenance,source}',to_jsonb('qzone'::text))::text",
                         "UPDATE reading_attempts SET context_json='{}'",
                         "UPDATE reading_attempts SET result_event_ids_json='[]'",
                         f"UPDATE reading_attempts SET original_url_sha256='{bad_sha}'",
                         "UPDATE reading_attempts SET state='UNKNOWN'",
                     ):
-                        core.store.execute("SAVEPOINT web_attribution_negative")
-                        try:
+                        with core.store.transaction(rollback=True):
                             core.store.execute(mutation)
                             with pytest.raises(CoreError, match="LIFE_SOURCE_UNAVAILABLE"):
                                 _source(core.store, core.settings, source_id, core.clock())
-                        finally:
-                            core.store.execute("ROLLBACK TO web_attribution_negative")
-                            core.store.execute("RELEASE web_attribution_negative")
 
                     def visible():
                         return [r for t in core.life_topics.preview(core.settings.owner_qq_id)[
                             "items"] for r in t["results"] if r["action"] == "SHARE"]
 
                     assert len(visible()) == 1
-                    core.store.execute("SAVEPOINT web_metadata_changed")
-                    try:
-                        core.store.execute("UPDATE observations SET evidence_json=json_set("
-                            "evidence_json,'$.read_observation.parser_version','web/changed')")
+                    with core.store.transaction(rollback=True):
+                        core.store.execute("UPDATE observations SET evidence_json=jsonb_set("
+                            "evidence_json::jsonb,'{read_observation,parser_version}',"
+                            "to_jsonb('web/changed'::text))::text")
                         changed = _source(core.store, core.settings, source_id, core.clock())
                         assert changed["source_sha256"] != sources[0]["source_sha256"]
                         assert visible() == []
-                    finally:
-                        core.store.execute("ROLLBACK TO web_metadata_changed")
-                        core.store.execute("RELEASE web_metadata_changed")
                 for mutation in (
                     "UPDATE life_activity_results SET goal_id=NULL WHERE action='EXPLORE'",
                     "UPDATE life_activity_results SET authority_sha256='changed' "
@@ -282,18 +275,14 @@ def test_live_authority_full_loop_independent_workers(
                     f"WHERE event_id='{inbound.event_id}'",
                     f"UPDATE events SET redacted=1 WHERE event_id='{inbound.event_id}'",
                 ):
-                    core.store.execute("SAVEPOINT authority_negative")
-                    try:
+                    with core.store.transaction(rollback=True):
                         core.store.execute(mutation)
                         code = ("MODEL_BUDGET_RECONCILIATION_REQUIRED"
                                 if mutation.startswith("UPDATE model_usage")
                                 else "LIFE_SHADOW_SCOPE_REQUIRED")
                         with pytest.raises(CoreError, match=code):
                             current_authority()
-                    finally:
-                        core.store.execute("ROLLBACK TO authority_negative")
-                        core.store.execute("RELEASE authority_negative")
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [inbound.event_id], core.clock())
                 assert not core.store.rows(
                     "SELECT * FROM life_activity_results WHERE state='SHADOW'")
@@ -328,7 +317,7 @@ def test_native_read_gates_still_block_life_choices(core, gate):
     elif gate == "adapter":
         core.settings.observation_enabled = False
     elif gate == "erasure":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     else:
         core.settings.observation_adapters["bili"].source_grant_required = True

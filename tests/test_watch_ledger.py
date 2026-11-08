@@ -136,7 +136,7 @@ def test_erasing_the_source_removes_the_entry(core, tmp_path):
     ready(core, tmp_path, json.dumps(JUDGEMENT, ensure_ascii=False))
     event_id = observe(core, 10)
     step(core)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
     assert entries(core) == []
     assert watch_ledger.recent(core.store) == []
@@ -188,11 +188,11 @@ def test_a_later_video_analysis_is_judged_again_but_a_shallower_read_is_not(core
     first = observe(core, 12, url=url)
     step(core)
     analysis = observe(core, 13, url=url, text="视频分析：猫自己跳进纸箱后睡着")
-    core.store.execute((
-        "UPDATE observations SET evidence_json=json_set(evidence_json,'$.bili"
-        '_video\',json(\'{"request_id":"x"}\')) WHERE event_id=%s'
-    ),
-                       (analysis,))
+    core.store.execute(
+        "UPDATE observations SET evidence_json=jsonb_set(evidence_json::jsonb,"
+        "'{bili_video}',%s::jsonb)::text WHERE event_id=%s",
+        (json.dumps({"request_id": "x"}), analysis),
+    )
     observe(core, 14, url=url, text="又一次只读到正文")
     step(core)
     [row] = entries(core)

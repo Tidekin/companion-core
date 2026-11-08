@@ -34,7 +34,7 @@ def test_shared_limit_note_reaches_real_worker_model_request(core, tmp_path, mon
                 200, json=answer("收到资料。"))) as worker:
                 assert await worker.run_once("limit-source")
             assert (await entry.send(entry.client, entry.protocol))["worked"]
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.memory.add(Candidate(subject="project", kind="fact", fact_key="prototype",
                     content=source["payload"]["text"], evidence_event_id=source["event_id"],
                     evidence_quote=source["payload"]["text"]), core.clock())
@@ -65,7 +65,7 @@ def test_prefetch_enters_first_request_without_tool_and_erases_with_source(core,
                 assert await worker.run_once("source-before-prefetch")
             assert (await entry.send(entry.client, entry.protocol))["worked"]
             assert len(sends) == 1
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 mid = core.memory.add(Candidate(subject="project", kind="fact",
                     fact_key="model_number", content=text,
                     evidence_event_id=original["event_id"], evidence_quote=text), core.clock())
@@ -74,7 +74,7 @@ def test_prefetch_enters_first_request_without_tool_and_erases_with_source(core,
             job_id = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s',
                                    (fresh["event_id"],))["job_id"]
             config = core.settings.model_dump(mode="json")
-            for key in ("model_key", "bridge_token", "control_token"):
+            for key in ("database", "model_key", "bridge_token", "control_token"):
                 config[key] = getattr(core.settings, key).get_secret_value()
             settings_path = tmp_path / "prefetch-worker.json"
             settings_path.write_text(encode(config), encoding="utf-8")
@@ -104,7 +104,7 @@ def test_prefetch_enters_first_request_without_tool_and_erases_with_source(core,
             assert not core.store.rows('SELECT * FROM agent_tool_calls WHERE job_id=%s', (job_id,))
             usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert len(usage) == 2 and all(row["state"] == "SETTLED" for row in usage)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [original["event_id"]], core.clock())
             saved = core.store.one('SELECT * FROM agent_conversations WHERE job_id=%s', (job_id,))
             assert saved["conversation_json"] is None and saved["snapshots_json"] == "[]"
@@ -234,7 +234,7 @@ def test_raw_tool_fallback_uses_original_sources_and_erasure_fence(
                 result = json.loads(tool["content"])
                 assert "GL-84" in json.dumps(result["raw_turns"], ensure_ascii=False)
                 if erase_after_tool:
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [original["event_id"]], core.clock())
                 return httpx.Response(200, json=answer("编号是GL-84。"))
 

@@ -1,4 +1,4 @@
-"""Inference yields; the original SQLite/source fences stay on the calling thread."""
+"""Inference yields; database writes and source checks stay on the calling thread."""
 
 import asyncio
 import threading
@@ -25,7 +25,7 @@ def test_async_recall_yields_and_rejects_changes_before_vector_commit(core, monk
     execute = core.store.execute
 
     def record(sql, params=()):
-        if "INSERT OR REPLACE INTO memory_vectors" in sql:
+        if "INSERT INTO memory_vectors" in sql:
             writes.append(threading.get_ident())
         assert threading.get_ident() == owner_thread
         return execute(sql, params)
@@ -56,7 +56,7 @@ def test_async_recall_yields_and_rejects_changes_before_vector_commit(core, monk
             elif change == "correct":
                 core.memory.decide(mid, "correct", core.clock(), "青禾项目使用绿色配色")
             elif change == "source":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
             elif change == "source_edit":
                 core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_1'",

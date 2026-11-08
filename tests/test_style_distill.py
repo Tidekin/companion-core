@@ -78,7 +78,7 @@ def test_owner_reviews_by_short_id_and_approved_versions_feed_the_shadow_segment
     text, used = style_observation.segment([cand])
     assert used == [cand] and PATTERN["response_action"] in text
     assert "没有找到" in core.life.command("/批准表达 " + key[:8], "evt_owner")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
     assert candidates(core) == [] and pairs(core) == []
 
@@ -244,7 +244,7 @@ def test_an_expired_candidate_or_erased_source_cancels_the_reply(core, tmp_path,
         core._check_context_snapshots(job, snapshots)
     core.store.execute('UPDATE style_candidates SET expires_at=%s', (row["expires_at"],))
     core._check_context_snapshots(job, snapshots)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
     # The candidate's sources are recorded as reply sources, so erasure recalls the reply.
     with pytest.raises(CoreError, match="REPLY_SOURCE_RECALLED"):

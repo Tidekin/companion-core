@@ -115,11 +115,11 @@ def test_consumption_revalidates_exact_draft_and_native_authority(core, tmp_path
     if mutation == "body":
         core.store.execute("UPDATE life_activity_results SET text='modified'")
     elif mutation == "source":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
     elif mutation == "fiction":
         core.store.execute("UPDATE life_activity_results SET proposal_json="
-                           "json_set(proposal_json,'$.fiction',json('true'))")
+                           "jsonb_set(proposal_json::jsonb,'{fiction}','true')::text")
     elif mutation == "revision":
         activate(core, policy, revision=1, operation="revise-before-consume")
     else:
@@ -144,7 +144,7 @@ def test_consumed_public_plan_rechecks_before_native_dispatch(core, tmp_path, mu
                            (token, after(core.clock(), 60)))
         module.validate_delivery(message_id, token)
     if mutation == "erase":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
     elif mutation == "stop":
         stop(core, ref)

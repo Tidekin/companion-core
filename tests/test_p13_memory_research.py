@@ -76,7 +76,7 @@ def test_derived_annotations_are_revalidated_even_when_the_old_input_is_retained
     if mutation == "source_changed":
         core.store.execute("UPDATE events SET body_json='{}' WHERE event_id=%s", (source,))
     elif mutation == "source_forgotten":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
     else:
         core.clock.advance(86400 * (memory.settings.raw_event_retention_days + 1))
@@ -98,7 +98,7 @@ def test_unapplied_latest_ledger_stops_the_experiment_before_candidate_return(co
     with monkeypatch.context() as patch:
         patch.setattr(core.ledger, "apply", interrupted)
         with pytest.raises(RuntimeError):
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [annotations[0]["source_event_id"]],
                                           core.clock())
     with pytest.raises(CoreError, match="ERASURE_REPLAY_REQUIRED"):
