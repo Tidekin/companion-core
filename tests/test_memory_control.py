@@ -4,7 +4,7 @@ import copy
 import hashlib
 import socket
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,6 +27,7 @@ from companion.memory_control import (
     load_grant,
     stopped_workers,
 )
+from companion.postgres import Database
 from companion.privacy import advance_epoch, epoch
 from companion.store import Store, encode
 from companion.worker_lock import single_worker
@@ -286,7 +287,7 @@ def test_restart_replay_is_idempotent_and_later_privacy_change_does_not_report_s
     approval = grant(core, cfg, text)
     body = captured(core, cfg, approval, text)
     first = service(core, approval).apply(body)
-    store = Store(core.settings.database)
+    store = Store(core.store.database, core.store.state_directory)
     try:
         restarted = StoppedMemoryControl(store, core.settings, core.ledger, core.clock,
             approval, paid_budget.sha(approval.model_dump(mode="json")))
@@ -313,7 +314,9 @@ def test_restart_replay_is_idempotent_and_later_privacy_change_does_not_report_s
     assert core.store.one("SELECT COUNT(*) n FROM memories")["n"] == 1
 
 
-def test_old_backup_cannot_reuse_an_unconsumed_or_consumed_control_grant(core, tmp_path):
+def test_old_backup_cannot_reuse_an_unconsumed_or_consumed_control_grant(
+    core, tmp_path, empty_database
+):
     cfg = bridge(core)
     text = "/记住这个：项目的代号是青竹七号。"
     approval = grant(core, cfg, text)
@@ -322,19 +325,20 @@ def test_old_backup_cannot_reuse_an_unconsumed_or_consumed_control_grant(core, t
     archive = tmp_path / "before-control.enc"
     backup(core.settings.database, archive, key)
     service(core, approval).apply(body)
-    restored = tmp_path / "restored.db"
-    restore(archive, restored, key, core.settings.erasure_ledger)
-    store = Store(str(restored))
-    try:
+    restored = empty_database
+    restore(archive, restored, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with (
+        Database(restored) as database,
+        closing(Store(database, tmp_path / "restored-state")) as store,
+    ):
         # Keep exactly the original configuration to isolate the restore-generation barrier.
         replay = StoppedMemoryControl(store, core.settings, core.ledger, core.clock,
                                      approval, paid_budget.sha(approval.model_dump(mode="json")))
         with pytest.raises(CoreError, match="RESTORED_REAPPROVAL_REQUIRED"):
             replay.apply(body)
         assert not store.rows("SELECT * FROM memories")
-        assert store.one("SELECT value FROM runtime_meta WHERE key=?", (RESTORED,))
-    finally:
-        store.close()
+        assert store.one("SELECT value FROM runtime_meta WHERE key=%s", (RESTORED,))
 
 
 def test_forget_ledger_survives_commit_failure_and_retry_cannot_claim_success(core, monkeypatch):
@@ -374,8 +378,11 @@ def test_forget_ledger_survives_commit_failure_and_retry_cannot_claim_success(co
 @pytest.mark.parametrize("kind", ["worker", "diary-worker", "life-worker",
                                  "executive-worker", "content-worker"])
 def test_control_process_cannot_coexist_with_any_business_worker(core, kind):
-    with stopped_workers(core.settings.database), pytest.raises(CoreError, match="ALREADY_RUNNING"):
-        with single_worker(core.settings.database, kind):
+    with (
+        stopped_workers(core.settings.state_directory),
+        pytest.raises(CoreError, match="ALREADY_RUNNING"),
+    ):
+        with single_worker(core.settings.state_directory, kind):
             pytest.fail("worker acquired the control process's lock")
 
 
@@ -434,7 +441,7 @@ def test_concurrent_forget_scopes_append_only_one_erasure(core):
 
     def execute(item):
         number, approval = item
-        store = Store(core.settings.database)
+        store = Store(core.store.database, core.store.state_directory)
         try:
             control = StoppedMemoryControl(store, core.settings, core.ledger, core.clock,
                 approval, paid_budget.sha(approval.model_dump(mode="json")))

@@ -100,9 +100,9 @@ def test_owner_reset_after_context_before_dispatch_across_processes(core, tmp_pa
     asyncio.run(scenario())
 
 
-def test_reset_command_and_old_backup_replay_in_independent_core(core, tmp_path):
+def test_reset_command_and_old_backup_replay_in_independent_core(core, tmp_path, empty_database):
     template, signing_key = prepare(core, tmp_path)
-    key, archive, destination = Fernet.generate_key(), tmp_path / "old.enc", tmp_path / "old.db"
+    key, archive, destination = Fernet.generate_key(), tmp_path / "old.enc", empty_database
     backup(core.settings.database, archive, key)
     signed_ingest(core, template, signing_key, 2, "/重置互动")
 
@@ -121,7 +121,9 @@ def test_reset_command_and_old_backup_replay_in_independent_core(core, tmp_path)
     value = asyncio.run(run("command"))
     assert value["calls"] == [] and value["affect"]["state"] == NEUTRAL
     assert "已重置互动反馈" in value["outbox"][0]["content_json"]
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    core.settings.database = str(destination)
+    restore(archive, destination, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    core.settings.database = destination
+    core.settings.state_directory = str(tmp_path / "restored-state")
     value = asyncio.run(run("inspect"))
     assert value["calls"] == [] and value["affect"]["state"] == NEUTRAL
