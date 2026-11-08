@@ -62,6 +62,23 @@ def test_96_large_roots_are_read_once_for_preparation_and_pin(core, monkeypatch)
         assert len(facts_read) == len(edges_read) == 1
 
 
+def test_source_only_pin_batches_all_requested_roots(core, monkeypatch):
+    facts(core, count=12, chars=40)
+    batches = []
+    original = core.store.bounded_source_read
+
+    def read(statement, parameters, **kwargs):
+        if ",e.body_json," in str(statement):
+            batches.append(list(parameters[0]))
+        return original(statement, parameters, **kwargs)
+
+    monkeypatch.setattr(core.store, "bounded_source_read", read)
+    keys = {f"proof_{i}" for i in range(1, 13)}
+    proof = core.memory_context.pin(core.clock(), event_ids=keys)
+    assert set(proof["source_event_ids"]) == keys
+    assert len(batches) == 1 and set(batches[0]) == keys
+
+
 @pytest.mark.parametrize("mutation", ["body", "redact", "edge", "owner", "fact", "evidence"])
 def test_source_cache_expires_at_snapshot_boundary(core, mutation):
     rows = facts(core, count=1, chars=20)

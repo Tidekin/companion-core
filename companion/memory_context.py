@@ -568,6 +568,8 @@ class MemoryContext:
             reference = sources.reference(row)
             if reference:
                 roots.update(reference["proof"]["source_event_ids"])
+        if sources._snapshot_cache():
+            sources._load_events(sorted(roots))
         fingerprints = {}
         for event_id in sorted(roots):
             lineage = sources.lineage(event_id)
