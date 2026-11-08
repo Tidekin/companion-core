@@ -154,13 +154,20 @@ Each tool requires its current purpose on the original owner-authorized job.
         policy = check("history").policy
         if not ranking:
             return None
-        result = turn_recall.reference(
-            core.store, core.settings, job, query, set(), source_ok, ranked_ids=ranking,
-            max_turns=min(RAW_TURNS, policy.history.max_turns),
-            max_bytes=min(RAW_BYTES, policy.history.max_utf8_bytes))
+        def collect():
+            result = turn_recall.reference(
+                core.store, core.settings, job, query, set(), source_ok, ranked_ids=ranking,
+                max_turns=min(RAW_TURNS, policy.history.max_turns),
+                max_bytes=min(RAW_BYTES, policy.history.max_utf8_bytes))
+            proof = core.memory_context.pin(core.clock(), event_ids=set(result["event_ids"])) if (
+                result) else None
+            return result, proof
+
+        # Ranking has finished. Read and pin this bounded result in one short
+        # synchronous snapshot; the following guards recheck the live boundary.
+        result, proof = core.store.read_or_write(collect)
         if not result:
             return None
-        proof = core.memory_context.pin(core.clock(), event_ids=set(result["event_ids"]))
         reply_revision.remember_sources(core.store, job, proof["source_event_ids"])
         snapshot = {"kind": "memory", "proof": proof}
         if snapshot not in snapshots:
