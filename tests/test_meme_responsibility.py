@@ -5,12 +5,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from psycopg import sql
 
 from companion import meme_responsibility, meme_service
+from companion.postgres import Database
 from companion.store import after
 from companion_meme_protocol import digest
 from tests.conftest import run
 from tests.meme_authority_fixture import admit, notice, stop
+from tests.postgres_fixture import copy_database, logical_state
 from tests.support.meme_core import body, caption_environment, worker
 from tests.support.meme_responsibility import liability_case, snapshot
 from tests.support.meme_service import claim, reservation, result
@@ -165,17 +168,16 @@ def test_original_fee_and_complete_reuse_ancestry_are_required(core, tmp_path, m
             elif damage == "cycle":
                 core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
                                    (child, root))
-            elif damage == "missing":
-                # Explicit damaged-snapshot setup; restore FK enforcement before the read.
-                core.store.execute("PRAGMA foreign_keys=OFF")
-                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
-                                   ("job_" + "f" * 32, root))
-                core.store.execute("PRAGMA foreign_keys=ON")
-            elif damage == "empty_parent":
-                core.store.execute("PRAGMA foreign_keys=OFF")
-                core.store.execute("UPDATE meme_captions SET reuse_job_id='' WHERE job_id=%s",
-                                   (root,))
-                core.store.execute("PRAGMA foreign_keys=ON")
+            elif damage in {"missing", "empty_parent"}:
+                # Emulate a damaged offline snapshot in the isolated test database.
+                core.store.execute("ALTER TABLE meme_captions "
+                                   "DROP CONSTRAINT fk_meme_captions_reuse_job_id")
+                parent = "job_" + "f" * 32 if damage == "missing" else ""
+                core.store.execute("UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s",
+                                   (parent, root))
+                core.store.execute("ALTER TABLE meme_captions ADD CONSTRAINT "
+                                   "fk_meme_captions_reuse_job_id FOREIGN KEY (reuse_job_id) "
+                                   "REFERENCES meme_captions(job_id) NOT VALID")
             elif damage == "identity":
                 core.store.execute('UPDATE meme_captions SET asset_sha256=%s WHERE job_id=%s',
                                    ("f" * 64, root))
@@ -236,11 +238,11 @@ def test_original_custody_never_initializes_or_substitutes_evidence(
                     key=case.replace("_restore", "_budget_restore_required"), value="retained")
                 expected = 503
             # Missing-file refusal and substituted settings use logical DB + actual evidence files.
-            before = tuple(core.store.db.iterdump()), core.ledger.path.read_bytes()
+            before = logical_state(core.store), core.ledger.path.read_bytes()
             files = {p: p.read_bytes() for p in tmp_path.rglob("*.jsonl")}
             response = await c.client.post(c.path, json={})
             assert response.status_code == expected, response.text
-            assert (tuple(core.store.db.iterdump()), core.ledger.path.read_bytes()) == before
+            assert (logical_state(core.store), core.ledger.path.read_bytes()) == before
             assert {p: p.read_bytes() for p in tmp_path.rglob("*.jsonl")} == files
             assert not missing.exists()
             if "restore" in case:
@@ -271,7 +273,7 @@ def test_stopped_expired_recalled_and_erased_fees_remain_original_read_only_meta
                         json=notice(c.config, c.grant, c.now))
                     assert response.status_code == 200, response.text
                 else:
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [c.event["event_id"]], core.clock())
                 raise ValueError("Synthetic loss after original dispatch and interruption")
 
@@ -293,49 +295,61 @@ def test_stopped_expired_recalled_and_erased_fees_remain_original_read_only_meta
 def test_actual_tcp_read_denies_all_sql_writes_and_caption_or_event_body_reads(
     core, tmp_path, monkeypatch
 ):
-    import sqlite3
+    from contextlib import contextmanager
+    from uuid import uuid4
 
     async def scenario():
         async with liability_case(core, tmp_path, monkeypatch) as c:
             assert await worker(core, [])
             read = meme_responsibility.read
-            checked = []
+            role = sql.Identifier("caption_reader_" + uuid4().hex)
+            db = core.store
+            db.execute(sql.SQL("CREATE ROLE {}").format(role))
+            try:
+                db.execute(
+                    sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA public TO {}").format(role)
+                )
+                for table, forbidden in {
+                    "meme_captions": {"asset_data", "result_json", "context_json", "source_json",
+                                      "request_json"},
+                    "events": {"body_json"},
+                }.items():
+                    db.execute(sql.SQL("REVOKE SELECT ON {} FROM {}").format(
+                        sql.Identifier(table), role))
+                    allowed = [sql.Identifier(row["column_name"]) for row in db.rows(
+                        "SELECT column_name FROM information_schema.columns WHERE "
+                        "table_schema=current_schema() AND table_name=%s", (table,))
+                        if row["column_name"] not in forbidden]
+                    db.execute(sql.SQL("GRANT SELECT ({}) ON {} TO {}").format(
+                        sql.SQL(",").join(allowed), sql.Identifier(table), role))
 
-            def guarded(store, settings, job_id):
-                statements, denied = [], []
+                actual_snapshots = []
 
-                def authorize(action, table, column, database, source):
-                    if action in {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE,
-                                  sqlite3.SQLITE_DELETE,
-                                  sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_DROP_TABLE,
-                                  sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_CREATE_INDEX,
-                                  sqlite3.SQLITE_DROP_INDEX, sqlite3.SQLITE_CREATE_TRIGGER,
-                                  sqlite3.SQLITE_DROP_TRIGGER} or (
-                        action == sqlite3.SQLITE_READ and (
-                            table == "meme_captions" and column in {
-                                "asset_data", "result_json", "context_json", "source_json",
-                                "request_json"} or table == "events" and column == "body_json")):
-                        denied.append((action, table, column))
-                        return sqlite3.SQLITE_DENY
-                    return sqlite3.SQLITE_OK
+                def guarded(store, settings, job_id):
+                    native_snapshot = store.read_snapshot
 
-                store.db.set_authorizer(authorize)
-                # The journal view key reads `PRAGMA data_version`, a read-only counter.
-                store.db.set_trace_callback(lambda sql: statements.append(
-                    "SELECT" if sql == "PRAGMA data_version" else sql.split()[0]))
-                try:
-                    return read(store, settings, job_id)
-                finally:
-                    store.db.set_authorizer(None)
-                    store.db.set_trace_callback(None)
-                    checked.append((statements, denied))
+                    @contextmanager
+                    def observe_snapshot():
+                        with native_snapshot():
+                            actual_snapshots.append(store.one("SHOW transaction_read_only"))
+                            yield
 
-            monkeypatch.setattr(meme_responsibility, "read", guarded)
-            assert (await unchanged_read(core, c))["usage"]["state"] == "SETTLED"
-            assert len(checked) == 1 and not checked[0][1]
-            statements = checked[0][0]
-            assert set(statements) == {"BEGIN", "SELECT", "COMMIT"}
-            assert statements.count("BEGIN") == statements.count("COMMIT") == 1
+                    store.execute(sql.SQL("SET ROLE {}").format(role))
+                    try:
+                        store.execute("SET default_transaction_read_only=on")
+                        with monkeypatch.context() as reader:
+                            reader.setattr(store, "read_snapshot", observe_snapshot)
+                            return read(store, settings, job_id)
+                    finally:
+                        store.execute("RESET default_transaction_read_only")
+                        store.execute("RESET ROLE")
+
+                monkeypatch.setattr(meme_responsibility, "read", guarded)
+                assert (await unchanged_read(core, c))["usage"]["state"] == "SETTLED"
+                assert actual_snapshots == [{"transaction_read_only": "on"}]
+            finally:
+                db.execute(sql.SQL("DROP OWNED BY {}").format(role))
+                db.execute(sql.SQL("DROP ROLE {}").format(role))
 
     run(scenario())
 
@@ -429,7 +443,7 @@ def test_legally_redacted_original_policy_is_accounting_evidence_without_reactiv
                 "purposes": [*c.grant.policy.purposes, "life"], "life_shadow": scope})
             await renewed_caption(core, c, policy)
             assert await worker(core, [])
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [original_event["event_id"]], core.clock())
             row = core.store.one("SELECT policy_json,policy_redacted,record_sha256 FROM "
                                  "owner_authority_revisions WHERE revision=3")
@@ -447,10 +461,9 @@ def test_legally_redacted_original_policy_is_accounting_evidence_without_reactiv
 
 @pytest.mark.parametrize("kind", ["stale_snapshot", "restored_backup"])
 def test_old_database_and_actual_backup_cannot_replay_or_clear_restore_barriers(
-    core, tmp_path, monkeypatch, kind
+    core, tmp_path, monkeypatch, kind, empty_database,
 ):
     import copy
-    import sqlite3
     from contextlib import closing
 
     import httpx
@@ -463,21 +476,23 @@ def test_old_database_and_actual_backup_cannot_replay_or_clear_restore_barriers(
     async def scenario():
         async with liability_case(core, tmp_path, monkeypatch) as c:
             assert await worker(core, [])
-            old = tmp_path / "old.sqlite3"
+            state = tmp_path / "restored-state"
             key, encrypted = Fernet.generate_key(), tmp_path / "old.backup"
             if kind == "stale_snapshot":
-                with sqlite3.connect(old) as db:
-                    core.store.db.backup(db)
+                copy_database(core.settings.database, empty_database, tmp_path)
             else:
                 backup(core.settings.database, encrypted, key)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [c.event["event_id"]], core.clock())
             if kind == "restored_backup":
-                restore(encrypted, old, key, core.settings.erasure_ledger)
-            with closing(Store(str(old))) as stored:
+                restore(encrypted, empty_database, key, core.settings.erasure_ledger,
+                        state_directory=state)
+            with Database(empty_database) as db, closing(Store(db, state)) as stored:
                 shadow = copy.copy(core)
+                shadow.database = db
                 shadow.store = stored
-                shadow.settings = core.settings.model_copy(update={"database": str(old)})
+                shadow.settings = core.settings.model_copy(update={"database": empty_database,
+                    "state_directory": str(state)})
                 if kind == "restored_backup":
                     assert stored.one("SELECT value FROM runtime_meta "
                                       "WHERE key='cloud_budget_restore_required'")
