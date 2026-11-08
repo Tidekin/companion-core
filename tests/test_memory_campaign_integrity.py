@@ -15,7 +15,7 @@ TOOLS = Path(__file__).resolve().parents[1] / "benchmarks/memory_campaign"
 
 
 @pytest.fixture
-def campaign(tmp_path, monkeypatch, request):
+def campaign(tmp_path, monkeypatch, request, campaign_runner):
     monkeypatch.syspath_prepend(str(TOOLS))
     for name in ("roundcfg", "rubrics", "integrity", "grade", "report"):
         monkeypatch.delitem(sys.modules, name, raising=False)

@@ -4,7 +4,6 @@ import hashlib
 import importlib.util
 import io
 import json
-import sys
 import wave
 from pathlib import Path
 
@@ -26,13 +25,10 @@ from tests.support.paid_model import approved_live
 
 @pytest.mark.parametrize("mode", ["image", "file", "voice", "quote"])
 def test_campaign_media_import_keeps_original_source_and_fee_custody(
-    core, tmp_path, monkeypatch, mode,
+    core, tmp_path, monkeypatch, mode, campaign_runner,
 ):
     root = Path(__file__).resolve().parents[1]
-    runner = root / "benchmarks/memory_campaign/runner"
-    sys.path.insert(0, str(runner))
-    if "scripts" in sys.modules:
-        sys.modules["scripts"].__path__.append(str(runner / "scripts"))
+    runner = campaign_runner
     from scripts.memory_benchmark import runtime
 
     stream = io.BytesIO()
