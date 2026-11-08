@@ -10,6 +10,7 @@ import httpx
 
 from companion import __main__, paid_budget
 from companion.config import Settings
+from companion.postgres import Database
 from companion.store import Store
 
 value = json.loads(Path(sys.argv[1]).read_text("utf-8"))
@@ -19,8 +20,11 @@ calls = []
 
 def provider(request):
     payload = json.loads(request.content)
-    with closing(Store(settings.database)) as store:
-        row = store.one("SELECT measurement_json FROM model_admissions WHERE payload_sha256=?",
+    with (
+        Database(settings.database) as database,
+        closing(Store(database, settings.state_directory)) as store,
+    ):
+        row = store.one("SELECT measurement_json FROM model_admissions WHERE payload_sha256=%s",
                         (paid_budget.sha(payload),))
         assert row and json.loads(row["measurement_json"])["payload_sha256"] == (
             paid_budget.sha(payload))
@@ -54,13 +58,16 @@ __main__.httpx.AsyncClient = OfflineClient
 async def exercise():
     task = asyncio.create_task(__main__.worker(settings))
     try:
-        with closing(Store(settings.database)) as observer:
+        with (
+            Database(settings.database) as database,
+            closing(Store(database, settings.state_directory)) as observer,
+        ):
             async with asyncio.timeout(25):
                 while True:
                     if task.done():
                         await task
                         raise AssertionError("worker exited before completion")
-                    job = observer.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                    job = observer.one("SELECT state,last_error_code FROM jobs WHERE job_id=%s",
                                        (value["job_id"],))
                     if calls and job["state"] in {"SUCCEEDED", "FAILED", "RETRY_WAIT"}:
                         assert job["state"] == "SUCCEEDED", job
