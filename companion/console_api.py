@@ -489,7 +489,7 @@ def register_console_routes(app, settings):
                 _check_owner(context, captured)
 
             def apply():
-                with store.transaction():
+                with store.transaction(control_write=True):
                     owner_check()
                     return AffectEngine(store, settings, clock).reset(
                         settings.owner_qq_id,
