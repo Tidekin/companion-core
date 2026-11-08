@@ -7,13 +7,14 @@ import sys
 import time
 from pathlib import Path
 
-from companion.voice_protocol import VoiceAudioResult
-from companion_voice_node.providers import validate_wav
 from companion_voice_node.supervisor import child_entry
-from tests.voice_service_fixtures import wav_bytes
 
 
 def fixture_provider(packet):
+    from companion.voice_protocol import VoiceAudioResult
+    from companion_voice_node.providers import validate_wav
+    from tests.voice_service_fixtures import wav_bytes
+
     fixture = packet.pop("_fixture")
     with Path(fixture["counter"]).open("a", encoding="utf-8") as output:
         output.write(
