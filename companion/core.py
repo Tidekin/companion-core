@@ -370,6 +370,7 @@ class Core(Runtime):
         if private_life.strict(self.store, self.settings):
             live_text.check_job(self.store, self.settings, self.clock, job,
                                 current_request=current_request)
+        memory_sources = None
         for snapshot in snapshots:
             try:
                 purpose = {"memory": "memory", "growth": "expression", "affect": "affect",
@@ -380,7 +381,26 @@ class Core(Runtime):
                 if authority and purpose and purpose not in authority.policy.purposes:
                     raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
                 if snapshot["kind"] == "memory":
-                    self.memory_context.revalidate(snapshot["proof"], self.clock())
+                    now = self.clock()
+                    if self.store.in_read_snapshot:
+                        if memory_sources is None:
+                            from companion.memory_context import MemorySources
+
+                            memory_sources = MemorySources(self.memory, now, bounded=True)
+                            memory_sources._snapshot_cache()
+                        now = memory_sources.now
+                    else:
+                        memory_sources = None
+                    try:
+                        self.memory_context.revalidate(snapshot["proof"], now,
+                                                       source_view=memory_sources)
+                    except retrieval_work.WorkLimit:
+                        if memory_sources is None:
+                            raise
+                        # Required proofs retain their individual work bounds when
+                        # their combined sources exceed this snapshot's shared view.
+                        memory_sources = None
+                        self.memory_context.revalidate(snapshot["proof"], now)
                 elif snapshot["kind"] == "growth":
                     self.expression_learning.revalidate_reply(
                         self.settings, job, self._affect_context(authority), snapshot["proof"])

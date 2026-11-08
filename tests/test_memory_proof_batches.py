@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from companion import retrieval_work
+from companion import reply_revision, retrieval_work
 from companion.contracts import CoreError
 from companion.memory_context import MemorySources
 from companion.store import encode
@@ -108,6 +108,38 @@ def test_source_cache_expires_at_snapshot_boundary(core, mutation):
             core.memory_context.revalidate(proof, core.clock())
         with pytest.raises(RuntimeError, match="MEMORY_SOURCE_SNAPSHOT_REQUIRED"):
             core.memory_context.pin(core.clock(), rows=expected, source_view=sources)
+
+
+@pytest.mark.parametrize("shared_limit", [None, 6])
+def test_context_boundary_reads_shared_sources_once_and_rechecks_next_boundary(
+    core, monkeypatch, shared_limit,
+):
+    facts(core, count=9, chars=40)
+    first = core.memory_context.pin(core.clock(), event_ids={f"proof_{i}" for i in range(1, 7)})
+    second = core.memory_context.pin(core.clock(), event_ids={f"proof_{i}" for i in range(4, 10)})
+    admitted = ingest(core, 2, "核对原始来源")
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=%s", (admitted["job_id"],))
+    snapshots = [{"kind": "memory", "proof": proof} for proof in (first, second)]
+    bodies = []
+    original = core.store.bounded_source_read
+
+    def read(statement, parameters, **kwargs):
+        if ",e.body_json," in str(statement):
+            bodies.extend(parameters[0])
+        return original(statement, parameters, **kwargs)
+
+    monkeypatch.setattr(core.store, "bounded_source_read", read)
+    if shared_limit:
+        monkeypatch.setattr(retrieval_work, "SOURCE_NODES", shared_limit)
+    with core.store.read_snapshot():
+        core._check_context_snapshots(job, snapshots)
+    if shared_limit is None:
+        assert len(bodies) == len(set(bodies)) == 9
+    else:
+        assert set(bodies) == {f"proof_{i}" for i in range(1, 10)}
+    core.store.execute("UPDATE events SET redacted=1 WHERE event_id='proof_4'")
+    with core.store.read_snapshot(), pytest.raises(CoreError, match=reply_revision.CANCELLED):
+        core._check_context_snapshots(job, snapshots)
 
 
 def test_async_search_keeps_large_verified_pool(core, monkeypatch):
