@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,8 @@ def core(tmp_path, migrated_database):
         import_sqlite_backup(database, target)
         settings = Settings.model_validate({**fixture["settings"], "database": target,
             "state_directory": str(tmp_path / "state"),
+            "embedding_cache_dir": os.environ.get(
+                "COMPANION_TEST_EMBEDDING_CACHE", "data/embedding-cache"),
             "erasure_ledger": str(tmp_path / "privacy.jsonl"),
             "bridge_token": "test-token-" * 4, "model_key": "synthetic-key",
             "video_model_key": "synthetic-video-provider-key-12345",

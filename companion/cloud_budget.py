@@ -8,7 +8,7 @@ snapshots preserve conversion, liability and task identity across policy changes
 import hashlib
 import json
 import re
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from pydantic import Field, ValidationError, field_validator
 
 from companion.contracts import CoreError, StrictModel
+from companion.postgres import BUDGET_LEDGER
 from companion.store import encode, utcnow
 
 
@@ -47,8 +48,11 @@ def _sha(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
+@contextmanager
 def _transaction(store):
-    return nullcontext() if store.in_transaction else store.transaction()
+    with nullcontext() if store.in_transaction else store.transaction():
+        store.ledger_lock(BUDGET_LEDGER, shared=store.in_read_snapshot)
+        yield
 
 
 def _config(settings):
@@ -350,6 +354,7 @@ def sync_reference(store, reference_type, reference_id):
     """Refresh a native charge in its caller's transaction, using only its old snapshot."""
     if not store.in_transaction:
         raise RuntimeError("CLOUD_BUDGET_TRANSACTION_REQUIRED")
+    store.ledger_lock(BUDGET_LEDGER)
     row = store.one(
         "SELECT cloud_cost_snapshots.reference_type AS reference_type, "
         "cloud_cost_snapshots.reference_id AS reference_id, cloud_cost_snapshots.policy_version AS "
@@ -651,6 +656,7 @@ def mark_dispatched(store, reference_type, reference_id, now):
     """Fix the actual dispatch day once, immediately before the native adapter I/O."""
     if not store.in_transaction:
         raise RuntimeError("CLOUD_BUDGET_TRANSACTION_REQUIRED")
+    store.ledger_lock(BUDGET_LEDGER)
     row = store.one(
         "SELECT cloud_cost_snapshots.reference_type AS reference_type, "
         "cloud_cost_snapshots.reference_id AS reference_id, cloud_cost_snapshots.policy_version AS "
@@ -691,9 +697,10 @@ def reserve(
     task_id=None,
     pricing=None,
 ):
-    """Require the native charge and this reservation to share one BEGIN IMMEDIATE."""
+    """Keep the native charge and cloud reservation under one transaction and ledger lock."""
     if not store.in_transaction:
         raise RuntimeError("CLOUD_BUDGET_TRANSACTION_REQUIRED")
+    store.ledger_lock(BUDGET_LEDGER)
     if _restore_required(store):
         raise CoreError("CLOUD_BUDGET_RESTORE_RECONCILIATION_REQUIRED", 503)
     if (
@@ -917,7 +924,7 @@ def summary(store, settings, now=None):
         )
         states = {row["state"]: row for row in rows}
         amounts = {
-            name: states.get(name, {}).get("amount", 0)
+            name: int(states.get(name, {}).get("amount", 0))
             for name in ("RESERVED", "SETTLED", "UNKNOWN")
         }
         used = sum(amounts.values())
@@ -929,6 +936,7 @@ def summary(store, settings, now=None):
             ),
             (day,),
         )["n"]
+        carried = int(carried)
         unpriced = _unpriced_unknown(store)
         restore_required = _restore_required(store)
         task_overruns = store.one(

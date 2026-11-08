@@ -16,6 +16,7 @@ from companion.model import ModelResponse
 from companion.store import Store, after
 from tests.conftest import run
 from tests.owner_model_fixtures import authorized_job
+from tests.postgres_fixture import logical_state
 from tests.sdk_reader_fixture import Provider, answer, worker_for
 from tests.support.cloud_budget import MESSAGES, change, charge, native, options
 from tests.support.cumulative_budget import policy as cumulative_policy
@@ -68,7 +69,7 @@ def test_two_independent_connections_cannot_overreserve_daily_budget(core):
     barrier = Barrier(2)
 
     def attempt(number):
-        store = Store(core.settings.database)
+        store = Store(core.database, core.settings.state_directory)
         try:
             barrier.wait(timeout=5)
             try:
@@ -374,6 +375,10 @@ def test_authenticated_http_and_independent_model_worker_share_the_live_cloud_ca
             assert len(provider.requests) == 1 and first_usage["state"] == "SETTLED"
             assert first_usage["job_id"] == entry.accepted[first["event_id"]]["job_id"]
             current = cloud_budget.summary(core.store, core.settings, core.clock())
+            assert all(type(current[field]) is int for field in (
+                "used_micro_cny", "reserved_micro_cny", "settled_micro_cny",
+                "unknown_micro_cny", "remaining_micro_cny", "carried_micro_cny",
+            ))
             change(core, daily_micro_cny=current["used_micro_cny"])
             second = await entry.admit(2, "第二条不得越过云总额")
             assert await worker.run_once("independent-cloud-worker")
@@ -389,11 +394,12 @@ def test_authenticated_http_and_independent_model_worker_share_the_live_cloud_ca
 def test_capacity_read_is_pure_before_binding_and_reports_known_legacy_exhaustion(core):
     options(core, daily_micro_cny=800)
     native(core.store, "legacy-paid", 100, core.clock(), state="SETTLED")
-    before = core.store.db.total_changes
-    assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
-        "CLOUD_DAILY_BUDGET_EXHAUSTED",
-    ]
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        before = logical_state(core.store)
+        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
+            "CLOUD_DAILY_BUDGET_EXHAUSTED",
+        ]
+        assert logical_state(core.store) == before
     assert not core.store.rows("SELECT * FROM cloud_budget_policies")
     assert not core.store.rows("SELECT * FROM cloud_cost_snapshots")
 
@@ -401,22 +407,24 @@ def test_capacity_read_is_pure_before_binding_and_reports_known_legacy_exhaustio
 def test_capacity_read_uses_frozen_fx_and_observed_usage_without_writing(core):
     options(core, daily_micro_cny=800, fx_validity_seconds=60)
     charge(core, "one-hold", 100)
-    before = core.store.db.total_changes
-    assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
-        "CLOUD_DAILY_BUDGET_EXHAUSTED",
-    ]
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        before = logical_state(core.store)
+        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
+            "CLOUD_DAILY_BUDGET_EXHAUSTED",
+        ]
+        assert logical_state(core.store) == before
     core.store.execute("UPDATE model_usage SET billed_micro_usd=50,state='SETTLED'")
-    before = core.store.db.total_changes
-    assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
-    assert core.store.db.total_changes == before
-    # This diagnostic neither settles the snapshot nor renews an expiring rate.
-    assert core.store.one("SELECT state FROM cloud_cost_snapshots")["state"] == "RESERVED"
-    core.clock.advance(61)
-    assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
-        "CLOUD_BUDGET_FX_EXPIRED",
-    ]
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        before = logical_state(core.store)
+        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
+        assert logical_state(core.store) == before
+        # This diagnostic neither settles the snapshot nor renews an expiring rate.
+        assert core.store.one("SELECT state FROM cloud_cost_snapshots")["state"] == "RESERVED"
+        core.clock.advance(61)
+        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
+            "CLOUD_BUDGET_FX_EXPIRED",
+        ]
+        assert logical_state(core.store) == before
 
 
 def test_erasing_a_dispatched_tool_keeps_unknown_cost_across_midnight(core):
@@ -431,11 +439,12 @@ def test_erasing_a_dispatched_tool_keeps_unknown_cost_across_midnight(core):
     assert native_row["state"] == "CANCELLED" and native_row["billed_micro_usd"] == 1000
     assert len(fake.calls) == 1
     core.clock.advance(86400)
-    before = core.store.db.total_changes
-    assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
-        "CLOUD_DAILY_BUDGET_EXHAUSTED",
-    ]
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        before = logical_state(core.store)
+        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
+            "CLOUD_DAILY_BUDGET_EXHAUSTED",
+        ]
+        assert logical_state(core.store) == before
     view = cloud_budget.summary(core.store, core.settings, core.clock())
     assert view["unknown_micro_cny"] == view["carried_micro_cny"] == 8000
     with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):

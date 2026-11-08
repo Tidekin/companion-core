@@ -41,11 +41,12 @@ def test_converged_cancelled_tools_do_not_sync_reference_or_write(core, monkeypa
         return original(*args)
 
     monkeypatch.setattr(cloud_budget, "sync_reference", observe)
-    changes = core.store.db.total_changes
-    for _ in range(2):
-        cloud_budget.sync(core.store, core.settings, core.clock())
-    assert calls == []
-    assert core.store.db.total_changes == changes
+    with core.store.transaction():
+        changes = core.store.change_token()["writes"]
+        for _ in range(2):
+            cloud_budget.sync(core.store, core.settings, core.clock())
+        assert calls == []
+        assert core.store.change_token()["writes"] == changes
     assert snapshot(core) == before
 
 
@@ -61,10 +62,11 @@ def test_cancelled_without_completion_proof_still_becomes_unknown(core):
     # Later generic completion text is not a native tool UNKNOWN reconciliation protocol.
     core.store.audit("tool.finished", task_id, task_id, core.clock(), status="SUCCEEDED")
     core.store.execute('UPDATE tool_tasks SET billed_micro_usd=1 WHERE task_id=%s', (task_id,))
-    changes = core.store.db.total_changes
-    cloud_budget.sync(core.store, core.settings, core.clock())
-    assert snapshot(core) == before
-    assert core.store.db.total_changes == changes
+    with core.store.transaction():
+        changes = core.store.change_token()["writes"]
+        cloud_budget.sync(core.store, core.settings, core.clock())
+        assert snapshot(core) == before
+        assert core.store.change_token()["writes"] == changes
 
 
 def test_direct_sync_preserves_sticky_model_charge_without_rewriting(core):
@@ -73,11 +75,11 @@ def test_direct_sync_preserves_sticky_model_charge_without_rewriting(core):
     cloud_budget.sync(core.store, core.settings, core.clock())
     core.store.execute("UPDATE model_usage SET state='SETTLED',billed_micro_usd=1")
     before = snapshot(core)
-    changes = core.store.db.total_changes
     with core.store.transaction():
+        changes = core.store.change_token()["writes"]
         cloud_budget.sync_reference(core.store, "model", "model-unknown")
-    assert snapshot(core) == before
-    assert core.store.db.total_changes == changes
+        assert snapshot(core) == before
+        assert core.store.change_token()["writes"] == changes
     assert before["state"] == "UNKNOWN" and before["accounted_micro_usd"] == 1000
 
 
@@ -101,10 +103,10 @@ def test_native_dispatch_day_change_uses_frozen_snapshot_then_converges(core):
     assert settled["local_day"] != original["local_day"]
     assert settled["amount_micro_cny"] == 8000
     assert settled["dispatched_at"] == core.clock()
-    changes = core.store.db.total_changes
     with core.store.transaction():
+        changes = core.store.change_token()["writes"]
         cloud_budget.sync_reference(core.store, "tool", task_id)
-    assert snapshot(core) == settled and core.store.db.total_changes == changes
+        assert snapshot(core) == settled and core.store.change_token()["writes"] == changes
 
 
 @pytest.mark.parametrize("snapshot_state", ["RESERVED", "SETTLED", "UNKNOWN"])
@@ -145,6 +147,7 @@ def test_cancelled_unknown_still_imports_larger_native_hold_and_legacy_dispatch(
     assert after["accounted_micro_usd"] == 2000
     assert after["amount_micro_cny"] == 16000
     assert after["dispatched_at"] == before["dispatched_at"]
-    changes = core.store.db.total_changes
-    cloud_budget.sync(core.store, core.settings, core.clock())
-    assert snapshot(core) == after and core.store.db.total_changes == changes
+    with core.store.transaction():
+        changes = core.store.change_token()["writes"]
+        cloud_budget.sync(core.store, core.settings, core.clock())
+        assert snapshot(core) == after and core.store.change_token()["writes"] == changes
