@@ -90,6 +90,24 @@ def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_inde
                 "pg0003_fact_key_ascii",)
 
 
+def test_fact_key_index_upgrades_from_relationship_revision():
+    statement = (
+        "SELECT pg_get_expr(indexprs,indrelid) FROM pg_index "
+        "WHERE indexrelid='idx_memories_fact_key'::regclass"
+    )
+    with isolated_database() as info:
+        migrate(info, revision="pg0002_relationship_standing")
+        with psycopg.connect(info.get_secret_value()) as db:
+            assert "lower(" in db.execute(statement).fetchone()[0]
+        migrate(info)
+        with psycopg.connect(info.get_secret_value()) as db:
+            expression = db.execute(statement).fetchone()[0]
+            assert "translate(" in expression
+            assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ" in expression
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
+                "pg0003_fact_key_ascii",)
+
+
 def audit(session, document):
     return session.one(
         "INSERT INTO audit_log (action,actor_id,entity_type,entity_id,trace_id,safe_detail_json,"
