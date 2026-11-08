@@ -132,22 +132,10 @@
           "title": "Max Output Tokens",
           "type": "integer"
         },
-        "max_request_micro_usd": {
-          "maximum": 9007199254740991,
-          "minimum": 0,
-          "title": "Max Request Micro Usd",
-          "type": "integer"
-        },
         "daily_calls": {
           "maximum": 9007199254740991,
           "minimum": 0,
           "title": "Daily Calls",
-          "type": "integer"
-        },
-        "daily_micro_usd": {
-          "maximum": 9007199254740991,
-          "minimum": 0,
-          "title": "Daily Micro Usd",
           "type": "integer"
         },
         "concurrency": {
@@ -162,9 +150,7 @@
         "paid_contract_sha256",
         "max_input_tokens",
         "max_output_tokens",
-        "max_request_micro_usd",
         "daily_calls",
-        "daily_micro_usd",
         "concurrency"
       ],
       "title": "ClientBudget",

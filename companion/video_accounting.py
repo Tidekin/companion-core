@@ -166,9 +166,13 @@ def reconcile(store, settings, request, clock=utcnow):
                 job = store.one('SELECT state FROM jobs WHERE job_id = %s', (usage["job_id"],))
                 if (usage["state"] != "UNKNOWN" or not job or job["state"] != "CANCELLED"
                     or usage["billed_micro_usd"] != prior["minimum_micro_usd"]
-                    or frozen != paid_budget.snapshot(settings)
+                    or {key: value for key, value in frozen.items() if key not in {
+                        "per_attempt_micro_usd", "per_request_micro_usd", "daily_micro_usd",
+                        "monthly_micro_usd", "window_micro_usd", "unlimited_period_spend",
+                        "local_monthly_micro_usd", "scenario_daily_micro_usd",
+                        "reflection_monthly_micro_usd",
+                    }} != paid_budget.snapshot(settings)
                     or admission["journal_id"] != request["journal_id"]
-                    or budget._actual_limit_violations(store, admission, frozen, usage, amount)
                     or store.one('SELECT 1 FROM outbox WHERE origin_event_id IN (SELECT event_id '
                         'FROM jobs WHERE job_id = %s)', (usage["job_id"],))):
                     raise ValueError("original frozen deployment or fee evidence changed")

@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, ValidationError
 
-from companion import budget, cloud_budget, model_carry, owner_authority, paid_budget
+from companion import cloud_budget, model_carry, owner_authority, paid_budget
 from companion.contracts import CoreError, StrictModel
 from companion.store import utcnow
 from companion_delivery_protocol import timestamp
@@ -250,8 +250,6 @@ def _prepare(store, settings, proposal, view):
     previous = _prior(view["model_accounting"], proposal.request_id)
     codes = []
     if isinstance(proposal.basis, Statement):
-        codes = budget._actual_limit_violations(store, admission,
-            json.loads(admission["snapshot_json"]), usage, proposal.basis.actual_micro_usd)
         if previous:
             codes += previous["request"]["budget_limit_codes"]
     request = Prepared(**proposal.model_dump(), journal_id=admission["journal_id"],

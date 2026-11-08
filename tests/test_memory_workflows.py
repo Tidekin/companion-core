@@ -42,6 +42,8 @@ def relation(payload, *, same=False, conflict=False):
         ("我的猫叫什么？", "布丁"),
     ],
 )
+
+
 def test_paraphrased_question_in_new_session_with_old_fact_and_distractors(core, question, answer):
     facts = [
         "用户最喜欢的饮料是茉莉绿茶。",
@@ -299,7 +301,6 @@ def test_recall_selection_accepts_the_prompt_limit_and_rejects_overflow(core, mo
 
 def test_zero_memory_currency_keeps_recall_available(core):
     message(core, 1, "/记住这个：用户最喜欢的饮料是茉莉绿茶。")
-    core.settings.memory_daily_micro_usd = 0
     core.settings.max_recent_messages = 0
     job = message(core, 2, "我平时最爱喝什么？", "new:FriendMessage:10001")
     assert job["state"] == "SUCCEEDED"

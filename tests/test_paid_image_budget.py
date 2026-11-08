@@ -62,17 +62,10 @@ def test_text_snapshot_omits_new_policy_and_keeps_original_shape(core, tmp_path)
     approval = approved_live(core, tmp_path)
     snapshot = paid_budget.snapshot(core.settings)
     assert "image_input" not in snapshot
-    assert "content_vision" not in snapshot["scenario_daily_micro_usd"]
+    assert "scenario_daily_micro_usd" not in snapshot
     assert snapshot["estimator"] == "utf8-third-v1"
-    # Golden pin of this pre-image fixture's canonical text-only contract.
-    assert paid_budget.sha(snapshot) == (
-        "582e96c6200b6bf1a8d5da93400aadb477228a72ef6561951bac391edf3083c1"
-    )
     assert set(snapshot) == set(approval.model_dump()) - {"journal_path", "image_input"} | {
         "estimator",
-        "local_monthly_micro_usd",
-        "scenario_daily_micro_usd",
-        "reflection_monthly_micro_usd",
         "credential_tag",
     }
 
@@ -168,6 +161,8 @@ def test_exact_image_and_chat_share_job_journal_usage_and_two_attempt_limit(core
         "wrong_role",
     ],
 )
+
+
 def test_unsupported_multimodal_shapes_cannot_create_admission(core, tmp_path, mutation):
     image_approval(core, tmp_path)
     messages = image_messages()
@@ -207,6 +202,8 @@ def test_unsupported_multimodal_shapes_cannot_create_admission(core, tmp_path, m
         ("max_bytes_per_image", 4000001),
     ],
 )
+
+
 def test_image_approval_is_explicit_and_strict(core, tmp_path, field, value):
     with pytest.raises(ValidationError):
         image_approval(core, tmp_path, policy={field: value})
@@ -221,6 +218,8 @@ def test_image_approval_is_explicit_and_strict(core, tmp_path, field, value):
         ("missing_job", "OWNER_AUTHORITY_JOB_BINDING_REQUIRED"),
     ],
 )
+
+
 def test_image_approval_never_authorizes_another_provider_or_job(core, tmp_path, mutation, code):
     image_approval(core, tmp_path)
     job = authorized_job(core, purposes=("chat", "image"))
@@ -255,6 +254,8 @@ def test_image_approval_never_authorizes_another_provider_or_job(core, tmp_path,
         ("provider", "CONTRACT_MISMATCH"),
     ],
 )
+
+
 def test_final_http_hook_drift_blocks_image_dispatch(core, tmp_path, mutation, code):
     image_approval(core, tmp_path)
     messages, calls = image_messages(), []
@@ -320,17 +321,14 @@ def test_missing_or_invalid_image_usage_retains_amount_and_blocks_retry(core, tm
         "state": "UNKNOWN",
         "billed_micro_usd": reserved,
     }
-    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+    with pytest.raises(CoreError, match="MODEL_IMAGE_ALREADY_ATTEMPTED"):
         budget.reserve(core.store, core.settings, job, "content_vision", messages, core.clock())
-    with pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
-        budget.reserve(
-            core.store,
-            core.settings,
-            job,
-            "chat",
-            [{"role": "user", "content": "reply"}],
-            core.clock(),
-        )
+    chat = budget.reserve(core.store, core.settings, job, "chat",
+                          [{"role": "user", "content": "reply"}], core.clock())
+    assert core.store.one("SELECT state FROM model_usage WHERE request_id=%s",
+                          (chat,))["state"] == "RESERVED"
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=%s",
+                          (request,)) == {"state": "UNKNOWN", "billed_micro_usd": reserved}
 
 
 def test_invalid_provider_text_still_settles_received_image_usage(core, tmp_path):
@@ -373,13 +371,12 @@ def test_image_scenario_and_global_five_call_caps_share_existing_accounting(core
     assert core.store.one("SELECT COUNT(*) AS n FROM model_usage WHERE state='SETTLED'")["n"] == 5
 
 
-def test_image_daily_budget_is_part_of_snapshot_and_admission(core, tmp_path):
+def test_image_approval_has_no_monetary_allocation(core, tmp_path):
     image_approval(core, tmp_path)
-    core.settings.content.image_daily_micro_usd = 1
-    assert paid_budget.snapshot(core.settings)["scenario_daily_micro_usd"]["content_vision"] == 1
-    with pytest.raises(CoreError, match="DAILY_BUDGET"):
-        reserve_image(core)
-    assert core.store.rows("SELECT * FROM model_usage") == []
+    assert "scenario_daily_micro_usd" not in paid_budget.snapshot(core.settings)
+    _, request = reserve_image(core)
+    assert core.store.one("SELECT state FROM model_usage WHERE request_id=%s",
+                          (request,))["state"] == "RESERVED"
 
 
 def test_image_payload_cannot_bypass_policy_as_text_chat(core, tmp_path):
@@ -402,6 +399,8 @@ def test_image_admission_requires_the_real_model_client(core, tmp_path):
 @pytest.mark.parametrize("column,value", [
     ("scenario", "chat"), ("job_id", None), ("logical_request_id", "other-logical"),
 ])
+
+
 def test_final_image_stage_identity_is_not_mutable(core, tmp_path, column, value):
     image_approval(core, tmp_path)
     messages, calls = image_messages(), []
@@ -448,10 +447,12 @@ def test_image_unknown_survives_reopen_without_fresh_concurrency_or_attempt(core
         assert paid_budget.journal(reopened, approval, allow_settlement=True) == old_custody
         with pytest.raises(CoreError, match="IMAGE_ALREADY_ATTEMPTED"):
             budget.reserve(reopened, core.settings, job, "content_vision", messages, core.clock())
-        with pytest.raises(CoreError, match="CONCURRENCY"):
-            budget.reserve(reopened, core.settings, job, "chat",
-                           [{"role": "user", "content": "reply"}], core.clock())
-        assert reopened.one("SELECT state,billed_micro_usd FROM model_usage") == {
+        chat = budget.reserve(reopened, core.settings, job, "chat",
+                              [{"role": "user", "content": "reply"}], core.clock())
+        assert reopened.one("SELECT state FROM model_usage WHERE request_id=%s",
+                            (chat,))["state"] == "RESERVED"
+        assert reopened.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=%s",
+                            (request,)) == {
             "state": "UNKNOWN", "billed_micro_usd": before["billed_micro_usd"],
         }
     finally:
@@ -482,13 +483,12 @@ def test_http_image_error_with_usage_is_accounted_once(core, tmp_path):
     assert core.store.one("SELECT COUNT(*) AS n FROM model_admissions")["n"] == 1
 
 
-def test_observed_image_amount_exceeding_daily_cap_stops_without_losing_usage(core, tmp_path):
+def test_observed_image_amount_above_daily_cap_remains_settled(core, tmp_path):
     image_approval(core, tmp_path, policy={"estimated_tokens_per_image": 100})
-    core.settings.content.image_daily_micro_usd = 900
     _, request = reserve_image(core)
     run(invoke(core, request, image_messages()))
     usage = core.store.one("SELECT * FROM model_usage")
-    assert usage["state"] == "UNKNOWN"
+    assert usage["state"] == "SETTLED"
     assert usage["input_tokens"] == 1000 and usage["output_tokens"] == 20
     assert usage["billed_micro_usd"] == budget.cost(core.settings, 1000, 20, 50) > 900
-    assert core.store.one("SELECT value FROM runtime_meta WHERE key='model_budget_blocked'")
+    assert not core.store.one("SELECT value FROM runtime_meta WHERE key='model_budget_blocked'")

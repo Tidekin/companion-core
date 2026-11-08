@@ -18,8 +18,8 @@ def response(value):
 
 @asynccontextmanager
 async def prepared(core, tmp_path, *, seed=True, diary=False, **config):
-    core.settings.rem = RemConfig.model_validate({"enabled": True, "daily_micro_usd": 50000,
-                                                "monthly_micro_usd": 200000, **config})
+    core.settings.rem = RemConfig.model_validate({"enabled": True,
+                                                 **config})
     core.settings.diary_enabled = diary
     core.settings.diary_min_source_events = 1
     async with environment(core, tmp_path, history=False,

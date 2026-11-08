@@ -30,8 +30,8 @@ Core `meme_semantics_enabled` 和 Bridge 同名开关默认均为 `false`；Brid
 运行范围是 `mode=live`、有效 paid approval 和 `owner_private_v1` 私聊窗口；
 启用字段会进入配置绑定，必须按现有窗口批准流程固定配置。
 
-真正识图另需 `paid_model.meme_input`，类型为 `ImageInputPolicy`，以及非零
-`meme_caption_daily_micro_usd`（默认 `0`）。policy 必须明确批准每图估算 token、字节、
+真正识图另需 `paid_model.meme_input`，类型为 `ImageInputPolicy`。
+policy 必须明确批准每图估算 token、字节、
 像素和请求张数，`max_images_per_request` 只能为 1–5，不能为 `unlimited`。
 GIF 最多生成 5 张样本，需相应配置样本数；超出实际授权数时直接拒绝。
 `meme_caption_max_output_tokens` 默认 2000，范围 128–4096，且不得超过 paid 总输出上限。
@@ -39,13 +39,12 @@ GIF 最多生成 5 张样本，需相应配置样本数；超出实际授权数�
 `meme_caption` 使用当前主 provider、model、key 和费率，返回 JSON；无单独裸 key 路由。
 它使用独立 `meme_input`，不继承 `content_vision` 或主人上传图片的授权。
 `meme_caption` job 只能调用该场景，最多建立一次 `model_usage`，并使用原
-`model_admissions`、请求/单次/日/月/窗口额度、并发限制、journal 与 STOP 检查。
-独立 caption 日额度即使在 `unlimited_period_spend` 窗口也生效；实际费用超过冻结额度
-仍保守记为 UNKNOWN 并阻止继续消费。图片按批准的固定估算加文本估算预留，实际 usage
-再结算；估算不代表 provider 的 token 或账单保证。
+`model_admissions`、请求/日/窗口调用次数、Token、并发限制、journal 与 STOP 检查。
+图片按批准的固定估算加文本估算登记，按实际 usage 结算；估算不代表 provider 的
+Token 或账单保证。费用 UNKNOWN 只提示待核对，真实结果可继续，缺失结果不能重放。
 
-新增默认字段和空 `meme_input` 不改变旧授权快照；仅配置 policy 时，paid snapshot 才
-增加该场景日额度与图片估算标识。已有 chat、content_vision、video 的授权边界保持原合同。
+空 `meme_input` 不增加图片估算标识；配置 policy 后，paid snapshot 包含图片估算标识。
+当前配置不含场景金额分配，历史授权快照保留原始字节。
 
 ## 认证 HTTP v1 接口
 

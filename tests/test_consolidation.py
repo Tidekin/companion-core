@@ -237,6 +237,8 @@ def test_reflection_full_provenance_erasure_after_commit_and_restore(
         ("activity", "UNSUPPORTED_ACTIVITY"),
     ],
 )
+
+
 def test_reflection_invalid_evidence_and_unsupported_activity_rejected(core, defect, code):
     model = enable_nightly(core)
 
@@ -255,18 +257,12 @@ def test_reflection_invalid_evidence_and_unsupported_activity_rejected(core, def
     assert not core.reflections.recent()
 
 
-@pytest.mark.parametrize("limit", ["disabled", "day", "month", "calls", "unknown"])
+@pytest.mark.parametrize("limit", ["normal", "calls", "unknown"])
 def test_reflection_currency_is_advisory_and_call_count_is_bounded(core, limit):
     model = enable_nightly(core)
-    if limit == "disabled":
-        core.settings.reflection_daily_micro_usd = 0
-    elif limit == "day":
-        core.settings.reflection_daily_micro_usd = 1
-    elif limit == "month":
-        core.settings.reflection_monthly_micro_usd = 1
-    elif limit == "unknown":
+    if limit == "unknown":
         core.settings.input_rate = None
-    else:
+    elif limit == "calls":
         from companion import budget
 
         budget.reserve(core.store, core.settings, None, "reflection", [], core.clock())
@@ -310,6 +306,8 @@ def test_shared_memory_lease_prevents_parallel_extraction_and_stale_commit(core)
     "now,expected",
     [("2026-03-09T07:30:00+00:00", "2026-03-08"), ("2028-03-01T08:30:00+00:00", "2028-02-29")],
 )
+
+
 def test_nightly_calendar_dst_and_leap_day(core, now, expected):
     core.settings.timezone = "America/New_York"
     core.settings.consolidation_enabled = True

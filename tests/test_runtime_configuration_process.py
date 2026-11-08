@@ -23,6 +23,8 @@ from tests.support.owner_input import captured, inbound
 
 @pytest.mark.parametrize("change", ["safe", "expression", "mixed", "stop", "privacy",
                                     "busy", "closing"])
+
+
 def test_native_worker_and_console_share_task_configuration_identity(core, tmp_path, change):
     capture, signing_key = captured(core, tmp_path)
     core.settings.operator_hot_reload = True
@@ -99,7 +101,7 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                         changes.update(turn_taking={"silence_enabled": True},
                                        input_debounce={"active_seconds": 6})
                     if change == "mixed":
-                        changes["monthly_limit_micro_usd"] = 99_999_999
+                        changes["reflection_max_daily_calls"] = 3
                     saved = await client.put("/v1/console/configuration", json={
                         "expected_version": 0, "changes": changes}, headers=headers)
                     assert saved.status_code == 200, saved.text

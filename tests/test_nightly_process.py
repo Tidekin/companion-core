@@ -61,8 +61,6 @@ def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_p
     cfg.extraction_min_events = 3
     cfg.extraction_idle_seconds = 0
     cfg.consolidation_catchup_days = 1
-    cfg.reflection_daily_micro_usd = 50000
-    cfg.reflection_monthly_micro_usd = 100000
     later = core.clock.now
     core.clock.now = datetime.fromisoformat(DAY.isoformat() + "T04:00:00+00:00")
     key = Ed25519PrivateKey.generate()

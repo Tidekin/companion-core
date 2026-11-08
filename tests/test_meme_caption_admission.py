@@ -48,10 +48,8 @@ def messages(count=1, format="PNG"):
 def setup_caption(core, tmp_path, monkeypatch, *, daily=30000, paid=None, second=False):
     async def prepare():
         async with discovery_environment(core, tmp_path, monkeypatch,
-            meme_semantics_enabled=True, meme_caption_daily_micro_usd=daily,
+            meme_semantics_enabled=True,
             paid={"meme_input": policy(), "max_output_tokens": 4096,
-                "unlimited_period_spend": False, "daily_micro_usd": 200000,
-                "monthly_micro_usd": 1000000, "window_micro_usd": 2000000,
                 "concurrency": 1, **(paid or {})}) as values:
             event, _, (client, _, _, now) = values
             submit(core, event)
@@ -89,19 +87,16 @@ def test_closed_defaults_preserve_prior_snapshot_and_config_fields(core, tmp_pat
     approval = approved_live(core, tmp_path)
     before = paid_budget.snapshot(core.settings)
     assert "meme_input" not in approval.model_dump(mode="json")
-    assert "meme_caption" not in before["scenario_daily_micro_usd"]
+    assert "scenario_daily_micro_usd" not in before
     assert "image_estimator" not in before
     assert core.settings.meme_semantics_enabled is False
-    assert core.settings.meme_caption_daily_micro_usd == 0
     assert core.settings.output_tokens("meme_caption") == 2000
     assert not any(name.startswith("meme_caption_") or name == "meme_semantics_enabled"
                    for name in core.settings.model_dump())
-    core.settings.meme_caption_daily_micro_usd = 20000
     assert paid_budget.snapshot(core.settings) == before
     core.settings.paid_model = approval.model_copy(update={"meme_input": policy()})
     snapshot = paid_budget.snapshot(core.settings)
-    assert snapshot["scenario_daily_micro_usd"]["meme_caption"] == 20000
-    assert "content_vision" not in snapshot["scenario_daily_micro_usd"]
+    assert "scenario_daily_micro_usd" not in snapshot
     assert snapshot["image_estimator"] == "approved-fixed-image-plus-utf8-third-v1"
 
 
@@ -147,6 +142,8 @@ def test_caption_estimate_uses_dedicated_policy_and_json_without_owner_image_per
     ("no_policy", "PAID_MEME_APPROVAL_REQUIRED"),
     ("logical", "MODEL_MEME_JOB_REQUIRED"),
 ])
+
+
 def test_caption_contract_fails_closed(core, tmp_path, monkeypatch, change, code):
     job_id = setup_caption(core, tmp_path, monkeypatch)
     assert core.settings.paid_model.image_input is None
@@ -160,8 +157,6 @@ def test_caption_contract_fails_closed(core, tmp_path, monkeypatch, change, code
             mode="OFF" if change == "runtime_off" else "SHADOW")
     elif change == "no_policy":
         core.settings.paid_model = core.settings.paid_model.model_copy(update={"meme_input": None})
-    elif change == "zero_cap":
-        core.settings.meme_caption_daily_micro_usd = 0
     with pytest.raises(CoreError, match=code):
         meme_input.contract(core.settings, job_id, "other" if change == "logical" else job_id)
     assert not core.store.one("SELECT 1 FROM model_usage")
@@ -206,11 +201,13 @@ def test_caption_settles_one_native_attempt_and_cannot_reuse_chat_or_background_
 
 
 @pytest.mark.parametrize("limit,code", [
-    ({"daily_micro_usd": 1}, "MODEL_DAILY_BUDGET_EXHAUSTED"),
-    ({"monthly_micro_usd": 1}, "MODEL_MONTHLY_BUDGET_EXHAUSTED"),
-    ({"window_micro_usd": 1}, "MODEL_WINDOW_BUDGET_EXHAUSTED"),
-    ({"per_attempt_micro_usd": 1}, "MODEL_ATTEMPT_BUDGET_EXHAUSTED"),
+    ({}, "MODEL_DAILY_BUDGET_EXHAUSTED"),
+    ({}, "MODEL_MONTHLY_BUDGET_EXHAUSTED"),
+    ({}, "MODEL_WINDOW_BUDGET_EXHAUSTED"),
+    ({}, "MODEL_ATTEMPT_BUDGET_EXHAUSTED"),
 ])
+
+
 def test_caption_currency_caps_are_advisory(core, tmp_path, monkeypatch, limit, code):
     job_id = setup_caption(core, tmp_path, monkeypatch, paid=limit)
     request = reserve(core, job_id)
@@ -230,8 +227,6 @@ def test_caption_currency_amount_does_not_disable_unlimited_period_spend(
     core, tmp_path, monkeypatch,
 ):
     job_id = setup_caption(core, tmp_path, monkeypatch, daily=1, paid={
-        "unlimited_period_spend": True, "daily_micro_usd": None,
-        "monthly_micro_usd": None, "window_micro_usd": None,
     })
     reserve(core, job_id)
     assert core.store.one("SELECT 1 FROM model_usage")
@@ -241,8 +236,6 @@ def test_caption_actual_usage_over_currency_amount_preserves_actual_charge(
     core, tmp_path, monkeypatch,
 ):
     job_id = setup_caption(core, tmp_path, monkeypatch, daily=5000, paid={
-        "unlimited_period_spend": True, "daily_micro_usd": None,
-        "monthly_micro_usd": None, "window_micro_usd": None,
     })
     request_id = reserve(core, job_id)
     budget.settle(core.store, core.settings, request_id, ModelResponse("{}", 6000, 20))
@@ -263,6 +256,8 @@ def test_caption_actual_usage_over_currency_amount_preserves_actual_charge(
     ("lease", "JOB_LEASE_LOST"),
     ("event", "OWNER_SOURCE_CHANGED"),
 ])
+
+
 def test_caption_rechecks_source_stop_job_lease_and_frozen_event_after_http_hooks(
     core, tmp_path, monkeypatch, change, code,
 ):

@@ -110,7 +110,7 @@ def test_unknown_call_is_never_replayed(core, tmp_path):
 
 def test_daily_currency_amount_does_not_refuse_a_judgement(core, tmp_path):
     core.settings.watch_ledger = core.settings.watch_ledger.model_copy(
-        update={"daily_micro_usd": 1})
+        update={})
     model = ready(core, tmp_path, json.dumps(JUDGEMENT))
     observe(core, 8)
     step(core)

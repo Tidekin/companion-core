@@ -778,7 +778,8 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
     run(scenario())
 
 
-@pytest.mark.parametrize("drift", ["content", "source", "usage", "privacy", "unknown"])
+@pytest.mark.parametrize("drift", ["content", "source", "usage", "measurement", "snapshot",
+                                  "privacy", "unknown"])
 def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path, drift):
     from companion.privacy import advance_epoch
     from companion.store import encode
@@ -819,6 +820,10 @@ def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path,
                     )
                 elif drift == "usage":
                     core.store.execute('UPDATE model_admissions SET payload_sha256=%s', ("0" * 64,))
+                elif drift == "measurement":
+                    core.store.execute("UPDATE model_admissions SET measurement_json='{}'")
+                elif drift == "snapshot":
+                    core.store.execute("UPDATE model_admissions SET snapshot_json='{}'")
                 elif drift == "unknown":
                     core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
                 else:
@@ -827,14 +832,19 @@ def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path,
                 original_usage = core.store.rows(
                     'SELECT * FROM model_usage ORDER BY record_sequence'
                 )
-                if drift in {"content", "source", "privacy"}:
+                if drift == "unknown":
+                    await window.pump()
+                    assert len(sends) == 1
+                    assert core.store.one("SELECT state FROM outbox")["state"] == "SENT"
+                elif drift in {"content", "source", "privacy"}:
                     await window.pump()
                     assert core.store.one("SELECT state FROM outbox")["state"] == "CANCELLED"
                 else:
                     with pytest.raises((CoreError, ValueError, httpx.HTTPStatusError)):
                         await window.pump()
-                assert not sends
-                assert not core.store.one("SELECT 1 FROM outbox WHERE state='SENT'")
+                if drift != "unknown":
+                    assert not sends
+                    assert not core.store.one("SELECT 1 FROM outbox WHERE state='SENT'")
                 assert core.store.rows(
                     'SELECT * FROM model_usage ORDER BY record_sequence'
                 ) == original_usage

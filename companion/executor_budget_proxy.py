@@ -1,4 +1,4 @@
-"""Private, per-task capped model proxy. Only this service has the model API key."""
+"""Private model proxy with scoped call limits and observed usage accounting."""
 
 import asyncio
 import json
@@ -28,11 +28,11 @@ def create_budget_proxy(
         len(admin_token) < 24
         or not api_key
         or admin_token == api_key
-        or input_rate <= 0
-        or output_rate <= 0
+        or type(input_rate) is not int or input_rate < 0
+        or type(output_rate) is not int or output_rate < 0
     ):
         raise ValueError(
-            "proxy requires distinct admin credentials and known positive upper prices"
+            "proxy requires distinct admin credentials and nonnegative token prices"
         )
     upstream = urlsplit(upstream_url)
     if (
@@ -60,7 +60,7 @@ def create_budget_proxy(
                 if grant["calls"] >= grant["request"].max_model_calls:
                     raise HTTPException(429, "MODEL_CALL_LIMIT")
                 grant["calls"] += 1
-                grant["reserved_micro_usd"] += grant["per_call"]
+                grant["unknown_calls"] += 1
             # No await separates the final admission from transport dispatch.
             # Revocation after this boundary retains the in-flight responsibility.
             return await self.delegate.handle_async_request(request)
@@ -75,10 +75,6 @@ def create_budget_proxy(
     @app.post("/internal/v1/reservations")
     async def reserve(body: ExecutionEnvelope, authorization: str = Header(default="")):
         admin(authorization)
-        # UTF-8 byte bound is conservative for text and tool schemas; no image inputs accepted.
-        one_call = (
-            body.max_input_bytes * input_rate + body.max_output_tokens * output_rate + 999999
-        ) // 1000000
         async with lock:
             for key in list(grants):
                 if grants[key]["expires"] <= clock():
@@ -89,8 +85,10 @@ def create_budget_proxy(
             grants[token] = {
                 "request": body,
                 "calls": 0,
-                "reserved_micro_usd": 0,
-                "per_call": one_call,
+                "billed_micro_usd": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "unknown_calls": 0,
                 "expires": clock() + body.timeout_seconds + 5,
                 "revoked": False,
             }
@@ -102,7 +100,9 @@ def create_budget_proxy(
         grant = grants.get(token)
         if not grant:
             raise HTTPException(404, "RESERVATION_MISSING")
-        return {"calls": grant["calls"], "reserved_micro_usd": grant["reserved_micro_usd"]}
+        return {key: grant[key] for key in (
+            "calls", "billed_micro_usd", "input_tokens", "output_tokens", "unknown_calls",
+        )}
 
     @app.delete("/internal/v1/reservations/{token}")
     async def revoke(token: str, authorization: str = Header(default="")):
@@ -144,6 +144,8 @@ def create_budget_proxy(
         body["n"] = 1
         body.pop("best_of", None)
         body.pop("max_completion_tokens", None)
+        if body.get("stream"):
+            body["stream_options"] = {"include_usage": True}
         # All requests, including failed/unknown requests and internal compaction, consume a slot.
         async with (
             asyncio.timeout(remaining),
@@ -168,6 +170,36 @@ def create_budget_proxy(
                     output.extend(chunk)
                     if len(output) > 4 * 1024 * 1024:
                         raise HTTPException(502, "MODEL_OUTPUT_LIMIT")
+                # Account only usage present in the original response. A final SSE
+                # usage chunk is cumulative, so it replaces earlier chunks once.
+                observed = None
+                try:
+                    records = (
+                        [json.loads(line[5:].strip()) for line in bytes(output).splitlines()
+                         if line.startswith(b"data:") and line[5:].strip() != b"[DONE]"]
+                        if body.get("stream") else [json.loads(output)]
+                    )
+                    for record in records:
+                        usage = record.get("usage") if isinstance(record, dict) else None
+                        if isinstance(usage, dict):
+                            prompt, completion = usage.get("prompt_tokens"), usage.get(
+                                "completion_tokens",
+                            )
+                            observed = ((prompt, completion) if all(
+                                type(value) is int and 0 <= value < 2**63
+                                for value in (prompt, completion)
+                            ) else None)
+                except (ValueError, TypeError):
+                    observed = None
+                if observed is not None:
+                    prompt, completion = observed
+                    async with lock:
+                        grant["input_tokens"] += prompt
+                        grant["output_tokens"] += completion
+                        grant["billed_micro_usd"] += (
+                            prompt * input_rate + completion * output_rate + 999999
+                        ) // 1000000
+                        grant["unknown_calls"] -= 1
                 return Response(
                     content=bytes(output),
                     status_code=upstream.status_code,

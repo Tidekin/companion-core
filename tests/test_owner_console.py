@@ -130,7 +130,7 @@ def test_cloud_budget_change_uses_its_own_version_and_preserves_native_rows(clie
     headers = login(client)
     policy = client.get("/v1/console/configuration").json()["cloud_budget"]
     response = client.put("/v1/console/cloud-budget", json={
-        "expected_version": policy["version"], "changes": {"daily_micro_cny": 18_000_000},
+        "expected_version": policy["version"], "changes": {},
     }, headers=headers)
     assert response.status_code == 200, response.text
     overview = client.get("/v1/console/overview").json()
@@ -312,6 +312,8 @@ def test_memory_projection_pages_native_candidates_and_keeps_literal_unicode_sea
 @pytest.mark.parametrize("invalid", [
     "negative", "tombstone", "expired", "conversation", "upstream", "future", "ended",
 ])
+
+
 @pytest.mark.parametrize("confirmed", [False, True])
 def test_memory_projection_preserves_native_source_and_validity_filters(
     client, core, invalid, confirmed,
@@ -493,6 +495,8 @@ def test_life_projection_rejects_diary_erasure_during_combined_read(client, core
     ("https://[::1]:443/", "https://[::1]"),
     ("https://例子.测试", "https://xn--fsqu00a.xn--0zwm56d"),
 ])
+
+
 def test_console_origin_matches_browser_serialization(supplied, canonical):
     assert operator_config.ConsoleConfig(public_origin=supplied).public_origin == canonical
 
@@ -502,6 +506,8 @@ def test_console_origin_matches_browser_serialization(supplied, canonical):
     "https://@console.example.test", "https://console.example.test/path",
     "https://console.example.test?x=1", "https://console.example.test#fragment",
 ])
+
+
 def test_console_origin_rejects_invalid_ports_and_non_origin_parts(supplied):
     with pytest.raises(ValidationError):
         operator_config.ConsoleConfig(public_origin=supplied)
@@ -536,5 +542,5 @@ def test_console_budget_reports_restore_reconciliation_without_new_spendable_poo
     assert value["runtime"]["state"] == "ATTENTION"
     assert value["budget"]["restore_reconciliation_required"]
     assert value["budget"]["restored_history_may_be_incomplete"]
-    assert value["budget"]["remaining_micro_cny"] == 0
-    assert value["budget"]["admission_blocked"]
+    assert "remaining_micro_cny" not in value["budget"]
+    assert "admission_blocked" not in value["budget"]

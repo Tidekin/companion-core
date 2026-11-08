@@ -45,11 +45,11 @@ APNG 的独立海报不进入动画时间轴。
 - `max_output_tokens` 默认 `1000`，`timeout_seconds` 默认 `45`、最大 `60`；
   `max_seconds` 默认整批视频合计 `30` 秒，`max_bytes` 默认每段 `4000000` 字节。
 
-既有 `paid_model.max_input_tokens`、`max_output_tokens` 和金额限制还要覆盖新路线的请求。
+既有 `paid_model.max_input_tokens`、`max_output_tokens` 和调用次数限制仍覆盖新路线的请求。
 私人陪伴窗口的 `per_request_calls` 从 `3` 改为 `4`，为拼图观察、可选视频分析、
 可选记忆筛选和最终聊天预留最多四次。未调用视频时不会产生该次调用。
-图片与视频分析共用 `content.image_daily_micro_usd`，所有调用共用原有窗口次数、
-总预算、并发和独立日志；用量分别记录实际提供方、模型和冻结价格。
+图片与视频分析共用原有窗口次数、Token、并发和独立日志；
+用量分别记录实际提供方、模型和冻结价格，不再分配场景金额额度。
 
 当前视频路线要求 `owner_private_v1` 私人陪伴、当前主人图片授权和已知价格。
 单一供应商的 `cumulative` 账号额度合同不允许混入另一提供方，配置这种组合时关闭调用。

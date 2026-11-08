@@ -474,7 +474,8 @@ def test_control_refuses_inflight_chat_or_cost_without_resetting_it(core, pendin
                        [{"role": "user", "content": "合成尚未结算的请求"}], core.clock())
         core.store.execute('UPDATE model_usage SET state=%s', (pending,))
     usage, jobs = (core.store.rows("SELECT * FROM " + table) for table in ("model_usage", "jobs"))
-    with pytest.raises(CoreError, match="INITIAL_WORK_MUST_BE_ZERO"):
+    code = "MEMORY_CONTROL_CUSTODY_CHANGED" if pending == "UNKNOWN" else "INITIAL_WORK_MUST_BE_ZERO"
+    with pytest.raises(CoreError, match=code):
         service(core, approval).apply(body)
     assert core.store.rows("SELECT * FROM model_usage") == usage
     assert core.store.rows("SELECT * FROM jobs") == jobs

@@ -23,13 +23,12 @@ from tests.support.model_reasoning import reasoning_chat
 def test_rem_defaults_enable_bounded_private_dreams():
     config = RemConfig()
     assert config.enabled
-    assert config.daily_micro_usd == 10000
-    assert config.monthly_micro_usd == 100000
     assert config.local_hour == 4
     assert plain().rem == config
     assert RemConfig(enabled=False).enabled is False
+    assert RemConfig().enabled
     with pytest.raises(ValidationError):
-        RemConfig(daily_micro_usd=0)
+        RemConfig(max_input_tokens=0)
 
 
 @pytest.mark.parametrize("reasoning", [None, "", {"unexpected": "value"}, "合成推理"])

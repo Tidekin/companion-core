@@ -104,10 +104,13 @@ async def rotation_case(core, tmp_path, monkeypatch, *, changed, responsibility,
             grant = SimpleNamespace(authority=active["authority"], key=key, policy=policy)
             config = replace(c.config, protocol_epoch=epoch)
         else:
-            # The original financial idle gate forbids rotation while UNKNOWN is held.
-            with pytest.raises(CoreError, match="LIVE_TEXT_INITIAL_WORK_MUST_BE_ZERO"):
-                activate(core, c.grant.policy, revision=1, operation="unknown-cannot-rotate")
-            grant, config = c.grant, c.config
+            original_usage = core.store.rows("SELECT * FROM model_usage")
+            active, _ = activate(core, c.grant.policy, revision=1,
+                                 operation="rotate-with-original-unknown")
+            assert core.store.rows("SELECT * FROM model_usage") == original_usage
+            grant = SimpleNamespace(authority=active["authority"], key=c.grant.key,
+                                    policy=c.grant.policy)
+            config = c.config
         event, response = await admit(c.client, config, grant, c.now, 2, text="太棒了，成功了")
         assert response.status_code == 202, response.text
         claimed = core.claim_job("rotated-offer", job_id=response.json()["job_id"])

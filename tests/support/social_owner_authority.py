@@ -17,8 +17,7 @@ def close_provider_clients(core):
 
 
 def authorize(core, tmp_path, *, life=None, account=True, module=None, additional_purposes=()):
-    approved_live(core, tmp_path, max_output_tokens=4096, per_attempt_micro_usd=100000,
-                  per_request_micro_usd=200000)
+    approved_live(core, tmp_path, max_output_tokens=4096, )
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
     purposes = (["life"] if life else ["social"]) + list(additional_purposes)
     capability = {}

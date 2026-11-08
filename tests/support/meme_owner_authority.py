@@ -6,7 +6,6 @@ from tests.support.meme_service import claim, reservation
 def configure(core, *, caption=False):
     core.settings.meme_discovery_enabled = True
     core.settings.meme_semantics_enabled = caption
-    core.settings.meme_caption_daily_micro_usd = 50000
     return {"max_output_tokens": 4096, **({"meme_input": ImageInputPolicy(
         approval_sha256="e" * 64, estimated_tokens_per_image=100,
         max_bytes_per_image=4000000, max_pixels_per_image=16000000,

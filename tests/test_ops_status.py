@@ -100,9 +100,8 @@ def test_snapshot_sees_committed_wal_and_preserves_unknown_and_private_content(c
     assert result["budget"]["calibration"]["calibrated_calls"] == 0
     assert result["budget"]["calibration"]["currency"] is None
     assert result["budget"]["calibration"]["billing_basis"] == "configured_rates_not_invoice"
-    assert {"MODEL_BUDGET_BLOCKED", "DELIVERY_UNCERTAIN", "MODEL_USAGE_UNSETTLED"} <= set(
-        result["blockers"]
-    )
+    assert result["blockers"] == ["DELIVERY_UNCERTAIN"]
+    assert {"MODEL_BUDGET_BLOCKED", "MODEL_COST_UNKNOWN"} <= set(result["warnings"])
     assert result["worker_progress"]["state"] == "UNOBSERVED"
     assert result["database"]["integrity"] == "NOT_CHECKED"
     assert observed == ["on"]

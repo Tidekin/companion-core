@@ -95,7 +95,7 @@ function tag(s, label) { const [text, tone] = statusOf(s); return el("span", { c
 
 const ACTIVITY_TITLES = {
   "event.accepted": "收到你的一条消息", "console.login": "你登录了控制台", "console.operation": "控制台操作已记录",
-  "configuration.saved": "保存了新的配置版本", "cloud_budget.bound": "建立了云端预算记录", "cloud_budget.configured": "更新了云端预算",
+  "configuration.saved": "保存了新的配置版本", "cloud_budget.bound": "建立了费用换算记录", "cloud_budget.configured": "更新了费用换算",
   "cloud_budget.native_settled": "同步了一笔已结算费用", "model.not_dispatched": "模型请求没有发出", "model.video_rate_correction": "修正了视频计费",
   "memory.conflict": "发现需要核对的记忆", "memory.control": "记忆管理操作已记录", "memory.recall_invalid": "一次记忆检索未通过核验",
   "reading.owner_requested": "收到你的阅读请求", "reply.superseded": "回复由新消息接续", "diary.recompute_requested": "请求重新整理日记",
@@ -148,13 +148,13 @@ const CAP_GROUPS = [
 ];
 /* 能力对应的配置项。只显示服务端实际返回的字段；executive 等部署保管的项不在其中。 */
 const CAP_FIELDS = {
-  "memory.manage": ["memory_enabled"], "memory.recall": ["semantic_min_score", "extraction_min_events", "extraction_idle_seconds", "emerging_min_sessions", "stable_min_days", "memory_daily_micro_usd", "raw_event_retention_days"],
-  diary: ["diary_enabled", "diary_generate_hour", "diary_min_source_events", "diary_max_source_events", "diary_max_body_chars", "diary_max_output_tokens", "diary_catchup_days", "diary_max_attempts", "diary_daily_micro_usd"],
+  "memory.manage": ["memory_enabled"], "memory.recall": ["semantic_min_score", "extraction_min_events", "extraction_idle_seconds", "emerging_min_sessions", "stable_min_days", "raw_event_retention_days"],
+  diary: ["diary_enabled", "diary_generate_hour", "diary_min_source_events", "diary_max_source_events", "diary_max_body_chars", "diary_max_output_tokens", "diary_catchup_days", "diary_max_attempts", ],
   consolidation: ["consolidation_enabled", "consolidation_local_hour", "consolidation_catchup_days"],
-  reflection: ["reflection_enabled", "reflection_daily_max_suggestions", "reflection_min_sources", "reflection_max_daily_calls", "reflection_max_output_tokens", "reflection_daily_micro_usd", "reflection_monthly_micro_usd"],
+  reflection: ["reflection_enabled", "reflection_daily_max_suggestions", "reflection_min_sources", "reflection_max_daily_calls", "reflection_max_output_tokens", ],
   goals: ["goals_enabled", "goals_max_active", "goal_max_attempts"], affect: ["affect_enabled", "affect_decay_minutes", "affect_max_evidence"],
   proactive: ["proactive_enabled", "proactive_interval_seconds", "proactive_idle_seconds", "proactive_daily_limit", "quiet_start", "quiet_end"],
-  wake: ["wake_enabled", "wake_min_interval_minutes", "wake_max_daily_runs", "autonomous_daily_micro_usd"],
+  wake: ["wake_enabled", "wake_min_interval_minutes", "wake_max_daily_runs", ],
   exploration: ["exploration_enabled", "exploration_daily_candidate_limit", "exploration_daily_deep_reads", "exploration_daily_requests", "exploration_monthly_requests", "exploration_max_response_bytes", "exploration_daily_bytes"],
   social: ["social_enabled", "social_semantic_threshold"], "qq.poke": ["poke_policy"], "qq.poke.native": ["poke_policy"],
   "reading.web": ["web_reading_enabled", "web_reading_hosts", "content_enabled"], "reading.bilibili": ["observation_enabled", "content_enabled"], "reading.heybox": ["observation_enabled", "content_enabled"],
@@ -163,7 +163,7 @@ const CAP_FIELDS = {
   expression_learning: ["expression_learning_enabled"], "unicode.emoji": ["expression_enabled"], "qq.face_names": ["expression_enabled"], "qq.face_images": ["expression_enabled"],
   "memes.catalog": ["meme_discovery_enabled"], "memes.search": ["meme_discovery_enabled", "meme_discovery_daily_queries"],
   "memes.community_import": ["meme_discovery_enabled", "meme_discovery_daily_download_bytes", "meme_discovery_daily_storage_bytes"],
-  "memes.semantic": ["meme_semantics_enabled", "meme_caption_daily_micro_usd", "meme_caption_max_output_tokens"],
+  "memes.semantic": ["meme_semantics_enabled", "meme_caption_max_output_tokens"],
   "qq.voice.asr": ["voice_enabled", "voice"], "qq.voice.tts": ["voice_enabled", "voice"], "media.voice": ["voice_enabled"], "media.camera": ["camera_enabled"], "media.android": ["android_enabled"],
   "qq.profile.observe": ["social_autonomy"], "qq.account.signature": ["social_autonomy"], "qq.account.nickname": ["social_autonomy"], "qq.account.avatar": ["social_autonomy"], "qq.account.qzone_publish": ["social_autonomy"],
 };
@@ -717,8 +717,8 @@ function todoList(data) {
   if (counts.companion_proposals) out.push(["info", counts.companion_proposals, "条她的调整提议", "她想少打扰或休息一下,等你批准", "去看看", "caps/wake"]);
   if (counts.pending_goals) out.push(["", counts.pending_goals, "个目标等你决定", "她提出了新目标,需要你接受或取消", "去看看", "life"]);
   if (counts.pending_reflections) out.push(["", counts.pending_reflections, "条反思等你批准", "每日反思已完成,需要你批准或拒绝", "去看看", "life"]);
-  if (counts.unknown_calls) out.push(["", counts.unknown_calls, "次模型调用结果不明", "相关费用会一直占用额度,直到核对完成", "查看诊断", "diagnostics"]);
-  if (b.reconciliation_required || b.restore_reconciliation_required) out.push(["bad", "!", "费用记录需要核对", b.admission_blocked ? "云调用已暂停,需核对独立账本" : "请核对独立费用记录", "查看诊断", "diagnostics"]);
+  if (counts.unknown_calls) out.push(["", counts.unknown_calls, "次模型调用结果不明", "费用信息已保留，等待核对", "查看诊断", "diagnostics"]);
+  if (b.reconciliation_required || b.restore_reconciliation_required) out.push(["bad", "!", "费用记录需要核对", "请核对独立费用记录", "查看诊断", "diagnostics"]);
   if (b.fx_expired) out.push(["bad", "!", "汇率已过期", "过期后不会发起新的云调用", "更新汇率", "configuration/budget"]);
   if (data.runtime?.worker?.state && data.runtime.worker.state !== "RECORDED") out.push(["info", "!", "聊天处理进程没有近期记录", "进程可能没有启动或已经停止", "查看诊断", "diagnostics"]);
   if (!out.length) return el("div", { class: "todo-clear" }, icon("check"), "没有需要你处理的事。");
@@ -728,21 +728,20 @@ function todoList(data) {
 }
 function budgetCard(b, counts = {}) {
   if (!b || b.currency !== "CNY") return sheet("今日云端费用", el("p", { class: "note" }, "费用记录还没有人民币口径。"));
-  const limit = b.daily_limit_micro_cny, pct = v => limit > 0 ? Math.min(100, Math.max(0, v / limit * 100)) + "%" : "0%";
+  const total = b.used_micro_cny, pct = v => total > 0 ? Math.min(100, Math.max(0, v / total * 100)) + "%" : "0%";
   const reconcile = b.reconciliation_required || b.restore_reconciliation_required;
   return sheet("今日云端费用", [
-    reconcile ? el("div", { class: "alert bad" }, icon("warn"), el("span", {}, (b.restore_reconciliation_required ? "备份恢复后的费用记录可能不完整" : "费用记录需要核对") + (b.admission_blocked ? "，云调用已暂停。" : "。"))) : null,
-    b.unknown_micro_cny > 0 ? el("div", { class: "alert" }, icon("warn"), el("span", {}, "有结果不明的费用，它们会一直占用额度，直到核对完成。")) : null,
-    el("div", { class: "money-big" }, el("b", { class: "num" }, yuan(b.remaining_micro_cny)), el("span", {}, "今天还能用，限额 " + yuan(limit))),
+    reconcile ? el("div", { class: "alert bad" }, icon("warn"), el("span", {}, b.restore_reconciliation_required ? "备份恢复后的费用记录可能不完整。" : "费用记录需要核对。")) : null,
+    b.unknown_micro_cny > 0 || b.unpriced_unknown_count > 0 ? el("div", { class: "alert" }, icon("warn"), el("span", {}, "部分费用尚未确认，原始记录已保留。")) : null,
+    el("div", { class: "money-big" }, el("b", { class: "num" }, yuan(b.settled_micro_cny)), el("span", {}, "今日已结算")),
     el("div", { class: "bar", role: "img", "aria-label": `已结算 ${yuan(b.settled_micro_cny)}，已预留 ${yuan(b.reserved_micro_cny)}，结果不明 ${yuan(b.unknown_micro_cny)}` },
       el("i", { class: "s", style: { width: pct(b.settled_micro_cny) } }), el("i", { class: "r", style: { width: pct(b.reserved_micro_cny) } }), el("i", { class: "u", style: { width: pct(b.unknown_micro_cny) } })),
     el("div", { class: "legend" }, [["已结算", b.settled_micro_cny, "var(--ink)"], ["已预留", b.reserved_micro_cny, "#8b90c4"], ["结果不明", b.unknown_micro_cny, "var(--amber)"]]
       .map(([n, v, c]) => el("div", { style: { "--c": c } }, n, el("b", {}, yuan(v))))),
-    b.over_limit ? el("p", { class: "form-error" }, "总占用已超出限额，之后的预留会受限。") : null,
     el("div", { class: "queues" }, el("div", {}, el("b", {}, count(counts.pending_jobs)), el("span", {}, "排队中的任务")),
       el("div", {}, el("b", {}, count(counts.pending_deliveries)), el("span", {}, "待发送消息")),
       el("div", {}, el("b", {}, count(counts.review_memories)), el("span", {}, "待确认记忆"))),
-    el("p", { class: "note mt" }, "按配置费率和汇率估算，不等于服务商的最终账单。")], linkTo("configuration/budget", "调整预算"));
+    el("p", { class: "note mt" }, "按配置费率和汇率估算，不等于服务商的最终账单。")], linkTo("configuration/money", "费用换算"));
 }
 function recentCard(recent) {
   if (!recent) return sheet("最近发生", el("p", { class: "note" }, "活动记录暂时读不到，可以稍后刷新。"));
@@ -1529,7 +1528,7 @@ function capMarks(id) {
 /* 多项能力共用一组设置时，每项只显示和自己相关的子项 */
 const PROFILE_LIMITS = ["profile_daily_limit", "profile_cooldown_seconds"];
 const CAP_SUB = {
-  "qq.profile.observe": { social_autonomy: ["enabled", "scope", "profile_baseline_seconds", "decision_interval_seconds", "model_daily_calls", "model_daily_micro_usd", "max_pending_plans", "plan_ttl_seconds"] },
+  "qq.profile.observe": { social_autonomy: ["enabled", "scope", "profile_baseline_seconds", "decision_interval_seconds", "model_daily_calls", "max_pending_plans", "plan_ttl_seconds"] },
   "qq.account.signature": { social_autonomy: ["signature_enabled", "max_signature_chars", ...PROFILE_LIMITS] },
   "qq.account.nickname": { social_autonomy: ["nickname_enabled", "max_nickname_chars", ...PROFILE_LIMITS] },
   "qq.account.avatar": { social_autonomy: ["avatar_enabled", "max_asset_bytes", "max_asset_dimension", ...PROFILE_LIMITS] },
@@ -1540,7 +1539,7 @@ const CAP_SUB = {
   "qq.voice.tts": { voice: ["reply", "result_ttl_seconds", "max_pending_jobs"] },
   "bilibili.video": { bili_video: ["enabled", "deadline_seconds", "max_concurrent", "max_context_chars", "sampling"] },
   "model.understand_video": { bili_video: ["media"] },
-  "qq.images": { content: ["use_chat_model_for_vision", "max_images_per_event", "max_image_bytes", "max_daily_images", "max_daily_image_bytes", "image_daily_micro_usd", "vision"] },
+  "qq.images": { content: ["use_chat_model_for_vision", "max_images_per_event", "max_image_bytes", "max_daily_images", "max_daily_image_bytes", "vision"] },
   "qq.animation": { content: ["use_chat_model_for_vision", "max_image_bytes", "max_daily_images", "max_daily_image_bytes"] },
 };
 const CAP_SUB_LABEL = { social_autonomy: "相关设置", poke_policy: "相关设置", voice: "相关设置", bili_video: "相关设置", content: "相关设置" };
@@ -1688,7 +1687,7 @@ function autonomySection(id) {
       cap.fields.includes("pause") ? el("label", { class: "ck big" }, el("input", { type: "checkbox", checked: draft.allow_pause, onchange: e => set({ allow_pause: e.target.checked }) }),
         el("span", {}, el("b", {}, "允许她暂停这项能力"), el("small", {}, "最长到第二天 08:00，到时自动恢复。她不能恢复你暂停的，也不能打开你关掉的能力。"))) : null,
       Object.keys(cap.limits || {}).length ? [el("p", { class: "sub2" }, "她可以调整的参数"), el("ul", { class: "ranges" }, Object.keys(cap.limits).map(rangeRow))] : null,
-      el("p", { class: "note mt" }, "她只能让这项能力少运行：减少次数和额度、拉长间隔或暂停，不能增加次数或费用。她的调整必须引用你们的原话作为理由。从备份恢复后，她的调整全部作废。"),
+      el("p", { class: "note mt" }, "她只能让这项能力少运行：减少次数、拉长间隔或暂停。她的调整必须引用你们的原话作为理由。从备份恢复后，她的调整全部作废。"),
       notWired.length ? el("p", { class: "lockline" }, icon("warn"), el("span", {}, (wired.size ? "其中" + notWired.map(autoLabel).join("、") : "这项能力") + "的运行逻辑还没有接入她的调整，授权可以先保存，接入后生效。")) : null] : null,
     changed ? el("div", { class: "row-gap mt" }, btn("保存授权", () => saveAutonomy(id, state.autoDraft[id]), { cls: "sm primary" }),
       btn("还原", () => { delete state.autoDraft[id]; rerender(); }, { cls: "sm quiet" })) : null,
@@ -1726,7 +1725,6 @@ const GROUPS = [["model", "模型与计价"], ["memory", "记忆与日记"], ["a
 const RATE_KEYS = ["input_rate", "cached_input_rate", "output_rate"];
 const MODEL_TAIL = ["timeout_seconds", "max_output_tokens", "context_soft_tokens", "max_recent_messages"];
 const SCHEDULE_KEYS = ["quiet_start", "quiet_end", "diary_generate_hour", "consolidation_local_hour"];
-const isMoneyKey = k => /_(daily|monthly)_micro_usd$|^monthly_limit_micro_usd$/.test(k);
 PAGES.configuration = data => {
   const c = data.configuration;
   if (!c || !Array.isArray(c.fields) || !Number.isInteger(c.version) || !Number.isInteger(c.active_version)) return empty("配置数据不完整", "请刷新核对，现在无法安全编辑配置。", true);
@@ -1741,15 +1739,15 @@ PAGES.configuration = data => {
           el("div", { class: "pf-c" }, el("a", { class: "btn sm", href: "#caps/" + encodeURIComponent(capOfKey(f.key)) }, "去能力与开关修改")))
       : fieldRow(f))) : el("div", { class: "empty" }, el("h3", {}, "没有找到这个设置"), el("p", {}, "试试“冷却”“上限”“时间”这类词。")), el("span", { class: "note" }, hits.length + " 项")));
   }
-  const special = new Set([...RATE_KEYS, ...MODEL_TAIL, ...fields.filter(f => isMoneyKey(f.key) || f.type === "secret").map(f => f.key)]);
+  const special = new Set([...RATE_KEYS, ...MODEL_TAIL, ...fields.filter(f => f.type === "secret").map(f => f.key)]);
   // 属于某项能力的开关和参数只在“能力与开关”里出现，配置页只放系统级设置。
   const rest = fields.filter(f => !special.has(f.key) && !CAP_KEYS.has(f.key));
   const groups = GROUPS.filter(([g]) => rest.some(f => (f.group || "system") === g));
   const extra = [...new Set(rest.map(f => f.group || "system"))].filter(g => !GROUPS.some(([k]) => k === g)).map(g => [g, "其他设置"]);
-  const sections = [["model", "模型与密钥"], ["money", "费用与预算"],
+  const sections = [["model", "模型与密钥"], ["money", "费用换算"],
     ...[...groups, ...extra].filter(([g]) => g !== "model")];
   const dirtyIn = id => ({ model: [...RATE_KEYS, ...MODEL_TAIL, ...fields.filter(f => f.type === "secret").map(f => f.key), ...rest.filter(f => f.group === "model").map(f => f.key)],
-    money: fields.filter(f => isMoneyKey(f.key) && !CAP_KEYS.has(f.key)).map(f => f.key) }[id] || rest.filter(f => (f.group || "system") === id).map(f => f.key)).some(k => state.draft.has(k));
+    money: [] }[id] || rest.filter(f => (f.group || "system") === id).map(f => f.key)).some(k => state.draft.has(k));
   // 版本状态始终在上方；下面一次只显示目录里选中的一节。草稿跨节保留，目录上的圆点标出哪节有修改。
   const cur = sections.some(([id]) => id === state.sub) ? state.sub : "model";
   const section = cur === "model" ? modelSection(rest.filter(f => f.group === "model"))
@@ -1884,14 +1882,9 @@ function scheduleStrip() {
       el("p", { class: "note clock-note" }, "斜纹是免打扰时段：不发主动消息，回复照常。灰色标记表示这项整理没有开启。"));
 }
 function moneySection(c) {
-  const monthly = fieldOf("monthly_limit_micro_usd"), scen = cfgFields().filter(f => isMoneyKey(f.key) && f.key !== "monthly_limit_micro_usd" && !CAP_KEYS.has(f.key));
-  return el("section", { class: "sheet cfg-sec", id: "cfg-money" }, el("div", { class: "sheet-head" }, el("h2", {}, "费用与预算")),
-    el("div", { class: "sheet-body" }, c.cloud_budget?.config ? cloudBudget(c.cloud_budget) : null,
-      el("div", { class: "budget-block" }, el("div", { class: "bb-head" }, el("div", {}, el("h3", {}, "模型账本"),
-        el("p", { class: "note" }, "所有模型调用每月的总额度。各能力自己的每日额度在“能力与开关”里调整。" + (state.currency === "CNY" ? "金额按 1 美元 = ¥" + (state.fx / 1e6).toFixed(2) + " 换算。" : ""))), el("span", { class: "chip" }, "新版本生效")),
-        monthly ? fieldRow(monthly) : null,
-        scen.length ? el("table", { class: "t scen" }, el("thead", {}, el("tr", {}, el("th", {}, "场景"), el("th", { class: "r" }, "额度"))),
-          el("tbody", {}, scen.map(f => el("tr", { class: "static" + (state.draft.has(f.key) ? " changed" : "") }, el("td", {}, el("b", {}, f.label)), el("td", { class: "r" }, control(f), el("p", { class: "pf-err", role: "alert", hidden: true })))))) : null)));
+  return el("section", { class: "sheet cfg-sec", id: "cfg-money" },
+    el("div", { class: "sheet-head" }, el("h2", {}, "费用换算")),
+    el("div", { class: "sheet-body" }, c.cloud_budget?.config ? cloudBudget(c.cloud_budget) : null));
 }
 function secretsSection(list) {
   return el("section", { class: "sheet cfg-sec", id: "cfg-secrets" }, el("div", { class: "sheet-head" }, el("h2", {}, "密钥"), el("span", { class: "note" }, "只能写入，任何地方都不会显示原值")),
@@ -1900,20 +1893,19 @@ function secretsSection(list) {
 }
 function cloudBudget(policy) {
   /** @type {Array<[string, string, number, string, string?]>} */
-  const defs = [["daily_micro_cny", "每日云端限额", 1e6, "¥"], ["video_per_item_micro_cny", "单个视频任务上限", 1e6, "¥"], ["asr_per_item_micro_cny", "单个语音任务上限", 1e6, "¥"],
-    ["usd_to_cny_micro", "美元汇率（每 1 美元）", 1e6, "¥"], ["fx_source", "汇率依据", 1, ""], ["fx_validity_seconds", "汇率有效期", 86400, "", "天"]];
+  const defs = [["usd_to_cny_micro", "美元汇率（每 1 美元）", 1e6, "¥"], ["fx_source", "汇率依据", 1, ""], ["fx_validity_seconds", "汇率有效期", 86400, "", "天"]];
   const form = el("form", { class: "cloud-grid", id: "budget-form" }, defs.map(([k, n, scale, pre, unit]) => {
     const cur = policy.config[k], value = state.budgetDraft.has(k) ? state.budgetDraft.get(k) : typeof cur === "number" ? String(+(cur / scale).toFixed(6)) : cur === "operator_planning_estimate" ? "运营估算" : cur ?? "";
     const input = el("input", { class: "input", id: "budget-" + k, value, inputmode: k === "fx_source" ? undefined : "decimal", maxlength: k === "fx_source" ? "256" : undefined,
       oninput: e => { state.budgetDraft.set(k, e.target.value); $("#budget-save").disabled = false; } });
     return el("label", { class: "field" }, el("span", {}, n), k === "fx_source" ? input : el("span", { class: "unit" + (pre ? " has-pre" : "") }, pre ? el("i", {}, pre) : null, input, unit ? el("em", {}, unit) : null));
   }));
-  const save = btn("更新云端预算", () => saveBudget(policy, defs, form, save), { cls: "sm primary", disabled: !state.budgetDraft.size });
+  const save = btn("更新费用换算", () => saveBudget(policy, defs, form, save), { cls: "sm primary", disabled: !state.budgetDraft.size });
   save.id = "budget-save";
-  return el("div", { class: "budget-block" }, el("div", { class: "bb-head" }, el("div", {}, el("h3", {}, "云端人民币预算"),
-      el("p", { class: "note" }, "保存后立即约束之后的云调用，不生成配置版本。不会重置已有费用、预留和结果不明的调用，进行中的任务继续用开始时的上限和汇率。")), el("span", { class: "chip" }, "立即生效")),
+  return el("div", { class: "budget-block" }, el("div", { class: "bb-head" }, el("div", {}, el("h3", {}, "人民币费用换算"),
+      el("p", { class: "note" }, "后续费用采用新的换算依据，已有记录保留各自的汇率。")), el("span", { class: "chip" }, "立即生效")),
     form, el("div", { class: "bb-acts" }, save, state.budgetDraft.size ? btn("还原", () => { state.budgetDraft.clear(); rerender(); }, { cls: "sm quiet" }) : null),
-    el("div", { class: "pf-list mt" }, kv("预算版本", "v" + policy.version), kv("生效时间", fmtDate(policy.effective_at)), kv("汇率有效期至", fmtDate(policy.fx_valid_until)), kv("记账时区", policy.timezone || "未记录")));
+    el("div", { class: "pf-list mt" }, kv("换算版本", "v" + policy.version), kv("生效时间", fmtDate(policy.effective_at)), kv("汇率有效期至", fmtDate(policy.fx_valid_until)), kv("记账时区", policy.timezone || "未记录")));
 }
 function saveBudget(policy, defs, form, button) {
   const changes = Object.create(null);
@@ -1928,11 +1920,11 @@ function saveBudget(policy, defs, form, button) {
       if (value !== policy.config[k]) changes[k] = value;
     }
   } catch (error) { formError(form, error.message); return; }
-  if (!Object.keys(changes).length) { formError(form, "没有需要保存的预算修改。"); return; }
+  if (!Object.keys(changes).length) { formError(form, "没有需要保存的换算修改。"); return; }
   if (state.budgetSave) return;
   state.budgetSave = true;
   perform(form, button, () => api.write("/cloud-budget", { expected_version: policy.version, changes }, "PUT", r => Number.isInteger(r.version) && r.config && typeof r.config === "object"),
-    async r => { state.data.configuration.cloud_budget = r; if (Number.isSafeInteger(r.config.usd_to_cny_micro)) state.fx = r.config.usd_to_cny_micro; state.budgetDraft.clear(); rerender(); toast("已更新云端预算，立即生效"); })
+    async r => { state.data.configuration.cloud_budget = r; if (Number.isSafeInteger(r.config.usd_to_cny_micro)) state.fx = r.config.usd_to_cny_micro; state.budgetDraft.clear(); rerender(); toast("已更新费用换算，立即生效"); })
     .finally(() => { state.budgetSave = null; });
 }
 
@@ -2030,7 +2022,7 @@ function reasonText(code) {
   return tail ? tail[1] : "未归类的原因";
 }
 const LIMIT_NAMES = {
-  daily_micro_usd: "每日额度", monthly_micro_usd: "每月额度", daily_calls: "每日调用", daily_limit: "每日次数", cooldown_seconds: "冷却", mode: "模式",
+  daily_calls: "每日调用", daily_limit: "每日次数", cooldown_seconds: "冷却", mode: "模式",
   max_daily_images: "每日图片", max_daily_files: "每日文件", daily_requests: "每日请求", monthly_requests: "每月请求", daily_bytes: "每日流量",
   max_concurrent: "并发", deadline_seconds: "处理时限", max_chars: "字数上限", wait_seconds: "等待", daily_queries: "每日搜索", max_active: "同时进行",
 };
@@ -2059,7 +2051,7 @@ const SUB = {
   coalesce_seconds: "合并间隔", cooldown_seconds: "冷却", daily_limit: "每天最多", max_coalesced: "最多合并", max_text_chars: "文字上限", max_pending_seconds: "最长等待",
   max_links_per_event: "每条消息最多链接", max_images_per_event: "每条消息最多图片", max_images_per_article: "每篇文章最多图片", article_image_micro_usd: "文章图片单价",
   use_chat_model_for_vision: "用对话模型理解图片", max_image_bytes: "单张图片上限", max_daily_image_bytes: "每日图片流量", max_daily_images: "每日最多图片",
-  image_daily_micro_usd: "图片理解每日额度", wait_seconds: "回复前最多等待", upload_window_seconds: "上传窗口", max_request_micro_usd: "单次请求上限",
+  wait_seconds: "回复前最多等待", upload_window_seconds: "上传窗口", estimated_request_micro_usd: "单次费用估算",
   max_files_per_event: "每条消息最多文件", max_daily_files: "每日最多文件", max_daily_bytes: "每日流量", upload_lease_seconds: "上传租约", worker_lease_seconds: "处理租约",
   spool_retention_seconds: "暂存保留", max_file_bytes: "单个文件上限", max_expanded_bytes: "解压后上限", max_zip_entries: "压缩包最多条目", max_compression_ratio: "最大压缩比",
   max_pages: "最多页数", max_records: "最多条数", max_text_chars_file: "文字上限", max_table_depth: "表格最深层级", max_pdf_stream_bytes: "PDF 单流上限",
@@ -2068,7 +2060,7 @@ const SUB = {
   max_private_blob_bytes: "私有数据上限", max_chars: "字数上限", max_context_chars: "带入对话的字数", authorization_sha256: "授权摘要", asset_policy_sha256: "素材策略摘要",
   policy_version: "策略版本", qzone_enabled: "允许 QQ 空间发布", qzone_public_enabled: "允许空间公开发布（逐稿审批）", nickname_enabled: "允许改昵称", signature_enabled: "允许改签名", avatar_enabled: "允许改头像",
   qzone_daily_limit: "QQ 空间每天最多", profile_daily_limit: "资料每天最多改", qzone_cooldown_seconds: "QQ 空间冷却", profile_cooldown_seconds: "资料改动冷却",
-  model_daily_calls: "模型每日调用", model_daily_micro_usd: "模型每日额度", decision_interval_seconds: "决策间隔", max_publish_chars: "发布字数上限",
+  model_daily_calls: "模型每日调用", decision_interval_seconds: "决策间隔", max_publish_chars: "发布字数上限",
   max_nickname_chars: "昵称字数上限", max_signature_chars: "签名字数上限", max_source_refs: "最多引用来源", max_source_chars: "来源字数上限", max_input_bytes: "输入上限",
   max_output_tokens: "输出上限", timeout_seconds: "超时", plan_ttl_seconds: "计划有效期", profile_baseline_seconds: "资料观测有效期", max_pending_plans: "最多待执行计划",
   max_asset_bytes: "素材大小上限", max_asset_dimension: "素材边长上限", deadline_seconds: "处理时限", max_concurrent: "并发", max_preview_frames: "最多预览帧",
@@ -2081,7 +2073,7 @@ const SUB = {
   local_window_seconds: "局部窗口", context_before_seconds: "之前的上下文", context_after_seconds: "之后的上下文", baseline_floor_per_second: "每秒基线",
   focus_terms: "关注词", max_evidence_per_selection: "每次选取最多证据", max_duration_seconds: "最长时长", provider_timeout_seconds: "服务商超时", image_adapter: "图片适配器",
   max_segments_reply: "最多分段", min_chars: "最少字数", interval_ms: "间隔（毫秒）",
-  strategy: "策略", daily_micro_usd: "每日额度", daily_pairs: "每日评论对数", candidate_days: "候选有效期（天）", lookback_hours: "回看时长（小时）",
+  strategy: "策略", daily_pairs: "每日评论对数", candidate_days: "候选有效期（天）", lookback_hours: "回看时长（小时）",
   max_attempts: "最多尝试", local_hour: "运行时刻", max_source_memories: "最多来源记忆", source_retention_days: "来源保留（天）",
   record_retention_days: "记录保留（天）", max_input_tokens: "输入上限（token）", source_limit: "来源上限", topic_ttl_seconds: "话题有效期",
   follow_up_delay_seconds: "跟进延迟", quiet_seconds: "安静时先等", active_seconds: "聊得正热时先等",
@@ -2582,7 +2574,7 @@ function scopeView(scope) {
     kv("工作区", scope.workspace || "—"),
     scope.path ? kv("路径", scope.path.state === "RECORDED" ? el("code", {}, scope.path.value) : "含有可能敏感的内容，不在这里显示") : null,
     scopeText("写入内容", scope.text), scopeText("任务说明", scope.prompt),
-    el("div", { class: "scope-limits" }, [["费用上限", usd(L.max_cost_micro_usd)], ["模型调用", count(L.max_model_calls) + " 次"], ["输入上限", bytes(L.max_input_bytes)],
+    el("div", { class: "scope-limits" }, [["模型调用", count(L.max_model_calls) + " 次"], ["输入上限", bytes(L.max_input_bytes)],
       ["输出上限", count(L.max_output_tokens) + " token"], ["时限", duration(L.timeout_seconds)]].map(([k, v]) => el("span", {}, el("small", {}, k), el("b", {}, v)))),
     scope.sources_live ? el("p", { class: "note" }, "依据你的 " + count(scope.source_count) + " 条私聊消息，来源仍然有效。")
       : el("div", { class: "alert" }, icon("warn"), el("span", {}, "依据的私聊消息已经失效或被清除，批准和拒绝都会被拒绝，可以撤回这个任务。")));

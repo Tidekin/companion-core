@@ -119,7 +119,7 @@ def test_interrupted_intent_distinguishes_no_admission_from_uncheckpointed_resul
 
 
 @pytest.mark.parametrize("scenario", ["memory_extract", "memory_review", "diary", "reflection"])
-def test_missing_usage_never_commits_or_replays_the_affected_step(core, scenario):
+def test_received_nightly_results_commit_with_cost_unknown_without_replay(core, scenario):
     model = staged(core)
     original = model.complete
 
@@ -131,17 +131,17 @@ def test_missing_usage_never_commits_or_replays_the_affected_step(core, scenario
     drain(core)
     unknown = core.store.rows("SELECT * FROM model_usage WHERE state='UNKNOWN'")
     assert len(unknown) == 1 and unknown[0]["scenario"] == scenario
-    assert core.consolidation.status(DAY)["state"] == "PARTIAL"
+    assert core.consolidation.status(DAY)["state"] == "COMPLETE"
     before = list(model.calls)
     drain(core)
     assert before == model.calls
     assert unknown == core.store.rows("SELECT * FROM model_usage WHERE state='UNKNOWN'")
     if scenario.startswith("memory"):
-        assert core.store.rows("SELECT * FROM memories") == []
+        assert len(core.store.rows("SELECT * FROM memories")) == 2
     elif scenario == "diary":
-        assert core.store.rows("SELECT * FROM diary_entries WHERE status='COMMITTED'") == []
+        assert core.store.rows("SELECT * FROM diary_entries WHERE status='COMMITTED'")
     else:
-        assert core.store.rows("SELECT * FROM reflection_suggestions") == []
+        assert core.store.rows("SELECT * FROM reflection_suggestions")
 
 
 def test_withdraw_pending_candidates_and_derived_episode_in_same_native_erasure(core):

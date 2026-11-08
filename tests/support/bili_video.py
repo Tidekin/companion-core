@@ -204,7 +204,7 @@ def paid_options(core, *, cloud=None, short_window=False, call_limit=4):
     options["core_options"].update(
         bili_video=config,
         cloud_budget=cloud or CloudBudgetConfig(),
-        content=ContentConfig(use_chat_model_for_vision=True, image_daily_micro_usd=1_000_000),
+        content=ContentConfig(use_chat_model_for_vision=True),
         observation_adapters={
             "bili": ObservationAdapterConfig(
                 source="bilibili",

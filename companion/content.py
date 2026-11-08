@@ -388,7 +388,7 @@ class ContentIntake:
                     and not bounded
                     and not native_images
                     and (
-                        not self.options.vision.url or not self.options.vision.max_request_micro_usd
+                        not self.options.vision.url or not self.options.vision.model
                     )
                 ):
                     error = "CONTENT_VISION_NOT_CONFIGURED"
@@ -561,7 +561,7 @@ class ContentService(ContentIntake):
                 url=self.settings.model_url.rstrip("/") + "/chat/completions",
                 key=self.settings.model_key,
                 model=self.settings.model_name,
-                max_request_micro_usd=self.options.vision.max_request_micro_usd,
+                estimated_request_micro_usd=self.options.vision.estimated_request_micro_usd,
             )
             self.options = self.options.model_copy(update={"vision": endpoint})
         self.provider = provider or HTTPMediaProvider(self.options)
@@ -1025,7 +1025,7 @@ class ContentService(ContentIntake):
 
     def _check_vision_limits(self, row):
         endpoint = self.options.vision
-        if not endpoint.url or not endpoint.model or not endpoint.max_request_micro_usd:
+        if not endpoint.url or not endpoint.model:
             raise CoreError("CONTENT_VISION_NOT_CONFIGURED", 503)
         if row["kind"] == "link_image":
             prior = self.store.one(
@@ -1101,7 +1101,7 @@ class ContentService(ContentIntake):
                 raise CoreError("CONTENT_IMAGE_LEASE_EXPIRED", 409)
             self._policy(row)
             self._check_vision_limits(row)
-            price = endpoint.max_request_micro_usd
+            price = endpoint.estimated_request_micro_usd
             traffic = s.one(
                 (
                     "SELECT COUNT(*) AS n,COALESCE(SUM(reserved_bytes),0) AS"

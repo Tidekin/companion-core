@@ -206,7 +206,7 @@ def test_chat_arriving_during_model_keeps_ready_plan_until_foreground_finishes(c
     assert core.store.one("SELECT state FROM outbox")["state"] == "PENDING"
 
 
-def test_unknown_model_is_durable_and_new_evidence_cannot_trigger_repayment(core):
+def test_lost_response_is_retained_and_fresh_evidence_can_get_a_new_decision(core):
     module, _, _ = background(core)
     module.model.error = RuntimeError("synthetic response loss")
     assert tick(module) is True
@@ -219,9 +219,13 @@ def test_unknown_model_is_durable_and_new_evidence_cannot_trigger_repayment(core
     next_module.model = module.model
     probe(next_module)
     next_module.model.error = None
-    assert tick(next_module) is False
-    assert len(module.model.calls) == 1
-    assert core.store.rows("SELECT * FROM model_usage") == [usage]
+    next_module.model.proposal = {"kind": "skip", "reason_code": "NO_ACTION"}
+    assert tick(next_module) is True
+    assert len(module.model.calls) == 2
+    rows = core.store.rows("SELECT * FROM model_usage ORDER BY record_sequence")
+    assert rows[0] == usage
+    assert rows[1]["state"] == "SETTLED"
+    assert rows[1]["request_id"] != usage["request_id"]
 
 
 @pytest.mark.parametrize("changes", [

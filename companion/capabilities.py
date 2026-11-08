@@ -9,7 +9,6 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from companion import (
-    cloud_budget,
     cumulative,
     delegation,
     live_text,
@@ -123,7 +122,6 @@ def _model_blocks(
         if live_blocks is not None
         else _live_blocks(store, settings, now, carry_view=carry_view)
     )
-    reasons += cloud_budget.capacity_blocks(store, settings, now)
     if settings.mode == "live":
         try:
             approval = paid_budget.contract(settings, now)
@@ -179,9 +177,7 @@ def _private_scope(settings, field, expected, code, *, digest_field=None, digest
     return []
 
 
-def _scenario_blocks(store, settings, now, scenarios, amount, *, calls=None, unlimited=False):
-    if calls is None:
-        return []
+def _scenario_blocks(store, settings, now, scenarios, *, calls):
     day, _ = _periods(settings, now)
     used = store.one("SELECT count(*) AS n FROM model_usage WHERE occurred_at>=%s "
                      "AND scenario=ANY(%s::text[])", (day, list(scenarios)))["n"]
@@ -437,14 +433,6 @@ def _bili_video_facts(store, settings, now, readers, model_blocks, *, owner_view
         or (used["reads"] or 0) >= settings.exploration_daily_deep_reads
     ):
         paused.append("READ_BUDGET_UNAVAILABLE")
-    paused += _scenario_blocks(
-        store,
-        settings,
-        now,
-        ("content_vision", "content_video_preview", "content_video"),
-        settings.content.image_daily_micro_usd,
-        unlimited=bool(approval and approval.unlimited_period_spend),
-    )
     observation = (
         "OBSERVED"
         if any(row["runtime_observation"] == "OBSERVED" for row in choices)
@@ -692,7 +680,6 @@ def _account_facts(store, settings, now, field, live_blocks, model_blocks, send_
             settings,
             now,
             ("social_autonomy",),
-            config.model_daily_micro_usd,
             calls=config.model_daily_calls,
         )
         paused += send_blocks
@@ -823,7 +810,6 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner
         "对相关记忆做有来源的检索与审核。",
         enabled=cfg.memory_enabled,
         paused=model_blocks,
-        limits={"daily_micro_usd": cfg.memory_daily_micro_usd},
     )
     for name, summary, extra, limits in (
         (
@@ -831,7 +817,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner
             "按已有对话来源整理日记。",
             (["DIARY_PAUSED"] if _meta(store, "diary_paused") == "1" else [])
             + (["COMPANION_PAUSED"] if delegation.paused(store, "diary", now) else []),
-            {"daily_micro_usd": cfg.diary_daily_micro_usd},
+            {},
         ),
         ("consolidation", "整理已有记忆和日常记录。", life_pause, {}),
         (
@@ -839,8 +825,6 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner
             "基于已有来源提出反思建议。",
             life_pause,
             {
-                "daily_micro_usd": cfg.reflection_daily_micro_usd,
-                "monthly_micro_usd": cfg.reflection_monthly_micro_usd,
                 "max_daily_calls": cfg.reflection_max_daily_calls,
             },
         ),

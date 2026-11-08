@@ -14,7 +14,7 @@ from companion.model import ModelResponse
 from companion.postgres import Database
 from companion.store import Store
 from tests.postgres_fixture import isolated_database, logical_state
-from tests.support.cloud_budget import MESSAGES, change, options
+from tests.support.cloud_budget import MESSAGES, change, currency_blocks, options
 from tests.support.executive import FakeExecutor, configured, proposal
 from tests.support.media import chunk, process, service, start
 
@@ -31,9 +31,8 @@ def restore_target(tmp_path):
 def test_old_backup_marks_missing_tool_cost_history_while_new_work_continues(
     core, tmp_path, bound_before_backup, restore_target,
 ):
-    options(core, daily_micro_cny=1000)
+    options(core)
     executive = configured(core)
-    executive.config.endpoints["windows"].max_cost_micro_usd = 100
     if bound_before_backup:
         cloud_budget.policy(core.store, core.settings, core.clock())
     dest, state = restore_target
@@ -52,17 +51,17 @@ def test_old_backup_marks_missing_tool_cost_history_while_new_work_continues(
     with Core(settings, clock=core.clock) as restored:
         with restored.store.read_snapshot():
             before = logical_state(restored.store)
-            assert cloud_budget.capacity_blocks(restored.store, settings, core.clock()) == []
+            assert currency_blocks(restored.store, settings, core.clock()) == []
             assert logical_state(restored.store) == before
         # The backup has no trace of the newer charge. The incomplete-history
         # warning persists while independently admitted work records new costs.
         assert not restored.store.rows("SELECT * FROM tool_tasks")
         for turn in range(2):
             view = cloud_budget.summary(restored.store, settings, core.clock())
-            assert view["reconciliation_required"] and not view["admission_blocked"]
+            assert view["reconciliation_required"] and "admission_blocked" not in view
             assert view["reconciliation_reasons"] == [BLOCK]
             assert view["restored_history_may_be_incomplete"]
-            assert view["used_micro_cny"] >= 0 and view["remaining_micro_cny"] == 0
+            assert view["used_micro_cny"] >= 0 and "remaining_micro_cny" not in view
             fake = FakeExecutor()
             runner = Executive(restored.store, settings, core.clock, fake)
             runner.submit(proposal(turn + 10))
@@ -70,13 +69,13 @@ def test_old_backup_marks_missing_tool_cost_history_while_new_work_continues(
             runner.begin(leased)
             assert fake.calls == []
             if not turn:
-                change(restored, daily_micro_cny=20_000_000, usd_to_cny_micro=1_000_000)
+                change(restored,  usd_to_cny_micro=1_000_000)
                 core.clock.advance(86400)
         assert len(restored.store.rows("SELECT * FROM cloud_cost_snapshots")) == 2
     # Restarting preserves the warning and does not add a currency fence.
     with Database(dest) as database, closing(Store(database, state)) as store:
         with store.read_snapshot():
-            assert cloud_budget.capacity_blocks(store, settings, core.clock()) == []
+            assert currency_blocks(store, settings, core.clock()) == []
             assert store.one("SELECT 1 FROM runtime_meta "
                              "WHERE key='cloud_budget_restore_required'")
 
@@ -116,6 +115,6 @@ def test_restore_retains_known_spend_pending_liability_and_incomplete_history_wa
         assert view["used_micro_cny"] == previous["used_micro_cny"] > 0
         assert view["settled_micro_cny"] == previous["settled_micro_cny"] > 0
         assert view["unknown_micro_cny"] == previous["reserved_micro_cny"] > 0
-        assert view["remaining_micro_cny"] == 0 and view["reconciliation_required"]
-        assert cloud_budget.capacity_blocks(store, settings, core.clock()) == []
-        assert not view["admission_blocked"]
+        assert "remaining_micro_cny" not in view and view["reconciliation_required"]
+        assert currency_blocks(store, settings, core.clock()) == []
+        assert "admission_blocked" not in view

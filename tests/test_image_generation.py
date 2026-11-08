@@ -64,10 +64,10 @@ def test_config_requires_priced_https_provider():
     assert ImageGenerationConfig().enabled is False
     with pytest.raises(ValidationError):
         ImageGenerationConfig(enabled=True)
-    assert config(daily_micro_usd=0).enabled
+    assert config().enabled
     with pytest.raises(ValidationError):
         config(endpoint=MediaEndpoint(url="http://images.example.test/v1", model="m",
-                                      key=SecretStr("k"), max_request_micro_usd=1))
+                                      key=SecretStr("k"), estimated_request_micro_usd=1))
 
 
 @pytest.mark.parametrize("case", ["redirect", "url_only", "too_large", "two", "lost"])
@@ -104,7 +104,7 @@ def test_adapter_request_shape_depends_on_model_family():
     transport = httpx.MockTransport(handler)
     assert run(HTTPImageGenerator(config(), transport).generate("cat", "1024x1024")) == png()
     other = config(endpoint=MediaEndpoint(url=URL, key=SecretStr("synthetic-image-provider-key"),
-                                          model="dall-e-3", max_request_micro_usd=40000))
+                                          model="dall-e-3", estimated_request_micro_usd=40000))
     run(HTTPImageGenerator(other, transport).generate("cat", "1024x1024"))
     assert "response_format" not in bodies[0]
     assert bodies[1]["response_format"] == "b64_json"

@@ -70,9 +70,6 @@ def require_reference(store, settings, grant, now):
 def _reference_locked(store, settings, grant, now):
     cumulative.preflight(store, settings, now)
     paid_budget.contract(settings, now)
-    if store.one("SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked', "
-        "'model_budget_restore_required', 'cloud_budget_restore_required')"):
-        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
     paid_budget.journal(store, settings.paid_model, initialize=False)
     journal = store.one("SELECT value FROM runtime_meta WHERE key = 'model_budget_journal_id'")
     if (journal is None or grant.budget.budget_journal_id != journal["value"]
@@ -189,8 +186,3 @@ def admit(store, settings, clock, model_request_id, estimate, input_tokens):
     if input_tokens > grant.budget.max_input_tokens:
         raise CoreError("GATEWAY_REQUEST_BUDGET_EXHAUSTED", 429)
     _quota(store, settings, grant, clock(), adding=1, estimate=estimate)
-
-
-def actual_limits(store, usage, actual):
-    """Observed monetary overruns are recorded without creating an execution fence."""
-    return []

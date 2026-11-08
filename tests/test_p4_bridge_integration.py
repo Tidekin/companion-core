@@ -195,6 +195,8 @@ def test_p4_ten_redacted_source_samples_reach_bridge_reply(
         (200, {"status": "relogin"}, "SOURCE_CREDENTIAL_REVOKED"),
     ],
 )
+
+
 def test_p4_upstream_failure_does_not_block_chat(rehearsal, tmp_path, status, payload, code):
     core, bridge, app = rehearsal
 
@@ -440,12 +442,12 @@ def test_p4_external_instructions_stay_data_and_erased_receipt_is_refused(rehear
     async def scenario():
         async with client(app, core.settings.bridge_token.get_secret_value()) as http:
             root = await submit(bridge, http)
-            limit = core.settings.monthly_limit_micro_usd
+            limit = core.settings.reflection_max_daily_calls
             await read_source(core, app, tmp_path, response(payload))
             completed = core.store.one("SELECT * FROM exploration_requests")
             assert core.content.context(root)[0]["trust"] == "external_untrusted"
             assert await core.run_once()
-            assert core.settings.monthly_limit_micro_usd == limit
+            assert core.settings.reflection_max_daily_calls == limit
             assert all(
                 r["action_type"] == "qq.private.reply"
                 for r in core.store.rows("SELECT * FROM outbox")

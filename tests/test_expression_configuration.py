@@ -213,7 +213,7 @@ def test_legacy_task_and_model_identity_survive_upgrade_save_and_restart(hot, ve
         original = runtime_config.get(resumed.store, reloaded, "job:" + job["job_id"])
         assert original.format_version == 1 and runtime_config.identity(reloaded, original) == key
         assert not original.silence_enabled and original.debounce.quiet_seconds == 2
-        reloaded.monthly_limit_micro_usd += 1
+        reloaded.reflection_max_daily_calls += 1
         with pytest.raises(CoreError, match="CONFIGURATION_STARTUP_IDENTITY_CHANGED"):
             resumed.context(retry)
 

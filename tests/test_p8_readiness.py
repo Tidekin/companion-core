@@ -122,7 +122,6 @@ def test_unknown_cost_is_retained_and_allows_an_independent_message(core, failur
     with core.store.transaction():
         core.recover(core.clock())
     core.store.execute("UPDATE jobs SET state='FAILED',lease_until=NULL,lease_token=NULL")
-    core.settings.monthly_limit_micro_usd = initial
     ingest(core, 2, "独立的新消息")
     assert run(core.run_once())
     assert len(core.model.calls) == expected_calls + 1
@@ -202,6 +201,8 @@ def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(
         (httpx.Response(200, json={"choices": []}), "MODEL_INVALID_RESPONSE"),
     ],
 )
+
+
 def test_model_adapter_errors_do_not_retry_or_expose_provider_body(core, response, code, tmp_path):
     from tests.support.paid_model import approved_live
 

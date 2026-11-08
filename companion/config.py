@@ -103,7 +103,7 @@ class PaidModelApproval(BaseModel):
     currency: Literal["USD"]
     timezone: str
     starts_at: datetime
-    # None is an open-ended approval: spend caps, STOP and revocation still bound it.
+    # None is an open-ended approval; STOP, revocation and resource quotas still apply.
     expires_at: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
     rates_valid_until: datetime | None = Field(
         default=None, exclude_if=lambda value: value is None,
@@ -119,13 +119,8 @@ class PaidModelApproval(BaseModel):
     max_context_tokens: int | None = Field(
         default=None, strict=True, gt=0, le=1000000, exclude_if=lambda value: value is None,
     )
-    per_attempt_micro_usd: int = Field(strict=True, ge=0)
-    per_request_micro_usd: int = Field(strict=True, ge=0)
     per_request_calls: int = Field(strict=True, gt=0, le=10)
-    daily_micro_usd: int | None = Field(default=None, strict=True, ge=0)
     daily_calls: int = Field(strict=True, gt=0)
-    monthly_micro_usd: int | None = Field(default=None, strict=True, ge=0)
-    window_micro_usd: int | None = Field(default=None, strict=True, ge=0)
     window_calls: int = Field(strict=True, gt=0)
     concurrency: int = Field(strict=True, gt=0, le=10)
     concurrency_basis: Literal["unresolved_liabilities_v1", "local_active_attempts_v2"] = Field(
@@ -133,9 +128,6 @@ class PaidModelApproval(BaseModel):
         exclude_if=lambda value: value == "unresolved_liabilities_v1",
     )
     journal_path: str = Field(min_length=1)
-    unlimited_period_spend: bool = Field(
-        default=False, strict=True, exclude_if=lambda value: value is False,
-    )
     image_input: ImageInputPolicy | None = None
     meme_input: ImageInputPolicy | None = Field(
         default=None, exclude_if=lambda value: value is None,
@@ -168,13 +160,6 @@ class PaidModelApproval(BaseModel):
             or self.meme_input.max_images_per_request > 5
         ):
             raise ValueError("meme input permits at most five image samples")
-        if self.unlimited_period_spend and self.cumulative is not None:
-            raise ValueError("unlimited period spend cannot override a cumulative account ceiling")
-        periods = (self.daily_micro_usd, self.monthly_micro_usd, self.window_micro_usd)
-        if (self.unlimited_period_spend and any(value is not None for value in periods)) or (
-            not self.unlimited_period_spend and any(value is None for value in periods)
-        ):
-            raise ValueError("choose explicit bounded period amounts or unlimited period spend")
         if self.cumulative and (
             (self.provider, self.currency, self.timezone) != (
                 self.cumulative.provider, self.cumulative.currency, self.cumulative.timezone
@@ -508,9 +493,6 @@ class Settings(BaseModel):
         default="never", exclude_if=lambda value: value == "never",
     )
     rich_input_scope: Literal["none", "references_v1"] = "none"
-    monthly_limit_micro_usd: int = Field(default=20000000, ge=0)
-    autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
-    memory_daily_micro_usd: int = Field(default=50000, ge=0)
     memory_enabled: bool = True
     evaluation_enabled: bool = False
     diary_enabled: bool = False
@@ -521,7 +503,6 @@ class Settings(BaseModel):
     diary_max_body_chars: int = Field(default=2400, ge=200, le=8000)
     diary_catchup_days: int = Field(default=3, ge=1, le=7)
     diary_max_attempts: int = Field(default=2, ge=1, le=3)
-    diary_daily_micro_usd: int = Field(default=50000, ge=0)
     diary_auto_share: bool = False
     diary_admin_token: SecretStr = SecretStr("")
     control_token: SecretStr = SecretStr("")
@@ -559,8 +540,6 @@ class Settings(BaseModel):
     reflection_min_sources: int = Field(default=3, ge=1, le=20)
     reflection_max_output_tokens: int = Field(default=600, ge=128, le=2048)
     reflection_max_daily_calls: int = Field(default=1, ge=1, le=5)
-    reflection_daily_micro_usd: int = Field(default=0, ge=0)
-    reflection_monthly_micro_usd: int = Field(default=0, ge=0)
     goals_enabled: bool = False
     goals_max_active: int = Field(default=10, ge=1, le=50)
     goal_max_attempts: int = Field(default=3, ge=1, le=3)
@@ -602,9 +581,6 @@ class Settings(BaseModel):
     )
     meme_semantics_enabled: bool = Field(
         default=False, exclude_if=lambda value: value is False,
-    )
-    meme_caption_daily_micro_usd: int = Field(
-        default=0, ge=0, exclude_if=lambda value: value == 0,
     )
     meme_caption_max_output_tokens: int = Field(
         default=2000, ge=128, le=4096, exclude_if=lambda value: value == 2000,

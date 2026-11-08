@@ -15,7 +15,7 @@ workflow 是另一份协议，不在本轮范围内。`[image_generation]` 默�
 每个聊天 job 最多调用一次。`size` 的 schema 只列出 `sizes` 中配置的尺寸。工具返回 `REFUSED`、`FAILED`
 或 `UNKNOWN` 时不会发图片，模型改用文字回答。以下情况在请求前拒绝，不预留费用：
 近六条主人消息或提示词命中 `expression.SERIOUS`、本日张数达到 `max_daily_images`、同会话仍在
-`cooldown_seconds` 内、`daily_micro_usd` 或月度上限不足、job 租约剩余时间不够覆盖 `provider_timeout_seconds`。
+`cooldown_seconds` 内、job 租约剩余时间不够覆盖 `provider_timeout_seconds`。
 
 ## 在后台切换地址和密钥
 

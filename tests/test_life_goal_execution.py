@@ -270,18 +270,18 @@ def test_live_authority_full_loop_independent_workers(
                     "WHERE action='EXPLORE'",
                     "UPDATE goals SET state='FAILED'",
                     "UPDATE goal_steps SET outcome_event_id=NULL",
-                    "UPDATE model_usage SET state='UNKNOWN'",
                     "UPDATE events SET body_json='{\"text\":\"changed\"}' "
                     f"WHERE event_id='{inbound.event_id}'",
                     f"UPDATE events SET redacted=1 WHERE event_id='{inbound.event_id}'",
                 ):
                     with core.store.transaction(rollback=True):
                         core.store.execute(mutation)
-                        code = ("MODEL_BUDGET_RECONCILIATION_REQUIRED"
-                                if mutation.startswith("UPDATE model_usage")
-                                else "LIFE_SHADOW_SCOPE_REQUIRED")
-                        with pytest.raises(CoreError, match=code):
+                        with pytest.raises(CoreError, match="LIFE_SHADOW_SCOPE_REQUIRED"):
                             current_authority()
+                with core.store.transaction(rollback=True):
+                    core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
+                    current_authority()
+                    assert core.store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN'")
                 with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [inbound.event_id], core.clock())
                 assert not core.store.rows(

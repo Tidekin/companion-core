@@ -55,10 +55,10 @@ def service(core, **changes):
         url="https://media.example.test/process",
         model="fixture-media",
         key="private-media-provider-key",
-        max_request_micro_usd=100,
+        estimated_request_micro_usd=100,
     )
     options = MediaConfig(
-        enabled=True, daily_micro_usd=1000, stt=endpoint, tts=endpoint, vision=endpoint, **changes
+        enabled=True,  stt=endpoint, tts=endpoint, vision=endpoint, **changes
     )
     fake = FakeMedia()
     return MediaService(core.store, core.settings, core.clock, core.observations, options, fake)

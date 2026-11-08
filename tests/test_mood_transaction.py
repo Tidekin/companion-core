@@ -8,7 +8,7 @@ import httpx
 import psycopg
 import pytest
 
-from companion import owner_authority, owner_input, paid_budget
+from companion import authority_custody, owner_authority, owner_input
 from companion.contracts import CoreError
 from companion.store import encode
 from tests.conftest import run
@@ -42,7 +42,7 @@ def test_mood_batches_authority_but_validates_every_source(core, tmp_path, monke
                                                         transactional):
     def check(expected):
         calls, recalls = [], []
-        native = paid_budget.journal
+        native = authority_custody.check
         native_recall = owner_input.input_recall.require_not_recalled
 
         def journal(*args, **kwargs):
@@ -53,7 +53,7 @@ def test_mood_batches_authority_but_validates_every_source(core, tmp_path, monke
             recalls.append(1)
             return native_recall(*args, **kwargs)
 
-        monkeypatch.setattr(paid_budget, "journal", journal)
+        monkeypatch.setattr(authority_custody, "check", journal)
         monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
         if transactional == "read_transaction":
             core.store.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")

@@ -195,6 +195,13 @@ async def selected_history_changed_in_final_preflight(core, tmp_path, kind, *, c
             {"role": "user", "content": "选了茉莉绿茶"},
             {"role": "assistant", "content": "合成回答1"},
         ]]
+        if kind == "UNKNOWN":
+            assert len(calls) == 2 and len(sends) == 1
+            assert changed == [kind]
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 2
+            assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE state='UNKNOWN'") == {
+                "n": 1}
+            return
         assert len(calls) == len(sends) == 1
         assert changed == [kind]
         assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1

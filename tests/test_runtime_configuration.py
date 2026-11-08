@@ -147,11 +147,13 @@ def test_workers_switch_independently_and_idle_observation_does_not_write(hot):
     {"max_output_tokens": 1024}, {"chat_thinking": "low"},
     {"memory_extract_max_output_tokens": 3072},
     {"segmented_reply": {"mode": "semantic"}}, {"model_name": "other-model"},
-    {"monthly_limit_micro_usd": 123456}, {"expression_selection_probability": 0.7},
+    {"reflection_max_daily_calls": 3}, {"expression_selection_probability": 0.7},
     {"quote_policy": "often"}, {"timeout_seconds": 60},
     {"mood_enabled": True}, {"input_debounce": {"enabled": True, "quiet_seconds": 3}},
     {"turn_taking": {"silence_enabled": True, "follow_up_daily_checks": 4}},
 ])
+
+
 def test_mixed_version_never_partially_applies(hot, changes):
     baseline = runtime_config.boundary(hot.store, hot.settings, hot.clock)
     view = save(hot, chat_time_labels=True, **changes)
@@ -212,7 +214,7 @@ def test_restart_can_recover_only_a_verified_effective_snapshot(hot):
     hot.store.execute("UPDATE operator_configuration SET encrypted_overrides='damaged'")
     recovered = operator_config.load(hot.settings)
     assert recovered._operator_config_version == 0 and not recovered.chat_time_labels
-    hot.settings.monthly_limit_micro_usd += 1
+    hot.settings.reflection_max_daily_calls += 1
     with pytest.raises(CoreError, match="OPERATOR_CONFIGURATION_UNREADABLE"):
         operator_config.load(hot.settings)
 
@@ -229,10 +231,10 @@ def test_switch_off_restores_startup_reads_and_retains_bound_tasks(hot):
 
 def test_snapshot_tampering_and_cold_changes_are_fenced(hot):
     job = task(hot)
-    hot.settings.monthly_limit_micro_usd += 1
+    hot.settings.reflection_max_daily_calls += 1
     with pytest.raises(CoreError, match="CONFIGURATION_STARTUP_IDENTITY_CHANGED"):
         hot.context(job)
-    hot.settings.monthly_limit_micro_usd -= 1
+    hot.settings.reflection_max_daily_calls -= 1
     hot.store.execute("UPDATE operator_runtime_snapshots SET chat_time_labels=1")
     with pytest.raises(CoreError, match="CONFIGURATION_SNAPSHOT_INVALID"):
         hot.context(job)
@@ -316,8 +318,11 @@ def test_owner_revocation_cannot_activate_a_new_runtime_version(hot, tmp_path):
 
 
 def test_restart_does_not_hide_a_changed_paid_contract(hot, tmp_path):
+    from companion.token_measurement import REVISION
     captured(hot, tmp_path)
-    save(hot, monthly_limit_micro_usd=hot.settings.monthly_limit_micro_usd + 1)
+    save(hot, token_measurement={"policy": "prefer_exact", "provider": "deepseek",
+        "endpoint": "https://api.deepseek.com", "model": "deepseek-flash",
+        "renderer": "deepseek-v4.1-flash-1017", "revision": REVISION})
     restarted = operator_config.load(hot.settings)
     view = operator_config.view(hot.store, restarted)
     assert not view["pending_restart"] and view["requires_reapproval"]

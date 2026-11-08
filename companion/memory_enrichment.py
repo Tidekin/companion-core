@@ -45,15 +45,15 @@ def _save(store, key, value):
         'UPDATE SET value = excluded.value, record_sequence = DEFAULT', (key, encode(value)))
 
 
-def _settled(store, request_id):
+def _recorded_usage(store, request_id):
     return store.one('SELECT 1 FROM model_usage WHERE request_id = %s AND scenario = '
-        "'memory_extract' AND state = 'SETTLED'", (request_id,))
+        "'memory_extract' AND state IN ('SETTLED','UNKNOWN')", (request_id,))
 
 
 def _valid(memory, record, now, content_hash, *, work=None):
     try:
         if (record["content_sha256"] != content_hash
-            or not _settled(memory.store, record["request_id"])
+            or not _recorded_usage(memory.store, record["request_id"])
             or record["source_event_ids"] != record["proof"]["source_event_ids"]):
             return False
         MemoryContext(memory).revalidate(record["proof"], now, work=work)
@@ -145,7 +145,7 @@ def record(memory, candidates, memory_ids, events, summaries, request_id, now, *
 
     if not any(contract.name == "memory-enrichment" for contract in cleanup_contracts()):
         raise CoreError("MEMORY_ENRICHMENT_ERASURE_REQUIRED", 503)
-    if not _settled(store, request_id):
+    if not _recorded_usage(store, request_id):
         raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
     validate_summaries(memory, events, summaries, now)
     for candidate, memory_id in zip(candidates, memory_ids, strict=True):

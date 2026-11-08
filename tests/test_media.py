@@ -69,6 +69,8 @@ def test_session_token_scope_expiry_and_stop(core):
         ("android", "android", "text"),
     ],
 )
+
+
 def test_media_creates_actual_observation_without_raw_retention_or_delivery(
     core, operation, source, kind
 ):
@@ -128,6 +130,8 @@ def test_provider_failure_keeps_reservation_and_blocks_duplicate_retry(core):
         ("expiry", "SESSION_CLOSED"),
     ],
 )
+
+
 def test_consent_privacy_and_feature_rechecked_after_provider(core, change, error):
     media = service(core)
     session = start(media, duration_seconds=5)
@@ -183,12 +187,7 @@ def test_reservation_limits_checked_before_any_provider_call(core, limit):
         item = chunk(data=AUDIO + b"x" * 1100)
     else:
         item = chunk()
-        if limit == "daily":
-            media.options.max_daily_bytes = 0
-        elif limit == "cost":
-            media.options.daily_micro_usd = 0
-        else:
-            core.settings.monthly_limit_micro_usd = 0
+        media.options.max_daily_bytes = 0
     with pytest.raises(CoreError, match="BUDGET_EXHAUSTED"):
         process(media, session, item)
     assert not media.provider.calls
@@ -225,8 +224,6 @@ def test_media_preserves_tool_liability_without_global_currency_refusal(core, to
 
     executor = FakeExecutor()
     executive = configured(core, executor)
-    core.settings.monthly_limit_micro_usd = 1000
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     executive.submit(proposal())
     if tool_state == "RUNNING":
         executive.begin(executive.claim())
@@ -235,7 +232,7 @@ def test_media_preserves_tool_liability_without_global_currency_refusal(core, to
         assert run(executive.run_one())
     assert core.store.one("SELECT state,billed_micro_usd FROM tool_tasks") == {
         "state": tool_state,
-        "billed_micro_usd": 1000,
+        "billed_micro_usd": 0,
     }
     media = service(core)
     process(media, start(media), chunk())
@@ -243,7 +240,7 @@ def test_media_preserves_tool_liability_without_global_currency_refusal(core, to
     assert core.store.rows("SELECT * FROM media_requests")
     assert core.store.rows("SELECT * FROM model_usage WHERE scenario='media'")
     assert core.store.one("SELECT state,billed_micro_usd FROM tool_tasks") == {
-        "state": tool_state, "billed_micro_usd": 1000}
+        "state": tool_state, "billed_micro_usd": 0}
 
 
 def test_credentials_rejected_before_speech_and_in_provider_output(core):
@@ -657,8 +654,6 @@ def test_settings_load_nested_media_configuration(core, monkeypatch, tmp_path):
 
 def test_zero_media_currency_amount_keeps_native_charge(core):
     media = service(core)
-    media.options.daily_micro_usd = 0
-    core.settings.monthly_limit_micro_usd = 0
     process(media, start(media), chunk())
     assert len(media.provider.calls) == 1
     usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE scenario='media'")

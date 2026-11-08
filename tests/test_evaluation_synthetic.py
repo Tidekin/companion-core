@@ -48,7 +48,7 @@ def test_synthetic_plan_runs_in_batches_and_never_repeats_a_request(core, tmp_pa
     manifest = synthetic(core, tmp_path)
     request = authorize(core, manifest)
     assert evaluation.preview(core.store, core.settings, core.clock, manifest)[
-        "max_cost_micro_usd"] == 1000000
+        "request_count"] == 12
     submitted = evaluation.submit(core, request)
     wire = []
 
@@ -82,7 +82,7 @@ def test_missing_result_after_a_batch_stops_instead_of_repaying(core, tmp_path):
         "state": "FAILED", "last_error_code": "EVALUATION_PREVIOUS_ATTEMPT_REVIEW_REQUIRED"}
 
 
-@pytest.mark.parametrize("change", ["v1", "missing_pair", "too_costly", "too_many_cases"])
+@pytest.mark.parametrize("change", ["v1", "missing_pair", "too_many_cases"])
 def test_synthetic_plan_scope_is_checked_before_consent(core, tmp_path, monkeypatch, change):
     manifest = synthetic(core, tmp_path, version=1 if change == "v1" else 2,
                          cases=3 if change == "too_many_cases" else 2)
@@ -93,8 +93,6 @@ def test_synthetic_plan_scope_is_checked_before_consent(core, tmp_path, monkeypa
         plan["estimated_reservation_micro_usd"] = sum(
             row["estimated_reservation_micro_usd"] for row in plan["requests"])
         rehash(plan)
-    elif change == "too_costly":
-        monkeypatch.setitem(evaluation.LIMITS["synthetic"], "cost", 1000)
     elif change == "too_many_cases":
         monkeypatch.setitem(evaluation.LIMITS["synthetic"], "cases", 2)
     with pytest.raises(CoreError, match="EVALUATION_MANIFEST_INVALID"):

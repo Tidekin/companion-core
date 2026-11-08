@@ -10,11 +10,11 @@
 
 - 主人身份、私聊范围、机器人回声校验；入站事务、幂等冲突检测、按会话 FIFO。
 - Worker 限次重试；发送使用 `LEASED → SENDING → SENT/DELIVERY_UNCERTAIN`。不确定消息不自动重发，后续聊天可继续。
-- DeepSeek Flash/OpenAI-compatible 模型适配；按场景预留预算，保存输入、输出、缓存 Token 与整数微美元估算。价格未知时停止自主活动。
+- DeepSeek Flash/OpenAI-compatible 模型适配；保存真实输入、输出、缓存 Token 与按冻结费率计算的费用，缺少用量时保留 UNKNOWN 提示。
 - 主动私聊有冷却、每日次数、免打扰、暂停指令；不伪造现实生活或浏览记录。
 - M1：批量记忆候选、逐字证据核验、语义冲突核对、确认/纠正/忘记、中文 FTS5 与本地语义混合检索、相关性筛选、空白起步的自我观察。
 - 加密热备份；恢复前强制回放独立遗忘日志；隐私变更期间的旧模型结果被丢弃。
-- M1.5：独立日记 Worker、自然日调度、真实来源核验、私人保存、主人查看/修订/删除、专用预算和完整遗忘回放。
+- M1.5：独立日记 Worker、自然日调度、真实来源核验、私人保存、主人查看/修订/删除、用量记录和完整遗忘回放。
 - QQ 协议端通过原生 OneBot v11 Bridge；批次隔离消息 ID，回滚禁止复用旧批次。旧 AstrBot 入口已退休，配置、状态核对与会话迁移边界见部署文档。
 
 M0/M1 普通聊天不进入工具执行循环。v0.5 的 DSH、Windows 与媒体会话使用独立身份、额度和明确授权；公开空间与评论没有执行入口。内容理解仅将外部文字作为不可信证据，不能改变权限或人格，也不会把标题或封面当作已观看完整视频。
@@ -42,7 +42,7 @@ uv run python -m companion life-worker
 
 演示可设 `COMPANION_MODE=demo`，无需模型密钥；回复明确标记为演示。`.env` 仅由 Docker Compose 读取，本地命令需通过环境变量注入。不要提交真实配置、密钥或数据库。
 
-默认 `memory_enabled=true`，同时默认开启 `participation_v2` 对话策略、语义分段回复和聊天 thinking（见 [拟人化默认值](docs/humanlike-defaults.md)）；需要只验收 M0 链路时在 `config.toml` 关闭。主模型、费率、预算、时区和频率均可配置，未知字段和非法值会使启动失败。生产配置使用 TOML，原设计 YAML 作为字段语义参考；环境变量覆盖文件值。
+默认 `memory_enabled=true`，同时默认开启 `participation_v2` 对话策略、语义分段回复和聊天 thinking（见 [拟人化默认值](docs/humanlike-defaults.md)）；需要只验收 M0 链路时在 `config.toml` 关闭。主模型、费率、调用次数、时区和频率均可配置，未知字段和非法值会使启动失败。费用口径见 [费用记录与运行边界](docs/model-cost-policy.md)。生产配置使用 TOML；环境变量覆盖文件值。
 
 ## QQ 指令
 
@@ -95,7 +95,7 @@ uv run python -m companion life-worker
 
 回放、进程冒烟、构建和打包验证由最终 CI 执行，开发期按变更选择相关检查。
 需要真实 DeepSeek 合成场景验证时，使用 `scripts/verify_memory_live.py` 或
-`scripts/verify_diary_live.py`；它们读取本地 `.env` 的模型 Key，单轮预算上限 0.05 USD。
+`scripts/verify_diary_live.py`；它们读取本地 `.env` 的模型 Key，按调用次数和 Token 限制执行并保留实际费用。
 
 Linux 检查：`uv run ruff check companion migrations astrbot_plugin_companion_bridge tests scripts` 与 `uv run pytest -q --basetemp=.local/test-temp`。CI 同时运行 Windows/Linux 测试和 Linux 容器构建。
 

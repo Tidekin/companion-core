@@ -355,9 +355,9 @@ class MediaService:
                 raise CoreError("MEDIA_TRAFFIC_BUDGET_EXHAUSTED", 429)
             usage_id = None
             if endpoint:
-                if not endpoint.url or not endpoint.model or endpoint.max_request_micro_usd == 0:
+                if not endpoint.url or not endpoint.model:
                     raise CoreError("MEDIA_PROVIDER_NOT_CONFIGURED", 503)
-                price = endpoint.max_request_micro_usd
+                price = endpoint.estimated_request_micro_usd
                 usage_id = uid("media_cost")
                 cloud_budget.reserve(
                     store,

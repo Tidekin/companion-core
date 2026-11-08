@@ -76,22 +76,22 @@ def test_process_death_after_dispatch_preserves_unknown_and_no_repayment(core, t
     assert core.store.rows("SELECT * FROM outbox") == []
 
 
-def test_two_workers_normal_chat_and_experiment_compete_for_original_cloud_budget(core, tmp_path):
+def test_two_workers_account_for_chat_and_experiment_above_old_money_cap(core, tmp_path):
     manifest = prepare(core, tmp_path, chat=True)
     core.settings.cloud_budget = core.settings.cloud_budget.model_copy(
-        update={"daily_micro_cny": 30000})
+        update={})
     normal = admitted_chat(core)
     submitted = evaluation.submit(core, authorize(core, manifest))
     hashes = asyncio.run(processes(core, tmp_path / "competing", drain=True))
-    assert len(hashes) == 1
+    assert len(hashes) == 7
     usage = core.store.rows("SELECT job_id,state,billed_micro_usd FROM model_usage")
-    assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
+    assert len(usage) == 7 and all(row["state"] == "SETTLED" for row in usage)
     eval_event = core.store.one('SELECT event_id FROM jobs WHERE job_id=%s', (submitted["job_id"],))
     assert not core.store.one('SELECT 1 FROM outbox WHERE origin_event_id=%s',
                               (eval_event["event_id"],))
-    assert result(core, submitted)["state"] == "FAILED"
+    assert result(core, submitted)["state"] == "SUCCEEDED"
     normal_state = core.store.one('SELECT state FROM jobs WHERE job_id=%s', (normal["job_id"],))
-    assert normal_state["state"] in {"SUCCEEDED", "FAILED"}
+    assert normal_state["state"] == "SUCCEEDED"
 
 
 @pytest.mark.parametrize("boundary", ["unchanged", "stop", "paid_change", "expiry", "restore"])

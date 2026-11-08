@@ -73,22 +73,10 @@ def test_large_input_deviation_is_diagnosed_but_settles_within_local_amount_limi
     assert reserve(core)[0] != request
 
 
-@pytest.mark.parametrize("field,code", [
-    ("per_attempt_micro_usd", "ATTEMPT_AMOUNT"),
-    ("per_request_micro_usd", "REQUEST_AMOUNT"),
-    ("daily_micro_usd", "DAILY_AMOUNT"),
-    ("monthly_micro_usd", "MONTHLY_AMOUNT"),
-    ("window_micro_usd", "WINDOW_AMOUNT"),
-    ("local_monthly", "MONTHLY_AMOUNT"),
-])
-def test_actual_cost_retains_usage_and_allows_new_io(core, tmp_path, field, code):
+def test_actual_cost_retains_usage_and_allows_new_io(core, tmp_path):
     approval = approved_live(core, tmp_path)
     estimated = paid_budget.estimate_input_tokens(approval, MESSAGES, "chat")
     estimate_cost = budget.cost(core.settings, estimated, core.settings.output_tokens("chat"))
-    if field == "local_monthly":
-        core.settings.monthly_limit_micro_usd = estimate_cost + 5
-    else:
-        approved_live(core, tmp_path, **{field: estimate_cost + 5})
     request, admission = reserve(core)
     budget.settle(core.store, core.settings, request, ModelResponse(
         "ok", estimated + 10, admission["output_bound"],
@@ -97,7 +85,7 @@ def test_actual_cost_retains_usage_and_allows_new_io(core, tmp_path, field, code
     assert usage["state"] == "SETTLED"
     assert usage["input_tokens"] == estimated + 10
     assert usage["billed_micro_usd"] == estimate_cost + 10
-    assert code not in diagnostic(core, request)["limits"]
+    assert diagnostic(core, request)["limits"] == []
     assert not core.store.one("SELECT value FROM runtime_meta WHERE key='model_budget_blocked'")
     assert reserve(core)[0] != request
 

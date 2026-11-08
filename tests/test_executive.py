@@ -123,8 +123,6 @@ def test_monthly_money_limit_is_advisory_and_each_unknown_tool_charge_remains(co
     fake.fail = True
     core.clock.now = datetime.fromisoformat("2026-09-30T16:00:00+00:00")
     executive = configured(core, fake)
-    executive.config.monthly_micro_usd = 1500
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     executive.submit(proposal())
     assert run(executive.run_one())
     core.clock.advance(10 * 86400)
@@ -132,14 +130,12 @@ def test_monthly_money_limit_is_advisory_and_each_unknown_tool_charge_remains(co
     assert run(executive.run_one())
     assert executive.get(second["task_id"])["last_error_code"] == "EXECUTION_UNCERTAIN"
     assert len(fake.calls) == 2
-    assert core.store.one("SELECT sum(billed_micro_usd) AS n FROM tool_tasks")["n"] == 2000
+    assert core.store.one("SELECT sum(billed_micro_usd) AS n FROM tool_tasks")["n"] == 0
 
 
 def test_tool_runs_beyond_advisory_shared_monthly_amount(core):
     fake = FakeExecutor()
     executive = configured(core, fake)
-    core.settings.monthly_limit_micro_usd = 1000
-    executive.config.endpoints["windows"].max_cost_micro_usd = 500
     job = core.store.one("SELECT job_id FROM jobs")["job_id"]
     budget.reserve(
         core.store, core.settings, job, "chat", [{"role": "user", "content": "hello"}], core.clock()
@@ -154,11 +150,10 @@ def test_unknown_does_not_retry_and_retains_budget(core):
     fake = FakeExecutor()
     fake.fail = True
     executive = configured(core, fake)
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     task = executive.submit(proposal())
     assert run(executive.run_one())
     row = executive.get(task["task_id"])
-    assert row["state"] == "UNKNOWN" and row["billed_micro_usd"] == 1000
+    assert row["state"] == "UNKNOWN" and row["billed_micro_usd"] == 0
     assert not row["result_event_id"] and not run(executive.run_one())
     assert len(fake.calls) == 1
 
@@ -384,6 +379,8 @@ def test_core_approval_http_gateway_real_file_and_observation(core, tmp_path):
         "dir./x.txt",
     ],
 )
+
+
 def test_gateway_rejects_outside_scope_paths(tmp_path, path):
     backend = FileExecutor({"work": tmp_path})
     result = run(backend.execute(envelope(arguments={"path": path})))
@@ -413,7 +410,7 @@ def test_gateway_mcp_exposes_only_scoped_executor(tmp_path):
         app.state.db.close()
 
 
-def test_proxy_enforces_budget_calls_tokens_and_revocation():
+def test_proxy_keeps_call_token_and_revocation_controls_with_advisory_money():
     upstream_calls = []
 
     def upstream(request):
@@ -452,13 +449,19 @@ def test_proxy_enforces_budget_calls_tokens_and_revocation():
             client.post("/v1/chat/completions", headers=scoped_auth, json=body).status_code == 429
         )
         usage = client.get("/internal/v1/reservations/" + grant["token"], headers=auth).json()
-        assert usage["calls"] == 1 and usage["reserved_micro_usd"] > 0
+        assert usage == {"calls": 1, "billed_micro_usd": 0, "input_tokens": 0,
+                         "output_tokens": 0, "unknown_calls": 1}
         client.delete("/internal/v1/reservations/" + grant["token"], headers=auth)
         assert (
             client.post("/v1/chat/completions", headers=scoped_auth, json=body).status_code == 403
         )
-        small = envelope(max_cost_micro_usd=1).model_dump()
-        assert client.post("/internal/v1/reservations", headers=auth, json=small).status_code == 429
+        small = envelope().model_dump()
+        reduced = client.post("/internal/v1/reservations", headers=auth, json=small)
+        assert reduced.status_code == 200
+        small_usage = client.get("/internal/v1/reservations/" + reduced.json()["token"],
+                                 headers=auth).json()
+        assert small_usage["calls"] == small_usage["billed_micro_usd"] == 0
+        assert small_usage["unknown_calls"] == 0
     assert len(upstream_calls) == 1
 
 
@@ -553,9 +556,6 @@ def test_unknown_tool_cost_remains_while_fresh_model_reservation_continues(core)
     adapter = FakeExecutor()
     adapter.fail = True
     executive = configured(core, adapter)
-    endpoint = core.settings.executive.endpoints["windows"]
-    endpoint.max_cost_micro_usd = 1000
-    core.settings.monthly_limit_micro_usd = 1000
     executive.submit(proposal())
     assert run(executive.run_one())
     assert core.store.one("SELECT state FROM tool_tasks")["state"] == "UNKNOWN"

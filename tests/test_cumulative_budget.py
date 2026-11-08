@@ -29,6 +29,8 @@ def reserve(core, **kwargs):
 @pytest.mark.parametrize("dimension", [
     "model_attempts", "input_tokens", "output_tokens",
 ])
+
+
 def test_all_model_limits_apply_before_reservation(core, tmp_path, period, dimension):
     enable(core, tmp_path, **{period: {dimension: 0}})
     with pytest.raises(CoreError, match="CUMULATIVE_LIMIT_EXHAUSTED"):
@@ -37,9 +39,8 @@ def test_all_model_limits_apply_before_reservation(core, tmp_path, period, dimen
     assert core.model.calls == []
 
 
-@pytest.mark.parametrize("period", ["request", "window", "day", "month", "account"])
-def test_currency_limits_are_advisory_and_original_liabilities_remain(core, tmp_path, period):
-    enable(core, tmp_path, **{period: {"micro_usd": 0}})
+def test_actual_fees_remain_in_resource_policy_accounting(core, tmp_path):
+    enable(core, tmp_path)
     request = reserve(core)
     assert view(core)["models"][request]["micro_usd"] > 0
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))

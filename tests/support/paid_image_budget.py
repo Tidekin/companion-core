@@ -47,7 +47,6 @@ def image_approval(core, tmp_path, **changes):
         },
     )
     core.settings.content.use_chat_model_for_vision = True
-    core.settings.content.image_daily_micro_usd = 100000
     return approval
 
 

@@ -255,9 +255,6 @@ def snapshot(settings, *, integrity=False):
             )
             result["budget"]["pricing_configured"] = settings.pricing_known
             result["budget"]["paid_approval_configured"] = settings.paid_model is not None
-            result["budget"]["unlimited_period_spend"] = bool(
-                settings.paid_model and settings.paid_model.unlimited_period_spend,
-            )
             result["budget"]["calibration"] = budget.usage_diagnostics(view)
             if settings.mode == "live" and settings.paid_model is None:
                 result["blockers"].append("PAID_APPROVAL_REQUIRED")

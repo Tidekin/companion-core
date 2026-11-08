@@ -205,7 +205,6 @@ class Executive:
             capability=request.capability,
             workspace=request.workspace,
             arguments=request.arguments.model_dump(),
-            max_cost_micro_usd=endpoint.max_cost_micro_usd,
             max_model_calls=endpoint.max_model_calls,
             max_input_bytes=endpoint.max_input_bytes,
             max_output_tokens=endpoint.max_output_tokens,
@@ -391,7 +390,6 @@ class Executive:
                 not endpoint
                 or current["capability"] not in endpoint.capabilities
                 or endpoint.workspace != scope["workspace"]
-                or endpoint.max_cost_micro_usd != scope["max_cost_micro_usd"]
                 or endpoint.max_model_calls < scope["max_model_calls"]
                 or endpoint.max_input_bytes < scope["max_input_bytes"]
                 or endpoint.max_output_tokens < scope["max_output_tokens"]
@@ -417,7 +415,7 @@ class Executive:
                 raise CoreError("TOOL_APPROVAL_REQUIRED", 403)
             local = datetime.fromisoformat(now).astimezone(ZoneInfo(self.settings.timezone))
             day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-            cost = scope["max_cost_micro_usd"]
+            cost = 0  # The original executor receipt supplies the actual charge.
             daily = s.one(
                 (
                     "SELECT COUNT(*) n FROM tool_tasks WHERE dispatched_at>=%s"
@@ -436,9 +434,11 @@ class Executive:
                 task_kind="tool",
                 task_id=current["task_id"],
                 pricing={
-                    "pricing_known": True,
+                    "pricing_known": False,
                     "executor_id": current["executor_id"],
                     "request_estimate_micro_usd": cost,
+                    "scope_sha256": current["scope_sha256"],
+                    "max_model_calls": scope["max_model_calls"],
                 },
             )
             s.execute(
@@ -451,6 +451,38 @@ class Executive:
             )
 
     def finish(self, task, receipt):
+        # Original costs belong to the dispatched request even if STOP or erasure
+        # now prevents accepting its content. Preserve them before checking delivery.
+        with self.store.transaction():
+            from companion.postgres import BUDGET_LEDGER
+            self.store.ledger_lock(BUDGET_LEDGER)
+            original = self.get(task["task_id"])
+            captured = self.store.one(
+                "SELECT snapshot_json FROM cloud_cost_snapshots "
+                "WHERE reference_type='tool' AND reference_id=%s", (original["task_id"],),
+            )
+            proof = json.loads(captured["snapshot_json"])["pricing"] if captured else {}
+            scope_hash = proof.get("scope_sha256", original["scope_sha256"])
+            calls = proof.get("max_model_calls")
+            if calls is None and not original["redacted"]:
+                calls = json.loads(original["scope_json"])["max_model_calls"]
+            if (receipt.task_id != original["task_id"]
+                or receipt.scope_sha256 != scope_hash or calls is None
+                or not original["redacted"] and original["scope_sha256"] != scope_hash
+                or receipt.model_calls > calls
+                or original["dispatched_at"] is None):
+                raise CoreError("INVALID_TOOL_RECEIPT", 409)
+            self.store.execute(
+                "UPDATE tool_tasks SET billed_micro_usd=GREATEST(billed_micro_usd,%s) "
+                "WHERE task_id=%s", (receipt.billed_micro_usd, original["task_id"]),
+            )
+            self.store.audit(
+                "tool.usage_received", original["task_id"], original["task_id"], self.clock(),
+                billed_micro_usd=receipt.billed_micro_usd, model_calls=receipt.model_calls,
+                input_tokens=receipt.input_tokens, output_tokens=receipt.output_tokens,
+                unknown_model_calls=receipt.unknown_model_calls,
+            )
+            cloud_budget.sync_reference(self.store, "tool", original["task_id"])
         self.policy()
         s, now = self.store, self.clock()
         with s.transaction():
@@ -519,17 +551,19 @@ class Executive:
                 "last_error_code = %s, lease_token = NULL, updated_at = %s WHERE task_id = %s",
                 (
                     receipt.status,
-                    current["reserved_micro_usd"]
-                    if receipt.status == "UNKNOWN"
-                    else receipt.billed_micro_usd,
+                    receipt.billed_micro_usd,
                     outcome,
-                    receipt.error_code,
+                    "MODEL_COST_UNKNOWN" if receipt.unknown_model_calls else receipt.error_code,
                     now,
                     current["task_id"],
                 ),
             )
             s.audit(
-                "tool.finished", current["task_id"], current["task_id"], now, status=receipt.status
+                "tool.finished", current["task_id"], current["task_id"], now,
+                status=receipt.status, billed_micro_usd=receipt.billed_micro_usd,
+                model_calls=receipt.model_calls, input_tokens=receipt.input_tokens,
+                output_tokens=receipt.output_tokens,
+                unknown_model_calls=receipt.unknown_model_calls,
             )
             cloud_budget.sync_reference(s, "tool", current["task_id"])
             return self.get(current["task_id"])

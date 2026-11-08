@@ -387,7 +387,7 @@ def test_erased_payload_uses_retained_authority_and_historical_public_key(core, 
                           (env.message_id,)) == {"content_json": "{}", "content_sha256": ""}
 
 
-def test_unrelated_model_unknown_stays_unknown_and_blocks_renewal(core, tmp_path):
+def test_cost_unknown_is_retained_across_policy_renewal(core, tmp_path):
     env = native(core, tmp_path, model_unknown=True)
     original = deepcopy(view(core)["models"])
     prepare(env)
@@ -395,9 +395,9 @@ def test_unrelated_model_unknown_stays_unknown_and_blocks_renewal(core, tmp_path
     assert view(core)["models"] == original
     assert {value["state"] for value in original.values()} == {"UNKNOWN"}
     policy(core)
-    with pytest.raises(CoreError):
-        with core.store.transaction():
-            cumulative.activate(core.store, core.settings, core.clock())
+    with core.store.transaction():
+        cumulative.activate(core.store, core.settings, core.clock())
+    assert view(core)["models"] == original
 
 
 def test_legacy_erased_text_receipt_keeps_payload_hash_without_inventing_content_hash(

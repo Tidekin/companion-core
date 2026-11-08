@@ -218,8 +218,7 @@ def budget_view(core):
 
     # Public adapter is kept here so the UI never reads raw price snapshots or credentials.
     value = cloud_budget.summary(core.store, core.settings, core.clock())
-    return {**value, "daily_limit_micro_cny": value["config"]["daily_micro_cny"],
-            "basis": value["cost_basis"]}
+    return {**value, "basis": value["cost_basis"]}
 
 
 def _review_count(core):
@@ -273,7 +272,8 @@ def overview(core):
     return {"schema_version": 1, "observed_at": now,
             "runtime": {"mode": core.settings.mode, "worker": worker, "modes": modes,
                         "state": "ATTENTION" if blocked or counts["unknown_calls"]
-                        or budget["admission_blocked"] or worker["state"] != "RECORDED"
+                        or budget["restore_reconciliation_required"]
+                        or worker["state"] != "RECORDED"
                         else "READY"},
             "counts": counts, "budget": budget, "model": model,
             "capabilities": capabilities.snapshot(s, core.settings, core.clock)}

@@ -53,7 +53,8 @@ def test_appraisals_decay_with_half_life(core):
 @pytest.mark.parametrize("damage", ["erase", "quote", "usage", "scenario"])
 def test_still_valid_filters_invalid_appraisals_from_projection(core, damage):
     key = appraise(core, 1, "测试")
-    assert len(core.mood.snapshot()["signals"]) == 1
+    original = core.mood.snapshot()["signals"]
+    assert len(original) == 1
     if damage == "erase":
         erase(core, [key])
     elif damage == "quote":
@@ -62,7 +63,7 @@ def test_still_valid_filters_invalid_appraisals_from_projection(core, damage):
         core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
     else:
         core.store.execute("UPDATE model_usage SET scenario='chat'")
-    assert core.mood.snapshot()["signals"] == []
+    assert core.mood.snapshot()["signals"] == (original if damage == "usage" else [])
 
 
 def test_capped_enforcement_during_projection(core):

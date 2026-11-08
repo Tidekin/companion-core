@@ -124,8 +124,8 @@ def test_eight_images_reuse_chat_provider_in_two_image_batches_and_keep_article(
             )
 
 
-def test_article_budget_stops_before_download_and_resume_never_repeats_completed_images(core):
-    service, vision = enable(core, article_image_micro_usd=20)
+def test_article_money_cap_is_advisory_and_completed_images_never_repeat(core):
+    service, vision = enable(core)
     gets = []
 
     def download(request):
@@ -136,12 +136,11 @@ def test_article_budget_stops_before_download_and_resume_never_repeats_completed
     owner, _ = article(core, 5)
     while run(service.run_batch()):
         pass
-    assert len(gets) == len(vision.calls) == 2
-    assert len(core.store.rows("SELECT * FROM content_items WHERE state='FAILED'")) == 3
+    assert len(gets) == len(vision.calls) == 5
+    assert not core.store.rows("SELECT * FROM content_items WHERE state='FAILED'")
     core.clock.advance(31)
-    service.options.article_image_micro_usd = 50
-    assert service.resume_link_images(owner)["resumed"] == 3
-    assert service.status(owner)["pending"]
+    assert service.resume_link_images(owner)["resumed"] == 0
+    assert not service.status(owner)["pending"]
     while run(service.run_batch()):
         pass
     assert len(gets) == len(set(gets)) == len(vision.calls) == 5

@@ -4,7 +4,6 @@ import httpx
 from pydantic_ai.toolsets import FunctionToolset
 
 from companion.agent_runtime import run_conversation
-from companion.contracts import CoreError
 from companion.model import ModelClient
 from tests.owner_model_fixtures import authorized_job
 from tests.support.token_measurement import configure
@@ -45,11 +44,12 @@ async def recorded_attempts(core, tmp_path, *, unknown=False):
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
         core.model = ModelClient(core.settings, client)
-        try:
-            await run_conversation(core, job, core.context(job),
-                                   toolsets=[FunctionToolset([first, second])])
-        except CoreError as error:
-            assert unknown and error.code == "MODEL_OUTCOME_UNKNOWN"
-        else:
-            assert not unknown
+        await run_conversation(core, job, core.context(job),
+                               toolsets=[FunctionToolset([first, second])])
+        states = core.store.rows(
+            "SELECT state FROM model_usage WHERE job_id=%s ORDER BY record_sequence",
+            (job["job_id"],),
+        )
+        assert [row["state"] for row in states] == [
+            "SETTLED", "UNKNOWN" if unknown else "SETTLED"]
     return job, requests

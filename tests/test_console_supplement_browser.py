@@ -416,7 +416,7 @@ def test_console_redacted_tool_scope_disables_approval_but_allows_rejection(core
     else:
         executive.config.endpoints["dsh"] = ExecutorEndpoint(
             url="http://127.0.0.1:8992", token="synthetic-dsh-browser-token-123456",
-            workspace="work", capabilities=["dsh.run"], max_cost_micro_usd=1000)
+            workspace="work", capabilities=["dsh.run"])
         request = ToolRequest(idempotency_key="browser-redacted-dsh", capability="dsh.run",
             workspace="work", arguments=ToolArguments(prompt=private_text),
             source_event_ids=["evt_test_1"])
@@ -477,6 +477,8 @@ async def serve_model_pages(page, respond):
     pytest.param(("Asia/Shanghai", "2026-10-27T23:59:30+08:00"), id="shanghai-before-midnight"),
     pytest.param(("UTC", "2026-10-27T00:00:30+00:00"), id="utc-after-midnight"),
 ])
+
+
 def model_chart_clock(core, request):
     core.settings.timezone, instant = request.param
     core.clock.now = datetime.fromisoformat(instant)

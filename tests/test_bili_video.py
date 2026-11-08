@@ -72,6 +72,8 @@ def test_unbound_model_request_does_not_claim_legacy_media(core):
     ("unrelated", "original", 9), ("job-only", "original", 8),
     ("current", "all_unknown", 9), ("current", "settled_foreground", 8),
 ])
+
+
 def test_model_room_counts_calls_once_and_preserves_foreground_slots(
     core, current, state_mode, required_calls,
 ):
@@ -313,6 +315,8 @@ def test_offset_content_deadline_is_normalized_before_comparing_to_utc_policy(co
         ("proof.declared_bytes", 40_000_000),
     ],
 )
+
+
 def test_prepare_rejects_unbound_or_unbounded_source_without_phase_or_cost(core, path, value):
     module, item = leased(core)
     body = preparation(item)
@@ -341,6 +345,8 @@ def test_lost_prepare_ack_uses_readonly_receipt_after_expiry_without_second_prep
 @pytest.mark.parametrize(
     "mutation", ["wrong_selection", "wrong_prepare", "bytes", "input", "range", "url"]
 )
+
+
 def test_upload_rejects_modified_materialization_before_any_paid_reservation(core, mutation):
     module, item, _, result = prepared(core)
     body = upload_body(item, result)
@@ -522,12 +528,9 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
     assert calls[0][1]["response_format"] == {"type": "json_object"}
 
 
-@pytest.mark.parametrize("kind", ["daily", "task"])
-def test_zero_cloud_currency_allows_analysis_and_keeps_native_charge(core, tmp_path, kind):
+def test_cloud_analysis_keeps_native_charge_without_currency_allocation(core, tmp_path):
     calls = []
-    cloud = CloudBudgetConfig(
-        **{"daily_micro_cny" if kind == "daily" else "video_per_item_micro_cny": 0}
-    )
+    cloud = CloudBudgetConfig()
 
     def provider(request):
         calls.append(request)
@@ -663,21 +666,20 @@ def test_clip_keeps_preview_and_clip_charges_above_item_currency_amount(core, tm
         )
 
     async def scenario():
-        cloud = CloudBudgetConfig(video_per_item_micro_cny=150000)
+        cloud = CloudBudgetConfig()
         async with paid_media(core, tmp_path, provider, cloud=cloud) as (module, item, prepared):
             preview = await module.upload("bili", item["request_id"], upload_body(item, prepared))
             assert preview["next_selection"] is not None
             cost = core.store.one("SELECT * FROM cloud_cost_snapshots WHERE task_kind='video'")
             assert cost["accounted_micro_usd"] == 18040
             assert cost["task_id"] == "content:" + item["media"]["content_item_id"]
-            assert 18040 * 8 < cloud.video_per_item_micro_cny
+            assert cost["amount_micro_cny"] == 18040 * 8
             await module.upload(
                 "bili", item["request_id"], upload_body(item, prepared, preview["next_selection"]))
             assert len(calls) == 2
             assert len(phase_usage(core)) == 2
             assert phase_costs(core)[0] == cost
-            assert sum(row["amount_micro_cny"] for row in phase_costs(core)) > (
-                cloud.video_per_item_micro_cny)
+            assert sum(row["amount_micro_cny"] for row in phase_costs(core)) == 2 * 18040 * 8
             partial = module.context(item["media"]["content_item_id"])
             assert partial["result_status"] == "FETCHED"
             assert [phase["phase"] for phase in partial["evidence"]["phases"]] == [
@@ -905,6 +907,8 @@ def test_followup_arriving_during_model_cannot_move_or_repay_started_phase(core,
 @pytest.mark.parametrize(
     "text,reference", [("先聊别的", None), ("不用继续看了", None), ("解释这里", 999)]
 )
+
+
 def test_unrelated_or_negative_followup_cannot_authorize_new_phase(core, tmp_path, text, reference):
     async def scenario():
         controls = {}

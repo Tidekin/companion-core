@@ -15,8 +15,8 @@ class MediaEndpoint(BaseModel):
     key: SecretStr = SecretStr("")
     model: str = Field(default="", max_length=128)
     protocol: Literal["openai", "minimax"] = "openai"
-    # Operator-configured maximum cost for one bounded request; zero disables calls.
-    max_request_micro_usd: int = Field(default=0, ge=0)
+    # Configured estimate for records without provider billing evidence.
+    estimated_request_micro_usd: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def valid_url(self):
@@ -42,7 +42,6 @@ class MediaConfig(BaseModel):
     max_chunk_bytes: int = Field(default=64_000, ge=1024, le=64_000)
     max_output_bytes: int = Field(default=256_000, ge=1024, le=2_000_000)
     max_active_sessions: int = Field(default=2, ge=1, le=5)
-    daily_micro_usd: int = Field(default=0, ge=0)
     provider_timeout_seconds: int = Field(default=20, ge=1, le=60)
     speech_voice: str = Field(default="alloy", min_length=1, max_length=128)
     voice_adapter: str = "media_voice"
@@ -70,16 +69,14 @@ class ImageGenerationConfig(BaseModel):
     max_output_bytes: int = Field(default=4 * 1024 * 1024, ge=1024, le=4 * 1024 * 1024)
     max_daily_images: int = Field(default=10, ge=0, le=100)
     cooldown_seconds: int = Field(default=300, ge=0, le=86400)
-    daily_micro_usd: int = Field(default=0, ge=0)
     retention_seconds: int = Field(default=3600, ge=60, le=86400)
 
     @model_validator(mode="after")
     def valid_provider(self):
         if self.enabled:
             endpoint = self.endpoint
-            if (not endpoint.url or not endpoint.model or not endpoint.key.get_secret_value()
-                    or endpoint.max_request_micro_usd <= 0):
-                raise ValueError("image generation needs endpoint url, model, key and price")
+            if not endpoint.url or not endpoint.model or not endpoint.key.get_secret_value():
+                raise ValueError("image generation needs endpoint url, model and key")
             if endpoint.protocol != "openai":
                 raise ValueError("image generation supports the openai protocol only")
         return self
@@ -90,12 +87,10 @@ class ContentConfig(BaseModel):
     max_links_per_event: int = Field(default=2, ge=1, le=2)
     max_images_per_event: CountLimit = 4
     max_images_per_article: int = Field(default=32, ge=1, le=32)
-    article_image_micro_usd: int = Field(default=50_000, ge=0)
     use_chat_model_for_vision: bool = False
     max_image_bytes: int = Field(default=1_000_000, ge=1024, le=MAX_OWNER_IMAGE_BYTES)
     max_daily_image_bytes: int = Field(default=32_000_000, ge=0, le=800 * 1024 * 1024)
     max_daily_images: int = Field(default=32, ge=0, le=50)
-    image_daily_micro_usd: int = Field(default=0, ge=0)
     wait_seconds: int = Field(default=30, ge=1, le=90)
     upload_window_seconds: int = Field(default=300, ge=30, le=900)
     provider_timeout_seconds: int = Field(default=20, ge=1, le=30)

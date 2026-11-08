@@ -53,6 +53,8 @@ from tests.support.social_autonomy import (
     {"kind": "signature", "value": "保持好奇"},
     {"kind": "avatar", "asset_id": "avatar_reviewed_one"},
 ])
+
+
 def test_proposal_dto_accepts_only_one_bounded_choice(proposal):
     assert proposal_adapter.validate_python(proposal).model_dump() == proposal
 
@@ -69,6 +71,8 @@ def test_proposal_dto_accepts_only_one_bounded_choice(proposal):
     {"kind": "avatar", "asset_id": "one", "file": "C:/private.png"},
     {"kind": "skip", "reason_code": "NO_ACTION", "authorization_sha256": "a" * 64},
 ])
+
+
 def test_proposal_dto_cannot_choose_authority_targets_or_transport_arguments(proposal):
     with pytest.raises(ValidationError):
         proposal_adapter.validate_python(proposal)
@@ -78,6 +82,8 @@ def test_proposal_dto_cannot_choose_authority_targets_or_transport_arguments(pro
     {"enabled": True}, {"enabled": 1}, {"qzone_daily_limit": True},
     {"qzone_daily_limit": -1}, {"avatar_enabled": True}, {"max_nickname_chars": 0},
 ])
+
+
 def test_config_is_strict_and_defaults_do_not_enable_m0_m1_actions(patch):
     assert SocialAutonomyConfig().enabled is False
     assert SocialAutonomyConfig().qzone_daily_limit == 1
@@ -147,6 +153,8 @@ def test_public_reader_evidence_is_reused_without_copying_private_trigger_text(c
 
 @pytest.mark.parametrize("mutation", ["private_chat", "private_file", "unknown", "redacted",
                                       "changed_text", "account_read", "missing_proof", "expired"])
+
+
 def test_nonpublic_or_unverifiable_material_cannot_become_a_publish_source(core, mutation):
     event_id = read_public(core, "bilibili")
     service(core)
@@ -214,6 +222,8 @@ def test_avatar_candidates_require_matching_review_policy_and_current_provenance
     {"source_url": "https://example.com/a.png?token=secret"},
     {"expires_at": "2026-10-24T12:00:00"},
 ])
+
+
 def test_avatar_review_dto_rejects_unscoped_or_private_asset_references(core, patch):
     with pytest.raises(ValidationError):
         avatar(core, **patch)
@@ -236,6 +246,8 @@ def test_profile_without_a_real_current_baseline_is_kept_unchanged(core):
     {"result": "REJECTED", "native_retcode": 0},
     {"action_type": "qq.profile.nickname", "resource_id": "fake-message-id"},
 ])
+
+
 def test_action_receipt_needs_real_protocol_evidence_and_never_a_fake_profile_message_id(patch):
     data = {"message_id": "msg_one", "lease_token": "lease_one", "payload_sha256": "a" * 64,
             "action_type": "qzone.publish", "result": "SUCCEEDED",
@@ -350,7 +362,7 @@ def test_model_skip_retains_real_planning_cost_without_using_a_publish_slot(core
 
 def test_global_cloud_amount_is_advisory_and_retains_native_charge(core):
     module, ref, _ = background(core)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
+    core.settings.cloud_budget = CloudBudgetConfig()
     planned(module, ref)
     assert len(module.model.calls) == 1
     assert len(core.store.rows("SELECT * FROM model_usage")) == 1
@@ -529,6 +541,8 @@ def test_changed_profile_baseline_cannot_pass_final_dispatch(core):
     ("content_json", '{"target_uins":[99999]}'), ("content_sha256", "0" * 64),
     ("action_type", "qq.profile.signature"), ("delivery_lane", "owner_private"),
 ])
+
+
 def test_forged_native_outbox_fields_cannot_pass_final_dispatch(core, column, value):
     module, ref, conversation = background(core)
     frozen = queue(module, planned(module, ref), conversation)

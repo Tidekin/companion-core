@@ -31,6 +31,8 @@ BLOCKER_CODES = frozenset({
     "MODEL_BUDGET_BLOCKED", "MODEL_BUDGET_RESTORE_REQUIRED", "LIVE_TEXT_STOPPED",
     "MODEL_USAGE_UNSETTLED", "DELIVERY_UNCERTAIN", "EXPIRED_LEASES", "EMBEDDING_CACHE_MISSING",
 })
+WARNING_CODES = frozenset({"MODEL_COST_UNKNOWN", "MODEL_BUDGET_BLOCKED",
+                           "MODEL_BUDGET_RESTORE_REQUIRED"})
 
 
 def _integer(value, *, signed=False):
@@ -94,6 +96,11 @@ def _safe_operations(raw, observed):
               "observed_at": observed.astimezone(UTC).isoformat(), "blockers": list(codes),
               "worker_progress": {"state": "UNOBSERVED",
                                   "reason": "BUSINESS_PROGRESS_NOT_INFERRED"}}
+    warnings = raw.get("warnings", [])
+    if (type(warnings) is not list or len(warnings) > len(WARNING_CODES)
+        or any(type(code) is not str or code not in WARNING_CODES for code in warnings)):
+        raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    result["warnings"] = list(warnings)
     result["worker_loop"] = worker_loop.project_public(raw["worker_loop"], observed)
     database = raw["database"]
     if not {"exists", "bytes"} <= database.keys():

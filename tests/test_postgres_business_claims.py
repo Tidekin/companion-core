@@ -19,8 +19,6 @@ DAY = date(2026, 10, 18)
 def prepare(core, kind):
     core.settings.diary_enabled = core.settings.consolidation_enabled = True
     core.settings.reflection_enabled = True
-    core.settings.reflection_daily_micro_usd = 50000
-    core.settings.reflection_monthly_micro_usd = 100000
     ingest(core, at=DAY.isoformat() + "T04:00:00+00:00")
     core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id = %s", ("evt_test_1",))
     if kind == "diary":
@@ -75,6 +73,8 @@ def interleaved(core, monkeypatch, selected_query, operation):
     ("goal", "FROM goal_steps AS st JOIN goals AS g"),
     ("reflection", "WHERE reflection_runs.local_date = %s AND "),
 ], ids=["diary", "consolidation", "goal", "reflection"])
+
+
 def test_independent_workers_claim_one_business_task(core, monkeypatch, kind, selected_query):
     prepare(core, kind)
     first_run, second_run = interleaved(
@@ -91,6 +91,8 @@ def test_independent_workers_claim_one_business_task(core, monkeypatch, kind, se
     ("diary", "SELECT run_id FROM diary_runs WHERE identity_id"),
     ("consolidation", "WHERE consolidation_runs.local_date = %s"),
 ])
+
+
 def test_two_schedulers_return_the_same_durable_run(core, monkeypatch, kind, selected_query):
     core.settings.diary_enabled = core.settings.consolidation_enabled = True
     first, second = interleaved(

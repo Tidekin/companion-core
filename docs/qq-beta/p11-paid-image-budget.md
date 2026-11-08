@@ -24,9 +24,9 @@ Content passes the actual chat `job_id` to the existing `budget.reserve`,
 `budget.complete`, and `budget.settle` functions. The logical request is that same
 job, `per_request_calls=2`, with at most one vision attempt followed by chat.
 The vision output cap is `min(max_output_tokens, 300)`. Both attempts use the
-existing admissions, usage rows and BudgetJournal, along with all request,
-window, day, month, concurrency and amount limits. The image scenario also uses
-`content.image_daily_micro_usd`. No extra job, queue or accounting ledger exists.
+existing admissions, usage rows and BudgetJournal, along with request/window/day
+call limits, token bounds and concurrency. Monetary caps and allocations are
+removed from current configuration. No extra job, queue or accounting ledger exists.
 
 The original ModelClient binds the actual multimodal HTTP payload to its single
 use admission after request hooks. Budget rechecks configuration, policy, job,
