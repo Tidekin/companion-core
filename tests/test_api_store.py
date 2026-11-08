@@ -1,6 +1,7 @@
 """Real HTTP/native transactions retain authority and receipts off the API loop."""
 
 import asyncio
+import json
 import pickle
 import sys
 import threading
@@ -105,8 +106,16 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
         assert core.store.one('SELECT COUNT(*) n FROM runtime_meta WHERE key=%s',
                               (owner_input.INPUT + capture.event_id,))["n"] == 1
     else:
-        assert core.store.one("SELECT COUNT(*) n FROM owner_authority_revisions "
-                              "WHERE state='STOPPED'")["n"] == 1
+        records = map(json.loads, Path(core.settings.paid_model.journal_path).read_text(
+            encoding="utf-8",
+        ).splitlines())
+        stopped, = [r for r in records if r["kind"] == owner_authority.RECORD_KIND
+                    and r["state"] == "STOPPED"]
+        assert stopped["operation_id"] == body["operation_id"]
+        assert core.store.rows(
+            "SELECT operation_id, record_sha256 FROM owner_authority_revisions "
+            "WHERE state='STOPPED'"
+        ) == [{"operation_id": stopped["operation_id"], "record_sha256": stopped["sha256"]}]
 
 
 def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
