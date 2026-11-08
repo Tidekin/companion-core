@@ -72,26 +72,26 @@ def test_recompute_after_old_backup_replay_uses_current_remaining_evidence(
             (f"evt_test_{i + 1}", f"今天讨论了读书计划的第 {i} 步。") for i in range(1, 4)
         ]
         usage = restored.store.rows("SELECT * FROM model_usage")
-        entries = restored.store.rows("SELECT * FROM diary_entries")
         assert recompute(restored)
         assert run(restored.diary.generate_once("restored-worker"))
-        assert model.calls == []
-        assert restored.diary.get_day(DAY, settings.owner_qq_id) is None
-        assert restored.store.rows("SELECT * FROM model_usage") == usage
-        assert restored.store.rows("SELECT * FROM diary_entries") == entries
-        assert restored.store.one("SELECT state,last_error_code FROM diary_runs") == {
-            "state": "FAILED", "last_error_code": "CLOUD_BUDGET_RESTORE_RECONCILIATION_REQUIRED",
-        }
+        assert len(model.calls) == 1
+        entry = restored.diary.get_day(DAY, settings.owner_qq_id)
+        assert "第 0 步" not in entry["body_md"] and "第 1 步" in entry["body_md"]
+        current_usage = restored.store.rows("SELECT * FROM model_usage")
+        assert all(row in current_usage for row in usage) and len(current_usage) == len(usage) + 1
+        assert [row["event_id"] for row in restored.store.rows(
+            "SELECT event_id FROM diary_evidence ORDER BY event_id")] == [
+                source["event_id"] for source in sources]
     with Core(settings, model, core.clock) as reopened:
-        # Replaying erasure preserves independent evidence, but cannot authorize new spending.
+        # Replaying erasure keeps current sources and the completed result idempotent.
         assert reopened.diary.repo.sources(DAY) == sources
-        assert reopened.diary.get_day(DAY, settings.owner_qq_id) is None
+        assert reopened.diary.get_day(DAY, settings.owner_qq_id) == entry
         assert reopened.store.one(
             "SELECT value FROM runtime_meta WHERE key='cloud_budget_restore_required'"
         ) == {"value": "1"}
         assert not run(reopened.diary.generate_once("reopened-worker"))
-        assert reopened.store.rows("SELECT * FROM model_usage") == usage
-        assert model.calls == []
+        assert reopened.store.rows("SELECT * FROM model_usage") == current_usage
+        assert len(model.calls) == 1
 
 
 @pytest.mark.parametrize("usage_state", ["UNKNOWN", "RESERVED"])

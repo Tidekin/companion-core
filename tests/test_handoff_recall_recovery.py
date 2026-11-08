@@ -278,7 +278,7 @@ def test_abort_rejects_missing_changed_or_used_custody_without_writes(core, tmp_
         core.store.insert("model_usage", usage_id="usage_unresolved", request_id="model_unresolved",
             scenario="chat", provider="synthetic", model="synthetic", input_tokens=0,
             output_tokens=0, billed_micro_usd=123, is_estimate=1, pricing_known=1,
-            state="UNKNOWN", occurred_at=core.clock())
+            state="RESERVED", occurred_at=core.clock())
 
     async def scenario():
         async with core_client(core) as client:

@@ -12,6 +12,47 @@ from companion.contracts import CoreError
 from companion.postgres import BUDGET_LEDGER
 
 
+def check_admissions(store, view, admissions):
+    """Bind selected response evidence to its original reservation, without cost totals."""
+    if not store.in_transaction:
+        raise RuntimeError("AUTHORITY_CUSTODY_REQUIRES_TRANSACTION")
+    store.ledger_lock(BUDGET_LEDGER, shared=store.in_read_snapshot)
+    path = Path(view.journal_path)
+    try:
+        raw = path.read_bytes()
+        records, verified = paid_budget._journal_records(raw)
+        previous, reservations = "0" * 64, {}
+        selected = {row["request_id"] for row in admissions}
+        for record in records:
+            digest = record.pop("sha256")
+            if not verified and (record.get("previous") != previous
+                                 or paid_budget.sha(record) != digest):
+                raise ValueError("journal chain")
+            previous = digest
+            if record.get("kind") == "reserve" and record["request_id"] in selected:
+                if record["request_id"] in reservations:
+                    raise ValueError("duplicate original reservation")
+                reservations[record["request_id"]] = record
+        if not records or records[0].get("journal_id") != view.journal_id:
+            raise ValueError("journal identity")
+        for row in admissions:
+            original = reservations[row["request_id"]]
+            receipt = json.loads(row["measurement_json"])
+            if (row["journal_id"] != view.journal_id
+                or Path(row["journal_path"]).resolve() != path.resolve()
+                or original["contract_sha256"] != row["contract_sha256"]
+                or paid_budget.sha(json.loads(row["snapshot_json"])) != row["contract_sha256"]
+                or original.get("measurement") != (
+                    {"version": 1, "sha256": paid_budget.sha(receipt)} if receipt else None)
+                or receipt and receipt.get("payload_sha256") != row["payload_sha256"]):
+                raise ValueError("original request evidence changed")
+        if path.read_bytes() != raw:
+            raise ValueError("journal changed during admission check")
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
+        paid_budget._clear_codec()
+        raise CoreError("OWNER_DELIVERY_MODEL_EVIDENCE_CHANGED", 403) from error
+
+
 def check(store, revision, *, historical=False):
     if not store.in_transaction:
         raise RuntimeError("AUTHORITY_CUSTODY_REQUIRES_TRANSACTION")

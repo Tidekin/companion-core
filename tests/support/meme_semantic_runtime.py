@@ -49,7 +49,7 @@ class SemanticCore(CoreHTTP):
 
         super().__init__(runtime, event, **kwargs)
         self.caption = SimpleNamespace(submissions=[], polls=[], model_calls=[],
-                                       state="SUCCEEDED", after_get=None)
+                                       state="SUCCEEDED", missing_response=False, after_get=None)
         self.processed = set()
         self.semantic_calls = []
         self.query_started, self.query_release = asyncio.Event(), None
@@ -65,6 +65,8 @@ class SemanticCore(CoreHTTP):
 
         def answer(request):
             self.caption.model_calls.append(json.loads(request.content))
+            if self.caption.missing_response:
+                raise httpx.ReadTimeout("Synthetic caption response lost", request=request)
             value = {"choices": [{"message": {"content": json.dumps(CAPTION)}}]}
             if self.caption.state != "UNKNOWN":
                 value["usage"] = {"prompt_tokens": 1050, "completion_tokens": 100,

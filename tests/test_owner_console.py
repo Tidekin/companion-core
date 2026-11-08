@@ -537,4 +537,4 @@ def test_console_budget_reports_restore_reconciliation_without_new_spendable_poo
     assert value["budget"]["restore_reconciliation_required"]
     assert value["budget"]["restored_history_may_be_incomplete"]
     assert value["budget"]["remaining_micro_cny"] == 0
-    assert value["budget"]["admission_blocked"]
+    assert not value["budget"]["admission_blocked"]

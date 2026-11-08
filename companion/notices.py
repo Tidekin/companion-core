@@ -607,11 +607,16 @@ def retry_required_wording(store, settings, job, code, now):
     ):
         return False
     usages = store.rows(
-        "SELECT scenario, state FROM model_usage WHERE job_id = %s", (job["job_id"],)
+        "SELECT m.scenario, m.state, EXISTS(SELECT 1 FROM agent_conversations c, "
+        "jsonb_array_elements(c.conversation_json::jsonb->'messages') response(value) "
+        "WHERE c.job_id=m.job_id AND response.value->>'kind'='response' "
+        "AND response.value->'metadata'->>'core_request_id'=m.request_id) "
+        "AS response_recorded FROM model_usage m WHERE m.job_id=%s", (job["job_id"],)
     )
     if (
         len(usages) != current["attempts"]
-        or any(row["scenario"] != "activity" or row["state"] not in {"SETTLED", "UNKNOWN"}
+        or any(row["scenario"] != "activity" or not (row["state"] == "SETTLED"
+                   or row["state"] == "UNKNOWN" and row["response_recorded"])
                for row in usages)
         or store.one(
             "SELECT 1 FROM outbox WHERE origin_event_id = %s OR reply_group_id = %s",

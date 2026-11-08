@@ -281,6 +281,8 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp
                                            "WHERE metadata_json IS NOT NULL")
             if boundary == "payload" or invalid:
                 assert_failure_notice(core)
+            elif boundary == "missing_usage":
+                assert core.store.rows("SELECT * FROM outbox")
             else:
                 assert not core.store.rows("SELECT * FROM outbox")
             before = len(calls)

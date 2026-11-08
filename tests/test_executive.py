@@ -413,7 +413,7 @@ def test_gateway_mcp_exposes_only_scoped_executor(tmp_path):
         app.state.db.close()
 
 
-def test_proxy_enforces_budget_calls_tokens_and_revocation():
+def test_proxy_keeps_call_token_and_revocation_controls_with_advisory_money():
     upstream_calls = []
 
     def upstream(request):
@@ -458,7 +458,11 @@ def test_proxy_enforces_budget_calls_tokens_and_revocation():
             client.post("/v1/chat/completions", headers=scoped_auth, json=body).status_code == 403
         )
         small = envelope(max_cost_micro_usd=1).model_dump()
-        assert client.post("/internal/v1/reservations", headers=auth, json=small).status_code == 429
+        reduced = client.post("/internal/v1/reservations", headers=auth, json=small)
+        assert reduced.status_code == 200
+        small_usage = client.get("/internal/v1/reservations/" + reduced.json()["token"],
+                                 headers=auth).json()
+        assert small_usage["calls"] == small_usage["reserved_micro_usd"] == 0
     assert len(upstream_calls) == 1
 
 

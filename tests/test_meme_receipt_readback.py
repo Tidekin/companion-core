@@ -30,6 +30,7 @@ def test_original_usage_readback_survives_stop_unknown_and_restart(make_runtime,
     core = SemanticCore(runtime, event)
     if fence != "stop":
         core.caption.state = "UNKNOWN"
+        core.caption.missing_response = True
 
     async def scenario():
         async with core.client() as client:

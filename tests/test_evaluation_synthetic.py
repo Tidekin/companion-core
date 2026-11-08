@@ -97,8 +97,12 @@ def test_synthetic_plan_scope_is_checked_before_consent(core, tmp_path, monkeypa
         monkeypatch.setitem(evaluation.LIMITS["synthetic"], "cost", 1000)
     elif change == "too_many_cases":
         monkeypatch.setitem(evaluation.LIMITS["synthetic"], "cases", 2)
-    with pytest.raises(CoreError, match="EVALUATION_MANIFEST_INVALID"):
-        evaluation.preview(core.store, core.settings, core.clock, manifest)
+    if change == "too_costly":
+        assert evaluation.preview(core.store, core.settings, core.clock, manifest)
+        assert not core.store.rows("SELECT * FROM model_usage")
+    else:
+        with pytest.raises(CoreError, match="EVALUATION_MANIFEST_INVALID"):
+            evaluation.preview(core.store, core.settings, core.clock, manifest)
 
 
 def test_sources_match_the_manifest_kind_and_pilot_digest_is_unchanged(core, tmp_path):

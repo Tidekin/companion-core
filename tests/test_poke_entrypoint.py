@@ -151,7 +151,7 @@ def test_signed_poke_uses_real_http_worker_budget_and_original_outbox(core, tmp_
 
 
 @pytest.mark.parametrize("failure", ["provider_unknown", "daily_budget"])
-def test_poke_cannot_repeat_uncertain_or_unfunded_model_call(core, tmp_path, failure):
+def test_poke_does_not_repeat_lost_response_even_with_zero_money_cap(core, tmp_path, failure):
     calls = []
 
     def model(request):
@@ -169,10 +169,7 @@ def test_poke_cannot_repeat_uncertain_or_unfunded_model_call(core, tmp_path, fai
             assert core.store.one("SELECT state FROM jobs")["state"] == "FAILED"
             assert not await worker.run_once("no-paid-retry")
             assert not core.store.rows("SELECT * FROM outbox")
-            if failure == "daily_budget":
-                assert not calls and not core.store.rows("SELECT * FROM model_usage")
-            else:
-                assert len(calls) == 1
-                assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
+            assert len(calls) == 1
+            assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
 
     run(scenario())

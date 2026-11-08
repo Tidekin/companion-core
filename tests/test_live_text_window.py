@@ -286,7 +286,7 @@ def test_live_input_cannot_bypass_individual_approval_through_generic_inbox(core
     ("deadline", "SETTLED"), ("privacy", "SETTLED"), ("revocation", "SETTLED"),
     ("oversize", "SETTLED"),
 ])
-def test_model_late_or_unknown_results_retain_costs_and_never_enqueue(
+def test_model_results_preserve_costs_and_require_current_delivery_authority(
     core, tmp_path, result, expected,
 ):
     from companion import owner_authority
@@ -319,6 +319,8 @@ def test_model_late_or_unknown_results_retain_costs_and_never_enqueue(
             assert usage["state"] == expected and usage["billed_micro_usd"] > 0
             if result == "oversize":
                 assert_failure_notice(core)
+            elif result in {"missing_usage", "rate_change"}:
+                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 1
             else:
                 assert not core.store.rows("SELECT * FROM outbox")
             assert len(ctx.calls) == 1 and ctx.sends == []
@@ -448,14 +450,20 @@ def test_native_lock_wait_cannot_authorize_send_after_deadline(core, tmp_path):
     {"per_attempt_micro_usd": 1}, {"daily_micro_usd": 1}, {"monthly_micro_usd": 1},
     {"window_micro_usd": 1}, {"max_input_tokens": 1},
 ])
-def test_existing_paid_approval_and_amount_limits_are_not_relaxed(core, tmp_path, limits):
+def test_money_caps_are_advisory_while_input_quota_stays_hard(core, tmp_path, limits):
     async def scenario():
         async with native_clients(core, tmp_path, paid_options=limits) as ctx:
             await native_admit(ctx)
             assert await ctx.worker.run_once()
-            assert ctx.calls == ctx.sends == []
-            assert not core.store.rows("SELECT * FROM model_usage")
-            assert_failure_notice(core)
+            assert ctx.sends == []
+            if "max_input_tokens" in limits:
+                assert not ctx.calls
+                assert not core.store.rows("SELECT * FROM model_usage")
+                assert_failure_notice(core)
+            else:
+                assert len(ctx.calls) == 1
+                assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
+                assert core.store.rows("SELECT * FROM outbox")
             assert ctx.spool.db.execute("SELECT count(*) FROM window_attempts").fetchone()[0] == 0
     run(scenario())
 
@@ -572,7 +580,7 @@ def test_core_stop_survives_old_db_without_its_native_projection(core, tmp_path)
                         response = await client.post("/internal/v1/owner-authority/check",
                             json={"authority": ctx.authority, "purpose": "chat"})
                         assert response.status_code == 503, response.text
-                        assert response.json()["error"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
+                        assert response.json()["error"] == "OWNER_AUTHORITY_CUSTODY_REQUIRED"
     run(scenario())
 
 

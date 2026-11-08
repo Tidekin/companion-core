@@ -28,8 +28,9 @@ def test_rem_defaults_enable_bounded_private_dreams():
     assert config.local_hour == 4
     assert plain().rem == config
     assert RemConfig(enabled=False).enabled is False
+    assert RemConfig(daily_micro_usd=0).enabled
     with pytest.raises(ValidationError):
-        RemConfig(daily_micro_usd=0)
+        RemConfig(daily_micro_usd=-1)
 
 
 @pytest.mark.parametrize("reasoning", [None, "", {"unexpected": "value"}, "合成推理"])

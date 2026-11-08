@@ -325,7 +325,7 @@ def test_https_requires_trusted_certificate_with_matching_ip_san(
     assert len(requests) == (1 if matches else 0)
 
 
-def test_valid_remote_unknown_counts_are_observed_as_blocked_not_rejected(core, tmp_path):
+def test_cost_unknown_is_observed_with_delivery_still_blocked(core, tmp_path):
     ingest(core)
     assert run(core.run_once("synthetic-ops-worker"))
     core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN'")
@@ -337,4 +337,5 @@ def test_valid_remote_unknown_counts_are_observed_as_blocked_not_rejected(core, 
     snapshot = records(output)[1]["snapshot"]
     assert snapshot["budget"]["unknown_calls"] == snapshot["budget"]["unsettled_calls"] == 1
     assert snapshot["deliveries"]["states"] == {"DELIVERY_UNCERTAIN": 1}
-    assert "MODEL_USAGE_UNSETTLED" in snapshot["blockers"]
+    assert "MODEL_COST_UNKNOWN" in snapshot["warnings"]
+    assert snapshot["blockers"] == ["DELIVERY_UNCERTAIN"]

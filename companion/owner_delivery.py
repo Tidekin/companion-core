@@ -148,12 +148,15 @@ def _context_hashes(history, snapshots):
 
 
 def _usage(store, job, view, snapshots, message_id, *, group=None):
+    from companion import authority_custody
     from companion.transport import reply_group
 
     preview = next((s for s in snapshots if s["kind"] == "video_preview_reply"), None)
     unavailable = (_preview_request(store, job, group or reply_group(store, message_id), preview)
                    if preview else None)
     rows = store.rows('SELECT m.request_id, m.state, m.scenario, a.authority_json, '
+        'a.measurement_json, a.payload_sha256, a.snapshot_json, a.contract_sha256, '
+        'a.journal_path, a.journal_id, '
         "CASE WHEN m.state='UNKNOWN' THEN EXISTS(SELECT 1 FROM agent_conversations AS c, "
         "jsonb_array_elements(c.conversation_json::jsonb->'messages') AS response(value) "
         "WHERE c.job_id=m.job_id AND c.phase IN ('OUTPUT','COMPLETE') "
@@ -177,6 +180,7 @@ def _usage(store, job, view, snapshots, message_id, *, group=None):
         and not any(row["scenario"] == ("qq_poke" if job["kind"] == "poke" else job["kind"])
                     for row in rows)):
         raise CoreError("OWNER_DELIVERY_SETTLED_MODEL_REQUIRED", 403)
+    authority_custody.check_admissions(store, view, rows)
     return [row["request_id"] for row in rows]
 
 

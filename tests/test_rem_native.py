@@ -129,7 +129,7 @@ def test_rem_failure_never_replays_and_keeps_accounting(core, tmp_path, failure)
 @pytest.mark.parametrize("config", [
     {"max_input_tokens": 128}, {"daily_micro_usd": 1}, {"monthly_micro_usd": 1},
 ])
-def test_rem_limits_block_before_provider_admission(core, tmp_path, config):
+def test_rem_input_limit_stays_hard_and_money_caps_are_advisory(core, tmp_path, config):
     calls = []
 
     def provider(request):
@@ -143,8 +143,13 @@ def test_rem_limits_block_before_provider_admission(core, tmp_path, config):
                 with Core(core.settings, ModelClient(core.settings, transport),
                           core.clock) as worker:
                     assert await worker.run_once(job_id=job)
-            assert not calls and not usage(core)
-            assert rem.records(core)[0]["state"] == "FAILED"
+            if "max_input_tokens" in config:
+                assert not calls and not usage(core)
+                assert rem.records(core)[0]["state"] == "FAILED"
+            else:
+                assert len(calls) == 1
+                assert usage(core)[0]["state"] == "SETTLED"
+                assert rem.records(core)[0]["state"] == "COMMITTED"
     run(scenario())
 
 

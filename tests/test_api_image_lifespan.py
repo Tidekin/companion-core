@@ -289,10 +289,11 @@ def test_worker_loop_waits_for_api_vision_and_preserves_unknown_block(
                         assert usage[0]["billed_micro_usd"] == 0
                     else:
                         assert len(calls) == 1 and usage[0]["billed_micro_usd"] > 0
-                    if outcome == "settled":
+                    if outcome in {"settled", "unknown"}:
                         await until(lambda: core.store.one("SELECT 1 FROM outbox"),
                                     tasks=[task], deadline_seconds=10)
-                        assert usage[0]["state"] == "SETTLED"
+                        assert usage[0]["state"] == (
+                            "UNKNOWN" if outcome == "unknown" else "SETTLED")
                     else:
                         assert usage[0]["state"] == (
                             "UNKNOWN" if outcome == "unknown" else "SETTLED")

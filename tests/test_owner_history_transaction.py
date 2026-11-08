@@ -8,7 +8,7 @@ import httpx
 import psycopg
 import pytest
 
-from companion import owner_authority, owner_input, paid_budget
+from companion import authority_custody, owner_authority, owner_input, paid_budget
 from companion.contracts import CoreError
 from companion.store import after, encode
 from tests.conftest import run
@@ -64,7 +64,7 @@ def test_history_reuses_custody_inside_one_owned_write_transaction(
 ):
     def check(job, expected):
         calls, recalls = [], []
-        native = paid_budget.journal
+        native = authority_custody.check
         native_recall = owner_input.input_recall.require_not_recalled
 
         def journal(*args, **kwargs):
@@ -75,7 +75,7 @@ def test_history_reuses_custody_inside_one_owned_write_transaction(
             recalls.append(1)
             return native_recall(*args, **kwargs)
 
-        monkeypatch.setattr(paid_budget, "journal", journal)
+        monkeypatch.setattr(authority_custody, "check", journal)
         monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
         if transactional == "read_transaction":
             core.store.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -207,13 +207,13 @@ def test_full_history_batches_without_the_journal_byte_cache(core, tmp_path, mon
     def check(job, expected):
         monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", 1)
         calls = []
-        native = paid_budget.journal
+        native = authority_custody.check
 
         def journal(*args, **kwargs):
             calls.append(1)
             return native(*args, **kwargs)
 
-        monkeypatch.setattr(paid_budget, "journal", journal)
+        monkeypatch.setattr(authority_custody, "check", journal)
         assert owner_input.history_sources(core.store, core.settings, core.clock, job) == expected
         assert len(calls) == 2
         assert not core.store.in_transaction

@@ -180,7 +180,7 @@ def assert_retained_enrichment(core, recovered, fact, episode, draft, usage):
 
 
 @pytest.mark.parametrize("fault", ["withdraw", "unknown"])
-def test_pending_enrichment_is_erased_or_stopped_without_replay(core, fault):
+def test_enrichment_uses_received_result_with_unknown_cost_and_respects_erasure(core, fault):
     model, draft = prepared(core)
     if fault == "unknown":
         original = model.complete
@@ -192,7 +192,15 @@ def test_pending_enrichment_is_erased_or_stopped_without_replay(core, fault):
         model.complete = missing_usage
         assert run(core.extract_step()).progressed
         state = checkpoint_state(core.store)["batch"]
-        assert state["phase"] == "UNKNOWN" and "episode_summaries" not in state
+        assert state["phase"] == "REVIEW"
+        assert state["episode_summaries"] == draft["episode_summaries"]
+        original_usage = core.store.one("SELECT * FROM model_usage")
+        assert original_usage["state"] == "UNKNOWN"
+        assert run(core.extract_step()).progressed
+        assert core.store.one("SELECT * FROM model_usage WHERE request_id=%s",
+                              (original_usage["request_id"],)) == original_usage
+        assert len(core.store.rows("SELECT * FROM memories")) == 1
+        assert len(core.store.rows("SELECT * FROM episodes")) == 1
     else:
         assert run(core.extract_step()).progressed
         state = checkpoint_state(core.store)["batch"]
@@ -202,9 +210,11 @@ def test_pending_enrichment_is_erased_or_stopped_without_replay(core, fault):
         assert checkpoint_state(core.store) is None
     usage = core.store.rows("SELECT * FROM model_usage")
     assert not run(core.extract_step()).progressed
-    assert core.store.rows("SELECT * FROM memories") == []
-    assert core.store.rows("SELECT * FROM episodes") == []
-    assert core.store.rows("SELECT * FROM model_usage") == usage and len(model.calls) == 1
+    if fault == "withdraw":
+        assert core.store.rows("SELECT * FROM memories") == []
+        assert core.store.rows("SELECT * FROM episodes") == []
+    assert core.store.rows("SELECT * FROM model_usage") == usage
+    assert len(model.calls) == (2 if fault == "unknown" else 1)
 
 
 def test_salience_does_not_replace_relevance_or_confirm_a_fact(core):

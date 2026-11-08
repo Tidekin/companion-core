@@ -240,10 +240,18 @@ def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypat
         if change == "caption":
             await request  # An item not offered yet is left out, never re-captioned in place.
             return
+        if change == "usage":
+            await request
+            return
         with pytest.raises(CoreError):
             await request
 
     run(scenario())
+    if change == "usage":
+        assert c.retrieval.check(c.job)["offer"]["candidates"]
+        assert c.core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
+        assert len(c.core.store.rows("SELECT * FROM model_usage")) == len(before)
+        return
     assert c.core.store.rows("SELECT * FROM meme_vectors") == corrected
     if change == "caption":
         saved = c.retrieval.check(c.job)

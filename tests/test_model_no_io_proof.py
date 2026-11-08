@@ -38,6 +38,6 @@ def test_delegate_background_error_keeps_uncertainty(core, tmp_path, foreign_pro
     assert row["state"] == "UNKNOWN" and row["billed_micro_usd"] > 0
     assert not core.store.rows("SELECT * FROM audit_log WHERE action='model.not_dispatched'")
     paid_budget.journal(core.store, core.settings.paid_model)
-    with pytest.raises(CoreError, match="CLOUD_TASK_USAGE_UNCERTAIN"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, authorized_job(core),
                        "chat", messages, core.clock())

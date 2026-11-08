@@ -320,17 +320,14 @@ def test_missing_or_invalid_image_usage_retains_amount_and_blocks_retry(core, tm
         "state": "UNKNOWN",
         "billed_micro_usd": reserved,
     }
-    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+    with pytest.raises(CoreError, match="MODEL_IMAGE_ALREADY_ATTEMPTED"):
         budget.reserve(core.store, core.settings, job, "content_vision", messages, core.clock())
-    with pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
-        budget.reserve(
-            core.store,
-            core.settings,
-            job,
-            "chat",
-            [{"role": "user", "content": "reply"}],
-            core.clock(),
-        )
+    chat = budget.reserve(core.store, core.settings, job, "chat",
+                          [{"role": "user", "content": "reply"}], core.clock())
+    assert core.store.one("SELECT state FROM model_usage WHERE request_id=%s",
+                          (chat,))["state"] == "RESERVED"
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=%s",
+                          (request,)) == {"state": "UNKNOWN", "billed_micro_usd": reserved}
 
 
 def test_invalid_provider_text_still_settles_received_image_usage(core, tmp_path):
@@ -373,13 +370,13 @@ def test_image_scenario_and_global_five_call_caps_share_existing_accounting(core
     assert core.store.one("SELECT COUNT(*) AS n FROM model_usage WHERE state='SETTLED'")["n"] == 5
 
 
-def test_image_daily_budget_is_part_of_snapshot_and_admission(core, tmp_path):
+def test_image_daily_money_cap_stays_in_snapshot_without_refusing_admission(core, tmp_path):
     image_approval(core, tmp_path)
     core.settings.content.image_daily_micro_usd = 1
     assert paid_budget.snapshot(core.settings)["scenario_daily_micro_usd"]["content_vision"] == 1
-    with pytest.raises(CoreError, match="DAILY_BUDGET"):
-        reserve_image(core)
-    assert core.store.rows("SELECT * FROM model_usage") == []
+    _, request = reserve_image(core)
+    assert core.store.one("SELECT state FROM model_usage WHERE request_id=%s",
+                          (request,))["state"] == "RESERVED"
 
 
 def test_image_payload_cannot_bypass_policy_as_text_chat(core, tmp_path):
@@ -448,10 +445,12 @@ def test_image_unknown_survives_reopen_without_fresh_concurrency_or_attempt(core
         assert paid_budget.journal(reopened, approval, allow_settlement=True) == old_custody
         with pytest.raises(CoreError, match="IMAGE_ALREADY_ATTEMPTED"):
             budget.reserve(reopened, core.settings, job, "content_vision", messages, core.clock())
-        with pytest.raises(CoreError, match="CONCURRENCY"):
-            budget.reserve(reopened, core.settings, job, "chat",
-                           [{"role": "user", "content": "reply"}], core.clock())
-        assert reopened.one("SELECT state,billed_micro_usd FROM model_usage") == {
+        chat = budget.reserve(reopened, core.settings, job, "chat",
+                              [{"role": "user", "content": "reply"}], core.clock())
+        assert reopened.one("SELECT state FROM model_usage WHERE request_id=%s",
+                            (chat,))["state"] == "RESERVED"
+        assert reopened.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=%s",
+                            (request,)) == {
             "state": "UNKNOWN", "billed_micro_usd": before["billed_micro_usd"],
         }
     finally:
@@ -482,13 +481,13 @@ def test_http_image_error_with_usage_is_accounted_once(core, tmp_path):
     assert core.store.one("SELECT COUNT(*) AS n FROM model_admissions")["n"] == 1
 
 
-def test_observed_image_amount_exceeding_daily_cap_stops_without_losing_usage(core, tmp_path):
+def test_observed_image_amount_above_daily_cap_remains_settled(core, tmp_path):
     image_approval(core, tmp_path, policy={"estimated_tokens_per_image": 100})
     core.settings.content.image_daily_micro_usd = 900
     _, request = reserve_image(core)
     run(invoke(core, request, image_messages()))
     usage = core.store.one("SELECT * FROM model_usage")
-    assert usage["state"] == "UNKNOWN"
+    assert usage["state"] == "SETTLED"
     assert usage["input_tokens"] == 1000 and usage["output_tokens"] == 20
     assert usage["billed_micro_usd"] == budget.cost(core.settings, 1000, 20, 50) > 900
-    assert core.store.one("SELECT value FROM runtime_meta WHERE key='model_budget_blocked'")
+    assert not core.store.one("SELECT value FROM runtime_meta WHERE key='model_budget_blocked'")

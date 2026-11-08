@@ -95,7 +95,7 @@ def test_skip_gets_one_new_native_attempt_and_retains_both_charges(core, outcome
         "timeout",
     ],
 )
-def test_only_received_known_empty_required_reply_gets_another_reservation(core, tmp_path, first):
+def test_only_received_empty_required_reply_gets_one_more_attempt(core, tmp_path, first):
     job = failed_commitment(core, tmp_path)
     calls = []
 

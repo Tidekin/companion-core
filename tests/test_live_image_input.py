@@ -218,6 +218,8 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
             assert not sends and len(calls) <= 1
             if failure in {"media_after_dispatch", "reserve"}:
                 assert_failure_notice(core)
+            elif failure == "unknown_usage":
+                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 1
             else:
                 assert not core.store.rows("SELECT * FROM outbox")
             assert not core.store.rows("SELECT * FROM observations")

@@ -152,13 +152,7 @@ def test_failed_generation_keeps_one_fault_receipt_without_another_model_call(
         async with independent_chat(core, provider) as (api, worker):
             accepted = await accept(api, value)
             assert await worker.run_once("failed-natural-chat")
-            if failure == "unknown":
-                blocked = await api.post("/internal/v1/inbox/events", json=value,
-                    headers={"x-idempotency-key": value["event_id"]})
-                assert blocked.status_code == 503
-                assert blocked.json()["error"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
-            else:
-                await accept(api, value, duplicate=True)
+            await accept(api, value, duplicate=True)
             assert not await worker.run_once("failed-natural-chat-replay")
             job = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                  (accepted["job_id"],))

@@ -104,11 +104,11 @@ def test_actual_reserved_admission_read_does_not_dispatch_or_finish_the_original
     run(scenario())
 
 
-def test_real_budget_refusal_has_terminal_no_admission_despite_a_preallocated_uid(
+def test_call_quota_refusal_has_terminal_no_admission_despite_a_preallocated_uid(
     core, tmp_path, monkeypatch
 ):
     async def scenario():
-        async with liability_case(core, tmp_path, monkeypatch, cap=1) as c:
+        async with liability_case(core, tmp_path, monkeypatch, daily_calls=0) as c:
             calls = []
             assert await worker(core, calls) and not calls
             assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (c.job_id,)) == {
@@ -198,7 +198,7 @@ def test_original_fee_and_complete_reuse_ancestry_are_required(core, tmp_path, m
 
 def test_terminal_target_cannot_hide_a_nonterminal_no_fee_ancestor(core, tmp_path, monkeypatch):
     async def scenario():
-        async with liability_case(core, tmp_path, monkeypatch, cap=1) as c:
+        async with liability_case(core, tmp_path, monkeypatch, daily_calls=0) as c:
             child = await add_reuse(core, c)
             assert await worker(core, [])
             core.store.execute("UPDATE jobs SET state='FAILED' WHERE job_id=%s", (child,))
@@ -578,7 +578,7 @@ def test_bounded_three_node_reuse_preserves_the_original_fee_or_complete_no_admi
 ):
     async def scenario():
         async with liability_case(core, tmp_path, monkeypatch,
-                                  cap=1 if state == "NO_ADMISSION" else 50000) as c:
+                                  daily_calls=0 if state == "NO_ADMISSION" else 30) as c:
             import copy
 
             root = c.job_id
@@ -644,7 +644,7 @@ def test_unused_preallocated_pointers_still_require_a_consistent_original_chain(
     core, tmp_path, monkeypatch, damage
 ):
     async def scenario():
-        async with liability_case(core, tmp_path, monkeypatch, cap=1) as c:
+        async with liability_case(core, tmp_path, monkeypatch, daily_calls=0) as c:
             root = c.job_id
             child = await add_reuse(core, c)
             assert await worker(core, [])
