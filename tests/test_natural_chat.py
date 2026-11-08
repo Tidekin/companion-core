@@ -55,7 +55,7 @@ async def independent_chat(core, provider):
         headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
     ) as api, httpx.AsyncClient(transport=httpx.MockTransport(provider)) as external:
         with Core(core.settings, ModelClient(core.settings, external), core.clock) as worker:
-            assert worker.store is not core.store and worker.store.db is not core.store.db
+            assert worker.store.backend_pid != core.store.backend_pid
             api.context_test_core = core
             yield api, worker
 
@@ -193,7 +193,7 @@ def test_source_erased_during_provider_response_never_publishes_old_reply(
 
     def provider(request):
         calls.append(request)
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [value["event_id"]], core.clock())
         return reply("已经撤回来源的旧回复")
 

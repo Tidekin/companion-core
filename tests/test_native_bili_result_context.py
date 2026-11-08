@@ -245,9 +245,8 @@ def test_completed_job_reader_proof_revalidates_readonly_before_delivery(core, t
                                    (job["job_id"],))["snapshots_json"]
             snapshots = json.loads(saved)
             usage = core.store.rows("SELECT * FROM model_usage")
-            changed = core.store.db.total_changes
-            revalidate_results(core.store, core.settings, core.clock, job, snapshots)
-            assert core.store.db.total_changes == changed
+            with core.store.read_snapshot():
+                revalidate_results(core.store, core.settings, core.clock, job, snapshots)
             visual = core.store.one("SELECT * FROM bili_video_items")
             if drift == "body":
                 core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
@@ -279,10 +278,9 @@ def test_completed_job_reader_proof_revalidates_readonly_before_delivery(core, t
                     "UPDATE reading_attempts SET result_event_ids_json='[]' "
                     'WHERE request_id=%s'
                 ), (item["request_id"],))
-            changed = core.store.db.total_changes
-            with pytest.raises(CoreError):
-                revalidate_results(core.store, core.settings, core.clock, job, snapshots)
-            assert core.store.db.total_changes == changed
+            with core.store.read_snapshot():
+                with pytest.raises(CoreError):
+                    revalidate_results(core.store, core.settings, core.clock, job, snapshots)
             assert core.store.rows("SELECT * FROM model_usage") == usage
             assert core.store.one('SELECT snapshots_json FROM agent_conversations WHERE job_id=%s',
                                    (job["job_id"],))["snapshots_json"] == saved

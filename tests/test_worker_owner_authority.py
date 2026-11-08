@@ -75,10 +75,9 @@ def test_deadlines_use_optional_owner_expiry_without_a_window(core, tmp_path, ki
         })
     activate(core, policy)
     assert core.settings.live_text_window is None
-    before = core.store.db.total_changes
-    start = datetime.fromisoformat(core.clock())
-    deadline = worker_deadlines.PROVIDERS[kind](core.store, core.settings, start)
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        start = datetime.fromisoformat(core.clock())
+        deadline = worker_deadlines.PROVIDERS[kind](core.store, core.settings, start)
     if expires:
         assert deadline == start + timedelta(seconds=60)
     else:

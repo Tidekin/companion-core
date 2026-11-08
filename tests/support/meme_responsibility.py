@@ -3,13 +3,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from companion.config import ImageInputPolicy
+from tests.postgres_fixture import logical_state
 from tests.support.meme_core import body
 from tests.support.meme_service import claim, discovery_environment, reservation, result, submit
 
 
 def snapshot(core):
     return {
-        "database": tuple(core.store.db.iterdump()),
+        "database": logical_state(core.store),
         "journal": Path(core.settings.paid_model.journal_path).read_bytes(),
         "ledger": core.ledger.path.read_bytes(),
     }

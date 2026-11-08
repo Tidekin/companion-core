@@ -40,13 +40,12 @@ def test_expired_voice_projection_is_read_only_and_source_erasure_still_blocks(c
     core.clock.advance(6)
     with core.store.transaction():
         core.recover(core.clock())
-    before = core.store.db.total_changes
-    projection = flow.input_receipt(event_id)
-    assert projection["state"] == "FALLBACK"
-    assert projection["records"][0]["input_sha256"] is None
-    assert not projection["records"][0]["upload_allowed"]
-    assert core.store.db.total_changes == before
-    with core.store.transaction():
+    with core.store.read_snapshot():
+        projection = flow.input_receipt(event_id)
+        assert projection["state"] == "FALLBACK"
+        assert projection["records"][0]["input_sha256"] is None
+        assert not projection["records"][0]["upload_allowed"]
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
     with pytest.raises(CoreError):
         flow.input_receipt(event_id)

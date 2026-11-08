@@ -18,12 +18,11 @@ def test_input_state_never_reopens_expired_or_consumed_upload(core, monkeypatch,
     else:
         core.store.execute('UPDATE jobs SET state=%s WHERE event_id=%s',
                            ("RUNNING" if closed == "running" else "SUCCEEDED", event_id))
-    before = core.store.db.total_changes
-    result = flow.input_receipt(event_id)
-    assert result["state"] == "FALLBACK"
-    assert result["records"][0]["state"] == "MISSING"
-    assert result["records"][0]["upload_allowed"] is False
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        result = flow.input_receipt(event_id)
+        assert result["state"] == "FALLBACK"
+        assert result["records"][0]["state"] == "MISSING"
+        assert result["records"][0]["upload_allowed"] is False
 
 
 def test_input_state_rejects_different_source_upload_hash(core, monkeypatch):
@@ -38,10 +37,9 @@ def test_input_state_rejects_cancelled_source_without_recovery_mutation(core, mo
     flow, _, _, event_id, key = flow_fixture(core, monkeypatch, make_reply=False)
     upload(core, flow, event_id, key)
     core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE event_id=%s", (event_id,))
-    before = core.store.db.total_changes
-    with pytest.raises(CoreError):
-        flow.input_receipt(event_id)
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        with pytest.raises(CoreError):
+            flow.input_receipt(event_id)
 
 
 def test_input_state_selects_asr_node_after_an_enabled_tts_only_node(core, monkeypatch):
@@ -52,9 +50,8 @@ def test_input_state_selects_asr_node_after_an_enabled_tts_only_node(core, monke
         "z_asr": VoiceNode(token="r" * 32, manifest_sha256="b" * 64, capabilities=("asr",)),
     }
     flow, _, _, event_id, key = flow_fixture(core, monkeypatch, make_reply=False, nodes=nodes)
-    before = core.store.db.total_changes
-    assert flow.input_receipt(event_id)["records"][0]["upload_allowed"] is True
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        assert flow.input_receipt(event_id)["records"][0]["upload_allowed"] is True
     upload(core, flow, event_id, key)
     job = core.store.one("SELECT node_id FROM voice_jobs WHERE operation='asr'")
     assert job["node_id"] == "z_asr"

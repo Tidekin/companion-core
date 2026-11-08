@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import sqlite3
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -589,8 +588,15 @@ def test_candidate_vector_cache_does_not_consume_one_sql_variable_per_memory(cor
             query_embed=lambda query: iter([np.asarray([1.0], dtype="<f4")]),
         ),
     )
-    original = core.store.db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 2)
-    try:
-        assert core.memory.index.scores("合成查询", rows[:3]) == {key: 1.0 for key in ids[:3]}
-    finally:
-        core.store.db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, original)
+    fetch = core.store.rows
+    bindings = []
+
+    def observed(statement, params=()):
+        bindings.append(len(params))
+        return fetch(statement, params)
+
+    monkeypatch.setattr(core.store, "rows", observed)
+    for count in (1, 3):
+        assert core.memory.index.scores("合成查询", rows[:count]) == {
+            key: 1.0 for key in ids[:count]}
+    assert bindings == [2, 2]  # Model version and one collection of candidate IDs.

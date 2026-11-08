@@ -43,12 +43,11 @@ def test_wake_missing_purpose_preserves_real_goal_and_steps(core, tmp_path, entr
     })
     activate(core, policy)
     before = core.store.one('SELECT * FROM goals WHERE goal_id=%s', (goal_id,))
-    changes = core.store.db.total_changes
-    assert not invoke(core, entry)
-    assert core.store.one('SELECT * FROM goals WHERE goal_id=%s', (goal_id,)) == before
-    assert core.store.rows("SELECT * FROM goal_steps") == []
-    assert core.store.rows("SELECT * FROM wake_decisions") == []
-    assert core.store.db.total_changes == changes
+    with core.store.read_snapshot():
+        assert not invoke(core, entry)
+        assert core.store.one('SELECT * FROM goals WHERE goal_id=%s', (goal_id,)) == before
+        assert core.store.rows("SELECT * FROM goal_steps") == []
+        assert core.store.rows("SELECT * FROM wake_decisions") == []
 
 
 @pytest.mark.parametrize("entry", ["direct", "selector"])
