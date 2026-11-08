@@ -449,7 +449,10 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
                 assert any(item["role"] == "tool" and "用户喜欢龙井茶" in json.dumps(
                     json.loads(item["content"]), ensure_ascii=False) for item in chat)
                 assert window.attempts() == {"ACK": 6}
-                assert core.store.rows("PRAGMA foreign_key_check") == []
+                assert not core.store.one(
+                    "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+                    "AND NOT convalidated"
+                )
 
     run(scenario())
 
@@ -819,7 +822,7 @@ def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path,
                 elif drift == "unknown":
                     core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
                 else:
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         advance_epoch(core.store)
                 original_usage = core.store.rows(
                     'SELECT * FROM model_usage ORDER BY record_sequence'
@@ -839,7 +842,9 @@ def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path,
     run(scenario())
 
 
-def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(core, tmp_path):
+def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(
+    empty_database, core, tmp_path,
+):
     number, text = 0, "/记住这个：我喜欢龙井茶"
 
     async def source(ws):
@@ -879,7 +884,8 @@ def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(co
                 memory = core.store.one("SELECT * FROM memories")
                 assert memory["status"] == "CONFIRMED"
                 key = Fernet.generate_key()
-                archive, restored = tmp_path / "before-forget.enc", tmp_path / "restored.db"
+                archive = tmp_path / "before-forget.enc"
+                restored_state = tmp_path / "restored-state"
                 backup(core.settings.database, str(archive), key)
                 text = "/忘记这一条 " + memory["memory_id"]
                 await turn()
@@ -888,10 +894,17 @@ def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(co
                 await turn()
                 assert len(sends) == 3
                 assert owner_authority.current(core.store, core.settings, core.clock)
-                restore(str(archive), str(restored), key, core.settings.erasure_ledger)
-                settings = core.settings.model_copy(update={"database": str(restored)})
+                restore(str(archive), empty_database, key, core.settings.erasure_ledger,
+                        state_directory=restored_state)
+                settings = core.settings.model_copy(update={
+                    "database": empty_database, "state_directory": str(restored_state),
+                })
                 with Core(settings, core.model, core.clock) as recovered:
                     assert not recovered.memory.search("龙井茶")
-                    assert recovered.store.rows("PRAGMA foreign_key_check") == []
+                    assert not recovered.store.one(
+                        "SELECT 1 FROM pg_constraint "
+                        "WHERE connamespace=current_schema()::regnamespace "
+                        "AND NOT convalidated"
+                    )
 
     run(scenario())

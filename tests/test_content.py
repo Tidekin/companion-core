@@ -375,7 +375,7 @@ def test_content_erasure_during_vision_discards_late_result(core):
     event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
 
     def erase():
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [event_id], core.clock())
 
     vision.callback = erase
@@ -412,16 +412,22 @@ def test_image_hash_changed_during_vision_cannot_create_false_evidence(core):
     assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
 
 
-def test_content_erasure_and_backup_replay_clear_every_derived_image(core, tmp_path):
+def test_content_erasure_and_backup_replay_clear_every_derived_image(
+    empty_database, core, tmp_path,
+):
     service, _ = enable(core)
     event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
     run(service.analyze_image(event_id, "image:0", png(), "image/png"))
-    key, archive, dest = Fernet.generate_key(), tmp_path / "content.enc", tmp_path / "restored.db"
+    key, archive = Fernet.generate_key(), tmp_path / "content.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         for instance in (core, restored):
             row = instance.store.one("SELECT * FROM content_items")
@@ -432,4 +438,4 @@ def test_content_erasure_and_backup_replay_clear_every_derived_image(core, tmp_p
                 item["redacted"] for item in instance.store.rows("SELECT * FROM observations")
             )
     finally:
-        restored.store.close()
+        restored.close()

@@ -350,7 +350,9 @@ def test_core_restart_keeps_original_window_history_and_attempts(core, tmp_path)
     run(scenario())
 
 
-def test_erasure_and_old_database_replay_clear_history_generated_replies(core, tmp_path):
+def test_erasure_and_old_database_replay_clear_history_generated_replies(
+    empty_database, core, tmp_path,
+):
     async def scenario():
         async with native_continuity(core, tmp_path) as (
             _, _, calls, _, capture_input, finish,
@@ -364,9 +366,10 @@ def test_erasure_and_old_database_replay_clear_history_generated_replies(core, t
                 "event_id"
             ]
             key = Fernet.generate_key()
-            snapshot, restored = tmp_path / "before-erasure.enc", tmp_path / "restored.db"
+            snapshot = tmp_path / "before-erasure.enc"
+            restored_state = tmp_path / "restored-state"
             backup(core.settings.database, snapshot, key)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [source], core.clock())
             assert all(row["content_json"] == "{}" for row in core.store.rows(
                 "SELECT content_json FROM outbox"
@@ -376,8 +379,11 @@ def test_erasure_and_old_database_replay_clear_history_generated_replies(core, t
             # New metadata stores only references/digests, never another plaintext copy.
             metadata = encode(core.store.rows("SELECT snapshots_json FROM agent_conversations"))
             assert "选了茉莉绿茶" not in metadata and "合成回答" not in metadata
-            restore(snapshot, restored, key, core.settings.erasure_ledger)
-            with Core(core.settings.model_copy(update={"database": str(restored)}),
+            restore(snapshot, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
+            with Core(core.settings.model_copy(update={
+                "database": empty_database, "state_directory": str(restored_state),
+            }),
                       core.model, core.clock) as reopened:
                 assert reopened.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                           (source,))["redacted"] == 1

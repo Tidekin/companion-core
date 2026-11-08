@@ -13,6 +13,7 @@ from companion.contracts import CoreError
 from companion.life_protocol import LifeLoopConfig, LifeQZoneSourceGrant, LifeShadowApproval
 from companion.life_topics import _source, authority
 from companion.owner_authority_protocol import OwnerGrantPolicy
+from companion.postgres import Database
 from companion.qzone import select_target
 from companion.qzone_protocol import QZoneTarget
 from companion.reading_protocol import ReadObservation
@@ -177,7 +178,7 @@ def test_expired_queued_target_never_reserves_a_read(core, tmp_path):
     run(scenario())
 
 
-def test_space_draft_uses_only_space_sources_and_native_life_worker(core, tmp_path):
+def test_space_draft_uses_only_space_sources_and_native_life_worker(empty_database, core, tmp_path):
     async def scenario():
         async with environment(core, tmp_path, purposes=("chat", "content", "social"),
                                core_options=options()) as (entry, sends):
@@ -233,24 +234,32 @@ def test_space_draft_uses_only_space_sources_and_native_life_worker(core, tmp_pa
             usage = core.store.one('SELECT * FROM model_usage WHERE job_id=%s',
                                    (result["job_id"],))
             key = Fernet.generate_key()
-            archive, restored_path = tmp_path / "qzone-before-forget.enc", tmp_path / "restored.db"
+            archive = tmp_path / "qzone-before-forget.enc"
+            restored_state = tmp_path / "restored-state"
             backup(core.settings.database, archive, key)
             forgotten = await entry.client.post("/internal/v2/source-grants/"
                 + grant["grant_id"] + "/forget", headers=control)
             assert forgotten.status_code == 200
             assert core.store.one("SELECT text,proposal_json,state FROM life_activity_results") == {
                 "text": "", "proposal_json": "{}", "state": "INVALIDATED"}
-            restore(archive, restored_path, key, core.settings.erasure_ledger)
-            with closing(Store(str(restored_path))) as restored:
-                assert restored.one("SELECT body_json,redacted FROM events WHERE event_id=?",
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
+            with (
+                Database(empty_database) as database,
+                closing(Store(database, restored_state)) as restored,
+            ):
+                assert restored.one("SELECT body_json,redacted FROM events WHERE event_id=%s",
                                     (source_id,)) == {"body_json": "{}", "redacted": 1}
                 assert restored.one(
                     "SELECT text,proposal_json,state FROM life_activity_results") == {
                     "text": "", "proposal_json": "{}", "state": "INVALIDATED"}
-                retained = restored.one("SELECT * FROM model_usage WHERE request_id=?",
+                retained = restored.one("SELECT * FROM model_usage WHERE request_id=%s",
                                         (usage["request_id"],))
                 assert retained["state"] == "SETTLED"
                 assert retained["billed_micro_usd"] == usage["billed_micro_usd"]
-                assert not restored.rows("PRAGMA foreign_key_check")
+                assert not restored.one(
+                    "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+                    "AND NOT convalidated"
+                )
 
     run(scenario())

@@ -26,7 +26,7 @@ from tests.support.observation_capture import enable_observations, observation
 @pytest.mark.parametrize("day_alias", ["20261018", "2026-W42-7"])
 @pytest.mark.parametrize("operation", ["read", "correct"])
 def test_historical_diary_date_aliases_are_erased_live_and_after_restore(
-    core, tmp_path, day_alias, operation
+    empty_database, core, tmp_path, day_alias, operation
 ):
     seed_day(core)
     generate(core)
@@ -46,13 +46,17 @@ def test_historical_diary_date_aliases_are_erased_live_and_after_restore(
     core.store.execute(
         "UPDATE events SET body_json=%s WHERE event_id='evt_test_10'", (encode(legacy_body),)
     )
-    archive, destination = tmp_path / "before-erasure.enc", tmp_path / "restored.db"
+    archive = tmp_path / "before-erasure.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     core.diary.forget(DAY, "10001")
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         copies = {}
@@ -71,7 +75,7 @@ def test_historical_diary_date_aliases_are_erased_live_and_after_restore(
             for label in ("live", "restored")
         }
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def prepare_idle_conversation(core, text="今天计划读一本小说"):
@@ -355,7 +359,7 @@ def seed_completed_legacy_diary_erasure(core):
     }
     with core.ledger.path.open("a", encoding="utf-8") as stream:
         stream.write(encode(record) + "\n")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         target = core.store.one(
             'SELECT entry_id FROM diary_entries WHERE local_date=%s', (DAY.isoformat(),)
         )["entry_id"]
@@ -368,7 +372,7 @@ def seed_completed_legacy_diary_erasure(core):
             (target,),
         )
         for table in ("diary_evidence", "diary_revisions"):
-            core.store.execute(f"DELETE FROM {table} WHERE entry_id=?", (target,))
+            core.store.execute(f"DELETE FROM {table} WHERE entry_id=%s", (target,))
         core.store.execute(
             (
                 "UPDATE diary_runs SET state='CANCELLED',lease_token=NULL,las"
@@ -377,7 +381,7 @@ def seed_completed_legacy_diary_erasure(core):
             (DAY.isoformat(),),
         )
         core.store.execute(
-            'INSERT INTO runtime_meta VALUES (%s,%s)',
+            'INSERT INTO runtime_meta (key,value) VALUES (%s,%s)',
             (f"diary_deleted:{core.settings.timezone}:{DAY}", record["erasure_id"]),
         )
         core.store.execute(
@@ -442,7 +446,9 @@ def assert_legacy_copy_repaired_without_collateral_changes(instance, unchanged):
 
 
 @pytest.mark.parametrize("entrypoint", ["startup", "repeat_forget", "post_delete_backup"])
-def test_already_completed_legacy_erasure_repairs_copies_idempotently(core, tmp_path, entrypoint):
+def test_already_completed_legacy_erasure_repairs_copies_idempotently(
+    empty_database, core, tmp_path, entrypoint,
+):
     unchanged = seed_completed_legacy_diary_erasure(core)
     ledger_bytes = core.ledger.path.read_bytes()
     instance = core
@@ -452,12 +458,16 @@ def test_already_completed_legacy_erasure_repairs_copies_idempotently(core, tmp_
         elif entrypoint == "repeat_forget":
             core.diary.forget(DAY, "10001")
         else:
-            archive, destination = tmp_path / "after-complete.enc", tmp_path / "recovered.db"
+            archive = tmp_path / "after-complete.enc"
+            restored_state = tmp_path / "restored-state"
             key = Fernet.generate_key()
             backup(core.settings.database, archive, key)
-            restore(archive, destination, key, core.settings.erasure_ledger)
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
             instance = Core(
-                core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+                core.settings.model_copy(update={
+                    "database": empty_database, "state_directory": str(restored_state),
+                }), clock=core.clock
             )
         assert_legacy_copy_repaired_without_collateral_changes(instance, unchanged)
         repaired_epoch = instance.store.one(
@@ -473,11 +483,13 @@ def test_already_completed_legacy_erasure_repairs_copies_idempotently(core, tmp_
         assert core.ledger.path.read_bytes() == ledger_bytes
     finally:
         if instance is not core:
-            instance.store.close()
+            instance.close()
 
 
 @pytest.mark.parametrize("command", ["/读日记", "/日记列表"])
-def test_legacy_diary_repair_preserves_newer_independent_readbacks(core, tmp_path, command):
+def test_legacy_diary_repair_preserves_newer_independent_readbacks(
+    empty_database, core, tmp_path, command,
+):
     seed_completed_legacy_diary_erasure(core)
     core.ledger.replay(core.store)
     core.clock.advance(60)
@@ -503,14 +515,18 @@ def test_legacy_diary_repair_preserves_newer_independent_readbacks(core, tmp_pat
     assert_newer_copy_unchanged(core.store)
     core.diary.forget(DAY, "10001")
     assert_newer_copy_unchanged(core.store)
-    archive, destination = tmp_path / "newer-readback.enc", tmp_path / "newer-restored.db"
+    archive = tmp_path / "newer-readback.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         assert_newer_copy_unchanged(restored.store)
     finally:
-        restored.store.close()
+        restored.close()

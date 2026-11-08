@@ -16,6 +16,7 @@ from companion.backup import backup, restore
 from companion.core import Core
 from companion.model import ModelClient
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.core_http import real_core_http
 from tests.support.evaluation_process import process_config
 from tests.support.rem_native import FACT, prepared, response, usage
@@ -56,7 +57,7 @@ def test_rem_native_success_is_private_fiction_with_one_settlement(core, tmp_pat
                     assert await worker.run_once(job_id=job)
                     assert not await worker.run_once(job_id=job)
                     record = rem.records(worker)[0]
-            before_read = core.store.db.total_changes
+            before_read = logical_state(core.store)
             async with real_core_http(core) as port, httpx.AsyncClient(
                 base_url=f"http://127.0.0.1:{port}", trust_env=False,
             ) as client:
@@ -76,7 +77,7 @@ def test_rem_native_success_is_private_fiction_with_one_settlement(core, tmp_pat
             assert "title" not in item and "text" not in item
             assert all(secret not in observed.text for secret in (
                 FACT, DREAM["title"], DREAM["text"], *DREAM["questions"]))
-            assert core.store.db.total_changes == before_read
+            assert logical_state(core.store) == before_read
             assert record["state"] == "SUCCEEDED"
             assert record["kind"] == "FICTION" and record["decision"] == draft["decision"]
             assert all(q["state"] == "UNVERIFIED" for q in record["questions"])
@@ -185,7 +186,9 @@ def test_rem_independent_process_restart_preserves_single_admission(core, tmp_pa
     run(scenario())
 
 
-def test_rem_retention_erases_only_derived_record_and_replays_after_restore(core, tmp_path):
+def test_rem_retention_erases_only_derived_record_and_replays_after_restore(
+    empty_database, core, tmp_path,
+):
     async def scenario():
         async with prepared(core, tmp_path, record_retention_days=1):
             job = rem.schedule_due(core)
@@ -196,14 +199,18 @@ def test_rem_retention_erases_only_derived_record_and_replays_after_restore(core
                           core.clock) as worker:
                     assert await worker.run_once(job_id=job)
             sources = rem.records(core)[0]["source_event_ids"]
-            archive, target = tmp_path / "before.enc", tmp_path / "restore.db"
+            archive = tmp_path / "before.enc"
+            restored_state = tmp_path / "restored-state"
             key = Fernet.generate_key()
             backup(core.settings.database, archive, key)
             settled = usage(core)
             core.clock.advance(2 * 86400)
             core.expire_raw_events()
-            restore(archive, target, key, core.settings.erasure_ledger)
-            cfg = core.settings.model_copy(update={"database": str(target)})
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
+            cfg = core.settings.model_copy(update={
+                "database": empty_database, "state_directory": str(restored_state),
+            })
             with Core(cfg, core.model, core.clock) as restored:
                 for instance in (core, restored):
                     record = rem.records(instance)[0]

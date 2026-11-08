@@ -75,7 +75,7 @@ def test_nightly_own_memory_commit_can_advance_to_diary_and_reflection(
         from companion.memory_work import checkpoint_state
 
         if checkpoint_state(core.store)["batch"].get("phase") == "COMPLETE":
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, ["evt_test_2"], core.clock())
         return result
 
@@ -106,7 +106,7 @@ def test_nightly_crash_resume_reuses_completed_diary(core, monkeypatch):
         assert [scenario for _, scenario in model.calls].count("diary") == 1
         assert [scenario for _, scenario in model.calls].count("reflection") == 1
     finally:
-        restarted.store.close()
+        restarted.close()
 
 
 def test_nightly_resume_after_memory_commit_before_checkpoint(core, monkeypatch):
@@ -144,7 +144,7 @@ def test_nightly_resume_after_memory_commit_before_checkpoint(core, monkeypatch)
         assert [scenario for _, scenario in model.calls].count("memory_extract") == 1
         assert len(core.store.rows("SELECT * FROM memories")) == 1
     finally:
-        restarted.store.close()
+        restarted.close()
 
 
 def test_nightly_waiting_model_does_not_block_chat_or_allow_second_lease(core):
@@ -174,7 +174,7 @@ def test_nightly_waiting_model_does_not_block_chat_or_allow_second_lease(core):
                 == "SUCCEEDED"
             )
         finally:
-            second.store.close()
+            second.close()
             release.set()
         await task
 
@@ -188,7 +188,7 @@ def test_nightly_source_erasure_during_model_discards_result_and_restored_projec
     model = enable_nightly(core)
 
     def forget():
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_2"], core.clock())
 
     model.reflection_callback = forget
@@ -199,21 +199,26 @@ def test_nightly_source_erasure_during_model_discards_result_and_restored_projec
     assert not core.diary.get_day(DAY, "10001")
 
 
-def test_reflection_full_provenance_erasure_after_commit_and_restore(core, tmp_path):
+def test_reflection_full_provenance_erasure_after_commit_and_restore(
+    empty_database, core, tmp_path,
+):
     enable_nightly(core)
     assert run(core.reflections.run_day(DAY))["state"] == "COMMITTED"
-    key, archive, dest = (
+    key, archive, restored_state = (
         Fernet.generate_key(),
         tmp_path / "reflection.enc",
-        tmp_path / "restored.db",
+        tmp_path / "restored-state",
     )
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(
             core.store, ["evt_test_3"], core.clock()
         )  # Unquoted input still counts.
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         for instance in (core, restored):
             assert instance.reflections.recent() == []
@@ -221,7 +226,7 @@ def test_reflection_full_provenance_erasure_after_commit_and_restore(core, tmp_p
             assert row["content"] == "" and row["evidence_json"] == "[]"
             assert run(instance.reflections.run_day(DAY))["state"] == "CANCELLED"
     finally:
-        restored.store.close()
+        restored.close()
 
 
 @pytest.mark.parametrize(

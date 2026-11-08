@@ -32,7 +32,7 @@ def test_affect_explicit_feedback_survives_new_conversation_restart_and_expires(
         assert not reopened.affect.observe("evt_test_1")
         assert len(core.model.calls) == 1  # No polling for decay or snapshots.
     finally:
-        reopened.store.close()
+        reopened.close()
 
 
 def test_affect_unrelated_messages_and_later_dimensions_do_not_extend_old_ttl(core):
@@ -65,16 +65,22 @@ def test_affect_does_not_infer_emotion_personality_or_accept_quoted_external_dir
     )
 
 
-def test_affect_source_erasure_retracts_only_dependent_state_and_survives_restore(core, tmp_path):
+def test_affect_source_erasure_retracts_only_dependent_state_and_survives_restore(
+    empty_database, core, tmp_path,
+):
     core.settings.affect_enabled = True
     ingest(core, 1, "简短一点")
     ingest(core, 2, "分步骤说")
-    key, archive, dest = Fernet.generate_key(), tmp_path / "affect.enc", tmp_path / "restored.db"
+    key, archive = Fernet.generate_key(), tmp_path / "affect.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         for instance in (core, restored):
             assert instance.affect.snapshot()["state"]["interaction_tone"] == "neutral"
@@ -83,7 +89,7 @@ def test_affect_source_erasure_retracts_only_dependent_state_and_survives_restor
                 "SELECT 1 FROM affect_evidence WHERE event_id='evt_test_1'"
             )
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_affect_keeps_cause_prior_state_and_bounded_evidence(core):

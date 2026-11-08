@@ -413,8 +413,9 @@ def test_ordinary_worker_native_missing_job_never_counts_as_cleanup_ack(node):
 
 
 @pytest.mark.parametrize("missing", [True, False])
-def test_real_core_restore_owner_recovery_missing_or_existing_unknown(core, node, tmp_path,
-                                                                   monkeypatch, missing):
+def test_real_core_restore_owner_recovery_missing_or_existing_unknown(
+    empty_database, core, node, tmp_path, monkeypatch, missing,
+):
     from cryptography.fernet import Fernet
 
     from companion.backup import backup, restore
@@ -425,7 +426,8 @@ def test_real_core_restore_owner_recovery_missing_or_existing_unknown(core, node
     from tests.support.voice_node_api import app_for
 
     jobs, message, _, _ = prepared(core, monkeypatch)
-    archive, restored_path = tmp_path / "early.enc", tmp_path / "restored.db"
+    archive = tmp_path / "early.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     if missing:
         backup(core.settings.database, archive, key)
@@ -435,10 +437,13 @@ def test_real_core_restore_owner_recovery_missing_or_existing_unknown(core, node
     jobs.input("local", VoiceLeaseRef.from_lease(lease))
     if not missing:
         backup(core.settings.database, archive, key)
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     config = node[0].model_copy(update={"node_id": "local",
         "credential": type(node[0].credential)(TOKEN)})
-    settings = core.settings.model_copy(update={"database": str(restored_path)})
+    settings = core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    })
     settings.control_token = type(config.credential)("synthetic-owner-control-" * 3)
     with Core(settings, core.model, core.clock) as restored:
         restored_jobs = VoiceJobs(restored.store, settings, core.clock)

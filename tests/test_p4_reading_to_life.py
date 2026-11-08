@@ -118,7 +118,7 @@ def read_item(core, adapter, day, url):
 
 @pytest.mark.parametrize("chain", ["heybox", "bili", "cross-platform"])
 def test_seven_simulated_days_read_interest_diary_share_and_erasure(
-    core, tmp_path, monkeypatch, chain
+    empty_database, core, tmp_path, monkeypatch, chain
 ):
     cfg = core.settings
     cfg.observation_enabled = cfg.goals_enabled = cfg.exploration_enabled = True
@@ -276,11 +276,14 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
         key, archive = Fernet.generate_key(), tmp_path / "synthetic-life-before-erasure.enc"
         backup(cfg.database, archive, key)
         source, fetched, goal_id, message_id, day = records[-1]
-        with active.store.transaction():
+        with active.store.transaction(control_write=True):
             active.ledger.expire_events(active.store, [source], active.clock())
-        destination = tmp_path / "synthetic-life-restored.db"
-        restore(archive, destination, key, cfg.erasure_ledger)
-        restored = Core(cfg.model_copy(update={"database": str(destination)}), clock=active.clock)
+        restored_state = tmp_path / "restored-state"
+        restore(archive, empty_database, key, cfg.erasure_ledger,
+                state_directory=restored_state)
+        restored = Core(cfg.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=active.clock)
         try:
             for instance in (active, restored):
                 for event_id in (source, fetched):
@@ -311,10 +314,17 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
                     )["status"]
                     == "REDACTED"
                 )
-                assert not instance.store.rows("PRAGMA foreign_key_check")
-                assert instance.store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
+                assert not instance.store.one(
+                    "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+                    "AND NOT convalidated"
+                )
+                assert instance.store.schema_capabilities() and not instance.store.one(
+                    "SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+                    "WHERE c.relnamespace=current_schema()::regnamespace "
+                    "AND (NOT i.indisvalid OR NOT i.indisready)"
+                )
         finally:
-            restored.store.close()
+            restored.close()
     finally:
         if active is not core:
-            active.store.close()
+            active.close()

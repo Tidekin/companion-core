@@ -215,7 +215,9 @@ def test_empty_scoped_search_combines_history_with_native_recall_per_input(core,
 
 
 @pytest.mark.parametrize("erased", ["history", "corrected_fact_family"])
-def test_latest_ledger_replay_of_old_combined_backup_cannot_revive_sources(core, tmp_path, erased):
+def test_latest_ledger_replay_of_old_combined_backup_cannot_revive_sources(
+    empty_database, core, tmp_path, erased,
+):
     from companion.core import Core
 
     async def scenario():
@@ -240,20 +242,24 @@ def test_latest_ledger_replay_of_old_combined_backup_cannot_revive_sources(core,
                 else "evt_test_900"
             )
             key = Fernet.generate_key()
-            archive, destination = tmp_path / "before.enc", tmp_path / "restored.db"
+            archive = tmp_path / "before.enc"
+            restored_state = tmp_path / "restored-state"
             backup(core.settings.database, archive, key)
             await window.pause()
             if erased == "history":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [source], core.clock())
             else:
                 changed = core.memory.decide(
                     memory_id, "correct", core.clock(), "新的临时项目代号。"
                 )
                 core.memory.decide(changed["memory_id"], "forget", core.clock())
-            restore(archive, destination, key, core.settings.erasure_ledger)
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
             with Core(
-                core.settings.model_copy(update={"database": str(destination)}),
+                core.settings.model_copy(update={
+                    "database": empty_database, "state_directory": str(restored_state),
+                }),
                 core.model,
                 core.clock,
             ) as recovered:
@@ -619,7 +625,7 @@ def test_five_total_attempt_cap_survives_combined_stages_and_fresh_core(core, tm
                 failed = restarted.store.one("SELECT event_id FROM jobs WHERE state='FAILED'")
                 assert_failure_notice(restarted, failed["event_id"])
             finally:
-                restarted.store.close()
+                restarted.close()
             assert len(calls) == 5
 
     run(scenario())

@@ -223,7 +223,9 @@ def test_rejecting_hypothesis_does_not_erase_an_actual_completed_result(core):
     assert core.store.rows("SELECT * FROM outbox") == []
 
 
-def test_latest_ledger_replay_erases_attributed_goal_but_keeps_independent_source(core, tmp_path):
+def test_latest_ledger_replay_erases_attributed_goal_but_keeps_independent_source(
+    empty_database, core, tmp_path,
+):
     enable_nightly(core)
     core.settings.goals_enabled = True
     suggestion, proposal = reflected_proposal(core)
@@ -232,20 +234,27 @@ def test_latest_ledger_replay_erases_attributed_goal_but_keeps_independent_sourc
     independent = core.goals.propose(
         GoalProposal(topic="独立保留主题", source_event_ids=["evt_test_90"])
     )
-    key, archive, dest = Fernet.generate_key(), tmp_path / "growth.enc", tmp_path / "restore.db"
+    key, archive = Fernet.generate_key(), tmp_path / "growth.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [proposal.source_event_ids[0]], core.clock())
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         assert restored.reflections.recent() == []
         assert [row["goal_id"] for row in restored.goals.recent()] == [independent]
         row = restored.store.one('SELECT redacted FROM goals WHERE goal_id=%s', (derived,))
         assert row["redacted"]
-        assert restored.store.rows("PRAGMA foreign_key_check") == []
+        assert not restored.store.one(
+            "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+            "AND NOT convalidated"
+        )
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_many_independent_reads_on_one_calendar_day_never_stabilize_interest(core):

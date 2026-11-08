@@ -13,6 +13,7 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.consolidation import enable_nightly
 from tests.support.goals import setup_goal
 from tests.support.growth_foundations import complete_read, view
@@ -33,14 +34,14 @@ def test_explicit_feedback_shadow_has_bounded_lifetime_without_enabling_expressi
 ):
     ingest(core, 1, text)
     ingest(core, 2, "引用里说：“" + text + "”")
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     proposal = core.affect.preview("evt_test_1")
     assert proposal["mode"] == "SHADOW" and proposal["namespace"] == "owner.feedback"
     assert proposal["dimension"] == dimension and proposal["new_state"] == value
     assert proposal["event_id"] == "evt_test_1" and proposal["expires_at"]
     assert core.affect.preview("evt_test_2") is None
     assert core.affect.snapshot()["state"] == NEUTRAL
-    assert core.store.db.total_changes == before and not core.model.calls
+    assert logical_state(core.store) == before and not core.model.calls
     core.clock.advance(core.settings.affect_decay_minutes * 60)
     assert core.affect.preview("evt_test_1") is None
 
@@ -74,6 +75,7 @@ def test_retained_demo_results_do_not_become_live_personality_evidence(core):
 
 @pytest.mark.parametrize("inspect_first", [True, False])
 def test_reflection_transitive_expiry_prevents_read_or_decision_and_survives_restore(
+    empty_database,
     core, tmp_path, inspect_first
 ):
     core.settings.raw_event_retention_days = 2
@@ -90,7 +92,8 @@ def test_reflection_transitive_expiry_prevents_read_or_decision_and_survives_res
     assert run(core.reflections.run_day(day))["state"] == "COMMITTED"
     suggestion = core.reflections.recent()[0]["suggestion_id"]
     assert core.reflections.decide(suggestion, "ACCEPT_AS_HYPOTHESIS")
-    key, archive, dest = Fernet.generate_key(), tmp_path / "reflection.enc", tmp_path / "restore.db"
+    key, archive = Fernet.generate_key(), tmp_path / "reflection.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     # Only the upstream event expires; the derived result is still recent.
     core.clock.advance(2)
@@ -98,8 +101,11 @@ def test_reflection_transitive_expiry_prevents_read_or_decision_and_survives_res
         assert core.reflections.recent() == []
     with pytest.raises(CoreError, match="REFLECTION_NOT_FOUND"):
         core.reflections.decide(suggestion, "ACCEPT_AS_HYPOTHESIS")
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         assert restored.reflections.recent() == []
         assert restored.store.one("SELECT redacted FROM events WHERE event_id='obs_test_1'")[
@@ -107,7 +113,7 @@ def test_reflection_transitive_expiry_prevents_read_or_decision_and_survives_res
         ]
         assert restored.store.rows("SELECT * FROM reflection_evidence") == []
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_owner_can_veto_reflection_without_mutating_facts_traits_or_permissions(core):

@@ -15,6 +15,7 @@ from companion.store import encode
 from companion.timeline import recent_timeline
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.confirmed_memory import remember
 from tests.support.diary import DAY, generate, seed_day
 from tests.support.exploration import configure, discover
@@ -37,13 +38,13 @@ def timeline(core, **kwargs):
 
 def test_feedback_shadow_is_readonly_and_disabled_never_changes_expression(core):
     ingest(core, 1, "简短一点")
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     proposal = core.affect.preview("evt_test_1")
     assert proposal["namespace"] == "owner.feedback" and proposal["mode"] == "SHADOW"
     assert proposal["reason_code"] == "OWNER_REQUESTED_CONCISE"
     assert core.affect.snapshot()["state"] == NEUTRAL
     assert not core.affect.observe("evt_test_1")
-    assert core.store.db.total_changes == before and not core.model.calls
+    assert logical_state(core.store) == before and not core.model.calls
 
 
 @pytest.mark.parametrize("mutation", ["privacy", "conversation", "type", "actor", "control"])
@@ -115,10 +116,10 @@ def test_distinct_readings_on_distinct_days_explain_and_expire_without_worker(co
     item = view(core)["self.interest"][0]
     assert item["status"] == "STABLE" and item["independent_days"] == 3
     assert {r["event_id"] for r in item["evidence"]} == {"obs_test_1", "obs_test_2", "obs_test_3"}
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     core.clock.advance(core.settings.raw_event_retention_days * 86400 + 1)
     assert view(core)["self.interest"] == []
-    assert core.store.db.total_changes == before  # Read path retracts stale derived projection.
+    assert logical_state(core.store) == before  # Read path retracts stale derived projection.
 
 
 def test_unfinished_or_owner_commitment_never_counts_as_self_interest(core):
@@ -150,7 +151,7 @@ def test_timeline_rebuilds_from_originals_and_never_calls_or_queues(core):
     core.store.execute(
         "UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=%s", (uncertain,)
     )
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     result = timeline(core)
     item = result["items"][0]
     assert item["subject"] == "owner" and item["evidence_level"] == "RECEIVED"
@@ -158,7 +159,7 @@ def test_timeline_rebuilds_from_originals_and_never_calls_or_queues(core):
     assert any(r.get("excerpt") == "天文已回复" for r in item["replies"])
     assert all("excerpt" not in r for r in item["replies"] if r["state"] != "SENT")
     assert "不应作为已发生的回答" not in encode(result)
-    assert timeline(core) == result and core.store.db.total_changes == before
+    assert timeline(core) == result and logical_state(core.store) == before
     assert not result["auto_share"] and not core.model.calls
     assert timeline(core, days=1)["items"]
     with pytest.raises(CoreError, match="INVALID_TIMELINE"):
@@ -199,14 +200,14 @@ def test_shadow_share_is_explicit_readonly_private_and_not_a_send_permission(cor
         payload={"title": "开发进展", "text": "天文游戏开发新进展"},
     )
     core.observations.append("heybox", item)
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     shadow = core.social.preview(item.event_id, core.settings.owner_qq_id)
     assert shadow["mode"] == "SHADOW" and shadow["evidence_level"] == "FETCHED"
     assert shadow["reason_code"] == "OUTBOUND_DISABLED_OR_PAUSED" and not shadow["auto_share"]
-    assert core.store.db.total_changes == before and not core.social.flush()
+    assert logical_state(core.store) == before and not core.social.flush()
     assert core.store.rows("SELECT * FROM social_candidates") == []
     assert core.store.rows("SELECT * FROM outbox") == [] and not core.model.calls
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [item.event_id], core.clock())
     assert core.social.preview(item.event_id, core.settings.owner_qq_id) is None
 
@@ -231,18 +232,24 @@ def test_private_views_require_control_auth_and_current_sources(core):
         profile(core.store, core.settings, core.clock(), "other")
 
 
-def test_diary_natural_day_idempotence_and_latest_ledger_retract_all_views(core, tmp_path):
+def test_diary_natural_day_idempotence_and_latest_ledger_retract_all_views(
+    empty_database, core, tmp_path,
+):
     seed_day(core, ["天文讨论一", "天文讨论二", "天文讨论三"])
     assert generate(core)["state"] == "COMMITTED"
     original = core.diary.schedule_day(DAY)
     assert core.diary.schedule_day(DAY) == original
     assert not run(core.diary.generate_once("second-worker"))
     assert len(core.diary.model.calls) == 1
-    key, archive, dest = Fernet.generate_key(), tmp_path / "growth.enc", tmp_path / "restore.db"
+    key, archive = Fernet.generate_key(), tmp_path / "growth.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     core.diary.forget(DAY, core.settings.owner_qq_id)
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    reopened = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    reopened = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         assert reopened.diary.get_day(DAY, core.settings.owner_qq_id) is None
         assert reopened.diary.schedule_day(DAY) is None
@@ -250,7 +257,7 @@ def test_diary_natural_day_idempotence_and_latest_ledger_retract_all_views(core,
         assert reopened.store.rows("SELECT * FROM diary_revisions") == []
         assert reopened.store.rows("SELECT * FROM outbox") == []
     finally:
-        reopened.store.close()
+        reopened.close()
 
 
 def test_discovered_titles_alone_do_not_fund_a_diary_of_completed_reads(core):
@@ -277,7 +284,9 @@ def test_discovered_titles_alone_do_not_fund_a_diary_of_completed_reads(core):
     assert core.diary.schedule_day(date(2026, 10, 18))
 
 
-def test_shadow_and_timeline_retain_revoked_read_history_but_forget_replays(core, tmp_path):
+def test_shadow_and_timeline_retain_revoked_read_history_but_forget_replays(
+    empty_database, core, tmp_path,
+):
     grant = prepare(core)
     source = accepted(core, grant)
     core.observations.grants.revoke(grant.grant_id)
@@ -287,22 +296,23 @@ def test_shadow_and_timeline_retain_revoked_read_history_but_forget_replays(core
         core.store, core.settings, core.clock(), core.settings.owner_qq_id, topic="Source-grant"
     )
     assert result["items"][0]["event_id"] == source
-    before = core.store.db.total_changes
-    core.store.execute("PRAGMA query_only=ON")
-    try:
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
         assert core.social.preview(source, core.settings.owner_qq_id)
         assert view(core)["self.interest"] == []
         assert recent_timeline(
             core.store, core.settings, core.clock(), core.settings.owner_qq_id, topic="Source-grant"
         )["items"]
-        assert core.store.db.total_changes == before
-    finally:
-        core.store.execute("PRAGMA query_only=OFF")
-    key, archive, dest = Fernet.generate_key(), tmp_path / "grant.enc", tmp_path / "restore.db"
+        assert logical_state(core.store) == before
+    key, archive = Fernet.generate_key(), tmp_path / "grant.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     core.observations.grants.forget(grant.grant_id, core.ledger)
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    reopened = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    reopened = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         assert reopened.social.preview(source, core.settings.owner_qq_id) is None
         assert (
@@ -317,7 +327,7 @@ def test_shadow_and_timeline_retain_revoked_read_history_but_forget_replays(core
         )
         assert not reopened.store.rows("SELECT * FROM outbox")
     finally:
-        reopened.store.close()
+        reopened.close()
 
 
 def test_core_context_and_life_explanation_recheck_stale_interest_sources(core, monkeypatch):
@@ -415,7 +425,7 @@ def test_private_growth_responses_never_cache_and_forget_updates_current_respons
         before = client.get(path, headers=owner)
         assert before.status_code == 200 and before.json()[field]
         assert before.headers.get("Cache-Control") == "no-store"
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(
                 core.store, ["evt_test_1", "evt_test_2", "obs_test_10"], core.clock()
             )

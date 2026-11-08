@@ -13,6 +13,7 @@ from companion.core import Core
 from companion.growth import ExpressionLearning
 from companion.store import encode
 from tests.conftest import ingest
+from tests.postgres_fixture import logical_state
 from tests.support.next_life_growth import feedback_days, snapshot
 
 
@@ -41,8 +42,8 @@ def test_short_state_decays_but_cross_day_candidate_rebuilds_without_indexes(cor
     core.settings.affect_enabled = True
     feedback_days(core)
     expected = snapshot(core)
-    before = core.store.db.total_changes
-    assert snapshot(core) == expected and core.store.db.total_changes == before
+    before = logical_state(core.store)
+    assert snapshot(core) == expected and logical_state(core.store) == before
     assert core.affect.snapshot()["state"]["interaction_tone"] == "concise"
     core.clock.advance(181 * 60)
     assert core.affect.snapshot()["state"] == NEUTRAL
@@ -73,20 +74,26 @@ def test_latest_contrary_feedback_restarts_learning_instead_of_being_outvoted(co
     assert snapshot(core)["items"][0]["independent_days"] == 1
 
 
-def test_withdrawal_rebuild_and_old_backup_replay_preserve_independent_feedback(core, tmp_path):
+def test_withdrawal_rebuild_and_old_backup_replay_preserve_independent_feedback(
+    empty_database, core, tmp_path,
+):
     feedback_days(core)
     prior = snapshot(core)
-    key, archive, destination = Fernet.generate_key(), tmp_path / "growth.enc", tmp_path / "old.db"
+    key, archive = Fernet.generate_key(), tmp_path / "growth.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     updated = snapshot(core)
     assert updated["version"] != prior["version"]
     assert updated["items"][0]["status"] == "EMERGING"
     assert updated["items"][0]["independent_days"] == 6
     assert "evt_test_1\"" not in encode(updated)
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    with Core(core.settings.model_copy(update={"database": str(destination)}),
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }),
               clock=core.clock) as restored:
         assert snapshot(restored) == updated
     core.clock.advance(core.settings.raw_event_retention_days * 86400)
@@ -161,11 +168,11 @@ def test_truncation_is_visible_and_never_promotes_partial_scan(core, monkeypatch
 def test_projection_requires_owner_and_never_writes(core):
     ingest(core, 1, "简短一点")
     service = ExpressionLearning(core.store, core.settings, core.clock)
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     with pytest.raises(CoreError, match="OWNER_REQUIRED"):
         service.snapshot("10003")
     snapshot(core)
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
 
 
 def test_higher_evidence_requirement_cannot_skip_emerging_stage(core):

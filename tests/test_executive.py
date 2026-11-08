@@ -1,5 +1,6 @@
 import json
 import os
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from companion.executive_protocol import (
 )
 from companion.executor_budget_proxy import create_budget_proxy
 from companion.executor_gateway import FileExecutor, create_executor_app, receipt
+from companion.postgres import Database
 from companion.privacy import advance_epoch
 from tests.conftest import run
 from tests.support.executive import TOKEN, FakeExecutor, configured, envelope, proposal
@@ -222,7 +224,9 @@ def test_erasure_hook_redacts_scope_approval_and_evidence(core):
         executive.submit(proposal(capability="windows.write_text", text="private draft"))
 
 
-def test_restore_revokes_queued_approval_and_running_becomes_unknown(core, tmp_path):
+def test_restore_revokes_queued_approval_and_running_becomes_unknown(
+    empty_database, core, tmp_path,
+):
     from cryptography.fernet import Fernet
 
     from companion.backup import backup, restore
@@ -235,30 +239,31 @@ def test_restore_revokes_queued_approval_and_running_becomes_unknown(core, tmp_p
     executive.decide(
         second["task_id"], ToolDecision(decision="APPROVE", scope_sha256=second["scope_sha256"])
     )
-    key, archive, destination = (
+    key, archive, restored_state = (
         Fernet.generate_key(),
         tmp_path / "tools.enc",
-        tmp_path / "restore.db",
+        tmp_path / "restored-state",
     )
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    restored = Store(destination)
-    try:
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as restored,
+    ):
         assert (
-            restored.one("SELECT state FROM tool_tasks WHERE task_id=?", (first["task_id"],))[
+            restored.one("SELECT state FROM tool_tasks WHERE task_id=%s", (first["task_id"],))[
                 "state"
             ]
             == "UNKNOWN"
         )
         assert (
-            restored.one("SELECT state FROM tool_tasks WHERE task_id=?", (second["task_id"],))[
+            restored.one("SELECT state FROM tool_tasks WHERE task_id=%s", (second["task_id"],))[
                 "state"
             ]
             == "CANCELLED"
         )
         assert restored.one("SELECT revoked_at FROM tool_approvals")["revoked_at"]
-    finally:
-        restored.close()
 
 
 def test_receipt_digest_and_task_identity_are_checked(core):
@@ -634,8 +639,8 @@ def test_open_file_retains_original_object_and_windows_holds_parent(tmp_path):
 def test_executive_worker_has_dedicated_single_instance_lock(tmp_path):
     from companion.worker_lock import single_worker
 
-    database = tmp_path / "worker.db"
-    with single_worker(database, "executive-worker"), single_worker(database, "worker"):
+    state_directory = tmp_path / "state"
+    with single_worker(state_directory, "executive-worker"), single_worker(state_directory):
         with pytest.raises(CoreError, match="WORKER_ALREADY_RUNNING"):
-            with single_worker(database, "executive-worker"):
+            with single_worker(state_directory, "executive-worker"):
                 pass

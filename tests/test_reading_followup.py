@@ -250,7 +250,7 @@ def test_followup_never_overrides_revocation(core, tmp_path, monkeypatch, change
             elif change == "new_turn":
                 await admit(client, core, config, plan, 3, "先聊别的")
             elif change == "epoch":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     advance_epoch(core.store)
             elif change == "expired":
                 core.clock.advance(31)
@@ -278,7 +278,7 @@ def test_followup_never_overrides_revocation(core, tmp_path, monkeypatch, change
 
 
 def test_erasure_replay_removes_followup_authority_without_erasing_new_input(
-    core, tmp_path, monkeypatch,
+    empty_database, core, tmp_path, monkeypatch,
 ):
     async def scenario():
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
@@ -287,7 +287,8 @@ def test_erasure_replay_removes_followup_authority_without_erasing_new_input(
             await lease(client)
             latest, _ = await admit(client, core, config, plan, 2, "继续看看")
             await select_read(core)
-            archive, destination = tmp_path / "followup.enc", tmp_path / "restored.db"
+            archive = tmp_path / "followup.enc"
+            restored_state = tmp_path / "restored-state"
             key = Fernet.generate_key()
             backup(core.settings.database, archive, key)
             response = await client.post(
@@ -295,8 +296,11 @@ def test_erasure_replay_removes_followup_authority_without_erasing_new_input(
                 config, plan, core.clock.now, number=1,
             ))
             assert response.status_code == 200, response.text
-            restore(archive, destination, key, core.settings.erasure_ledger)
-            with Core(core.settings.model_copy(update={"database": str(destination)}),
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
+            with Core(core.settings.model_copy(update={
+                "database": empty_database, "state_directory": str(restored_state),
+            }),
                       clock=core.clock) as restored:
                 assert followup_item(restored.store, restored.settings, latest["event_id"],
                                      clock=restored.clock) is None

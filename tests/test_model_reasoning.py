@@ -104,20 +104,26 @@ def test_reasoning_redacts_credentials_before_storage_and_readback(core, tmp_pat
     assert item["reasoning"]["redacted"] and secret not in json.dumps(item)
 
 
-def test_reasoning_source_erasure_scrubs_snapshots_and_preserves_accounting(core, tmp_path):
+def test_reasoning_source_erasure_scrubs_snapshots_and_preserves_accounting(
+    empty_database, core, tmp_path,
+):
     capture, job, usage, _ = reasoning_chat(core, tmp_path)
     before = core.store.rows("SELECT * FROM model_usage")
-    archive, target = tmp_path / "reasoning.enc", tmp_path / "restore.db"
+    archive = tmp_path / "reasoning.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [capture.event_id], core.clock())
     assert core.store.one('SELECT conversation_json FROM agent_conversations WHERE job_id=%s',
                           (job["job_id"],))["conversation_json"] is None
     assert core.store.rows("SELECT * FROM model_usage") == before
     assert CognitionRead(core).page("model", record_id=usage[0]["request_id"])["items"] == []
-    restore(archive, target, key, core.settings.erasure_ledger)
-    with Core(core.settings.model_copy(update={"database": str(target)}), core.model,
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), core.model,
               core.clock) as restored:
         assert restored.store.one((
             'SELECT conversation_json FROM agent_conversations WHERE '

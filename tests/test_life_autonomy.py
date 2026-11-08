@@ -11,6 +11,7 @@ from companion.core import Core
 from companion.life_context import decision_context
 from companion.life_protocol import LifeDecision, LifeLoopConfig
 from companion.store import encode
+from tests.postgres_fixture import logical_state
 from tests.support.goals import result_for, setup_goal
 from tests.support.growth_foundations import complete_read
 
@@ -28,7 +29,7 @@ def test_guidance_uses_only_current_source_closure_and_has_no_write_or_clock(cor
     core.store.execute("UPDATE goals SET topic='其他私人兴趣' WHERE goal_id IN "
                        "(SELECT goal_id FROM goal_evidence WHERE event_id='evt_test_2')")
     revision = core.store.one("SELECT version_num FROM alembic_version")["version_num"]
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     for ids in (["evt_test_1"], ["obs_test_1"], ["evt_test_1", "obs_test_2"]):
         view = context(core, ids)
         assert view["self_interests"] == []
@@ -40,9 +41,12 @@ def test_guidance_uses_only_current_source_closure_and_has_no_write_or_clock(cor
     assert "其他私人兴趣" not in encode(view)
     core.clock.advance(60)
     assert context(core, ["evt_test_1", "obs_test_1"]) == view
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     assert core.store.one("SELECT version_num FROM alembic_version")["version_num"] == revision
-    assert core.store.rows("PRAGMA foreign_key_check") == []
+    assert not core.store.one(
+        "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+        "AND NOT convalidated"
+    )
 
 
 @pytest.mark.parametrize("mutation", ["failed", "unknown", "withdrawn", "discovered", "empty_hash"])
@@ -54,7 +58,7 @@ def test_unfinished_or_invalid_receipts_never_supply_guidance(core, mutation):
         core.store.execute('UPDATE goals SET state=%s WHERE goal_id=%s',
                            ("FAILED" if mutation == "failed" else "WAITING_INPUT", goal))
     elif mutation == "withdrawn":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     elif mutation == "discovered":
         core.store.execute("UPDATE observations SET result_status='DISCOVERED'")
@@ -90,20 +94,26 @@ def test_interest_provenance_and_completion_commit_atomically(core, monkeypatch)
     assert len(core.store.rows("SELECT * FROM trait_evidence")) == 1
 
 
-def test_latest_erasure_ledger_removes_guidance_from_an_older_backup(core, tmp_path):
+def test_latest_erasure_ledger_removes_guidance_from_an_older_backup(
+    empty_database, core, tmp_path,
+):
     core.settings.life_loop = LifeLoopConfig(autonomy_enabled=True)
     core.settings.memory_enabled = True
     complete_read(core, 1, "https://example.org/scoped")
     ids = ["evt_test_1", "obs_test_1"]
     assert context(core, ids)["autonomy_guidance"]["depth_control"]
-    archive, destination = tmp_path / "before.enc", tmp_path / "restored.db"
+    archive = tmp_path / "before.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [ids[0]], core.clock())
     assert context(core, ids)["autonomy_guidance"]["depth_control"] == []
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    with Core(core.settings.model_copy(update={"database": str(destination)}),
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }),
               clock=core.clock) as restored:
         assert context(restored, ids)["autonomy_guidance"]["depth_control"] == []
         assert restored.store.rows("SELECT * FROM trait_evidence") == []

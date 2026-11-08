@@ -126,7 +126,7 @@ def test_observation_replay_concurrent_idempotency_and_conflict(core):
         try:
             return instance.observations.append("reader", item)
         finally:
-            instance.store.close()
+            instance.close()
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(append_once, range(20)))
@@ -135,7 +135,7 @@ def test_observation_replay_concurrent_idempotency_and_conflict(core):
         core.observations.append("reader", observation(core, text="同 ID 不同内容"))
 
 
-def test_observation_source_erasure_transitive_closure_and_restore(core, tmp_path):
+def test_observation_source_erasure_transitive_closure_and_restore(empty_database, core, tmp_path):
     enable_observations(core)
     ingest(core, 100, "可以围绕这个主题读一篇文章")
     core.observations.append("reader", observation(core, 1, source_event_ids=["evt_test_100"]))
@@ -144,14 +144,17 @@ def test_observation_source_erasure_transitive_closure_and_restore(core, tmp_pat
     key, archive = Fernet.generate_key(), tmp_path / "observations.enc"
     backup(core.settings.database, archive, key)
     stale = observation(core, 4, source_event_ids=["obs_test_2"])
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_100"], core.clock())
     with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
         core.observations.append("reader", stale)
-    destination = tmp_path / "restored.db"
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restored_state = tmp_path / "restored-state"
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         for instance in (core, restored):
@@ -166,7 +169,7 @@ def test_observation_source_erasure_transitive_closure_and_restore(core, tmp_pat
                     "reader", observation(instance, 1, source_event_ids=["evt_test_100"])
                 )
     finally:
-        restored.store.close()
+        restored.close()
 
 
 @pytest.mark.parametrize("end", ["expired", "revoked", "wrong-device", "disabled"])
@@ -221,21 +224,24 @@ def test_observation_tokens_are_independent_and_never_persist_in_content(core):
         core.observations.append("reader", observation(core, source_event_ids=["evt_test_200"]))
 
 
-def test_restoring_backup_never_restores_device_permission(core, tmp_path):
+def test_restoring_backup_never_restores_device_permission(empty_database, core, tmp_path):
     enable_observations(core, "camera", media=True)
     core.settings.camera_enabled = True
     grant = core.observations.consents.grant(
         ConsentRequest(capabilities=["camera.observe"], device_id="camera", session_id="one")
     )
-    key, archive, destination = (
+    key, archive, restored_state = (
         Fernet.generate_key(),
         tmp_path / "grant.enc",
-        tmp_path / "restored.db",
+        tmp_path / "restored-state",
     )
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         with pytest.raises(CoreError, match="CONSENT_REQUIRED"):
@@ -243,7 +249,7 @@ def test_restoring_backup_never_restores_device_permission(core, tmp_path):
                 grant["consent_id"], "camera.observe", "camera", "one"
             )
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_adapter_configuration_environment_validation(core, monkeypatch, tmp_path):

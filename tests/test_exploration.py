@@ -1,6 +1,7 @@
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from threading import Barrier
 
 import httpx
@@ -13,6 +14,7 @@ from companion.contracts import CoreError, LeaseRequest
 from companion.core import Core
 from companion.exploration import ReadItem, ReadResult, content_target
 from companion.observation import ObservationEvent
+from companion.postgres import Database
 from companion.privacy import epoch
 from companion.store import Store
 from companion.transport import begin_send, lease_deliveries
@@ -153,7 +155,9 @@ def test_discovery_generates_no_tools_from_injected_text(core):
     assert not core.model.calls
 
 
-def test_erase_during_read_rejects_old_output_and_restore_clears_sources(core, tmp_path):
+def test_erase_during_read_rejects_old_output_and_restore_clears_sources(
+    empty_database, core, tmp_path,
+):
     configure(core)
     result, _ = discover(core)
     _, item = read_goal(core)
@@ -161,7 +165,7 @@ def test_erase_during_read_rejects_old_output_and_restore_clears_sources(core, t
     archive = tmp_path / "before-read.bin"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [secret_source], core.clock())
     with pytest.raises(CoreError):
         core.exploration.complete(
@@ -174,14 +178,15 @@ def test_erase_during_read_rejects_old_output_and_restore_clears_sources(core, t
                 items=[ReadItem(title="旧内容", text="旧资料", url=URL)],
             ),
         )
-    restored = tmp_path / "restore.db"
-    restore(archive, restored, key, core.settings.erasure_ledger)
-    s = Store(str(restored))
-    try:
+    restored_state = tmp_path / "restored-state"
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as s,
+    ):
         assert s.one("SELECT * FROM goals")["topic"] == ""
         assert all(row["url"] == "" for row in s.rows("SELECT * FROM exploration_requests"))
-    finally:
-        s.close()
 
 
 def test_sharing_uses_same_outbox_and_common_proactive_limit(core, monkeypatch):

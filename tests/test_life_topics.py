@@ -15,6 +15,7 @@ from companion.life_protocol import LifeLoopConfig
 from companion.store import encode
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.life_topics import assert_no_delivery, bug, configure, due, proposal
 
 
@@ -24,7 +25,7 @@ def test_off_and_empty_short_circuit_before_model(core):
     assert core.life_topics.schedule() is None
     assert core.store.rows("SELECT * FROM life_topics") == []
     configure(core)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert core.life_topics.schedule() is None
     assert not core.model.calls
@@ -80,7 +81,7 @@ def test_inflight_change_rejects_stale_shadow_without_refunding_usage(core, chan
         elif change == "off":
             core.settings.life_loop = LifeLoopConfig()
         elif change == "delete":
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
         elif change == "expiry":
             core.clock.advance(8 * 86400)
@@ -154,7 +155,7 @@ def test_preview_is_uncached_authorized_and_read_only_before_any_topic_write(cor
     app = create_app(core.settings)
     app.state.core = core
     client = TestClient(app)
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     assert client.get("/internal/v2/life/topics").status_code == 401
     result = client.get(
         "/internal/v2/life/topics",
@@ -165,7 +166,7 @@ def test_preview_is_uncached_authorized_and_read_only_before_any_topic_write(cor
     assert result.status_code == 200 and result.headers["Cache-Control"] == "no-store"
     assert result.json()["candidate_sources"][0]["event_id"] == "evt_test_1"
     assert result.json()["items"] == []
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     assert_no_delivery(core)
 
 
@@ -257,23 +258,29 @@ def test_expired_running_lease_is_failed_without_paid_replay(core):
     assert not core.model.calls
 
 
-def test_source_changed_after_generation_hides_text_and_erasure_replays_old_backup(core, tmp_path):
+def test_source_changed_after_generation_hides_text_and_erasure_replays_old_backup(
+    empty_database, core, tmp_path,
+):
     bug(core)
     proposal(core)
     job = due(core)
     assert run(core.run_once(job_id=job))
-    key, archive, destination = Fernet.generate_key(), tmp_path / "life.enc", tmp_path / "old.db"
+    key, archive = Fernet.generate_key(), tmp_path / "life.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     core.store.execute(
         "UPDATE events SET body_json=%s WHERE event_id='evt_test_1'",
         (encode({"text": "来源已改写"}),),
     )
     assert not core.life_topics.preview(core.settings.owner_qq_id)["items"][0]["results"]
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     with Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     ) as old:
         assert not old.store.rows("SELECT * FROM life_activity_results WHERE text<>''")
         assert old.store.one("SELECT state FROM life_topics")["state"] == "EXPIRED"
