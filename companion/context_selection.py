@@ -52,6 +52,13 @@ def focus(current, sources, *, shared=False):
     return terms(current)
 
 
+def history_text(source, turn):
+    """Rank the authorized owner/source content, including expanded attachments."""
+    return "\n".join([source.get("user_text", ""), *[
+        message["content"] for message in turn
+        if message["role"] == "user" and isinstance(message["content"], str)]])
+
+
 def share_continuation(text):
     """Only current owner text supplies discourse cues, never image/OCR text."""
     return not _NEW_TOPIC.search(text) and bool(_SHARE_BACKREF.search(text))
@@ -104,24 +111,25 @@ def drop_order(groups):
                   key=lambda group: (group["priority"], group["wire_start"]))
 
 
-def protected_recent(settings, sources, turns, current_input, scenario):
-    """Keep a bounded tail of complete pairs alongside the current input.
+def protected_recent(settings, sources, turns, current_input, scenario, *, query="", required=()):
+    """Protect relevant recent source groups within the complete required request.
 
     Pending inputs do not consume the pair count. Oversized pairs remain optional;
     static rules, attached media and actual tools still face full hard admission.
     """
+    from companion.context_planner import pressure
     from companion.token_measurement import measure_request
 
     pairs = [(source, turn) for source, turn in zip(sources, turns, strict=True)
              if source.get("reply_text") and source.get("reply_complete") is not False]
     retained, messages = set(), list(current_input)
+    continuation = not query.strip() or bool(_CONTINUATION.fullmatch(query.strip()))
+    topic = focus(query, sources)
     for source, turn in reversed(pairs[-settings.recent_protected_turns:]):
-        # turn_messages prepends source references (cards, quotes or observations)
-        # to the pair. Keep that richer group atomic under its normal budget.
-        if len(turn) != 2:
+        if not continuation and relevance(topic, history_text(source, turn)) != RELATED:
             continue
-        measured = measure_request(settings, [*turn, *messages], scenario)
-        if measured.reserved_input_tokens <= settings.context_soft_tokens:
+        measured = measure_request(settings, [*required, *turn, *messages], scenario)
+        if pressure(settings, measured, scenario=scenario) is None:
             retained.add(source["event_id"])
             messages = [*turn, *messages]
     return retained

@@ -1159,7 +1159,9 @@ class Core(Runtime):
                     proofs=[{"kind": "account_actions", "proof": actions["proof"]}])
         mark("context_memory")
         turns = [dialogue_history.turn_messages(source, s, text) for source in sources]
-        recalled = None
+        recalled = recalled_reference = None
+        recalled_history = []
+        history_order = {source["event_id"]: i for i, source in enumerate(sources)}
         if (job["kind"] == "chat" and authority and not bounded_text and text and not scoped_share
                 and cfg.memory_enabled and permitted("memory")
                 and "history" in authority.policy.purposes):
@@ -1169,17 +1171,27 @@ class Core(Runtime):
             # dialogue first; episode continuation then uses what remains.
             scope = authority.policy.history
             recalled = turn_recall.reference(
-                s, cfg, job, text, {source["event_id"] for source in sources},
+                s, cfg, job, text, set(),
                 lambda ids: available(ids, "memory"), ranked_ids=turn_ranking,
-                max_turns=scope.max_turns - len(sources),
-                max_bytes=int(cfg.turn_recall_history_share * (
-                    scope.max_utf8_bytes - sum(len(message["content"].encode())
-                                               for turn in turns for message in turn))))
+                max_turns=scope.max_turns, max_bytes=scope.max_utf8_bytes,
+                history_costs={source["event_id"]: sum(len(message["content"].encode())
+                                                      for message in turn)
+                               for source, turn in zip(sources, turns, strict=True)})
             if recalled:
+                # Deduplicate only against an original that is actually selected
+                # and required through SDK continuation and checkpoint restore.
+                recalled_history = [(source, turn)
+                    for source, turn in zip(sources, turns, strict=True)
+                    if source["event_id"] in recalled["event_ids"]]
+                remaining = [(source, turn) for source, turn in zip(sources, turns, strict=True)
+                             if source["event_id"] not in recalled["event_ids"]]
+                sources, turns = ([source for source, _ in remaining],
+                                  [turn for _, turn in remaining])
                 # These bounded, authorized originals carry attribution and uncertainty
                 # that a later tool summary need not repeat. Keep their source group
                 # through SDK continuations; full paid admission still enforces hard caps.
-                selection.add(turn_recall.HEADING, recalled["data"], recalled["event_ids"],
+                recalled_reference = selection.add(
+                    turn_recall.HEADING, recalled["data"], recalled["event_ids"],
                     priority=context_selection.RELATED, required=True, module="memory",
                     proofs=[{"kind": "memory", "proof": self.memory_context.pin(
                         self.clock(), event_ids=set(recalled["event_ids"]))}])
@@ -1282,17 +1294,47 @@ class Core(Runtime):
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and hits
         )
         preserve = bool(protected or continuation)
+        full_recalled = set()
+        if recalled and {source["event_id"] for source, _ in recalled_history} == set(
+            recalled["event_ids"]
+        ):
+            from companion.context_planner import pressure
+            from companion.token_measurement import measure_request
+
+            # Prefer complete recent originals when the entire required request
+            # fits. Under pressure the already-pinned bounded representation wins.
+            required = [rules, *[ref for ref in references
+                if ref is not recalled_reference and (preserve or id(ref) in selection.required)],
+                *[message for source, turn in zip(sources, turns, strict=True)
+                  if preserve or source.get("reply_complete") is False for message in turn],
+                *[message for _, turn in recalled_history for message in turn], *current_input]
+            if pressure(cfg, measure_request(cfg, required, job["kind"]),
+                        scenario=job["kind"]) is None:
+                references.remove(recalled_reference)
+                merged = [*zip(sources, turns, strict=True), *recalled_history]
+                merged.sort(key=lambda pair: history_order[pair[0]["event_id"]])
+                sources, turns = [row for row, _ in merged], [turn for _, turn in merged]
+                full_recalled = {source["event_id"] for source, _ in recalled_history}
         # Count delivered pairs, not pending image/text inputs. A burst of unanswered
         # images must not evict the answer that the owner's follow-up refers to.
-        recent = context_selection.protected_recent(cfg, sources, turns, current_input, job["kind"])
+        required_messages = [rules, *[
+            reference for reference in references
+            if preserve or id(reference) in selection.required], *[
+            message for source, turn in zip(sources, turns, strict=True)
+            if preserve or source.get("reply_complete") is False
+            or source["event_id"] in full_recalled for message in turn]]
+        recent = context_selection.protected_recent(
+            cfg, sources, turns, current_input, job["kind"], query=text,
+            required=required_messages)
         blocks = [("rules", [rules], True, context_selection.TOPIC)]
         blocks.extend(("reference", [reference], preserve or id(reference) in selection.required,
                        selection.priorities.get(id(reference), context_selection.BACKGROUND))
                       for reference in references)
         blocks.extend(("history", turn, preserve or source.get("reply_complete") is False
-                       or source["event_id"] in recent,
+                       or source["event_id"] in recent or source["event_id"] in full_recalled,
                        context_selection.TOPIC if (
-                           related(source.get("user_text", "")) == context_selection.RELATED
+                           related(context_selection.history_text(source, turn))
+                           == context_selection.RELATED
                            or image_review_target and source["event_id"] == image_review_target.get(
                                "event_id")
                            or source["event_id"] in recent)
