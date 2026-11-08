@@ -3,9 +3,11 @@
 import httpx
 import pytest
 
+from companion.cognition_read import CognitionRead
 from tests.conftest import run
 from tests.support.core_http import real_core_http
 from tests.support.life_rem_consumption import draft, prepared
+from tests.support.unchanged_transactions import readonly_service_call
 
 
 @pytest.mark.parametrize("change", ["none", "source", "output", "recall", "queued"])
@@ -37,7 +39,7 @@ def test_produced_life_creation_has_read_only_owner_cognition(core, tmp_path, ch
             async with real_core_http(core) as port, httpx.AsyncClient(
                 base_url=f"http://127.0.0.1:{port}", trust_env=False,
             ) as client:
-                with core.store.read_snapshot():
+                with readonly_service_call(core.store, CognitionRead, "page"):
                     query = {"kind": "rem", "record_id": record["rem_id"]}
                     for headers in ({}, {"Authorization": "Bearer "
                                          + core.settings.bridge_token.get_secret_value()}):

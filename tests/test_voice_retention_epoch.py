@@ -15,6 +15,7 @@ from companion.model import ModelClient
 from companion.privacy import epoch
 from companion.retrieval import SemanticIndex
 from companion.store import encode
+from companion.voice_flow import VoiceFlow
 from companion.voice_jobs import INPUT_RECEIPT
 from companion.voice_protocol import (
     ROUTE_PREFIX,
@@ -25,7 +26,7 @@ from companion.voice_protocol import (
     digest,
 )
 from tests.conftest import ingest, run
-from tests.support.unchanged_transactions import unchanged_transactions
+from tests.support.unchanged_transactions import readonly_service_call, unchanged_transactions
 from tests.support.voice_flow import signed_input
 from tests.support.voice_jobs import TOKEN, result, voice_config
 from tests.support.voice_node_api import claim_body, tls_core
@@ -178,7 +179,7 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
             assert owner_authority.current(
                 core.store, core.settings, core.clock).authority.as_dict() == (
                 capture.authority)
-            with core.store.read_snapshot():
+            with readonly_service_call(core.store, VoiceFlow, "input_receipt"):
                 projected = await client.get(path + "/state")
             if voice_state == "source-erased":
                 assert projected.status_code in {403, 409}, projected.text

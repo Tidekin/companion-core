@@ -16,6 +16,7 @@ from companion.voice_jobs import erase_voice_jobs, restore_voice_jobs
 from companion.voice_protocol import VoiceDeliveryEnvelope, VoiceLeaseRef, canonical_bytes, digest
 from companion_voice_node.worker import local_manifest
 from tests.conftest import run
+from tests.support.unchanged_transactions import readonly_service_call
 from tests.support.voice_flow import (
     delivery_check,
     finish_node,
@@ -402,7 +403,7 @@ def test_real_native_asr_context_tts_outbox_send_check_and_counter_chain(
                     "Content-Type": "audio/wav",
                     "x-voice-proof": base64.urlsafe_b64encode(canonical_bytes(proof)).decode()})
                 assert uploaded.status_code == 200, uploaded.text
-                with core.store.read_snapshot():
+                with readonly_service_call(core.store, VoiceFlow, "input_receipt"):
                     recovered = await client.get(path + "/state")
                 assert recovered.status_code == 200
                 assert recovered.json()["records"] == [{

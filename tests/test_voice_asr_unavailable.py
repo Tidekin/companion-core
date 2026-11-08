@@ -9,9 +9,11 @@ import httpx
 from companion.core import Core
 from companion.model import ModelClient
 from companion.voice_config import VoiceNode
+from companion.voice_flow import VoiceFlow
 from companion.voice_jobs import INPUT_RECEIPT
 from companion.voice_protocol import canonical_bytes
 from tests.conftest import run
+from tests.support.unchanged_transactions import readonly_service_call
 from tests.support.voice_flow import signed_input
 from tests.support.voice_jobs import TOKEN, voice_config
 from tests.support.voice_node_api import tls_core
@@ -41,7 +43,7 @@ def test_tts_only_node_projects_unavailable_asr_and_independent_worker_replies(c
                 httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http:
             original_body = event["body_json"]
             path = "/internal/v1/voice-inputs/" + event["event_id"]
-            with core.store.read_snapshot():
+            with readonly_service_call(core.store, VoiceFlow, "input_receipt"):
                 state = await client.get(path + "/state")
             assert state.status_code == 200, state.text
             assert state.json()["state"] == "FALLBACK"
@@ -88,7 +90,7 @@ def test_tts_only_node_projects_unavailable_asr_and_independent_worker_replies(c
             assert not core.store.rows("SELECT * FROM voice_jobs")
             assert core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                    (event["event_id"],))["body_json"] == original_body
-            with core.store.read_snapshot():
+            with readonly_service_call(core.store, VoiceFlow, "input_receipt"):
                 settled = await client.get(path + "/state")
             assert settled.status_code == 200, settled.text
             assert settled.json()["state"] == "FALLBACK"

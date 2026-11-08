@@ -1,4 +1,4 @@
-"""Observe the original write transactions opened by a synthetic HTTP request."""
+"""Observe the native sessions used by synthetic HTTP requests."""
 
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -30,3 +30,19 @@ def unchanged_transactions(core):
             assert writes, "expected a native write transaction"
             assert all(first == last for first, last in writes), "request changed business rows"
             assert logical_state(core.store) == before
+
+
+@contextmanager
+def readonly_service_call(store, service_type, method):
+    original = getattr(service_type, method)
+    calls = []
+
+    def observed(service, *args, **kwargs):
+        assert service.store is store
+        assert service.store.one("SHOW transaction_read_only") == {"transaction_read_only": "on"}
+        calls.append(service.store.backend_pid)
+        return original(service, *args, **kwargs)
+
+    with store.read_snapshot(), patch.object(service_type, method, observed):
+        yield
+    assert calls == [store.backend_pid]
