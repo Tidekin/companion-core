@@ -53,7 +53,6 @@ def native_settings(directory):
         name: max(1, round(price[name] * price["safety_factor"] * 100000))
         for name in ("input_rate", "cached_input_rate", "output_rate")
     }
-    cap = round(config["budget"]["inference_cny"] / 10 * 1_000_000)
     authorization = hashlib.sha256(
         json.dumps(
             {
@@ -66,6 +65,8 @@ def native_settings(directory):
             sort_keys=True,
         ).encode()
     ).hexdigest()
+    # Native approval owns resource limits; the campaign's Budget transport still
+    # enforces the user's cumulative CNY cap and retains uncertain liabilities.
     paid = PaidModelApproval(
         live_approved=True,
         window_id="memory-benchmark-" + config["run_id"],
@@ -81,13 +82,8 @@ def native_settings(directory):
         **rates,
         max_input_tokens=40000,
         max_output_tokens=4096,
-        per_attempt_micro_usd=20000,
-        per_request_micro_usd=100000,
         per_request_calls=8,
-        daily_micro_usd=cap,
         daily_calls=1000,
-        monthly_micro_usd=cap,
-        window_micro_usd=cap,
         window_calls=1000,
         concurrency=1,
         concurrency_basis="local_active_attempts_v2",
@@ -113,9 +109,6 @@ def native_settings(directory):
         proactive_enabled=False,
         max_recent_messages=12,
         operator_hot_reload=False,
-        monthly_limit_micro_usd=cap,
-        memory_daily_micro_usd=cap,
-        autonomous_daily_micro_usd=cap,
         paid_model=paid,
     )
     return settings, authorization
