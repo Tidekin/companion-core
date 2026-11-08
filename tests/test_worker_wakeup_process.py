@@ -1,4 +1,4 @@
-"""Real CLI processes share one SQLite authority; only external model transport is mocked."""
+"""Real CLI processes share one PostgreSQL database; only external model transport is mocked."""
 
 import asyncio
 import json
@@ -255,7 +255,7 @@ def test_real_http_forget_wakes_native_control_without_provider(core, tmp_path):
     core.clock = utcnow
     core.settings.memory_enabled = True
     source = ingest(core, 1, "I prefer green tea.")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         memory_id = core.memory.add(
             Candidate(
                 subject="user",
