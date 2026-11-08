@@ -2,6 +2,7 @@
 
 import json
 
+import psycopg
 import pytest
 
 from companion import paid_budget, style_distill, style_observation
@@ -133,6 +134,7 @@ def test_both_switches_can_be_enabled_from_the_environment(monkeypatch, tmp_path
 
     monkeypatch.setenv("COMPANION_CONFIG", str(tmp_path / "absent.toml"))
     for name, value in {"OWNER_QQ_ID": "10001", "BOT_QQ_ID": "10002",
+                        "DATABASE": "dbname=synthetic",
                         "BRIDGE_TOKEN": "env-switch-token-" * 3,
                         "WATCH_LEDGER": '{"enabled": true}',
                         "STYLE_DISTILL": '{"enabled": true, "daily_pairs": 50}',
@@ -256,12 +258,26 @@ def test_offline_samples_script_prints_the_segment_read_only(core, tmp_path, cap
 
     approve_one(core, tmp_path)
     before = candidates(core)
-    style_shadow_samples.main(["--db", str(core.store.path), "--now", core.clock(),
-                               "--text", SHARE, "--text", "帮我查一下明天的天气"])
+    style_shadow_samples.main(["--db", core.settings.database.get_secret_value(),
+                               "--now", core.clock(), "--text", SHARE,
+                               "--text", "帮我查一下明天的天气"])
     shared, help_request = capsys.readouterr().out.split("== ")[1:]
     assert PATTERN["response_action"] in shared and "暂停键" not in shared
     assert "无追加段落" in help_request
     assert candidates(core) == before
+
+
+def test_offline_samples_script_refuses_writes(core, monkeypatch):
+    from scripts import style_shadow_samples
+
+    def write(store, *_):
+        store.db.execute("INSERT INTO runtime_meta(key,value) VALUES ('shadow-write','1')")
+
+    monkeypatch.setattr(style_shadow_samples.style_observation, "live_segment", write)
+    with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+        style_shadow_samples.main(["--db", core.settings.database.get_secret_value(),
+                                   "--text", SHARE])
+    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key='shadow-write'") is None
 
 
 @pytest.mark.parametrize("roots_only", [False, True])

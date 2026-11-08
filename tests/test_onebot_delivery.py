@@ -3,6 +3,7 @@ import httpx
 import pytest
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.transport import reconcile_delivery, recover_deliveries
 from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.outbound import deliver_tick
@@ -60,6 +61,7 @@ def test_lost_core_ack_never_reissues_onebot_send(core, tmp_path, fault):
     cfg = config(data_dir=str(tmp_path / "bridge"), delivery_enabled=True)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     inner = httpx.ASGITransport(app=app)
     tripped = False
 

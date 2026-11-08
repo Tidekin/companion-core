@@ -573,26 +573,11 @@ class ObservationService:
             "observation." + adapter.source,
             adapter_id + ":" + observation.provider_event_id,
         )
-        with nullcontext() if s.in_transaction else s.transaction():
-            if observation.privacy_epoch != epoch(s):
-                raise CoreError("PRIVACY_CHANGED", 409)
-            occurred = self.validate(observation, adapter)
-            account_read = (
-                observation.payload.reading and observation.payload.reading.method == "account_api"
-            )
-            if observation.source_grant or adapter.source_grant_required or account_read:
-                self.grants.require(adapter_id, observation.source_grant)
+
+        def replay():
             previous = s.one(
-                "SELECT events.event_id AS event_id, events.schema_version AS schema_version, "
-                "events.source AS source, events.source_event_id AS source_event_id, "
-                "events.conversation_id AS conversation_id, events.actor_id AS actor_id, "
-                "events.event_type AS event_type, events.occurred_at AS occurred_at, "
-                "events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, "
-                "events.body_json AS body_json, events.trace_id AS trace_id, "
-                "events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, "
-                "events.redacted AS redacted, events.memory_processed AS memory_processed, "
-                "events.reply_revision AS reply_revision FROM events AS events WHERE "
-                "(events.source = %s AND events.source_event_id = %s) OR events.event_id = %s",
+                "SELECT event_id,source,source_event_id,fingerprint,redacted FROM events "
+                "WHERE (source = %s AND source_event_id = %s) OR event_id = %s",
                 (source, external_id, observation.event_id),
             )
             if previous:
@@ -605,6 +590,20 @@ class ObservationService:
                 if previous["redacted"]:
                     raise CoreError("SOURCE_ERASED", 410)
                 return {"event_id": previous["event_id"], "duplicate": True}
+            return None
+
+        with nullcontext() if s.in_transaction else s.transaction():
+            if observation.privacy_epoch != epoch(s):
+                raise CoreError("PRIVACY_CHANGED", 409)
+            occurred = self.validate(observation, adapter)
+            account_read = (
+                observation.payload.reading and observation.payload.reading.method == "account_api"
+            )
+            if observation.source_grant or adapter.source_grant_required or account_read:
+                self.grants.require(adapter_id, observation.source_grant)
+            duplicate = replay()
+            if duplicate:
+                return duplicate
             for source_id in set(observation.source_event_ids):
                 event = s.one(
                     "SELECT events.event_id AS event_id, events.schema_version AS "
@@ -632,18 +631,19 @@ class ObservationService:
                 ):
                     raise CoreError("INVALID_OBSERVATION_PROVENANCE", 400)
             conversation_id = "conv_internal_observations"
-            if not s.one(
-                "SELECT 1 FROM conversations WHERE conversation_id = %s", (conversation_id,)
-            ):
-                s.insert(
-                    "conversations",
-                    conversation_id=conversation_id,
-                    platform="companion",
-                    platform_session_key="observations",
-                    scope="private",
-                    owner_actor_id="owner",
-                    created_at=now,
-                )
+            s.execute(
+                "INSERT INTO conversations (conversation_id,platform,platform_session_key,"
+                "scope,owner_actor_id,created_at) VALUES (%s,'companion','observations',"
+                "'private','owner',%s) ON CONFLICT DO NOTHING",
+                (conversation_id, now),
+            )
+            # Serialize new observation replay keys without blocking FK key-share
+            # locks used by other event producers in this existing conversation.
+            s.one("SELECT conversation_id FROM conversations WHERE conversation_id=%s "
+                  "FOR NO KEY UPDATE", (conversation_id,))
+            duplicate = replay()
+            if duplicate:
+                return duplicate
             s.insert(
                 "events",
                 event_id=observation.event_id,

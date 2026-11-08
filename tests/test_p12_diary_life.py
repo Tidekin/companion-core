@@ -265,7 +265,7 @@ def test_source_expiry_never_claims_cancellation_after_io_started(core, uncertai
     assert not lease_deliveries(
         core.store, core.settings, LeaseRequest(worker_id="fixture"), core.clock()
     )["items"]
-    row = core.store.one("SELECT * FROM outbox")
+    row = core.store.one("SELECT * FROM outbox WHERE message_id=%s", (item["message_id"],))
     assert row["state"] == ("DELIVERY_UNCERTAIN" if uncertain else "SENDING")
     assert row["attempt_count"] == 1
 

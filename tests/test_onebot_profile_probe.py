@@ -37,6 +37,7 @@ async def source_window(core, tmp_path, source, *, live, approved, scope_options
     from dataclasses import replace
 
     from companion.api import create_app
+    from companion.api_store import ApiStore
     from tests.support.onebot import provider
 
     core.settings.social_autonomy = scope_options["core_options"]["social_autonomy"]
@@ -46,6 +47,7 @@ async def source_window(core, tmp_path, source, *, live, approved, scope_options
         cfg = replace(cfg, **bridge_options)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     def native(request):
         return protocol_reply(request) or provider(request, [])
