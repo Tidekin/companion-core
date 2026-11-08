@@ -222,7 +222,9 @@ class AffectEngine:
         if not callable(getattr(ledger, "reset_affect", None)):
             raise CoreError("AFFECT_RESET_NOT_INTEGRATED", 503)
         # Also available while Affect is disabled; reset cannot enable a feature.
-        with nullcontext() if self.store.in_transaction else self.store.transaction():
+        with nullcontext() if self.store.in_transaction else self.store.transaction(
+            control_write=True
+        ):
             return ledger.reset_affect(self.store, request_id, self.clock())
 
     def revalidate(self, snapshot):

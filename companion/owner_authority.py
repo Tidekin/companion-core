@@ -802,7 +802,7 @@ def _append(store, settings, clock, operation, request_hash, policy, state, prev
 def activate(store, settings, clock, request):
     from companion import cumulative, live_text
 
-    with store.transaction():
+    with store.transaction(control_write=True):
         request_hash = _sha(request.model_dump(mode="json"))
         if existing := _operation(store, request.operation_id, request_hash):
             custody(store, settings, settlement=True)
@@ -851,7 +851,7 @@ def activate(store, settings, clock, request):
 def stop(store, settings, clock, request):
     from companion import private_life
 
-    with store.transaction():
+    with store.transaction(control_write=True):
         request_hash = _sha(request.model_dump(mode="json"))
         if existing := _operation(store, request.operation_id, request_hash):
             custody(store, settings, settlement=True)

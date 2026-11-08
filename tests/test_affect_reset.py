@@ -13,6 +13,27 @@ from companion.affect import (
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from tests.conftest import ingest
+from tests.postgres_fixture import logical_state
+
+
+@pytest.mark.parametrize("scope", ["outside", "ordinary", "control"])
+def test_owner_reset_uses_native_control_scope_and_refuses_lock_upgrade(core, scope):
+    before = logical_state(core.store)
+    raw = core.ledger.path.read_bytes()
+    if scope == "ordinary":
+        with pytest.raises(RuntimeError, match="ERASURE_CONTROL_WRITE_REQUIRED"):
+            with core.store.transaction():
+                core.affect.reset(core.settings.owner_qq_id, "native-reset", core.ledger)
+        assert logical_state(core.store) == before
+        assert core.ledger.path.read_bytes() == raw
+        return
+    if scope == "control":
+        with core.store.transaction(control_write=True):
+            result = core.affect.reset(core.settings.owner_qq_id, "native-reset", core.ledger)
+    else:
+        result = core.affect.reset(core.settings.owner_qq_id, "native-reset", core.ledger)
+    assert result["state"] == "RESET"
+    assert core.model.calls == []
 
 
 def apply(core, request="owner-reset"):
