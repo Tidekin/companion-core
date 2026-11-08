@@ -348,8 +348,7 @@ def classify(changed, probe, policy_change=None, rolling=False, edge=None):
     if migration.get("needed") and not migration.get("ok"):
         return "NOT_READY", ["MIGRATION_FAILED_ON_COPY"]
     final = probe.get("after") or probe["before"]
-    blockers = [b for b in final["blockers"] if b not in MIGRATION_BLOCKERS
-                and not (b == "MODEL_USAGE_UNSETTLED" and probe.get("unknown_closed"))]
+    blockers = [b for b in final["blockers"] if b not in MIGRATION_BLOCKERS]
     authority = probe.get("authority", {})
     if authority.get("state") == "UNREADABLE":
         blockers.append("AUTHORITY_UNREADABLE")

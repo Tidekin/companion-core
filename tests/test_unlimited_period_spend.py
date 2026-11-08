@@ -53,13 +53,12 @@ def test_explicit_unlimited_periods_still_record_and_settle_real_dispatch(core, 
         assert paid_budget.journal(core.store, approval)["head_sha256"] != "0" * 64
 
 
-def test_old_authority_keeps_its_serialized_shape_and_limits(core, tmp_path):
+def test_old_authority_keeps_its_serialized_shape_with_advisory_money(core, tmp_path):
     approval = approved_live(core, tmp_path, daily_micro_usd=1)
     job_id = authorized_job(core)
     assert "unlimited_period_spend" not in approval.model_dump(mode="json")
     assert "unlimited_period_spend" not in paid_budget.snapshot(core.settings)
-    with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
-        budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
+    budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     with pytest.raises(ValidationError):
         PaidModelApproval.model_validate({**approval.model_dump(), "unlimited_period_spend": "yes"})
     with pytest.raises(ValidationError):
@@ -70,8 +69,6 @@ def test_old_authority_keeps_its_serialized_shape_and_limits(core, tmp_path):
 
 @pytest.mark.parametrize("changes,code", [
     ({"max_input_tokens": 1}, "MODEL_INPUT_LIMIT"),
-    ({"per_attempt_micro_usd": 1}, "MODEL_ATTEMPT_BUDGET_EXHAUSTED"),
-    ({"per_request_micro_usd": 1}, "MODEL_REQUEST_BUDGET_EXHAUSTED"),
 ])
 def test_period_opt_in_never_lifts_per_request_bounds(core, tmp_path, changes, code):
     unlimited(core, tmp_path, **changes)
@@ -86,7 +83,7 @@ def test_unknown_usage_blocks_further_dispatch_under_unlimited_money(core, tmp_p
     job_id = authorized_job(core)
     request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     budget.settle(core.store, core.settings, request_id)
-    with pytest.raises(CoreError, match="MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
 

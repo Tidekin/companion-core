@@ -238,14 +238,15 @@ def test_real_http_unknown_phase_receipt_cannot_repay_after_restart(core, tmp_pa
 
 
 @pytest.mark.parametrize("ceiling", ["item", "day"])
-def test_real_http_clip_phase_obeys_original_one_cny_and_twenty_cny_ceiling(
+def test_real_http_clip_phase_preserves_charges_above_currency_amounts(
     core, tmp_path, ceiling,
 ):
     calls = []
 
     def provider(request):
         calls.append(request)
-        return model_response({"analysis": "局部帧仍需要看原定片段", "need_clips": True})
+        return model_response({"analysis": "局部帧仍需要看原定片段", "need_clips": True}
+                              if len(calls) == 1 else {"analysis": "原定片段的局部蓝色画面"})
 
     async def scenario():
         async with paid_media(core, tmp_path, provider) as (_, item, prepared):
@@ -280,15 +281,9 @@ def test_real_http_clip_phase_obeys_original_one_cny_and_twenty_cny_ceiling(
                     result = await client.post(path, json=upload_body(
                         item, prepared, first.json()["next_selection"],
                     ))
-                    assert result.status_code == 429, result.text
-                    assert result.json() == {"error": (
-                        "CLOUD_TASK_BUDGET_EXHAUSTED" if ceiling == "item"
-                        else "CLOUD_DAILY_BUDGET_EXHAUSTED"
-                    )}
-                    assert len(calls) == 1
-                    assert phase_usage(core) == before
-                    # The rejected clip never creates a new charge or new visual
-                    # claim. Already settled preview evidence remains available.
+                    assert result.status_code == 200, result.text
+                    assert len(calls) == 2
+                    assert len(phase_usage(core)) == len(before) + 1
                     retained = core.store.one("SELECT * FROM bili_video_items")
                     assert retained["state"] == "ANALYZED" and retained["output_event_id"]
                     observation = core.store.one('SELECT * FROM observations WHERE event_id=%s',
@@ -296,9 +291,9 @@ def test_real_http_clip_phase_obeys_original_one_cny_and_twenty_cny_ceiling(
                     proof = json.loads(observation["evidence_json"])["bili_video"]
                     assert proof["partial"] and proof["complete_video"] is False
                     assert proof["audio_analyzed"] is False
-                    assert [phase["phase"] for phase in proof["phases"]] == ["preview"]
+                    assert [phase["phase"] for phase in proof["phases"]] == ["preview", "clips"]
                     assert core.store.one("SELECT state FROM bili_video_phases "
-                                          "WHERE phase='clips'") == {"state": "REJECTED"}
+                                          "WHERE phase='clips'") == {"state": "SETTLED"}
                     assert not core.store.one("SELECT 1 FROM outbox")
 
     run(scenario())

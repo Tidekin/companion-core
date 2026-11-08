@@ -12,7 +12,6 @@ Output is one JSON object of codes and counts; no message text, config value or 
 
 import json
 import time
-from pathlib import Path
 
 from companion import owner_authority
 from companion.config import Settings
@@ -32,6 +31,7 @@ def _summary(view):
         "expected_schema": database.get("expected_schema"),
         "integrity": database.get("integrity"),
         "blockers": sorted(view.get("blockers", [])),
+        "warnings": sorted(view.get("warnings", [])),
         "active_jobs": view.get("jobs", {}).get("active"),
         "open_deliveries": view.get("deliveries", {}).get("active"),
         "uncertain_deliveries": view.get("deliveries", {}).get("states", {}).get(
@@ -61,27 +61,6 @@ def authority(settings):
                 "policy_problem": problem.code if problem else None}
 
 
-def closed_unknowns(settings):
-    """Match every native UNKNOWN row to its original copied journal closure."""
-    closures = {"model_local_close", "model_unknown_carry"}
-    with read_view(settings) as store:
-        rows = store.rows("SELECT m.request_id,a.journal_path FROM model_usage m "
-                          "LEFT JOIN model_admissions a USING(request_id) WHERE m.state='UNKNOWN'")
-        journals = {}
-        for row in rows:
-            path = row["journal_path"]
-            if not path:
-                return False
-            if path not in journals:
-                try:
-                    journals[path] = [json.loads(line) for line in
-                                      Path(path).read_text(encoding="utf8").splitlines()]
-                except (OSError, ValueError):
-                    return False
-            if not any(isinstance(record, dict) and record.get("request_id") == row["request_id"]
-                       and record.get("kind") in closures for record in journals[path]):
-                return False
-    return True
 
 
 def probe(load=Settings.load):
@@ -105,7 +84,6 @@ def probe(load=Settings.load):
         result["after"] = _summary(snapshot(settings, integrity=True))
     try:
         result["authority"] = authority(settings)
-        result["unknown_closed"] = closed_unknowns(settings)
     except (CoreError, ValueError) as error:
         result["authority"] = {"state": "UNREADABLE",
                                "error": getattr(error, "code", type(error).__name__)}

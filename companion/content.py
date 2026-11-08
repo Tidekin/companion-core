@@ -392,14 +392,6 @@ class ContentIntake:
                     )
                 ):
                     error = "CONTENT_VISION_NOT_CONFIGURED"
-                elif (
-                    kind != "link"
-                    and not bounded
-                    and not native_images
-                    and self.options.image_daily_micro_usd
-                    < self.options.vision.max_request_micro_usd
-                ):
-                    error = "CONTENT_VISION_BUDGET_EXHAUSTED"
                 elif kind == "qq_image":
                     day, _ = self._periods()
                     traffic = s.one(
@@ -1031,26 +1023,10 @@ class ContentService(ContentIntake):
             )
         return {"resumed": changed, **self.status(event_id)}
 
-    def _check_vision_budget(self, row):
+    def _check_vision_limits(self, row):
         endpoint = self.options.vision
         if not endpoint.url or not endpoint.model or not endpoint.max_request_micro_usd:
             raise CoreError("CONTENT_VISION_NOT_CONFIGURED", 503)
-        day, month = self._periods()
-        daily = self.store.one(
-            (
-                "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM "
-                "model_usage WHERE occurred_at>=%s AND "
-                "scenario='content_vision'"
-            ),
-            (day,),
-        )["n"]
-        price = endpoint.max_request_micro_usd
-        if (
-            daily + price > self.options.image_daily_micro_usd
-            or budget.total_monthly(self.store, month) + price
-            > self.settings.monthly_limit_micro_usd
-        ):
-            raise CoreError("CONTENT_VISION_BUDGET_EXHAUSTED", 429)
         if row["kind"] == "link_image":
             prior = self.store.one(
                 "SELECT COUNT(*) AS n FROM content_items WHERE owner_event_id = %s AND "
@@ -1059,14 +1035,6 @@ class ContentService(ContentIntake):
             )["n"]
             if prior >= self.options.max_images_per_article:
                 raise CoreError("CONTENT_ARTICLE_IMAGE_LIMIT", 429)
-            spent = self.store.one(
-                "SELECT COALESCE(CAST(SUM(m.billed_micro_usd) AS BIGINT), 0) AS n FROM model_usage "
-                "AS m JOIN content_items AS c ON c.usage_request_id = m.request_id WHERE "
-                "c.source_event_id = %s",
-                (row["source_event_id"],),
-            )["n"]
-            if spent + price > self.options.article_image_micro_usd:
-                raise CoreError("CONTENT_ARTICLE_VISION_BUDGET_EXHAUSTED", 429)
 
     def _policy(self, row):
         from companion import runtime_config
@@ -1132,7 +1100,7 @@ class ContentService(ContentIntake):
             if row["state"] == "FETCHING" and row["lease_until"] <= now:
                 raise CoreError("CONTENT_IMAGE_LEASE_EXPIRED", 409)
             self._policy(row)
-            self._check_vision_budget(row)
+            self._check_vision_limits(row)
             price = endpoint.max_request_micro_usd
             traffic = s.one(
                 (
@@ -1841,7 +1809,7 @@ class ContentService(ContentIntake):
                 return True
             try:
                 self._policy(row)
-                self._check_vision_budget(row)
+                self._check_vision_limits(row)
             except CoreError as error:
                 s.execute(
                     "UPDATE content_items SET state = 'FAILED', error_code = %s WHERE item_id = %s",

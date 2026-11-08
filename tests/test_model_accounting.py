@@ -106,42 +106,35 @@ def test_provider_record_and_operation_cannot_be_reused_for_different_material(c
     assert snapshot(core) == before
 
 
-def test_confirmed_limit_violation_blocks_future_io_and_allows_larger_bill(core, tmp_path):
+def test_confirmed_over_budget_bill_is_retained_and_fresh_work_continues(core, tmp_path):
     case = migrated(core, tmp_path)
     job = authorized_job(core, number=2)
     actual = core.settings.paid_model.per_attempt_micro_usd + 1
     bill = {"kind": "provider_statement", "provider": "offline-fixture", "model": "offline-text",
             "currency": "USD", "actual_micro_usd": actual, "provider_record_sha256": "b" * 64}
     request, private = prepared(core, tmp_path, case.request_id, basis=bill)
-    assert request["budget_limit_codes"] == ["ATTEMPT_AMOUNT"]
+    assert request["budget_limit_codes"] == []
     result = model_accounting.record(core.store, core.settings, request, private, core.clock)
     assert result["accounted_micro_usd"] == actual
-    assert case.request_id in custody(core)["blocked_request_ids"]
-    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
-    with pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
-        budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
+    assert case.request_id not in custody(core)["blocked_request_ids"]
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
+    budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
     before = snapshot(core)
     assert model_accounting.record(core.store, core.settings, request, private, core.clock) == (
         result)
     assert snapshot(core) == before
-    # An exact replay also repairs the STOP projection when it was lost or changed.
-    for damage in ("UPDATE runtime_meta SET value='stale'", "DELETE FROM runtime_meta"):
-        core.store.execute(damage + " WHERE key='model_budget_blocked'")
-        assert model_accounting.record(core.store, core.settings, request, private, core.clock) == (
-            result)
-        marker = core.store.one("SELECT value FROM runtime_meta WHERE key='model_budget_blocked'")
-        assert marker == {"value": "1"}
-        assert journal(core).read_bytes() == before[1]
     bill.update(actual_micro_usd=actual + 100, provider_record_sha256="c" * 64)
     request, private = prepared(core, tmp_path, case.request_id,
                                 operation="higher-confirmed-bill", basis=bill)
     higher = model_accounting.record(core.store, core.settings, request, private, core.clock)
     assert higher["accounted_micro_usd"] == actual + 100
-    assert higher["budget_limit_codes"] == ["ATTEMPT_AMOUNT"]
-    # A rolled-back DB stop cannot release the independently recorded violation.
-    core.store.execute("DELETE FROM runtime_meta WHERE key='model_budget_blocked'")
-    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
-        custody(core)
+    assert higher["budget_limit_codes"] == []
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=%s",
+                          (case.request_id,)) == {
+        "state": "UNKNOWN", "billed_micro_usd": actual + 100,
+    }
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
+    custody(core)
 
 
 @pytest.mark.parametrize("failure", ["before", "after_fsync", "partial"])

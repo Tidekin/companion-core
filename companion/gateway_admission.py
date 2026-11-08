@@ -2,7 +2,7 @@
 
 import json
 from contextlib import nullcontext
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from companion import cumulative, paid_budget
@@ -130,15 +130,13 @@ def _quota(store, settings, grant, now, *, adding=0, estimate=0):
     local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
     day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC).isoformat(
         timespec="microseconds")
-    daily = store.one('SELECT COUNT(*) AS calls, COALESCE(CAST(SUM(m.billed_micro_usd) AS BIGINT), '
-        '0) AS amount FROM model_usage AS m JOIN gateway_requests AS g ON g.model_request_id = '
-        'm.request_id WHERE g.client_id = %s AND m.occurred_at >= %s', (grant.client_id, day))
-    running = store.one('SELECT COUNT(*) AS n FROM model_usage AS m JOIN gateway_requests AS g ON '
-        "g.model_request_id = m.request_id WHERE g.client_id = %s AND m.state IN ('RESERVED', "
-        "'UNKNOWN')", (grant.client_id,))["n"]
-    if (daily["calls"] + adding > grant.budget.daily_calls
-        or daily["amount"] + estimate > grant.budget.daily_micro_usd
-        or running + adding > grant.budget.concurrency):
+    counts = store.one("SELECT count(*) FILTER (WHERE m.occurred_at>=%s) AS calls, "
+                       "count(*) FILTER (WHERE m.state='RESERVED') AS running "
+                       "FROM model_usage m JOIN gateway_requests g ON "
+                       "g.model_request_id=m.request_id WHERE g.client_id=%s",
+                       (day, grant.client_id))
+    if (counts["calls"] + adding > grant.budget.daily_calls
+        or counts["running"] + adding > grant.budget.concurrency):
         raise CoreError("GATEWAY_CLIENT_BUDGET_EXHAUSTED", 429)
 
 
@@ -188,30 +186,11 @@ def admit(store, settings, clock, model_request_id, estimate, input_tokens):
     row = store.one('SELECT frozen_json FROM gateway_requests WHERE model_request_id = %s',
                     (model_request_id,))
     grant = ClientGrant.model_validate(json.loads(row["frozen_json"])["policy"]["grant"])
-    if (estimate > grant.budget.max_request_micro_usd or estimate <= 0
-        or input_tokens > grant.budget.max_input_tokens):
+    if input_tokens > grant.budget.max_input_tokens:
         raise CoreError("GATEWAY_REQUEST_BUDGET_EXHAUSTED", 429)
     _quota(store, settings, grant, clock(), adding=1, estimate=estimate)
 
 
 def actual_limits(store, usage, actual):
-    row = store.one('SELECT frozen_json, client_id FROM gateway_requests WHERE model_request_id = '
-        '%s',
-                    (usage["request_id"],))
-    grant = ClientGrant.model_validate(json.loads(row["frozen_json"])["policy"]["grant"])
-    local = datetime.fromisoformat(usage["occurred_at"]).astimezone(ZoneInfo(
-        json.loads(store.one('SELECT snapshot_json FROM model_admissions WHERE request_id = %s',
-                            (usage["request_id"],))["snapshot_json"])["timezone"]))
-    day = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    start = day.astimezone(UTC)
-    end = (day + timedelta(days=1)).astimezone(UTC).isoformat(timespec="microseconds")
-    total = store.one('SELECT COALESCE(CAST(SUM(m.billed_micro_usd) AS BIGINT), 0) AS amount FROM '
-        'model_usage AS m JOIN gateway_requests AS g ON g.model_request_id = m.request_id WHERE '
-        'g.client_id = %s AND m.occurred_at >= %s AND m.occurred_at < %s',
-        (row["client_id"], start.isoformat(timespec="microseconds"), end))["amount"]
-    result = []
-    if actual > grant.budget.max_request_micro_usd:
-        result.append("GATEWAY_REQUEST_AMOUNT")
-    if total + actual - usage["billed_micro_usd"] > grant.budget.daily_micro_usd:
-        result.append("GATEWAY_DAILY_AMOUNT")
-    return result
+    """Observed monetary overruns are recorded without creating an execution fence."""
+    return []

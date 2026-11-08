@@ -165,7 +165,7 @@ def test_diary_admission_refusal_defers_without_losing_attempts_or_replaying_unk
                     worked = await worker.diary.generate_once("after-recovery")
                     assert worked is (recovery != "stop")
                     row = worker.store.one("SELECT state,attempts FROM diary_runs")
-                    if recovery in {"settled", "day_reset"}:
+                    if recovery in {"settled", "day_reset", "unknown"}:
                         assert row["state"] == "COMMITTED"
                         assert row["attempts"] == core.settings.diary_max_attempts + 1
                         assert len(draft_model.calls) == 1
@@ -175,9 +175,5 @@ def test_diary_admission_refusal_defers_without_losing_attempts_or_replaying_unk
                     if recovery == "unknown":
                         assert worker.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                                                 (competing[0],))["state"] == "UNKNOWN"
-                        assert worker.store.one(
-                            "SELECT model_request_id,last_error_code FROM diary_runs") == {
-                                "model_request_id": None,
-                                "last_error_code": "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"}
                         assert not await worker.diary.generate_once("unknown-not-replayed")
     run(scenario())

@@ -81,7 +81,7 @@ def test_large_input_deviation_is_diagnosed_but_settles_within_local_amount_limi
     ("window_micro_usd", "WINDOW_AMOUNT"),
     ("local_monthly", "MONTHLY_AMOUNT"),
 ])
-def test_actual_cost_over_a_local_limit_keeps_usage_and_stops_new_io(core, tmp_path, field, code):
+def test_actual_cost_retains_usage_and_allows_new_io(core, tmp_path, field, code):
     approval = approved_live(core, tmp_path)
     estimated = paid_budget.estimate_input_tokens(approval, MESSAGES, "chat")
     estimate_cost = budget.cost(core.settings, estimated, core.settings.output_tokens("chat"))
@@ -94,13 +94,12 @@ def test_actual_cost_over_a_local_limit_keeps_usage_and_stops_new_io(core, tmp_p
         "ok", estimated + 10, admission["output_bound"],
     ))
     usage = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,))
-    assert usage["state"] == "UNKNOWN"
+    assert usage["state"] == "SETTLED"
     assert usage["input_tokens"] == estimated + 10
     assert usage["billed_micro_usd"] == estimate_cost + 10
-    assert code in diagnostic(core, request)["limits"]
-    assert core.store.one("SELECT value FROM runtime_meta WHERE key='model_budget_blocked'")
-    with pytest.raises(CoreError, match="RECONCILIATION|MONTHLY_BUDGET_EXHAUSTED"):
-        reserve(core)
+    assert code not in diagnostic(core, request)["limits"]
+    assert not core.store.one("SELECT value FROM runtime_meta WHERE key='model_budget_blocked'")
+    assert reserve(core)[0] != request
 
 
 def test_output_cap_violation_preserves_known_priced_usage_and_reserved_liability(core, tmp_path):
@@ -114,7 +113,7 @@ def test_output_cap_violation_preserves_known_priced_usage_and_reserved_liabilit
     assert row["output_tokens"] == admission["output_bound"] + 1
     assert row["billed_micro_usd"] >= admission["reserved_micro_usd"]
     assert "OUTPUT_CAP_EXCEEDED" in diagnostic(core, request)["limits"]
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         reserve(core)
 
 
@@ -123,7 +122,7 @@ def test_returned_response_without_usage_stops_even_when_concurrency_remains(cor
     request, _ = reserve(core)
     budget.settle(core.store, core.settings, request, ModelResponse("ok"))
     assert diagnostic(core, request)["actual_usage_known"] is False
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         reserve(core)
 
 
@@ -133,11 +132,13 @@ def test_transport_unknown_keeps_liability_and_limits_new_native_work(core, tmp_
     budget.settle(core.store, core.settings, request)
     assert diagnostic(core, request)["code"] == "TRANSPORT_USAGE_UNKNOWN"
     original = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,))
-    with pytest.raises(CoreError, match="CLOUD_TASK_USAGE_UNCERTAIN"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         reserve(core)
     job = authorized_job(core, number=2)
     second = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
     assert second != request
+    third = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
+    assert third != second
     with pytest.raises(CoreError, match="CONCURRENCY"):
         budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
     assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,)) == original

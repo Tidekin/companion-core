@@ -17,7 +17,6 @@ import httpx
 from pydantic import Field
 
 from companion import cloud_budget
-from companion.budget import total_monthly
 from companion.contracts import CoreError, StrictModel
 from companion.media_provider import HTTPMediaProvider, MediaResult
 from companion.observation import ObservationEvent
@@ -308,11 +307,6 @@ class MediaService:
             .astimezone(UTC)
             .isoformat(timespec="microseconds")
         )
-        month = (
-            local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            .astimezone(UTC)
-            .isoformat(timespec="microseconds")
-        )
         reserve_bytes = len(data) + (
             self.options.max_output_bytes if chunk.operation == "speech" else 0
         )
@@ -364,19 +358,6 @@ class MediaService:
                 if not endpoint.url or not endpoint.model or endpoint.max_request_micro_usd == 0:
                     raise CoreError("MEDIA_PROVIDER_NOT_CONFIGURED", 503)
                 price = endpoint.max_request_micro_usd
-                daily = store.one(
-                    (
-                        "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM "
-                        "model_usage WHERE scenario='media' AND occurred_at>=%s"
-                    ),
-                    (day,),
-                )["n"]
-                monthly = total_monthly(store, month)
-                if (
-                    daily + price > self.options.daily_micro_usd
-                    or monthly + price > self.settings.monthly_limit_micro_usd
-                ):
-                    raise CoreError("MEDIA_COST_BUDGET_EXHAUSTED", 429)
                 usage_id = uid("media_cost")
                 cloud_budget.reserve(
                     store,

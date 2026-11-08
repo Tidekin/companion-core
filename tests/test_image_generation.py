@@ -64,8 +64,7 @@ def test_config_requires_priced_https_provider():
     assert ImageGenerationConfig().enabled is False
     with pytest.raises(ValidationError):
         ImageGenerationConfig(enabled=True)
-    with pytest.raises(ValidationError):
-        config(daily_micro_usd=100)
+    assert config(daily_micro_usd=0).enabled
     with pytest.raises(ValidationError):
         config(endpoint=MediaEndpoint(url="http://images.example.test/v1", model="m",
                                       key=SecretStr("k"), max_request_micro_usd=1))

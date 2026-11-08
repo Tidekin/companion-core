@@ -145,7 +145,6 @@ def test_caption_estimate_uses_dedicated_policy_and_json_without_owner_image_per
     ("runtime_off", "MODEL_MEME_SCOPE_REQUIRED"),
     ("runtime_shadow", "MODEL_MEME_SCOPE_REQUIRED"),
     ("no_policy", "PAID_MEME_APPROVAL_REQUIRED"),
-    ("zero_cap", "SCENARIO_BUDGET_DISABLED"),
     ("logical", "MODEL_MEME_JOB_REQUIRED"),
 ])
 def test_caption_contract_fails_closed(core, tmp_path, monkeypatch, change, code):
@@ -212,11 +211,11 @@ def test_caption_settles_one_native_attempt_and_cannot_reuse_chat_or_background_
     ({"window_micro_usd": 1}, "MODEL_WINDOW_BUDGET_EXHAUSTED"),
     ({"per_attempt_micro_usd": 1}, "MODEL_ATTEMPT_BUDGET_EXHAUSTED"),
 ])
-def test_caption_respects_shared_paid_caps(core, tmp_path, monkeypatch, limit, code):
+def test_caption_currency_caps_are_advisory(core, tmp_path, monkeypatch, limit, code):
     job_id = setup_caption(core, tmp_path, monkeypatch, paid=limit)
-    with pytest.raises(CoreError, match=code):
-        reserve(core, job_id)
-    assert not core.store.one("SELECT 1 FROM model_usage")
+    request = reserve(core, job_id)
+    assert core.store.one("SELECT state FROM model_usage WHERE request_id=%s", (request,))[
+        "state"] == "RESERVED"
 
 
 def test_caption_reservation_shares_provider_concurrency(core, tmp_path, monkeypatch):
@@ -227,19 +226,18 @@ def test_caption_reservation_shares_provider_concurrency(core, tmp_path, monkeyp
     assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
 
 
-def test_caption_independent_daily_cap_applies_even_to_unlimited_period_spend(
+def test_caption_currency_amount_does_not_disable_unlimited_period_spend(
     core, tmp_path, monkeypatch,
 ):
     job_id = setup_caption(core, tmp_path, monkeypatch, daily=1, paid={
         "unlimited_period_spend": True, "daily_micro_usd": None,
         "monthly_micro_usd": None, "window_micro_usd": None,
     })
-    with pytest.raises(CoreError, match="DAILY_BUDGET_EXHAUSTED"):
-        reserve(core, job_id)
-    assert not core.store.one("SELECT 1 FROM model_usage")
+    reserve(core, job_id)
+    assert core.store.one("SELECT 1 FROM model_usage")
 
 
-def test_caption_actual_usage_over_independent_cap_stops_unlimited_period_spend(
+def test_caption_actual_usage_over_currency_amount_preserves_actual_charge(
     core, tmp_path, monkeypatch,
 ):
     job_id = setup_caption(core, tmp_path, monkeypatch, daily=5000, paid={
@@ -249,14 +247,14 @@ def test_caption_actual_usage_over_independent_cap_stops_unlimited_period_spend(
     request_id = reserve(core, job_id)
     budget.settle(core.store, core.settings, request_id, ModelResponse("{}", 6000, 20))
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
-        "state": "UNKNOWN", "billed_micro_usd": 6040,
+        "state": "SETTLED", "billed_micro_usd": 6040,
     }
-    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
     diagnostic = json.loads(core.store.one("SELECT safe_detail_json FROM audit_log "
                                            "WHERE action='model.usage_diagnostic'")[
         "safe_detail_json"
     ])
-    assert diagnostic["limits"] == ["SCENARIO_DAILY_AMOUNT"]
+    assert diagnostic["limits"] == []
 
 
 @pytest.mark.parametrize("change,code", [

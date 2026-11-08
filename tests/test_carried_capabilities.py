@@ -65,7 +65,8 @@ def test_unverified_or_unclosed_liability_keeps_reader_unavailable(core, tmp_pat
     if boundary == "unclosed":
         assert ready["state"] == "READY", ready
         rows = snapshot(core.store, core.settings, core.clock)["capabilities"]
-        assert any("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" in row["reason_codes"] for row in rows)
+        assert not any("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" in row["reason_codes"]
+                       for row in rows)
     else:
         assert ready["state"] != "READY", ready
 

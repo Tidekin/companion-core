@@ -66,7 +66,7 @@ def test_invalid_reply_preserves_large_known_usage_and_blocks_new_io(
     records = [json.loads(line) for line in Path(approval.journal_path).read_text().splitlines()]
     assert records[-1]["minimum_micro_usd"] >= 90000
     assert any(row["kind"] == "blocked" for row in records)
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, authorized_job(core),
             "chat", MESSAGES, core.clock())
 

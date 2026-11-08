@@ -653,13 +653,14 @@ def test_offset_live_window_is_the_shortest_child_deadline(core, tmp_path):
     run(scenario())
 
 
-def test_clip_reservation_counts_the_preview_fee_against_the_same_item_limit(core, tmp_path):
+def test_clip_keeps_preview_and_clip_charges_above_item_currency_amount(core, tmp_path):
     calls = []
 
     def provider(request):
         calls.append(request)
         return model_response(
-            {"analysis": "需要检查预先定义的片段", "need_clips": True}, tokens=18000
+            {"analysis": "需要检查预先定义的片段", "need_clips": True}
+            if len(calls) == 1 else {"analysis": "选定片段的局部画面"}, tokens=18000
         )
 
     async def scenario():
@@ -671,18 +672,17 @@ def test_clip_reservation_counts_the_preview_fee_against_the_same_item_limit(cor
             assert cost["accounted_micro_usd"] == 18040
             assert cost["task_id"] == "content:" + item["media"]["content_item_id"]
             assert 18040 * 8 < cloud.video_per_item_micro_cny
-            with pytest.raises(CoreError, match="CLOUD_TASK_BUDGET_EXHAUSTED"):
-                await module.upload(
-                    "bili",
-                    item["request_id"],
-                    upload_body(item, prepared, preview["next_selection"]),
-                )
-            assert len(calls) == 1
-            assert len(phase_usage(core)) == 1
-            assert phase_costs(core) == [cost]
+            await module.upload(
+                "bili", item["request_id"], upload_body(item, prepared, preview["next_selection"]))
+            assert len(calls) == 2
+            assert len(phase_usage(core)) == 2
+            assert phase_costs(core)[0] == cost
+            assert sum(row["amount_micro_cny"] for row in phase_costs(core)) > (
+                cloud.video_per_item_micro_cny)
             partial = module.context(item["media"]["content_item_id"])
             assert partial["result_status"] == "FETCHED"
-            assert [phase["phase"] for phase in partial["evidence"]["phases"]] == ["preview"]
+            assert [phase["phase"] for phase in partial["evidence"]["phases"]] == [
+                "preview", "clips"]
 
     run(scenario())
 

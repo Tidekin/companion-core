@@ -386,30 +386,10 @@ def admit(store, settings, clock, job_id, estimated_input, estimate):
         raise CoreError("REM_INPUT_LIMIT", 429)
     local = datetime.fromisoformat(clock()).astimezone(ZoneInfo(settings.timezone)).date()
     day = day_bounds(local, settings.timezone)[0]
-    month = day_bounds(local.replace(day=1), settings.timezone)[0]
-    usage = store.one(
-        (
-            "SELECT COUNT(*) n,COALESCE(SUM(billed_micro_usd),0) "
-            "cost FROM model_usage WHERE scenario='rem' AND "
-            "occurred_at>=%s"
-        ),
-        (day,),
-    )
-    monthly = store.one(
-        (
-            "SELECT COALESCE(SUM(billed_micro_usd),0) cost FROM "
-            "model_usage WHERE scenario='rem' AND occurred_at>=%s"
-        ),
-        (month,),
-    )["cost"]
-    if not cfg.daily_micro_usd or not cfg.monthly_micro_usd:
-        raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
+    usage = store.one("SELECT count(*) AS n FROM model_usage "
+                      "WHERE scenario='rem' AND occurred_at>=%s", (day,))
     if usage["n"] >= 1:
         raise CoreError("SCENARIO_CALL_LIMIT", 429)
-    if usage["cost"] + estimate > cfg.daily_micro_usd:
-        raise CoreError("DAILY_BUDGET_EXHAUSTED", 429)
-    if monthly + estimate > cfg.monthly_micro_usd:
-        raise CoreError("SCENARIO_MONTHLY_BUDGET_EXHAUSTED", 429)
     if store.one("SELECT 1 FROM model_usage WHERE job_id = %s", (job_id,)):
         raise CoreError("REM_ALREADY_ATTEMPTED", 409)
 

@@ -29,7 +29,6 @@ from companion import (
     reply_revision,
     transport,
 )
-from companion.budget import total_monthly
 from companion.contracts import CoreError
 from companion.media_provider import HTTPImageGenerator
 from companion.owner_authority_protocol import AuthorityReference
@@ -244,7 +243,7 @@ def _limit(store, settings, cfg, job, now):
     """Return a refusal code for an ordinary limit; the caller holds the transaction."""
     if store.one("SELECT 1 FROM generated_images WHERE job_id = %s", (job["job_id"],)):
         return "IMAGE_GENERATION_ONCE_PER_REPLY"
-    day, month = _day_and_month(settings, now)
+    day, _ = _day_and_month(settings, now)
     if (
         store.one("SELECT COUNT(*) AS n FROM generated_images WHERE created_at >= %s", (day,))["n"]
         >= cfg.max_daily_images
@@ -256,19 +255,6 @@ def _limit(store, settings, cfg, job, now):
         (job["conversation_id"], since),
     ):
         return "IMAGE_GENERATION_COOLDOWN"
-    price = cfg.endpoint.max_request_micro_usd
-    daily = store.one(
-        (
-            "SELECT COALESCE(SUM(billed_micro_usd),0) n FROM "
-            "model_usage WHERE scenario=%s AND occurred_at>=%s"
-        ),
-        (SCENARIO, day),
-    )["n"]
-    if (
-        daily + price > cfg.daily_micro_usd
-        or total_monthly(store, month) + price > settings.monthly_limit_micro_usd
-    ):
-        return "IMAGE_GENERATION_BUDGET_EXHAUSTED"
     return None
 
 

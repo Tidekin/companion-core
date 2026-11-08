@@ -8,7 +8,6 @@ import subprocess
 import sys
 from datetime import timedelta
 
-import psycopg
 import pytest
 
 from companion import owner_authority, release_probe
@@ -142,35 +141,18 @@ def test_copy_folds_wal_into_the_copy_and_skips_side_files(tmp_path):
     assert not any(p.name.endswith(("-wal", "-shm")) for p in target.rglob("*"))
 
 
-@pytest.mark.parametrize(("closed", "expected"), [(True, "R"), (False, "NOT_READY")])
-def test_closed_unknown_calls_do_not_block_a_release(closed, expected):
+@pytest.mark.parametrize("closed", [True, False])
+def test_active_model_work_blocks_release_even_when_other_calls_are_closed(closed):
     value = {**probe(blockers=["MODEL_USAGE_UNSETTLED"]), "unknown_closed": closed}
-    assert plan.classify(CORE, value, rolling=True)[0] == expected
+    assert plan.classify(CORE, value, rolling=True)[0] == "NOT_READY"
 
 
-def test_unknown_closure_is_read_from_native_rows_and_the_copied_journal(core, tmp_path):
-    journal = tmp_path / "budget.jsonl"
-    lines = [{"kind": "settle", "request_id": "model_a"},
-             {"kind": "model_local_close", "request_id": "model_a"},
-             {"kind": "model_local_close", "request_id": "other_model_b"},
-             {"kind": "settle", "request_id": "model_b"}]
-    journal.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
-    with isolated_database() as copy:
-        with psycopg.connect(copy.get_secret_value()) as db:
-            db.execute("CREATE TABLE model_usage(request_id TEXT, state TEXT)")
-            db.execute("CREATE TABLE model_admissions(request_id TEXT, journal_path TEXT)")
-            for request_id in ("model_a", "model_b"):
-                db.execute("INSERT INTO model_usage VALUES(%s, 'UNKNOWN')", (request_id,))
-                db.execute("INSERT INTO model_admissions VALUES(%s, %s)",
-                           (request_id, str(journal)))
-        settings = core.settings.model_copy(update={"database": copy})
-        assert release_probe.closed_unknowns(settings) is False
-        with journal.open("a", encoding="utf8") as handle:
-            handle.write(json.dumps({"kind": "model_unknown_carry", "request_id": "model_b"})
-                         + "\n")
-        assert release_probe.closed_unknowns(settings) is True
-        journal.unlink()
-        assert release_probe.closed_unknowns(settings) is False
+def test_unknown_model_cost_is_an_advisory_release_fact():
+    value = probe()
+    value["before"].update(unknown_model_calls=2, warnings=["MODEL_COST_UNKNOWN"])
+    assert plan.classify(CORE, value, rolling=True)[0] == "R"
+
+
 
 
 @pytest.mark.parametrize("network", [None, "host", "none", "bridge"])
@@ -233,7 +215,7 @@ def test_target_probe_entrypoint_migrates_private_native_copy_and_ignores_live_e
         config.write_text("".join(f"{k}={json.dumps(v)}\n" for k, v in values.items()), "utf8")
         result = plan.run_probe(api, "target-image", workspace, config, "private-probe")
         assert result["migration"]["needed"] and result["migration"]["ok"], result
-        assert result["unknown_closed"] is True
+        assert result["after"]["unknown_model_calls"] == 0
     assert logical_state(core.store) == original
     assert (live / "witness").read_text("utf8") == "original"
 

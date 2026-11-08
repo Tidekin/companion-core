@@ -60,7 +60,7 @@ def _carry_view(store, settings):
 
 
 def open_unknown(store, settings):
-    """Whether an UNKNOWN call still holds a provider slot, counted as admission counts it."""
+    """Informational unresolved cost evidence; UNKNOWN no longer holds a provider slot."""
     closed = _carry_view(store, settings).get("model_closures", {})
     return any(
         row["request_id"] not in closed
@@ -150,13 +150,13 @@ def _cumulative_blocks(store, settings, now, *, dimensions=(), state=None):
         return ["CUMULATIVE_ACCOUNT_NOT_ENROLLED"] if scope else []
     if not status.get("available"):
         return ["BUDGET_RECONCILIATION_REQUIRED"]
-    reasons = ["CUMULATIVE_PAUSED"] if status["paused"] else []
+    reasons = ["CUMULATIVE_PAUSED"] if cumulative.blocking_pause(status) else []
     if scope is None or status["policy_sha256"] != paid_budget.sha(scope.model_dump(mode="json")):
         reasons.append("CUMULATIVE_SCOPE_REQUIRED")
     if datetime.fromisoformat(status["expires_at"]) <= datetime.fromisoformat(now):
         reasons.append("CUMULATIVE_POLICY_EXPIRED")
     for dimension in dimensions:
-        if any(
+        if dimension != "micro_usd" and any(
             status["used"][period][dimension] >= limits[dimension]
             for period, limits in status["limits"].items()
         ):
@@ -180,23 +180,12 @@ def _private_scope(settings, field, expected, code, *, digest_field=None, digest
 
 
 def _scenario_blocks(store, settings, now, scenarios, amount, *, calls=None, unlimited=False):
+    if calls is None:
+        return []
     day, _ = _periods(settings, now)
-    usage = store.one(
-        (
-            "SELECT COUNT(*) calls,COALESCE(SUM(billed_micro_usd),0)"
-            " amount FROM model_usage WHERE occurred_at>=%s AND "
-            "scenario IN ("
-        )
-        + ",".join('%s' for _ in scenarios)
-        + ")",
-        (day, *scenarios),
-    )
-    reasons = []
-    if calls is not None and usage["calls"] >= calls:
-        reasons.append("SCENARIO_CALL_LIMIT")
-    if not unlimited and usage["amount"] >= amount:
-        reasons.append("SCENARIO_BUDGET_DISABLED" if amount <= 0 else "DAILY_BUDGET_EXHAUSTED")
-    return reasons
+    used = store.one("SELECT count(*) AS n FROM model_usage WHERE occurred_at>=%s "
+                     "AND scenario=ANY(%s::text[])", (day, list(scenarios)))["n"]
+    return ["SCENARIO_CALL_LIMIT"] if used >= calls else []
 
 
 def _periods(settings, now):
@@ -209,43 +198,32 @@ def _periods(settings, now):
 
 
 def _paid_capacity_blocks(store, settings, approval, now, *, carry_view=None):
-    return (["MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"]
-            if capacity_exhausted(store, approval) else [])
+    day, _ = _periods(settings, now)
+    windows = (model_carry.scope_windows(carry_view, approval.window_id)
+               if carry_view else [approval.window_id])
+    counts = store.one(
+        "SELECT count(*) FILTER (WHERE m.occurred_at>=%s) AS daily, "
+        "count(*) FILTER (WHERE a.window_id=ANY(%s::text[])) AS window, "
+        "count(*) FILTER (WHERE a.request_id IS NULL AND m.state='RESERVED') AS legacy "
+        "FROM model_usage m LEFT JOIN model_admissions a USING(request_id)", (day, windows),
+    )
+    reasons = []
+    if counts["legacy"]:
+        reasons.append("MODEL_LEGACY_USAGE_RECONCILIATION_REQUIRED")
+    if counts["daily"] >= approval.daily_calls:
+        reasons.append("MODEL_DAILY_BUDGET_EXHAUSTED")
+    if counts["window"] >= approval.window_calls:
+        reasons.append("MODEL_WINDOW_BUDGET_EXHAUSTED")
+    if capacity_exhausted(store, approval):
+        reasons.append("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED")
+    return reasons
 
 
 def _reflection_blocks(store, settings, now):
-    day, month = _periods(settings, now)
-    used = store.one(
-        (
-            "SELECT COUNT(CASE WHEN occurred_at>=%s THEN 1 END) "
-            "calls,COALESCE(SUM(CASE WHEN occurred_at>=%s THEN "
-            "billed_micro_usd ELSE 0 END),0) "
-            "daily,COALESCE(SUM(billed_micro_usd),0) monthly FROM "
-            "model_usage WHERE scenario='reflection' AND "
-            "occurred_at>=%s"
-        ),
-        (day, day, month),
-    )
-    reasons = []
-    if used["calls"] >= settings.reflection_max_daily_calls:
-        reasons.append("SCENARIO_CALL_LIMIT")
-    unlimited = bool(
-        settings.mode == "live"
-        and settings.paid_model
-        and settings.paid_model.unlimited_period_spend
-    )
-    if not unlimited:
-        if (
-            settings.reflection_daily_micro_usd > 0
-            and used["daily"] >= settings.reflection_daily_micro_usd
-        ):
-            reasons.append("DAILY_BUDGET_EXHAUSTED")
-        if (
-            settings.reflection_monthly_micro_usd > 0
-            and used["monthly"] >= settings.reflection_monthly_micro_usd
-        ):
-            reasons.append("SCENARIO_MONTHLY_BUDGET_EXHAUSTED")
-    return reasons
+    day, _ = _periods(settings, now)
+    used = store.one("SELECT count(*) AS n FROM model_usage WHERE scenario='reflection' "
+                     "AND occurred_at>=%s", (day,))["n"]
+    return ["SCENARIO_CALL_LIMIT"] if used >= settings.reflection_max_daily_calls else []
 
 
 def public_source_readiness(
@@ -844,8 +822,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner
         "memory.recall",
         "对相关记忆做有来源的检索与审核。",
         enabled=cfg.memory_enabled,
-        paused=model_blocks
-        + ([] if cfg.memory_daily_micro_usd > 0 else ["SCENARIO_BUDGET_DISABLED"]),
+        paused=model_blocks,
         limits={"daily_micro_usd": cfg.memory_daily_micro_usd},
     )
     for name, summary, extra, limits in (
@@ -879,7 +856,8 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner
         ),
     ):
         paused = model_blocks + extra
-        if limits and any(value <= 0 for value in limits.values()):
+        if limits and any(value <= 0 for key, value in limits.items()
+                          if not key.endswith("micro_usd")):
             paused += ["SCENARIO_BUDGET_DISABLED"]
         if name == "reflection":
             paused += _reflection_blocks(store, cfg, now)
@@ -1185,8 +1163,7 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None, owner
         enabled=cfg.meme_semantics_enabled,
         unavailable=private_errors
         + ([] if cfg.paid_model and cfg.paid_model.meme_input else ["PAID_MEME_APPROVAL_REQUIRED"]),
-        paused=model_blocks
-        + ([] if cfg.meme_caption_daily_micro_usd > 0 else ["SCENARIO_BUDGET_DISABLED"]),
+        paused=model_blocks,
     )
     for name in ("voice", "camera", "android"):
         adapter = cfg.observation_adapters.get(getattr(cfg.media, name + "_adapter"))

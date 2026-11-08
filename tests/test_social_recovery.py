@@ -13,13 +13,18 @@ import pytest
 from pydantic import SecretStr
 
 from companion import budget, social_plan_jobs
-from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
 from companion.social_autonomy_runtime import _expire, run_once
 from companion.store import Store
 from tests.conftest import ingest, run
 from tests.postgres_fixture import logical_state
-from tests.support.social_autonomy import MockPlanner, background, extra_public, planned
+from tests.support.social_autonomy import (
+    MockPlanner,
+    background,
+    deferred_admission,
+    extra_public,
+    planned,
+)
 from tests.support.social_owner_authority import authorize
 
 
@@ -101,17 +106,17 @@ def test_native_reserve_fences_worker_resuming_after_expired_plan_recovery(core,
 
 def test_budget_refusal_reuses_original_plan_and_request_without_poll_writes(core):
     module, ref, _ = background(core)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        planned(module, ref)
-    before = core.store.one("SELECT * FROM social_autonomy_plans")
-    changes = logical_state(core.store)
-    assert planned(module, ref)["state"] == "REJECTED"
-    assert logical_state(core.store) == changes
-    assert core.store.one("SELECT * FROM social_autonomy_plans") == before
-    assert len(core.store.rows("SELECT * FROM audit_log WHERE action='social.plan_failed'")) == 1
-    assert not core.store.rows("SELECT * FROM model_usage")
-    core.settings.cloud_budget = CloudBudgetConfig()
+    with deferred_admission():
+        with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+            planned(module, ref)
+        before = core.store.one("SELECT * FROM social_autonomy_plans")
+        changes = logical_state(core.store)
+        assert planned(module, ref)["state"] == "REJECTED"
+        assert logical_state(core.store) == changes
+        assert core.store.one("SELECT * FROM social_autonomy_plans") == before
+        assert len(core.store.rows(
+            "SELECT * FROM audit_log WHERE action='social.plan_failed'")) == 1
+        assert not core.store.rows("SELECT * FROM model_usage")
     core.clock.advance(60)
     assert run(run_once(core.store, core.settings, module.model, core.clock))
     result = module.get(before["plan_id"])
@@ -149,14 +154,13 @@ def test_native_admission_yields_to_new_chat_without_consuming_the_unadmitted_pl
 def test_runtime_retries_unadmitted_candidate_across_midnight_without_extending_expiry(core):
     core.clock.now = datetime.fromisoformat("2026-10-19T15:59:50+00:00")
     module, _, _ = background(core)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    assert run(run_once(core.store, core.settings, module.model, core.clock))
-    prior = core.store.one("SELECT * FROM social_autonomy_plans")
-    assert prior["state"] == "REJECTED" and not module.model.calls
-    assert not run(run_once(core.store, core.settings, module.model, core.clock))
-    core.clock.advance(60)
-    newer_ref = extra_public(core)
-    core.settings.cloud_budget = CloudBudgetConfig()
+    with deferred_admission():
+        assert run(run_once(core.store, core.settings, module.model, core.clock))
+        prior = core.store.one("SELECT * FROM social_autonomy_plans")
+        assert prior["state"] == "REJECTED" and not module.model.calls
+        assert not run(run_once(core.store, core.settings, module.model, core.clock))
+        core.clock.advance(60)
+        newer_ref = extra_public(core)
     assert run(run_once(core.store, core.settings, module.model, core.clock))
     current = core.store.one("SELECT * FROM social_autonomy_plans")
     for key in ("plan_id", "model_request_id", "expires_at", "created_at", "candidate_sha256"):
@@ -191,10 +195,9 @@ def test_timezone_change_is_refused_before_consuming_a_candidate_or_rebinding_ol
 @pytest.mark.parametrize("change", ["expire", "erase", "policy", "unknown"])
 def test_unadmitted_retry_cannot_outlive_original_source_authority_or_liability(core, change):
     module, ref, _ = background(core, plan_ttl_seconds=300)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        planned(module, ref)
-    core.settings.cloud_budget = CloudBudgetConfig()
+    with deferred_admission():
+        with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+            planned(module, ref)
     if change == "expire":
         core.clock.advance(301)
     elif change == "erase":
@@ -226,10 +229,9 @@ def test_unadmitted_retry_cannot_outlive_original_source_authority_or_liability(
 
 def test_two_connections_retry_one_original_unadmitted_request(core):
     module, ref, _ = background(core)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        planned(module, ref)
-    core.settings.cloud_budget = CloudBudgetConfig()
+    with deferred_admission():
+        with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+            planned(module, ref)
     core.clock.advance(60)
     barrier = Barrier(2)
     calls = []
@@ -255,10 +257,9 @@ def test_two_connections_retry_one_original_unadmitted_request(core):
 @pytest.mark.parametrize("mode", ["before_reserve", "reserved", "settled"])
 def test_native_retry_process_death_reclaims_only_unadmitted_job(core, tmp_path, mode):
     module, ref, _ = background(core, plan_ttl_seconds=600)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        planned(module, ref)
-    core.settings.cloud_budget = CloudBudgetConfig()
+    with deferred_admission():
+        with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+            planned(module, ref)
     original = core.store.one("SELECT * FROM social_autonomy_plans")
     core.clock.advance(60)
     crash(core, tmp_path, ref, "retry_" + mode)
@@ -280,17 +281,17 @@ def test_native_retry_process_death_reclaims_only_unadmitted_job(core, tmp_path,
 
 def test_native_retry_wait_is_durable_and_not_polled_as_a_new_attempt(core):
     module, ref, _ = background(core, plan_ttl_seconds=600)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        planned(module, ref)
-    plan = core.store.one("SELECT * FROM social_autonomy_plans")
-    core.clock.advance(60)
-    assert run(run_once(core.store, core.settings, module.model, core.clock))
-    job = social_plan_jobs.get(core.store, plan["plan_id"])
-    assert job["state"] == "RETRY_WAIT" and job["attempts"] == 0
-    for _ in range(3):
-        run(run_once(core.store, core.settings, module.model, core.clock))
-    assert social_plan_jobs.get(core.store, plan["plan_id"]) == job
-    assert not module.model.calls
-    assert not core.store.rows("SELECT * FROM model_usage")
-    assert len(core.store.rows("SELECT * FROM social_autonomy_jobs")) == 1
+    with deferred_admission():
+        with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+            planned(module, ref)
+        plan = core.store.one("SELECT * FROM social_autonomy_plans")
+        core.clock.advance(60)
+        assert run(run_once(core.store, core.settings, module.model, core.clock))
+        job = social_plan_jobs.get(core.store, plan["plan_id"])
+        assert job["state"] == "RETRY_WAIT" and job["attempts"] == 0
+        for _ in range(3):
+            run(run_once(core.store, core.settings, module.model, core.clock))
+        assert social_plan_jobs.get(core.store, plan["plan_id"]) == job
+        assert not module.model.calls
+        assert not core.store.rows("SELECT * FROM model_usage")
+        assert len(core.store.rows("SELECT * FROM social_autonomy_jobs")) == 1

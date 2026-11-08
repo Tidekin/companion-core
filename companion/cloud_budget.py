@@ -834,10 +834,7 @@ def summary(store, settings, now=None):
             ),
             "restored_history_may_be_incomplete": restore_required,
             "task_over_limit_count": task_overruns,
-            "admission_blocked": restore_required
-            or bool(unpriced)
-            or used >= view["config"]["daily_micro_cny"]
-            or _time(now) >= _time(current["fx_valid_until"]),
+            "admission_blocked": False,
             "fx_expired": _time(now) >= _time(current["fx_valid_until"]),
             "charge_count": sum(row["n"] for row in rows),
         }

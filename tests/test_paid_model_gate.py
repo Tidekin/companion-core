@@ -137,20 +137,22 @@ def test_approved_call_requires_durable_admission_and_uses_shared_window(core, t
         ({"live_approved": False}, "LIVE_OPT_IN_REQUIRED"),
     ],
 )
-def test_limits_reject_with_no_model_io(core, tmp_path, changes, code):
+def test_money_is_advisory_and_other_limits_refuse_before_io(core, tmp_path, changes, code):
     from companion import budget
 
     approved_live(core, tmp_path, **changes)
-    with pytest.raises(CoreError, match=code):
-        budget.reserve(
-            core.store,
-            core.settings,
-            authorized_job(core),
-            "chat",
-            [{"role": "user", "content": "hello"}],
-            core.clock(),
-        )
-    assert core.store.rows("SELECT * FROM model_usage") == []
+    def reserve():
+        return budget.reserve(core.store, core.settings, authorized_job(core), "chat",
+                              [{"role": "user", "content": "hello"}], core.clock())
+
+    if any(name.endswith("micro_usd") for name in changes):
+        request = reserve()
+        assert core.store.one("SELECT request_id,state FROM model_usage") == {
+            "request_id": request, "state": "RESERVED"}
+    else:
+        with pytest.raises(CoreError, match=code):
+            reserve()
+        assert core.store.rows("SELECT * FROM model_usage") == []
     assert core.model.calls == []
 
 
@@ -187,7 +189,7 @@ def test_all_scenarios_share_daily_call_limit(core, tmp_path, scenario):
     assert core.model.calls == []
 
 
-def test_unknown_keeps_upper_cost_concurrency_and_fresh_window_cannot_reset_it(core, tmp_path):
+def test_unknown_keeps_original_cost_and_absent_response_cannot_replay(core, tmp_path):
     from companion import budget
 
     approval = approved_live(core, tmp_path, concurrency=1)
@@ -205,7 +207,7 @@ def test_unknown_keeps_upper_cost_concurrency_and_fresh_window_cannot_reset_it(c
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_PAID_POLICY_CHANGED"):
         budget.reserve(core.store, core.settings, job_id, "chat", messages, core.clock())
     core.settings.paid_model = approval
-    with pytest.raises(CoreError, match="CONCURRENCY"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, job_id, "chat", messages, core.clock())
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
         "state": "UNKNOWN",
@@ -327,7 +329,8 @@ def test_missing_or_anomalous_usage_never_refunds_unknown(core, tmp_path, bad_us
     response = ModelResponse("ok", *bad_usage) if bad_usage else None
     budget.settle(core.store, core.settings, request, response)
     usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
-    assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] >= before
+    assert usage["state"] == ("SETTLED" if bad_usage == (999999, 1, 0) else "UNKNOWN")
+    assert usage["billed_micro_usd"] >= before
 
 
 def test_price_change_retains_snapshot_and_permanently_blocks_next_admission(core, tmp_path):
@@ -341,7 +344,7 @@ def test_price_change_retains_snapshot_and_permanently_blocks_next_admission(cor
     core.settings.input_rate += 1
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
     core.settings.input_rate -= 1
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, authorized_job(core),
                                "chat", messages, core.clock())
     assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
@@ -589,7 +592,7 @@ def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(
     assert len(calls) == 1
 
 
-def test_legacy_unknown_without_admission_blocks_paid_account(core, tmp_path):
+def test_legacy_unknown_retains_original_evidence_without_blocking_fresh_admission(core, tmp_path):
     from companion import budget
 
     approved_live(core, tmp_path)
@@ -599,15 +602,13 @@ def test_legacy_unknown_without_admission_blocks_paid_account(core, tmp_path):
                       scenario="chat", provider=core.settings.provider,
                       model=core.settings.model_name, billed_micro_usd=100,
                       state="UNKNOWN", pricing_known=1, occurred_at=core.clock())
-    with pytest.raises(CoreError, match="LEGACY_USAGE_RECONCILIATION"):
-        budget.reserve(
-            core.store,
-            core.settings,
-            job_id,
-            "chat",
-            [{"role": "user", "content": "hello"}],
-            core.clock(),
-        )
+    budget.reserve(core.store, core.settings, job_id, "chat",
+                   [{"role": "user", "content": "hello"}], core.clock())
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage "
+                          "WHERE request_id='model_historical'") == {
+        "state": "UNKNOWN", "billed_micro_usd": 100,
+    }
+    assert len(core.store.rows("SELECT * FROM model_usage")) == 2
     assert core.model.calls == []
 
 
@@ -621,7 +622,7 @@ def test_provider_invoice_discrepancy_stops_new_calls_and_records_upper_differen
                            "chat", messages, core.clock())
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
     budget.record_provider_discrepancy(core.store, core.settings, request, 8000, "USD", "e" * 64)
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, authorized_job(core),
                                "chat", messages, core.clock())
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
@@ -863,8 +864,8 @@ def test_stopping_admission_does_not_discard_later_inflight_cost_evidence(core, 
         'record_sequence'
     )
     assert rows == [
-        {"state": "UNKNOWN", "billed_micro_usd": 1000003},
-        {"state": "UNKNOWN", "billed_micro_usd": 888892},
+        {"state": "SETTLED", "billed_micro_usd": 1000003},
+        {"state": "SETTLED", "billed_micro_usd": 888892},
     ]
     budget.record_provider_discrepancy(core.store, core.settings, second, 2000000, "USD", "f" * 64)
     assert (
@@ -873,7 +874,7 @@ def test_stopping_admission_does_not_discard_later_inflight_cost_evidence(core, 
         ]
         == 2000000
     )
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, authorized_job(core),
                                "chat", messages, core.clock())
 
@@ -927,13 +928,17 @@ def test_known_cost_uses_reserved_accounting_custody_after_live_config_changes(
 
     asyncio.run(exercise())
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
-        "state": "UNKNOWN",
+        "state": "UNKNOWN" if change == "write_failure" else "SETTLED",
         "billed_micro_usd": 900004,
     }
     core.settings.paid_model = original_approval
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    if change == "write_failure":
+        with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
+            budget.reserve(core.store, core.settings, authorized_job(core),
+                           "chat", messages, core.clock())
+    else:
         budget.reserve(core.store, core.settings, authorized_job(core),
-                               "chat", messages, core.clock())
+                       "chat", messages, core.clock())
     assert len(calls) == 1
 
 

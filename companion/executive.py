@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from companion import cloud_budget
-from companion.budget import total_monthly
 from companion.contracts import CoreError
 from companion.executive_protocol import ExecutionEnvelope, ToolReceipt
 from companion.privacy import epoch, redact
@@ -418,31 +417,15 @@ class Executive:
                 raise CoreError("TOOL_APPROVAL_REQUIRED", 403)
             local = datetime.fromisoformat(now).astimezone(ZoneInfo(self.settings.timezone))
             day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-            month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
             cost = scope["max_cost_micro_usd"]
             daily = s.one(
                 (
-                    "SELECT COUNT(*) n,COALESCE(SUM(billed_micro_usd),0) "
-                    "cost FROM tool_tasks WHERE dispatched_at>=%s"
+                    "SELECT COUNT(*) n FROM tool_tasks WHERE dispatched_at>=%s"
                 ),
                 (day.isoformat(),),
             )
-            monthly = s.one(
-                (
-                    "SELECT COALESCE(SUM(billed_micro_usd),0) cost FROM "
-                    "tool_tasks WHERE dispatched_at>=%s"
-                ),
-                (month.isoformat(),),
-            )
-            shared_monthly = total_monthly(s, month.isoformat(timespec="microseconds"))
             if daily["n"] >= cfg.daily_calls:
                 raise CoreError("TOOL_CALL_LIMIT", 429)
-            if (
-                daily["cost"] + cost > cfg.daily_micro_usd
-                or (monthly["cost"] + cost > cfg.monthly_micro_usd)
-                or (shared_monthly + cost > self.settings.monthly_limit_micro_usd)
-            ):
-                raise CoreError("TOOL_BUDGET_EXHAUSTED", 429)
             cloud_budget.reserve(
                 s,
                 self.settings,
@@ -479,7 +462,6 @@ class Executive:
             if (
                 receipt.task_id != current["task_id"]
                 or receipt.scope_sha256 != current["scope_sha256"]
-                or receipt.billed_micro_usd > current["reserved_micro_usd"]
                 or receipt.model_calls > scope["max_model_calls"]
             ):
                 raise CoreError("INVALID_TOOL_RECEIPT", 409)

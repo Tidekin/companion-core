@@ -225,6 +225,7 @@ def reserve(
     current_time = clock or (lambda: now)
     wire = (runtime_config.video_settings(store, settings, "job:" + job_id, scenario,
                                           clock=current_time) if job_id else settings)
+    cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
     inputs = model_scope.prepare_input(store, settings, current_time, wire, approval, request_id,
                                        logical_request_id, job_id, scenario, messages, tools,
@@ -389,6 +390,22 @@ def _record_paid_reservation(store, settings, approval, scenario, request_id, lo
 def _admit(store, settings, approval, logical, estimate, now, day, month, *, scenario="chat",
            job_id=None):
     """Keep contract identity and live execution capacity without monetary refusals."""
+    from companion import model_carry
+
+    carry = None
+    if model_carry.active(settings):
+        model_carry.supported(store, settings)
+        carry = paid_budget.journal(store, approval)
+    if store.one(
+        "SELECT 1 FROM model_admissions a JOIN model_usage m USING(request_id) "
+        "WHERE a.logical_request_id=%s AND m.scenario=%s AND m.state='UNKNOWN' AND NOT EXISTS("
+        "SELECT 1 FROM agent_conversations c, "
+        "jsonb_array_elements(c.conversation_json::jsonb->'messages') response(value) "
+        "WHERE c.job_id=m.job_id AND response.value->>'kind'='response' "
+        "AND response.value->'metadata'->>'core_request_id'=m.request_id) LIMIT 1",
+        (logical, scenario),
+    ):
+        raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
     if store.one(
         "SELECT 1 FROM model_usage AS m LEFT JOIN model_admissions AS a USING(request_id) "
         "WHERE a.request_id IS NULL AND m.state='RESERVED' LIMIT 1"
@@ -401,6 +418,21 @@ def _admit(store, settings, approval, logical, estimate, now, day, month, *, sce
         raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
     store.execute("INSERT INTO model_budget_windows VALUES (%s,%s) ON CONFLICT DO NOTHING",
                   (approval.window_id, frozen))
+    daily = store.one("SELECT count(*) AS n FROM model_usage WHERE occurred_at>=%s",
+                      (day.isoformat(timespec="microseconds"),))["n"]
+    if daily >= approval.daily_calls:
+        raise CoreError("MODEL_DAILY_BUDGET_EXHAUSTED", 429)
+    for column, value, calls, label in (
+        ("window_id", approval.window_id, approval.window_calls, "WINDOW"),
+        ("logical_request_id", logical, approval.per_request_calls, "REQUEST"),
+    ):
+        values = (model_carry.scope_windows(carry, value)
+                  if column == "window_id" and carry else [value])
+        used = store.one("SELECT count(*) AS n FROM model_admissions a "
+                         "JOIN model_usage m USING(request_id) WHERE a." + column
+                         + "=ANY(%s::text[])", (values,))["n"]
+        if used >= calls:
+            raise CoreError("MODEL_" + label + "_BUDGET_EXHAUSTED", 429)
     if capacity_exhausted(store, approval, scenario=scenario, job_id=job_id):
         raise CoreError("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", 429)
 

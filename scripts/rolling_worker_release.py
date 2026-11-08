@@ -7,8 +7,8 @@ fixed order, it:
 1. checks the OwnerAuthority is still ACTIVE and records the UNKNOWN model call count;
 2. stops the old container with a long grace period, so the worker finishes its current
    unit (model call, send, commit) and exits 0 after releasing its file locks;
-3. refuses to continue if the exit was not clean, a lock is still held or a new UNKNOWN
-   appeared;
+3. refuses to continue if the exit was not clean or a lock is still held, and records
+   changed cost UNKNOWN counts as warnings;
 4. starts the service again from its original Compose files plus an image-only override,
    and waits until the new container is running and holds the same locks.
 
@@ -196,7 +196,7 @@ def roll(project, service, image, state_directory, override, images, receipt):
     if any(lock_holders(path, locks) for path in lock_paths(state_directory, service)):
         raise RuntimeError(f"{service} still holds a worker lock after stopping")
     if after["unknown"] != before["unknown"]:
-        raise RuntimeError(f"{service} stop left a new UNKNOWN model call")
+        step.setdefault("warnings", []).append("MODEL_COST_UNKNOWN_CHANGED")
     images[service] = image
     write_override(override, images)
     docker(*compose(old, override), "up", "-d", "--no-deps", "--no-build", "--pull", "never",

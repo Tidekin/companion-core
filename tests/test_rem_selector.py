@@ -64,7 +64,7 @@ def test_rem_explicit_off_stays_silent_in_original_selector(core):
 
 
 @pytest.mark.parametrize("cap", [1, 50000])
-def test_rem_native_turn_budget_fence_or_completion_does_not_block_next_lanes(core, tmp_path, cap):
+def test_rem_currency_amount_does_not_block_next_lanes(core, tmp_path, cap):
     prepare(core, tmp_path, cap=cap)
     memories = core.store.rows("SELECT * FROM memories")
     calls = []
@@ -95,17 +95,13 @@ def test_rem_native_turn_budget_fence_or_completion_does_not_block_next_lanes(co
 
     run(scenario())
     job = core.store.one("SELECT state,last_error_code FROM jobs WHERE kind='rem'")
-    if cap == 1:
-        assert job == {"state": "FAILED", "last_error_code": "DAILY_BUDGET_EXHAUSTED"}
-        assert calls == [] and core.store.rows("SELECT * FROM model_usage") == []
-    else:
-        assert job == {"state": "SUCCEEDED", "last_error_code": None}
-        assert len(calls) == 1
-        assert core.store.one("SELECT state,scenario FROM model_usage") == {
-            "state": "SETTLED", "scenario": "rem",
-        }
-        artifact = rem.records(core)[0]
-        assert artifact["kind"] == "FICTION"
-        assert artifact["questions"][0]["state"] == "UNVERIFIED"
+    assert job == {"state": "SUCCEEDED", "last_error_code": None}
+    assert len(calls) == 1
+    assert core.store.one("SELECT state,scenario FROM model_usage") == {
+        "state": "SETTLED", "scenario": "rem",
+    }
+    artifact = rem.records(core)[0]
+    assert artifact["kind"] == "FICTION"
+    assert artifact["questions"][0]["state"] == "UNVERIFIED"
     assert core.store.rows("SELECT * FROM memories") == memories
     assert core.store.rows("SELECT * FROM outbox") == []

@@ -29,8 +29,6 @@ def contract(settings, job_id, logical_request_id):
     ):
         raise CoreError("MODEL_MEME_SCOPE_REQUIRED", 503)
     _policy(approval.meme_input)
-    if settings.meme_caption_daily_micro_usd <= 0:
-        raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
     if not job_id or logical_request_id != job_id:
         raise CoreError("MODEL_MEME_JOB_REQUIRED", 503)
 

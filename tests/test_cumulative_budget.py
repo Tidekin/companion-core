@@ -27,7 +27,7 @@ def reserve(core, **kwargs):
 
 @pytest.mark.parametrize("period", ["request", "window", "day", "month", "account"])
 @pytest.mark.parametrize("dimension", [
-    "micro_usd", "model_attempts", "input_tokens", "output_tokens",
+    "model_attempts", "input_tokens", "output_tokens",
 ])
 def test_all_model_limits_apply_before_reservation(core, tmp_path, period, dimension):
     enable(core, tmp_path, **{period: {dimension: 0}})
@@ -35,6 +35,15 @@ def test_all_model_limits_apply_before_reservation(core, tmp_path, period, dimen
         reserve(core)
     assert core.store.rows("SELECT * FROM model_usage") == []
     assert core.model.calls == []
+
+
+@pytest.mark.parametrize("period", ["request", "window", "day", "month", "account"])
+def test_currency_limits_are_advisory_and_original_liabilities_remain(core, tmp_path, period):
+    enable(core, tmp_path, **{period: {"micro_usd": 0}})
+    request = reserve(core)
+    assert view(core)["models"][request]["micro_usd"] > 0
+    budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
+    assert view(core)["models"][request]["state"] == "SETTLED"
 
 
 @pytest.mark.parametrize("boundary", ["2026-10-19T15:59:59+00:00", "2026-10-31T15:59:59+00:00"])
@@ -127,6 +136,29 @@ def test_clock_rollback_pause_survives_transaction_rollback(core, tmp_path):
     core.clock.advance(2)
     with pytest.raises(CoreError, match="CUMULATIVE_PAUSED"):
         reserve(core)
+
+
+def test_cost_unknown_does_not_prevent_a_later_owner_pause(core, tmp_path):
+    enable(core, tmp_path)
+    request = reserve(core)
+    budget.settle(core.store, core.settings, request)
+    assert view(core)["reason"] == "UNKNOWN_MODEL_LIABILITY"
+    with core.store.transaction():
+        cumulative.pause(core.store, core.settings.paid_model, core.clock())
+    assert view(core)["reason"] == "OWNER_PAUSE"
+    budget.settle(core.store, core.settings, request, ModelResponse("late", 30, 2))
+    assert view(core)["reason"] == "OWNER_PAUSE"
+    with pytest.raises(CoreError, match="CUMULATIVE_PAUSED"):
+        reserve(core)
+
+
+def test_cost_unknown_is_a_warning_in_cumulative_status(core, tmp_path):
+    enable(core, tmp_path)
+    request = reserve(core)
+    budget.settle(core.store, core.settings, request)
+    status = cumulative.status(core.store, core.settings, core.clock())
+    assert status["available"] and not status["paused"]
+    assert "MODEL_COST_UNKNOWN" in status["warnings"]
 
 
 def test_legacy_costs_require_exact_inventory_and_are_not_reset(core, tmp_path):

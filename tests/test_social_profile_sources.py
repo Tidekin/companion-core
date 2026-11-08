@@ -5,7 +5,6 @@ import json
 import pytest
 
 from companion import social_profile_sources
-from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
 from companion.social_autonomy import _sha
 from companion.social_autonomy_protocol import ProfileBaseline
@@ -13,7 +12,7 @@ from companion.social_autonomy_runtime import run_once
 from companion.store import encode
 from tests.conftest import ingest, run
 from tests.social_profile_support import confirmed_profile_material
-from tests.support.social_autonomy import background, dispatch, queue
+from tests.support.social_autonomy import background, deferred_admission, dispatch, queue
 
 
 def setup(core, **kwargs):
@@ -175,16 +174,15 @@ def test_legacy_public_profile_plan_is_rejected_without_replaying_liability(core
 @pytest.mark.parametrize("forget", [False, True])
 def test_deferred_profile_reuses_native_job_and_rechecks_owner_material(core, forget):
     module, memory_id, _, _ = setup(core)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        plan(module, memory_id)
-    before = core.store.one("SELECT * FROM social_autonomy_plans")
-    job = core.store.one("SELECT * FROM jobs WHERE kind='social_plan'")
-    assert job["state"] == "QUEUED"
-    assert not module.model.calls and not core.store.rows("SELECT * FROM model_usage")
-    if forget:
-        core.memory.decide(memory_id, "forget", core.clock())
-    core.settings.cloud_budget = CloudBudgetConfig()
+    with deferred_admission():
+        with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+            plan(module, memory_id)
+        before = core.store.one("SELECT * FROM social_autonomy_plans")
+        job = core.store.one("SELECT * FROM jobs WHERE kind='social_plan'")
+        assert job["state"] == "QUEUED"
+        assert not module.model.calls and not core.store.rows("SELECT * FROM model_usage")
+        if forget:
+            core.memory.decide(memory_id, "forget", core.clock())
     core.clock.advance(60)
     # Isolate this existing retry from independent public candidates.
     from companion import social_plan_jobs

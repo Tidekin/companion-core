@@ -223,7 +223,7 @@ def test_private_modes_require_original_owner_authority_reference(mode):
 
 
 @pytest.mark.parametrize("changes", [
-    {"daily_micro_usd": 99}, {"concurrency": 0}, {"daily_calls": -1},
+    {"concurrency": 0}, {"daily_calls": -1},
     {"max_input_tokens": True}, {"max_output_tokens": 2.5}, {"daily_micro_usd": 2**53},
     {"paid_contract_sha256": "unknown-price"},
 ])
@@ -352,3 +352,8 @@ assert schema['$defs']['RouteIntent']['properties']['dispatch_allowed']['const']
     result = subprocess.run([sys.executable, "-B", "-c", script], cwd=tmp_path,
                             capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+def test_currency_amounts_do_not_refuse_a_bounded_gateway_client():
+    value = ClientBudget.model_validate({**BUDGET, "daily_micro_usd": 0})
+    assert value.daily_micro_usd == 0 and value.daily_calls == BUDGET["daily_calls"]

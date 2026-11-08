@@ -118,7 +118,7 @@ def test_revocation_during_execution_never_accepts_late_result(core):
     assert core.store.rows("SELECT * FROM observations") == []
 
 
-def test_monthly_reservations_include_first_local_day(core):
+def test_monthly_money_limit_is_advisory_and_each_unknown_tool_charge_remains(core):
     fake = FakeExecutor()
     fake.fail = True
     core.clock.now = datetime.fromisoformat("2026-09-30T16:00:00+00:00")
@@ -130,11 +130,12 @@ def test_monthly_reservations_include_first_local_day(core):
     core.clock.advance(10 * 86400)
     second = executive.submit(proposal(2))
     assert run(executive.run_one())
-    assert executive.get(second["task_id"])["last_error_code"] == "TOOL_BUDGET_EXHAUSTED"
-    assert len(fake.calls) == 1
+    assert executive.get(second["task_id"])["last_error_code"] == "EXECUTION_UNCERTAIN"
+    assert len(fake.calls) == 2
+    assert core.store.one("SELECT sum(billed_micro_usd) AS n FROM tool_tasks")["n"] == 2000
 
 
-def test_tool_cost_respects_shared_model_monthly_budget(core):
+def test_tool_runs_beyond_advisory_shared_monthly_amount(core):
     fake = FakeExecutor()
     executive = configured(core, fake)
     core.settings.monthly_limit_micro_usd = 1000
@@ -145,8 +146,8 @@ def test_tool_cost_respects_shared_model_monthly_budget(core):
     )
     task = executive.submit(proposal())
     assert run(executive.run_one())
-    assert executive.get(task["task_id"])["last_error_code"] == "TOOL_BUDGET_EXHAUSTED"
-    assert not fake.calls
+    assert executive.get(task["task_id"])["state"] == "SUCCEEDED"
+    assert len(fake.calls) == 1
 
 
 def test_unknown_does_not_retry_and_retains_budget(core):
@@ -548,7 +549,7 @@ def test_core_tool_routes_require_owner_control_and_exact_scope(core):
         assert client.post("/internal/v1/tasks", json=body, headers=bridge).status_code == 403
 
 
-def test_model_budget_counts_tool_unknown_reservations(core):
+def test_unknown_tool_cost_remains_while_fresh_model_reservation_continues(core):
     adapter = FakeExecutor()
     adapter.fail = True
     executive = configured(core, adapter)
@@ -558,15 +559,11 @@ def test_model_budget_counts_tool_unknown_reservations(core):
     executive.submit(proposal())
     assert run(executive.run_one())
     assert core.store.one("SELECT state FROM tool_tasks")["state"] == "UNKNOWN"
-    with pytest.raises(CoreError, match="MONTHLY_BUDGET_EXHAUSTED"):
-        budget.reserve(
-            core.store,
-            core.settings,
-            None,
-            "chat",
-            [{"role": "user", "content": "test"}],
-            core.clock(),
-        )
+    before = core.store.one("SELECT state,billed_micro_usd FROM tool_tasks")
+    budget.reserve(core.store, core.settings, None, "chat",
+                   [{"role": "user", "content": "test"}], core.clock())
+    assert core.store.one("SELECT state,billed_micro_usd FROM tool_tasks") == before
+    assert core.store.one("SELECT state FROM model_usage")["state"] == "RESERVED"
 
 
 def test_settings_reject_reusing_executor_and_bridge_tokens(core):

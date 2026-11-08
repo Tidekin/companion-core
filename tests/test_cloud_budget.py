@@ -7,7 +7,7 @@ from threading import Barrier
 
 import pytest
 
-from companion import budget, cloud_budget, cumulative, paid_budget
+from companion import budget, cloud_budget, paid_budget
 from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
 from companion.executive import erase_executive
@@ -64,7 +64,7 @@ def test_invalid_cloud_configuration_never_changes_policy(core, patch):
     assert cloud_budget.policy(core.store, core.settings, core.clock()) == original
 
 
-def test_two_independent_connections_cannot_overreserve_daily_budget(core):
+def test_two_independent_connections_record_charges_beyond_advisory_daily_amount(core):
     options(core, daily_micro_cny=1_000_000)
     barrier = Barrier(2)
 
@@ -82,11 +82,11 @@ def test_two_independent_connections_cannot_overreserve_daily_budget(core):
 
     with ThreadPoolExecutor(max_workers=2) as workers:
         results = list(workers.map(attempt, [1, 2]))
-    assert sorted(results) == ["CLOUD_DAILY_BUDGET_EXHAUSTED", "RESERVED"]
-    assert len(core.store.rows("SELECT * FROM model_usage")) == 1
-    assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 1
+    assert sorted(results) == ["RESERVED", "RESERVED"]
+    assert len(core.store.rows("SELECT * FROM model_usage")) == 2
+    assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 2
     view = cloud_budget.summary(core.store, core.settings, core.clock())
-    assert view["used_micro_cny"] == 560_000
+    assert view["used_micro_cny"] == 1_120_000 and view["over_limit"]
 
 
 @pytest.mark.parametrize("kind,limit", [("video", 500_000), ("asr", 300_000)])
@@ -94,22 +94,21 @@ def test_task_and_daily_caps_commit_together_and_cover_all_rounds(core, kind, li
     options(core, daily_micro_cny=1_000_000, **{kind + "_per_item_micro_cny": limit})
     first = limit // 16
     charge(core, "round-one", first, task_kind=kind, task_id="trusted-item-one")
-    with pytest.raises(CoreError, match="CLOUD_TASK_BUDGET_EXHAUSTED"):
-        charge(core, "round-two", first + 1, task_kind=kind, task_id="trusted-item-one")
-    assert core.store.one("SELECT request_id FROM model_usage") == {"request_id": "round-one"}
-    assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 1
+    charge(core, "round-two", first + 1, task_kind=kind, task_id="trusted-item-one")
+    assert {row["request_id"] for row in core.store.rows("SELECT request_id FROM model_usage")} == {
+        "round-one", "round-two",
+    }
+    assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 2
     # A larger future limit does not enlarge the original item's captured cap.
     change(core, **{kind + "_per_item_micro_cny": limit * 10})
-    with pytest.raises(CoreError, match="CLOUD_TASK_BUDGET_EXHAUSTED"):
-        charge(core, "round-three", first + 1, task_kind=kind, task_id="trusted-item-one")
+    charge(core, "round-three", first + 1, task_kind=kind, task_id="trusted-item-one")
 
 
 def test_fractional_fx_is_rounded_up_for_each_atomic_reservation(core):
     options(core, daily_micro_cny=3, usd_to_cny_micro=1_000_001)
     first = charge(core, "fraction-one", 1)
     assert first["reserved_micro_cny"] == 2
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        charge(core, "fraction-two", 1)
+    charge(core, "fraction-two", 1)
 
 
 def test_legacy_models_and_dispatched_tools_are_included_before_fx_changes(core):
@@ -124,18 +123,17 @@ def test_legacy_models_and_dispatched_tools_are_included_before_fx_changes(core)
                        (core.clock(), task["task_id"]))
     first = cloud_budget.summary(core.store, core.settings, core.clock())
     assert first["used_micro_cny"] == 880_000 and first["charge_count"] == 2
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        charge(core, "over-original-fx", 20_000)
+    charge(core, "over-original-fx", 20_000)
     change(core, usd_to_cny_micro=4_000_000, fx_source="synthetic-rate-v2")
     charge(core, "new-fx", 20_000)
     assert cloud_budget.summary(core.store, core.settings, core.clock())["used_micro_cny"] == (
-        960_000
+        1_120_000
     )
     rows = core.store.rows("SELECT amount_micro_cny FROM cloud_cost_snapshots WHERE legacy=1")
     assert sorted(row["amount_micro_cny"] for row in rows) == [400_000, 480_000]
     change(core, key="cloud-change-2", usd_to_cny_micro=16_000_000)
     assert cloud_budget.summary(core.store, core.settings, core.clock())["used_micro_cny"] == (
-        960_000
+        1_120_000
     )
 
 
@@ -164,19 +162,18 @@ def test_legacy_native_reservation_is_not_lost_when_billed_projection_lags(core,
     assert row["accounted_micro_usd"] == row["reserved_micro_usd"] == held
 
 
-def test_unknown_liability_survives_fx_and_native_projection_changes_and_blocks_repayment(core):
+def test_unknown_liability_is_retained_while_new_explicit_charge_continues(core):
     options(core, daily_micro_cny=2000)
     charge(core, "uncertain", 80, task_kind="video", task_id="same-video")
     core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id='uncertain'")
     assert cloud_budget.summary(core.store, core.settings, core.clock())["unknown_micro_cny"] == 640
     change(core, usd_to_cny_micro=1_000_000)
-    with pytest.raises(CoreError, match="CLOUD_TASK_USAGE_UNCERTAIN"):
-        charge(core, "second-payment", 1, task_kind="video", task_id="same-video")
+    charge(core, "second-payment", 1, task_kind="video", task_id="same-video")
     core.store.execute("UPDATE model_usage SET state='SETTLED',billed_micro_usd=1 "
                        "WHERE request_id='uncertain'")
     view = cloud_budget.summary(core.store, core.settings, core.clock())
-    assert view["unknown_micro_cny"] == view["used_micro_cny"] == 640
-    assert len(core.store.rows("SELECT * FROM model_usage")) == 1
+    assert view["unknown_micro_cny"] == 640 and view["used_micro_cny"] == 641
+    assert len(core.store.rows("SELECT * FROM model_usage")) == 2
 
 
 def test_native_settlement_uses_reserved_usd_rates_and_fx_snapshot(core):
@@ -193,43 +190,32 @@ def test_native_settlement_uses_reserved_usd_rates_and_fx_snapshot(core):
     assert view["settled_micro_cny"] == original_cost * 8
 
 
-def test_old_unlimited_paid_approval_cannot_bypass_cloud_daily_limit(core, tmp_path):
+def test_cloud_currency_cap_is_advisory_for_original_paid_reservation(core, tmp_path):
     approved_live(core, tmp_path, unlimited_period_spend=True, daily_micro_usd=None,
                   monthly_micro_usd=None, window_micro_usd=None)
     options(core, daily_micro_cny=1)
     job_id = authorized_job(core)
     path = Path(core.settings.paid_model.journal_path)
     before = path.read_bytes()
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
-    assert not core.store.rows("SELECT * FROM model_usage")
-    assert not core.store.rows("SELECT * FROM model_admissions")
-    assert path.read_bytes() == before
-    change(core, daily_micro_cny=20_000_000)
     request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     assert core.store.one("SELECT request_id FROM model_usage")["request_id"] == request_id
+    assert core.store.one("SELECT request_id FROM model_admissions")["request_id"] == request_id
+    assert path.read_bytes() != before
+    assert cloud_budget.summary(core.store, core.settings, core.clock())["over_limit"]
 
 
-def test_cloud_rejection_does_not_partially_reserve_cumulative_model_budget(core, tmp_path):
+def test_advisory_cloud_cap_commits_original_cumulative_reservation_atomically(core, tmp_path):
     approved_live(core, tmp_path)
     options(core, daily_micro_cny=1)
     cumulative_policy(core)
     job_id = authorized_job(core)
-    path = Path(core.settings.paid_model.journal_path)
-    before = path.read_bytes()
-    projection = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
-                                (cumulative.PROJECTION,))
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
-    assert path.read_bytes() == before
-    assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
-                          (cumulative.PROJECTION,)) == projection
-    assert not core.store.rows("SELECT * FROM model_usage")
-    change(core, daily_micro_cny=20_000_000)
     request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     with core.store.transaction():
         custody = paid_budget.journal(core.store, core.settings.paid_model)
     assert request_id in custody["cumulative"]["models"]
+    assert core.store.one("SELECT reference_id FROM cloud_cost_snapshots") == {
+        "reference_id": request_id,
+    }
 
 
 def test_midnight_settlement_stays_in_original_day_and_timezone_is_not_reset(core):
@@ -259,8 +245,7 @@ def test_reservation_from_yesterday_counts_today_until_late_dispatch_and_settlem
     options(core, daily_micro_cny=1000)
     charge(core, "pending", 80)
     core.clock.advance(2)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        charge(core, "midnight-bypass", 80)
+    charge(core, "midnight-bypass", 80)
     with core.store.transaction():
         cloud_budget.mark_dispatched(core.store, "model", "pending", core.clock())
         core.store.execute("UPDATE model_usage SET billed_micro_usd=100,state='SETTLED' "
@@ -268,15 +253,15 @@ def test_reservation_from_yesterday_counts_today_until_late_dispatch_and_settlem
         cloud_budget.sync_reference(core.store, "model", "pending")
     current = cloud_budget.summary(core.store, core.settings, core.clock())
     assert current["settled_micro_cny"] == 800 and current["carried_micro_cny"] == 0
-    assert core.store.one("SELECT local_day FROM cloud_cost_snapshots")["local_day"] == "2026-10-20"
+    assert {row["local_day"] for row in core.store.rows(
+        "SELECT local_day FROM cloud_cost_snapshots")} == {"2026-10-20"}
 
 
-def test_fx_expiry_stops_new_reservations_but_old_usage_can_settle(core):
+def test_fx_expiry_is_visible_while_new_reservations_and_old_settlement_continue(core):
     options(core, fx_validity_seconds=60)
     request_id = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
     core.clock.advance(61)
-    with pytest.raises(CoreError, match="CLOUD_BUDGET_FX_EXPIRED"):
-        charge(core, "expired-fx", 1)
+    charge(core, "expired-fx", 1)
     budget.settle(core.store, core.settings, request_id, ModelResponse("done", 100, 20))
     view = cloud_budget.summary(core.store, core.settings, core.clock())
     assert view["fx_expired"] and view["settled_micro_cny"] > 0
@@ -290,19 +275,17 @@ def test_limit_edit_does_not_silently_renew_the_fx_validity_period(core):
     assert updated["fx_valid_from"] == original["fx_valid_from"]
     assert updated["fx_valid_until"] == original["fx_valid_until"]
     core.clock.advance(31)
-    with pytest.raises(CoreError, match="CLOUD_BUDGET_FX_EXPIRED"):
-        charge(core, "expired-rate", 1)
+    charge(core, "expired-rate", 1)
     change(core, key="renew-reviewed-fx", usd_to_cny_micro=8_000_000)
     charge(core, "reviewed-rate", 1)
 
 
-def test_unpriced_legacy_unknown_is_visible_and_cannot_be_treated_as_free(core):
+def test_unpriced_legacy_unknown_remains_visible_without_blocking_new_charge(core):
     native(core.store, "legacy-unpriced", 0, core.clock(), state="UNKNOWN")
     core.store.execute("UPDATE model_usage SET pricing_known=0")
     summary = cloud_budget.summary(core.store, core.settings, core.clock())
-    assert summary["unpriced_unknown_count"] == 1 and summary["admission_blocked"]
-    with pytest.raises(CoreError, match="CLOUD_BUDGET_UNPRICED_USAGE"):
-        charge(core, "new-spend", 1)
+    assert summary["unpriced_unknown_count"] == 1 and not summary["admission_blocked"]
+    charge(core, "new-spend", 1)
 
 
 def test_cloud_asr_and_tool_paths_use_the_same_daily_pool(core):
@@ -311,16 +294,14 @@ def test_cloud_asr_and_tool_paths_use_the_same_daily_pool(core):
     session = start(media)
     process(media, session, chunk())
     assert cloud_budget.summary(core.store, core.settings, core.clock())["used_micro_cny"] == 800
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        process(media, session, chunk(key="second-chunk"))
-    assert len(media.provider.calls) == 1
+    process(media, session, chunk(key="second-chunk"))
+    assert len(media.provider.calls) == 2
     executive = configured(core)
     executive.settings.executive.endpoints["windows"].max_cost_micro_usd = 1000
     executive.submit(proposal())
     task = executive.claim()
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        executive.begin(task)
-    assert core.store.one("SELECT state FROM tool_tasks")["state"] == "LEASED"
+    executive.begin(task)
+    assert core.store.one("SELECT state FROM tool_tasks")["state"] == "RUNNING"
 
 
 def test_observed_cost_overrun_is_retained_and_reported_instead_of_rolled_back(core):
@@ -331,8 +312,7 @@ def test_observed_cost_overrun_is_retained_and_reported_instead_of_rolled_back(c
     assert summary["used_micro_cny"] == 1600 and summary["over_limit"]
     assert summary["task_over_limit_count"] == 1
     assert core.store.one("SELECT billed_micro_usd FROM model_usage")["billed_micro_usd"] == 200
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        charge(core, "next-estimate", 1)
+    charge(core, "next-estimate", 1)
 
 
 class TestHistoricalCorrection:
@@ -360,9 +340,9 @@ class TestHistoricalCorrection:
         assert after_row["reconciliation_sha256"] == receipt["receipt_sha256"]
 
 
-def test_authenticated_http_and_independent_model_worker_share_the_live_cloud_cap(core, tmp_path):
+def test_http_and_independent_model_worker_continue_beyond_advisory_cloud_amount(core, tmp_path):
     options(core, daily_micro_cny=100_000)
-    provider = Provider(answer("合成预算回复"))
+    provider = Provider(answer("合成预算回复一"), answer("合成预算回复二"))
 
     async def scenario():
         async with environment(core, tmp_path, purposes=("chat",), paid_options={
@@ -380,14 +360,15 @@ def test_authenticated_http_and_independent_model_worker_share_the_live_cloud_ca
                 "unknown_micro_cny", "remaining_micro_cny", "carried_micro_cny",
             ))
             change(core, daily_micro_cny=current["used_micro_cny"])
-            second = await entry.admit(2, "第二条不得越过云总额")
+            second = await entry.admit(2, "第二条超额仍运行并记录原费用")
             assert await worker.run_once("independent-cloud-worker")
             job_id = entry.accepted[second["event_id"]]["job_id"]
-            assert core.store.one('SELECT last_error_code FROM jobs WHERE job_id=%s',
-                                  (job_id,))["last_error_code"] == "CLOUD_DAILY_BUDGET_EXHAUSTED"
-            assert len(provider.requests) == 1
-            assert core.store.rows("SELECT * FROM model_usage") == [first_usage]
-            assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 1
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
+                                  (job_id,))["state"] == "SUCCEEDED"
+            assert len(provider.requests) == 2
+            assert core.store.one("SELECT * FROM model_usage WHERE request_id=%s",
+                                  (first_usage["request_id"],)) == first_usage
+            assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 2
     run(scenario())
 
 
@@ -396,9 +377,7 @@ def test_capacity_read_is_pure_before_binding_and_reports_known_legacy_exhaustio
     native(core.store, "legacy-paid", 100, core.clock(), state="SETTLED")
     with core.store.read_snapshot():
         before = logical_state(core.store)
-        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
-            "CLOUD_DAILY_BUDGET_EXHAUSTED",
-        ]
+        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
         assert logical_state(core.store) == before
     assert not core.store.rows("SELECT * FROM cloud_budget_policies")
     assert not core.store.rows("SELECT * FROM cloud_cost_snapshots")
@@ -409,9 +388,7 @@ def test_capacity_read_uses_frozen_fx_and_observed_usage_without_writing(core):
     charge(core, "one-hold", 100)
     with core.store.read_snapshot():
         before = logical_state(core.store)
-        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
-            "CLOUD_DAILY_BUDGET_EXHAUSTED",
-        ]
+        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
         assert logical_state(core.store) == before
     core.store.execute("UPDATE model_usage SET billed_micro_usd=50,state='SETTLED'")
     with core.store.read_snapshot():
@@ -421,9 +398,7 @@ def test_capacity_read_uses_frozen_fx_and_observed_usage_without_writing(core):
         # This diagnostic neither settles the snapshot nor renews an expiring rate.
         assert core.store.one("SELECT state FROM cloud_cost_snapshots")["state"] == "RESERVED"
         core.clock.advance(61)
-        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
-            "CLOUD_BUDGET_FX_EXPIRED",
-        ]
+        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
         assert logical_state(core.store) == before
 
 
@@ -441,14 +416,11 @@ def test_erasing_a_dispatched_tool_keeps_unknown_cost_across_midnight(core):
     core.clock.advance(86400)
     with core.store.read_snapshot():
         before = logical_state(core.store)
-        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == [
-            "CLOUD_DAILY_BUDGET_EXHAUSTED",
-        ]
+        assert cloud_budget.capacity_blocks(core.store, core.settings, core.clock()) == []
         assert logical_state(core.store) == before
     view = cloud_budget.summary(core.store, core.settings, core.clock())
     assert view["unknown_micro_cny"] == view["carried_micro_cny"] == 8000
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        charge(core, "post-erase-midnight", 1)
+    charge(core, "post-erase-midnight", 1)
 
 
 @pytest.mark.parametrize("legacy", [False, True])

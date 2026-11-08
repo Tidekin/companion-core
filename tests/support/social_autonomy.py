@@ -1,5 +1,8 @@
 import json
+from contextlib import contextmanager
+from unittest.mock import patch
 
+from companion.contracts import CoreError
 from companion.model import ModelResponse
 from companion.reading_protocol import ReadObservation
 from companion.social_autonomy import SocialAutonomy
@@ -134,3 +137,12 @@ def outcome(module, frozen, token, result):
             'message_id=%s'
         ), (native, frozen.message_id))
         return module.record_result(receipt)
+
+
+@contextmanager
+def deferred_admission():
+    """Exercise durable retry after a native nonmonetary admission refusal."""
+    with patch("companion.budget.reserve", side_effect=CoreError(
+        "MODEL_DAILY_BUDGET_EXHAUSTED", 429,
+    )):
+        yield

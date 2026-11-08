@@ -7,7 +7,6 @@ from pydantic import ValidationError
 
 from companion import account_actions, notices, owner_authority, social_plan_jobs
 from companion.affect import AffectEngine
-from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
 from companion.life_protocol import LifeShadowApproval
 from companion.owner_authority_protocol import OwnerRuntimeConfig
@@ -15,7 +14,7 @@ from companion.store import after, uid
 from tests.conftest import ingest, run
 from tests.support.life_topics import bug, due, proposal
 from tests.support.owner_authority import activate
-from tests.support.social_autonomy import background, planned, queue
+from tests.support.social_autonomy import background, deferred_admission, planned, queue
 from tests.support.social_owner_authority import (
     authorize,
     stop,
@@ -120,20 +119,20 @@ def test_social_stop_during_paid_request_discards_result_without_repayment(core,
 
 def test_social_native_retry_keeps_authority_and_is_cancelled_after_revision(core, tmp_path):
     module, source, _ = background(core, max_output_tokens=512)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    policy, ref = authorize(core, tmp_path, module=module)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        planned(module, source)
-    job = core.store.one("SELECT * FROM jobs WHERE kind='social_plan'")
-    assert job and json.loads(job["authority_json"]) == ref
-    core.clock.advance(61)
-    stop(core, ref)
-    activate(core, policy, revision=2, operation="revision-before-social-retry")
-    assert social_plan_jobs.claim(module, "retry-worker") is None
-    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],)) == {
-        "state": "CANCELLED",
-    }
-    assert module.model.calls == []
+    with deferred_admission():
+        policy, ref = authorize(core, tmp_path, module=module)
+        with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+            planned(module, source)
+        job = core.store.one("SELECT * FROM jobs WHERE kind='social_plan'")
+        assert job and json.loads(job["authority_json"]) == ref
+        core.clock.advance(61)
+        stop(core, ref)
+        activate(core, policy, revision=2, operation="revision-before-social-retry")
+        assert social_plan_jobs.claim(module, "retry-worker") is None
+        assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],)) == {
+            "state": "CANCELLED",
+        }
+        assert module.model.calls == []
 
 
 def test_native_outbox_pins_authority_and_stop_preserves_no_io_receipt(core, tmp_path):

@@ -240,7 +240,7 @@ def test_five_image_memory_inputs_obey_the_explicit_model_attempt_cap(core, tmp_
 
 
 @pytest.mark.parametrize("mutation", [
-    "raw_hash", "expired", "erased_current", "unknown_tool_request",
+    "raw_hash", "expired", "erased_current",
 ])
 def test_joint_image_memory_flow_stops_before_final_io_on_lost_evidence(core, tmp_path, mutation):
     async def scenario():
@@ -265,4 +265,21 @@ def test_joint_image_memory_flow_stops_before_final_io_on_lost_evidence(core, tm
             image_spool.cleanup(core.store, core.clock(), retain_completed=True)
             assert not list(image_spool.directory(core.store).glob("*.raw"))
             assert core.store.rows("SELECT * FROM model_usage") == usage
+    run(scenario())
+
+
+def test_image_tool_response_with_unknown_cost_retains_evidence_and_continues(core, tmp_path):
+    async def scenario():
+        async with native_image_memory(core, tmp_path, mutation="unknown_tool_request") as value:
+            assert await value.worker.run_once("native-image-cost-warning")
+            assert len(value.calls) == 2
+            assert core.store.one("SELECT state FROM jobs WHERE job_id=%s",
+                                  (value.job["job_id"],))["state"] == "SUCCEEDED"
+            rows = core.store.rows("SELECT * FROM model_usage ORDER BY record_sequence")
+            assert [row["state"] for row in rows] == ["UNKNOWN", "SETTLED"]
+            original = rows[0]
+            assert original["billed_micro_usd"] > 0
+            assert not await value.worker.run_once("no-image-replay")
+            assert core.store.one("SELECT * FROM model_usage WHERE request_id=%s",
+                                  (original["request_id"],)) == original
     run(scenario())

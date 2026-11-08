@@ -91,26 +91,26 @@ def test_unknown_price_blocks_autonomy_only(core):
     assert core.status()["usage"][0]["unknown_price_requests"] == 1
 
 
-def test_monthly_budget_reservation_is_enforced(core):
+def test_monthly_currency_amount_does_not_refuse_a_valid_reply(core):
     core.settings.monthly_limit_micro_usd = 1
     ingest(core)
     run(core.run_once())
-    assert core.model.calls == []
+    assert len(core.model.calls) == 1
     assert (
         core.store.one("SELECT last_error_code FROM jobs")["last_error_code"]
-        == "MONTHLY_BUDGET_EXHAUSTED"
+        is None
     )
 
 
-def test_extraction_budget_pause_does_not_consume_events(core):
+def test_zero_extraction_currency_amount_does_not_disable_processing(core):
     core.settings.memory_enabled = True
     core.settings.extraction_min_events = 1
     core.settings.extraction_idle_seconds = 0
     core.settings.memory_daily_micro_usd = 0
     ingest(core)
     run(core.run_once())
-    assert not run(core.extract_once())
-    assert core.store.one("SELECT memory_processed FROM events")["memory_processed"] == 0
+    assert run(core.extract_once())
+    assert core.store.one("SELECT memory_processed FROM events")["memory_processed"] == 1
 
 
 def test_erasure_ledger_loss_blocks_startup(core):
