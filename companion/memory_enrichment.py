@@ -20,14 +20,15 @@ def _hash(value):
 
 def _load(store, key, *, work=None):
     if work is not None:
-        size = store.one('SELECT OCTET_LENGTH(value) AS size FROM runtime_meta WHERE key = %s',
+        size = work.one(store, 'SELECT OCTET_LENGTH(value) AS size FROM runtime_meta '
+                        'WHERE key = %s',
                          (key,))
         if not size:
             return None
         if not work.take("text_bytes", size["size"]):
             raise retrieval_work.WorkLimit("enrichment_text_bytes")
-        row = store.one('SELECT value FROM runtime_meta WHERE key = %s AND OCTET_LENGTH(value) = '
-            '%s',
+        row = work.one(store, 'SELECT value FROM runtime_meta WHERE key = %s '
+                       'AND OCTET_LENGTH(value) = %s',
                         (key, size["size"]))
     else:
         row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))

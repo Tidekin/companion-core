@@ -84,25 +84,28 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
                 "m.updated_at DESC,m.memory_id LIMIT %s", (*params, ceiling + 1), ceiling)
     except retrieval_work.WorkLimit:
         pass  # Already nominated identities can still undergo complete live validation.
-    rows = []
+    selected = []
     for header in headers.values():
         if not work.take("candidates"):
             break
         if not work.take("text_bytes", header["text_bytes"]):
             continue
-        row = memory.store.one('SELECT memories.memory_id AS memory_id, memories.subject AS '
-            'subject, memories.kind AS kind, memories.content AS content, memories.status AS '
-            'status, memories.origin AS origin, memories.confidence AS confidence, '
-            'memories.importance AS importance, memories.privacy_scope AS privacy_scope, '
-            'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
-            'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
-            'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
-            'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM memories AS '
-            'memories WHERE memories.memory_id = %s AND OCTET_LENGTH(memories.content) = %s AND '
-            "memories.status IN ('CONFIRMED', 'HYPOTHESIS') AND memories.privacy_scope = 'private' "
-            'AND memories.confidence > 0',
-            (header["memory_id"], header["text_bytes"]))
-        if row:
-            rows.append(row)
+        selected.append(header)
+    if not selected:
+        return [], []
+    from companion.memory_context import MEMORY_COLUMNS
+
+    try:
+        rows = work.rows(memory.store, "SELECT " + ",".join("m." + key for key in MEMORY_COLUMNS)
+            + " FROM memories m JOIN unnest(%s::text[],%s::bigint[]) "
+            "AS h(memory_id,text_bytes) USING(memory_id) "
+            "WHERE octet_length(m.content)=h.text_bytes "
+            "AND m.status IN ('CONFIRMED','HYPOTHESIS') AND m.privacy_scope='private' "
+            "AND m.confidence>0", ([h["memory_id"] for h in selected],
+                                  [h["text_bytes"] for h in selected]), limit=len(selected))
+    except retrieval_work.WorkLimit:
+        return [], []
+    positions = {h["memory_id"]: i for i, h in enumerate(selected)}
+    rows.sort(key=lambda row: positions[row["memory_id"]])
     allowed = {row["memory_id"] for row in rows}
     return rows, [mid for mid in lexical if mid in allowed]

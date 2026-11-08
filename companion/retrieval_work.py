@@ -59,13 +59,24 @@ class Work:
         if store.in_transaction and not store.in_read_snapshot:
             self.mark("nomination_requires_committed_snapshot")
             raise WorkLimit("nomination_requires_committed_snapshot")
+        return self._read(store.bounded_read, sql, params, limit=limit)
+
+    def source_rows(self, store, sql, params=(), *, limit):
+        """Meter complete provenance reads, including required checks inside a writer."""
+        return self._read(store.bounded_source_read, sql, params, limit=limit)
+
+    def one(self, store, sql, params=()):
+        rows = self.source_rows(store, sql, params, limit=1)
+        return rows[0] if rows else None
+
+    def _read(self, operation, sql, params, *, limit):
         remaining = self.remaining("sql_milliseconds")
         if not remaining:
             self.mark("sql_milliseconds")
             raise WorkLimit("sql_milliseconds")
         started = monotonic()
         try:
-            return store.bounded_read(sql, params, limit=limit, timeout_ms=remaining)
+            return operation(sql, params, limit=limit, timeout_ms=remaining)
         except psycopg.errors.QueryCanceled as error:
             self.mark("sql_milliseconds")
             raise WorkLimit("sql_milliseconds") from error

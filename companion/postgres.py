@@ -142,7 +142,7 @@ class Session:
             cursor.execute(statement, parameters)
             return cursor.fetchall()
 
-    def bounded_read(self, statement, parameters, *, limit, timeout_ms):
+    def bounded_read(self, statement, parameters, *, limit, timeout_ms, readonly=True):
         """Materialize a finite optional SELECT without aborting its caller's snapshot.
 
         Psycopg creates a savepoint inside an existing transaction. Read-only mode
@@ -156,12 +156,14 @@ class Session:
         with self._connection.transaction():
             if not active:
                 self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            elif self.one("SHOW transaction_read_only")["transaction_read_only"] != "on":
+            elif (readonly and self.one(
+                    "SHOW transaction_read_only")["transaction_read_only"] != "on"):
                 raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
             previous = self.one("SHOW statement_timeout")["statement_timeout"]
             self.execute("SELECT set_config('statement_timeout',%s,true)", (f"{timeout_ms}ms",))
             with self._connection.cursor() as cursor:
-                cursor.execute(sql.SQL("SELECT * FROM ({}) AS bounded_result LIMIT %s").format(
+                cursor.execute(sql.SQL(
+                    "SELECT * FROM ({}) AS bounded_result LIMIT %s").format(
                     statement if isinstance(statement, sql.Composable) else sql.SQL(statement)),
                     (*parameters, limit))
                 result = cursor.fetchmany(limit)
