@@ -142,13 +142,20 @@ def test_raw_source_batch_preserves_each_signature_and_fresh_writer_reads(
         async with environment(core, tmp_path) as (entry, _):
             keys = [(await entry.admit(n, "合成来源"))["event_id"] for n in range(1, 7)]
             reads, original = [], core.store.rows
+            original_one = core.store.one
 
             def rows(statement, parameters=()):
                 if "AS capture_receipt" in statement and "AS source_jobs" in statement:
                     reads.append(len(parameters[0]))
                 return original(statement, parameters)
 
+            def one(statement, parameters=()):
+                if "AS capture_receipt" in statement and "AS source_jobs" in statement:
+                    reads.append(1)
+                return original_one(statement, parameters)
+
             monkeypatch.setattr(core.store, "rows", rows)
+            monkeypatch.setattr(core.store, "one", one)
             with core.store.transaction() if writer else nullcontext():
                 assert sources_allowed(core.store, core.settings, core.clock, keys, "memory")
             assert reads == ([1] * 6 if writer else [6])

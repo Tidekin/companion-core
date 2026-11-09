@@ -63,7 +63,7 @@ def _allowed(store, settings, clock, event_id, purpose, view, *, allow_commands,
             original = json.loads(receipt["value"]).get("authority") if receipt else None
             owner_input._checked_source(store, settings, view, event_id, clock(), purpose=purpose,
                 history=original != view.authority.as_dict(), allow_commands=allow_commands,
-                loaded=loaded)
+                _loaded=loaded)
     except (CoreError, ValueError, TypeError, AttributeError):
         return False
     return True
