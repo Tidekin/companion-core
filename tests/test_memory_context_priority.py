@@ -68,13 +68,14 @@ def test_attachment_content_can_establish_relevance_without_assistant_guesses(co
         query=current[0]["content"])
 
 
-def test_recalled_recent_originals_replace_history_with_one_signed_allowance(monkeypatch):
+def test_recalled_recent_originals_replace_history_with_one_signed_allowance(core, monkeypatch):
     rows = [{"event_id": "a", "user_text": "台布是靛青", "reply_text": "记住了"},
             {"event_id": "b", "user_text": "台布是砂黄", "reply_text": "记住了"}]
     monkeypatch.setattr(turn_recall, "_candidates", lambda *_a: (rows, [[], []]))
     settings = SimpleNamespace(turn_recall_limit=2, turn_recall_scan_turns=10,
         turn_recall_second_hop=0, turn_recall_history_share=.75, timezone="Asia/Shanghai")
-    result = turn_recall.reference(None, settings, {}, "台布", set(), lambda _: True,
+    store = core.store
+    result = turn_recall.reference(store, settings, {}, "台布", set(), lambda _: True,
         max_turns=2, max_bytes=8000, ranked_ids={"first": ["a", "b"], "hop": []},
         history_costs={"a": 100, "b": 100})
     assert set(result["event_ids"]) == {"a", "b"}
@@ -83,6 +84,6 @@ def test_recalled_recent_originals_replace_history_with_one_signed_allowance(mon
     # Full history cost, not the small displayed excerpt, controls admission.
     monkeypatch.setattr("companion.dialogue_history.turn_messages", lambda *_a: [
         {"role": "user", "content": "x" * 8001}])
-    assert turn_recall.reference(None, settings, {}, "台布", set(), lambda _: True,
+    assert turn_recall.reference(store, settings, {}, "台布", set(), lambda _: True,
         max_turns=2, max_bytes=8000, ranked_ids={"first": ["a", "b"], "hop": []},
         history_costs={"a": 100, "b": 100}) is None
