@@ -89,7 +89,7 @@ def due(window):
 
     if not isinstance(window, OwnerRuntime):
         return False
-    records = window.verify()
+    records = window.verify(record_kinds={"PROFILE_PROBE_STARTED"})
     previous = next((row for row in reversed(records)
                      if row["kind"] == "PROFILE_PROBE_STARTED"), None)
     return previous is None or (window.clock() - datetime.fromisoformat(

@@ -52,7 +52,7 @@ def verify(runtime, records, *, references=None):
 
 
 def put(runtime, frame, received_at, peer):
-    runtime.verify()
+    runtime.verify(include_records=False)
     value = normalize_recall(frame, runtime.config, now=received_at.timestamp())
     if value is None:
         return False
@@ -89,7 +89,7 @@ def put(runtime, frame, received_at, peer):
 
 def recalled(runtime, event_id):
     """Read only authenticated, journal-verified recall custody."""
-    runtime.verify(active=False)
+    runtime.verify(active=False, include_records=False)
     if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'"
                               ).fetchone():
         return False
@@ -98,7 +98,7 @@ def recalled(runtime, event_id):
 
 
 async def flush_one(runtime, client):
-    runtime.verify(active=False)
+    runtime.verify(active=False, include_records=False)
     if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'"
                               ).fetchone():
         return False
@@ -114,7 +114,7 @@ async def flush_one(runtime, client):
         or result["state"] not in {"RECALLED", "PENDING_TARGET"}
         or type(result["duplicate"]) is not bool or type(result["reply_revision"]) is not int):
         raise ValueError("OWNER_RECALL_RECEIPT_INVALID")
-    runtime.verify(active=False)
+    runtime.verify(active=False, include_records=False)
     with runtime.db:
         runtime.append("RECALL_ACCEPTED", {"recall_id": row[0],
                                            "response_sha256": journal.digest(result)})

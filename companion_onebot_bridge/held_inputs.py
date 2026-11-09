@@ -67,7 +67,7 @@ def counts(runtime):
 
 def hold(runtime, frame, received_at, peer):
     """Keep one owner message frame without Core; False when it is not one or already known."""
-    runtime.verify()
+    runtime.verify(include_records=False)
     event = normalize(frame, runtime.config, now=received_at.timestamp())
     if event is None:
         return False
@@ -114,7 +114,7 @@ def _code(error):
 
 async def promote_one(runtime, client, onebot):
     """Admit or close the oldest held frame; transient failures leave it held and raise."""
-    runtime.verify()
+    runtime.verify(include_records=False)
     if not _exists(runtime):
         return False
     row = runtime.db.execute("SELECT event_id,record_json,frame FROM held_inputs "

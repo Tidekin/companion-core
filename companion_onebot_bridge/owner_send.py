@@ -52,7 +52,7 @@ class OwnerSendGuard:
             and self.db.execute("SELECT 1 FROM automatic_recalls WHERE target_event_id=? LIMIT 1",
                                 (prior[1],)).fetchone()):
             return None
-        records = self.runtime.verify()
+        records = self.runtime.verify(record_kinds={"RESERVED", "ACK"})
         reserved = next(record for record in reversed(records) if record["kind"] == "RESERVED"
                         and record["data"]["message_id"] == prior[0])
         ack = next(record for record in reversed(records) if record["kind"] == "ACK"

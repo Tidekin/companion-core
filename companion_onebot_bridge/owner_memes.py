@@ -131,7 +131,7 @@ class MemePump:
     def tick(self, *, idle):
         if self.runtime is None:
             return
-        self.owner.verify()
+        self.owner.verify(include_records=False)
         row = self.latest()
         pending = self.owner.db.execute("SELECT 1 FROM inbox WHERE state='pending' LIMIT 1"
                                        ).fetchone()

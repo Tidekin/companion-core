@@ -188,11 +188,12 @@ class OwnerRuntime:
             return None
         return (raw, tuple(row.values()), self.db.total_changes, *versions)
 
-    def verify(self, *, active=True, include_records=True):
+    def verify(self, *, active=True, include_records=True, record_kinds=None):
         """Revalidate custody; an unchanged journal and database reuse the last full proof.
 
         The legacy cutover evidence reads other files and is always rechecked, as are
-        the binding, the persisted state and the stop marker.
+        the binding, the persisted state and the stop marker. record_kinds limits
+        only the returned copy; every record still participates in validation.
         """
         row = self.row()
         if row is None or json.loads(row["authority_json"]) != self.authority:
@@ -216,6 +217,8 @@ class OwnerRuntime:
             raise ValueError("OWNER_RUNTIME_STOPPED")
         # Projection replay owns the decoded records. Only history readers need a copy.
         if include_records:
+            if record_kinds is not None:
+                records = [record for record in records if record["kind"] in record_kinds]
             return deepcopy(records)
 
     def _replay(self, row):
