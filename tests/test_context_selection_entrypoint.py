@@ -10,6 +10,7 @@ import pytest
 
 from companion.contracts import Candidate
 from companion.goals import GoalProposal, GoalScope
+from companion.model import SOURCE_RULES
 from companion.store import encode
 from tests.conftest import run
 from tests.support.goals import result_for
@@ -100,6 +101,11 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             core.clock.advance(1)
             event = await entry.admit(6, "继续说说天文光谱，你当时的判断是什么？")
             messages = await worker("selected")
+            # Source guidance must survive final SDK fitting and worker/config rebuilds,
+            # after the capability block that otherwise separates it from the question.
+            assert messages[0]["role"] == "system"
+            assert messages[0]["content"].endswith(SOURCE_RULES)
+            assert messages[0]["content"].count(SOURCE_RULES) == 1
             prompt = "\n".join(m["content"] for m in messages)
             # Exclude the raw original owner utterance: reference copies occur once.
             refs = [m for m in messages if m["role"] == "user" and any(

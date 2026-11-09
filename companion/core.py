@@ -57,6 +57,7 @@ from companion.model import (
     MEMORY_RULES,
     PRINCIPLES,
     RECALL_RULES,
+    SOURCE_RULES,
 )
 from companion.observation import ObservationService
 from companion.privacy import epoch, redact
@@ -964,6 +965,8 @@ class Core(Runtime):
         mark("context_current")
         if (work := retrieval_work.current()) is not None and work.receipt()["coverage_limited"]:
             rules.append("\n" + retrieval_work.NOTE, dynamic=True)
+        if turn.permits("memory") or turn.permits("history"):
+            rules.append(SOURCE_RULES, dynamic=True)
         protected = combined or image_memory or (
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and memory_refs)
         fitted = context_selection.fit_reply(cfg, job["kind"], rules.message, selection, history,
