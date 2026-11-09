@@ -255,6 +255,13 @@ CLI 在创建工作循环前完成这些同步初始化，随后才开始领取�
 SHA-256，[PostgreSQL 原生散列函数](https://www.postgresql.org/docs/16/functions-binarystring.html)
 与 Python 的原键计算分别验证。临时原行不会跨异步调用或多次模型校验保存。
 
+上下文计划先验证完整计划的大小与请求结构，再按有界请求 ID 集合一次读取模型准入与
+用量绑定。内连接的两个请求键相等，条件直接使用准入表主键，避免 `COALESCE` 条件使
+数据库先扫描并连接全部历史请求。只取请求 ID、任务 ID、payload 哈希及 measurement
+原文；每个请求仍分别执行任务、payload 与 measurement 哈希校验，缺失或任一项变化
+仍拒绝计划。读取结果只在本次同步检查内使用，后续边界重新读取，也能看到当前写事务
+的修改。原生回归覆盖工具续接的两次真实模拟请求、逐项篡改及一万条无关请求的查询计划。
+
 复用既有 `to_jsonb` 行投影与原生事务，不新增存储或依赖；DSH 已核验的文档存储实现
 仍不提供可替代 Core 业务校验的 PostgreSQL 事务接口，见 ADR 0002。
 [PostgreSQL 的语句快照](https://www.postgresql.org/docs/16/transaction-iso.html#XACT-READ-COMMITTED)
