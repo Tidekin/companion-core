@@ -448,7 +448,7 @@ def history_batch(store, settings, clock, job, *, purpose, read=None):
 def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid, read=None):
     view, check, finish = history_batch(store, settings, clock, job, purpose=purpose, read=read)
     return _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid,
-                            batch_sources=True, read=read)
+                            batch_sources=True, read=read, purpose=purpose)
 
 
 def history_for_owner(store, settings, clock, job, view):
@@ -475,7 +475,7 @@ def history_for_owner(store, settings, clock, job, view):
 
 
 def _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid, *,
-                     batch_sources=False, read=None):
+                     batch_sources=False, read=None, purpose="chat"):
     from companion.dialogue_history import recent_context_sources, turn_messages
 
     if "history" not in view.policy.purposes:
@@ -490,11 +490,19 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
         store, job["conversation_id"], job["event_id"], max_turns, cutoff_rowid=cutoff_rowid
     )
     frozen = store.frozen_scope
+    # This collector consumes the entire finite batch before returning. Its
+    # existing finish fence rejects any own write during validation. Reusable
+    # history_batch callbacks and unowned transactions retain live source reads.
+    owned_writer = batch_sources and store.in_write_transaction
+    batched = frozen is not None or owned_writer
+    authority_row = store.one(owner_authority._current_query(), (
+        owner_authority.CURRENT, owner_authority.GENERATION, owner_authority.MODE,
+    )) if owned_writer and candidates else None
     source_rows = (read.sources if read is not None else lambda keys: _load_sources(store, keys))(
         [item["event_id"] for item in candidates]) if (
-        frozen is not None and batch_sources and candidates) else None
+        batched and batch_sources and candidates) else None
     deliveries, receipts = {}, set()
-    if frozen is not None and candidates:
+    if batched and candidates:
         message_ids = list(dict.fromkeys(
             part["message_id"] for item in candidates
             for part in (item.get("reply_segments") or ([item] if item.get("message_id") else []))
@@ -512,14 +520,24 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
                     )})
     for item in candidates:
         try:
-            if source_rows is not None and store.frozen_scope == frozen:
+            if owned_writer:
+                # Re-run every original policy, time and independent-file check
+                # for each source; only this collector's raw rows are shared.
+                source_view = owner_authority._checked_current(
+                    store, settings, clock, authority_row, purpose=purpose,
+                    authority=view.authority,
+                )
+                _checked_source(store, settings, source_view, item["event_id"], clock(),
+                                purpose=purpose, history=True,
+                                _loaded=source_rows[item["event_id"]])
+            elif source_rows is not None and store.frozen_scope == frozen:
                 check(item["event_id"], loaded=source_rows[item["event_id"]])
             else:
                 check(item["event_id"])
             parts = item.get("reply_segments") or ([item] if item.get("message_id") else [])
             for part in parts:
                 sent = deliveries.get(part["message_id"]) if (
-                    frozen is not None and store.frozen_scope == frozen
+                    batched and store.frozen_scope == frozen
                 ) else store.one(
                     "SELECT sent_at FROM outbox WHERE message_id = %s", (part["message_id"],)
                 )
@@ -530,7 +548,7 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
                 ):
                     raise CoreError("OWNER_HISTORY_FUTURE_DELIVERY", 403)
             has_receipt = INPUT + item["event_id"] in receipts if (
-                frozen is not None and store.frozen_scope == frozen
+                batched and store.frozen_scope == frozen
             ) else store.one(
                 "SELECT 1 FROM runtime_meta WHERE key = %s", (INPUT + item["event_id"],)
             )
