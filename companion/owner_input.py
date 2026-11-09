@@ -186,11 +186,23 @@ def source(
             store, settings, view, event_id, now, allow_commands=allow_commands,
             history=history, purpose=purpose,
         ))
-    view = owner_authority.current(
-        store, settings, lambda: now, purpose=purpose, authority=view.authority
+    if settings.owner_runtime.mode != "ENABLED":
+        raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
+    owner_authority._lock_current(store)
+    # The same native row projection as the conversation guard. Every source
+    # invocation, including each writer call, still takes fresh original rows.
+    loaded = store.one(
+        "SELECT (SELECT to_jsonb(authority_row) FROM ("
+        + owner_authority._current_query() + ") authority_row) AS authority, "
+        "(SELECT to_jsonb(source_row) FROM (" + _SOURCE_SQL + ") source_row) AS source",
+        (owner_authority.CURRENT, owner_authority.GENERATION, owner_authority.MODE, event_id),
+    )
+    view = owner_authority._checked_current(
+        store, settings, lambda: now, loaded["authority"],
+        purpose=purpose, authority=view.authority,
     )
     return _checked_source(store, settings, view, event_id, now,
-                           allow_commands=allow_commands, history=history, purpose=purpose)
+        allow_commands=allow_commands, history=history, purpose=purpose, _loaded=loaded["source"])
 
 
 def _checked_source(store, settings, view, event_id, now, *, allow_commands=False, history=False,
@@ -228,7 +240,7 @@ def _checked_source(store, settings, view, event_id, now, *, allow_commands=Fals
 
 
 _SOURCE_FIELDS = (
-    "SELECT e.event_id AS event_id, e.schema_version AS "
+    "e.event_id AS event_id, e.schema_version AS "
     "schema_version, e.source AS source, e.source_event_id AS "
     "source_event_id, e.conversation_id AS conversation_id, "
     "e.actor_id AS actor_id, e.event_type AS event_type, "
@@ -255,10 +267,19 @@ _SOURCE_JOINS = (
     + input_recall.SOURCE_JOIN_SQL
 )
 
+def _load_sources(store, event_ids):
+    """Finite native bindings from the caller's owned snapshot."""
+    rows = store.rows(
+        "SELECT target.event_id AS source_id," + _SOURCE_FIELDS
+        + "FROM unnest(%s::text[]) AS target(event_id) " + _SOURCE_JOINS,
+        (list(dict.fromkeys(event_ids)),),
+    )
+    return {row.pop("source_id"): row for row in rows}
+
 
 def _source_query(*, native_job=False):
     target = "guard_job AS target " if native_job else "(VALUES (%s::text)) AS target(event_id) "
-    return _SOURCE_FIELDS + "FROM " + target + _SOURCE_JOINS
+    return "SELECT " + _SOURCE_FIELDS + "FROM " + target + _SOURCE_JOINS
 
 
 _SOURCE_SQL = _source_query()
@@ -269,9 +290,7 @@ def _source(
     _loaded=None,
 ):
     loaded = dict(_loaded) if _loaded is not None else store.one(
-        (
-            _SOURCE_SQL
-        ),
+        _SOURCE_SQL,
         (event_id,),
     )
     receipt_value = loaded.pop("capture_receipt")
@@ -353,7 +372,7 @@ def _source(
     return event, body, jobs[0]
 
 
-def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid=None):
+def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid=None, read=None):
     """Apply explicit current history bounds to native source-bound dialogue turns."""
     if not store.in_transaction:
         # Own one synchronous batch on one DB state; never retain custody across the
@@ -363,10 +382,11 @@ def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid
                 store, settings, clock, job, purpose=purpose, cutoff_rowid=cutoff_rowid
             )
         )
-    return _history_sources(store, settings, clock, job, purpose=purpose, cutoff_rowid=cutoff_rowid)
+    return _history_sources(store, settings, clock, job, purpose=purpose,
+                            cutoff_rowid=cutoff_rowid, read=read)
 
 
-def history_batch(store, settings, clock, job, *, purpose):
+def history_batch(store, settings, clock, job, *, purpose, read=None):
     """One job authority view for many history sources read from one DB state.
 
     Inside a repeatable read-only snapshot no other writer's commit is visible,
@@ -374,13 +394,14 @@ def history_batch(store, settings, clock, job, *, purpose):
     not written. Outside them, or after any own write, each source takes the full check.
     `finish` rechecks live authority and independent files for the whole batch.
     """
-    view = owner_authority.check_job(store, settings, clock, job, purpose=purpose)
+    view = owner_authority.check_job(store, settings, clock, job, purpose=purpose, read=read)
     scope = store.frozen_scope
 
     def frozen():
         return scope is not None and store.frozen_scope == scope
 
-    batched, changes = frozen(), store.change_token()
+    batched = frozen()
+    changes = None if batched else store.change_token()
     originals = {encode(view.authority.as_dict()): view}
 
     def evidence(ref):
@@ -392,7 +413,7 @@ def history_batch(store, settings, clock, job, *, purpose):
     def verify_capture(value):
         return _verify(store, settings, value, evidence)
 
-    def check(event_id):
+    def check(event_id, *, loaded=None):
         if batched and frozen():
             if settings.owner_runtime.mode != "ENABLED":
                 raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
@@ -405,13 +426,14 @@ def history_batch(store, settings, clock, job, *, purpose):
             ):
                 raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
             return _source(
-                store, settings, view, event_id, now, history=True, verify_capture=verify_capture
+                store, settings, view, event_id, now, history=True, verify_capture=verify_capture,
+                _loaded=loaded,
             )
         return source(store, settings, view, event_id, clock(), purpose=purpose, history=True)
 
     def finish():
         # A source exclusion must never swallow a changed batch-wide boundary.
-        owner_authority.check_job(store, settings, clock, job, purpose=purpose)
+        owner_authority.check_job(store, settings, clock, job, purpose=purpose, read=read)
         if batched:
             if not frozen():
                 raise CoreError(reply_revision.CANCELLED, 409)
@@ -423,9 +445,10 @@ def history_batch(store, settings, clock, job, *, purpose):
     return view, check, finish
 
 
-def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
-    view, check, finish = history_batch(store, settings, clock, job, purpose=purpose)
-    return _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid)
+def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid, read=None):
+    view, check, finish = history_batch(store, settings, clock, job, purpose=purpose, read=read)
+    return _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid,
+                            batch_sources=True, read=read, purpose=purpose)
 
 
 def history_for_owner(store, settings, clock, job, view):
@@ -451,7 +474,8 @@ def history_for_owner(store, settings, clock, job, view):
     )
 
 
-def _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid):
+def _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid, *,
+                     batch_sources=False, read=None, purpose="chat"):
     from companion.dialogue_history import recent_context_sources, turn_messages
 
     if "history" not in view.policy.purposes:
@@ -461,14 +485,60 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
     # The signed scope is an authority ceiling; the existing presentation setting
     # may select fewer recent pairs and leave room for episodic continuation.
     max_turns = min(scope.max_turns, settings.max_recent_messages // 2)
-    for item in recent_context_sources(
+    candidates = read.history if (read is not None and read.history is not None
+                                  and cutoff_rowid is None) else recent_context_sources(
         store, job["conversation_id"], job["event_id"], max_turns, cutoff_rowid=cutoff_rowid
-    ):
+    )
+    frozen = store.frozen_scope
+    # This collector consumes the entire finite batch before returning. Its
+    # existing finish fence rejects any own write during validation. Reusable
+    # history_batch callbacks and unowned transactions retain live source reads.
+    owned_writer = batch_sources and store.in_write_transaction
+    batched = frozen is not None or owned_writer
+    authority_row = store.one(owner_authority._current_query(), (
+        owner_authority.CURRENT, owner_authority.GENERATION, owner_authority.MODE,
+    )) if owned_writer and candidates else None
+    source_rows = (read.sources if read is not None else lambda keys: _load_sources(store, keys))(
+        [item["event_id"] for item in candidates]) if (
+        batched and batch_sources and candidates) else None
+    deliveries, receipts = {}, set()
+    if batched and candidates:
+        message_ids = list(dict.fromkeys(
+            part["message_id"] for item in candidates
+            for part in (item.get("reply_segments") or ([item] if item.get("message_id") else []))
+        ))
+        if message_ids:
+            deliveries = {row["message_id"]: row for row in store.rows(
+                "SELECT message_id,sent_at FROM outbox WHERE message_id=ANY(%s::text[])",
+                (message_ids,),
+            )}
+        receipts = ({INPUT + key for key, row in source_rows.items()
+                     if row["capture_receipt"] is not None} if source_rows is not None else
+                    {row["key"] for row in store.rows(
+                        "SELECT key FROM runtime_meta WHERE key=ANY(%s::text[])",
+                        ([INPUT + item["event_id"] for item in candidates],),
+                    )})
+    for item in candidates:
         try:
-            check(item["event_id"])
+            if owned_writer:
+                # Re-run every original policy, time and independent-file check
+                # for each source; only this collector's raw rows are shared.
+                source_view = owner_authority._checked_current(
+                    store, settings, clock, authority_row, purpose=purpose,
+                    authority=view.authority,
+                )
+                _checked_source(store, settings, source_view, item["event_id"], clock(),
+                                purpose=purpose, history=True,
+                                _loaded=source_rows[item["event_id"]])
+            elif source_rows is not None and store.frozen_scope == frozen:
+                check(item["event_id"], loaded=source_rows[item["event_id"]])
+            else:
+                check(item["event_id"])
             parts = item.get("reply_segments") or ([item] if item.get("message_id") else [])
             for part in parts:
-                sent = store.one(
+                sent = deliveries.get(part["message_id"]) if (
+                    batched and store.frozen_scope == frozen
+                ) else store.one(
                     "SELECT sent_at FROM outbox WHERE message_id = %s", (part["message_id"],)
                 )
                 if (
@@ -477,9 +547,12 @@ def _collect_history(store, settings, clock, job, view, check, finish, cutoff_ro
                     or datetime.fromisoformat(sent["sent_at"]) > datetime.fromisoformat(clock())
                 ):
                     raise CoreError("OWNER_HISTORY_FUTURE_DELIVERY", 403)
-            if not store.one(
+            has_receipt = INPUT + item["event_id"] in receipts if (
+                batched and store.frozen_scope == frozen
+            ) else store.one(
                 "SELECT 1 FROM runtime_meta WHERE key = %s", (INPUT + item["event_id"],)
-            ):
+            )
+            if not has_receipt:
                 from companion import legacy_owner_input
 
                 legacy_owner_input.validate_turn(store, settings, view, item, clock())
@@ -510,7 +583,7 @@ def history_proof(sources):
     ]
 
 
-def check_history(store, settings, clock, job, proof):
+def check_history(store, settings, clock, job, proof, *, read=None):
     """Recheck selected history, including its original signed input and sent text."""
     try:
         if (
@@ -537,6 +610,7 @@ def check_history(store, settings, clock, job, proof):
                 clock,
                 job,
                 purpose=owner_authority.model_purpose(store, job["kind"], job["job_id"]),
+                read=read,
             )
         }
         actual = history_proof([current[item["event_id"]] for item in proof])

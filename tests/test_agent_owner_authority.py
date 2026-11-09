@@ -31,7 +31,7 @@ def test_chat_tools_do_not_expose_ungranted_purposes(owner_chat):
     assert not core.store.rows("SELECT * FROM model_usage")
 
 
-@pytest.mark.parametrize("boundary", ["stop", "revision", "lease", "source"])
+@pytest.mark.parametrize("boundary", ["stop", "revision", "lease", "source", "owner", "scope"])
 def test_prepared_tool_rechecks_native_authority_before_execution(owner_chat, boundary):
     core, capture, job = owner_chat
     tools = core_query_tools(core, job, [])
@@ -46,8 +46,14 @@ def test_prepared_tool_rechecks_native_authority_before_execution(owner_chat, bo
     elif boundary == "lease":
         core.store.execute("UPDATE jobs SET lease_token='different' WHERE job_id=%s",
                            (job["job_id"],))
-    else:
+    elif boundary == "source":
         core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (job["event_id"],))
+    elif boundary == "owner":
+        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=%s",
+                           (job["event_id"],))
+    else:
+        core.store.execute("UPDATE conversations SET owner_actor_id='companion' "
+                           "WHERE conversation_id=%s", (job["conversation_id"],))
     with pytest.raises(CoreError):
         asyncio.run(tools.tools["current_time"].function())
     assert not core.store.rows("SELECT * FROM model_usage")

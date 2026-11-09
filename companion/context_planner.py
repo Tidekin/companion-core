@@ -234,21 +234,17 @@ def check(core, job, snapshots):
 def check_bound(store, job, snapshots, current_epoch):
     """Read-only shape/admission binding; never replaces source revalidation."""
     plan = validate(snapshots, job, current_epoch)
-    if plan is not None:
+    if plan is not None and plan["requests"]:
+        # validate() bounds the complete plan before this native key lookup. The
+        # inner join makes both request IDs equal; COALESCE hid their indexes.
+        bindings = {row["request_id"]: row for row in store.rows(
+            'SELECT a.request_id,a.payload_sha256,a.measurement_json,m.job_id '
+            'FROM model_admissions AS a JOIN model_usage AS m ON a.request_id=m.request_id '
+            'WHERE a.request_id=ANY(%s::text[])',
+            ([record["request_id"] for record in plan["requests"]],),
+        )}
         for record in plan["requests"]:
-            row = store.one(
-                'SELECT a.request_id AS request_id, a.logical_request_id AS logical_request_id, '
-                'a.attempt_id AS attempt_id, a.attempt_number AS attempt_number, a.window_id AS '
-                'window_id, a.contract_sha256 AS contract_sha256, a.payload_sha256 AS '
-                'payload_sha256, a.snapshot_json AS snapshot_json, a.reserved_micro_usd AS '
-                'reserved_micro_usd, a.input_bound AS input_bound, a.output_bound AS output_bound, '
-                'a.lease_token AS lease_token, a.lease_until AS lease_until, a.io_started_at AS '
-                'io_started_at, a.journal_path AS journal_path, a.journal_id AS journal_id, '
-                'a.measurement_json AS measurement_json, a.authority_json AS authority_json, '
-                'm.job_id AS job_id FROM model_admissions AS a JOIN model_usage AS m ON '
-                'a.request_id = m.request_id WHERE COALESCE(a.request_id, m.request_id) = %s',
-                (record["request_id"],),
-            )
+            row = bindings.get(record["request_id"])
             try:
                 valid = (
                     row

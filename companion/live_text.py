@@ -585,7 +585,7 @@ def _ledger_custody(store, settings, expected_sha256=None, *, projection=None):
     digest = hashlib.sha256(raw).hexdigest()
     if expected_sha256 is not None and digest != expected_sha256:
         raise CoreError("LIVE_TEXT_HANDOFF_LEDGER_CHANGED", 409)
-    records = ledger.read()
+    records = ledger.read(raw=raw)
     if projection is None:
         projection = store.rows(ERASURE_PROJECTION_SQL)
     if projection[0]["ledger_id"] != records[0]["ledger_id"]:

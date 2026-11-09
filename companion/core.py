@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 
+import psycopg
+
 from companion import (
     budget,
     context_selection,
@@ -55,6 +57,7 @@ from companion.model import (
     MEMORY_RULES,
     PRINCIPLES,
     RECALL_RULES,
+    SOURCE_RULES,
 )
 from companion.observation import ObservationService
 from companion.privacy import epoch, redact
@@ -359,7 +362,10 @@ class Core(Runtime):
         return {**row, "lease_token": token, "attempts": row["attempts"] + 1}
 
     def _check_context_snapshots(self, job, snapshots, *, current_request=None, owner_view=None,
-                                 reads=None):
+                                 read=None, reads=None):
+        if not self.store.in_transaction:
+            return self.store.read_or_write(lambda: self._check_context_snapshots(
+                job, snapshots, current_request=current_request, owner_view=owner_view))
         if reads is None:
             reply_revision.check_job(self.store, job)
         else:
@@ -378,6 +384,8 @@ class Core(Runtime):
         if private_life.strict(self.store, self.settings):
             live_text.check_job(self.store, self.settings, self.clock, job,
                                 current_request=current_request)
+        memory_sources = None
+        memory_prepared = False
         for snapshot in snapshots:
             try:
                 purpose = {"memory": "memory", "growth": "expression", "affect": "affect",
@@ -388,7 +396,30 @@ class Core(Runtime):
                 if authority and purpose and purpose not in authority.policy.purposes:
                     raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
                 if snapshot["kind"] == "memory":
-                    self.memory_context.revalidate(snapshot["proof"], self.clock())
+                    now = self.clock()
+                    if self.store.in_read_snapshot:
+                        if read is not None and not memory_prepared:
+                            memory_sources = read.proof_sources(self, snapshots, now)
+                            memory_prepared = True
+                        elif read is None and memory_sources is None:
+                            from companion.memory_context import MemorySources
+
+                            memory_sources = MemorySources(self.memory, now, bounded=True)
+                            memory_sources._snapshot_cache()
+                        if memory_sources is not None:
+                            now = memory_sources.now
+                    else:
+                        memory_sources = None
+                    try:
+                        self.memory_context.revalidate(snapshot["proof"], now,
+                                                       source_view=memory_sources)
+                    except retrieval_work.WorkLimit:
+                        if memory_sources is None:
+                            raise
+                        # Required proofs retain their individual work bounds when
+                        # their combined sources exceed this snapshot's shared view.
+                        memory_sources = None
+                        self.memory_context.revalidate(snapshot["proof"], now)
                 elif snapshot["kind"] == "growth":
                     self.expression_learning.revalidate_reply(
                         self.settings, job, self._affect_context(authority), snapshot["proof"])
@@ -427,7 +458,7 @@ class Core(Runtime):
                     self.goals.validate_sources(snapshot["event_ids"])
                 elif snapshot["kind"] == "history":
                     owner_input.check_history(self.store, self.settings, self.clock,
-                                              job, snapshot["proof"])
+                                              job, snapshot["proof"], read=read)
                 elif snapshot["kind"] == "context_plan":
                     from companion.context_planner import check, check_bound
 
@@ -715,6 +746,7 @@ class Core(Runtime):
             )
             memory_references = self.memory_context.add_reply_facts(
                 selection, facts, cfg, self.clock, chat=job["kind"] == "chat", paused=memory_paused,
+                query=text, allowed_ids=allowed,
             )
         # A bounded window admits only its approved facts, never learned jargon.
         if (job["kind"] == "chat" and cfg.jargon.enabled and turn.permits("memory")
@@ -757,14 +789,25 @@ class Core(Runtime):
         s, cfg, job, text = self.store, turn.settings, turn.job, turn.text
         authority = turn.authority
         turns = [dialogue_history.turn_messages(source, s, text) for source in sources]
-        recalled = None
+        recalled = recalled_reference = None
+        recalled_history = []
+        original_order = {source["event_id"]: i for i, source in enumerate(sources)}
         if (job["kind"] == "chat" and authority and not bounded_text and text and not scoped_share
                 and cfg.memory_enabled and turn.permits("memory")
                 and "history" in authority.policy.purposes):
-            recalled = turn_recall.add_reply_reference(
+            recalled, recalled_reference = turn_recall.add_reply_reference(
                 s, cfg, self.clock, job, text, sources, turns, authority.policy.history,
                 available=available, ranked_ids=turn_ranking, memory_context=self.memory_context,
                 selection=selection)
+            if recalled:
+                recalled_ids = set(recalled["event_ids"])
+                recalled_history = [(source, group)
+                    for source, group in zip(sources, turns, strict=True)
+                    if source["event_id"] in recalled_ids]
+                remaining = [(source, group) for source, group in zip(sources, turns, strict=True)
+                             if source["event_id"] not in recalled_ids]
+                sources, turns = ([source for source, _ in remaining],
+                                  [group for _, group in remaining])
         mark("context_turn_recall")
         continuation = None
         if not scoped_share:
@@ -786,7 +829,8 @@ class Core(Runtime):
             if turn.permits("memory"):
                 image_review_proofs = image_review.annotate(self, job, sources, turns)
         return dialogue_history.ReplyHistory(sources, turns, continuation, image_review_target,
-                                            image_review_proofs)
+            image_review_proofs, recalled=recalled, recalled_reference=recalled_reference,
+            recalled_history=recalled_history, original_order=original_order)
 
     def _format_reply_turns(self, turn, rules, current, history, content_reference, selection,
                            notice_messages, has_images):
@@ -922,10 +966,12 @@ class Core(Runtime):
         mark("context_current")
         if (work := retrieval_work.current()) is not None and work.receipt()["coverage_limited"]:
             rules.append("\n" + retrieval_work.NOTE, dynamic=True)
+        if turn.permits("memory") or turn.permits("history"):
+            rules.append(SOURCE_RULES, dynamic=True)
         protected = combined or image_memory or (
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and memory_refs)
         fitted = context_selection.fit_reply(cfg, job["kind"], rules.message, selection, history,
-                                             current_input, related, protected=protected)
+            current_input, related, protected=protected, query=turn.text)
         if authority and job["kind"] == "chat" and turn.permits("image"):
             from companion import agent_images, image_review
 
@@ -1712,6 +1758,21 @@ class Core(Runtime):
                     token=job["lease_token"],
                     refund=True,
                 )
+                return
+            if code == "CONVERSATION_RESTORE_BUSY":
+                # Restore has not dispatched a model/tool. Yield this same lease
+                # without touching saved requests, paid uncertainty or tool results.
+                # A blocked job row falls back to the existing lease-expiry recovery.
+                try:
+                    with self.store.deadline(.25):
+                        self.store.execute(
+                            "UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL,"
+                            "last_error_code=%s,next_attempt_at=%s,"
+                            "attempts=GREATEST(0,attempts-1),updated_at=%s "
+                            "WHERE job_id=%s AND state='RUNNING' AND lease_token=%s",
+                            (code, after(now, 1), now, job["job_id"], job["lease_token"]))
+                except (psycopg.errors.QueryCanceled, psycopg.errors.LockNotAvailable):
+                    pass
                 return
             checkpoint = self.store.one(
                 'SELECT phase FROM agent_conversations WHERE job_id = %s', (job["job_id"],))

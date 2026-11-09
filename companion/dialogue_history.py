@@ -5,7 +5,7 @@ without settings use the historical byte estimate. Neither grants source authori
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from companion import qq_quotes, reply_revision
 from companion.budget import token_upper_bound
@@ -20,6 +20,10 @@ class ReplyHistory:
     continuation: dict | None
     review_target: dict | None
     review_proofs: list
+    recalled: dict | None = None
+    recalled_reference: dict | None = None
+    recalled_history: list = field(default_factory=list)
+    original_order: dict = field(default_factory=dict)
 
     def retained(self, messages):
         visible = {id(message) for message in messages}
@@ -148,6 +152,13 @@ def recent_sent_sources(
         if not include_partial
         else ""
     )
+    frozen = store.frozen_scope if include_partial and _nominate is None else None
+    delivery_projection = (
+        ",jsonb_build_object('sent_at',o.sent_at,'segment_index',o.segment_index,"
+        "'segment_count',o.segment_count,'reply_group_sha256',o.reply_group_sha256,"
+        "'segment_interval_ms',o.segment_interval_ms) AS history_delivery "
+        if frozen is not None else ""
+    )
     projection = (
         "SELECT e.event_id,octet_length(e.body_json)+octet_length(o.content_json) AS text_bytes "
         if _nominate is not None
@@ -168,7 +179,7 @@ def recent_sent_sources(
         else lambda sql, args: _nominate.rows(store, sql, args, limit=max_turns)
     )
     rows = read(
-        projection
+        projection + delivery_projection
         + (
 
                 'FROM events e JOIN outbox o ON '
@@ -225,11 +236,13 @@ def recent_sent_sources(
     )
     if _nominate is not None:
         return rows  # Identity/size nominations only; callers must read and validate live sources.
+    active = reply_revision.active_sources(store, [row["event_id"] for row in rows])
     sources = []
     for row in rows:
+        delivery = row.pop("history_delivery", None)
         # This operational column is outside historical input and context fingerprints.
         row.pop("reply_revision", None)
-        if not reply_revision.source_active(store, row["event_id"]):
+        if row["event_id"] not in active:
             continue
         if row.pop("reply_group_id") is not None:
             try:
@@ -277,7 +290,11 @@ def recent_sent_sources(
             except CoreError:
                 continue
         elif include_partial:
-            delivered = store.one(
+            # The same immutable snapshot already read these exact outbox fields.
+            # Writers and unowned transactions still take their fresh per-row read.
+            delivered = delivery if (
+                frozen is not None and store.frozen_scope == frozen
+            ) else store.one(
                 "SELECT outbox.message_id AS message_id, outbox.origin_event_id "
                 "AS origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type "
                 "AS action_type, outbox.content_json AS content_json, outbox.content_sha256 AS "
@@ -370,7 +387,8 @@ def pending_owner_sources(
     for row in rows:
         row.pop("reply_revision", None)
         row["reply_complete"] = False
-    return [row for row in reversed(rows) if reply_revision.source_active(store, row["event_id"])]
+    active = reply_revision.active_sources(store, [row["event_id"] for row in rows])
+    return [row for row in reversed(rows) if row["event_id"] in active]
 
 
 def recent_context_sources(

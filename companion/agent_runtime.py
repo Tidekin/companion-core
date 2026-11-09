@@ -74,9 +74,23 @@ def check_conversation(core, job, snapshots=(), *, current_request=None, purpose
         ))
     if job["kind"] != "chat":
         raise CoreError("CONVERSATION_CHAT_JOB_REQUIRED", 403)
-    from companion.conversation_guard import read
+    if core.store.frozen_scope is not None:
+        from companion.conversation_read import ConversationRead
 
-    reads = read(core.store, job)
+        read = ConversationRead(core.store)
+        try:
+            return _check_conversation(core, job, snapshots, current_request, purpose, read)
+        finally:
+            read.close()
+    return _check_conversation(core, job, snapshots, current_request, purpose, None)
+
+
+def _check_conversation(core, job, snapshots, current_request, purpose, read):
+    from companion import conversation_guard
+
+    reads = conversation_guard.read(core.store, job)
+    if read is not None:
+        read.seed(job, reads)
     ref = owner_authority._job_reference(reads.job)
     view = owner_authority._checked_current(
         core.store, core.settings, core.clock, reads.authority, purpose="chat", authority=ref,
@@ -84,15 +98,20 @@ def check_conversation(core, job, snapshots=(), *, current_request=None, purpose
     owner_authority._checked_job(reads.job, job, view, core.clock, executing=True)
     if purpose not in view.policy.purposes:
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
+    if read is not None:
+        read.prepare(core, job, snapshots, view)
     owner_input._checked_source(core.store, core.settings, view, job["event_id"], core.clock(),
-                                _loaded=reads.source)
+        _loaded=reads.source)
     core._check_context_snapshots(job, snapshots, current_request=current_request,
-                                  owner_view=view, reads=reads)
+                                  owner_view=view, read=read, reads=reads)
     from companion import agent_images, agent_reading
 
     agent_reading.check_results(core, job, snapshots)
     agent_images.input_sources(core.store, core.settings, core.clock, job,
                                _item_ids=reads.image_item_ids)
+    if read is not None:
+        owner_authority.check_job(core.store, core.settings, core.clock, job,
+                                  purpose=purpose, executing=True, read=read)
     return view
 
 

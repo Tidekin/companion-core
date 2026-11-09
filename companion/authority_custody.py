@@ -57,6 +57,34 @@ def check_admissions(store, view, admissions):
         raise CoreError("OWNER_DELIVERY_MODEL_EVIDENCE_CHANGED", 403) from error
 
 
+def _decode_authority(raw):
+    """Pure original fold; it grants no permission and reads no database or clock."""
+    records, verified = paid_budget._journal_records(raw)
+    authority, lifecycle, seen = [], None, set()
+    managed = False
+    previous, journal_id = "0" * 64, None
+    for index, record in enumerate(records):
+        digest = record.pop("sha256")
+        if not verified and (
+            record.get("previous") != previous or paid_budget.sha(record) != digest
+        ):
+            raise ValueError("journal chain")
+        previous = digest
+        if index == 0:
+            if record.get("kind") != "header":
+                raise ValueError("journal header required")
+            journal_id = record["journal_id"]
+        elif record.get("kind") == owner_authority.RECORD_KIND:
+            owner_authority.fold(authority, record, digest)
+        elif record.get("kind") in {"window_open", "window_stop", "window_handoff"}:
+            lifecycle = paid_budget._live_record(record, digest, lifecycle, seen)
+            managed |= record["kind"] != "window_stop"
+    if journal_id is None:
+        raise ValueError("journal header required")
+    return {"authority": authority, "lifecycle": lifecycle,
+            "managed": managed, "journal_id": journal_id}
+
+
 def check(store, revision, *, historical=False):
     if not store.in_transaction:
         raise RuntimeError("AUTHORITY_CUSTODY_REQUIRES_TRANSACTION")
@@ -64,34 +92,15 @@ def check(store, revision, *, historical=False):
     path = Path(revision["journal_path"])
     try:
         raw = path.read_bytes()
-        records, verified = paid_budget._journal_records(raw)
-        authority, lifecycle, seen = [], None, set()
-        managed = False
-        previous, journal_id = "0" * 64, None
-        for index, record in enumerate(records):
-            digest = record.pop("sha256")
-            if not verified and (
-                record.get("previous") != previous or paid_budget.sha(record) != digest
-            ):
-                raise ValueError("journal chain")
-            previous = digest
-            if index == 0:
-                if record.get("kind") != "header":
-                    raise ValueError("journal header required")
-                journal_id = record["journal_id"]
-            elif record.get("kind") == owner_authority.RECORD_KIND:
-                owner_authority.fold(authority, record, digest)
-            elif record.get("kind") in {"window_open", "window_stop", "window_handoff"}:
-                lifecycle = paid_budget._live_record(record, digest, lifecycle, seen)
-                managed |= record["kind"] != "window_stop"
-        if journal_id is None:
-            raise ValueError("journal header required")
+        material = paid_budget.authority_material(raw)
+        authority, lifecycle = material["authority"], material["lifecycle"]
+        journal_id = material["journal_id"]
         projection = revision["custody_projection"]
         if revision["custody_journal_id"] != journal_id:
             raise ValueError("journal identity")
         owner_authority._validate_projection(authority, journal_id, path, projection)
         stored = revision["custody_lifecycle"]
-        if (managed or stored is not None) and (
+        if (material["managed"] or stored is not None) and (
             (json.loads(stored) if stored is not None else None) != lifecycle
         ):
             raise ValueError("live lifecycle behind journal or DB")
