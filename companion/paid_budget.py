@@ -19,8 +19,9 @@ from companion.contracts import CoreError
 from companion.postgres import BUDGET_LEDGER, TRANSACTION_WRITE_COUNT
 from companion.store import encode, uid
 
-# The chain codec retains at most this many source bytes. Whole custody views
-# retain only their digest key and at most this many serialized result bytes.
+# The exact-byte chain codec uses the Bridge's existing bounded 16 MiB capacity.
+# Financial views retain their separate 1 MiB serialized-result bound.
+CODEC_MAX_BYTES = 16 * 1048576
 CACHE_MAX_BYTES = 1048576
 # One Store may retain complete bytes only for its current frozen-scope key.
 # Larger journals retain the original digest key; codec/view bounds stay separate.
@@ -70,10 +71,10 @@ def _validated_bytes(raw):
 
 def _journal_records(raw):
     end = len(raw)
-    if end > CACHE_MAX_BYTES:
+    if end > CODEC_MAX_BYTES:
         # As in the Bridge codec, LF terminates a prefix in every splitlines()
         # reading. Keep its exact bytes bounded; every later line is still checked.
-        end = raw.rfind(b"\n", 0, CACHE_MAX_BYTES) + 1
+        end = raw.rfind(b"\n", 0, CODEC_MAX_BYTES) + 1
     if end:
         try:
             prefix = raw[:end]
@@ -85,7 +86,7 @@ def _journal_records(raw):
                     prefix = last
             end = len(prefix)
             payload, previous = _validated_bytes(prefix)
-            if len(payload) > CACHE_MAX_BYTES:
+            if len(payload) > CODEC_MAX_BYTES:
                 _clear_codec()
             records = marshal.loads(payload)
             tail, _ = _decode_lines(raw[end:].decode("utf-8").splitlines(), previous)

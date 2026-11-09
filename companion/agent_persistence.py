@@ -12,11 +12,11 @@ from pydantic_ai import Conversation, DeferredToolRequests
 from pydantic_ai.conversation import ConversationTypeAdapter
 from pydantic_ai.exceptions import CallDeferred
 
-from companion import context_planner
+from companion import context_planner, job_queue
 from companion.agent_runtime import check_conversation
 from companion.contracts import CoreError
 from companion.privacy import redact
-from companion.store import encode
+from companion.store import after, encode
 from companion.transport import digest
 
 
@@ -103,6 +103,9 @@ class ConversationStore:
     def _save(self, conversation, phase, *, output=None):
         self.check()
         now = self.core.clock()
+        if phase in {"MODEL_PENDING", "READY", "OUTPUT"} and self.store.in_write_transaction:
+            job_queue.renew(self.store, self.job,
+                            after(now, self.core.settings.lease_seconds), now=now)
         from companion.agent_images import inputs, stored_conversation
 
         if self._image_inputs is None:

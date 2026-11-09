@@ -4,6 +4,7 @@ Callers choose eligible work, verify domain authority, and settle their own evid
 Worker results carrying a lease are conditional on that lease still owning the job.
 """
 
+from companion.contracts import CoreError
 from companion.store import encode, uid
 
 ACTIVE = "state IN ('QUEUED','RUNNING','RETRY_WAIT')"
@@ -113,9 +114,17 @@ def retry_unadmitted(store, job, now, next_at, reason):
                   (next_at, reason, now, job["job_id"], job["lease_token"]))
 
 
-def renew(store, job, until):
-    store.execute('UPDATE jobs SET lease_until=%s WHERE job_id=%s AND lease_token=%s',
-                  (until, job["job_id"], job["lease_token"]))
+def renew(store, job, until, *, now):
+    """Refresh an owned live lease after the caller's native authority/source check."""
+    if not store.in_write_transaction:
+        raise RuntimeError("JOB_RENEWAL_REQUIRES_WRITE_TRANSACTION")
+    changed = store.execute(
+        "UPDATE jobs SET lease_until=%s WHERE job_id=%s AND lease_token=%s "
+        "AND state='RUNNING' AND lease_until>%s",
+        (until, job["job_id"], job["lease_token"], now),
+    )
+    if changed != 1:
+        raise CoreError("JOB_LEASE_LOST", 409)
 
 
 def reader_ready(store, request_id, now):
