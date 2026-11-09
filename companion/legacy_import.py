@@ -14,7 +14,7 @@ from psycopg import sql
 from pydantic import SecretStr
 
 SOURCE_REVISION = "0068_image_review_target"
-TARGET_REVISION = "pg0003_fact_key_ascii"
+TARGET_REVISION = "pg0004_job_event_lookup"
 
 
 def migrate_sqlite(path, revision="head"):

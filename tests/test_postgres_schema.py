@@ -61,7 +61,7 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
             "WHERE constraint_schema=current_schema() AND constraint_type='FOREIGN KEY'"
         )["n"] == foreign_keys
         assert session.one("SELECT version_num FROM alembic_version") == {
-            "version_num": "pg0003_fact_key_ascii"}
+            "version_num": "pg0004_job_event_lookup"}
 
 
 def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_index():
@@ -87,7 +87,23 @@ def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_inde
         with psycopg.connect(info.get_secret_value()) as db:
             assert directions(db) == expected
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0003_fact_key_ascii",)
+                "pg0004_job_event_lookup",)
+
+
+def test_job_event_index_upgrades_existing_fact_key_database_without_changing_jobs():
+    with isolated_database() as info:
+        migrate(info, revision="pg0003_fact_key_ascii")
+        with psycopg.connect(info.get_secret_value()) as db:
+            db.execute("INSERT INTO jobs(job_id,kind,state,idempotency_key,created_at,updated_at) "
+                       "VALUES ('original','memory_extract','SUCCEEDED','original','t','t')")
+            before = db.execute("SELECT * FROM jobs").fetchall()
+        migrate(info)
+        with psycopg.connect(info.get_secret_value()) as db:
+            assert db.execute("SELECT * FROM jobs").fetchall() == before
+            definition = db.execute("SELECT indexdef FROM pg_indexes WHERE "
+                                    "schemaname=current_schema() AND "
+                                    "indexname='idx_jobs_event_kind'").fetchone()[0]
+            assert "(event_id, kind)" in definition
 
 
 def test_fact_key_index_upgrades_from_relationship_revision():
@@ -105,7 +121,7 @@ def test_fact_key_index_upgrades_from_relationship_revision():
             assert "translate(" in expression
             assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ" in expression
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0003_fact_key_ascii",)
+                "pg0004_job_event_lookup",)
 
 
 def audit(session, document):
