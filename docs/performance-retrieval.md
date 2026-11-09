@@ -464,3 +464,33 @@ real TCP ingress and independent CLI workers. At 48 and 480 admitted source even
 original text must appear in the actual final provider request. Provider transport is mocked;
 this checks evidence delivery, separately from model reading quality, consistent with the
 [LongMemEval retrieval/reading distinction](https://arxiv.org/html/2410.10813v2).
+
+#### Targeted v6 evidence, 2026-11-09
+
+The isolated native run froze `d0f1b6c7` and answered 25 original v6 questions selected for
+likely failures, with the original evidence cutoffs and criteria. All 25 executions succeeded.
+All first provider requests contained facts and raw turns; all 16 questions after corpus turn
+200 contained facts. This establishes evidence delivery on these cases, not semantic completeness.
+First-provider preparation averaged 5.36s (P95 7.26s); complete answers averaged 12.42s.
+These timings do not establish the separate full Core 4–6s or QQ latency target.
+
+Automated grading failed anchor calibration, including one independent replacement vote;
+the gate was retained and no formal score was published. A separate Codex paired diagnostic
+review gave 23/25 for this candidate, 8/25 for a007 and 18/25 for the historical 85.61% run.
+This review is not independent human adjudication or an estimate of full v6 accuracy.
+Archived answers and scores remain unchanged. Uniform ASR candidate handling and the
+advice-initiation boundary account for explicitly recorded differences from archived decisions.
+
+Generic prompt follow-ups culminated in `d7c0d412`. Four frozen-evidence reading checks passed
+the requested date, food and time/place items; three met all stricter preregistered conditions.
+The remaining ASR answer still mislabeled candidate spellings as transcript text. This reading
+limitation remains open. These calls changed instructions only and used
+[`tool_choice=none`](https://api-docs.deepseek.com/api/create-chat-completion/); they are not
+native v6 reruns and do not replace the original 25 answers. Total new inference and grading
+cost was CNY 1.30727328, within the CNY 2 cap, with no new UNKNOWN reservations.
+
+The final verification receipt reuses 179 distinct successful local regression cases, including
+real ingress/independent-worker evidence checks at 48 and 480 admitted events, plus the Linux
+qualification and native lifecycle checks. Prompt-only changes passed the final 29 related
+checks. The evidence package retains frozen source, raw calls, every failed grading gate,
+fee ledgers, paired review decisions and log-normalization hashes; it excludes credentials.
