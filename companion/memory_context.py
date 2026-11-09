@@ -688,12 +688,19 @@ class MemoryContext:
                                    memory_ids, project_query, trace)
 
     def _recall_result(self, rows, version, query, now, memory_ids, project_query, trace=None):
+        if not self.store.in_transaction:
+            return self.store.read_or_write(lambda: self._recall_result(
+                rows, version, query, now, memory_ids, project_query, trace))
         if not rows and project_query is not None:
             rows = self.memory.project_recall_candidates(
                 project_query, memory_ids=memory_ids, limit=6, now=now,
             )
         work = retrieval_work.current()
         sources = MemorySources(self.memory, now, bounded=True, work=work)
+        try:
+            sources.prefetch([row["memory_id"] for row in rows])
+        except retrieval_work.WorkLimit as error:
+            work.mark(error.reason)
         facts, conflicts = [], []
         for row in rows:
             try:
@@ -704,10 +711,8 @@ class MemoryContext:
             if not evidence:
                 continue
             item = self._fact(row, evidence)
-            from companion import memory_references
-
             try:
-                reference = memory_references.for_memory(self.memory, row, now, work=work)
+                reference = sources.reference(row)
             except retrieval_work.WorkLimit as error:
                 work.mark(error.reason)
                 break

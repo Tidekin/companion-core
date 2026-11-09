@@ -1,6 +1,7 @@
 """Native provenance batches, snapshot lifetime and partial verified candidates."""
 
 import asyncio
+import itertools
 import time
 from pathlib import Path
 
@@ -33,6 +34,25 @@ def facts(core, count=96, chars=6000):
     core.store.execute("INSERT INTO memory_evidence(memory_id,event_id,polarity,created_at) "
         "SELECT 'fact_'||n,'proof_'||n,1,%s FROM generate_series(1,%s) n", (core.clock(), count))
     return core.store.rows("SELECT * FROM memories ORDER BY memory_id")
+
+
+def test_recall_result_keeps_selected_facts_within_the_original_sql_budget(core, monkeypatch):
+    rows = facts(core, count=6, chars=40)
+    # Simulate finite per-read transport cost; use the real PostgreSQL validators,
+    # the unchanged 1-second allowance and no provider or fabricated source verdicts.
+    ticks = itertools.count(0, .05)
+    monkeypatch.setattr(retrieval_work, "monotonic", lambda: next(ticks))
+
+    def recall():
+        with retrieval_work.scope():
+            return core.memory_context._recall_result(
+                rows, read_version(core.memory), "test_token", core.clock(), None, None)
+
+    result = recall()
+    assert {row["memory_id"] for row in result["facts"]} == {row["memory_id"] for row in rows}
+    core.store.execute("UPDATE events SET redacted=1 WHERE event_id='proof_1'")
+    assert {row["memory_id"] for row in recall()["facts"]} == {
+        row["memory_id"] for row in rows if row["memory_id"] != "fact_1"}
 
 
 def test_reply_source_group_batches_lineage_and_rechecks_the_next_scope(core, monkeypatch):
