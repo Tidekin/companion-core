@@ -416,7 +416,8 @@ async def run(core, job):
                           current_request=current_request)
             with store.transaction():
                 source_check()
-                job_queue.renew(store, job, after(clock(), settings.lease_seconds))
+                now = clock()
+                job_queue.renew(store, job, after(now, settings.lease_seconds), now=now)
             messages = item["payload"]["messages"]
             budget.reserve(store, settings, job["job_id"], "evaluation", messages, clock(),
                            request_id=rid, logical_request_id=rid, clock=clock)

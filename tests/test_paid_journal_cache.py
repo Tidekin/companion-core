@@ -91,7 +91,7 @@ def test_warm_chain_rejects_changed_complete_bytes(
     approval, _ = settled(core, tmp_path)
     path = Path(approval.journal_path)
     if bounded_prefix:
-        monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES",
+        monkeypatch.setattr(paid_budget, "CODEC_MAX_BYTES",
                             len(path.read_bytes().splitlines(keepends=True)[0]))
     with core.store.transaction():
         paid_budget.journal(core.store, approval)
@@ -148,7 +148,7 @@ def test_bad_tail_preserves_earlier_fold_error_and_durable_stop(
         view = paid_budget.journal(core.store, approval)
     raw = path.read_bytes()
     if bounded_prefix:
-        monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES",
+        monkeypatch.setattr(paid_budget, "CODEC_MAX_BYTES",
                             len(raw.splitlines(keepends=True)[0]))
     if tail == "json":
         path.write_bytes(raw + b"{\n")
@@ -185,7 +185,8 @@ def test_over_limit_read_bypasses_and_clears_cache(core, tmp_path, monkeypatch):
     approval, _ = settled(core, tmp_path)
     with core.store.transaction():
         expected = paid_budget.journal(core.store, approval)
-    monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", 1)
+    paid_budget.forget_views()
+    monkeypatch.setattr(paid_budget, "CODEC_MAX_BYTES", 1)
     with core.store.transaction():
         assert paid_budget.journal(core.store, approval) == expected
     assert paid_budget._validated_bytes.cache_info().currsize == 0
@@ -194,8 +195,8 @@ def test_over_limit_read_bypasses_and_clears_cache(core, tmp_path, monkeypatch):
 def test_large_source_reuses_only_a_small_verified_view(core, tmp_path, monkeypatch):
     approval, request = settled(core, tmp_path)
     path = Path(approval.journal_path)
-    # Whitespace preserves each parsed record and chain hash while crossing the
-    # codec's source-byte limit with the original accounting state.
+    # Source bytes may exceed the financial-view result bound while their
+    # validated accounting projection remains small.
     raw = path.read_bytes().rstrip(b"\n") + b" " * (paid_budget.CACHE_MAX_BYTES + 1) + b"\n"
     path.write_bytes(raw)
     paid_budget.forget_views(core.store)
@@ -243,7 +244,7 @@ def test_bounded_chain_prefix_survives_appends_without_reusing_mutable_records(
     path = Path(approval.journal_path)
     raw = path.read_bytes()
     prefix = b"".join(raw.splitlines(keepends=True)[:-1])
-    monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", len(prefix))
+    monkeypatch.setattr(paid_budget, "CODEC_MAX_BYTES", len(prefix))
     records, checked = paid_budget._journal_records(raw)
     assert checked
     records[0]["kind"] = "mutated caller copy"
@@ -528,6 +529,29 @@ def codec_chain(count, *, padding=0):
     return ("".join(encode(row) + "\n" for row in rows)).encode(), rows
 
 
+def test_production_sized_chain_reuses_verified_bytes_without_expanding_fee_views(monkeypatch):
+    raw, expected = codec_chain(2000, padding=512)
+    assert 1048576 < len(raw) < 4 * 1048576
+    assert paid_budget._journal_records(raw) == (expected, True)
+    hashes = []
+    original = paid_budget.sha
+
+    def sha(value):
+        hashes.append(True)
+        return original(value)
+
+    monkeypatch.setattr(paid_budget, "sha", sha)
+    assert paid_budget._journal_records(raw) == (expected, True)
+    assert hashes == []
+    assert paid_budget.CACHE_MAX_BYTES == 1048576
+    # Matching size cannot disguise a changed byte in a previously checked chain.
+    changed = raw.replace(b'"text":"x', b'"text":"y', 1)
+    assert len(changed) == len(raw) and changed != raw
+    _, checked = paid_budget._journal_records(changed)
+    assert not checked
+    assert paid_budget._validated_bytes.cache_info().currsize == 0
+
+
 @pytest.mark.parametrize("separator", [b"\n", b"\r\n", b"\r", "\u2028".encode()])
 def test_codec_append_reuses_only_an_exact_lf_terminated_prefix(monkeypatch, separator):
     complete, expected = codec_chain(3)
@@ -583,7 +607,7 @@ def test_decoded_chain_over_serialized_limit_is_not_retained(monkeypatch):
     row["sha256"] = paid_budget.sha(row)
     raw = (encode(row) + "\n").encode()
     assert len(raw) < len(marshal.dumps([row]))
-    monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", len(raw))
+    monkeypatch.setattr(paid_budget, "CODEC_MAX_BYTES", len(raw))
     assert paid_budget._journal_records(raw) == ([row], True)
     assert paid_budget._validated_bytes.cache_info().currsize == 0
     assert paid_budget._previous is None
