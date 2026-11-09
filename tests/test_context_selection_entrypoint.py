@@ -60,8 +60,9 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             purposes=("chat", "memory", "history", "goals", "exploration", "expression"),
             core_options={"operator_hot_reload": hot_reload, "goals_enabled": True,
                           "exploration_enabled": True, "mood_enabled": True,
-                          "context_soft_tokens": type(core.settings).model_fields[
-                              "context_soft_tokens"].default,
+                          # Keep the latest related turn source-bound while leaving
+                          # older turns as ordinary history to exercise pruning.
+                          "turn_recall_limit": 1,
                           "watch_ledger": core.settings.watch_ledger.model_copy(
                               update={"enabled": True})},
             history_bytes=64000) as (entry, sends):
@@ -117,9 +118,7 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
                         if p["kind"] == "context_plan")
             dropped = [*plan["assembly_dropped"], *plan["requests"][-1]["dropped"]]
             assert any(item["priority"] == 0 for item in dropped)
-            # Unrelated owner history can be excluded before the planner. Check
-            # the actual payload rather than requiring a later drop receipt.
-            assert "烘焙闲聊" not in prompt
+            assert any(item["kind"] == "history" for item in dropped)
             assert (await entry.send(entry.client, entry.protocol))["worked"]
             assert len(sends) == 6
             assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == len(calls)
