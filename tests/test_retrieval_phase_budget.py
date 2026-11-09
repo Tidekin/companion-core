@@ -29,6 +29,22 @@ def test_nested_phase_headroom_survives_await_without_reset_or_leaking():
     run(scenario())
 
 
+def test_nested_reserve_is_relative_to_the_inherited_effective_ceiling():
+    async def scenario():
+        with retrieval_work.scope() as work:
+            with work.stage("automatic", reserve={"sql_milliseconds": 150}):
+                assert work.take("sql_milliseconds", 600)
+                with work.stage("proofs", reserve={"sql_milliseconds": 83}):
+                    assert work.remaining("sql_milliseconds") == 167
+                    assert await asyncio.to_thread(work.take, "sql_milliseconds", 167)
+                    assert not work.take("sql_milliseconds")
+                assert work.remaining("sql_milliseconds") == 83
+                assert work.take("sql_milliseconds", 83)
+            assert work.remaining("sql_milliseconds") == 150
+            assert work.counts["sql_milliseconds"] == 850
+    run(scenario())
+
+
 def test_exhausted_recall_is_terminal_and_still_checks_current_owner_authority(core, tmp_path):
     async def scenario():
         async with environment(core, tmp_path) as (entry, _):

@@ -83,8 +83,8 @@ async def reply(core, job, snapshots):
             trace = {}
             try:
                 with phase("recall_memory", job["trace_id"]), retrieval_work.current().stage(
-                    "automatic_memory", reserve={"sql_milliseconds": 150,
-                        "text_bytes": 65536, "source_nodes": 64, "candidates": 24,
+                    "automatic_memory", reserve={**retrieval_work.FINAL_SOURCE_RESERVE,
+                        "candidates": 24,
                         "searches": 1}):
                     result = await core.memory_context.recall_async(query, core.clock(),
                         project_query=query, clock=core.clock, trace=trace,
@@ -106,7 +106,9 @@ async def reply(core, job, snapshots):
             from companion import turn_recall
 
             # Embedding and cross-encoder scoring run in a worker thread, not on the loop.
-            with phase("recall_turns", job["trace_id"]):
+            with phase("recall_turns", job["trace_id"]), retrieval_work.current().stage(
+                "automatic_turns", reserve=retrieval_work.FINAL_SOURCE_RESERVE,
+            ):
                 ranking = await turn_recall.prefetch(core.store, core.settings, job, query)
         messages = [] if conversation is not None else core.context(
             job, memories=memories, snapshots=snapshots,

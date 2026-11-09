@@ -18,6 +18,8 @@ LIMITS = {"candidates": 256, "text_bytes": 1048576, "cold_vectors": 16,
           "query_vectors": 8, "searches": 8, "source_nodes": 2048, "sql_milliseconds": 1000,
           "rerank_pairs": 48, "vector_rows": 4096, "vector_bytes": 8388608,
           "attachment_rows": 128}
+FINAL_SOURCE_RESERVE = {"sql_milliseconds": 150, "text_bytes": 65536,
+                        "source_nodes": 64, "attachment_rows": 16}
 NOTE = "本轮检索覆盖有限，未命中不代表主人没有说过或没有这段记忆。"
 _work = ContextVar("retrieval_work", default=None)
 _stages = ContextVar("retrieval_stages", default=())
@@ -48,7 +50,7 @@ class Work:
     @contextmanager
     def stage(self, name, *, reserve):
         """Leave shared reply allowance for later stages; never create a new budget."""
-        ceiling = {key: max(0, LIMITS[key] - value) for key, value in reserve.items()}
+        ceiling = {key: max(0, self._ceiling(key) - value) for key, value in reserve.items()}
         token = _stages.set((*_stages.get(), (self, name, ceiling)))
         try:
             yield

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from companion import context_selection
+from companion import context_selection, retrieval_work
 from companion import memory_references as refs
 from companion.contracts import CoreError
 from companion.model import MEMORY_HEADING
@@ -71,6 +71,34 @@ def test_asr_projection_cannot_revive_a_withdrawn_receipt(core):
     with pytest.raises(CoreError):
         core.memory_context.reply_facts(core.settings, core.clock, "入场日期", selected,
                                        allowed_ids=None, include_standing=False)
+
+
+def test_recalled_asr_with_exhausted_shared_work_never_retries_or_exposes_unverified_fact(
+        core, monkeypatch):
+    _, item = prepared(core, "transcript")
+    core.memory.add(item, core.clock())
+    selected = core.memory.search("入场日期")
+    assert selected
+    writes = []
+    native_transaction = core.store.transaction
+
+    def transaction(*args, **kwargs):
+        writes.append(True)
+        return native_transaction(*args, **kwargs)
+
+    monkeypatch.setattr(core.store, "transaction", transaction)
+    with retrieval_work.scope() as work:
+        assert work.take("sql_milliseconds", 1000)
+        facts = core.memory_context.reply_facts(core.settings, core.clock, "入场日期", selected,
+                                               allowed_ids=None, include_standing=False)
+        assert not facts[0] and not facts[1] and not facts[3]["source_event_ids"]
+        assert work.counts["sql_milliseconds"] == 1000
+        assert work.receipt()["coverage_limited"]
+        selection = context_selection.References()
+        assert not core.memory_context.add_reply_facts(selection, facts, core.settings, core.clock,
+                                                       chat=True, paused=False)
+        assert not selection.messages
+    assert not writes
 
 
 def test_long_single_line_asr_retains_the_selected_detail_within_fact_capacity(core):

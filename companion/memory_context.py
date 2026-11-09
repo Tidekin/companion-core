@@ -608,7 +608,7 @@ class MemoryContext:
                                     work=retrieval_work.current())
             # Pin and display share immutable source material in this synchronous read.
             shared = sources if sources._snapshot_cache() else None
-            proof = self.pin(now, rows=hits, source_view=shared)
+            proof = self.pin(now, rows=hits, work=sources.work, source_view=shared)
             overlays = dict(relations)
             for row in hits:
                 if row["origin"] != "event_observed":
@@ -622,7 +622,22 @@ class MemoryContext:
                         "content": memory_references.display_content(row, reference)}
             return hits, overlays, standing, proof
 
-        return self.store.read_or_write(pinned_display)
+        def read():
+            try:
+                return pinned_display()
+            except retrieval_work.WorkLimit as error:
+                return error  # Optional exhaustion cannot trigger a write/fresh-budget retry.
+
+        result = self.store.read_or_write(read)
+        if isinstance(result, retrieval_work.WorkLimit):
+            if (work := retrieval_work.current()) is not None:
+                work.mark(result.reason)
+                work.mark("final_evidence_unavailable")
+            # No selected claim is usable without its final proof. Keep normal standing
+            # facts on their existing validation path and expose limited coverage above.
+            return [], {}, standing, {"rows": [], "event_ids": [], "historical": False,
+                                      "source_event_ids": [], "sources": {}}
+        return result
 
     def pin(self, now, *, rows=(), event_ids=(), historical=False, work=None, source_view=None):
         return self.store.read_or_write(lambda: self._pin(

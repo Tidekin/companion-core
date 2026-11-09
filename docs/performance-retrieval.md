@@ -527,3 +527,25 @@ was performed by this repair. Median/P95/max measured answer time on the earlier
 was 10.98/19.85/24.98 seconds; QQ queue/send time and full Core 4–6-second acceptance remain
 unmeasured. The updated package corrects the prior README's separator description: original
 reading JSONL uses valid LF lines; normalized derivatives use Windows CRLF.
+
+#### Nested reservations and final source assembly
+
+Nested `Work.stage` reservations subtract from the inherited effective ceiling, not from
+the global limit. With an outer 850ms ceiling and 600ms already used, reserving 83ms inside
+permits 167ms of inner work and leaves 83ms for the outer phase, plus the original 150ms
+outside it. Await/thread context propagation keeps the same ledger and never resets counts.
+
+Automatic memory and turn nomination both leave the same final-source allowance: 150ms of
+bounded SQL reads, 64KiB of text, 64 source nodes and 16 attachment rows. Their stages end
+before final assembly, which spends that allowance on the same reply-local Work. Pinning
+and ASR projection retain one source view; a mutable fallback also keeps the same Work.
+An exhausted final proof is returned as an optional limit without a write/fresh-budget
+retry. Its unverified selected claims are omitted and the existing coverage warning remains;
+privacy/source failures still cancel rather than becoming empty successful evidence.
+
+A regression first reproduced a real TCP/independent-worker failure after a nonempty ASR
+recall and optional turn work exhaustion. With the reservation it completes and includes
+the exact native transcript in the final provider request, preserving stored fact bytes.
+Direct hard-exhaustion checks require no write fallback or unverified memory display.
+The 48/480 extracted-history checks and saved-resume/withdrawal paths also pass. Providers
+are mocked for these boundary checks; full v6.1 answer accuracy is measured separately.
