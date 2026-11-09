@@ -100,8 +100,21 @@ def normalize_v4(row, case):
     return row
 
 
+# v5 keeps the same decision rule; conclusion and precise-value claims must really
+# be asserted by the answer, rather than supplied by the judge from the rubric.
+RULES_V5 = RULES_V4.replace(
+    "不能只匹配关键词。\n",
+    "不能只匹配关键词。若题目要求确定的最终安排或结论，只列出多个旧新说法后仍称"
+    "最终不确定，不满足对应 required；提到正确值不等于选择了该结论。\n"
+    "精确编号、金额、数量按回答实际明确给出的值核对。合法的数字、单位等价形式仍接受，"
+    "但不能为了匹配判据自行删除、补充或重排噪声字符，不能从多个候选替回答选择一个值；"
+    "引用带噪原文而未给出可确定的目标值，不算已回答目标值。\n",
+)
+
+
 RUBRICS = {"v1": (RULES_V1, normalize_v1), "v2": (RULES_V2, normalize_v2),
-           "v3": (RULES_V3, normalize_v3), "v4": (RULES_V4, normalize_v4)}
+           "v3": (RULES_V3, normalize_v3), "v4": (RULES_V4, normalize_v4),
+           "v5": (RULES_V5, normalize_v4)}
 
 
 def rubric(version):

@@ -212,3 +212,24 @@ results on anchor-only batches, not a new v6/v6.1 score or permission to bypass 
 mixed-batch gates. Raw wrong judgments and the previous failed calibration remain intact.
 The preflight cost CNY 0.22995828, bringing this targeted repair's cumulative cost to
 CNY 1.89940128 under its CNY 2 cap, with no new UNKNOWN or RESERVED entries.
+
+The v6.1 follow-up uses rubric `v5`: an answer that lists the correct value among alternatives
+but refuses the required final conclusion has not supplied that conclusion. Exact identifiers
+cannot be obtained by deleting or guessing noisy characters to fit a criterion. Legal equivalent
+number/unit formats remain acceptable. V4 and its preflight receipts stay unchanged.
+
+One historical anchor describing a duration as "两个多小时四十五分钟" has an ambiguous failed
+label despite correct endpoints and midnight crossing. The v6.1 run records that adjudication
+in a new anchor audit and omits this one item from its scored anchor pool; the original40 remain
+immutable. The other39 keep their original labels (20 positive/19 negative), including the hard
+undecided-conclusion and noisy-identifier negatives. The existing majority-baseline-plus-0.15
+gate is retained. Formal mixed-batch checks cover the normal eight-candidate/two-anchor shape,
+rejection of a misjudged anchor batch, bounded recovery, and mandatory unresolved-item review.
+
+Named archived native cohorts can use the existing `references` list. Their original answers
+live under `arms/<name>/results/<persona>/answers.jsonl`, with a completed collection manifest
+at `<name>/manifest.json`. Preparation binds the copied source hashes and original provenance;
+the execution freeze includes those files before new provider calls. Missing or incomplete
+native references stop the runner instead of generating replacement answers. Final freezing,
+grading and report integrity use the same native answer paths. RAG and zero-material controls
+retain their existing paths and meaning.

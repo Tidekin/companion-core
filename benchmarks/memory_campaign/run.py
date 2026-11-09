@@ -21,7 +21,7 @@ from filelock import FileLock  # noqa: E402
 from scripts.memory_benchmark.budget import Budget  # noqa: E402
 from scripts.memory_benchmark.cli import closure, environment, execute, validate_run  # noqa: E402
 
-from roundcfg import TOOLS, Round, ledger_total, read_rows, save, sha  # noqa: E402
+from roundcfg import TOOLS, Round, ledger_total, save, sha  # noqa: E402
 
 R = Round()
 ROOT = R.root
@@ -87,7 +87,7 @@ def rag(name="rag"):
 def freeze_answers(configs):
     for name in (*R.references, *R.controls):
         assert completed(name), name
-        answers = read_rows(ROOT / name / "answers.jsonl")
+        answers = R.arm_answers(name)
         assert len(answers) == len({a["id"] for a in answers}) == R.total
         assert {a["id"] for a in answers} == {q["id"] for q in R.questions}
     held, latest = Budget.from_context(next(iter(configs.values()))).snapshot()
@@ -97,7 +97,9 @@ def freeze_answers(configs):
     assert qwen <= R.cfg["budget"]["qwen_total_cny"]
     assert not any(v["state"] == "RESERVED" for v in qlatest.values())
     files = [p for a in configs for p in (R.arm_dir(a) / "results").glob("*/answers.jsonl")]
-    files += [ROOT / name / "answers.jsonl" for name in (*R.references, *R.controls)]
+    for name in (*R.references, *R.controls):
+        files += ([ROOT / name / "answers.jsonl"] if name == "rag" or name in R.controls else
+                  sorted((R.arm_dir(name) / "results").glob("*/answers.jsonl")))
     save(ROOT / "all-answers-frozen.json", {
         "status": "ALL_ANSWERS_CLOSED_BEFORE_GOLD_READ", "answers": R.answers_total,
         "files_sha256": {p.relative_to(ROOT).as_posix(): sha(p) for p in files},
@@ -113,6 +115,12 @@ def main():
         frozen = json.loads((ROOT / "execution-freeze.json").read_text("utf-8"))
         for name, expected in frozen["files_sha256"].items():
             assert sha(ROOT / name) == expected, "Execution freeze changed: " + name
+        for name in R.references:
+            if name != "rag":
+                answers = R.arm_answers(name)
+                assert (completed(name) and len(answers) == R.total
+                        and {a["id"] for a in answers} == {q["id"] for q in R.questions}), \
+                    "Archived reference incomplete; never generate replacement answers: " + name
         configs = {a: validate_run(R.arm_dir(a)) for a in R.cfg["arms"]}
         try:
             if not resume:

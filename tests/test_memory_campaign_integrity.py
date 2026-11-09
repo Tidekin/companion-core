@@ -25,9 +25,11 @@ def campaign(tmp_path, monkeypatch, request, campaign_runner):
     monkeypatch.setenv("MEMORY_ROUND", str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["grade.py"])
     rc = importlib.import_module("roundcfg")
-    controls = getattr(request, "param", [])
+    selection = getattr(request, "param", [])
+    controls = selection.get("controls", []) if isinstance(selection, dict) else selection
+    references = selection.get("references", ["rag"]) if isinstance(selection, dict) else ["rag"]
     rc.save(tmp_path / "round.json", {"name": "offline", "arms": {"old": {}, "new": {}},
-                                     "controls": controls})
+                                     "controls": controls, "references": references})
     suite = tmp_path / "bank/suite-v1"
     (suite / "review-only").mkdir(parents=True)
     (suite / "inputs").mkdir()
@@ -218,6 +220,42 @@ def test_unresolved_judgments_require_an_explicit_review_verdict(campaign, flag)
     assert len(report.load()[0]) == 3
 
 
+@pytest.mark.parametrize("campaign", [{"references": ["historical"]}], indirect=True)
+def test_archived_native_reference_freezes_original_paths_without_inference(campaign, monkeypatch):
+    root, _, _, rc, _, _ = campaign
+    spec = importlib.util.spec_from_file_location("campaign_run", TOOLS / "run.py")
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    (root / "historical").mkdir(exist_ok=True)
+    rc.save(root / "historical/manifest.json", {"status": "COMPLETED"})
+    budget = runner.Budget(root / "replay-usage.jsonl", base_url="https://offline.invalid",
+                           pricing=dict(input_rate=1, cached_input_rate=1,
+                                        output_rate=1, safety_factor=1),
+                           total_cny=1, inference_cny=1)
+    monkeypatch.setattr(runner.Budget, "from_context", lambda _: budget)
+    runner.freeze_answers({"old": {}, "new": {}})
+    frozen = json.loads((root / "all-answers-frozen.json").read_text("utf8"))
+    assert frozen["answers"] == 9
+    assert "arms/historical/results/P1/answers.jsonl" in frozen["files_sha256"]
+    assert not (root / "historical/answers.jsonl").exists()
+    assert importlib.import_module("integrity").answer_freeze(rc.Round(root))
+    assert not list(root.glob("*-usage.jsonl"))
+
+
+@pytest.mark.parametrize("campaign", [{"references": ["historical"]}], indirect=True)
+def test_missing_archived_reference_stops_before_any_native_provider_attempt(campaign, monkeypatch):
+    root, _, _, rc, _, _ = campaign
+    spec = importlib.util.spec_from_file_location("campaign_run", TOOLS / "run.py")
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    rc.save(root / "execution-freeze.json", {"files_sha256": {}})
+    attempts = []
+    monkeypatch.setattr(runner, "native", lambda _: attempts.append(True))
+    with pytest.raises(AssertionError, match="Archived reference incomplete"):
+        runner.main()
+    assert not attempts and not (root / "run-started.json").exists()
+
+
 @pytest.mark.parametrize("campaign", [["closed"]], indirect=True)
 @pytest.mark.parametrize("arm", ["old", "closed"])
 def test_unresolved_verdicts_are_selected_for_review_including_controls(campaign, monkeypatch, arm):
@@ -331,11 +369,12 @@ def test_judging_entrypoint_freezes_metered_mock_results_and_resumes(campaign, m
 
 
 @pytest.mark.parametrize("positive_only", [False, True])
+@pytest.mark.parametrize("version", ["v4", "v5"])
 def test_v4_real_judging_entrypoint_preserves_clocks_and_blinds_anchors(
-        campaign, monkeypatch, positive_only):
+        campaign, monkeypatch, positive_only, version):
     root, grade, report, rc, _, _ = campaign
-    rules, normalize, _ = importlib.import_module("rubrics").rubric("v4")
-    monkeypatch.setattr(grade, "VERSION", "v4")
+    rules, normalize, _ = importlib.import_module("rubrics").rubric(version)
+    monkeypatch.setattr(grade, "VERSION", version)
     monkeypatch.setattr(grade, "RULES", rules)
     monkeypatch.setattr(grade, "NORMALIZE", normalize)
     monkeypatch.setattr(grade, "OUT", root / "with-context")
@@ -432,3 +471,78 @@ def test_anchor_export_preserves_original_question_clocks_and_existing_file(camp
     before = target.read_bytes()
     again = subprocess.run(command, capture_output=True, text=True, encoding="utf8", timeout=30)
     assert again.returncode != 0 and target.read_bytes() == before
+
+
+def test_formal_mixed_batch_discards_bad_anchor_and_requires_unresolved_review(
+        campaign, monkeypatch):
+    root, grade, report, rc, write_rows, _ = campaign
+    rules, normalize, _ = importlib.import_module("rubrics").rubric("v5")
+    monkeypatch.setattr(grade, "VERSION", "v5")
+    monkeypatch.setattr(grade, "RULES", rules)
+    monkeypatch.setattr(grade, "NORMALIZE", normalize)
+    monkeypatch.setattr(grade, "OUT", root / "mixed")
+    monkeypatch.setattr(grade, "ARGS", ["--votes", "1"])
+    monkeypatch.setattr(report, "GRADING", grade.OUT)
+    context = dict(question_at="2026-01-01T00:00:00+08:00",
+                   source_message_ats=["2025-12-31T20:00:00+08:00"])
+    anchors = [dict(question="锚题", answer=answer, required=["绿茶"], forbidden=["红茶"],
+                    context=context, **{"pass": verdict})
+               for answer, verdict in [("绿茶", True), ("红茶", False)]]
+    anchor_path = root / "mixed-anchors.jsonl"
+    write_rows(anchor_path, anchors)
+    monkeypatch.setattr(grade, "ANCHORS", anchors)
+    monkeypatch.setitem(grade.G, "anchors", str(anchor_path))
+    monkeypatch.setitem(grade.G, "concurrency", 1)
+    config = json.loads((root / "round.json").read_text("utf8"))
+    config["grading"] = grade.G
+    rc.save(root / "round.json", config)
+    monkeypatch.setattr(report, "R", rc.Round(root))
+    calls, target = [], []
+
+    def respond(request):
+        cases = json.loads(json.loads(request.content)["messages"][-1]["content"])
+        calls.append(cases)
+        assert all(c["context"] == context and "pass" not in c for c in cases)
+        if not target:
+            assert len(cases) == 10  # Eight real candidates and the normal two hidden anchors.
+            target.append(next(c["key"] for c in cases if c["question"] != "锚题"))
+        grades = []
+        for c in cases:
+            positive = c["answer"] == "绿茶"
+            if c["key"] == target[0]:
+                positive, missing, violations = False, [], []  # Unexplained, unresolved.
+            elif c["answer"] == "红茶" and len(calls) == 1:
+                positive, missing, violations = True, [], []  # First batch must be discarded.
+            else:
+                missing, violations = ([] if positive else [0]), ([] if positive else [0])
+            grades.append(dict(key=c["key"], missing=missing, violations=violations,
+                               unsupported=[], **{"pass": positive}))
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": json.dumps({"grades": grades})}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10}, "model": "offline"})
+
+    def client(_config, _name):
+        budget = grade.Budget(root / "mixed-usage.jsonl", base_url="https://offline.invalid",
+                              pricing=dict(input_rate=1, cached_input_rate=1,
+                                           output_rate=1, safety_factor=1),
+                              total_cny=1, inference_cny=1)
+        return budget.base_url, {}, grade.MeteredTransport(
+            budget, "judge", inner=httpx.MockTransport(respond)), {}, "offline"
+
+    monkeypatch.setattr(grade, "judge_client", client)
+    asyncio.run(grade.main())
+    manifest = json.loads((grade.OUT / "manifest.json").read_text("utf8"))
+    assert manifest["anchor_gates"]["mixed"]["discarded_batches"] == 1
+    assert 1 < len(calls) <= 6
+    raw = rc.read_rows(grade.OUT / "grades.jsonl")
+    unsettled = next(row for row in raw if row["key"] == target[0])
+    assert unsettled["judge_unresolved"] and not unsettled["pass"]
+    with pytest.raises(AssertionError, match="Unresolved"):
+        report.load()
+    loaded, grades = report.load(allow_failed_gate=True)
+    selection = report.prepare_review(loaded, grades)
+    chosen = next(r for r in selection if r["key"] == target[0])
+    assert chosen["auto_grade"]["judge_unresolved"]
+    write_rows(grade.OUT / "overrides.jsonl", [dict(key=target[0], original_grade=unsettled,
+        reason="Offline fixture reviewed: this answer says green tea.", **{"pass": True})])
+    assert len(report.load()[0]) == 3
