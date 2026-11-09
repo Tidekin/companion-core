@@ -20,8 +20,32 @@ class ConversationReads:
         return int(value) if value is not None else 0
 
 
+@dataclass(frozen=True, repr=False)
+class ModelReads:
+    authority: dict | None
+    job: dict | None
+    source: dict | None
+    reply: dict | None
+
+
 def _record(query):
     return "(SELECT to_jsonb(guard_row) FROM (" + query + ") AS guard_row)"
+
+
+def read_model(store, job_id):
+    """One model boundary's rows, with the event selected by its native job binding."""
+    if not store.in_transaction:
+        raise RuntimeError("CONVERSATION_READS_REQUIRE_TRANSACTION")
+    owner_authority._lock_current(store)
+    row = store.one(
+        "WITH guard_job AS MATERIALIZED (SELECT * FROM jobs WHERE job_id=%s) SELECT "
+        + _record(owner_authority._current_query()) + " AS authority, "
+        "(SELECT to_jsonb(j) FROM guard_job j) AS job, "
+        + _record(owner_input._source_query(native_job=True)) + " AS source, "
+        + _record(reply_revision._job_query(native_job=True)) + " AS reply",
+        (job_id, owner_authority.CURRENT, owner_authority.GENERATION, owner_authority.MODE),
+    )
+    return ModelReads(**row)
 
 
 def read(store, job):

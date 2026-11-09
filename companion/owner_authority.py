@@ -488,12 +488,23 @@ def admit_model(store, settings, clock, job_id, scenario, *, yield_to_chat=True)
             store, settings, clock, job_id, scenario, yield_to_chat=yield_to_chat,
         ))
     purpose = model_purpose(store, scenario, job_id)
-    view = current(store, settings, clock, purpose=purpose)
+    view, reads = _model_view(store, settings, clock, job_id, purpose=purpose)
     return _admit_model(store, settings, clock, job_id, scenario, view,
-                        yield_to_chat=yield_to_chat)
+                        yield_to_chat=yield_to_chat, reads=reads)
 
 
-def _admit_model(store, settings, clock, job_id, scenario, view, *, yield_to_chat):
+def _model_view(store, settings, clock, job_id, *, purpose, authority=None):
+    if job_id is None:
+        return current(store, settings, clock, purpose=purpose, authority=authority), None
+    from companion.conversation_guard import read_model
+
+    reads = read_model(store, job_id)
+    view = _checked_current(store, settings, clock, reads.authority,
+                            purpose=purpose, authority=authority)
+    return view, reads
+
+
+def _admit_model(store, settings, clock, job_id, scenario, view, *, yield_to_chat, reads):
     """Finish one synchronous admission with the authority this transaction just checked."""
     from companion import owner_input, reply_revision
     from companion.budget import is_background
@@ -508,27 +519,17 @@ def _admit_model(store, settings, clock, job_id, scenario, view, *, yield_to_cha
     ):
         raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
     if job_id is not None:
-        job = store.one(
-            "SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS "
-            "kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS "
-            "attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, "
-            "jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, "
-            "jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, "
-            "jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked "
-            "AS context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs WHERE "
-            "jobs.job_id = %s",
-            (job_id,),
-        )
+        job = reads.job
         if job is None:
             raise CoreError("OWNER_AUTHORITY_JOB_BINDING_REQUIRED", 403)
         _checked_job(
             job, job, view, clock,
             executing=scenario not in {"content_vision", "content_video", "content_video_preview"},
         )
-        reply_revision.check_job(store, job)
+        reply_revision._checked_job(job, reads.reply)
         if job["kind"] == "chat":
             owner_input._checked_source(store, settings, view, job["event_id"], clock(),
-                                        allow_commands=True)
+                                        allow_commands=True, _loaded=reads.source)
         allowed = {
             "chat": {
                 "chat",
@@ -582,15 +583,16 @@ def check_model(store, settings, clock, request_id, *, yield_to_chat=True):
     )
     if not row or row["state"] != "RESERVED":
         raise CoreError("OWNER_AUTHORITY_MODEL_ADMISSION_REQUIRED", 403)
-    view = current(
+    view, reads = _model_view(
         store,
         settings,
         clock,
+        row["job_id"],
         purpose=model_purpose(store, row["scenario"], row["job_id"]),
         authority=json.loads(row["authority_json"]),
     )
     _admit_model(store, settings, clock, row["job_id"], row["scenario"], view,
-                  yield_to_chat=yield_to_chat)
+                  yield_to_chat=yield_to_chat, reads=reads)
     deadlines = [datetime.fromisoformat(row["lease_until"])]
     if view.policy.expires_at:
         deadlines.append(view.policy.expires_at)
@@ -599,8 +601,7 @@ def check_model(store, settings, clock, request_id, *, yield_to_chat=True):
         "content_video",
         "content_video_preview",
     }:
-        job = store.one("SELECT lease_until FROM jobs WHERE job_id = %s", (row["job_id"],))
-        deadlines.append(datetime.fromisoformat(job["lease_until"]))
+        deadlines.append(datetime.fromisoformat(reads.job["lease_until"]))
     deadline = min(deadlines)
     if deadline <= datetime.fromisoformat(clock()):
         raise CoreError("JOB_LEASE_LOST", 409)

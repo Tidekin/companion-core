@@ -112,14 +112,23 @@ def check_sources(store, job_id):
         raise CoreError(SOURCE_RECALLED, 409)
 
 
-_JOB_SQL = (
+_JOB_FIELDS = (
     "SELECT j.state, r.*, EXISTS(SELECT 1 FROM job_sources AS s "
     "JOIN events AS e USING (event_id) WHERE s.job_id=j.job_id AND "
     "(e.redacted=1 OR EXISTS(SELECT 1 FROM runtime_meta WHERE "
     "key='erased_event:'||e.event_id))) AS sources_recalled "
-    "FROM jobs AS j LEFT JOIN LATERAL (" + _REPLY_STATE +
-    "WHERE e.event_id=%s) AS r ON true WHERE j.job_id=%s"
 )
+
+
+def _job_query(*, native_job=False):
+    table = "guard_job" if native_job else "jobs"
+    event = "j.event_id" if native_job else "%s"
+    condition = "" if native_job else " WHERE j.job_id=%s"
+    return (_JOB_FIELDS + f"FROM {table} AS j LEFT JOIN LATERAL (" + _REPLY_STATE
+            + f"WHERE e.event_id={event}) AS r ON true" + condition)
+
+
+_JOB_SQL = _job_query()
 
 
 def check_job(store, job):

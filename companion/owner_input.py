@@ -227,7 +227,7 @@ def _checked_source(store, settings, view, event_id, now, *, allow_commands=Fals
     )
 
 
-_SOURCE_SQL = (
+_SOURCE_FIELDS = (
     "SELECT e.event_id AS event_id, e.schema_version AS "
     "schema_version, e.source AS source, e.source_event_id AS "
     "source_event_id, e.conversation_id AS conversation_id, "
@@ -239,8 +239,10 @@ _SOURCE_SQL = (
     " redacted, e.memory_processed AS memory_processed, "
     "e.reply_revision AS reply_revision, c.scope AS scope, "
     "c.owner_actor_id AS owner_actor_id, receipt.value AS capture_receipt, "
-    "privacy.value AS source_epoch, bindings.jobs AS source_jobs "
-    "FROM (VALUES (%s::text)) AS target(event_id) "
+    "privacy.value AS source_epoch, bindings.jobs AS source_jobs, "
+    "recalled.value AS source_recall "
+)
+_SOURCE_JOINS = (
     "LEFT JOIN events AS e ON e.event_id=target.event_id "
     "LEFT JOIN conversations AS c ON e.conversation_id=c.conversation_id "
     "LEFT JOIN runtime_meta AS receipt ON receipt.key='owner_input:'||target.event_id "
@@ -249,8 +251,17 @@ _SOURCE_SQL = (
     "SELECT job_id,event_id,kind,state,idempotency_key,attempts,max_attempts,"
     "lease_owner,lease_until,next_attempt_at,last_error_code,created_at,updated_at,"
     "lease_token,context_tracked,authority_json FROM jobs "
-    "WHERE event_id=target.event_id AND kind='chat') AS bound) AS bindings ON true"
+    "WHERE event_id=target.event_id AND kind='chat') AS bound) AS bindings ON true "
+    + input_recall.SOURCE_JOIN_SQL
 )
+
+
+def _source_query(*, native_job=False):
+    target = "guard_job AS target " if native_job else "(VALUES (%s::text)) AS target(event_id) "
+    return _SOURCE_FIELDS + "FROM " + target + _SOURCE_JOINS
+
+
+_SOURCE_SQL = _source_query()
 
 
 def _source(
@@ -266,6 +277,7 @@ def _source(
     receipt_value = loaded.pop("capture_receipt")
     source_epoch = loaded.pop("source_epoch")
     jobs = loaded.pop("source_jobs") or []
+    recall = loaded.pop("source_recall")
     receipt = {"value": receipt_value} if receipt_value is not None else None
     event = loaded if loaded["event_id"] is not None and loaded["scope"] is not None else None
     if (
@@ -334,7 +346,8 @@ def _source(
             raise ValueError("source expired")
     except (ValueError, KeyError, TypeError):
         raise CoreError("OWNER_SOURCE_CHANGED", 403) from None
-    input_recall.require_not_recalled(store, event["source_event_id"])
+    input_recall.require_not_recalled(store, event["source_event_id"],
+                                     _loaded={"value": recall} if recall is not None else None)
     if len(jobs) != 1 or json.loads(jobs[0]["authority_json"]) != original.authority.as_dict():
         raise CoreError("OWNER_SOURCE_JOB_BINDING_REQUIRED", 403)
     return event, body, jobs[0]
