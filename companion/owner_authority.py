@@ -239,8 +239,7 @@ def _journal_custody(store, settings, row, *, settlement=False):
 def _lock_current(store):
     from companion.postgres import BUDGET_LEDGER, ERASURE_LEDGER
 
-    store.ledger_lock(BUDGET_LEDGER, shared=store.in_read_snapshot)
-    store.ledger_lock(ERASURE_LEDGER, shared=True)
+    store.ledger_locks(((BUDGET_LEDGER, store.in_read_snapshot), (ERASURE_LEDGER, True)))
 
 
 def _current_query():
@@ -356,20 +355,24 @@ def bind_job(store, settings, clock, job_id, *, purpose):
     return view
 
 
-def check_job(store, settings, clock, job, *, purpose, executing=False, read=None):
+def check_job(store, settings, clock, job, *, purpose, executing=False, read=None, _reads=None):
     """Re-read native state and permission; a durable grant is never a native lease."""
     if read is not None:
         read.require(store)
     if not store.in_transaction:
+        if _reads is not None:
+            raise RuntimeError("OWNER_AUTHORITY_CHECKED_TRANSACTION_REQUIRED")
         return store.read_or_write(lambda: check_job(
             store, settings, clock, job, purpose=purpose, executing=executing,
         ))
-    row = (read.one if read is not None else store.one)(
+    row = _reads.job if _reads is not None else (read.one if read is not None else store.one)(
         "SELECT state,lease_token,lease_until,authority_json FROM jobs WHERE job_id=%s",
         (job["job_id"],),
     )
     ref = _job_reference(row)
-    view = current(store, settings, clock, purpose=purpose, authority=ref, read=read)
+    view = (_checked_current(store, settings, clock, _reads.authority,
+                              purpose=purpose, authority=ref) if _reads is not None
+            else current(store, settings, clock, purpose=purpose, authority=ref, read=read))
     return _checked_job(row, job, view, clock, executing=executing)
 
 

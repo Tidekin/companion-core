@@ -154,9 +154,13 @@ class Store:
                              "ON CONFLICT (actor_id) DO NOTHING", (actor, kind, now))
 
     def ledger_lock(self, domain, *, shared=False):
-        if self.in_read_snapshot and not shared:
+        self.ledger_locks(((domain, shared),))
+
+    def ledger_locks(self, domains):
+        domains = tuple(domains)
+        if self.in_read_snapshot and any(not shared for _, shared in domains):
             raise RuntimeError("READ_SNAPSHOT_WRITE_REQUIRED")
-        self._session.ledger_lock(domain, shared=shared)
+        self._session.ledger_locks(domains)
 
     @contextmanager
     def read_snapshot(self):

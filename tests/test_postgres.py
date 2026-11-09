@@ -4,8 +4,11 @@ import json
 import os
 import re
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
+from threading import Event
+from time import monotonic, sleep
 from uuid import uuid4
 
 import psycopg
@@ -14,7 +17,7 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 
-from companion.postgres import BUDGET_LEDGER, WAKE_CHANNEL, Database
+from companion.postgres import BUDGET_LEDGER, ERASURE_LEDGER, WAKE_CHANNEL, Database
 
 
 @pytest.fixture
@@ -104,6 +107,58 @@ def test_repeated_ledger_locks_upgrade_and_reacquire_after_rollback(database):
             first.ledger_lock(BUDGET_LEDGER)
             assert not available(second)
         assert available(second)
+
+
+@pytest.mark.parametrize("budget_shared", [True, False])
+def test_batched_ledger_locks_preserve_order_modes_and_later_statement_snapshot(
+    database, budget_shared,
+):
+    started, acquired, release = Event(), Event(), Event()
+    with database.session() as first, database.session() as second:
+        def acquire():
+            with first.transaction(rollback=True):
+                started.set()
+                first.ledger_locks(((BUDGET_LEDGER, budget_shared), (ERASURE_LEDGER, True)))
+                observed = first.one("SELECT value FROM items WHERE id=1")
+                acquired.set()
+                assert release.wait(3)
+                return observed
+
+        def available(domain, *, shared=False):
+            function = "pg_try_advisory_xact_lock_shared" if shared else "pg_try_advisory_xact_lock"
+            return second.one(sql.SQL("SELECT {}(hashtext(current_schema()),%s) AS held").format(
+                sql.Identifier(function)), (domain,))["held"]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            try:
+                with second.transaction():
+                    second.ledger_lock(BUDGET_LEDGER)
+                    future = pool.submit(acquire)
+                    assert started.wait(3)
+                    deadline = monotonic() + 3
+                    while monotonic() < deadline:
+                        blocked = second.one("SELECT %s=ANY(pg_blocking_pids(%s)) AS blocked",
+                                             (second.backend_pid, first.backend_pid))["blocked"]
+                        if blocked:
+                            break
+                        sleep(0.01)
+                    else:
+                        pytest.fail("batch never waited for the first ledger")
+                    # Erasure must remain free while the first, budget lock is blocked.
+                    assert available(ERASURE_LEDGER)
+                    second.execute("UPDATE items SET value=9 WHERE id=1")
+                assert acquired.wait(3)
+                with second.transaction():
+                    assert available(BUDGET_LEDGER, shared=True) is budget_shared
+                    assert not available(ERASURE_LEDGER)
+                release.set()
+                assert future.result(timeout=3) == {"value": 9}
+            finally:
+                release.set()
+        # Rollback releases both native locks and their managed-scope bookkeeping.
+        with second.transaction():
+            assert available(BUDGET_LEDGER)
+            assert available(ERASURE_LEDGER)
 
 
 def test_rolled_back_transaction_does_not_publish_wakeup(database):

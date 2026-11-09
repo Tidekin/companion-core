@@ -275,6 +275,16 @@ SHA-256，[PostgreSQL 原生散列函数](https://www.postgresql.org/docs/16/fun
 见 [Psycopg 事务属性](https://www.psycopg.org/psycopg3/docs/basic/transactions.html#transaction-characteristics)；
 同时核对项目固定 3.3.8 的 `_get_tx_start_command` 与属性设置实现，不新增依赖。
 
+原生投递的来源校验复用同一读取入口；原授权、回复、配置 HMAC、来源、历史、图片、
+记忆和阅读证据校验仍全部执行。已准备投递沿用原配置查询语义，缺少后加的配置绑定
+不会额外阻断旧投递；存在的绑定与签名快照仍须有效。每次投递边界重新读取。
+
+当前授权的费用日志锁和删除日志锁按原顺序、原共享或独占模式在一条 SQL 内获取。
+[MATERIALIZED CTE](https://www.postgresql.org/docs/16/queries-with.html) 逐项消费前一个
+锁请求后再执行下一个；已有事务锁仅沿用原生锁存续范围内的记录。业务行仍由后续
+独立语句读取，确保 READ COMMITTED 在等待锁后取得新的已提交快照。并发测试核对
+阻塞顺序、锁模式、回滚释放和等待期间提交的数据，未把业务读取并入取锁语句。
+
 复用既有 `to_jsonb` 行投影与原生事务，不新增存储或依赖；DSH 已核验的文档存储实现
 仍不提供可替代 Core 业务校验的 PostgreSQL 事务接口，见 ADR 0002。
 [PostgreSQL 的语句快照](https://www.postgresql.org/docs/16/transaction-iso.html#XACT-READ-COMMITTED)

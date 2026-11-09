@@ -65,13 +65,14 @@ def _history_proof(store, job, snapshots):
         raise CoreError(reply_revision.CANCELLED, 409) from error
 
 
-def _images(store, settings, clock, job, snapshots, *, executing):
+def _images(store, settings, clock, job, snapshots, *, executing, _item_ids=None):
     from companion import agent_images
 
     try:
         saved = [item["item_ids"] for item in snapshots if item["kind"] == "images"]
         # A frozen text reply consumes the signed evidence, not original pixels.
-        actual = agent_images.context_item_ids(store, settings, clock, job, executing=executing)
+        actual = agent_images.context_item_ids(store, settings, clock, job, executing=executing,
+                                               _item_ids=_item_ids)
         if saved != ([actual] if actual else []):
             raise ValueError("original image snapshots changed")
     except (ValueError, KeyError, TypeError, CoreError) as error:
@@ -107,25 +108,33 @@ def _readings(store, settings, clock, job, snapshots, *, executing):
 
 
 def _sources(store, settings, clock, job, *, executing=False):
+    from companion.conversation_guard import read
+
     if job is None:
         raise CoreError("OWNER_DELIVERY_JOB_REQUIRED", 403)
+    reads = read(store, job)
     view = owner_authority.check_job(store, settings, clock, job,
         purpose="poke" if job["kind"] == "poke" else owner_authority.model_purpose(
             store, job["kind"], job["job_id"]),
-        executing=executing)
-    reply_revision.check_job(store, job)
+        executing=executing, _reads=reads)
+    reply_revision._checked_job(job, reads.reply)
     from companion import runtime_config
 
     # Older prepared deliveries retain their original responsibility. New tasks
     # carry a signed configuration binding as well as their existing source proof.
-    runtime_config.get(store, settings, "job:" + job["job_id"])
+    if reads.configuration is not None:
+        runtime_config._bound_snapshot(store, settings, "job:" + job["job_id"],
+                                        reads.configuration["binding"],
+                                        reads.configuration["snapshot"])
     snapshots, history = [], []
     if job["kind"] == "chat":
-        owner_input.source(store, settings, view, job["event_id"], clock(), allow_commands=True)
+        owner_input._checked_source(store, settings, view, job["event_id"], clock(),
+                                     allow_commands=True, _loaded=reads.source)
         snapshots = _snapshots(store, job)
         history = _history_proof(store, job, snapshots)
         owner_input.check_history(store, settings, clock, job, history)
-        _images(store, settings, clock, job, snapshots, executing=executing)
+        _images(store, settings, clock, job, snapshots, executing=executing,
+                 _item_ids=reads.image_item_ids)
         _memories(store, settings, clock, view, snapshots)
         _readings(store, settings, clock, job, snapshots, executing=executing)
         from companion.agent_singing import revalidate
