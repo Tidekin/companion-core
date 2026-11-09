@@ -179,3 +179,11 @@ standard library's [pkgutil.extend_path](https://docs.python.org/3.12/library/pk
 Loading campaign configuration first keeps the native SDK probe available in the same
 interpreter. Fresh-process checks cover both import orders and bind each imported module
 to its expected checkout path; no provider call is needed for these checks.
+
+`python repair_v6_bank.py ORIGINAL_BANK NEW_BANK` creates a separately labeled
+`v6.1-evidence-ambiguities` scoring bank. It retains original source bytes, excludes C21 items
+whose differently named letters have no supported co-reference, and removes a C03 requirement
+to repeat a workplace already supplied in the question. `corrections.json` records every change
+and original file hash. The destination must be new. Original v6 questions, scores and evidence
+remain immutable. Apply the derived bank uniformly to both old and new answers, and report that
+score separately; an original-v6 targeted run continues to use its original criteria.
