@@ -5,6 +5,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 from companion import memory_references as refs
 from companion.contracts import Candidate
 from companion.store import encode
@@ -12,7 +14,8 @@ from tests.conftest import run
 from tests.support.native_consumer_entry import environment
 
 
-def test_selected_asr_reaches_provider_after_turn_search_consumes_its_allowance(core, tmp_path):
+@pytest.mark.parametrize("mode", ["exhaust_turn_budget", "post_model_source_budget"])
+def test_selected_asr_reaches_provider_and_checkpoint_under_source_budget(core, tmp_path, mode):
     workspace = Path(__file__).resolve().parents[1]
 
     async def worker(label, mode="normal"):
@@ -47,7 +50,9 @@ def test_selected_asr_reaches_provider_after_turn_search_consumes_its_allowance(
             assert (await entry.send(entry.client, entry.protocol))["worked"]
             raw = "今天8月7日，约好两天后到枫汀取松灯凭条。"
             receipt = refs.capture(core.memory, event["event_id"], "transcript", raw,
-                                   {"fixture": "optional-work-exhaustion"}, core.clock())
+                {"fixture": "optional-work-exhaustion", **(
+                    {"native_receipt": "x" * 30000} if mode == "post_model_source_budget" else {})},
+                core.clock())
             summary = "松灯凭条的转写日期被旧助手认为有矛盾。"
             key = core.memory.add(Candidate(subject="project", kind="fact", fact_key="receipt_date",
                 content=summary, evidence_event_id=event["event_id"], evidence_quote="取松灯凭条",
@@ -56,18 +61,24 @@ def test_selected_asr_reaches_provider_after_turn_search_consumes_its_allowance(
                 "content"]
             core.clock.advance(60)
             question = await entry.admit(2, "松灯凭条约了哪天去取？")
-            result = await worker("exam", "exhaust_turn_budget")
+            result = await worker("exam", mode)
             job = core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=%s",
                                  (question["event_id"],))
             assert job["state"] == "SUCCEEDED", {"job": job, "result": result}
-            assert result["recalled_facts"] and result["recalled_facts"][-1] > 0
-            work = result["retrieval_work"][-1]
-            assert 850 <= work["counts"]["sql_milliseconds"] <= 1000
-            assert "stage:automatic_turns:sql_milliseconds" in work["reasons"]
+            if mode == "exhaust_turn_budget":
+                assert result["recalled_facts"] and result["recalled_facts"][-1] > 0
+                work = result["retrieval_work"][-1]
+                assert 850 <= work["counts"]["sql_milliseconds"] <= 1000
+                assert "stage:automatic_turns:sql_milliseconds" in work["reasons"]
+            else:
+                assert result["retrieval_work"] and len(result["calls"]) == 1
+                assert all(1048576 - 60000 <= work["counts"]["text_bytes"] <= 1048576
+                           for work in result["retrieval_work"])
             prompt = encode(result["calls"][-1]["messages"])
             assert raw in prompt and "机器转写原文摘录" in prompt
             assert summary not in prompt
-            assert "本轮检索覆盖有限" in prompt
+            if mode == "exhaust_turn_budget":
+                assert "本轮检索覆盖有限" in prompt
             assert all(row["state"] == "SETTLED" for row in result["usage"])
             assert core.store.one("SELECT content FROM memories WHERE memory_id=%s", (key,))[
                 "content"] == stored

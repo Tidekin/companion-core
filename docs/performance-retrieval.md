@@ -549,3 +549,24 @@ the exact native transcript in the final provider request, preserving stored fac
 Direct hard-exhaustion checks require no write fallback or unverified memory display.
 The 48/480 extracted-history checks and saved-resume/withdrawal paths also pass. Providers
 are mocked for these boundary checks; full v6.1 answer accuracy is measured separately.
+
+#### ASR proof material inside checkpoint writers
+
+An early result in the frozen `8480209a` v6.1 round received HTTP 200 but then failed
+with `MEMORY_RETRIEVAL_LIMIT` while `after_model_request` rolled back its checkpoint.
+The native response and settled usage remain in that round; the failed instance stays
+in its denominator. The running candidate is unchanged.
+
+Currentness validation already reads and validates an observed fact's native reference.
+Pinning now retains that returned material for the rest of the same synchronous pin,
+instead of reading and validating the receipt a second time inside a mutable writer.
+Later guards, later calls, and writes inside the transaction still recheck the source.
+Source-byte/SQL ceilings, privacy cancellation and received-response accounting remain
+unchanged; no permission verdict is cached across an await.
+
+The regression covers six facts backed by a large native receipt, verifies one read per
+fact, and requires a later deletion in the same writer to cancel validation. A real HTTP
+entrypoint with an independent worker also spends source allowance after the mocked
+provider response: the original implementation fails its checkpoint, while the repaired
+implementation must finish with one provider call, settled usage and the original ASR
+quote. These are offline boundary checks; they do not replace the frozen full-round result.

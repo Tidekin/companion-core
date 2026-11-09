@@ -439,19 +439,24 @@ class MemorySources:
         key = encode(row)
         if cached and key in self._current:
             return self._current[key]
+        result, _ = self._current_reference(row)
+        if cached:
+            self._current[key] = result
+        return result
+
+    def _current_reference(self, row):
+        """Return the material from this synchronous validation, including in writers."""
         try:
-            self.reference(row)
+            reference = self.reference(row)
         except retrieval_work.WorkLimit:
             raise
         except CoreError:
-            return False
+            return False, None
         now = datetime.fromisoformat(self.now) if self.now else None
         result = (now is None or (
             (not row["valid_from"] or datetime.fromisoformat(row["valid_from"]) <= now)
             and (not row["valid_to"] or now < datetime.fromisoformat(row["valid_to"]))))
-        if cached:
-            self._current[key] = result
-        return result
+        return result, reference
 
     def reference(self, row):
         from companion import memory_references
@@ -671,15 +676,20 @@ class MemoryContext:
                 or row["status"] not in (
                     {"CONFIRMED", "HYPOTHESIS", "SUPERSEDED"} if historical
                     else {"CONFIRMED", "HYPOTHESIS"}
-                ) or (not historical and not sources.current(row))
-                or any(row[key] != expected[key] for key in MEMORY_FIELDS)):
+                ) or any(row[key] != expected[key] for key in MEMORY_FIELDS)):
                 raise CoreError("PRIVACY_CHANGED", 409)
+            reference = None
+            if not historical:
+                current, reference = sources._current_reference(row)
+                if not current:
+                    raise CoreError("PRIVACY_CHANGED", 409)
             ids = sorted(item["event_id"] for item in sources.evidence(row["memory_id"]))
             if not ids or ids != sorted(expected["evidence_ids"]):
                 raise CoreError("PRIVACY_CHANGED", 409)
             memories.append({**{key: row[key] for key in MEMORY_FIELDS}, "evidence_ids": ids})
             roots.update(ids)
-            reference = sources.reference(row)
+            if historical:
+                reference = sources.reference(row)
             if reference:
                 roots.update(reference["proof"]["source_event_ids"])
         fingerprints = {}

@@ -22,6 +22,26 @@ def run_worker(settings_path, now, mode="normal"):
     original_client, original_run = httpx.AsyncClient, Core.run_once
     calls = []
     selected, retrieval = [], []
+    provider_returned = [False]
+    if mode == "post_model_source_budget":
+        from companion import retrieval_work
+
+        original_read = retrieval_work.Work._read
+
+        def source_read(self, operation, statement, parameters, *, limit):
+            store = getattr(operation, "__self__", None)
+            if (provider_returned[0] and store is not None and store.in_transaction
+                and not store.in_read_snapshot and not getattr(self, "_post_source_seeded", False)):
+                # Other source material has already spent this required proof's
+                # allowance. Keep the same ledger and the 60,000-byte remainder.
+                amount = max(0, retrieval_work.LIMITS["text_bytes"] - 60000
+                             - self.counts["text_bytes"])
+                assert self.take("text_bytes", amount)
+                self._post_source_seeded = True
+                retrieval.append(self)
+            return original_read(self, operation, statement, parameters, limit=limit)
+
+        retrieval_work.Work._read = source_read
     if mode == "exhaust_turn_budget":
         from companion import retrieval_work, turn_recall
         from companion.memory_context import MemoryContext
@@ -59,6 +79,7 @@ def run_worker(settings_path, now, mode="normal"):
             text = json.dumps({"relevant": [row["ref"] for row in data["memories"]]})
         else:
             text = "星光资料的旧判断仍有依据，光谱标注的疑问也记着。"
+            provider_returned[0] = True
         return httpx.Response(200, json=answer(text))
 
     def client(**kwargs):
