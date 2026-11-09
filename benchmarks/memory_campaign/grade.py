@@ -59,7 +59,7 @@ def append(path, value):
 
 
 def prepare():
-    if VERSION == "v4":
+    if VERSION in {"v4", "v5"}:
         for anchor in ANCHORS:
             validate_judging_context(anchor.get("context"))
     OUT.mkdir(exist_ok=True)
@@ -92,7 +92,7 @@ def prepare():
                 case = dict(key=key, question=questions[a["id"]]["question"],
                             answer=a["answer"], required=c["required"],
                             forbidden=c.get("forbidden", []))
-                if VERSION == "v4":
+                if VERSION in {"v4", "v5"}:
                     case["context"] = R.judging_context(questions[a["id"]])
                 cases.append(case)
     mapping.sort(key=lambda r: r["key"])
@@ -111,7 +111,7 @@ def prepare():
 
 def anchor_cases(response):
     """{key: (anchor case, expected verdict)} for the anchors a saved batch carried."""
-    fields = ANCHOR_FIELDS + (("context",) if VERSION == "v4" else ())
+    fields = ANCHOR_FIELDS + (("context",) if VERSION in {"v4", "v5"} else ())
     return {key: (dict(key=key, **{f: ANCHORS[i].get(f, []) for f in fields}),
                   ANCHORS[i]["pass"]) for key, i in response.get("anchors", {}).items()}
 
