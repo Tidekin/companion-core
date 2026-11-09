@@ -404,7 +404,8 @@ def extras(summary, e):
     for name, entry in summary.get("strata", {}).items():
         cells = "；".join(f'{value}: ' + " / ".join(f'{v[a]["passed"]}/{v[a]["total"]}' for a in ARMS)
                          for value, v in entry["values"].items())
-        out.append(f"<p>分层 {e(name)}（旧/新/RAG）：{e(cells)}</p>")
+        labels = "/".join(LABELS[a] for a in ARMS)
+        out.append(f"<p>分层 {e(name)}（{e(labels)}）：{e(cells)}</p>")
     return "".join(out)
 
 
