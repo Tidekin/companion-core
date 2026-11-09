@@ -73,8 +73,9 @@ def test_asr_projection_cannot_revive_a_withdrawn_receipt(core):
                                        allowed_ids=None, include_standing=False)
 
 
+@pytest.mark.parametrize("resource", ["sql_milliseconds", "text_bytes", "source_nodes"])
 def test_recalled_asr_with_exhausted_shared_work_never_retries_or_exposes_unverified_fact(
-        core, monkeypatch):
+        core, monkeypatch, resource):
     _, item = prepared(core, "transcript")
     core.memory.add(item, core.clock())
     selected = core.memory.search("入场日期")
@@ -88,11 +89,11 @@ def test_recalled_asr_with_exhausted_shared_work_never_retries_or_exposes_unveri
 
     monkeypatch.setattr(core.store, "transaction", transaction)
     with retrieval_work.scope() as work:
-        assert work.take("sql_milliseconds", 1000)
+        assert work.take(resource, retrieval_work.LIMITS[resource])
         facts = core.memory_context.reply_facts(core.settings, core.clock, "入场日期", selected,
                                                allowed_ids=None, include_standing=False)
         assert not facts[0] and not facts[1] and not facts[3]["source_event_ids"]
-        assert work.counts["sql_milliseconds"] == 1000
+        assert work.counts[resource] == retrieval_work.LIMITS[resource]
         assert work.receipt()["coverage_limited"]
         selection = context_selection.References()
         assert not core.memory_context.add_reply_facts(selection, facts, core.settings, core.clock,
