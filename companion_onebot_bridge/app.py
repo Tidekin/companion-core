@@ -227,7 +227,7 @@ async def deliver(client, onebot, spool, stop, metrics, *, runtime=None, protoco
                 # Reports remain replayable after STOP; sends never are.
                 if await spool.flush_result(client, runtime=runtime):
                     continue
-                runtime.verify()
+                runtime.verify(include_records=False)
                 guard = OwnerSendGuard(runtime, client)
                 onebot = OwnerOneBot(guard, protocol)
             worked = await deliver_tick(client, onebot, spool, metrics=metrics, guard=guard)
@@ -315,7 +315,7 @@ async def run(config):
             from .owner_runtime import OwnerRuntime
 
             runtime = OwnerRuntime(spool)
-            runtime.verify()
+            runtime.verify(include_records=False)
         async with (
             private_http_client(config.core_url, config.bridge_token) as core,
             private_http_client(config.onebot_http_url, config.onebot_token) as protocol,
