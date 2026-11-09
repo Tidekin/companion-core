@@ -483,8 +483,8 @@ advice-initiation boundary account for explicitly recorded differences from arch
 
 Generic prompt follow-ups culminated in `d7c0d412`. Four frozen-evidence reading checks passed
 the requested date, food and time/place items; three met all stricter preregistered conditions.
-The remaining ASR answer still mislabeled candidate spellings as transcript text. This reading
-limitation remains open. These calls changed instructions only and used
+The remaining ASR answer still mislabeled candidate spellings as transcript text. At this
+intermediate revision that reading limitation remained open. These calls changed instructions only and used
 [`tool_choice=none`](https://api-docs.deepseek.com/api/create-chat-completion/); they are not
 native v6 reruns and do not replace the original 25 answers. Total new inference and grading
 cost was CNY 1.30727328, within the CNY 2 cap, with no new UNKNOWN reservations.
@@ -494,3 +494,36 @@ real ingress/independent-worker evidence checks at 48 and 480 admitted events, p
 qualification and native lifecycle checks. Prompt-only changes passed the final 29 related
 checks. The evidence package retains frozen source, raw calls, every failed grading gate,
 fee ledgers, paired review decisions and log-normalization hashes; it excludes credentials.
+
+#### ASR provenance follow-up, 2026-11-09
+
+Product revision `41cd21bc` distinguishes the native machine transcript, earlier assistant
+interpretations and owner confirmation. Unconfirmed transcript observations display the native
+quote when it fits the existing 500-character fact allowance; longer transcripts retain the
+selected summary instead of cropping away relevant detail. Stored facts and proof bytes remain
+unchanged. Projection and pinning reuse one owned immutable read snapshot and its materialized
+source view; later validation still reads fresh sources. Images and other source kinds retain
+their original display path.
+
+Private context labels earlier ASR replies as `prior_assistant_interpretation`, preserving the
+reply text, and labels observed-source message dates as `source_message_on`. A source message
+date does not override a date stated inside the utterance. A short source interpretation rule
+also occupies the existing dynamic system tail so normal context fitting retains it.
+
+The last eight frozen-evidence reading checks met their preregistered ASR, delayed date, plan
+state, speaker and revision-order conditions. The delayed date answer still included an
+unnecessary upload-date remark, but asserted neither a source-date error nor an alternative
+answer date. Earlier failed attempts, the interrupted two-call stage and its six-call cached
+continuation remain in the evidence. These are diagnostic reading calls with tools disabled,
+not another native 25-question run or a full v6 score; the earlier native paired result stays
+23/25 and the automated calibration failure stays authoritative.
+
+All new inference and grading now totals CNY 1.66944300 under the unchanged CNY 2 cap, with no
+new UNKNOWN or RESERVED entries. The final local receipt covers 299 distinct successful cases
+across related verification layers, including real entrypoint/independent-worker checks and
+ASR proof, erasure, long-transcript and other-media regressions. It records the two corrected
+fixture preconditions and reuses unaffected passing checks. No production change or CI run
+was performed by this repair. Median/P95/max measured answer time on the earlier native 25
+was 10.98/19.85/24.98 seconds; QQ queue/send time and full Core 4–6-second acceptance remain
+unmeasured. The updated package corrects the prior README's separator description: original
+reading JSONL uses valid LF lines; normalized derivatives use Windows CRLF.
