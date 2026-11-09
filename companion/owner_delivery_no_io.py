@@ -31,9 +31,9 @@ def prepare(store, custody, proof, now):
         'owner_authority_revisions.journal_path AS journal_path, '
         'owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS '
         'owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND '
-        'owner_authority_revisions.revision = %s',
-                     (proof["authority"]["grant_id"], proof["authority"]["revision"] + 1))
-    owner_delivery_reconciliation.stopped(store, proof, stop, current=True)
+        'owner_authority_revisions.record_sha256 = %s',
+                     (proof["authority"]["grant_id"], proof["core_stop_record_sha256"]))
+    owner_delivery_reconciliation.stopped(store, proof, stop, current=True, chain=True)
     if (prior is None and (not view["owner_authority"]
                           or view["owner_authority"]["record_sha256"] != stop["record_sha256"])
         or wire.timestamp(proof["quiesced_at"]) > wire.timestamp(now)):
@@ -76,7 +76,7 @@ def candidate(store, proof):
     """Only the zero-send native branch; other reservations keep the manual flow."""
     if (proof.get("version") != 2 or proof.get("attempt_state") != "RESERVED"
         or proof.get("original_result_sha256") is not None
-        or proof.get("action_type") != "qq.private.reply"):
+        or proof.get("action_type") not in no_io.TEXT_ACTIONS):
         return False
     row = store.one('SELECT attempt_count FROM outbox WHERE message_id = '
         '%s', (proof["message_id"],))

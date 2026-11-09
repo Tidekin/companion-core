@@ -10,7 +10,7 @@ from companion_delivery_protocol.authority import AuthorityRef
 BOUND_WORK = ("jobs", "goals", "exploration_requests", "model_admissions", "outbox", "voice_jobs")
 
 
-def stopped_chain(store, ref):
+def stopped_chain(store, ref, *, through=None):
     """The latest STOPPED revision if it closes an unbound chain started by `ref`'s STOP.
 
     A failed release can activate a successor and STOP it again before the Bridge hands
@@ -34,7 +34,8 @@ def stopped_chain(store, ref):
         'owner_authority_revisions.revision = %s',
         (ref.grant_id, ref.revision),
     )
-    latest = owner_authority._latest(store)
+    # A retained no-I/O receipt pins the original STOP even after later activation.
+    latest = through if through is not None else owner_authority._latest(store)
     if (original is None or owner_authority.reference(original) != ref
             or original["state"] != "ACTIVE" or latest is None or latest["state"] != "STOPPED"
             or latest["grant_id"] != ref.grant_id

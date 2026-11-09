@@ -174,12 +174,16 @@ STOP 取消尚可撤销的原生任务和待发项，保留 `SENDING`、`DELIVER
 
 原进程退出后，`owner-delivery-prepare --message-id ...` 继续使用原 Spool 排他锁、
 capture key 签名的 v2 quiescence 证明及 Core STOP 回执。对于原日志最后仍为
-`RESERVED`、没有原投递结果的普通私聊回复，Core 只在原 STOP 已取消该项、
+`RESERVED`、没有原投递结果的普通私聊回复或主动文本，Core 只在原 STOP 已取消该项、
 `attempt_count=0`、没有 provider/native ACK、投递结果审计或独立账本 send 责任时，
 返回 `owner_delivery_not_sent_v1` 回执。原授权、来源、内容及 delivery 绑定须完整匹配。
 已过期的明文 lease 不重建；回执保留原签名 lease 哈希，原模型费用和尝试记录保持原值。
 后续输入取消旧回复时保留的原 lease，须与签名证明中的 lease 和 send-check 哈希一致；
 完成未发送结算后继续保留这份原证据。
+
+发布中途启用但未承接任务的授权，可复用既有 STOP 链校验。证明须绑定链末的 STOP，
+同一 grant、恢复代际及完整修订链均须一致，中间 ACTIVE 修订不得绑定任何工作。
+同一未发送回执在后继授权启用后仍可幂等读取；原有签名和投递证据继续逐项核对。
 
 该分支复用 `/internal/v1/deliveries/reconciliation/prepare`，返回 `NOT_SENT`。
 Bridge 将原尝试记为 `NOT_SENT`，保存 accepted 收口结果；丢失 HTTP 响应可用同一证明
