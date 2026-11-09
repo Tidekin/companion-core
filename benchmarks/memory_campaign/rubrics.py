@@ -67,8 +67,41 @@ def normalize_v3(row, case):
     return row
 
 
+# v4 retains v3's required/forbidden decision rule. It supplies the original clocks
+# and rejects an unexplained false verdict rather than silently counting it as wrong.
+RULES_V4 = RULES_V3.replace(
+    "逐条判断 required：",
+    "context.question_at 是这份回答对应的原始提问时间，不是判卷运行时间。"
+    "回答中的今天、昨天等相对日期按它换算。context.source_message_ats 仅是来源消息时间，"
+    "不能覆盖原话中明确说出的日期。禁止按提问当天重新计算，指不能把原话的日期锚点移到另一天；"
+    "原话与提问同日的等价换算不算改变锚点。\n"
+    "逐条判断 required：",
+).replace(
+    "回答只说不知道、含糊回避、只反问或只说可再提供资料，不能代替已有的明确事实。\n",
+    "required 可由同一回答的明确事实逻辑推出，不要求重复标签词："
+    "助手提议A、主人最后改选B，可表达A未被采纳；不能仅因缺少‘否决’二字判缺失。"
+    "回忆过去已作出的决定，同时说明没有新的当前安排，不等于否认过去的决定。\n"
+    "回答只说不知道、含糊回避、只反问或只说可再提供资料，不能代替已有的明确事实。"
+    "若先提及某事实又明确否认它或坚持不相容的结论，该项仍缺失；不能只匹配关键词。\n",
+).replace(
+    "pass 仅当 missing、violations 都为空时为 true；不能增加或漏掉题目。",
+    "直接否认 required 的主张须标对应 missing；命中 forbidden 须标对应 violations，"
+    "不能只写 unsupported。pass 必须严格等于 missing、violations 都为空；"
+    "禁止输出没有任何判据下标的 false。不能增加或漏掉题目。",
+)
+
+
+def normalize_v4(row, case):
+    raw_pass = row.get("pass")
+    row = normalize_v3(row, case)
+    assert not row.get("index_annotation_errors"), "Unresolved criterion annotation"
+    assert raw_pass == (not row["missing"] and not row["violations"]), \
+        "Verdict contradicts criterion annotations"
+    return row
+
+
 RUBRICS = {"v1": (RULES_V1, normalize_v1), "v2": (RULES_V2, normalize_v2),
-           "v3": (RULES_V3, normalize_v3)}
+           "v3": (RULES_V3, normalize_v3), "v4": (RULES_V4, normalize_v4)}
 
 
 def rubric(version):

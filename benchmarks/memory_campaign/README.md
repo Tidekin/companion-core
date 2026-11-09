@@ -187,3 +187,18 @@ to repeat a workplace already supplied in the question. `corrections.json` recor
 and original file hash. The destination must be new. Original v6 questions, scores and evidence
 remain immutable. Apply the derived bank uniformly to both old and new answers, and report that
 score separately; an original-v6 targeted run continues to use its original criteria.
+
+For new rounds, rubric `v4` supplies original question and source-message clocks to the
+judge for both candidate cases and anchors. Generate anchors into a new file with
+`make_anchors.py`; v4 refuses anchors without timezone-aware clocks. `question_at` anchors
+relative dates in an answer; source-message times do not override an explicit date inside
+the utterance. Review verdicts, source arm labels and review explanations remain hidden.
+Existing v1/v2/v3 grading archives retain their original payloads and semantics.
+
+V4 clarifies semantic entailment and requires the boolean verdict to agree with the
+required/forbidden annotations. An unexplained false or an invalid criterion index is an
+unresolved judge response, subject to the existing bounded recovery and review rules.
+It is never silently counted as an answer failure or converted into a pass. The existing
+anchor gate margin, majority baseline, batch rejection and publication restrictions stay
+unchanged. A preflight calibration on the complete frozen anchor pool qualifies a judge
+configuration for a new run; actual mixed-batch gates and review still apply to that run.

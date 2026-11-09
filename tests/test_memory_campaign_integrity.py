@@ -43,7 +43,8 @@ def campaign(tmp_path, monkeypatch, request, campaign_runner):
     rows(suite / "questions.jsonl", questions)
     rows(suite / "review-only/criteria.jsonl",
          [dict(id=q["id"], required=["绿茶"], forbidden=[]) for q in questions])
-    rows(suite / "inputs/P1.jsonl", [dict(id="P1-S1", text="喜欢绿茶。")])
+    rows(suite / "inputs/P1.jsonl", [dict(id="P1-S1", text="喜欢绿茶。",
+                                        now="2025-12-31T20:00:00+08:00")])
     rc.save(tmp_path / "bank/bundle-manifest.json", {
         "files_sha256": {p.relative_to(tmp_path / "bank").as_posix(): rc.sha(p)
                          for p in suite.rglob("*") if p.is_file()}})
@@ -327,3 +328,107 @@ def test_judging_entrypoint_freezes_metered_mock_results_and_resumes(campaign, m
     usage = rc.read_rows(root / "mock-usage.jsonl")
     assert len(usage) == count * 2
     assert sum(r["state"] == "SETTLED" for r in usage) == count
+
+
+@pytest.mark.parametrize("positive_only", [False, True])
+def test_v4_real_judging_entrypoint_preserves_clocks_and_blinds_anchors(
+        campaign, monkeypatch, positive_only):
+    root, grade, report, rc, _, _ = campaign
+    rules, normalize, _ = importlib.import_module("rubrics").rubric("v4")
+    monkeypatch.setattr(grade, "VERSION", "v4")
+    monkeypatch.setattr(grade, "RULES", rules)
+    monkeypatch.setattr(grade, "NORMALIZE", normalize)
+    monkeypatch.setattr(grade, "OUT", root / "with-context")
+    monkeypatch.setattr(grade, "ARGS", ["--votes", "1"])
+    monkeypatch.setattr(report, "GRADING", grade.OUT)
+    context = dict(question_at="2026-01-01T00:00:00+08:00",
+                   source_message_ats=["2025-12-31T20:00:00+08:00"])
+    anchor = dict(question="回想昨天喜欢什么？", answer="绿茶", required=["绿茶"],
+                  forbidden=[], context=context, source={"review_reason": "hidden review"},
+                  **{"pass": True})
+    anchors = [anchor] if positive_only else [anchor, {
+        **anchor, "answer": "红茶", "forbidden": ["红茶"], "pass": False}]
+    monkeypatch.setattr(grade, "ANCHORS", anchors)
+    calls = []
+
+    def respond(request):
+        cases = json.loads(json.loads(request.content)["messages"][-1]["content"])
+        calls.append(cases)
+        assert all(c["context"] == context for c in cases)
+        assert all(set(c) == {"key", "question", "answer", "required", "forbidden", "context"}
+                   for c in cases)
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({
+            "grades": [dict(key=c["key"], missing=[] if c["answer"] == "绿茶" else [0],
+                            violations=[] if c["answer"] == "绿茶" else [0], unsupported=[],
+                            **{"pass": c["answer"] == "绿茶"}) for c in cases]})}}],
+            "usage": {"prompt_tokens": 40, "completion_tokens": 10}, "model": "offline"})
+
+    def client(_config, _name):
+        budget = grade.Budget(root / "context-usage.jsonl", base_url="https://offline.invalid",
+                              pricing=dict(input_rate=1, cached_input_rate=1,
+                                           output_rate=1, safety_factor=1),
+                              total_cny=1, inference_cny=1)
+        return budget.base_url, {}, grade.MeteredTransport(
+            budget, "judge", inner=httpx.MockTransport(respond)), {}, "offline"
+
+    monkeypatch.setattr(grade, "judge_client", client)
+    asyncio.run(grade.main())
+    assert calls and any(c["question"] == anchor["question"] for call in calls for c in call)
+    manifest = json.loads((grade.OUT / "manifest.json").read_text("utf8"))
+    assert manifest["anchor_gates"]["with-context"]["passed"] is (not positive_only)
+    # An all-positive anchor pool has baseline 1.0: do not weaken the gate to pass it.
+    if positive_only:
+        with pytest.raises(AssertionError, match="Anchor gate"):
+            report.load()
+    else:
+        assert len(report.load()[0]) == 3
+
+
+@pytest.mark.parametrize("context", [None, {}, {"question_at": "2026-01-01",
+                                               "source_message_ats": ["2025-12-31"]}])
+def test_v4_rejects_incomplete_anchor_clocks_before_judging(campaign, monkeypatch, context):
+    root, grade, _, _, _, _ = campaign
+    monkeypatch.setattr(grade, "VERSION", "v4")
+    monkeypatch.setattr(grade, "OUT", root / "invalid-context")
+    monkeypatch.setattr(grade, "ANCHORS", [dict(context=context)])
+    with pytest.raises(AssertionError):
+        grade.prepare()
+    assert not grade.OUT.exists()
+
+
+@pytest.mark.parametrize("missing,violations,verdict", [([], [], False), ([0], [], True),
+                                                       ([], [0], True), ([99], [], False)])
+def test_v4_does_not_turn_malformed_verdicts_into_semantic_failures(
+        campaign, missing, violations, verdict):
+    _, grade, _, _, _, _ = campaign
+    _, normalize, _ = importlib.import_module("rubrics").rubric("v4")
+    case = dict(key="opaque", required=["绿茶"], forbidden=["红茶"])
+    row = dict(key="opaque", missing=missing, violations=violations, unsupported=[],
+               **{"pass": verdict})
+    with pytest.raises(AssertionError):
+        normalize(json.loads(json.dumps(row)), case)
+    response = dict(status=200, keys=["opaque"], response={"choices": [{"message": {
+        "content": json.dumps({"grades": [row]})}}]})
+    grade.NORMALIZE = normalize
+    assert grade.parse(response, {"opaque": case}) == []
+
+
+def test_anchor_export_preserves_original_question_clocks_and_existing_file(campaign):
+    root, _, report, rc, rows, _ = campaign
+    results, _ = report.load()
+    rc.save(root / "results.json", results)
+    rows(root / "grading/review.jsonl", [dict(key=v["key"], review_pass=v["passed"],
+                                             reason="offline agreed")
+                                        for row in results for v in row["arms"].values()])
+    target = root / "anchors-context.jsonl"
+    command = [sys.executable, "-B", str(TOOLS / "make_anchors.py"), "--round", str(root),
+               "--out", str(target), "--n", "3"]
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf8", timeout=30)
+    assert result.returncode == 0, result.stderr
+    anchors = rc.read_rows(target)
+    assert anchors and all(a["context"] == {
+        "question_at": "2026-01-01T00:00:00+08:00",
+        "source_message_ats": ["2025-12-31T20:00:00+08:00"]} for a in anchors)
+    before = target.read_bytes()
+    again = subprocess.run(command, capture_output=True, text=True, encoding="utf8", timeout=30)
+    assert again.returncode != 0 and target.read_bytes() == before

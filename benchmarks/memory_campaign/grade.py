@@ -36,7 +36,7 @@ from scripts.memory_benchmark.cli import validate_run  # noqa: E402
 from scripts.memory_benchmark.runtime import credential  # noqa: E402
 
 from integrity import check_grading_freeze, grading_identity, vote_settings  # noqa: E402
-from roundcfg import Round, read_rows, save, sha  # noqa: E402
+from roundcfg import Round, read_rows, save, sha, validate_judging_context  # noqa: E402
 from rubrics import rubric  # noqa: E402
 
 R = Round()
@@ -59,6 +59,9 @@ def append(path, value):
 
 
 def prepare():
+    if VERSION == "v4":
+        for anchor in ANCHORS:
+            validate_judging_context(anchor.get("context"))
     OUT.mkdir(exist_ok=True)
     votes = int(ARGS[ARGS.index("--votes") + 1]) if "--votes" in ARGS else None
     identity = grading_identity(R, VERSION, RULES, votes)
@@ -86,9 +89,12 @@ def prepare():
                                    status=a["status"], error=a.get("error"), **{"pass": False}))
             else:
                 c = R.criteria[a["id"]]
-                cases.append(dict(key=key, question=questions[a["id"]]["question"],
-                                  answer=a["answer"], required=c["required"],
-                                  forbidden=c.get("forbidden", [])))
+                case = dict(key=key, question=questions[a["id"]]["question"],
+                            answer=a["answer"], required=c["required"],
+                            forbidden=c.get("forbidden", []))
+                if VERSION == "v4":
+                    case["context"] = R.judging_context(questions[a["id"]])
+                cases.append(case)
     mapping.sort(key=lambda r: r["key"])
     cases.sort(key=lambda r: r["key"])
     if (OUT / "blind-mapping.json").exists():
@@ -105,7 +111,8 @@ def prepare():
 
 def anchor_cases(response):
     """{key: (anchor case, expected verdict)} for the anchors a saved batch carried."""
-    return {key: (dict(key=key, **{f: ANCHORS[i].get(f, []) for f in ANCHOR_FIELDS}),
+    fields = ANCHOR_FIELDS + (("context",) if VERSION == "v4" else ())
+    return {key: (dict(key=key, **{f: ANCHORS[i].get(f, []) for f in fields}),
                   ANCHORS[i]["pass"]) for key, i in response.get("anchors", {}).items()}
 
 
