@@ -14,6 +14,14 @@ from companion.contracts import CoreError
 from companion.store import encode
 
 PREFIX = "input_recall:"
+_MISSING = object()
+# The same UTF-8 SHA-256 marker as marker_key, evaluated for a native source row.
+SOURCE_JOIN_SQL = (
+    "LEFT JOIN runtime_meta AS recalled ON recalled.key=CASE "
+    "WHEN left(e.source_event_id,4)='evt_' THEN 'erased_event:'||e.source_event_id "
+    f"ELSE '{PREFIX}'||pg_catalog.encode(pg_catalog.sha256("
+    "pg_catalog.convert_to(e.source_event_id,'UTF8')),'hex') END "
+)
 
 
 def canonical_source(
@@ -67,14 +75,24 @@ def marker_key(source_event_id):
 
 def is_recalled(store, source_event_id):
     if source_event_id.startswith("evt_"):
-        return bool(store.one('SELECT 1 FROM runtime_meta WHERE key = %s',
-                              ("erased_event:" + source_event_id,)))
-    row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (marker_key(source_event_id),))
+        row = store.one('SELECT 1 FROM runtime_meta WHERE key = %s',
+                        ("erased_event:" + source_event_id,))
+    else:
+        row = store.one('SELECT value FROM runtime_meta WHERE key = %s',
+                        (marker_key(source_event_id),))
+    return _recalled(source_event_id, row)
+
+
+def _recalled(source_event_id, row):
+    if source_event_id.startswith("evt_"):
+        return bool(row)
     return bool(row and json.loads(row["value"])["state"] == "RECALLED")
 
 
-def require_not_recalled(store, source_event_id):
-    if is_recalled(store, source_event_id):
+def require_not_recalled(store, source_event_id, *, _loaded=_MISSING):
+    recalled = (is_recalled(store, source_event_id) if _loaded is _MISSING
+                else _recalled(source_event_id, _loaded))
+    if recalled:
         # Existing Spools only consume this exact, authenticated 410 terminal receipt.
         raise CoreError("EVENT_ERASED", 410)
 
