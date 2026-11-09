@@ -503,6 +503,16 @@ def attributed(item, reference):
     return (LABELS[reference["kind"]] + "（未由主人确认为事实）：" + item.content)[:500]
 
 
+def display_content(row, reference):
+    """Prefer the exact ASR when it fits the existing fact display allowance."""
+    if row["origin"] != "event_observed" or reference["kind"] != "transcript":
+        return row["content"]
+    prefix = "机器转写原文摘录（未由主人确认为事实）："
+    original = prefix + reference["text"]
+    # Do not replace a selected long-speech detail with an arbitrary leading crop.
+    return original if len(original) <= 500 else row["content"]
+
+
 def record(memory, memory_id, item, now):
     value = candidate(memory, item, now)
     content = memory.store.one('SELECT content FROM memories WHERE memory_id = %s',

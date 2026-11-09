@@ -546,7 +546,7 @@ class MemoryContext:
                 h["evidence_ids"], priority=context_selection.RELATED,
                 required=rank < settings.memory_required_hits,
                 proofs=[{"kind": "memory", "proof": memory_proof}], module="memory",
-                fact=(h["subject"], h["content"]))
+                fact=(h["subject"], memory["content"]))
             memory_references.append((reference, h))
         if chat and re.search(r"最初|最早|原来|之前|更正|改过|变更|顺序|依次|版本|"
                               r"截至|当时|当天|当前|现在|"
@@ -598,7 +598,30 @@ class MemoryContext:
         ) if include_standing else []
         standing_ids = {row["memory_id"] for row in standing}
         hits = [row for row in hits if row["memory_id"] not in standing_ids]
-        return hits, relations, standing, self.pin(clock(), rows=hits)
+
+        def pinned_display():
+            from companion import memory_references
+
+            now = clock()
+            sources = MemorySources(self.memory, now, bounded=True,
+                                    work=retrieval_work.current())
+            # Pin and display share immutable source material in this synchronous read.
+            shared = sources if sources._snapshot_cache() else None
+            proof = self.pin(now, rows=hits, source_view=shared)
+            overlays = dict(relations)
+            for row in hits:
+                if row["origin"] != "event_observed":
+                    continue
+                current = sources.fact(row)
+                if not current or any(current[key] != row[key] for key in MEMORY_FIELDS):
+                    raise CoreError("PRIVACY_CHANGED", 409)
+                if reference := sources.reference(current):
+                    overlays[row["memory_id"]] = {
+                        **overlays.get(row["memory_id"], {}),
+                        "content": memory_references.display_content(row, reference)}
+            return hits, overlays, standing, proof
+
+        return self.store.read_or_write(pinned_display)
 
     def pin(self, now, *, rows=(), event_ids=(), historical=False, work=None, source_view=None):
         return self.store.read_or_write(lambda: self._pin(
@@ -738,6 +761,9 @@ class MemoryContext:
                 work.mark(error.reason)
                 break
             if reference:
+                from companion import memory_references
+
+                item["content"] = memory_references.display_content(row, reference)
                 item["reference"] = {"kind": reference["kind"],
                     "reference_id": reference["reference_id"],
                     "source_event_ids": reference["proof"]["source_event_ids"],
