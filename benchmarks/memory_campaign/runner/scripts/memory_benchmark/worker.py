@@ -504,6 +504,7 @@ async def run_profile(directory, persona, max_questions):
         "short_term_turns": 6,
         "concurrency_basis": cfg.paid_model.concurrency_basis,
         "memory_extraction": "native default min5 idle900; native retry/checkpoint rules",
+        "campaign_budget_cny": CTX["budget"],
         "fx_validity_days": 366,
         "fx_hold_cny_per_usd": 10,
         "actual_started_at": datetime.now(UTC).isoformat(),

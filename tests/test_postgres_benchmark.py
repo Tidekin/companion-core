@@ -2,10 +2,13 @@
 
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 import httpx
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from companion import owner_authority, paid_budget
@@ -19,11 +22,41 @@ from tests.support.owner_authority import activate
 from tests.support.paid_model import approved_live
 
 
-def test_native_campaign_exam_keeps_memory_and_settled_liability(core, tmp_path):
-    runner = Path(__file__).resolve().parents[1] / "benchmarks/memory_campaign/runner"
-    sys.path.insert(0, str(runner))
-    if "scripts" in sys.modules:
-        sys.modules["scripts"].__path__.append(str(runner / "scripts"))
+def test_campaign_native_approval_preserves_its_independent_cny_cap(
+    core, tmp_path, monkeypatch, campaign_runner,
+):
+    from scripts.memory_benchmark import runtime
+    from scripts.memory_benchmark.budget import Budget
+
+    config = {"provider": {"adapter": "openai", "model": "synthetic-model",
+                            "base_url": "https://synthetic.invalid/v1"},
+              "pricing": {"input_rate": 1., "cached_input_rate": .04,
+                          "output_rate": 1., "safety_factor": 1.},
+              "budget": {"total_cny": .003, "inference_cny": .003},
+              "run_id": "synthetic-resource-approval", "source_commit": "a" * 40,
+              "logical_starts_at": "2026-01-01T00:00:00+00:00",
+              "logical_expires_at": "2027-01-01T00:00:00+00:00",
+              "embedding_cache_dir": core.settings.embedding_cache_dir,
+              "run_dir": str(tmp_path), "concurrency": 1}
+    monkeypatch.setattr(runtime, "context", lambda: config)
+    monkeypatch.setattr(runtime, "credential", lambda _: "synthetic-key")
+    monkeypatch.setattr(runtime, "database_info", lambda *_: core.settings.database)
+    settings, _ = runtime.native_settings(tmp_path / "X01")
+    assert settings.paid_model.per_request_calls == 8
+    assert settings.paid_model.max_output_tokens == 4096
+    budget = Budget.from_context(config)
+    payload = {"messages": [], "max_tokens": 1}
+    request_id, maximum = budget.reserve(payload, "inference")
+    budget.unknown(request_id, maximum, "SYNTHETIC_TRANSPORT_UNCERTAINTY")
+    reopened = Budget.from_context(config)
+    with pytest.raises(RuntimeError, match="MEMORY_BENCHMARK_CNY_CAP"):
+        reopened.reserve(payload, "inference")
+    held, records = reopened.snapshot()
+    assert held == maximum and records[request_id]["state"] == "UNKNOWN"
+    assert len(records) == 1
+
+
+def test_native_campaign_exam_keeps_memory_and_settled_liability(core, tmp_path, campaign_runner):
     from scripts.memory_benchmark.native import Harness, execution_audit
 
     core.settings.memory_enabled = True
@@ -68,6 +101,9 @@ def test_native_campaign_exam_keeps_memory_and_settled_liability(core, tmp_path)
                 await harness.exam({"id": "synthetic/d00", "question": "相机放在哪？",
                                     "cutoff_turn": 1})
                 record = json.loads((tmp_path / "answers.jsonl").read_text("utf8"))
+                plans = json.loads((tmp_path / "context-plans.jsonl").read_text("utf8"))
+                assert plans["case"] == "synthetic/d00" and plans["plans"]
+                assert len(plans["plans"][0]["requests"]) == 2
                 assert record["status"] == "SUCCEEDED", record
                 assert text in record["answer"]
                 assert worker.store.one("SELECT status FROM memories WHERE memory_id=%s",
@@ -91,3 +127,34 @@ def test_native_campaign_exam_keeps_memory_and_settled_liability(core, tmp_path)
                 ).hexdigest()
                 json.dumps(observed)
     run(scenario())
+
+
+def test_campaign_imports_leave_the_native_sdk_probe_available():
+    from scripts import benchmark_qq_beta
+
+    assert Path(benchmark_qq_beta.__file__).resolve() == (
+        Path(__file__).resolve().parents[1] / "scripts/benchmark_qq_beta.py")
+
+
+@pytest.mark.parametrize("native_first", [False, True])
+def test_campaign_and_native_scripts_resolve_in_both_fresh_import_orders(tmp_path, native_first):
+    root = Path(__file__).resolve().parents[1]
+    program = """import sys
+from pathlib import Path
+root=Path(sys.argv[1])
+tools=root/'benchmarks/memory_campaign'
+sys.path.insert(0,str(tools))
+if sys.argv[2]=='True':
+ import scripts
+import roundcfg
+from scripts import benchmark_qq_beta
+from scripts.memory_benchmark import runtime
+assert Path(benchmark_qq_beta.__file__).resolve()==root/'scripts/benchmark_qq_beta.py'
+assert Path(runtime.__file__).resolve()==tools/'runner/scripts/memory_benchmark/runtime.py'
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", program, str(root), str(native_first)], cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(root), "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr

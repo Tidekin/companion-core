@@ -122,6 +122,10 @@ PostgreSQL 两字查询参与有限词法提名，候选内复用现有中文 bi
 超限通过既有 RETRY_WAIT/lease 恢复让出 worker，保留请求 ID、工具结果、费用和 UNKNOWN
 责任。模型及外部工具执行位于恢复重试之外。
 
+v6 runner 在合成考题擦除之前，将既有 planner 回执写入人物目录的
+`context-plans.jsonl`；`requests.jsonl`/`responses.jsonl` 保留实际请求与响应。题目、判据
+和来源标签只用于离线核查；生产选择不读取它们。
+
 实现依据：已核对 DSH AgentLink 的 `src/file-lock.ts` 原始绝对截止时间循环及
 `src/dsh-client.ts` 取消组合；这里复用原生 PostgreSQL 会话和调度器。数据库行为依据
 [PostgreSQL statement_timeout](https://www.postgresql.org/docs/16/runtime-config-client.html)

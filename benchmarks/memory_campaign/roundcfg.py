@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+from datetime import datetime
 from functools import cached_property
 from pathlib import Path
 
@@ -92,6 +93,18 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def validate_judging_context(context):
+    """Only original clocks, never an expected verdict or review explanation."""
+    assert isinstance(context, dict) and set(context) == {"question_at", "source_message_ats"}, \
+        "Judging context must contain original question and source-message clocks"
+    assert isinstance(context["source_message_ats"], list) and context["source_message_ats"], \
+        "Judging context needs source-message clocks"
+    for value in [context["question_at"], *context["source_message_ats"]]:
+        assert isinstance(value, str), "Judging clock must be an ISO timestamp"
+        assert datetime.fromisoformat(value).utcoffset() is not None, \
+            "Judging clock needs a timezone"
+
+
 def round_dir(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if "--round" in argv:
@@ -127,6 +140,17 @@ class Round:
     @cached_property
     def criteria(self):
         return {c["id"]: c for c in read_rows(self.suite / "review-only/criteria.jsonl")}
+
+    @cached_property
+    def input_times(self):
+        return {row["id"]: row.get("now") for path in (self.suite / "inputs").glob("*.jsonl")
+                for row in read_rows(path)}
+
+    def judging_context(self, question):
+        context = dict(question_at=question["now"], source_message_ats=[
+            self.input_times[source] for source in question["source_ids"]])
+        validate_judging_context(context)
+        return context
 
     @property
     def total(self):
