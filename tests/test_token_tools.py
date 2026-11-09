@@ -56,7 +56,7 @@ def test_tool_payload_admission_and_actual_transport_share_measurement(core, tmp
     request_id = budget.reserve(core.store, core.settings, authorized_job(core),
         "chat", CONTINUATION,
                                 core.clock(), tools=TOOLS)
-    saved = core.store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
+    saved = core.store.one('SELECT * FROM model_admissions WHERE request_id=%s', (request_id,))
     measurement = tm.measure_request(core.settings, CONTINUATION, tools=TOOLS)
     assert saved["input_bound"] == measurement.reserved_input_tokens
     assert json.loads(saved["measurement_json"]) == measurement.receipt()
@@ -86,7 +86,7 @@ def test_tool_payload_admission_and_actual_transport_share_measurement(core, tmp
     else:
         assert asyncio.run(invoke()).text == "synthetic"
         assert received == [model_payload(core.settings, CONTINUATION, "chat", tools=TOOLS)]
-        assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+        assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                               (request_id,))["state"] == "SETTLED"
 
 
@@ -96,8 +96,10 @@ def test_native_sdk_tool_roundtrip_keeps_exact_required_usable(core, tmp_path):
 
     configure(core, tmp_path, "exact_required")
     job_id = authorized_job(core)
-    job = core.store.one("SELECT j.*,e.conversation_id,e.body_json,e.trace_id FROM jobs j "
-                         "JOIN events e USING(event_id) WHERE job_id=?", (job_id,))
+    job = core.store.one((
+        'SELECT j.*,e.conversation_id,e.body_json,e.trace_id FROM jobs j JOIN'
+        ' events e USING(event_id) WHERE job_id=%s'
+    ), (job_id,))
     requests = []
 
     def provider(request):
@@ -115,8 +117,10 @@ def test_native_sdk_tool_roundtrip_keeps_exact_required_usable(core, tmp_path):
                 toolsets=[core_query_tools(core, job, [])])
 
     assert asyncio.run(invoke()).output == "synthetic tool result"
-    admissions = core.store.rows("SELECT a.*,u.state FROM model_admissions a "
-                                  "JOIN model_usage u USING(request_id) ORDER BY a.rowid")
+    admissions = core.store.rows(
+        'SELECT a.*,u.state FROM model_admissions a JOIN model_usage u '
+        'USING(request_id) ORDER BY a.record_sequence'
+    )
     assert len(admissions) == len(requests) == 2
     for admission, payload in zip(admissions, requests, strict=True):
         measured = json.loads(admission["measurement_json"])

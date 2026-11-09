@@ -15,6 +15,7 @@ from companion.life_protocol import LifeLoopConfig
 from companion.store import encode
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.life_topics import assert_no_delivery, bug, configure, due, proposal
 
 
@@ -24,7 +25,7 @@ def test_off_and_empty_short_circuit_before_model(core):
     assert core.life_topics.schedule() is None
     assert core.store.rows("SELECT * FROM life_topics") == []
     configure(core)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert core.life_topics.schedule() is None
     assert not core.model.calls
@@ -80,7 +81,7 @@ def test_inflight_change_rejects_stale_shadow_without_refunding_usage(core, chan
         elif change == "off":
             core.settings.life_loop = LifeLoopConfig()
         elif change == "delete":
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
         elif change == "expiry":
             core.clock.advance(8 * 86400)
@@ -99,7 +100,7 @@ def test_inflight_change_rejects_stale_shadow_without_refunding_usage(core, chan
         reconsider = core.life_topics.schedule()
         assert reconsider and reconsider != job
         assert run(core.run_once(job_id=reconsider))
-        assert core.store.one("SELECT state FROM life_activity_results WHERE job_id=?",
+        assert core.store.one('SELECT state FROM life_activity_results WHERE job_id=%s',
                               (reconsider,))["state"] == "SHADOW"
 
 
@@ -113,7 +114,7 @@ def test_destination_scope_keeps_private_sources_out_of_qzone(core, destination)
     if destination == "QZONE_DRAFT":
         assert not result["text"]
         assert (
-            core.store.one("SELECT last_error_code FROM jobs WHERE job_id=?", (job,))[
+            core.store.one('SELECT last_error_code FROM jobs WHERE job_id=%s', (job,))[
                 "last_error_code"
             ]
             == "LIFE_PROPOSAL_SCOPE_REQUIRED"
@@ -135,15 +136,14 @@ def test_duplicate_workers_claim_original_job_once(core):
     assert_no_delivery(core)
 
 
-def test_budget_denial_defers_unadmitted_job_without_model_call(core):
+def test_zero_currency_keeps_native_life_generation_available(core):
     bug(core)
     proposal(core)
-    core.settings.autonomous_daily_micro_usd = 0
     job = due(core)
     assert run(core.run_once(job_id=job))
-    assert not core.model.calls
-    assert not core.store.rows("SELECT * FROM model_usage")
-    assert not core.store.rows("SELECT * FROM life_activity_results WHERE text<>''")
+    assert core.model.calls
+    assert core.store.rows("SELECT * FROM model_usage")
+    assert core.store.rows("SELECT * FROM life_activity_results WHERE text<>''")
     assert_no_delivery(core)
 
 
@@ -154,7 +154,7 @@ def test_preview_is_uncached_authorized_and_read_only_before_any_topic_write(cor
     app = create_app(core.settings)
     app.state.core = core
     client = TestClient(app)
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     assert client.get("/internal/v2/life/topics").status_code == 401
     result = client.get(
         "/internal/v2/life/topics",
@@ -165,7 +165,7 @@ def test_preview_is_uncached_authorized_and_read_only_before_any_topic_write(cor
     assert result.status_code == 200 and result.headers["Cache-Control"] == "no-store"
     assert result.json()["candidate_sources"][0]["event_id"] == "evt_test_1"
     assert result.json()["items"] == []
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     assert_no_delivery(core)
 
 
@@ -253,27 +253,33 @@ def test_expired_running_lease_is_failed_without_paid_replay(core):
     assert core.claim_job("crashed-worker", job_id=job)
     core.clock.advance(core.settings.lease_seconds + 1)
     assert not run(core.run_once(job_id=job))
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job,))["state"] == "FAILED"
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job,))["state"] == "FAILED"
     assert not core.model.calls
 
 
-def test_source_changed_after_generation_hides_text_and_erasure_replays_old_backup(core, tmp_path):
+def test_source_changed_after_generation_hides_text_and_erasure_replays_old_backup(
+    empty_database, core, tmp_path,
+):
     bug(core)
     proposal(core)
     job = due(core)
     assert run(core.run_once(job_id=job))
-    key, archive, destination = Fernet.generate_key(), tmp_path / "life.enc", tmp_path / "old.db"
+    key, archive = Fernet.generate_key(), tmp_path / "life.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     core.store.execute(
-        "UPDATE events SET body_json=? WHERE event_id='evt_test_1'",
+        "UPDATE events SET body_json=%s WHERE event_id='evt_test_1'",
         (encode({"text": "来源已改写"}),),
     )
     assert not core.life_topics.preview(core.settings.owner_qq_id)["items"][0]["results"]
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     with Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     ) as old:
         assert not old.store.rows("SELECT * FROM life_activity_results WHERE text<>''")
         assert old.store.one("SELECT state FROM life_topics")["state"] == "EXPIRED"
@@ -284,7 +290,7 @@ def test_uncertain_delivery_blocks_new_decision_without_mutating_original_send(c
     topic = bug(core)
     message = enqueue(core.store, "evt_test_1", topic["conversation_id"], "原投递", core.clock())
     core.store.execute(
-        "UPDATE outbox SET state='DELIVERY_UNCERTAIN',attempt_count=1 WHERE message_id=?",
+        "UPDATE outbox SET state='DELIVERY_UNCERTAIN',attempt_count=1 WHERE message_id=%s",
         (message,),
     )
     original = core.store.one("SELECT * FROM outbox")
@@ -329,7 +335,7 @@ def test_ineligible_inputs_never_enter_topic_context(core, bad):
                 "control_command": True,
             }
         )
-        core.store.execute("UPDATE events SET body_json=?", (encode(body),))
+        core.store.execute('UPDATE events SET body_json=%s', (encode(body),))
     assert due(core) is None
     assert not core.store.rows("SELECT * FROM life_topics")
     assert not core.model.calls
@@ -357,7 +363,7 @@ def test_long_owner_source_keeps_its_ending_and_decision_sees_current_time(core)
     assert len(clock) == 1 and "本次生活判断的时间" in clock[0]
     # The moving decision time is prompt context only, never part of the frozen material.
     frozen = json.loads(core.store.one(
-        "SELECT body_json FROM events e JOIN jobs j USING(event_id) WHERE j.job_id=?",
+        'SELECT body_json FROM events e JOIN jobs j USING(event_id) WHERE j.job_id=%s',
         (job,))["body_json"])["life_material"]
     assert frozen["sources"][0]["occurred_at"] == core.store.one(
         "SELECT occurred_at FROM events WHERE event_id='evt_test_1'")["occurred_at"]
@@ -372,8 +378,11 @@ def test_unavailable_due_candidates_cannot_hide_a_later_one(core, monkeypatch):
     # Twenty earlier synthetic candidates whose material is unavailable this round.
     for index in range(20):
         core.store.execute(
-            "INSERT INTO life_topics SELECT ?,conversation_id,?,'reading','DUE',?,expires_at,"
-            "reason_code,revision,0,NULL,created_at,updated_at FROM life_topics WHERE topic_id=?",
+            (
+                "INSERT INTO life_topics SELECT %s,conversation_id,%s,'readin"
+                "g','DUE',%s,expires_at,reason_code,revision,0,NULL,created_a"
+                't,updated_at FROM life_topics WHERE topic_id=%s'
+            ),
             (f"blocked_{index:02d}", f"blocked:{index}", f"2000-01-01T00:00:{index:02d}+00:00",
              topic["topic_id"]))
     monkeypatch.setattr(core.life_topics, "synchronize", lambda: None)
@@ -391,5 +400,5 @@ def test_unavailable_due_candidates_cannot_hide_a_later_one(core, monkeypatch):
     assert len(checked) == 20 and all(item.startswith("blocked_") for item in checked)
     job = core.life_topics.schedule()
     assert job and checked[-1] == topic["topic_id"]
-    assert core.store.one("SELECT topic_id FROM life_activity_results WHERE job_id=?",
+    assert core.store.one('SELECT topic_id FROM life_activity_results WHERE job_id=%s',
                           (job,))["topic_id"] == topic["topic_id"]

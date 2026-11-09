@@ -9,10 +9,10 @@ import asyncio
 import hashlib
 import hmac
 import json
-import sqlite3
 from contextlib import nullcontext
 from typing import Literal
 
+import psycopg
 from cryptography.fernet import InvalidToken
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -36,14 +36,12 @@ REVIEW_FIELDS = frozenset({
     "owner_runtime", "model_url", "model_name", "model_key", "video_model_key", "provider",
     "input_rate", "cached_input_rate", "output_rate", "max_output_tokens", "chat_thinking",
     "chat_thinking_tokens", "segmented_reply", "token_measurement", "rich_input_scope",
-    "monthly_limit_micro_usd", "autonomous_daily_micro_usd", "memory_daily_micro_usd",
     "memory_extract_max_output_tokens",
-    "diary_daily_micro_usd", "reflection_daily_micro_usd", "reflection_monthly_micro_usd",
     "raw_event_retention_days", "private_files", "voice", "social_autonomy", "bili_video",
     "rem", "poke_policy", "content", "meme_catalog_owner", "meme_trusted_sources",
     "meme_gallery_source", "meme_excluded_sha256",
     "meme_cooldown_seconds", "expression_enabled", "meme_discovery_enabled",
-    "meme_semantics_enabled", "meme_caption_daily_micro_usd", "meme_discovery_daily_queries",
+    "meme_semantics_enabled", "meme_discovery_daily_queries",
     "meme_discovery_daily_download_bytes", "meme_discovery_daily_storage_bytes",
     "expression_selection_probability", "expression_cooldown_minutes", "expression_meme_categories",
 })
@@ -202,11 +200,11 @@ def classify(before, after):
 
 def _persist(store, settings, snapshot, now):
     key = identity(settings, snapshot)
-    if store.one("SELECT 1 FROM operator_runtime_snapshots WHERE snapshot_id=?", (key,)):
+    if store.one('SELECT 1 FROM operator_runtime_snapshots WHERE snapshot_id = %s', (key,)):
         _read(store, settings, key)
         return key
-    conflict = store.one("SELECT snapshot_id FROM operator_runtime_snapshots WHERE version=? "
-                         "AND base_sha256=? AND snapshot_id<>?",
+    conflict = store.one('SELECT snapshot_id FROM operator_runtime_snapshots WHERE version = %s '
+        'AND base_sha256 = %s AND snapshot_id <> %s',
                          (snapshot.version, snapshot.base_sha256, key))
     if conflict:
         raise CoreError("CONFIGURATION_VERSION_CONFLICT", 409)
@@ -225,17 +223,38 @@ def _persist(store, settings, snapshot, now):
         if image is not None else None,
         encrypted_video_models=operator_config._cipher(settings).encrypt(
             encode(operator_config._raw(videos)).encode()).decode() if videos is not None else None)
-    store.insert("operator_runtime_snapshots", snapshot_id=key, version=snapshot.version,
-        base_sha256=snapshot.base_sha256, chat_time_labels=int(snapshot.chat_time_labels),
-        created_at=now, expression_json=stored.model_dump_json()
-        if snapshot.format_version >= 2 else None)
+    store.execute(
+        "INSERT INTO operator_runtime_snapshots "
+        "(snapshot_id,version,base_sha256,chat_time_labels,created_at,expression_json) "
+        "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT(snapshot_id) DO NOTHING",
+        (key, snapshot.version, snapshot.base_sha256, int(snapshot.chat_time_labels), now,
+         stored.model_dump_json() if snapshot.format_version >= 2 else None),
+    )
+    # Another worker may have committed this exact identity after our first read.
+    # Validate its signed record and retain its original encryption and timestamp.
+    _read(store, settings, key)
     return key
 
 
 def _read(store, settings, key):
-    row = store.one("SELECT * FROM operator_runtime_snapshots WHERE snapshot_id=?", (key,))
+    row = store.one('SELECT operator_runtime_snapshots.snapshot_id AS snapshot_id, '
+        'operator_runtime_snapshots.version AS version, operator_runtime_snapshots.base_sha256 AS '
+        'base_sha256, operator_runtime_snapshots.chat_time_labels AS chat_time_labels, '
+        'operator_runtime_snapshots.created_at AS created_at, '
+        'operator_runtime_snapshots.expression_json AS expression_json FROM '
+        'operator_runtime_snapshots AS operator_runtime_snapshots WHERE '
+        'operator_runtime_snapshots.snapshot_id = %s', (key,))
+    return _validated_snapshot(store, settings, row)
+
+
+def _validated_snapshot(store, settings, row):
     return validate_record(settings, row, lookup=lambda version: store.one(
-        "SELECT * FROM operator_configuration WHERE version=?", (version,)))
+        'SELECT operator_configuration.version AS version, operator_configuration.request_id AS '
+        'request_id, operator_configuration.request_sha256 AS request_sha256, '
+        'operator_configuration.encrypted_overrides AS encrypted_overrides, '
+        'operator_configuration.fields_json AS fields_json, operator_configuration.created_at AS '
+        'created_at FROM operator_configuration AS operator_configuration WHERE '
+        'operator_configuration.version = %s', (version,)))
 
 
 def validate_record(settings, row, *, lookup=None):
@@ -319,7 +338,7 @@ def boundary(store, settings, clock, *, worker=None):
 
     def publish():
         now, current = clock(), _snapshot(settings)
-        prior = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+        prior = store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
         previous = {}
         if prior:
             try:
@@ -371,7 +390,9 @@ def boundary(store, settings, clock, *, worker=None):
         if {k: v for k, v in state.items() if k != "observed_at"} != {
             k: v for k, v in previous.items() if k != "observed_at"
         }:
-            store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(state)))
+            store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) '
+                'DO UPDATE SET value = excluded.value, record_sequence = '
+                'DEFAULT', (key, encode(state)))
         return current
 
     if store.in_write_transaction:
@@ -381,7 +402,7 @@ def boundary(store, settings, clock, *, worker=None):
 
 
 async def worker_boundary(store, settings, clock):
-    """Wait out SQLite writer contention before starting a native worker unit.
+    """Wait out PostgreSQL lock contention before starting a native worker unit.
 
     Only the configuration transaction is retried, after rollback. Business work,
     provider calls and their uncertainty remain outside this retry boundary.
@@ -390,9 +411,9 @@ async def worker_boundary(store, settings, clock):
         try:
             boundary(store, settings, clock)
             return True
-        except sqlite3.OperationalError as error:
-            if (getattr(error, "sqlite_errorcode", 0) & 0xFF != sqlite3.SQLITE_BUSY
-                or store.db.in_transaction):
+        except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected,
+                    psycopg.errors.SerializationFailure):
+            if store.in_transaction:
                 raise
             await asyncio.sleep(0.1)
     return False
@@ -400,7 +421,8 @@ async def worker_boundary(store, settings, clock):
 
 def workers(store, settings):
     result = []
-    for row in store.rows("SELECT value FROM runtime_meta WHERE key LIKE ? ORDER BY key",
+    for row in store.rows('SELECT value FROM runtime_meta WHERE key LIKE %s ORDER BY key NULLS '
+        'FIRST',
                           (PREFIX + "%",)):
         try:
             state = json.loads(row["value"])
@@ -414,15 +436,30 @@ def workers(store, settings):
     return result
 
 
+_TASK_SQL = (
+    'SELECT to_jsonb(binding) AS binding, to_jsonb(snapshot) AS snapshot '
+    'FROM operator_task_configuration AS binding '
+    'LEFT JOIN operator_runtime_snapshots AS snapshot '
+    'ON snapshot.snapshot_id = binding.snapshot_id WHERE binding.task_key = %s'
+)
+
+
 def get(store, settings, task_key):
-    row = store.one("SELECT * FROM operator_task_configuration WHERE task_key=?", (task_key,))
+    row = store.one(
+        _TASK_SQL, (task_key,))
+    if row is None:
+        return None
+    return _bound_snapshot(store, settings, task_key, row["binding"], row["snapshot"])
+
+
+def _bound_snapshot(store, settings, task_key, row, snapshot):
     if row is None:
         return None
     if not isinstance(row["binding_sha256"], str) or not hmac.compare_digest(
         row["binding_sha256"], _digest(settings, [task_key, row["snapshot_id"]]),
     ):
         raise CoreError("CONFIGURATION_TASK_BINDING_INVALID", 409)
-    return _read(store, settings, row["snapshot_id"])
+    return _validated_snapshot(store, settings, snapshot)
 
 
 def bind(store, settings, clock, task_key, *, snapshot=None):
@@ -435,8 +472,8 @@ def bind(store, settings, clock, task_key, *, snapshot=None):
         if not settings.operator_hot_reload and snapshot is None:
             return None
         if task_key.startswith("job:") and store.one(
-            "SELECT 1 FROM model_usage WHERE job_id=? UNION ALL "
-            "SELECT 1 FROM agent_conversations WHERE job_id=? LIMIT 1",
+            'SELECT 1 FROM model_usage WHERE job_id = %s UNION ALL SELECT 1 FROM '
+            'agent_conversations WHERE job_id = %s LIMIT 1',
             (task_key[4:], task_key[4:]),
         ):
             raise CoreError("CONFIGURATION_TASK_BINDING_REQUIRED", 409)
@@ -448,7 +485,13 @@ def bind(store, settings, clock, task_key, *, snapshot=None):
 
 
 def check(store, settings, task_key):
-    snapshot = get(store, settings, task_key)
+    return _checked_task(store, settings, task_key, store.one(_TASK_SQL, (task_key,)))
+
+
+def _checked_task(store, settings, task_key, loaded):
+    """Validate a binding and its signed snapshot loaded at the current guard boundary."""
+    snapshot = (_bound_snapshot(store, settings, task_key, loaded["binding"], loaded["snapshot"])
+                if loaded is not None else None)
     if snapshot is None and settings.operator_hot_reload:
         raise CoreError("CONFIGURATION_TASK_BINDING_REQUIRED", 409)
     return snapshot
@@ -489,10 +532,25 @@ def video_settings(store, settings, task_key, scenario, *, clock=None):
 
 
 def check_request(store, settings, request_id):
-    row = store.one("SELECT job_id FROM model_usage WHERE request_id=?", (request_id,))
+    row = store.one(
+        'SELECT usage.job_id, to_jsonb(task) AS task, to_jsonb(task_snapshot) AS task_snapshot, '
+        'to_jsonb(request) AS request, to_jsonb(request_snapshot) AS request_snapshot '
+        'FROM model_usage AS usage '
+        'LEFT JOIN operator_task_configuration AS task ON task.task_key = \'job:\' || usage.job_id '
+        'LEFT JOIN operator_runtime_snapshots AS task_snapshot '
+        'ON task_snapshot.snapshot_id = task.snapshot_id '
+        'LEFT JOIN operator_task_configuration AS request ON request.task_key = \'model:\' || %s '
+        'LEFT JOIN operator_runtime_snapshots AS request_snapshot '
+        'ON request_snapshot.snapshot_id = request.snapshot_id WHERE usage.request_id = %s',
+        (request_id, request_id))
     if row is None or row["job_id"] is None:
         return
-    task = check(store, settings, "job:" + row["job_id"])
-    request = check(store, settings, "model:" + request_id)
+    snapshots = []
+    for name, key in (("task", "job:" + row["job_id"]), ("request", "model:" + request_id)):
+        snapshot = _bound_snapshot(store, settings, key, row[name], row[name + "_snapshot"])
+        if snapshot is None and settings.operator_hot_reload:
+            raise CoreError("CONFIGURATION_TASK_BINDING_REQUIRED", 409)
+        snapshots.append(snapshot)
+    task, request = snapshots
     if task != request:
         raise CoreError("CONFIGURATION_REQUEST_CHANGED", 409)

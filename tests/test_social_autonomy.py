@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
+from companion.legacy_import import migrate_sqlite
 from companion.social_autonomy import (
     SocialAutonomy,
     erase_social_autonomy,
@@ -27,9 +28,11 @@ from companion.social_autonomy_protocol import (
     SocialAutonomyConfig,
     proposal_adapter,
 )
-from companion.store import Store, after, encode, migrate, uid
+from companion.store import Store, after, encode, uid
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.social_profile_support import confirmed_profile_material
+from tests.support.release_migration import insert, one, open_historical, rows
 from tests.support.social_autonomy import (
     avatar,
     background,
@@ -50,6 +53,8 @@ from tests.support.social_autonomy import (
     {"kind": "signature", "value": "保持好奇"},
     {"kind": "avatar", "asset_id": "avatar_reviewed_one"},
 ])
+
+
 def test_proposal_dto_accepts_only_one_bounded_choice(proposal):
     assert proposal_adapter.validate_python(proposal).model_dump() == proposal
 
@@ -66,6 +71,8 @@ def test_proposal_dto_accepts_only_one_bounded_choice(proposal):
     {"kind": "avatar", "asset_id": "one", "file": "C:/private.png"},
     {"kind": "skip", "reason_code": "NO_ACTION", "authorization_sha256": "a" * 64},
 ])
+
+
 def test_proposal_dto_cannot_choose_authority_targets_or_transport_arguments(proposal):
     with pytest.raises(ValidationError):
         proposal_adapter.validate_python(proposal)
@@ -75,6 +82,8 @@ def test_proposal_dto_cannot_choose_authority_targets_or_transport_arguments(pro
     {"enabled": True}, {"enabled": 1}, {"qzone_daily_limit": True},
     {"qzone_daily_limit": -1}, {"avatar_enabled": True}, {"max_nickname_chars": 0},
 ])
+
+
 def test_config_is_strict_and_defaults_do_not_enable_m0_m1_actions(patch):
     assert SocialAutonomyConfig().enabled is False
     assert SocialAutonomyConfig().qzone_daily_limit == 1
@@ -126,13 +135,13 @@ def test_readonly_context_is_blocked_after_restore_even_if_config_is_reenabled(c
 def test_public_reader_evidence_is_reused_without_copying_private_trigger_text(core, source):
     event_id = read_public(core, source)
     private = "私聊中的独立内容 " + core.settings.bridge_token.get_secret_value()
-    core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_1'",
+    core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_1'",
                        (encode({"text": private}),))
     module = service(core)
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     context = module.context([event_id])
     messages, allowed = module._messages(context, module.config)
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     assert context["sources"][0]["ref"] == event_id
     assert "qzone_publish" in allowed
     assert private not in encode(context) and private not in encode(messages)
@@ -144,28 +153,33 @@ def test_public_reader_evidence_is_reused_without_copying_private_trigger_text(c
 
 @pytest.mark.parametrize("mutation", ["private_chat", "private_file", "unknown", "redacted",
                                       "changed_text", "account_read", "missing_proof", "expired"])
+
+
 def test_nonpublic_or_unverifiable_material_cannot_become_a_publish_source(core, mutation):
     event_id = read_public(core, "bilibili")
     service(core)
     if mutation == "private_chat":
         event_id = "evt_test_1"
     elif mutation == "private_file":
-        core.store.execute("UPDATE events SET source='observation.qq_file' WHERE event_id=?",
+        core.store.execute("UPDATE events SET source='observation.qq_file' WHERE event_id=%s",
                            (event_id,))
     elif mutation == "unknown":
-        core.store.execute("UPDATE observations SET result_status='UNKNOWN' WHERE event_id=?",
+        core.store.execute("UPDATE observations SET result_status='UNKNOWN' WHERE event_id=%s",
                            (event_id,))
     elif mutation == "redacted":
         core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
     elif mutation == "changed_text":
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                            (encode({"title": "原题", "text": "被私聊摘要替换"}), event_id))
     elif mutation == "account_read":
-        core.store.execute("UPDATE observations SET evidence_json=json_set(evidence_json,"
-                           "'$.read_observation.evidence.method','account_api') WHERE event_id=?",
+        core.store.execute((
+            "UPDATE observations SET evidence_json=jsonb_set(evidence_json::jsonb,"
+            "'{read_observation,evidence,method}',to_jsonb('account_api'::text))::text WHERE "
+            'event_id=%s'
+        ),
                            (event_id,))
     elif mutation == "missing_proof":
-        core.store.execute("UPDATE observations SET evidence_json='{}' WHERE event_id=?",
+        core.store.execute("UPDATE observations SET evidence_json='{}' WHERE event_id=%s",
                            (event_id,))
     else:
         core.clock.advance((core.settings.raw_event_retention_days + 1) * 86400)
@@ -178,10 +192,11 @@ def test_web_access_query_cannot_be_exported_as_a_public_source(core):
     ref = read_public(core, "web")
     service(core)
     url = "https://articles.example/story?access_token=private-access"
-    core.store.execute("UPDATE observations SET canonical_url=?,evidence_json=json_set("
-                       "evidence_json,'$.read_observation.url',?,"
-                       "'$.read_observation.original_url',?) "
-                       "WHERE event_id=?", (url, url, url, ref))
+    core.store.execute((
+        "UPDATE observations SET canonical_url=%s,evidence_json=jsonb_set("
+        "jsonb_set(evidence_json::jsonb,'{read_observation,url}',to_jsonb(%s::text)),"
+        "'{read_observation,original_url}',to_jsonb(%s::text))::text WHERE event_id=%s"
+    ), (url, url, url, ref))
     with pytest.raises(CoreError, match="SOCIAL_PUBLIC_SOURCE_REQUIRED"):
         public_source(core.store, core.settings, ref, core.clock())
     assert core.model.calls == []
@@ -207,6 +222,8 @@ def test_avatar_candidates_require_matching_review_policy_and_current_provenance
     {"source_url": "https://example.com/a.png?token=secret"},
     {"expires_at": "2026-10-24T12:00:00"},
 ])
+
+
 def test_avatar_review_dto_rejects_unscoped_or_private_asset_references(core, patch):
     with pytest.raises(ValidationError):
         avatar(core, **patch)
@@ -229,6 +246,8 @@ def test_profile_without_a_real_current_baseline_is_kept_unchanged(core):
     {"result": "REJECTED", "native_retcode": 0},
     {"action_type": "qq.profile.nickname", "resource_id": "fake-message-id"},
 ])
+
+
 def test_action_receipt_needs_real_protocol_evidence_and_never_a_fake_profile_message_id(patch):
     data = {"message_id": "msg_one", "lease_token": "lease_one", "payload_sha256": "a" * 64,
             "action_type": "qzone.publish", "result": "SUCCEEDED",
@@ -251,34 +270,34 @@ def test_timeout_receipt_has_no_manufactured_native_response_hash():
 
 def test_0029_preserves_populated_outbox_and_refuses_to_drop_new_evidence(tmp_path):
     database = tmp_path / "migration.db"
-    migrate(str(database), "0028_private_files")
-    store = Store(str(database))
+    migrate_sqlite(str(database), "0028_private_files")
+    store = open_historical(database)
     try:
-        store.insert("principals", actor_id="owner", kind="owner",
+        insert(store, "principals", actor_id="owner", kind="owner",
                      created_at="2026-10-19T04:00:00+00:00")
-        store.insert("conversations", conversation_id="conv_one", platform="qq.onebot",
+        insert(store, "conversations", conversation_id="conv_one", platform="qq.onebot",
                      platform_session_key="qq:FriendMessage:10001", scope="private",
                      owner_actor_id="owner", created_at="2026-10-19T04:00:00+00:00")
-        store.insert("outbox", message_id="msg_old", conversation_id="conv_one",
+        insert(store, "outbox", message_id="msg_old", conversation_id="conv_one",
                      action_type="qq.private.reply", content_json=encode({"text": "保留"}),
                      content_sha256="a" * 64, state="SENT", delivery_key="old-delivery",
                      created_at="2026-10-19T04:00:00+00:00", updated_at="2026-10-19T04:00:00+00:00")
-        before = store.one("SELECT * FROM outbox")
-        indexes = store.rows("SELECT name FROM sqlite_master WHERE type='index' "
+        before = one(store, "SELECT * FROM outbox")
+        indexes = rows(store, "SELECT name FROM sqlite_master WHERE type='index' "
                              "AND tbl_name='outbox' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     finally:
         store.close()
-    migrate(str(database), "0029_social_autonomy")
-    store = Store(str(database))
+    migrate_sqlite(str(database), "0029_social_autonomy")
+    store = open_historical(database)
     try:
-        assert store.one("SELECT * FROM outbox") == {**before, "delivery_lane": "owner_private"}
-        assert store.rows("SELECT name FROM sqlite_master WHERE type='index' "
+        assert one(store, "SELECT * FROM outbox") == {**before, "delivery_lane": "owner_private"}
+        assert rows(store, "SELECT name FROM sqlite_master WHERE type='index' "
                           "AND tbl_name='outbox' AND name NOT LIKE 'sqlite_%' "
                           "ORDER BY name") == indexes
-        assert store.rows("PRAGMA foreign_key_check") == []
+        assert rows(store, "PRAGMA foreign_key_check") == []
         with pytest.raises(sqlite3.IntegrityError):
             store.execute("UPDATE outbox SET action_type='arbitrary.action'")
-        store.insert("social_autonomy_assets", asset_id="retained", asset_sha256="a" * 64,
+        insert(store, "social_autonomy_assets", asset_id="retained", asset_sha256="a" * 64,
                      provenance_json="{}", provenance_sha256="b" * 64,
                      created_at="2026-10-19T04:00:00+00:00", expires_at="2026-10-20T04:00:00+00:00")
     finally:
@@ -295,7 +314,7 @@ def test_native_model_charge_and_server_plan_are_idempotent_and_bind_only_direct
     module, ref, conversation = background(core)
     result = planned(module, ref)
     assert result["state"] == "READY" and planned(module, ref) == result
-    usage = core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+    usage = core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                            (result["model_request_id"],))
     assert usage["state"] == "SETTLED" and usage["scenario"] == "social_autonomy"
     assert usage["billed_micro_usd"] > 0 and len(module.model.calls) == 1
@@ -341,17 +360,16 @@ def test_model_skip_retains_real_planning_cost_without_using_a_publish_slot(core
     assert not core.store.rows("SELECT * FROM social_autonomy_reservations")
 
 
-def test_global_cloud_limit_stops_new_planning_before_provider_and_native_charge(core):
+def test_global_cloud_amount_is_advisory_and_retains_native_charge(core):
     module, ref, _ = background(core)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        planned(module, ref)
-    assert module.model.calls == []
-    assert not core.store.rows("SELECT * FROM model_usage")
-    assert not core.store.rows("SELECT * FROM cloud_cost_snapshots")
+    core.settings.cloud_budget = CloudBudgetConfig()
+    planned(module, ref)
+    assert len(module.model.calls) == 1
+    assert len(core.store.rows("SELECT * FROM model_usage")) == 1
+    assert core.store.rows("SELECT * FROM cloud_cost_snapshots")
 
 
-def test_unknown_model_attempt_blocks_another_candidate_without_repayment(core):
+def test_unknown_model_cost_allows_another_candidate_without_repayment(core):
     module, ref, _ = background(core)
     module.model.error = RuntimeError("synthetic lost response")
     with pytest.raises(RuntimeError, match="synthetic lost response"):
@@ -360,10 +378,10 @@ def test_unknown_model_attempt_blocks_another_candidate_without_repayment(core):
     assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
     second = extra_public(core)
     module.model.error = None
-    with pytest.raises(CoreError, match="SOCIAL_MODEL_RECONCILIATION_REQUIRED"):
-        planned(module, second, "social-plan-two")
-    assert core.store.rows("SELECT * FROM model_usage") == [usage]
-    assert len(module.model.calls) == 1
+    assert planned(module, second, "social-plan-two")["state"] == "READY"
+    assert core.store.one("SELECT * FROM model_usage WHERE request_id=%s",
+                          (usage["request_id"],)) == usage
+    assert len(module.model.calls) == 2
 
 
 def test_source_erasure_during_model_await_discards_plan_but_keeps_observed_cost(core):
@@ -393,7 +411,7 @@ def test_two_connections_cannot_reserve_the_same_daily_publish_slot(core):
     barrier = Barrier(2)
 
     def attempt(result):
-        store = Store(core.settings.database)
+        store = Store(core.store.database, core.store.state_directory)
         other = SocialAutonomy(store, core.settings, clock=core.clock)
         try:
             barrier.wait(timeout=5)
@@ -473,7 +491,7 @@ def test_unstarted_erasure_releases_only_action_slot_and_never_refunds_model_cos
         queue(module, second, conversation)
     with core.store.transaction():
         erase_social_autonomy(core.store, [ref])
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (first.message_id,)) == {
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (first.message_id,)) == {
         "state": "CANCELLED",
     }
     assert queue(module, second, conversation).plan_id == second["plan_id"]
@@ -523,14 +541,16 @@ def test_changed_profile_baseline_cannot_pass_final_dispatch(core):
     ("content_json", '{"target_uins":[99999]}'), ("content_sha256", "0" * 64),
     ("action_type", "qq.profile.signature"), ("delivery_lane", "owner_private"),
 ])
+
+
 def test_forged_native_outbox_fields_cannot_pass_final_dispatch(core, column, value):
     module, ref, conversation = background(core)
     frozen = queue(module, planned(module, ref), conversation)
     token = uid("lease")
     with core.store.transaction():
-        core.store.execute("UPDATE outbox SET state='LEASED',lease_token=?,lease_until=?",
+        core.store.execute("UPDATE outbox SET state='LEASED',lease_token=%s,lease_until=%s",
                            (token, after(core.clock(), 60)))
-        core.store.execute("UPDATE outbox SET " + column + "=?", (value,))
+        core.store.execute("UPDATE outbox SET " + column + "=%s", (value,))
     with pytest.raises(CoreError, match="SOCIAL_DELIVERY_CHANGED"):
         with core.store.transaction():
             module.validate_delivery(frozen.message_id, token)
@@ -576,11 +596,11 @@ def test_restore_preserves_completed_receipts_cancels_pending_and_blocks_new_act
     second = queue(module, planned(module, second_ref, "social-plan-two"), conversation)
     with core.store.transaction():
         restore_social_autonomy(core.store, core.clock())
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (first.message_id,)) == {
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (first.message_id,)) == {
         "state": "SENT",
     }
     assert module.get(first.plan_id)["state"] == "READY"
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (second.message_id,)) == {
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (second.message_id,)) == {
         "state": "CANCELLED",
     }
     with pytest.raises(CoreError, match="SOCIAL_RESTORE_RECONCILIATION_REQUIRED"):

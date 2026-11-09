@@ -42,7 +42,7 @@ def test_source_review_disagreement_reextracts_then_reviews_before_commit(core, 
     assert feedback["reason"] == "update_disagreement" and feedback["candidates"]
     assert run(core.extract_step()).progressed
     assert checkpoint_state(core.store)["batch"]["phase"] == "COMPLETE"
-    rows = core.store.rows("SELECT * FROM memories ORDER BY rowid")
+    rows = core.store.rows("SELECT * FROM memories ORDER BY record_sequence")
     assert len(rows) == 2
     if correction:
         assert rows[0]["valid_to"] and rows[1]["needs_review"] == 0
@@ -57,7 +57,7 @@ def test_source_review_disagreement_reextracts_then_reviews_before_commit(core, 
 
 def test_failed_disagreement_recovers_through_extraction_after_restart_once(core):
     record = failed_semantic_batch(core)
-    archived = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    archived = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=%s",
                          (PREFIX + record["batch_id"],))["value"])
     assert archived["batch"]["candidates"][0].get("update") is None
     assert archived["batch"]["review_feedback"]["issues"]
@@ -107,11 +107,14 @@ def test_authorized_correction_cannot_degrade_to_two_current_conflicting_values(
         "same": None, "conflicts": ["m0"], "replaces": []}]})
     with pytest.raises(CoreError, match="MEMORY_REVIEW_INVALID"):
         run(core.prepare_memories([item]))
-    audit = core.store.one("SELECT safe_detail_json FROM audit_log "
-                           "WHERE action='memory.review_invalid' ORDER BY rowid DESC LIMIT 1")
+    audit = core.store.one(
+        'SELECT safe_detail_json FROM audit_log WHERE '
+        "action='memory.review_invalid' ORDER BY "
+        'record_sequence DESC LIMIT 1'
+    )
     assert json.loads(audit["safe_detail_json"])["reason"] == "missing_replacement_target"
     assert len(core.store.rows("SELECT * FROM memories")) == 1
-    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=?", (old,)) == {
+    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=%s", (old,)) == {
         "valid_to": None}
 
 
@@ -137,8 +140,8 @@ def test_single_same_array_does_not_block_correct_cabinet_in_same_batch(core):
     core.model.review = review
     assert run(core.extract_step()).progressed
     assert run(core.extract_step()).progressed
-    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=?", (old,))["valid_to"]
-    assert len(core.store.rows("SELECT * FROM memory_evidence WHERE memory_id=?", (paper,))) == 2
+    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=%s", (old,))["valid_to"]
+    assert len(core.store.rows("SELECT * FROM memory_evidence WHERE memory_id=%s", (paper,))) == 2
     assert len(core.store.rows("SELECT * FROM memories")) == 3
 
 

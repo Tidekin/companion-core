@@ -57,32 +57,38 @@ def test_real_http_ingress_independent_worker_and_original_receipt(harness, tmp_
                         assert time.monotonic() < deadline
                         time.sleep(0.05)
                 with ThreadPoolExecutor(max_workers=1) as pool:
-                    pending = pool.submit(client.post, "/v1/chat/completions", json=body())
-                    deadline = time.monotonic() + 5
-                    while not core.store.one("SELECT 1 FROM gateway_requests"):
-                        assert time.monotonic() < deadline
-                        time.sleep(0.02)
                     observed = tmp_path / "provider.json"
                     arguments = [sys.executable, "-B", str(PROCESS),
                                  "worker-paused" if pause_record else "worker",
                                  str(settings_file), str(observed)]
                     if pause_record:
                         arguments.append(pause_record)
-                        worker = subprocess.Popen(arguments, cwd=ROOT, stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
-                        try:
+                    arguments.append("--wait-ready")
+                    worker = subprocess.Popen(arguments, cwd=ROOT, stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
+                    try:
+                        assert worker.stdout.readline().strip() == "GATEWAY_WORKER_READY"
+                        pending = pool.submit(client.post, "/v1/chat/completions", json=body())
+                        deadline = time.monotonic() + 5
+                        while not core.store.one("SELECT 1 FROM gateway_requests"):
+                            assert time.monotonic() < deadline
+                            time.sleep(0.02)
+                        worker.stdin.write("run\n")
+                        worker.stdin.flush()
+                        if pause_record:
                             assert worker.stdout.readline().strip() == "GATEWAY_JOURNAL_APPENDED"
                             # Six API poll intervals pass while the journal append is
-                            # durable but the writer's SQLite transaction is uncommitted.
+                            # durable but the database transaction is uncommitted.
                             with pytest.raises(FutureTimeout):
                                 pending.result(timeout=0.3)
-                        finally:
-                            _, error = worker.communicate("continue\n", timeout=30)
+                            worker.stdin.write("continue\n")
+                            worker.stdin.flush()
+                        _, error = worker.communicate(timeout=30)
                         assert worker.returncode == 0, error
-                    else:
-                        worker = subprocess.run(arguments, cwd=ROOT, capture_output=True,
-                            text=True, timeout=30, **flags)
-                        assert worker.returncode == 0, worker.stderr
+                    finally:
+                        if worker.poll() is None:
+                            worker.kill()
+                            worker.communicate(timeout=10)
                     result = pending.result(timeout=20)
                 assert result.status_code == 200, result.text
                 completion = result.json()

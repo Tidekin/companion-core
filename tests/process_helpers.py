@@ -67,30 +67,24 @@ def window_child():
         raise SystemExit(24) from None
 
 
-def reservation_process(database, settings_json, now, job_id):
-    """Use an independent SQLite connection and exit without releasing its reservation."""
+def reservation_process(settings_path, now, job_id):
+    """Exit immediately after native admission, leaving the committed lease for recovery."""
+    from contextlib import closing
+    from pathlib import Path
+
     from companion import budget
     from companion.config import Settings
     from companion.contracts import CoreError
+    from companion.postgres import Database
     from companion.store import Store
 
-    store = Store(database)
-    try:
-        request = budget.reserve(
-            store,
-            Settings.model_validate(
-                {
-                    **json.loads(settings_json),
-                    "bridge_token": "synthetic-bridge-" * 3,
-                    "model_key": "synthetic-key",
-                }
-            ),
-            job_id,
-            "chat",
-            [{"role": "user", "content": "hello"}],
-            now,
-        )
-        print(request, flush=True)
-    except CoreError as error:
-        print(error.code, flush=True)
-    os._exit(23)
+    cfg = Settings.model_validate_json(Path(settings_path).read_text("utf-8"))
+    with Database(cfg.database) as database, closing(Store(database, cfg.state_directory)) as store:
+        try:
+            request = budget.reserve(
+                store, cfg, job_id, "chat", [{"role": "user", "content": "hello"}], now,
+            )
+            print(request, flush=True)
+        except CoreError as error:
+            print(error.code, flush=True)
+        os._exit(23)

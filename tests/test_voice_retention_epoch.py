@@ -15,6 +15,7 @@ from companion.model import ModelClient
 from companion.privacy import epoch
 from companion.retrieval import SemanticIndex
 from companion.store import encode
+from companion.voice_flow import VoiceFlow
 from companion.voice_jobs import INPUT_RECEIPT
 from companion.voice_protocol import (
     ROUTE_PREFIX,
@@ -25,6 +26,7 @@ from companion.voice_protocol import (
     digest,
 )
 from tests.conftest import ingest, run
+from tests.support.unchanged_transactions import readonly_service_call, unchanged_transactions
 from tests.support.voice_flow import signed_input
 from tests.support.voice_jobs import TOKEN, result, voice_config
 from tests.support.voice_node_api import claim_body, tls_core
@@ -46,7 +48,7 @@ def expired_input_with_settled_charge(core):
     transport.delivery_result(core.store, core.settings, item["message_id"],
         DeliveryResult(lease_token=item["lease_token"], result="SENT",
                        provider_message_id="old-synthetic-ack"), core.clock())
-    core.store.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (old["event_id"],))
+    core.store.execute('UPDATE events SET memory_processed=1 WHERE event_id=%s', (old["event_id"],))
     core.clock.now = current
     # Retention crosses the default 30-day FX interval. Renew only the current
     # policy through its native API; the old fee keeps its original FX snapshot.
@@ -108,12 +110,12 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
     from tests.voice_owner_fixtures import native_voice
 
     capture, key, _ = native_voice(core, tmp_path, config=voice)
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (capture.event_id,))
 
     def model(request):
         calls.append(json.loads(request.content)["messages"])
         if old_proof is not None:
-            job = active_worker.store.one("SELECT * FROM jobs WHERE job_id=?",
+            job = active_worker.store.one('SELECT * FROM jobs WHERE job_id=%s',
                                            (old_proof["job_id"],))
             with pytest.raises(CoreError, match="VOICE_CONTEXT_RESULT_CHANGED"):
                 active_worker.voice.check_context(job, old_proof)
@@ -138,7 +140,7 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
                 assert waiting.store is not core.store
                 assert not await waiting.run_once("retention-voice-wait")
             receipt = json.loads(core.store.one(
-                "SELECT value FROM runtime_meta WHERE key=?", (receipt_key,))["value"])
+                'SELECT value FROM runtime_meta WHERE key=%s', (receipt_key,))["value"])
             assert receipt["state"] == "WAITING" and not calls
             node = None
             if voice_state in {"running", "transcribed", "source-erased"}:
@@ -149,42 +151,42 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
             if voice_state == "fallback":
                 core.clock.advance(voice.asr.wait_seconds + 1)
                 assert core.voice.input_status(event["event_id"]).state == "FALLBACK"
-                previous = json.loads(core.store.one("SELECT value FROM runtime_meta "
-                    "WHERE key=?", (receipt_key,))["value"])
+                previous = json.loads(core.store.one((
+                    'SELECT value FROM runtime_meta WHERE key=%s'
+                ), (receipt_key,))["value"])
                 old_proof = {"event_id": event["event_id"],
-                    "job_id": core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
+                    "job_id": core.store.one('SELECT job_id FROM jobs WHERE event_id=%s',
                                                (event["event_id"],))["job_id"],
                     "input_receipt_sha256": digest(previous), "voice_results": []}
             old_node = core.store.one("SELECT * FROM voice_jobs") if node else None
             before_epoch = epoch(core.store)
             with Core(core.settings, clock=core.clock) as maintenance:
                 if voice_state == "source-erased":
-                    with maintenance.store.transaction():
+                    with maintenance.store.transaction(control_write=True):
                         maintenance.ledger.expire_events(maintenance.store,
                             [event["event_id"]], maintenance.clock())
                 else:
                     assert maintenance.expire_raw_events() == 1
             assert epoch(core.store) == before_epoch + 1
             current = core.store.one(
-                "SELECT redacted,body_json FROM events WHERE event_id=?",
+                'SELECT redacted,body_json FROM events WHERE event_id=%s',
                 (event["event_id"],))
             assert current["redacted"] == int(voice_state == "source-erased")
             if voice_state != "source-erased":
                 assert current["body_json"] == event["body_json"]
-                assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                        (old_id,))["redacted"] == 1
             assert owner_authority.current(
                 core.store, core.settings, core.clock).authority.as_dict() == (
                 capture.authority)
-            before = core.store.db.total_changes
-            projected = await client.get(path + "/state")
+            with readonly_service_call(core.store, VoiceFlow, "input_receipt"):
+                projected = await client.get(path + "/state")
             if voice_state == "source-erased":
                 assert projected.status_code in {403, 409}, projected.text
             else:
                 assert projected.status_code == 200, projected.text
                 assert projected.json()["state"] == "FALLBACK"
                 assert all(not row["upload_allowed"] for row in projected.json()["records"])
-            assert core.store.db.total_changes == before
             with Core(core.settings, ModelClient(core.settings, model_http),
                       core.clock) as worker:
                 active_worker = worker
@@ -209,14 +211,15 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
                 assert evidence[0]["unavailable"] == [{"segment_index": 0,
                                                        "reason": REASON}]
                 assert OLD_TRANSCRIPT not in encode(calls)
-                replacement = json.loads(core.store.one("SELECT value FROM runtime_meta "
-                    "WHERE key=?", (receipt_key,))["value"])
+                replacement = json.loads(core.store.one((
+                    'SELECT value FROM runtime_meta WHERE key=%s'
+                ), (receipt_key,))["value"])
                 assert replacement["privacy_epoch"] == epoch(core.store)
                 assert replacement["wait_until"] == receipt["wait_until"]
                 assert replacement["state"] == "FALLBACK"
             if node:
                 ref, value, audio, upload_headers, stop = node
-                saved = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?",
+                saved = core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s',
                                        (ref.job_id,))
                 assert saved["state"] == ("CANCELLED" if voice_state == "transcribed"
                                           else "UNKNOWN")
@@ -232,16 +235,15 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
                     })
                 assert late.status_code == 410, late.text
                 assert late.json()["error"] == "VOICE_LEASE_RETIRED"
-                before_replay = core.store.db.total_changes
-                replayed = await client.post(path, content=audio, headers=upload_headers)
+                with unchanged_transactions(core):
+                    replayed = await client.post(path, content=audio, headers=upload_headers)
                 if voice_state == "source-erased":
                     assert replayed.status_code in {403, 409}, replayed.text
                 else:
                     assert replayed.status_code == 410, replayed.text
                     assert replayed.json()["error"] == "VOICE_JOB_RETIRED"
-                    assert core.store.one("SELECT * FROM voice_jobs WHERE job_id=?",
+                    assert core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s',
                                            (ref.job_id,)) == saved
-                    assert core.store.db.total_changes == before_replay
                 if voice_state != "transcribed":
                     held = core.store.one("SELECT active_job_id FROM voice_node_state")
                     assert held["active_job_id"] == ref.job_id
@@ -257,14 +259,14 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
                     assert core.store.one("SELECT active_job_id FROM voice_node_state")[
                         "active_job_id"] is None
                 assert len(core.store.rows("SELECT * FROM voice_jobs")) == 1
-            charges = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            charges = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert charges[:len(old_charges)] == old_charges
             assert len(charges) == len(old_charges) + expected_calls
             assert all(row["state"] == "SETTLED" for row in charges)
-            costs = core.store.rows("SELECT * FROM cloud_cost_snapshots ORDER BY rowid")
+            costs = core.store.rows('SELECT * FROM cloud_cost_snapshots ORDER BY record_sequence')
             assert costs[:len(old_costs)] == old_costs
             assert len(costs) == len(old_costs) + expected_calls
-            replies = core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+            replies = core.store.rows('SELECT * FROM outbox WHERE origin_event_id=%s',
                                        (event["event_id"],))
             assert len(replies) == expected_calls
             with Core(core.settings, ModelClient(core.settings, model_http),

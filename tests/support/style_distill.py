@@ -29,8 +29,11 @@ def thread(core, number, items):
     event_id = observe(core, number)
     evidence = {"items": items, "reported_total": 100, "partial": True}
     core.store.execute(
-        "UPDATE observations SET evidence_json=json_set(evidence_json,'$.reading',json(?)) "
-        "WHERE event_id=?", (json.dumps({"comments": evidence}, ensure_ascii=False), event_id))
+        (
+            'UPDATE observations SET '
+            "evidence_json=jsonb_set(evidence_json::jsonb,'{reading}',%s::jsonb)::text WHERE"
+            ' event_id=%s'
+        ), (json.dumps({"comments": evidence}, ensure_ascii=False), event_id))
     return event_id
 
 

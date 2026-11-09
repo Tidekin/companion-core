@@ -1,12 +1,13 @@
 """Synthetic fragment envelopes and original Bridge delivery boundaries."""
 
 import json
-import sqlite3
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import httpx
+import psycopg
 import pytest
 
 from companion.reply_segments import SegmentedReplyConfig
@@ -17,6 +18,7 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.native_continuous_support import host
+from tests.postgres_fixture import logical_state
 from tests.support.live_text_window import live_fixture
 from tests.support.onebot import provider
 from tests.support.onebot_events import config, normalized, raw_event
@@ -275,10 +277,14 @@ async def native_fragments(core, tmp_path, *, parts=None, quota=None, period="ac
 
 async def original_input_state(active):
     capture = json.loads(active.db.execute("SELECT capture_json FROM window_inputs").fetchone()[0])
-    before = active.core.store.db.total_changes
-    response = await active.client.post("/internal/v1/owner-authority/inputs/state", json=capture)
+    before = logical_state(active.core.store)
+    # The request uses a separate ApiStore lease. The real read_or_write must succeed
+    # in its native read-only transaction, without falling back to a writer.
+    with patch("companion.store.Store.transaction", side_effect=AssertionError("write retry")):
+        response = await active.client.post(
+            "/internal/v1/owner-authority/inputs/state", json=capture)
     assert response.status_code == 200 and response.headers["Cache-Control"] == "no-store"
-    assert active.core.store.db.total_changes == before
+    assert logical_state(active.core.store) == before
     return response.json()
 
 
@@ -368,7 +374,7 @@ def test_later_fragment_cannot_replace_acknowledged_group_manifest(core, tmp_pat
         async with native_fragments(core, tmp_path) as (active, sends, _, calls):
             assert await active.pump()
             core.clock.advance(1.5)
-            row = core.store.rows("SELECT * FROM outbox ORDER BY rowid")[1]
+            row = core.store.rows('SELECT * FROM outbox ORDER BY record_sequence')[1]
             field, value = {
                 "index": ("segment_index", 3), "count": ("segment_count", 3),
                 "group": ("reply_group_id", "job_" + "c" * 32),
@@ -376,14 +382,14 @@ def test_later_fragment_cannot_replace_acknowledged_group_manifest(core, tmp_pat
                 "event": ("delivery_key", "reply:evt_" + "e" * 64 + ":v2:1"),
             }[damage]
             if damage in {"index", "group"}:
-                with pytest.raises(sqlite3.IntegrityError):
-                    core.store.execute(f"UPDATE outbox SET {field}=? WHERE message_id=?",
+                with pytest.raises(psycopg.IntegrityError):
+                    core.store.execute(f"UPDATE outbox SET {field}=%s WHERE message_id=%s",
                                        (value, row["message_id"]))
-                assert core.store.one("SELECT * FROM outbox WHERE message_id=?",
+                assert core.store.one('SELECT * FROM outbox WHERE message_id=%s',
                                       (row["message_id"],)) == row
                 assert len(sends) == len(calls) == 1 and active.attempts() == {"ACK": 1}
                 return
-            core.store.execute(f"UPDATE outbox SET {field}=? WHERE message_id=?",
+            core.store.execute(f"UPDATE outbox SET {field}=%s WHERE message_id=%s",
                                (value, row["message_id"]))
             try:
                 await active.pump()

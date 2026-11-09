@@ -171,7 +171,7 @@ def load_environment(core, tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setenv("COMPANION_CONFIG", str(path))
-    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database)
+    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database.get_secret_value())
     monkeypatch.setenv("COMPANION_ERASURE_LEDGER", core.settings.erasure_ledger)
     monkeypatch.setenv("COMPANION_MEME_CATALOG_OWNER", "core")
     monkeypatch.setenv("COMPANION_MEME_TRUSTED_SOURCES", json.dumps([RULE]))
@@ -209,7 +209,7 @@ def queued_native_chat(core, tmp_path):
 
     _, job = chat(core, tmp_path)
     core.store.execute(
-        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=?", (job["job_id"],)
+        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=%s", (job["job_id"],)
     )
     return job
 
@@ -233,7 +233,7 @@ def test_prepare_failure_fences_fresh_and_persisted_native_chat(core, tmp_path, 
             "READY",
         )
     core.store.execute(
-        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=?", (job["job_id"],)
+        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=%s", (job["job_id"],)
     )
     called = []
 
@@ -244,7 +244,7 @@ def test_prepare_failure_fences_fresh_and_persisted_native_chat(core, tmp_path, 
     monkeypatch.setattr(core.memes, "prepare_offer", fail)
     assert run(core.run_once("prepare-hook-check", job_id=job["job_id"]))
     assert called == [job["job_id"]]
-    row = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job["job_id"],))
+    row = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s', (job["job_id"],))
     assert row == {"state": "FAILED", "last_error_code": "MEME_ASSET_SOURCE_CHANGED"}
     assert not core.store.rows("SELECT * FROM model_usage")
     assert_failure_notice(core)
@@ -279,7 +279,7 @@ def test_offer_revocation_after_http_hook_fences_final_provider_io(core, tmp_pat
     asyncio.run(scenario())
     assert not providers
     assert_failure_notice(core)
-    assert core.store.one("SELECT last_error_code FROM jobs WHERE job_id=?", (job["job_id"],)) == {
+    assert core.store.one('SELECT last_error_code FROM jobs WHERE job_id=%s', (job["job_id"],)) == {
         "last_error_code": "MEME_ASSET_SOURCE_CHANGED"
     }
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
@@ -307,10 +307,10 @@ def test_classified_controls_keep_original_reply_without_offer_preparation(
             _, response = await admit(client, config, grant, now, text=command)
             assert response.status_code == 202, response.text
             job_id = response.json()["job_id"]
-            job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+            job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job_id,))
             assert reply_revision.control_job(core.store, job)
             assert await core.run_once("control-hook-check", job_id=job_id)
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job_id,)) == {
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job_id,)) == {
                 "state": "SUCCEEDED"
             }
             assert (
@@ -321,7 +321,7 @@ def test_classified_controls_keep_original_reply_without_offer_preparation(
             assert len(core.store.rows("SELECT * FROM outbox")) == 1
             assert (
                 core.store.one(
-                    "SELECT 1 FROM runtime_meta WHERE key=?", ("meme_offer:" + job["event_id"],)
+                    'SELECT 1 FROM runtime_meta WHERE key=%s', ("meme_offer:" + job["event_id"],)
                 )
                 is None
             )

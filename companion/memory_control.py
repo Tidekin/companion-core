@@ -116,18 +116,29 @@ def load_grant(path, approved_sha256):
 
 
 @contextmanager
-def stopped_workers(database):
+def stopped_workers(state_directory):
     """Hold the existing OS locks for the entire separately launched control API lifetime."""
     with ExitStack() as stack:
         for kind in ("worker", "diary-worker", "life-worker", "executive-worker", "content-worker"):
-            stack.enter_context(single_worker(database, kind))
+            stack.enter_context(single_worker(state_directory, kind))
         yield
 
 
 def target_digest(store, memory_id):
     """Bind the reviewed target, correction family and shared evidence deletion closure."""
-    memories = store.rows("SELECT * FROM memories ORDER BY memory_id")
-    links = store.rows("SELECT * FROM memory_evidence ORDER BY memory_id,event_id")
+    memories = store.rows('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
+        'memories.kind AS kind, memories.content AS content, memories.status AS status, '
+        'memories.origin AS origin, memories.confidence AS confidence, memories.importance AS '
+        'importance, memories.privacy_scope AS privacy_scope, memories.supersedes_memory_id AS '
+        'supersedes_memory_id, memories.created_at AS created_at, memories.updated_at AS '
+        'updated_at, memories.valid_from AS valid_from, memories.valid_to AS valid_to, '
+        'memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS fact_key, '
+        'memories.needs_review AS needs_review FROM memories AS memories ORDER BY '
+        'memories.memory_id NULLS FIRST')
+    links = store.rows('SELECT memory_evidence.memory_id AS memory_id, memory_evidence.event_id AS '
+        'event_id, memory_evidence.polarity AS polarity, memory_evidence.created_at AS created_at '
+        'FROM memory_evidence AS memory_evidence ORDER BY memory_evidence.memory_id NULLS FIRST, '
+        'memory_evidence.event_id NULLS FIRST')
     ids, events = {memory_id}, set()
     while True:
         previous = len(ids), len(events)
@@ -148,8 +159,17 @@ def target_digest(store, memory_id):
         raise CoreError("MEMORY_NOT_FOUND", 404)
     return paid_budget.sha({"memories": selected,
         "evidence": [row for row in links if row["memory_id"] in ids],
-        "events": store.rows("SELECT * FROM events WHERE event_id IN "
-                             "(SELECT value FROM json_each(?)) ORDER BY event_id",
+        "events": store.rows('SELECT events.event_id AS event_id, events.schema_version AS '
+            'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
+            'events.conversation_id AS conversation_id, events.actor_id AS actor_id, '
+            'events.event_type AS event_type, events.occurred_at AS occurred_at, '
+            'events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, '
+            'events.body_json AS body_json, events.trace_id AS trace_id, events.idempotency_key AS '
+            'idempotency_key, events.fingerprint AS fingerprint, events.redacted AS redacted, '
+            'events.memory_processed AS memory_processed, events.reply_revision AS reply_revision '
+            'FROM events AS events WHERE events.event_id IN (SELECT parsed.value COLLATE "C" AS '
+            '_col_0 FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) ORDER BY '
+            'events.event_id NULLS FIRST',
                              (encode(sorted(events)),))})
 
 
@@ -166,15 +186,38 @@ def stopped_state(store):
             journal_path=binding["budget_journal_path"]), allow_settlement=True)
         if not custody["lifecycle"] or custody["lifecycle"]["state"] != "STOPPED":
             raise CoreError("MEMORY_CONTROL_STOP_REQUIRED", 403)
-    elif store.one("SELECT 1 FROM model_admissions LIMIT 1") or store.one(
-        "SELECT 1 FROM runtime_meta WHERE key='model_budget_live_lifecycle'"
+    elif store.one('SELECT 1 FROM model_admissions LIMIT 1') or store.one(
+        "SELECT 1 FROM runtime_meta WHERE key = 'model_budget_live_lifecycle'"
     ):
         raise CoreError("MEMORY_CONTROL_STOP_REQUIRED", 403)
     return paid_budget.sha({"binding": binding, "custody": custody,
-        "windows": store.rows("SELECT * FROM runtime_meta WHERE key LIKE 'live_text_%' "
-                              "OR key LIKE 'model_budget_%' ORDER BY key"),
-        "usage": store.rows("SELECT * FROM model_usage ORDER BY request_id"),
-        "admissions": store.rows("SELECT * FROM model_admissions ORDER BY request_id")})
+        "windows": store.rows('SELECT runtime_meta.key AS key, runtime_meta.value AS value FROM '
+            "runtime_meta AS runtime_meta WHERE runtime_meta.key LIKE 'live_text_%%' OR "
+            "runtime_meta.key LIKE 'model_budget_%%' ORDER BY runtime_meta.key NULLS FIRST"),
+        "usage": store.rows('SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS '
+            'request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
+            'model_usage.provider AS provider, model_usage.model AS model, '
+            'model_usage.input_tokens AS input_tokens, model_usage.cached_input_tokens AS '
+            'cached_input_tokens, model_usage.output_tokens AS output_tokens, '
+            'model_usage.billed_micro_usd AS billed_micro_usd, model_usage.is_estimate AS '
+            'is_estimate, model_usage.occurred_at AS occurred_at, model_usage.state AS state, '
+            'model_usage.pricing_known AS pricing_known FROM model_usage AS model_usage ORDER BY '
+            'model_usage.request_id NULLS FIRST'),
+        "admissions": store.rows('SELECT model_admissions.request_id AS request_id, '
+            'model_admissions.logical_request_id AS logical_request_id, '
+            'model_admissions.attempt_id AS attempt_id, model_admissions.attempt_number AS '
+            'attempt_number, model_admissions.window_id AS window_id, '
+            'model_admissions.contract_sha256 AS contract_sha256, model_admissions.payload_sha256 '
+            'AS payload_sha256, model_admissions.snapshot_json AS snapshot_json, '
+            'model_admissions.reserved_micro_usd AS reserved_micro_usd, '
+            'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
+            'output_bound, model_admissions.lease_token AS lease_token, '
+            'model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS '
+            'io_started_at, model_admissions.journal_path AS journal_path, '
+            'model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS '
+            'measurement_json, model_admissions.authority_json AS authority_json FROM '
+            'model_admissions AS model_admissions ORDER BY model_admissions.request_id NULLS '
+            'FIRST')})
 
 
 class StoppedMemoryControl:
@@ -203,13 +246,13 @@ class StoppedMemoryControl:
             "social_enabled", "proactive_enabled", "content_enabled", "observation_enabled",
         )):
             raise CoreError("MEMORY_CONTROL_OTHER_WRITERS_ENABLED", 403)
-        restored = s.one("SELECT value FROM runtime_meta WHERE key=?", (RESTORED,))
+        restored = s.one('SELECT value FROM runtime_meta WHERE key = %s', (RESTORED,))
         if (restored["value"] if restored else None) != g.restore_generation:
             raise CoreError("MEMORY_CONTROL_RESTORED_REAPPROVAL_REQUIRED", 403)
         if not g.starts_at <= now < g.ends_at:
             raise CoreError("MEMORY_CONTROL_EXPIRED", 403)
         if (g.identity_sha256 != paid_budget.sha([cfg.owner_qq_id, cfg.bot_qq_id])
-            or s.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+            or s.one("SELECT value FROM runtime_meta WHERE key = 'owner_qq_id'")
             != {"value": cfg.owner_qq_id}
             or g.core_config_sha256 != live_text.config_sha256(cfg)
             or g.core_code_sha256 != live_text.code_sha256()):
@@ -276,7 +319,7 @@ class StoppedMemoryControl:
     def apply(self, body):
         body = MemoryControlInput.model_validate(body)
         s, g, event = self.store, self.grant, body.event
-        with s.transaction():
+        with s.transaction(control_write=True):
             now = self.check()
             content = self.verify_source(body, now)
             key = RECEIPT + g.grant_id
@@ -297,23 +340,24 @@ class StoppedMemoryControl:
             if g.target_memory_id and target_digest(s, g.target_memory_id) != g.target_sha256:
                 raise CoreError("MEMORY_CONTROL_TARGET_CHANGED", 409)
             if g.operation == "remember" and s.one(
-                "SELECT 1 FROM memories WHERE subject=? AND status IN ('HYPOTHESIS','CONFIRMED') "
-                "AND (content=? OR fact_key=?)", (g.subject, content, g.fact_key)
+                "SELECT 1 FROM memories WHERE subject = %s AND status IN ('HYPOTHESIS', "
+                "'CONFIRMED') AND (content = %s OR fact_key = %s)", (g.subject, content, g.fact_key)
             ):
                 raise CoreError("MEMORY_CONTROL_EXPLICIT_EXISTING_TARGET_REQUIRED", 409)
             if g.operation in {"confirm", "correct"} and not s.one(
-                "SELECT 1 FROM memory_evidence v JOIN events e USING(event_id) "
-                "WHERE v.memory_id=? AND e.redacted=0 AND e.actor_id='owner' "
-                "AND e.privacy_scope='private'", (g.target_memory_id,)
+                'SELECT 1 FROM memory_evidence AS v JOIN events AS e USING (event_id) WHERE '
+                "v.memory_id = %s AND e.redacted = 0 AND e.actor_id = 'owner' AND e.privacy_scope "
+                "= 'private'", (g.target_memory_id,)
             ):
                 raise CoreError("MISSING_MEMORY_EVIDENCE", 409)
-            if s.one("SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event.event_id,)):
+            if s.one('SELECT 1 FROM runtime_meta WHERE key = '
+                '%s', ("erased_event:" + event.event_id,)):
                 raise CoreError("EVENT_ERASED", 410)
-            if s.one("SELECT 1 FROM events WHERE event_id=? OR source_event_id=?",
+            if s.one('SELECT 1 FROM events WHERE event_id = %s OR source_event_id = %s',
                      (event.event_id, event.source_event_id)):
                 raise CoreError("MEMORY_CONTROL_SOURCE_REPLAY", 409)
-            conversation = s.one("SELECT conversation_id FROM conversations WHERE platform=? "
-                                "AND platform_session_key=?", (event.source,
+            conversation = s.one('SELECT conversation_id FROM conversations WHERE platform = %s '
+                'AND platform_session_key = %s', (event.source,
                                  event.conversation.platform_session_key))
             conversation_id = conversation["conversation_id"] if conversation else uid("conv")
             if not conversation:

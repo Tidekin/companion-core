@@ -2,8 +2,8 @@
 
 import asyncio
 import json
-import sqlite3
 
+import psycopg
 from pydantic_ai import DeferredToolRequests
 
 from companion import job_queue, qq_video, reply_revision
@@ -36,9 +36,9 @@ async def reply(core, job, snapshots):
                     wait(core, job, persistence)
                     return None, persistence
                 break
-            except sqlite3.OperationalError as error:
-                if (getattr(error, "sqlite_errorcode", 0) & 0xFF != sqlite3.SQLITE_BUSY
-                    or core.store.db.in_transaction):
+            except (psycopg.errors.LockNotAvailable, psycopg.errors.DeadlockDetected,
+                    psycopg.errors.SerializationFailure):
+                if core.store.in_transaction:
                     raise
                 # Restore only revalidates saved inputs and original Reader/voice
                 # results. Model requests and tool execution remain outside retry.
@@ -58,7 +58,7 @@ async def reply(core, job, snapshots):
             tools.append(qq_video.toolset(core, job, snapshots))
         from companion import image_generation
 
-        if image_generation.available(core, job) and "expression" in view.policy.purposes:
+        if "expression" in view.policy.purposes and image_generation.available(core, job):
             tools.append(image_generation.toolset(core, job, snapshots))
     with phase("context_build", job["trace_id"]):
         memories = []

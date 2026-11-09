@@ -88,7 +88,7 @@ def test_tts_requires_transaction_and_exact_pending_outbox(core, monkeypatch):
         create_tts(core, jobs, message_id)
     core.store.execute("UPDATE outbox SET attempt_count=0")
     core.store.execute(
-        "DELETE FROM runtime_meta WHERE key=?", (owner_delivery.DELIVERY + message_id,)
+        'DELETE FROM runtime_meta WHERE key=%s', (owner_delivery.DELIVERY + message_id,)
     )
     with pytest.raises(CoreError, match="OWNER_DELIVERY_BINDING_REQUIRED"):
         create_tts(core, jobs, message_id)
@@ -99,14 +99,18 @@ def test_running_fences_wipe_and_commit_before_rejecting_input(core, monkeypatch
     jobs, message_id, event_id, _ = prepared(core, monkeypatch)
     job, _, _, ref = start(core, jobs, message_id)
     if change == "epoch":
-        core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch','1')")
+        core.store.execute(
+            'INSERT INTO runtime_meta (key,value) VALUES '
+            "('privacy_epoch','1') ON CONFLICT(key) DO UPDATE SET "
+            'value=excluded.value,record_sequence=DEFAULT'
+        )
     elif change == "revision":
         core.store.execute("UPDATE conversations SET reply_revision=reply_revision+1")
     elif change == "source":
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (event_id,))
+        core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (event_id,))
     elif change == "receipt":
         core.store.execute(
-            "DELETE FROM runtime_meta WHERE key=?", (owner_delivery.DELIVERY + message_id,)
+            'DELETE FROM runtime_meta WHERE key=%s', (owner_delivery.DELIVERY + message_id,)
         )
     elif change == "config":
         core.settings.voice = voice_config(job_ttl_seconds=91)
@@ -128,7 +132,7 @@ def test_lease_expiry_responsibility_and_node_quarantine(core, monkeypatch):
     core.clock.advance(31)
     with pytest.raises(CoreError, match="VOICE_CLAIM_RETIRED"):
         jobs.claim("local", request)
-    assert core.store.one("SELECT state FROM voice_jobs WHERE job_id=?", (job["job_id"],))[
+    assert core.store.one('SELECT state FROM voice_jobs WHERE job_id=%s', (job["job_id"],))[
         "state"] == "UNKNOWN"
     assert (
         core.store.one("SELECT active_job_id FROM voice_node_state")["active_job_id"]
@@ -168,7 +172,7 @@ def test_erasure_restore_and_revision_hooks_never_requeue(core, monkeypatch, sta
                 restore_voice_jobs(core.store)
             else:
                 row = core.store.one(
-                    "SELECT conversation_id FROM events WHERE event_id=?", (event_id,)
+                    'SELECT conversation_id FROM events WHERE event_id=%s', (event_id,)
                 )
                 fence_conversation(core.store, row["conversation_id"])
     assert jobs.status(job["job_id"])["state"] == ("UNKNOWN" if started else "CANCELLED")
@@ -192,7 +196,7 @@ def test_cached_result_expiry_wipes_payload_and_rejects_duplicate_put(core, monk
 
 def test_asr_preserves_untrusted_scope_partial_and_native_input(core, monkeypatch):
     jobs, _, event_id, key = prepared(core, monkeypatch)
-    original = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,))
+    original = core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event_id,))
     job = create_asr(core, jobs, event_id, key, partial=True)
     assert create_asr(core, jobs, event_id, key, partial=True)["job_id"] == job["job_id"]
     _, response = claim(jobs)
@@ -204,7 +208,7 @@ def test_asr_preserves_untrusted_scope_partial_and_native_input(core, monkeypatc
     evidence = jobs.untrusted_transcription(job["job_id"])
     assert evidence["kind"] == "untrusted_transcription" and evidence["partial"] is True
     assert evidence["text"].startswith("/forget")
-    assert core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,)) == original
+    assert core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event_id,)) == original
     assert core.store.one("SELECT COUNT(*) AS count FROM outbox")["count"] == 1
 
 
@@ -249,7 +253,7 @@ def test_wrong_ref_does_not_mutate_job_and_quota_precedes_storage(core, monkeypa
 
 def test_tts_requires_intact_native_capture_and_voice_scope(core, monkeypatch):
     jobs, message_id, event_id, _ = prepared(core, monkeypatch)
-    core.store.execute("DELETE FROM runtime_meta WHERE key=?", (owner_input.INPUT + event_id,))
+    core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (owner_input.INPUT + event_id,))
     with pytest.raises(CoreError, match="OWNER_SOURCE_CHANGED"):
         create_tts(core, jobs, message_id)
     core.settings.voice = voice_config(job_ttl_seconds=91)
@@ -268,7 +272,7 @@ def test_rotated_policy_claim_persists_revocation(core, monkeypatch, started):
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_CAPABILITY_CHANGED"):
         claim(jobs)
     row = core.store.one(
-        "SELECT state,input_blob,result_blob FROM voice_jobs WHERE job_id=?", (job["job_id"],)
+        'SELECT state,input_blob,result_blob FROM voice_jobs WHERE job_id=%s', (job["job_id"],)
     )
     assert row == {"state": "UNKNOWN" if started else "CANCELLED",
                    "input_blob": None, "result_blob": None}
@@ -289,7 +293,7 @@ def test_erasure_withdraws_completed_audio_and_keeps_only_metadata(core, monkeyp
     assert row["result_sha256"] is None
     assert row["input_blob"] is row["result_blob"] is None
     audit = encode(
-        core.store.rows("SELECT safe_detail_json FROM audit_log WHERE action LIKE 'voice.%'")
+        core.store.rows("SELECT safe_detail_json FROM audit_log WHERE action LIKE 'voice.%%'")
     )
     assert TOKEN not in audit and TEXT not in audit and value.payload.audio_base64 not in audit
     with pytest.raises(CoreError, match="VOICE_LEASE_RETIRED"):

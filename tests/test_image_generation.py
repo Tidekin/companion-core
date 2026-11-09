@@ -31,12 +31,12 @@ def test_maintenance_preserves_bytes_between_dispatch_and_result_commit(
         root.mkdir(mode=0o700, exist_ok=True)
         partial = root / (image_id + ".tmp")
         partial.write_bytes(data[:10])
-        with closing(Store(store.path)) as other:
-            image_generation.cleanup(other, core.clock())
+        with closing(Store(store.database, store.state_directory)) as other:
+            assert image_generation.cleanup(other, core.clock()) == (1, 0)
             assert partial.exists()
             partial.unlink()
             original_write(store, image_id, data)
-            image_generation.cleanup(other, core.clock())
+            assert image_generation.cleanup(other, core.clock()) == (1, 0)
             assert (root / (image_id + ".img")).exists()
         observed.append(image_id)
 
@@ -64,11 +64,10 @@ def test_config_requires_priced_https_provider():
     assert ImageGenerationConfig().enabled is False
     with pytest.raises(ValidationError):
         ImageGenerationConfig(enabled=True)
-    with pytest.raises(ValidationError):
-        config(daily_micro_usd=100)
+    assert config().enabled
     with pytest.raises(ValidationError):
         config(endpoint=MediaEndpoint(url="http://images.example.test/v1", model="m",
-                                      key=SecretStr("k"), max_request_micro_usd=1))
+                                      key=SecretStr("k"), estimated_request_micro_usd=1))
 
 
 @pytest.mark.parametrize("case", ["redirect", "url_only", "too_large", "two", "lost"])
@@ -105,7 +104,7 @@ def test_adapter_request_shape_depends_on_model_family():
     transport = httpx.MockTransport(handler)
     assert run(HTTPImageGenerator(config(), transport).generate("cat", "1024x1024")) == png()
     other = config(endpoint=MediaEndpoint(url=URL, key=SecretStr("synthetic-image-provider-key"),
-                                          model="dall-e-3", max_request_micro_usd=40000))
+                                          model="dall-e-3", estimated_request_micro_usd=40000))
     run(HTTPImageGenerator(other, transport).generate("cat", "1024x1024"))
     assert "response_format" not in bodies[0]
     assert bodies[1]["response_format"] == "b64_json"
@@ -135,7 +134,7 @@ def test_generated_image_reaches_reply_lease_bridge_and_erasure(core, tmp_path):
             assert images == [{"model": "gpt-image-1", "prompt": "一只在窗边晒太阳的橘猫",
                                "n": 1, "size": "1024x1024"}]
             assert [(row["scenario"], row["state"]) for row in core.store.rows(
-                "SELECT scenario,state FROM model_usage ORDER BY rowid")] == [
+                'SELECT scenario,state FROM model_usage ORDER BY record_sequence')] == [
                 ("chat", "SETTLED"), ("image_generation", "SETTLED"), ("chat", "SETTLED")]
             generated = core.store.one("SELECT * FROM generated_images")
             assert generated["state"] == "SUCCEEDED" and generated["event_id"] == event["event_id"]
@@ -168,7 +167,7 @@ def test_generated_image_reaches_reply_lease_bridge_and_erasure(core, tmp_path):
                         "content_sha256": item["content_sha256"]}
                 denied = await client.post(path, json={**body, "lease_token": "lease_" + "b" * 32})
                 assert denied.status_code == 409 and "data_base64" not in denied.text
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
                 erased = await client.post(path, json=body)
                 assert erased.status_code in {403, 409, 410} and "data_base64" not in erased.text
@@ -198,7 +197,10 @@ def test_unknown_image_outcome_keeps_charge_sends_text_and_never_repeats(core, t
                 worker.image_transport = httpx.MockTransport(respond)
                 assert await worker.run_once("generated-image-unknown")
             assert len(images) == 1
-            usage = core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid")
+            usage = core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            )
             assert ("image_generation", "UNKNOWN") in [(r["scenario"], r["state"]) for r in usage]
             assert core.store.one("SELECT state FROM generated_images")["state"] == "UNKNOWN"
             tool = core.store.one("SELECT * FROM agent_tool_calls")
@@ -230,9 +232,9 @@ def test_generated_image_native_delivery_and_uncertainty(core, tmp_path, outcome
             async with worker_for(core, model) as worker:
                 worker.image_transport = httpx.MockTransport(lambda request: image_reply(data))
                 assert await worker.run_once("generated-image-native-send")
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             if outcome == "expired":
-                core.store.execute("UPDATE generated_images SET expires_at=?", (core.clock(),))
+                core.store.execute('UPDATE generated_images SET expires_at=%s', (core.clock(),))
 
             spool, runtime = native_spool(core, tmp_path, config_, plan)
             sends = []
@@ -260,7 +262,9 @@ def test_generated_image_native_delivery_and_uncertainty(core, tmp_path, outcome
                 outbox = core.store.one("SELECT state,attempt_count FROM outbox")
                 assert outbox == {"state": "DELIVERY_UNCERTAIN" if outcome == "lost_ack"
                                   else "SENT", "attempt_count": 1}
-                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+                assert core.store.rows(
+                    'SELECT * FROM model_usage ORDER BY record_sequence'
+                ) == usage
                 if outcome == "lost_ack":
                     assert runtime.row()["state"] == "STOPPED"
             finally:
@@ -293,7 +297,7 @@ def test_refusals_never_reach_the_provider(core, tmp_path, case):
                 assert await worker.run_once("generated-image-refusal")
             assert len(images) == (1 if case == "twice" else 0)
             results = [row["result_json"] for row in core.store.rows(
-                "SELECT result_json FROM agent_tool_calls ORDER BY rowid")]
+                'SELECT result_json FROM agent_tool_calls ORDER BY record_sequence')]
             if case == "size":
                 # The tool schema lists configured sizes only; the SDK rejects the call.
                 assert not results and "1024x1024" in json.dumps(provider.requests[0]["tools"])

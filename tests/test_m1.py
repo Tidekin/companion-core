@@ -11,6 +11,7 @@ from companion.core import Core
 from companion.privacy import epoch
 from companion.store import after, encode, migrate
 from tests.conftest import ingest, run
+from tests.postgres_fixture import isolated_database
 from tests.support.confirmed_memory import remember
 
 
@@ -75,7 +76,7 @@ def test_m1_07_conflicts_do_not_overwrite(core):
     assert {r["memory_id"] for r in rows} == {a, b}
     assert all(r["needs_review"] for r in rows)
     assert (
-        core.store.one("SELECT status FROM memories WHERE memory_id=?", (a,))["status"]
+        core.store.one('SELECT status FROM memories WHERE memory_id=%s', (a,))["status"]
         == "CONFIRMED"
     )
 
@@ -91,7 +92,7 @@ def test_m1_08_correction_supersedes_and_keeps_revision(core):
         == "我喜欢绿茶"
     )
     assert (
-        core.store.one("SELECT status FROM memories WHERE memory_id=?", (a,))["status"]
+        core.store.one('SELECT status FROM memories WHERE memory_id=%s', (a,))["status"]
         == "SUPERSEDED"
     )
 
@@ -101,7 +102,7 @@ def test_m1_09_erasure_invalidates_derivatives_and_survives_old_backup(core, tmp
     memory_id = remember(core, 1, secret_fact, confirmed=True)
     run(core.run_once())
     e = core.store.one("SELECT * FROM events")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.memory.episodes([e], core.clock())
     key = Fernet.generate_key()
     archive = tmp_path / "old.enc"
@@ -112,23 +113,24 @@ def test_m1_09_erasure_invalidates_derivatives_and_survives_old_backup(core, tmp
     assert secret_fact not in encode(core.store.rows("SELECT body_json FROM events"))
     assert secret_fact not in encode(core.store.rows("SELECT content_json FROM outbox"))
     assert secret_fact not in Path(core.settings.erasure_ledger).read_text("utf-8")
-    restored = tmp_path / "restored.db"
-    restore(archive, restored, key, core.settings.erasure_ledger)
-    reopened = Core(
-        core.settings.model_copy(update={"database": str(restored)}), core.model, core.clock
-    )
-    assert reopened.memory.search("茉莉") == []
-    assert secret_fact not in encode(reopened.store.rows("SELECT * FROM episodes"))
-    reopened.store.close()
-    with pytest.raises(CoreError):
-        restore(archive, tmp_path / "bad.db", key, tmp_path / "missing-ledger")
+    with isolated_database() as database:
+        state = tmp_path / "restored-state"
+        restore(archive, database, key, core.settings.erasure_ledger, state_directory=state)
+        settings = core.settings.model_copy(update={"database": database,
+                                                    "state_directory": str(state)})
+        with Core(settings, core.model, core.clock) as reopened:
+            assert reopened.memory.search("茉莉") == []
+            assert secret_fact not in encode(reopened.store.rows("SELECT * FROM episodes"))
+    with isolated_database() as database, pytest.raises(CoreError):
+        restore(archive, database, key, tmp_path / "missing-ledger",
+                state_directory=tmp_path / "missing-ledger-state")
 
 
 def test_m1_10_invalid_evidence_downgrades_inference(core):
     memory_id = remember(core, 1, "我喜欢茉莉绿茶", confirmed=True)
     core.store.execute("UPDATE events SET redacted=1,body_json='{}'")
     assert core.memory.search("绿茶") == []
-    row = core.store.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+    row = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (memory_id,))
     assert row["confidence"] == 0 and row["needs_review"] == 1
 
 
@@ -150,11 +152,17 @@ def test_m1_12_nonowner_cannot_retrieve_private_memory(core):
 def test_m1_13_migration_and_fts_short_chinese(core):
     remember(core, 1, "我喜欢茉莉绿茶", confirmed=True)
     migrate(core.settings.database)
-    other = Core(core.settings, core.model, core.clock)
-    assert len(other.memory.search("绿茶")) == 1
-    assert len(other.memory.search("茉莉绿茶")) == 1
-    assert other.store.rows("PRAGMA foreign_key_check") == []
-    other.store.close()
+    with Core(core.settings, core.model, core.clock) as other:
+        assert len(other.memory.search("绿茶")) == 1
+        assert len(other.memory.search("茉莉绿茶")) == 1
+        assert other.store.one(
+            "SELECT bool_and(convalidated) AS valid FROM pg_constraint "
+            "WHERE connamespace=current_schema()::regnamespace AND contype='f'"
+        )["valid"]
+        assert not other.store.one(
+            "SELECT 1 FROM memory_evidence me LEFT JOIN memories m USING (memory_id) "
+            "LEFT JOIN events e USING (event_id) WHERE m.memory_id IS NULL OR e.event_id IS NULL"
+        )
 
 
 def test_m1_14_replay_one_hundred_format_valid_messages(core):
@@ -166,7 +174,8 @@ def test_m1_14_replay_one_hundred_format_valid_messages(core):
         core.store.execute("UPDATE outbox SET state='SENT'")
     assert core.store.one("SELECT COUNT(*) AS n FROM memories WHERE status='CONFIRMED'")["n"] == 30
     assert (
-        core.store.one("SELECT COUNT(*) AS n FROM outbox WHERE action_type LIKE 'qzone.%'")["n"]
+        core.store.one("SELECT COUNT(*) AS n FROM outbox WHERE action_type LIKE %s",
+                       ("qzone.%",))["n"]
         == 0
     )
     chat_calls = [messages for messages, scenario in core.model.calls if scenario == "chat"]
@@ -252,18 +261,18 @@ def test_forget_in_recall_request_hook_keeps_retry_contract_before_provider_disp
             query="茉莉绿茶", tool_query="*", request_hook=forget) as value:
             source = await value.capture()
             assert await value.worker.run_once("forget-before-native-answer-dispatch")
-            assert core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+            assert core.store.one('SELECT state,last_error_code FROM jobs WHERE event_id=%s',
                 (source["event_id"],)) == {"state": "CANCELLED",
                                          "last_error_code": "REPLY_SOURCE_RECALLED"}
             assert len(value.calls) == 1 and not value.sends
             assert not core.store.rows("SELECT * FROM outbox")
-            usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage ORDER BY rowid")
+            usage_query = "SELECT state,billed_micro_usd FROM model_usage ORDER BY record_sequence"
+            usage = core.store.rows(usage_query)
             assert len(usage) == 2 and all(row["state"] == "SETTLED" for row in usage)
             assert usage[0]["billed_micro_usd"] > 0
             assert usage[1]["billed_micro_usd"] == 0
             assert not await value.worker.run_once("no-stale-recall-retry")
-            assert core.store.rows(
-                "SELECT state,billed_micro_usd FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows(usage_query) == usage
     value = None
     run(scenario())
 
@@ -275,7 +284,7 @@ def test_candidate_distinguishes_unsupported_text_from_unavailable_source(core, 
         core.store.execute("UPDATE events SET redacted=1")
     elif source == "expired":
         expired_at = after(core.clock(), -86400 * core.settings.raw_event_retention_days - 1)
-        core.store.execute("UPDATE events SET ingested_at=?", (expired_at,))
+        core.store.execute('UPDATE events SET ingested_at=%s', (expired_at,))
     candidate = Candidate(subject="user", kind="fact", fact_key="not-owner",
                           content="引用不是主人原话", evidence_quote="  ",
                           evidence_event_id="missing" if source == "missing" else "evt_test_1")

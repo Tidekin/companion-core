@@ -40,7 +40,11 @@ def test_ten_thousand_idle_claims_keep_one_slot_and_reject_consumed_sequences(co
         assert jobs.claim("local", current).lease is None
     assert core.store.one("SELECT COUNT(*) n FROM voice_node_state")["n"] == 1
     assert core.store.one("SELECT last_claim_seq FROM voice_node_state")["last_claim_seq"] == 10_000
-    assert not core.store.one("SELECT 1 FROM sqlite_master WHERE name='voice_claims'")
+    assert not core.store.one(
+        'SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relkind IN ('r','p')"
+        " AND relname='voice_claims'"
+    )
     assert jobs.claim("local", current).lease is None
     with pytest.raises(CoreError, match="VOICE_CLAIM_RETIRED"):
         jobs.claim("local", first)
@@ -57,7 +61,7 @@ def test_expiry_is_persisted_across_restart_and_clock_rollback(core, monkeypatch
     core.clock.advance(core.settings.voice.job_ttl_seconds + 1)
     assert not jobs.session("local").replay_available
     core.clock.advance(-core.settings.voice.job_ttl_seconds - 1)
-    with closing(Store(core.settings.database)) as restarted:
+    with closing(Store(core.store.database, core.store.state_directory)) as restarted:
         reader = VoiceJobs(restarted, core.settings, core.clock)
         with pytest.raises(CoreError, match="VOICE_CLAIM_RETIRED"):
             reader.claim("local", first)
@@ -71,7 +75,7 @@ def test_two_connections_same_sequence_allocate_one_identical_lease(core, monkey
     barrier = Barrier(2)
 
     def allocate():
-        store = Store(core.settings.database)
+        store = Store(core.store.database, core.store.state_directory)
         try:
             barrier.wait()
             return VoiceJobs(store, core.settings, core.clock).claim("local", claim)
@@ -94,7 +98,7 @@ def test_session_expiry_cannot_clear_a_newer_claim_from_another_connection(core,
 
     @contextmanager
     def concurrent_claim_before_expiry_write():
-        with closing(Store(core.settings.database)) as other:
+        with closing(Store(core.store.database, core.store.state_directory)) as other:
             VoiceJobs(other, core.settings, core.clock).claim(
                 "local", first.model_copy(update={"sequence": 2}))
         with transaction():
@@ -119,7 +123,7 @@ def test_forget_scrubs_voice_content_but_random_stop_capability_only_closes_cust
     with pytest.raises(CoreError, match="VOICE_LEASE_MISMATCH"):
         jobs.input("local", ref.model_copy(update={"lease_token": lease.stop_token}))
     jobs.input("local", ref)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
     row = core.store.one("SELECT * FROM voice_jobs")
     for field in ("input_blob", "result_blob", "input_sha256", "result_sha256", "lease_json",
@@ -127,7 +131,7 @@ def test_forget_scrubs_voice_content_but_random_stop_capability_only_closes_cust
         assert row[field] is None
     assert row["state"] == "UNKNOWN" and row["cleanup_state"] == "PENDING"
     assert lease.input_sha256 not in str(core.store.rows(
-        "SELECT safe_detail_json FROM audit_log WHERE action LIKE 'voice.%'"))
+        "SELECT safe_detail_json FROM audit_log WHERE action LIKE 'voice.%%'"))
     with pytest.raises(CoreError, match="VOICE_LEASE_RETIRED"):
         jobs.input("local", ref)
     with pytest.raises(CoreError, match="VOICE_CLAIM_RETIRED"):
@@ -212,7 +216,7 @@ def test_disabled_node_can_ack_cleanup_only_at_current_epoch_through_http(core, 
     lease = jobs.claim("local", request(jobs)).lease
     execution = VoiceLeaseRef.from_lease(lease)
     jobs.input("local", execution)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
     node = core.settings.voice.nodes["local"].model_copy(update={"enabled": False})
     core.settings.voice = core.settings.voice.model_copy(update={"nodes": {"local": node}})

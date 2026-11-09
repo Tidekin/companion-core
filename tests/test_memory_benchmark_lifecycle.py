@@ -1,5 +1,4 @@
 """18 independent fictional lifecycle instances; separate from semantic answers."""
-
 from contextlib import closing
 
 import pytest
@@ -7,8 +6,10 @@ from cryptography.fernet import Fernet
 
 from companion.backup import backup, restore
 from companion.memory import Memory
+from companion.postgres import Database
 from companion.store import Store, encode
 from tests.conftest import ingest
+from tests.postgres_fixture import isolated_database
 from tests.support.memory_commands import fact
 
 PROFILES = [
@@ -33,7 +34,8 @@ def test_fictional_suite_lifecycle(core, tmp_path, persona, name, operation, rec
     target = fact(core, 1, original)
     independent = fact(core, 2, independent_text)
     key = Fernet.generate_key()
-    archive, destination = tmp_path / "before.enc", tmp_path / "restored.sqlite3"
+    archive = tmp_path / "before.enc"
+    state_directory = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     if operation == "correct":
         source = ingest(core, 3, f"/纠正这一条 {target} {replacement}")
@@ -43,31 +45,44 @@ def test_fictional_suite_lifecycle(core, tmp_path, persona, name, operation, rec
         hits = core.memory.search("测试样本代号", now=core.clock())
         assert new_id in {r["memory_id"] for r in hits}
         assert target not in {r["memory_id"] for r in hits}
-        assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (target,)) == {
+        assert core.store.one("SELECT status FROM memories WHERE memory_id=%s", (target,)) == {
             "status": "SUPERSEDED"
         }
     elif operation == "recall":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
         hits = core.memory.search("测试样本代号", now=core.clock())
         assert target not in {r["memory_id"] for r in hits}
         assert original not in encode(hits)
-        restore(archive, destination, key, core.settings.erasure_ledger)
     else:
         core.memory.decide(target, "forget", core.clock())
         assert target not in {r["memory_id"] for r in core.memory.search("测试样本代号")}
-        restore(archive, destination, key, core.settings.erasure_ledger)
-    assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (independent,)) == {
+    assert core.store.one("SELECT status FROM memories WHERE memory_id=%s", (independent,)) == {
         "status": "CONFIRMED"
     }
     if operation != "correct":
-        with closing(Store(str(destination))) as reopened:
-            memory = Memory(reopened, core.settings, core.ledger)
-            reopened.execute("DELETE FROM memory_vectors")
-            hits = memory.search("测试样本代号", now=core.clock())
-            assert target not in {r["memory_id"] for r in hits}
-            assert original not in encode(hits)
-            assert reopened.one(
-                "SELECT status FROM memories WHERE memory_id=?", (independent,)
-            ) == {"status": "CONFIRMED"}
+        with isolated_database() as destination:
+            restore(
+                archive,
+                destination,
+                key,
+                core.settings.erasure_ledger,
+                state_directory=state_directory,
+            )
+            with (
+                Database(destination) as database,
+                closing(Store(database, state_directory)) as reopened,
+            ):
+                configuration = core.settings.model_copy(
+                    update={"database": destination, "state_directory": str(state_directory)}
+                )
+                memory = Memory(reopened, configuration, core.ledger)
+                reopened.execute("DELETE FROM memory_vectors")
+                hits = memory.search("测试样本代号", now=core.clock())
+                assert target not in {r["memory_id"] for r in hits}
+                assert original not in encode(hits)
+                assert reopened.one(
+                    "SELECT status FROM memories WHERE memory_id=%s",
+                    (independent,),
+                ) == {"status": "CONFIRMED"}
     assert core.store.rows("SELECT * FROM model_usage") == []

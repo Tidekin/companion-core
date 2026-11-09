@@ -12,11 +12,11 @@ from tests.support.qq_files import prepared, signed_upload
 def test_file_source_requires_real_capture_and_current_owner(core, monkeypatch):
     _, approval, _, event_id, files = prepared(core, monkeypatch)
     assert qq_files.source(core.store, core.settings, approval, event_id)[2] == files
-    receipt = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    receipt = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                              ("live_text_input:" + event_id,))
     broken = json.loads(receipt["value"])
     broken["capture"]["signature"] = "0" * 128
-    core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+    core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                        (encode(broken), "live_text_input:" + event_id))
     with pytest.raises(CoreError, match="LIVE_SOURCE_CAPTURE_CHANGED"):
         qq_files.source(core.store, core.settings, approval, event_id)

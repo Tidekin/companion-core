@@ -154,7 +154,7 @@ def validate_reset_record(record):
 
 
 def reset_at(store):
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (RESET_KEY,))
+    row = store.one("SELECT value FROM runtime_meta WHERE key = %s", (RESET_KEY,))
     try:
         return stamp(row["value"]) if row else None
     except (TypeError, ValueError) as error:
@@ -164,13 +164,17 @@ def reset_at(store):
 def apply_reset(store, record):
     from companion.privacy import advance_epoch
 
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("MOOD_RESET_REQUIRES_TRANSACTION")
     validate_reset_record(record)
     previous = reset_at(store)
     cutoff = max(stamp(record["at"]), previous or stamp(record["at"]))
     if cutoff != previous:
-        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (RESET_KEY, cutoff))
+        store.execute(
+            "INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO "
+            "UPDATE SET value = excluded.value, record_sequence = DEFAULT",
+            (RESET_KEY, cutoff),
+        )
         advance_epoch(store)
     return {"state": "RESET", "reset_at": cutoff}
 
@@ -230,8 +234,14 @@ class MoodService:
             return None
         for row in rows:
             if row["source"] == "qq.onebot" and not (
-                source_check(row["event_id"]) if source_check is not None else source_allowed(
-                    self.store, self.settings, self.clock, row["event_id"], "expression",
+                source_check(row["event_id"])
+                if source_check is not None
+                else source_allowed(
+                    self.store,
+                    self.settings,
+                    self.clock,
+                    row["event_id"],
+                    "expression",
                 )
             ):
                 return None
@@ -239,7 +249,7 @@ class MoodService:
 
     def _signals(self, at, allowed):
         s, cfg = self.store, self.settings
-        if owner_authority.required(s, cfg) and not s.db.in_transaction:
+        if owner_authority.required(s, cfg) and not s.in_transaction:
             # Reuse the native history reader's synchronous batch on one DB state.
             # This batch never spans an await or a later context revalidation.
             return s.read_or_write(lambda: self._signals(at, allowed))
@@ -253,23 +263,29 @@ class MoodService:
                     after(self.clock(), -view.policy.source_retention_days * 86400)
                 ),
             )
-        def frozen():
-            return s.in_write_transaction or s.in_read_snapshot
 
-        transactional, changes = frozen(), s.db.total_changes
+        def frozen():
+            return s.in_read_snapshot
+
+        transactional, changes = frozen(), s.change_token()
         originals = {encode(view.authority.as_dict()): view} if view else {}
 
         def batched():
-            return view and transactional and frozen() and s.db.total_changes == changes
+            return view and transactional and frozen() and s.change_token() == changes
 
         def permitted(purpose):
             if not batched():
                 return self._permitted(purpose)
             # The batch view is the current one on this DB state; the boundary below
             # rechecks live authority and independent files once for every signal.
-            return (cfg.owner_runtime.mode == "ENABLED" and purpose in view.policy.purposes
-                    and (view.policy.expires_at is None
-                         or datetime.fromisoformat(self.clock()) < view.policy.expires_at))
+            return (
+                cfg.owner_runtime.mode == "ENABLED"
+                and purpose in view.policy.purposes
+                and (
+                    view.policy.expires_at is None
+                    or datetime.fromisoformat(self.clock()) < view.policy.expires_at
+                )
+            )
 
         def evidence(ref):
             key = encode(ref)
@@ -281,35 +297,55 @@ class MoodService:
             if not batched():
                 return source_allowed(s, cfg, self.clock, event_id, "expression")
             now = self.clock()
-            if (cfg.owner_runtime.mode != "ENABLED" or "expression" not in view.policy.purposes
+            if (
+                cfg.owner_runtime.mode != "ENABLED"
+                or "expression" not in view.policy.purposes
                 or view.policy.expires_at is not None
-                and datetime.fromisoformat(now) >= view.policy.expires_at):
+                and datetime.fromisoformat(now) >= view.policy.expires_at
+            ):
                 raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
-            receipt = s.one("SELECT value FROM runtime_meta WHERE key=?",
-                            (owner_input.INPUT + event_id,))
+            receipt = s.one(
+                "SELECT value FROM runtime_meta WHERE key = %s", (owner_input.INPUT + event_id,)
+            )
             try:
                 original = json.loads(receipt["value"]).get("authority") if receipt else None
-                owner_input._source(s, cfg, view, event_id, now,
+                owner_input._source(
+                    s,
+                    cfg,
+                    view,
+                    event_id,
+                    now,
                     history=original != view.authority.as_dict(),
-                    verify_capture=lambda value: owner_input._verify(s, cfg, value, evidence))
+                    verify_capture=lambda value: owner_input._verify(s, cfg, value, evidence),
+                )
             except (CoreError, ValueError, TypeError, AttributeError):
                 return False
             return True
 
         cutoff = max(after(at, -WINDOW), reset_at(s) or after(at, -WINDOW))
         candidates = s.rows(
-            "SELECT e.event_id,e.occurred_at AS at,'feedback' AS kind FROM events e "
-            "WHERE e.source='qq.onebot' AND e.actor_id='owner' AND e.redacted=0 "
-            "AND e.event_type='message.received' AND e.ingested_at>? AND e.ingested_at<=? "
-            "AND e.occurred_at>? AND e.occurred_at<=? "
-            "AND length(e.body_json)<=16000 AND rtrim(trim(json_extract(e.body_json,'$.text')),"
-            "'。！! ') IN (SELECT value FROM json_each(?)) UNION ALL "
-            "SELECT w.source_event_id,w.updated_at,'watch' FROM watch_ledger w "
-            "WHERE w.state='JUDGED' AND w.rating<>0 AND w.depth<>'title_only' "
-            "AND w.updated_at>? AND w.updated_at<=? UNION ALL "
-            "SELECT g.result_event_id,g.updated_at,'goal' FROM goals g WHERE g.state='DONE' "
-            "AND g.redacted=0 AND g.result_event_id IS NOT NULL AND g.updated_at>? "
-            "AND g.updated_at<=? ORDER BY at DESC,event_id,kind LIMIT ?",
+            (
+                (
+                    "SELECT e.event_id,e.occurred_at AS at,'feedback' AS "
+                    "kind FROM events e WHERE e.source='qq.onebot' AND "
+                    "e.actor_id='owner' AND e.redacted=0 AND "
+                    "e.event_type='message.received' AND e.ingested_at>%s "
+                    'AND e.ingested_at<=%s AND e.occurred_at>%s AND '
+                    'e.occurred_at<=%s AND length(e.body_json)<=16000 AND '
+                    'rtrim(trim((CASE WHEN e.body_json IS JSON THEN '
+                    "(e.body_json::json#>>'{text}') END)),'。！! ') IN "
+                    '(SELECT value FROM json_array_elements_text(%s::json) '
+                    'AS ids(value)) UNION ALL SELECT w.source_event_id,'
+                    "w.updated_at,'watch' FROM watch_ledger w WHERE "
+                    "w.state='JUDGED' AND w.rating<>0 AND "
+                    "w.depth<>'title_only' AND w.updated_at>%s AND "
+                    'w.updated_at<=%s UNION ALL SELECT g.result_event_id,'
+                    "g.updated_at,'goal' FROM goals g WHERE g.state='DONE' "
+                    'AND g.redacted=0 AND g.result_event_id IS NOT NULL AND '
+                    'g.updated_at>%s AND g.updated_at<=%s ORDER BY at DESC,'
+                    'event_id,kind LIMIT %s'
+                )
+            ),
             (cutoff, at, cutoff, at, encode(list(CHAT_SIGNALS)), cutoff, at, cutoff, at, LIMIT + 1),
         )
         signals, used = [], set()
@@ -345,27 +381,57 @@ class MoodService:
                     continue
                 # Feedback refers to an actual delivered reply in this conversation.
                 reply = s.one(
-                    "SELECT o.* FROM outbox o JOIN events original "
-                    "ON original.event_id=o.origin_event_id "
-                    "WHERE o.conversation_id=? AND o.state='SENT' "
-                    "AND o.action_type='qq.private.reply' AND o.sent_at<=? "
-                    "AND original.rowid<(SELECT rowid FROM events WHERE event_id=?) "
-                    "ORDER BY o.sent_at DESC,o.rowid DESC LIMIT 1",
+                    (
+                        'SELECT o.message_id AS message_id, o.origin_event_id '
+                        'AS origin_event_id, o.conversation_id AS '
+                        'conversation_id, o.action_type AS action_type, '
+                        'o.content_json AS content_json, o.content_sha256 AS '
+                        'content_sha256, o.approval_id AS approval_id, o.state '
+                        'AS state, o.delivery_key AS delivery_key, '
+                        'o.lease_owner AS lease_owner, o.lease_until AS '
+                        'lease_until, o.attempt_count AS attempt_count, '
+                        'o.provider_message_id AS provider_message_id, '
+                        'o.last_error_code AS last_error_code, o.created_at AS '
+                        'created_at, o.updated_at AS updated_at, o.sent_at AS '
+                        'sent_at, o.lease_token AS lease_token, '
+                        'o.next_attempt_at AS next_attempt_at, o.reply_group_id '
+                        'AS reply_group_id, o.segment_index AS segment_index, '
+                        'o.segment_count AS segment_count, o.reply_group_sha256 '
+                        'AS reply_group_sha256, o.segment_interval_ms AS '
+                        'segment_interval_ms, o.delivery_lane AS delivery_lane, '
+                        'o.native_ack_json AS native_ack_json, o.authority_json '
+                        'AS authority_json FROM outbox AS o JOIN events AS '
+                        'original ON original.event_id = o.origin_event_id '
+                        "WHERE o.conversation_id = %s AND o.state = 'SENT' AND "
+                        "o.action_type = 'qq.private.reply' AND o.sent_at <= %s "
+                        'AND original.record_sequence < (SELECT record_sequence '
+                        'AS rowid FROM events AS events WHERE events.event_id = '
+                        '%s) ORDER BY o.sent_at DESC NULLS LAST, '
+                        'o.record_sequence DESC NULLS LAST LIMIT 1'
+                    ),
                     (event["conversation_id"], candidate["at"], key),
                 )
-                if not reply or not (prior := self._lineage(
-                    reply["origin_event_id"], sources, source_check,
-                )):
+                if not reply or not (
+                    prior := self._lineage(
+                        reply["origin_event_id"],
+                        sources,
+                        source_check,
+                    )
+                ):
                     continue
                 # A possibly delivered newer reply makes the feedback target ambiguous.
                 # Never silently attribute it to an older known SENT reply instead.
                 uncertain = s.one(
-                    "SELECT 1 FROM outbox o JOIN events original "
-                    "ON original.event_id=o.origin_event_id WHERE o.conversation_id=? "
-                    "AND o.action_type='qq.private.reply' "
-                    "AND o.state IN ('SENDING','DELIVERY_UNCERTAIN') "
-                    "AND o.created_at>=? AND o.created_at<=? "
-                    "AND original.rowid<(SELECT rowid FROM events WHERE event_id=?) LIMIT 1",
+                    (
+                        'SELECT 1 FROM outbox AS o JOIN events AS original ON '
+                        'original.event_id = o.origin_event_id WHERE '
+                        'o.conversation_id = %s AND o.action_type = '
+                        "'qq.private.reply' AND o.state IN ('SENDING', "
+                        "'DELIVERY_UNCERTAIN') AND o.created_at >= %s AND "
+                        'o.created_at <= %s AND original.record_sequence < '
+                        '(SELECT record_sequence AS rowid FROM events WHERE '
+                        'event_id = %s) LIMIT 1'
+                    ),
                     (event["conversation_id"], reply["created_at"], candidate["at"], key),
                 )
                 if uncertain:
@@ -376,11 +442,15 @@ class MoodService:
                     # Deictic phrases such as "this idea" need a recent, adjacent
                     # delivered turn. Never guess across a later topic or a gap.
                     preceding = s.one(
-                        "SELECT event_id FROM events WHERE conversation_id=? "
-                        "AND source='qq.onebot' AND actor_id='owner' "
-                        "AND event_type IN ('message.received','message.media_received') "
-                        "AND rowid<(SELECT rowid FROM events WHERE event_id=?) "
-                        "ORDER BY rowid DESC LIMIT 1",
+                        (
+                            'SELECT event_id FROM events WHERE conversation_id = %s '
+                            "AND source = 'qq.onebot' AND actor_id = 'owner' AND "
+                            "event_type IN ('message.received', "
+                            "'message.media_received') AND record_sequence < "
+                            '(SELECT record_sequence AS rowid FROM events WHERE '
+                            'event_id = %s) ORDER BY record_sequence DESC NULLS '
+                            'LAST LIMIT 1'
+                        ),
                         (event["conversation_id"], key),
                     )
                     elapsed = (
@@ -400,10 +470,35 @@ class MoodService:
             elif kind == "watch":
                 if not permitted("exploration"):
                     continue
-                detail = s.one("SELECT * FROM watch_ledger WHERE source_event_id=?", (key,))
-                observation = s.one("SELECT * FROM observations WHERE event_id=?", (key,))
+                detail = s.one(
+                    "SELECT watch_ledger.entry_id AS entry_id, "
+                    "watch_ledger.source_event_id AS source_event_id, watch_ledger.platform AS "
+                    "platform, watch_ledger.item_ref AS item_ref, watch_ledger.depth AS depth, "
+                    "watch_ledger.state AS state, watch_ledger.attempts AS attempts, "
+                    "watch_ledger.lease_until AS lease_until, watch_ledger.next_attempt_at AS "
+                    "next_attempt_at, watch_ledger.model_request_id AS model_request_id, "
+                    "watch_ledger.rating AS rating, watch_ledger.take AS take, "
+                    "watch_ledger.topic_tags_json AS topic_tags_json, watch_ledger.error_code AS "
+                    "error_code, watch_ledger.created_at AS created_at, watch_ledger.updated_at AS "
+                    "updated_at FROM watch_ledger AS watch_ledger WHERE "
+                    "watch_ledger.source_event_id = %s",
+                    (key,),
+                )
+                observation = s.one(
+                    "SELECT observations.event_id AS event_id, "
+                    "observations.adapter_id AS adapter_id, observations.source_kind AS "
+                    "source_kind, observations.result_status AS result_status, "
+                    "observations.source_sha256 AS source_sha256, observations.canonical_url AS "
+                    "canonical_url, observations.device_id AS device_id, observations.session_id "
+                    "AS session_id, observations.consent_id AS consent_id, "
+                    "observations.evidence_json AS evidence_json, "
+                    "observations.captured_privacy_epoch AS captured_privacy_epoch, "
+                    "observations.redacted AS redacted, observations.created_at AS created_at FROM "
+                    "observations AS observations WHERE observations.event_id = %s",
+                    (key,),
+                )
                 usage = s.one(
-                    "SELECT state,scenario FROM model_usage WHERE request_id=?",
+                    "SELECT state, scenario FROM model_usage WHERE request_id = %s",
                     (detail["model_request_id"],),
                 )
                 if (
@@ -431,15 +526,33 @@ class MoodService:
                 engine = GoalEngine(s, cfg, self.memory.ledger, self.clock)
                 projection = MemoryProjections(self.memory)
                 goals = s.rows(
-                    "SELECT * FROM goals WHERE result_event_id=? AND state='DONE' "
-                    "AND redacted=0 ORDER BY goal_id",
+                    "SELECT goals.goal_id AS goal_id, goals.kind AS kind, goals.topic AS topic, "
+                    "goals.scope_json AS scope_json, goals.proposal_key AS proposal_key, "
+                    "goals.state AS state, goals.priority AS priority, goals.next_due_at AS "
+                    "next_due_at, goals.last_error_code AS last_error_code, goals.version AS "
+                    "version, goals.result_event_id AS result_event_id, goals.created_at AS "
+                    "created_at, goals.updated_at AS updated_at, goals.redacted AS redacted, "
+                    "goals.reflection_suggestion_id AS reflection_suggestion_id, "
+                    "goals.authority_json AS authority_json FROM goals AS goals WHERE "
+                    "goals.result_event_id = %s AND goals.state = 'DONE' AND goals.redacted = 0 "
+                    "ORDER BY goals.goal_id NULLS FIRST",
                     (key,),
                 )
                 found = None
                 for goal in goals:
                     roots = engine.source_ids(goal["goal_id"])
                     steps = s.rows(
-                        "SELECT * FROM goal_steps WHERE goal_id=? ORDER BY position",
+                        "SELECT goal_steps.step_id AS step_id, goal_steps.goal_id AS goal_id, "
+                        "goal_steps.position AS position, goal_steps.scope_json AS scope_json, "
+                        "goal_steps.state AS state, goal_steps.attempts AS attempts, "
+                        "goal_steps.max_attempts AS max_attempts, goal_steps.lease_token AS "
+                        "lease_token, goal_steps.lease_until AS lease_until, "
+                        "goal_steps.captured_privacy_epoch AS captured_privacy_epoch, "
+                        "goal_steps.outcome_event_id AS outcome_event_id, "
+                        "goal_steps.last_error_code AS last_error_code, goal_steps.created_at AS "
+                        "created_at, goal_steps.updated_at AS updated_at FROM goal_steps AS "
+                        "goal_steps WHERE goal_steps.goal_id = %s ORDER BY goal_steps.position "
+                        "NULLS FIRST",
                         (goal["goal_id"],),
                     )
                     if (
@@ -455,8 +568,10 @@ class MoodService:
                     ):
                         continue
                     expanded = [self._lineage(root, sources, source_check) for root in roots]
-                    expanded += [self._lineage(step["outcome_event_id"], sources, source_check)
-                                 for step in steps]
+                    expanded += [
+                        self._lineage(step["outcome_event_id"], sources, source_check)
+                        for step in steps
+                    ]
                     if any(not value for value in expanded):
                         continue
                     lineage += [row for value in expanded for row in value]
@@ -464,7 +579,9 @@ class MoodService:
                     break
                 if not found:
                     continue
-                receipt = s.one("SELECT canonical_url FROM observations WHERE event_id=?", (key,))
+                receipt = s.one(
+                    "SELECT canonical_url FROM observations WHERE event_id = %s", (key,)
+                )
                 identity, detail = "read:" + receipt["canonical_url"], found
                 reason, delta = "VERIFIED_GOAL_COMPLETION", (0.03, 0.0, 0.04)
             ids = sorted({row["event_id"] for row in lineage})
@@ -486,8 +603,9 @@ class MoodService:
             if (category, identity) not in used:
                 signals.append(signal)
                 used.add((category, identity))
-        signals += self._appraisals(at, allowed, cutoff, sources,
-                                   {x["event_id"] for x in signals}, source_check)
+        signals += self._appraisals(
+            at, allowed, cutoff, sources, {x["event_id"] for x in signals}, source_check
+        )
         # The same observation's review and verified goal result form one bounded impulse.
         merged = {}
         for item in signals:
@@ -506,11 +624,15 @@ class MoodService:
                 prior["reason"], prior["kind"] = "REVIEWED_GOAL_COMPLETION", "experience"
             else:
                 merged[key] = item
-        if view and transactional:
+        if view:
             # Independent journals, STOP and time remain live at the batch boundary.
-            owner_authority.current(s, cfg, self.clock, purpose="expression",
-                                    authority=view.authority)
-            if not frozen() or s.db.total_changes != changes:
+            owner_authority.current(
+                s, cfg, self.clock, purpose="expression", authority=view.authority
+            )
+            if transactional:
+                if not frozen() or s.change_token() != changes:
+                    raise CoreError("PRIVACY_CHANGED", 409)
+            elif not s.in_transaction or s.change_token()["writes"] != changes["writes"]:
                 raise CoreError("PRIVACY_CHANGED", 409)
         ordered = sorted(
             merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
@@ -526,8 +648,14 @@ class MoodService:
         s = self.store
         signals = []
         for row in s.rows(
-            "SELECT * FROM mood_appraisals WHERE created_at>? AND created_at<=? "
-            "ORDER BY created_at,event_id",
+            "SELECT mood_appraisals.event_id AS event_id, mood_appraisals.reason AS reason, "
+            "mood_appraisals.quote_start AS quote_start, mood_appraisals.quote_length AS "
+            "quote_length, mood_appraisals.quote_sha256 AS quote_sha256, "
+            "mood_appraisals.request_id AS request_id, mood_appraisals.created_at AS created_at, "
+            "mood_appraisals.target_message_id AS target_message_id, mood_appraisals.target_sha256 "
+            "AS target_sha256 FROM mood_appraisals AS mood_appraisals WHERE "
+            "mood_appraisals.created_at > %s AND mood_appraisals.created_at <= %s ORDER BY "
+            "mood_appraisals.created_at NULLS FIRST, mood_appraisals.event_id NULLS FIRST",
             (cutoff, at),
         ):
             key = row["event_id"]
@@ -545,7 +673,7 @@ class MoodService:
             if row["target_message_id"]:
                 # Hurt about a reply also rests on that reply's own input.
                 target = s.one(
-                    "SELECT action_type,origin_event_id FROM outbox WHERE message_id=?",
+                    "SELECT action_type, origin_event_id FROM outbox WHERE message_id = %s",
                     (row["target_message_id"],),
                 )
                 if target["action_type"] == "qq.private.reply":
@@ -576,7 +704,7 @@ class MoodService:
             raise CoreError("MOOD_TIME_INVALID", 400)
         captured = read_version(self.memory)
         paused = self.store.one(
-            "SELECT 1 FROM runtime_meta WHERE key=? AND value='1'", (PAUSE_KEY,)
+            "SELECT 1 FROM runtime_meta WHERE key = %s AND value = '1'", (PAUSE_KEY,)
         )
         enabled = bool(self.settings.mood_enabled)
         active = enabled and not paused and self._permitted("expression")
@@ -646,14 +774,17 @@ class MoodService:
             raise CoreError("OWNER_REQUIRED", 403)
         if action not in {"pause", "resume", "clear", "recompute"}:
             raise CoreError("MOOD_ACTION_INVALID", 400)
-        with nullcontext() if self.store.db.in_transaction else self.store.transaction():
+        with nullcontext() if self.store.in_transaction else self.store.transaction(
+            control_write=True
+        ):
             if action == "clear":
                 return self.memory.ledger.reset_mood(self.store, request_id, self.clock())
             if action in {"pause", "resume"}:
                 from companion.privacy import advance_epoch
 
                 self.store.execute(
-                    "INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                    "INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO "
+                    "UPDATE SET value = excluded.value, record_sequence = DEFAULT",
                     (PAUSE_KEY, "1" if action == "pause" else "0"),
                 )
                 advance_epoch(self.store)

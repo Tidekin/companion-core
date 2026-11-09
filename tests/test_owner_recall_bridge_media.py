@@ -255,7 +255,7 @@ def test_restart_download_waits_original_lease_without_replaying_get(core, tmp_p
                 core.clock.advance(61)
                 await core.content.run_once()
             elif recovery == "erased":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [row["event_id"]], core.clock())
             window.restart()
             resumed = pending_media.MediaPump(window.runtime, client,
@@ -278,7 +278,7 @@ def test_restart_download_waits_original_lease_without_replaying_get(core, tmp_p
             assert claims == [{"request_key": "image:0", "source_sha256": original_source}]
             assert checks and all(check == {"lease_token": original_claim["lease_token"],
                 "source_sha256": original_source} for check in checks)
-            current = core.store.one("SELECT * FROM content_items WHERE item_id=?",
+            current = core.store.one('SELECT * FROM content_items WHERE item_id=%s',
                                      (item["item_id"],))
             assert current["reserved_bytes"] == item["reserved_bytes"]
             if recovery != "erased":
@@ -385,7 +385,7 @@ def test_media_source_erasure_keeps_original_unknown_model_reservation(core, tmp
             assert await core.run_once()
             assert len(calls) == len(downloads) == 1
             assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [media_row(window)["event_id"]], core.clock())
             usage = core.store.rows("SELECT * FROM model_usage")
             await pump.execute(media_row(window))
@@ -436,7 +436,7 @@ def test_original_input_custody_rejects_reparented_unknown_delivery(core, tmp_pa
             assert response.status_code == 200, response.text
             assert response.json()["unsettled_delivery"] and not response.json()["terminal"]
             usage = core.store.rows("SELECT * FROM model_usage")
-            core.store.execute("UPDATE outbox SET origin_event_id=? WHERE message_id=?",
+            core.store.execute('UPDATE outbox SET origin_event_id=%s WHERE message_id=%s',
                 (None if origin == "missing" else earlier, delivery["message_id"]))
             before = core.store.rows("SELECT * FROM outbox")
             response = await window.client.post(path, json=capture)

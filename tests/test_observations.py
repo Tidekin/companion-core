@@ -1,5 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 from cryptography.fernet import Fernet
@@ -117,16 +118,21 @@ def test_observation_discovery_and_complete_video_evidence(core):
     assert {row["result_status"] for row in core.observations.recent()} == {"DISCOVERED", "WATCHED"}
 
 
-def test_observation_replay_concurrent_idempotency_and_conflict(core):
+@pytest.mark.parametrize("conversation_exists", [False, True])
+def test_observation_replay_concurrent_idempotency_and_conflict(core, conversation_exists):
     enable_observations(core)
+    if conversation_exists:
+        core.observations.append("reader", observation(core, 2))
     item = observation(core)
+    barrier = Barrier(4)
 
     def append_once(_):
         instance = Core(core.settings, clock=core.clock)
         try:
+            barrier.wait(timeout=20)
             return instance.observations.append("reader", item)
         finally:
-            instance.store.close()
+            instance.close()
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(append_once, range(20)))
@@ -135,7 +141,7 @@ def test_observation_replay_concurrent_idempotency_and_conflict(core):
         core.observations.append("reader", observation(core, text="同 ID 不同内容"))
 
 
-def test_observation_source_erasure_transitive_closure_and_restore(core, tmp_path):
+def test_observation_source_erasure_transitive_closure_and_restore(empty_database, core, tmp_path):
     enable_observations(core)
     ingest(core, 100, "可以围绕这个主题读一篇文章")
     core.observations.append("reader", observation(core, 1, source_event_ids=["evt_test_100"]))
@@ -144,21 +150,24 @@ def test_observation_source_erasure_transitive_closure_and_restore(core, tmp_pat
     key, archive = Fernet.generate_key(), tmp_path / "observations.enc"
     backup(core.settings.database, archive, key)
     stale = observation(core, 4, source_event_ids=["obs_test_2"])
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_100"], core.clock())
     with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
         core.observations.append("reader", stale)
-    destination = tmp_path / "restored.db"
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restored_state = tmp_path / "restored-state"
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         for instance in (core, restored):
             assert [row["event_id"] for row in instance.observations.recent()] == ["obs_test_3"]
             for number in (1, 2):
                 row = instance.store.one(
-                    "SELECT * FROM observations WHERE event_id=?", (f"obs_test_{number}",)
+                    'SELECT * FROM observations WHERE event_id=%s', (f"obs_test_{number}",)
                 )
                 assert row["evidence_json"] == "{}" and row["canonical_url"] == ""
             with pytest.raises(CoreError, match="SOURCE_ERASED"):
@@ -166,7 +175,7 @@ def test_observation_source_erasure_transitive_closure_and_restore(core, tmp_pat
                     "reader", observation(instance, 1, source_event_ids=["evt_test_100"])
                 )
     finally:
-        restored.store.close()
+        restored.close()
 
 
 @pytest.mark.parametrize("end", ["expired", "revoked", "wrong-device", "disabled"])
@@ -221,21 +230,24 @@ def test_observation_tokens_are_independent_and_never_persist_in_content(core):
         core.observations.append("reader", observation(core, source_event_ids=["evt_test_200"]))
 
 
-def test_restoring_backup_never_restores_device_permission(core, tmp_path):
+def test_restoring_backup_never_restores_device_permission(empty_database, core, tmp_path):
     enable_observations(core, "camera", media=True)
     core.settings.camera_enabled = True
     grant = core.observations.consents.grant(
         ConsentRequest(capabilities=["camera.observe"], device_id="camera", session_id="one")
     )
-    key, archive, destination = (
+    key, archive, restored_state = (
         Fernet.generate_key(),
         tmp_path / "grant.enc",
-        tmp_path / "restored.db",
+        tmp_path / "restored-state",
     )
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         with pytest.raises(CoreError, match="CONSENT_REQUIRED"):
@@ -243,11 +255,12 @@ def test_restoring_backup_never_restores_device_permission(core, tmp_path):
                 grant["consent_id"], "camera.observe", "camera", "one"
             )
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_adapter_configuration_environment_validation(core, monkeypatch, tmp_path):
     monkeypatch.setenv("COMPANION_CONFIG", str(tmp_path / "absent.toml"))
+    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database.get_secret_value())
     monkeypatch.setenv("COMPANION_OWNER_QQ_ID", "10001")
     monkeypatch.setenv("COMPANION_BOT_QQ_ID", "10002")
     monkeypatch.setenv("COMPANION_BRIDGE_TOKEN", core.settings.bridge_token.get_secret_value())

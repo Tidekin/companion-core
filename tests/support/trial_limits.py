@@ -18,8 +18,8 @@ def limits(**changes):
 
 def native_quota(core, tmp_path, *, account=None, window=None, paid=None):
     # Real existing cumulative policy/journal; there is no fixture-side counter.
-    values = {"max_output_tokens": 4096, "per_attempt_micro_usd": 100000,
-        "per_request_micro_usd": 200000, "daily_calls": 100, "window_calls": 100, **(paid or {})}
+    values = {"max_output_tokens": 4096,
+         "daily_calls": 100, "window_calls": 100, **(paid or {})}
     approved_live(core, tmp_path, **values)
     scope = quota_policy(core, **({"account": account} if account is not None else {}),
                          **({"window": window} if window is not None else {}))

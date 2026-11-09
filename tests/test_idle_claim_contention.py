@@ -1,9 +1,9 @@
-"""Idle chat polls must leave the SQLite writer available to delivery."""
+"""Idle chat polls leave delivery writers free to commit."""
 
 import asyncio
-import sqlite3
 from contextlib import closing
 
+import psycopg
 import pytest
 
 from companion.core import proactive_allowed
@@ -22,7 +22,7 @@ def test_idle_authority_check_allows_independent_writer(core, monkeypatch):
         return recover(now)
 
     def check(store, settings, now):
-        with closing(sqlite3.connect(settings.database, timeout=0)) as writer:
+        with closing(psycopg.connect(settings.database.get_secret_value())) as writer:
             writer.execute("INSERT INTO runtime_meta VALUES ('delivery_writer_probe','1')")
             writer.commit()
         checked.append("check")
@@ -45,18 +45,18 @@ def test_claim_rechecks_job_after_snapshot_changes(core, monkeypatch):
         checked.append(store.in_write_transaction)
         if len(checked) == 1:
             # Pin the old row, then let another worker take the original lease.
-            assert store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert store.one("SELECT state FROM jobs WHERE job_id=%s",
                              (admitted["job_id"],))["state"] == "QUEUED"
-            with closing(sqlite3.connect(settings.database, timeout=0)) as writer:
+            with closing(psycopg.connect(settings.database.get_secret_value())) as writer:
                 writer.execute("UPDATE jobs SET state='RUNNING',lease_owner='other',"
-                               "lease_token='original-token',lease_until=? WHERE job_id=?",
+                               "lease_token='original-token',lease_until=%s WHERE job_id=%s",
                                ("2099-01-01T00:00:00+00:00", admitted["job_id"]))
                 writer.commit()
         return proactive_allowed(store, settings, now)
 
     monkeypatch.setattr("companion.core.proactive_allowed", check)
     assert core.claim_job("stale-snapshot") is None
-    row = core.store.one("SELECT * FROM jobs WHERE job_id=?", (admitted["job_id"],))
+    row = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (admitted["job_id"],))
     assert (row["lease_owner"], row["lease_token"]) == ("other", "original-token")
     assert checked == [False, True]
 
@@ -76,8 +76,8 @@ def test_chat_worker_survives_busy_before_claim_without_repeating_a_job(
                 if boundary == "claim" else core_module.poke.claim_ready)
     calls, attempts = [], []
     shutdown.reset()
-    core.store.db.execute("PRAGMA busy_timeout=1")
-    with closing(sqlite3.connect(core.settings.database, isolation_level=None)) as writer:
+
+    with closing(psycopg.connect(core.settings.database.get_secret_value())) as writer:
         def contend(*args, **kwargs):
             calls.append(1)
             if len(calls) == 1:
@@ -85,7 +85,8 @@ def test_chat_worker_survives_busy_before_claim_without_repeating_a_job(
                 # is introduced at its own snapshot-to-writer boundary instead.
                 if boundary == "recovery":
                     return original(*args, **kwargs)
-                writer.execute("BEGIN IMMEDIATE")
+                writer.execute(
+                    "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
                 asyncio.get_running_loop().call_soon(writer.rollback)
                 if stop_while_busy:
                     asyncio.get_running_loop().call_soon(shutdown.request)
@@ -97,7 +98,8 @@ def test_chat_worker_survives_busy_before_claim_without_repeating_a_job(
             def claim_once(*args, **kwargs):
                 attempts.append(1)
                 if len(attempts) == 1:
-                    writer.execute("BEGIN IMMEDIATE")
+                    writer.execute(
+                        "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
                     try:
                         return claim(*args, **kwargs)
                     finally:
@@ -124,12 +126,12 @@ def test_chat_worker_survives_busy_before_claim_without_repeating_a_job(
 
         monkeypatch.setattr(__main__.Recorder, "completed", stop_after_unit)
         try:
-            run(asyncio.wait_for(__main__.worker(core.settings), 5))
+            run(asyncio.wait_for(__main__.worker(core.settings), 12))
         finally:
             shutdown.reset()
     if admitted:
-        with closing(sqlite3.connect(core.settings.database)) as observed:
-            job = observed.execute("SELECT state,attempts FROM jobs WHERE job_id=?",
+        with closing(psycopg.connect(core.settings.database.get_secret_value())) as observed:
+            job = observed.execute("SELECT state,attempts FROM jobs WHERE job_id=%s",
                                    (admitted["job_id"],)).fetchone()
         assert job == (("QUEUED", 0) if stop_while_busy else ("SUCCEEDED", 1))
         assert len(core.model.calls) == int(not stop_while_busy)

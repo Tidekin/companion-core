@@ -38,8 +38,10 @@ async def session(core, tmp_path, *, reply="第一段合成回答。第二段合
             number += 1
             await captured.capture_once(client, protocol)
             assert await captured.runtime.flush_one(client)
-            return core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e "
-                                  "USING(event_id) ORDER BY j.rowid DESC LIMIT 1")
+            return core.store.one(
+                'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+                'USING(event_id) ORDER BY j.record_sequence DESC LIMIT 1'
+            )
 
         async def send():
             assert (await captured.send(client, protocol))["worked"]

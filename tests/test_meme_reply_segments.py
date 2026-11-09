@@ -22,7 +22,7 @@ def freeze(core):
     job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id)")
     image = IMAGE | {"offer_key": "meme:" + job["event_id"]}
     ids = enqueue_reply_parts(core.store, job, PARTS, 500, core.clock(), image=image)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (job["job_id"],))
     return job, ids, image
 
 
@@ -73,7 +73,7 @@ def test_group_and_independent_bridge_bind_image_identity_and_every_part(core, c
             "reply_segment": envelope}
     with pytest.raises(ValueError, match="INVALID_REPLY_SEGMENT"):
         reply_segments.envelope(item)
-    core.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+    core.store.execute('UPDATE outbox SET content_json=%s,content_sha256=%s WHERE message_id=%s',
                        (json.dumps(content), digest(content), row["message_id"]))
     with pytest.raises(CoreError, match="REPLY_GROUP_CHANGED"):
         reply_group(core.store, ids[0])
@@ -92,9 +92,9 @@ def test_unfinished_text_prefix_never_releases_the_meme_tail(core, outcome):
 
         cancel_interrupted_replies(core.store, job["conversation_id"], core.clock())
     else:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
     core.clock.advance(10)
     assert not lease(core)
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (ids[-1],))["state"] in {
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (ids[-1],))["state"] in {
         "CANCELLED", "FAILED"}

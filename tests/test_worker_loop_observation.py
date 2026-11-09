@@ -2,11 +2,11 @@
 
 import asyncio
 import json
-import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import psycopg
 import pytest
 from cryptography.fernet import Fernet
 
@@ -16,6 +16,7 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.store import encode
 from tests.conftest import ingest, run
+from tests.postgres_fixture import isolated_database, logical_state
 from tests.support.observations import records, status_server
 
 BASE = datetime(2026, 10, 21, tzinfo=UTC)
@@ -34,7 +35,7 @@ def sample(sequence=1, *, session="a" * 32, at=0, age=0):
 
 
 def stored(core):
-    row = core.store.one("SELECT value FROM runtime_meta WHERE key=?", (worker_loop.KEY,))
+    row = core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (worker_loop.KEY,))
     return json.loads(row["value"]) if row else None
 
 
@@ -61,7 +62,7 @@ def observation_clock(monkeypatch):
 
 def test_recorder_never_reuses_startup_record_and_throttles_completed_loops(core, monkeypatch):
     prior = encode(record(987))
-    core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", (worker_loop.KEY, prior))
+    core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)', (worker_loop.KEY, prior))
     ticks = [0.0]
     monkeypatch.setattr(worker_loop, "monotonic", lambda: ticks[0])
     monkeypatch.setattr(worker_loop, "utcnow", core.clock)
@@ -174,7 +175,7 @@ def test_actual_worker_blocked_poll_never_advances(core, monkeypatch):
 def test_actual_worker_failed_maintenance_preserves_previous_loop_record(core, monkeypatch):
     worker_fixture(core, monkeypatch)
     previous = encode(record(987))
-    core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", (worker_loop.KEY, previous))
+    core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)', (worker_loop.KEY, previous))
 
     def fail():
         raise RuntimeError("synthetic maintenance failure")
@@ -183,9 +184,9 @@ def test_actual_worker_failed_maintenance_preserves_previous_loop_record(core, m
     with pytest.raises(RuntimeError, match="synthetic maintenance failure"):
         run(__main__.worker(core.settings))
     # The worker closes its connection even when maintenance fails.
-    with closing(sqlite3.connect(core.settings.database)) as database:
+    with closing(psycopg.connect(core.settings.database.get_secret_value())) as database:
         persisted = database.execute(
-            "SELECT value FROM runtime_meta WHERE key=?", (worker_loop.KEY,),
+            "SELECT value FROM runtime_meta WHERE key=%s", (worker_loop.KEY,),
         ).fetchone()
     assert persisted == (previous,)
 
@@ -206,12 +207,12 @@ def test_native_failed_business_is_not_success_even_when_loop_completes(core, mo
 
 def test_status_reads_only_a_bounded_safe_record_without_initializing_or_writing(core, monkeypatch):
     worker_loop.Recorder(core.store).completed()
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     ledger = Path(core.settings.erasure_ledger).read_bytes()
     monkeypatch.setattr(core_module.Core, "__init__", lambda *_: pytest.fail("no Core startup"))
     snapshot = ops_status.snapshot(core.settings)
     assert snapshot["worker_loop"]["state"] == "RECORDED"
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert Path(core.settings.erasure_ledger).read_bytes() == ledger
     assert core.model.calls == []
 
@@ -219,7 +220,7 @@ def test_status_reads_only_a_bounded_safe_record_without_initializing_or_writing
     invalid = record()
     invalid["stage"] = secret
     for raw in (encode(invalid), secret * 1000, "{broken:" + secret):
-        core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?", (raw, worker_loop.KEY))
+        core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s', (raw, worker_loop.KEY))
         result = ops_status.snapshot(core.settings)
         assert result["worker_loop"] == {"state": "INVALID"}
         assert secret not in encode(result)
@@ -243,7 +244,7 @@ def test_invalid_persisted_record_cannot_become_activity(core, change):
         value["completed_at"] = "2026-10-21T08:00:00+08:00"
     else:
         value["completed_at"] = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
-    core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", (worker_loop.KEY, encode(value)))
+    core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)', (worker_loop.KEY, encode(value)))
     assert ops_status.snapshot(core.settings)["worker_loop"] == {"state": "INVALID"}
 
 
@@ -322,25 +323,28 @@ def test_native_restored_fresh_loop_record_never_proves_a_running_worker(
 ):
     worker_loop.Recorder(core.store).completed()
     original = stored(core)
-    source_before = list(core.store.db.iterdump())
+    source_before = logical_state(core.store)
     key = Fernet.generate_key()
-    archive, restored = tmp_path / "backup.enc", tmp_path / "restored.db"
+    archive = tmp_path / "backup.enc"
     backup(core.settings.database, archive, key)
-    restore(archive, restored, key, core.settings.erasure_ledger)
-    settings = core.settings.model_copy(update={"database": str(restored)})
-    first = ops_status.snapshot(settings)
-    assert first["worker_loop"]["state"] == "RECORDED"
-    assert first["worker_loop"]["session"] == original["session"]
-    assert first["worker_loop"]["sequence"] == original["sequence"]
-    output = tmp_path / "restored-loop.jsonl"
-    result = observe.observe(lambda: (ops_status.snapshot(settings), None), output,
-                             samples=2, interval_seconds=5)
-    assert result["worker_loop_activity"]["advancing_intervals"] == 0
-    assert result["worker_health_proven"] is False
-    assert [row["worker_loop_activity"]["reasons"] for row in records(output)[1:-1]] == [
-        ["LOOP_BASELINE_REQUIRED"], ["LOOP_SEQUENCE_UNCHANGED"],
-    ]
-    assert list(core.store.db.iterdump()) == source_before
+    with isolated_database() as restored:
+        state = tmp_path / "restored-state"
+        restore(archive, restored, key, core.settings.erasure_ledger, state_directory=state)
+        settings = core.settings.model_copy(update={"database": restored,
+                                                    "state_directory": str(state)})
+        first = ops_status.snapshot(settings)
+        assert first["worker_loop"]["state"] == "RECORDED"
+        assert first["worker_loop"]["session"] == original["session"]
+        assert first["worker_loop"]["sequence"] == original["sequence"]
+        output = tmp_path / "restored-loop.jsonl"
+        result = observe.observe(lambda: (ops_status.snapshot(settings), None), output,
+                                 samples=2, interval_seconds=5)
+        assert result["worker_loop_activity"]["advancing_intervals"] == 0
+        assert result["worker_health_proven"] is False
+        assert [row["worker_loop_activity"]["reasons"] for row in records(output)[1:-1]] == [
+            ["LOOP_BASELINE_REQUIRED"], ["LOOP_SEQUENCE_UNCHANGED"],
+        ]
+    assert logical_state(core.store) == source_before
 
 
 @pytest.mark.parametrize("change", ["sequence", "age", "state", "state_type", "stage",
@@ -380,5 +384,5 @@ def test_real_http_observation_records_safe_loop_metadata_only(core, tmp_path):
     assert result["failures"] == 0
     assert value["worker_loop_activity"]["reasons"] == ["LOOP_BASELINE_REQUIRED"]
     assert value["snapshot"]["worker_loop"]["state"] == "RECORDED"
-    assert core.settings.database not in output.read_text("utf-8")
+    assert core.settings.database.get_secret_value() not in output.read_text("utf-8")
     assert core.settings.bridge_token.get_secret_value() not in output.read_text("utf-8")

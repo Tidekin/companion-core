@@ -53,7 +53,7 @@ def test_authorized_history_can_exceed_individual_memory_search_query_limit(
                         _, accepted = await admit(number, text)
                     # Earlier unanswered inputs remain authorized context after supersession.
                     assert await worker.run_once("long-history-chat")
-                    assert worker.store.one("SELECT state FROM jobs WHERE job_id=?",
+                    assert worker.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                             (accepted["job_id"],))["state"] == "SUCCEEDED"
                     assert len(prompts) == 1
                     assert all(text in encode(prompts[-1]) for text in texts)
@@ -110,9 +110,17 @@ def test_every_fact_source_is_tracked_before_await_and_recall_keeps_independent_
                     )
                     task = asyncio.create_task(worker.run_once("actual-memory-reply"))
                     try:
-                        await asyncio.wait_for(entered.wait(), 10)
+                        try:
+                            await asyncio.wait_for(entered.wait(), 10)
+                        except TimeoutError:
+                            state = core.store.one(
+                                "SELECT state,last_error_code FROM jobs WHERE job_id=%s",
+                                (accepted["job_id"],),
+                            )
+                            pytest.fail(str({"stage": stage, "entered": entered.is_set(),
+                                "worker_done": task.done(), "calls": calls, "job": state}))
                         tracked = {row["event_id"] for row in core.store.rows(
-                            "SELECT event_id FROM job_sources WHERE job_id=?",
+                            'SELECT event_id FROM job_sources WHERE job_id=%s',
                             (accepted["job_id"],),
                         )}
                         assert set(sources) | {question.event_id} <= tracked
@@ -123,13 +131,13 @@ def test_every_fact_source_is_tracked_before_await_and_recall_keeps_independent_
                     finally:
                         release.set()
                         await asyncio.gather(task, return_exceptions=True)
-                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                           (accepted["job_id"],))["state"] == "CANCELLED"
-                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                    assert not core.store.rows('SELECT * FROM outbox WHERE origin_event_id=%s',
                                                (question.event_id,))
-                    assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                           (question.event_id,))["redacted"] == 0
-                    assert not core.store.rows("SELECT * FROM event_dependencies WHERE event_id=?",
+                    assert not core.store.rows('SELECT * FROM event_dependencies WHERE event_id=%s',
                                                (question.event_id,))
                     assert core.store.one("SELECT status FROM memories")["status"] == "CONFIRMED"
                     assert core.store.one("SELECT COUNT(*) n FROM memory_evidence")["n"] == 8
@@ -187,7 +195,7 @@ def test_continuation_uses_full_episode_proof_including_undisplayed_sources(
                         assert set(items[0]["source_event_ids"]) == set(sources)
                         assert sources[0] not in {row["event_id"] for row in items[0]["excerpts"]}
                         tracked = {row["event_id"] for row in core.store.rows(
-                            "SELECT event_id FROM job_sources WHERE job_id=?",
+                            'SELECT event_id FROM job_sources WHERE job_id=%s',
                             (accepted["job_id"],),
                         )}
                         assert set(sources) <= tracked
@@ -198,7 +206,7 @@ def test_continuation_uses_full_episode_proof_including_undisplayed_sources(
                     finally:
                         release.set()
                         await asyncio.gather(task, return_exceptions=True)
-                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                    assert not core.store.rows('SELECT * FROM outbox WHERE origin_event_id=%s',
                                                (question.event_id,))
                     current = owner_authority.current(core.store, core.settings, core.clock)
                     assert current.authority.as_dict() == reference
@@ -223,7 +231,7 @@ def test_expired_fact_is_absent_from_real_http_search_and_independent_worker(cor
                     assert await worker.run_once("seed-valid-fact")
                     assert calls == []
                     mid = core.store.one("SELECT memory_id FROM memories")["memory_id"]
-                    core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+                    core.store.execute('UPDATE memories SET valid_to=%s WHERE memory_id=%s',
                                        (after(core.clock(), -1), mid))
                     async with real_core_http(worker) as port, httpx.AsyncClient(
                         base_url=f"http://127.0.0.1:{port}", trust_env=False,
@@ -261,12 +269,12 @@ def test_fact_validity_is_rechecked_after_model_await_without_refunding_usage(co
                     assert calls == []
                     mid = core.store.one("SELECT memory_id FROM memories")["memory_id"]
                     question, accepted = await admit(2, "青禾项目下一步做什么？")
-                    core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+                    core.store.execute('UPDATE memories SET valid_to=%s WHERE memory_id=%s',
                                        (after(core.clock(), 1), mid))
                     assert await worker.run_once()
-                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                         (accepted["job_id"],)) == {"state": "CANCELLED"}
-                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                    assert not core.store.rows('SELECT * FROM outbox WHERE origin_event_id=%s',
                                                (question.event_id,))
     run(work())
     assert len(calls) == 2
@@ -306,7 +314,7 @@ def test_expression_hook_uses_actual_owner_sources_and_short_feedback_wins(
             if mode == "transient":
                 assert "当前交互参考" in prompt
             tracked = {row["event_id"] for row in core.store.rows(
-                "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],),
+                'SELECT event_id FROM job_sources WHERE job_id=%s', (accepted["job_id"],),
             )}
             assert source.event_id in tracked
             assert (historical <= tracked) is (mode == "enabled")
@@ -346,7 +354,7 @@ def test_history_is_explicit_and_current_recall_does_not_reintroduce_revision_te
                                             f"/你记得什么 历史 {revised}")
                     assert await worker.run_once()
                     reply = core.store.one(
-                        "SELECT content_json FROM outbox WHERE origin_event_id=?",
+                        'SELECT content_json FROM outbox WHERE origin_event_id=%s',
                         (source.event_id,),
                     )["content_json"]
                     assert old in reply and new in reply and "SUPERSEDED" in reply
@@ -381,7 +389,7 @@ def test_strict_fact_scope_does_not_authorize_episode_context(core, tmp_path):
                     source, _ = await admit_input(80, canary)
                     assert await worker.run_once()
                     worker.memory.episodes(worker.store.rows(
-                        "SELECT * FROM events WHERE event_id=?", (source.event_id,)),
+                        'SELECT * FROM events WHERE event_id=%s', (source.event_id,)),
                         worker.clock())
                     await admit_input(81, "/记住这个 " + FACT)
                     assert await worker.run_once()
@@ -390,11 +398,11 @@ def test_strict_fact_scope_does_not_authorize_episode_context(core, tmp_path):
                     _, accepted = await admit_input(82, "配色")
                     assert await worker.run_once()
                     assert len(calls) == 2, worker.store.rows(
-                        "SELECT * FROM audit_log WHERE action LIKE 'memory.%'")
+                        "SELECT * FROM audit_log WHERE action LIKE 'memory.%%'")
                     assert FACT in encode(calls)
                     assert "相关情景接续" not in encode(calls) and canary not in encode(calls)
                     assert source.event_id not in {row["event_id"] for row in worker.store.rows(
-                        "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],))}
+                        'SELECT event_id FROM job_sources WHERE job_id=%s', (accepted["job_id"],))}
     run(scenario())
 
 
@@ -412,5 +420,5 @@ def test_dropped_expression_reference_does_not_register_its_sources(core):
     assert "主人长期表达偏好参考" not in encode(messages)
     assert not snapshots
     assert not historical & {row["event_id"] for row in core.store.rows(
-        "SELECT event_id FROM job_sources WHERE job_id=?", (job["job_id"],),
+        'SELECT event_id FROM job_sources WHERE job_id=%s', (job["job_id"],),
     )}

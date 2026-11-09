@@ -102,7 +102,7 @@ def policy(settings, approval):
 
 
 def original_deadline(store, job):
-    record = store.one("SELECT value FROM runtime_meta WHERE key=?", (FROZEN + job["job_id"],))
+    record = store.one('SELECT value FROM runtime_meta WHERE key = %s', (FROZEN + job["job_id"],))
     value = json.loads(record["value"]) if record else {}
     if not isinstance(value.get("original_expires_at"), str):
         raise CoreError("LIVE_IMAGE_ORIGINAL_UNAVAILABLE", 410)
@@ -115,7 +115,14 @@ def source(store, settings, approval, event_id):
     from companion import private_life, reply_revision
 
     if private_life.enabled(settings):
-        current = store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
+        current = store.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS '
+            'kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS '
+            'attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, '
+            'jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, '
+            'jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, '
+            'jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked '
+            'AS context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs WHERE '
+            "jobs.event_id = %s AND jobs.kind = 'chat'", (event_id,))
         if current:
             reply_revision.check_job(store, current)
     try:
@@ -138,8 +145,21 @@ def source(store, settings, approval, event_id):
 
 def _rows(store, event_id):
     return store.rows(
-        "SELECT * FROM content_items WHERE owner_event_id=? AND kind='qq_image' "
-        "AND redacted=0 ORDER BY slot",
+        'SELECT content_items.item_id AS item_id, content_items.owner_event_id AS owner_event_id, '
+        'content_items.kind AS kind, content_items.slot AS slot, content_items.source_event_id AS '
+        'source_event_id, content_items.target_url AS target_url, content_items.read_request_id AS '
+        'read_request_id, content_items.state AS state, content_items.media_sha256 AS '
+        'media_sha256, content_items.fingerprint AS fingerprint, '
+        'content_items.captured_privacy_epoch AS captured_privacy_epoch, '
+        'content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS '
+        'usage_request_id, content_items.output_event_id AS output_event_id, '
+        'content_items.lease_token AS lease_token, content_items.lease_until AS lease_until, '
+        'content_items.deadline AS deadline, content_items.error_code AS error_code, '
+        'content_items.redacted AS redacted, content_items.created_at AS created_at, '
+        'content_items.started_at AS started_at, content_items.updated_at AS updated_at, '
+        'content_items.attachment_json AS attachment_json FROM content_items AS content_items '
+        "WHERE content_items.owner_event_id = %s AND content_items.kind = 'qq_image' AND "
+        'content_items.redacted = 0 ORDER BY content_items.slot NULLS FIRST',
         (event_id,),
     )
 
@@ -179,7 +199,7 @@ def freeze(store, settings, approval, clock, row, messages, proofs):
     _, _, images, _ = source(store, settings, approval, row["owner_event_id"])
     rows = _rows(store, row["owner_event_id"])
     key = FROZEN + job["job_id"]
-    if store.one("SELECT 1 FROM runtime_meta WHERE key=?", (key,)):
+    if store.one('SELECT 1 FROM runtime_meta WHERE key = %s', (key,)):
         raise CoreError("LIVE_IMAGE_ALREADY_FROZEN", 409)
     value = {
         "plan_sha256": approval.plan_sha256,
@@ -200,13 +220,13 @@ def freeze(store, settings, approval, clock, row, messages, proofs):
     }
     store.insert("runtime_meta", key=key, value=encode(value))
     for item in rows:
-        store.execute("DELETE FROM runtime_meta WHERE key=?", (STAGED + item["item_id"],))
+        store.execute('DELETE FROM runtime_meta WHERE key = %s', (STAGED + item["item_id"],))
     return job
 
 
 def frozen(store, settings, approval, job):
     _, _, images, _ = source(store, settings, approval, job["event_id"])
-    record = store.one("SELECT value FROM runtime_meta WHERE key=?", (FROZEN + job["job_id"],))
+    record = store.one('SELECT value FROM runtime_meta WHERE key = %s', (FROZEN + job["job_id"],))
     value = json.loads(record["value"]) if record else {}
     rows = _rows(store, job["event_id"])
     if (
@@ -241,8 +261,15 @@ def result(store, settings, approval, job):
     """Every native observation and the shared paid admission, rehashed at each boundary."""
     value, _ = frozen(store, settings, approval, job)
     admission = store.one(
-        "SELECT a.*,m.state FROM model_admissions a JOIN model_usage m "
-        "USING(request_id) WHERE a.request_id=?", (value["request_id"],),
+        'SELECT a.request_id AS request_id, a.logical_request_id AS logical_request_id, '
+        'a.attempt_id AS attempt_id, a.attempt_number AS attempt_number, a.window_id AS window_id, '
+        'a.contract_sha256 AS contract_sha256, a.payload_sha256 AS payload_sha256, a.snapshot_json '
+        'AS snapshot_json, a.reserved_micro_usd AS reserved_micro_usd, a.input_bound AS '
+        'input_bound, a.output_bound AS output_bound, a.lease_token AS lease_token, a.lease_until '
+        'AS lease_until, a.io_started_at AS io_started_at, a.journal_path AS journal_path, '
+        'a.journal_id AS journal_id, a.measurement_json AS measurement_json, a.authority_json AS '
+        'authority_json, m.state AS state FROM model_admissions AS a JOIN model_usage AS m ON '
+        'a.request_id = m.request_id WHERE a.request_id = %s', (value["request_id"],),
     )
     if (
         not admission or admission["state"] != "SETTLED"
@@ -253,13 +280,19 @@ def result(store, settings, approval, job):
     evidence_rows = []
     for item, row in zip(value["images"], _rows(store, job["event_id"]), strict=True):
         observation = store.one(
-            "SELECT o.*,e.body_json,e.redacted AS event_redacted "
-            "FROM observations o JOIN events e USING(event_id) WHERE o.event_id=?",
+            'SELECT o.event_id AS event_id, o.adapter_id AS adapter_id, o.source_kind AS '
+            'source_kind, o.result_status AS result_status, o.source_sha256 AS source_sha256, '
+            'o.canonical_url AS canonical_url, o.device_id AS device_id, o.session_id AS '
+            'session_id, o.consent_id AS consent_id, o.evidence_json AS evidence_json, '
+            'o.captured_privacy_epoch AS captured_privacy_epoch, o.redacted AS redacted, '
+            'o.created_at AS created_at, e.body_json AS body_json, e.redacted AS event_redacted '
+            'FROM observations AS o JOIN events AS e ON o.event_id = e.event_id WHERE o.event_id = '
+            '%s',
             (row["output_event_id"],),
         )
         dependencies = store.rows(
-            "SELECT source_event_id FROM event_dependencies WHERE event_id=? "
-            "ORDER BY source_event_id", (row["output_event_id"],),
+            'SELECT source_event_id FROM event_dependencies WHERE event_id = %s ORDER BY '
+            'source_event_id NULLS FIRST', (row["output_event_id"],),
         )
         if (
             row["state"] != "SUCCEEDED" or not observation
@@ -297,7 +330,7 @@ def retrieval_text(store, settings, clock, job):
     texts = []
     for row in _rows(store, job["event_id"]):
         observed = store.one(
-            "SELECT body_json FROM events WHERE event_id=?", (row["output_event_id"],),
+            'SELECT body_json FROM events WHERE event_id = %s', (row["output_event_id"],),
         )
         text = json.loads(observed["body_json"]).get("text", "")
         if text not in texts:

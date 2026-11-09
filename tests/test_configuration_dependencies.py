@@ -18,8 +18,9 @@ forbidden = {
     'companion.goals', 'companion.goal_plan',
 }
 assert not forbidden.intersection(sys.modules), sorted(forbidden.intersection(sys.modules))
-settings = Settings(owner_qq_id='10001', bot_qq_id='10002', bridge_token='synthetic-config-' * 2)
-assert settings.content.vision.max_request_micro_usd == 0
+settings = Settings(owner_qq_id='10001', bot_qq_id='10002', bridge_token='synthetic-config-' * 2,
+                    database='dbname=synthetic')
+assert settings.content.vision.estimated_request_micro_usd == 0
 assert settings.media.stt.url == ''
 assert Settings.model_validate(settings.model_dump()).model_dump() == settings.model_dump()
 """

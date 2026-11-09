@@ -141,7 +141,7 @@ def test_retained_failed_gallery_caption_does_not_restart_import(core, tmp_path,
             calls = []
             assert await worker(core, calls, content="not valid caption JSON")
             caption = core.store.one("SELECT job_id FROM meme_captions")
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                   (caption["job_id"],))["state"] == "FAILED"
             assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
             assert c.service.discovery._held(c.event["event_id"]) == {IMAGE_BASE + "001.png"}

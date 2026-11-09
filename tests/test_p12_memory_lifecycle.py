@@ -1,6 +1,7 @@
 """Native memory lifecycle preserves paid custody, source erasure and restore replay."""
 
 import asyncio
+from contextlib import closing
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -8,6 +9,7 @@ from cryptography.fernet import Fernet
 from companion.backup import backup, restore
 from companion.contracts import Candidate
 from companion.memory import Memory
+from companion.postgres import Database
 from companion.privacy import epoch
 from companion.store import Store, encode
 from companion.timeline import recent_timeline
@@ -16,13 +18,15 @@ from tests.sdk_reader_fixture import Provider, answer, worker_for
 from tests.support.native_consumer_entry import environment
 
 
-def test_native_lifecycle_restore_and_rebuild_preserve_independent_fact(core, tmp_path):
+def test_native_lifecycle_restore_and_rebuild_preserve_independent_fact(
+    core, tmp_path, empty_database
+):
     memory = Memory(core.store, core.settings.model_copy(update={"memory_enabled": True}),
                     core.ledger)
     first = ingest(core, 1, "用户最喜欢的饮料是茉莉绿茶。")
     other = ingest(core, 2, "另一个项目的封面是蓝色。")
     core.store.execute("UPDATE jobs SET state='CANCELLED'")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         ids = [memory.add(Candidate(subject="user", kind="fact", fact_key=key,
             content=text, evidence_event_id=source["event_id"], evidence_quote=text),
             core.clock(), confirmed=False) for key, text, source in (
@@ -40,42 +44,41 @@ def test_native_lifecycle_restore_and_rebuild_preserve_independent_fact(core, tm
     assert target not in {row["memory_id"] for row in memory.search("茉莉绿茶")}
     assert core.store.one("SELECT COUNT(*) n FROM memory_revisions")["n"] == 1
     assert core.store.one("SELECT COUNT(*) n FROM memory_vectors")["n"] >= 1
-    with core.store.transaction():
-        memory.episodes(core.store.rows("SELECT * FROM events WHERE event_id IN (?,?)",
+    with core.store.transaction(control_write=True):
+        memory.episodes(core.store.rows('SELECT * FROM events WHERE event_id IN (%s,%s)',
                                        (first["event_id"], correction["event_id"])), core.clock())
     key = Fernet.generate_key()
-    archive, restored = tmp_path / "before-forget.enc", tmp_path / "restored.db"
+    archive, restored = tmp_path / "before-forget.enc", empty_database
     backup(core.settings.database, archive, key)
     before = epoch(core.store)
     memory.decide(revised, "forget", core.clock())
     assert epoch(core.store) > before
     assert len(core.ledger.read()) == 2
-    restore(archive, restored, key, core.settings.erasure_ledger)
-    reopened = Store(str(restored))
-    try:
+    restore(archive, restored, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with (
+        Database(restored) as database,
+        closing(Store(database, tmp_path / "restored-state")) as reopened,
+    ):
         for store in (core.store, reopened):
             store.execute("DELETE FROM memory_vectors")
-            store.execute("DELETE FROM memories_fts")
-            store.execute("INSERT INTO memories_fts(memory_id,content) SELECT memory_id,content "
-                          "FROM memories WHERE status IN ('HYPOTHESIS','CONFIRMED')")
+            store.execute("REINDEX INDEX idx_memories_lexical")
             rebuilt = Memory(store, memory.settings, core.ledger)
             for query in ("茉莉绿茶", "热可可", "我平时最爱喝什么？"):
                 assert not ({target, revised} & {row["memory_id"] for row in rebuilt.search(query)})
             assert independent in {row["memory_id"] for row in rebuilt.search("项目封面颜色")}
             assert not store.rows("SELECT * FROM memory_revisions")
-            assert not store.rows("SELECT * FROM memory_evidence WHERE memory_id IN (?,?)",
+            assert not store.rows("SELECT * FROM memory_evidence WHERE memory_id IN (%s,%s)",
                                   (target, revised))
-            assert not store.rows("SELECT * FROM memory_vectors WHERE memory_id IN (?,?)",
+            assert not store.rows("SELECT * FROM memory_vectors WHERE memory_id IN (%s,%s)",
                                   (target, revised))
-            assert store.one("SELECT redacted FROM events WHERE event_id=?",
+            assert store.one("SELECT redacted FROM events WHERE event_id=%s",
                              (other["event_id"],)) == {"redacted": 0}
             timeline = recent_timeline(store, memory.settings, core.clock(),
                                        core.settings.owner_qq_id, topic="饮料", days=7)
             assert "热可可" not in encode(timeline) and "茉莉绿茶" not in encode(timeline)
             assert "热可可" not in encode(store.rows("SELECT body_json FROM events"))
             assert not store.rows("SELECT * FROM model_usage")
-    finally:
-        reopened.close()
 
 
 def test_native_control_lifecycle_preserves_paid_and_authority_journals(core, tmp_path):
@@ -115,7 +118,9 @@ def test_native_control_lifecycle_preserves_paid_and_authority_journals(core, tm
                 assert core.store.rows("SELECT * FROM owner_authority_revisions") == authority
                 assert len(model.requests) == 1 and len(sends) == 4
                 assert len(core.ledger.read()) == 2
-                assert not core.store.rows("SELECT * FROM memory_evidence WHERE memory_id IN (?,?)",
+                assert not core.store.rows((
+                    'SELECT * FROM memory_evidence WHERE memory_id IN (%s,%s)'
+                ),
                                            (mid, revised))
 
                 await entry.stop()

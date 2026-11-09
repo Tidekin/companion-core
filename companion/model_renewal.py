@@ -23,11 +23,36 @@ def manifest(store, settings, authority, window, witness, view, original, stop, 
     unknown = {k for k, v in view["model_latest"].items() if v["state"] == "UNKNOWN"}
     retained = {item["request_id"]: item for item in prior["manifest"]["unknowns"]}
     inputs = []
-    fresh = {key: store.one("SELECT * FROM model_admissions WHERE request_id=?", (key,))
+    fresh = {key: store.one('SELECT model_admissions.request_id AS request_id, '
+        'model_admissions.logical_request_id AS logical_request_id, model_admissions.attempt_id AS '
+        'attempt_id, model_admissions.attempt_number AS attempt_number, model_admissions.window_id '
+        'AS window_id, model_admissions.contract_sha256 AS contract_sha256, '
+        'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json AS '
+        'snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
+        'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
+        'output_bound, model_admissions.lease_token AS lease_token, model_admissions.lease_until '
+        'AS lease_until, model_admissions.io_started_at AS io_started_at, '
+        'model_admissions.journal_path AS journal_path, model_admissions.journal_id AS journal_id, '
+        'model_admissions.measurement_json AS measurement_json, model_admissions.authority_json AS '
+        'authority_json FROM model_admissions AS model_admissions WHERE '
+        'model_admissions.request_id = %s', (key,))
              for key in unknown - retained.keys()}
     revisions = store.rows(
-        "SELECT * FROM owner_authority_revisions WHERE grant_id=? "
-        "AND revision BETWEEN ? AND ? AND state='ACTIVE' ORDER BY revision",
+        'SELECT owner_authority_revisions.grant_id AS grant_id, owner_authority_revisions.revision '
+        'AS revision, owner_authority_revisions.operation_id AS operation_id, '
+        'owner_authority_revisions.request_sha256 AS request_sha256, '
+        'owner_authority_revisions.state AS state, owner_authority_revisions.policy_json AS '
+        'policy_json, owner_authority_revisions.policy_sha256 AS policy_sha256, '
+        'owner_authority_revisions.policy_redacted AS policy_redacted, '
+        'owner_authority_revisions.restore_generation AS restore_generation, '
+        'owner_authority_revisions.predecessor_sha256 AS predecessor_sha256, '
+        'owner_authority_revisions.record_sha256 AS record_sha256, '
+        'owner_authority_revisions.journal_id AS journal_id, '
+        'owner_authority_revisions.journal_path AS journal_path, '
+        'owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS '
+        'owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND '
+        'owner_authority_revisions.revision BETWEEN %s AND %s AND owner_authority_revisions.state '
+        "= 'ACTIVE' ORDER BY owner_authority_revisions.revision NULLS FIRST",
         (authority["grant_id"], prior["manifest"]["authority"]["revision"] + 2,
          authority["revision"]),
     )
@@ -47,7 +72,7 @@ def manifest(store, settings, authority, window, witness, view, original, stop, 
             raise CoreError("OWNER_MODEL_RENEWAL_CURRENT_WORK_REQUIRED", 409)
         inputs = current["inputs"]
     for request_id, admission in fresh.items():
-        usage = store.one("SELECT job_id FROM model_usage WHERE request_id=?", (request_id,))
+        usage = store.one('SELECT job_id FROM model_usage WHERE request_id = %s', (request_id,))
         financial = view["model_latest"][request_id]
         retained[request_id] = {
             **model_carry._tuple(admission),
@@ -56,7 +81,16 @@ def manifest(store, settings, authority, window, witness, view, original, stop, 
             "minimum_micro_usd": financial["minimum_micro_usd"],
             "settlement_sha256": paid_budget.sha(financial),
             "tool_sha256": digest(store.rows(
-                "SELECT * FROM agent_tool_calls WHERE job_id=? AND state='STARTED'",
+                'SELECT agent_tool_calls.job_id AS job_id, agent_tool_calls.tool_call_id AS '
+                'tool_call_id, agent_tool_calls.tool_name AS tool_name, '
+                'agent_tool_calls.args_sha256 AS args_sha256, agent_tool_calls.model_request_id AS '
+                'model_request_id, agent_tool_calls.state AS state, agent_tool_calls.result_json '
+                'AS result_json, agent_tool_calls.metadata_json AS metadata_json, '
+                'agent_tool_calls.request_id AS request_id, agent_tool_calls.created_at AS '
+                'created_at, agent_tool_calls.updated_at AS updated_at, '
+                'agent_tool_calls.voice_job_id AS voice_job_id FROM agent_tool_calls AS '
+                'agent_tool_calls WHERE agent_tool_calls.job_id = %s AND agent_tool_calls.state = '
+                "'STARTED'",
                 (usage["job_id"],),
             )),
         }
@@ -83,7 +117,8 @@ def manifest(store, settings, authority, window, witness, view, original, stop, 
             {
                 key: value
                 for key, value in view["model_latest"].items()
-                if store.one("SELECT window_id FROM model_admissions WHERE request_id=?", (key,))[
+                if store.one('SELECT window_id FROM model_admissions WHERE request_id = '
+                    '%s', (key,))[
                     "window_id"
                 ]
                 in windows
@@ -172,7 +207,21 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
             raise ValueError("model renewal original liability")
         if item["request_id"] in fresh:
             admission = store.one(
-                "SELECT * FROM model_admissions WHERE request_id=?", (item["request_id"],)
+                'SELECT model_admissions.request_id AS request_id, '
+                'model_admissions.logical_request_id AS logical_request_id, '
+                'model_admissions.attempt_id AS attempt_id, model_admissions.attempt_number AS '
+                'attempt_number, model_admissions.window_id AS window_id, '
+                'model_admissions.contract_sha256 AS contract_sha256, '
+                'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json '
+                'AS snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
+                'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
+                'output_bound, model_admissions.lease_token AS lease_token, '
+                'model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS '
+                'io_started_at, model_admissions.journal_path AS journal_path, '
+                'model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS '
+                'measurement_json, model_admissions.authority_json AS authority_json FROM '
+                'model_admissions AS model_admissions WHERE model_admissions.request_id = '
+                '%s', (item["request_id"],)
             )
             if (
                 not admission
@@ -187,7 +236,7 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
             ):
                 raise ValueError("model renewal current admission changed")
     windows = {item["request_id"]: item["window_id"] for item in store.rows(
-        "SELECT request_id,window_id FROM model_admissions"
+        'SELECT request_id, window_id FROM model_admissions'
     )}
     if latest.keys() - windows.keys():
         raise ValueError("model renewal admission missing")
@@ -216,7 +265,7 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
 
 def _closed_context_models(store, capture, models, retained_unknowns):
     primary = store.rows(
-        "SELECT job_id,authority_json FROM jobs WHERE event_id=? AND kind='chat' LIMIT 2",
+        "SELECT job_id, authority_json FROM jobs WHERE event_id = %s AND kind = 'chat' LIMIT 2",
         (capture.event_id,),
     )
     if len(primary) != 1 or json.loads(primary[0]["authority_json"]) != capture.authority:
@@ -226,8 +275,8 @@ def _closed_context_models(store, capture, models, retained_unknowns):
     return all(
         item["state"] == "UNKNOWN" and item["request_id"] in retained_unknowns
         and store.one(
-            "SELECT 1 FROM model_usage m JOIN jobs j USING(job_id) WHERE m.request_id=? "
-            "AND j.job_id<>? AND j.kind='chat' AND j.event_id<>?",
+            'SELECT 1 FROM model_usage AS m JOIN jobs AS j USING (job_id) WHERE m.request_id = %s '
+            "AND j.job_id <> %s AND j.kind = 'chat' AND j.event_id <> %s",
             (item["request_id"], primary[0]["job_id"], capture.event_id),
         )
         for item in models if item["state"] != "SETTLED"
@@ -278,12 +327,19 @@ def check_policy(store, settings, old, new, now, *, retained_unknowns):
     for event_id in scope.source_event_ids:
         current = owner_authority._latest(store)
         row = store.one(
-            "SELECT e.*,c.owner_actor_id,c.scope FROM events e "
-            "JOIN conversations c USING(conversation_id) WHERE event_id=?",
+            'SELECT e.event_id AS event_id, e.schema_version AS schema_version, e.source AS '
+            'source, e.source_event_id AS source_event_id, e.conversation_id AS conversation_id, '
+            'e.actor_id AS actor_id, e.event_type AS event_type, e.occurred_at AS occurred_at, '
+            'e.ingested_at AS ingested_at, e.privacy_scope AS privacy_scope, e.body_json AS '
+            'body_json, e.trace_id AS trace_id, e.idempotency_key AS idempotency_key, '
+            'e.fingerprint AS fingerprint, e.redacted AS redacted, e.memory_processed AS '
+            'memory_processed, e.reply_revision AS reply_revision, c.owner_actor_id AS '
+            'owner_actor_id, c.scope AS scope FROM events AS e JOIN conversations AS c ON '
+            'e.conversation_id = c.conversation_id WHERE e.event_id = %s',
             (event_id,),
         )
         capture = store.one(
-            "SELECT value FROM runtime_meta WHERE key=?", ("owner_input:" + event_id,)
+            'SELECT value FROM runtime_meta WHERE key = %s', ("owner_input:" + event_id,)
         )
         captured = json.loads(capture["value"])["capture"] if capture else None
         history = old.history

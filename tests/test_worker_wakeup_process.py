@@ -1,4 +1,4 @@
-"""Real CLI processes share one SQLite authority; only external model transport is mocked."""
+"""Real CLI processes share one PostgreSQL database; only external model transport is mocked."""
 
 import asyncio
 import json
@@ -207,18 +207,22 @@ def test_independent_retry_due_without_new_write(core, tmp_path):
     # Keep the job pending while the independent interpreter imports/starts.
     due = after(utcnow(), 3600)
     core.store.execute(
-        "UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=? WHERE job_id=?", (due, item["job_id"])
+        (
+            "UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=%s WHERE "
+            'job_id=%s'
+        ), (due, item["job_id"])
     )
 
     async def scenario():
         child = await start(core, tmp_path / "retry", duration=5)
         try:
             await ready(child)
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (item["job_id"],))[
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (item["job_id"],))[
                 "state"
             ] == ("RETRY_WAIT")
-            core.store.execute("UPDATE jobs SET next_attempt_at=? WHERE job_id=?",
-                               (after(utcnow(), 1), item["job_id"]))
+            with core.store.transaction():
+                core.store.execute("UPDATE jobs SET next_attempt_at=%s WHERE job_id=%s",
+                                   (after(utcnow(), 1), item["job_id"]))
             # No writes after scheduling: only the native deadline can make it due.
             await state(core, item["job_id"], seconds=5)
             result = await finish(child)
@@ -252,7 +256,7 @@ def test_real_http_forget_wakes_native_control_without_provider(core, tmp_path):
     core.clock = utcnow
     core.settings.memory_enabled = True
     source = ingest(core, 1, "I prefer green tea.")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         memory_id = core.memory.add(
             Candidate(
                 subject="user",
@@ -299,7 +303,7 @@ def test_real_http_forget_wakes_native_control_without_provider(core, tmp_path):
                 assert result["total"]["provider_calls"] == 0
                 assert result["steady"]["scans"] >= 1
                 assert core.store.one(
-                    "SELECT status FROM memories WHERE memory_id=?", (memory_id,)
+                    'SELECT status FROM memories WHERE memory_id=%s', (memory_id,)
                 ) == {"status": "FORGOTTEN"}
             finally:
                 await close_child(child)

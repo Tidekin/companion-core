@@ -38,29 +38,56 @@ def service_for_store(store, settings, clock):
 def followup_item(store, settings, event_id, *, clock=utcnow):
     """Project a source-bound SDK tool selection through the existing Content view."""
     if settings.owner_runtime.mode != "ENABLED" or not store.one(
-        "SELECT 1 FROM sqlite_master WHERE name='agent_tool_calls'"
+        "SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespace AND "
+        "relname='agent_tool_calls' AND relkind IN ('r','p')"
     ):
         return None
     item = store.one(
-        "SELECT c.* FROM content_items c JOIN exploration_requests r "
-        "ON r.request_id=c.read_request_id JOIN agent_tool_calls a "
-        "ON a.request_id=r.request_id JOIN jobs j ON j.job_id=a.job_id "
-        "JOIN agent_conversations ac ON ac.job_id=j.job_id WHERE j.event_id=? "
-        "AND ac.phase<>'STOPPED' AND a.state IN ('DEFERRED','RETURNED') "
-        "AND c.kind='link' AND c.redacted=0 AND r.redacted=0 AND r.operation='read' "
-        "AND r.goal_step_json='{}' ORDER BY a.rowid DESC LIMIT 1", (event_id,),
+        "SELECT c.item_id AS item_id, c.owner_event_id AS owner_event_id, c.kind AS kind, c.slot "
+        "AS slot, c.source_event_id AS source_event_id, c.target_url AS target_url, "
+        "c.read_request_id AS read_request_id, c.state AS state, c.media_sha256 AS media_sha256, "
+        "c.fingerprint AS fingerprint, c.captured_privacy_epoch AS captured_privacy_epoch, "
+        "c.reserved_bytes AS reserved_bytes, c.usage_request_id AS usage_request_id, "
+        "c.output_event_id AS output_event_id, c.lease_token AS lease_token, c.lease_until AS "
+        "lease_until, c.deadline AS deadline, c.error_code AS error_code, c.redacted AS redacted, "
+        "c.created_at AS created_at, c.started_at AS started_at, c.updated_at AS updated_at, "
+        "c.attachment_json AS attachment_json FROM content_items AS c JOIN exploration_requests AS "
+        "r ON r.request_id = c.read_request_id JOIN agent_tool_calls AS a ON a.request_id = "
+        "r.request_id JOIN jobs AS j ON j.job_id = a.job_id JOIN agent_conversations AS ac ON "
+        "ac.job_id = j.job_id WHERE j.event_id = %s AND ac.phase <> 'STOPPED' AND a.state IN "
+        "('DEFERRED', 'RETURNED') AND c.kind = 'link' AND c.redacted = 0 AND r.redacted = 0 AND "
+        "r.operation = 'read' AND r.goal_step_json = '{}' ORDER BY a.record_sequence DESC NULLS "
+        "LAST LIMIT 1",
+        (event_id,),
     )
     if not item:
         return None
     try:
-        job = store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
+        job = store.one(
+            "SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS "
+            "kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS "
+            "attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, "
+            "jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, "
+            "jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, "
+            "jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked "
+            "AS context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs WHERE "
+            "jobs.event_id = %s AND jobs.kind = 'chat'",
+            (event_id,),
+        )
         view = owner_authority.check_job(store, settings, clock, job, purpose="content")
         reply_revision.check_job(store, job)
         consumer, _, _ = owner_input.source(store, settings, view, event_id, clock())
-        source, _, _ = owner_input.source(store, settings, view, item["owner_event_id"],
-                                          clock(), history=item["owner_event_id"] != event_id)
-        if (source["conversation_id"] != consumer["conversation_id"]
-            or not reply_revision.source_active(store, source["event_id"])):
+        source, _, _ = owner_input.source(
+            store,
+            settings,
+            view,
+            item["owner_event_id"],
+            clock(),
+            history=item["owner_event_id"] != event_id,
+        )
+        if source["conversation_id"] != consumer[
+            "conversation_id"
+        ] or not reply_revision.source_active(store, source["event_id"]):
             return None
     except CoreError:
         return None
@@ -68,7 +95,11 @@ def followup_item(store, settings, event_id, *, clock=utcnow):
 
 
 def erase_reading(store, event_ids):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='reading_attempts'"):
+    if not store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE "
+        "relnamespace=current_schema()::regnamespace AND relname='reading_attempts' AND relkind IN "
+        "('r','p')"
+    ):
         return
     clear = (
         "UPDATE reading_attempts SET state=CASE WHEN state='RUNNING' THEN 'UNKNOWN' "
@@ -77,20 +108,34 @@ def erase_reading(store, event_ids):
     )
     # A forgotten grant may own only an in-flight read, with no observation/event roots yet.
     # Consult its durable tombstone on both initial erasure and old-backup replay.
-    store.execute(clear + "WHERE request_id IN (SELECT request_id FROM exploration_requests x "
-                  "WHERE EXISTS (SELECT 1 FROM runtime_meta "
-                  "WHERE key='erased_source_grant:' || x.source_grant_id))")
+    store.execute(
+        clear + "WHERE request_id IN (SELECT request_id FROM exploration_requests x "
+        "WHERE EXISTS (SELECT 1 FROM runtime_meta "
+        "WHERE key='erased_source_grant:' || x.source_grant_id))"
+    )
     for event_id in event_ids:
         store.execute(
-            "DELETE FROM runtime_meta WHERE key=? OR (key LIKE ? AND "
-            "json_extract(value,'$.item_id') IN "
-            "(SELECT item_id FROM content_items WHERE owner_event_id=?))",
+            (
+                (
+                    'DELETE FROM runtime_meta WHERE key=%s OR (key LIKE %s '
+                    'AND (CASE WHEN value IS JSON THEN '
+                    "(value::json#>>'{item_id}') END) IN (SELECT item_id "
+                    'FROM content_items WHERE owner_event_id=%s))'
+                )
+            ),
             (FOLLOWUP + event_id, FOLLOWUP + "%", event_id),
         )
         # Retain only the attempt identity/counters: a late receipt cannot revive content.
-        store.execute(clear + "WHERE request_id IN "
-            "(SELECT request_id FROM exploration_evidence WHERE event_id=?) OR "
-            "EXISTS (SELECT 1 FROM json_each(context_json,'$.source_event_ids') WHERE value=?)",
+        store.execute(
+            clear
+            + (
+
+                    'WHERE request_id IN (SELECT request_id FROM '
+                    'exploration_evidence WHERE event_id=%s) OR EXISTS '
+                    '(SELECT 1 FROM json_array_elements_text(context_json::j'
+                    "son->'source_event_ids') AS ids(value) WHERE value=%s)"
+
+            ),
             (event_id, event_id),
         )
 
@@ -100,7 +145,7 @@ def _validate_sources(store, settings, clock, exploration, row, context):
     for source_id in context.source_event_ids:
         if not reply_revision.source_active(store, source_id):
             raise CoreError("REPLY_SOURCE_RECALLED", 409)
-        captured_owner = store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+        captured_owner = store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                                    (owner_input.INPUT + source_id,))
         if row["goal_step_json"] == "{}" and (
             captured_owner or reply_revision.owner_input(store, source_id)
@@ -115,7 +160,20 @@ def _validate_sources(store, settings, clock, exploration, row, context):
 
 def reading_attempt(store, adapter_id, request_id, token):
     attempt = store.one(
-        "SELECT * FROM reading_attempts WHERE request_id=? AND adapter_id=?",
+        (
+            'SELECT reading_attempts.request_id, reading_attempts.adapter_id,'
+            ' reading_attempts.lease_token, reading_attempts.lease_until, '
+            'reading_attempts.context_json, '
+            'reading_attempts.allowed_hosts_json, '
+            'reading_attempts.original_url_sha256, '
+            'reading_attempts.source_grant_json, reading_attempts.state, '
+            'reading_attempts.result_sha256, '
+            'reading_attempts.result_event_ids_json, '
+            'reading_attempts.observed_requests, '
+            'reading_attempts.observed_bytes, reading_attempts.created_at, '
+            'reading_attempts.updated_at FROM reading_attempts WHERE '
+            'request_id=%s AND adapter_id=%s'
+        ),
         (request_id, adapter_id),
     )
     if not attempt or attempt["lease_token"] != token:
@@ -136,7 +194,26 @@ def validate_attempt(store, settings, clock, exploration, attempt, validation, *
         attempt["adapter_id"], attempt["request_id"], validation, reading=True,
         current_request=current_request,
     )
-    row = store.one("SELECT * FROM exploration_requests WHERE request_id=?",
+    row = store.one((
+        'SELECT exploration_requests.request_id, '
+        'exploration_requests.request_key, exploration_requests.adapter_id, '
+        'exploration_requests.operation, exploration_requests.url, '
+        'exploration_requests.goal_step_json, exploration_requests.state, '
+        'exploration_requests.lease_token, exploration_requests.lease_until, '
+        'exploration_requests.captured_privacy_epoch, '
+        'exploration_requests.reserved_bytes, '
+        'exploration_requests.used_bytes, exploration_requests.result_sha256,'
+        ' exploration_requests.last_error_code, '
+        'exploration_requests.created_at, exploration_requests.started_at, '
+        'exploration_requests.updated_at, exploration_requests.redacted, '
+        'exploration_requests.reserved_requests, '
+        'exploration_requests.used_requests, '
+        'exploration_requests.source_grant_id, '
+        'exploration_requests.source_grant_epoch, '
+        'exploration_requests.authority_json, exploration_requests.query, '
+        'exploration_requests.discovery_mode FROM exploration_requests WHERE '
+        'request_id=%s'
+    ),
                 (attempt["request_id"],))
     if hashlib.sha256(row["url"].encode()).hexdigest() != attempt["original_url_sha256"]:
         raise CoreError("READER_TARGET_MISMATCH", 409)
@@ -159,29 +236,44 @@ class ReadingService:
     def __init__(self, store, settings, exploration, clock=utcnow, *, video=None):
         self.video = video
         self.store, self.settings, self.exploration, self.clock = (
-            store, settings, exploration, clock,
+            store,
+            settings,
+            exploration,
+            clock,
         )
 
     def _context(self, row, source):
-        sources = [item["event_id"] for item in self.store.rows(
-            "SELECT event_id FROM exploration_evidence WHERE request_id=? ORDER BY event_id",
-            (row["request_id"],),
-        )]
+        sources = [
+            item["event_id"]
+            for item in self.store.rows(
+                "SELECT event_id FROM exploration_evidence WHERE request_id = %s ORDER BY event_id "
+                "NULLS FIRST",
+                (row["request_id"],),
+            )
+        ]
         step = json.loads(row["goal_step_json"])
         root = step.get("goal_id", row["request_id"])
         if not step:
-            job = self.store.one("SELECT job_id FROM agent_tool_calls WHERE request_id=? "
-                                 "ORDER BY rowid LIMIT 1", (row["request_id"],))
+            job = self.store.one(
+                "SELECT job_id FROM agent_tool_calls WHERE request_id = %s ORDER "
+                "BY record_sequence NULLS FIRST LIMIT 1",
+                (row["request_id"],),
+            )
             if job is None:
                 job = self.store.one(
-                    "SELECT job_id FROM jobs WHERE kind='chat' AND event_id IN "
-                    "(SELECT event_id FROM exploration_evidence WHERE request_id=?) ORDER BY rowid",
+                    "SELECT job_id FROM jobs WHERE kind = 'chat' AND event_id IN (SELECT event_id "
+                    "FROM exploration_evidence WHERE request_id = %s) ORDER BY record_sequence "
+                    "NULLS FIRST",
                     (row["request_id"],),
                 )
             if job:
                 root = job["job_id"]
-        return ReadingContext(root_task_id=root, source=source, source_event_ids=sources,
-                              privacy_epoch=row["captured_privacy_epoch"])
+        return ReadingContext(
+            root_task_id=root,
+            source=source,
+            source_event_ids=sources,
+            privacy_epoch=row["captured_privacy_epoch"],
+        )
 
     def lease(self, adapter_id, source_grant=None, *, capabilities=()):
         s = self.store
@@ -201,8 +293,12 @@ class ReadingService:
                                 after(row["created_at"], TARGET_TTL_SECONDS),
                                 captured.snapshot()["expires_at"])}
                 video = self.video
-                exists = s.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_items'")
-                if not exists or not s.one("SELECT 1 FROM bili_video_items WHERE request_id=?",
+                exists = s.one(
+                    'SELECT 1 FROM pg_catalog.pg_class WHERE '
+                    'relnamespace=current_schema()::regnamespace AND '
+                    "relname='bili_video_items' AND relkind IN ('r','p')"
+                )
+                if not exists or not s.one('SELECT 1 FROM bili_video_items WHERE request_id=%s',
                                           (row["request_id"],)):
                     return None
                 if video is None or "bounded_video_media_v1" not in capabilities:
@@ -218,8 +314,29 @@ class ReadingService:
             )
             if item is None:
                 return None
-            row = s.one("SELECT * FROM exploration_requests WHERE request_id=?",
-                        (item["request_id"],))
+            row = s.one(
+                "SELECT exploration_requests.request_id AS request_id, "
+                "exploration_requests.request_key AS request_key, exploration_requests.adapter_id "
+                "AS adapter_id, exploration_requests.operation AS operation, "
+                "exploration_requests.url AS url, exploration_requests.goal_step_json AS "
+                "goal_step_json, exploration_requests.state AS state, "
+                "exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
+                "AS lease_until, exploration_requests.captured_privacy_epoch AS "
+                "captured_privacy_epoch, exploration_requests.reserved_bytes AS reserved_bytes, "
+                "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 "
+                "AS result_sha256, exploration_requests.last_error_code AS last_error_code, "
+                "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
+                "started_at, exploration_requests.updated_at AS updated_at, "
+                "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests "
+                "AS reserved_requests, exploration_requests.used_requests AS used_requests, "
+                "exploration_requests.source_grant_id AS source_grant_id, "
+                "exploration_requests.source_grant_epoch AS source_grant_epoch, "
+                "exploration_requests.authority_json AS authority_json, exploration_requests.query "
+                "AS query, exploration_requests.discovery_mode AS discovery_mode FROM "
+                "exploration_requests AS exploration_requests WHERE "
+                "exploration_requests.request_id = %s",
+                (item["request_id"],),
+            )
             context = self._context(row, policy.source)
             _validate_sources(self.store, self.settings, self.clock, self.exploration, row, context)
             hosts = list(self.settings.web_reading_hosts) if policy.source == "web" else []
@@ -230,12 +347,18 @@ class ReadingService:
             elif policy.source == "web":
                 raise CoreError("READER_OPERATION_UNAVAILABLE", 403)
             s.insert(
-                "reading_attempts", request_id=row["request_id"], adapter_id=adapter_id,
-                lease_token=item["lease_token"], lease_until=row["lease_until"],
-                context_json=encode(context.model_dump()), allowed_hosts_json=encode(hosts),
+                "reading_attempts",
+                request_id=row["request_id"],
+                adapter_id=adapter_id,
+                lease_token=item["lease_token"],
+                lease_until=row["lease_until"],
+                context_json=encode(context.model_dump()),
+                allowed_hosts_json=encode(hosts),
                 original_url_sha256=hashlib.sha256(row["url"].encode()).hexdigest(),
-                source_grant_json=encode(item.get("source_grant")), state="RUNNING",
-                created_at=self.clock(), updated_at=self.clock(),
+                source_grant_json=encode(item.get("source_grant")),
+                state="RUNNING",
+                created_at=self.clock(),
+                updated_at=self.clock(),
             )
             result = {**item, "schema_version": 1, "lease_until": row["lease_until"],
                       "context": context.model_dump(), "allowed_hosts": hosts}
@@ -258,8 +381,12 @@ class ReadingService:
             grant = None
         if grant != json.loads(attempt["source_grant_json"]):
             raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
-        if (result.used_requests is not None and result.used_requests > row["reserved_requests"]
-            or result.used_bytes is not None and result.used_bytes > row["reserved_bytes"]):
+        if (
+            result.used_requests is not None
+            and result.used_requests > row["reserved_requests"]
+            or result.used_bytes is not None
+            and result.used_bytes > row["reserved_bytes"]
+        ):
             raise CoreError("READER_USAGE_LIMIT", 400)
         if len(result.observations) > min(40, self.settings.exploration_daily_candidate_limit):
             raise CoreError("READER_ITEM_LIMIT", 400)
@@ -267,17 +394,27 @@ class ReadingService:
             provenance = observation.provenance.model_dump(exclude={"source_grant"})
             if provenance != context.model_dump():
                 raise CoreError("READING_PROVENANCE_MISMATCH", 400)
-            if row["operation"] == "read" and hashlib.sha256(
-                observation.original_url.encode(),
-            ).hexdigest() != attempt["original_url_sha256"]:
+            if (
+                row["operation"] == "read"
+                and hashlib.sha256(
+                    observation.original_url.encode(),
+                ).hexdigest()
+                != attempt["original_url_sha256"]
+            ):
                 raise CoreError("READER_TARGET_MISMATCH", 400)
             for original, url in ((True, observation.original_url), (False, observation.url)):
                 source, canonical = content_target(
-                    url, web_hosts=json.loads(attempt["allowed_hosts_json"]),
+                    url,
+                    web_hosts=json.loads(attempt["allowed_hosts_json"]),
                 )
-                if source != context.source or canonical != url or (
-                    row["operation"] == "read" and canonical != row["url"]
-                    and (original or context.source != "web")
+                if (
+                    source != context.source
+                    or canonical != url
+                    or (
+                        row["operation"] == "read"
+                        and canonical != row["url"]
+                        and (original or context.source != "web")
+                    )
                 ):
                     raise CoreError("READER_TARGET_MISMATCH", 400)
             fetched = observation.fetched_at.astimezone(UTC).isoformat(timespec="microseconds")
@@ -291,37 +428,77 @@ class ReadingService:
                 "recommend" if row["discovery_mode"] == "recommend" else None
             ):
                 raise CoreError("READING_DISCOVERY_MISMATCH", 400)
-            evidence_bytes = (sum(item.bytes for item in evidence.sources)
-                              if isinstance(evidence, ReadingEvidence)
-                              else getattr(evidence, "response_bytes", 0))
+            evidence_bytes = (
+                sum(item.bytes for item in evidence.sources)
+                if isinstance(evidence, ReadingEvidence)
+                else getattr(evidence, "response_bytes", 0)
+            )
             if result.used_bytes is None or evidence_bytes > result.used_bytes:
                 raise CoreError("READING_EVIDENCE_USAGE_MISMATCH", 400)
 
     def complete(self, adapter_id, request_id, result):
         s, fingerprint, step = self.store, digest(result.model_dump(mode="json")), None
         with s.transaction():
-            if s.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_items'") and s.one(
-                "SELECT 1 FROM bili_video_items WHERE request_id=?", (request_id,),
+            if s.one(
+                "SELECT 1 FROM pg_catalog.pg_class WHERE "
+                "relnamespace=current_schema()::regnamespace AND relname='bili_video_items' AND "
+                "relkind IN ('r','p')"
+            ) and s.one(
+                "SELECT 1 FROM bili_video_items WHERE request_id = %s",
+                (request_id,),
             ):
                 raise CoreError("READER_MEDIA_PROTOCOL_REQUIRED", 409)
             attempt = reading_attempt(self.store, adapter_id, request_id, result.lease_token)
             if attempt["result_sha256"]:
                 if attempt["result_sha256"] != fingerprint:
                     raise CoreError("IDEMPOTENCY_CONFLICT", 409)
-                return {"state": attempt["state"], "duplicate": True,
-                        "event_ids": json.loads(attempt["result_event_ids_json"])}
+                return {
+                    "state": attempt["state"],
+                    "duplicate": True,
+                    "event_ids": json.loads(attempt["result_event_ids_json"]),
+                }
             validation = ReaderReadValidation(
-                lease_token=result.lease_token, source_grant=result.source_grant,
+                lease_token=result.lease_token,
+                source_grant=result.source_grant,
             )
             try:
                 row, context = validate_attempt(
                     s, self.settings, self.clock, self.exploration, attempt, validation)
             except CoreError as error:
                 # Identity still authenticates metering, never expired/revoked content.
-                row = s.one("SELECT * FROM exploration_requests WHERE request_id=?", (request_id,))
-                outcome = {"state": "CANCELLED" if result.used_requests is not None
-                           and result.used_bytes is not None else "UNKNOWN", "event_ids": [],
-                           "duplicate": False}
+                row = s.one(
+                    "SELECT exploration_requests.request_id AS request_id, "
+                    "exploration_requests.request_key AS request_key, "
+                    "exploration_requests.adapter_id AS adapter_id, exploration_requests.operation "
+                    "AS operation, exploration_requests.url AS url, "
+                    "exploration_requests.goal_step_json AS goal_step_json, "
+                    "exploration_requests.state AS state, exploration_requests.lease_token AS "
+                    "lease_token, exploration_requests.lease_until AS lease_until, "
+                    "exploration_requests.captured_privacy_epoch AS captured_privacy_epoch, "
+                    "exploration_requests.reserved_bytes AS reserved_bytes, "
+                    "exploration_requests.used_bytes AS used_bytes, "
+                    "exploration_requests.result_sha256 AS result_sha256, "
+                    "exploration_requests.last_error_code AS last_error_code, "
+                    "exploration_requests.created_at AS created_at, "
+                    "exploration_requests.started_at AS started_at, "
+                    "exploration_requests.updated_at AS updated_at, exploration_requests.redacted "
+                    "AS redacted, exploration_requests.reserved_requests AS reserved_requests, "
+                    "exploration_requests.used_requests AS used_requests, "
+                    "exploration_requests.source_grant_id AS source_grant_id, "
+                    "exploration_requests.source_grant_epoch AS source_grant_epoch, "
+                    "exploration_requests.authority_json AS authority_json, "
+                    "exploration_requests.query AS query, exploration_requests.discovery_mode AS "
+                    "discovery_mode FROM exploration_requests AS exploration_requests WHERE "
+                    "exploration_requests.request_id = %s",
+                    (request_id,),
+                )
+                outcome = {
+                    "state": "CANCELLED"
+                    if result.used_requests is not None and result.used_bytes is not None
+                    else "UNKNOWN",
+                    "event_ids": [],
+                    "duplicate": False,
+                }
                 code = error.code
             else:
                 self._evidence(attempt, row, context, result)
@@ -329,49 +506,82 @@ class ReadingService:
                 legacy = ReadResult(
                     lease_token=result.lease_token,
                     status="UNKNOWN" if result.status == "CANCELLED" else result.status,
-                    source_grant=result.source_grant, used_requests=result.used_requests,
-                    used_bytes=result.used_bytes, error_code=result.error_code,
-                    items=[ReadItem(
-                        title=item.title, text=item.text, url=item.url,
-                        reading=item.evidence if isinstance(item.evidence, ReadingEvidence)
-                        else None,
-                        article=item.evidence if isinstance(item.evidence, ArticleEvidence)
-                        else None,
-                        image_urls=[image.url for image in item.evidence.images]
-                        if isinstance(item.evidence, ArticleEvidence) else [],
-                    ) for item in result.observations],
+                    source_grant=result.source_grant,
+                    used_requests=result.used_requests,
+                    used_bytes=result.used_bytes,
+                    error_code=result.error_code,
+                    items=[
+                        ReadItem(
+                            title=item.title,
+                            text=item.text,
+                            url=item.url,
+                            reading=item.evidence
+                            if isinstance(item.evidence, ReadingEvidence)
+                            else None,
+                            article=item.evidence
+                            if isinstance(item.evidence, ArticleEvidence)
+                            else None,
+                            image_urls=[image.url for image in item.evidence.images]
+                            if isinstance(item.evidence, ArticleEvidence)
+                            else [],
+                        )
+                        for item in result.observations
+                    ],
                 )
                 outcome = self.exploration.complete(adapter_id, request_id, legacy, reading=True)
                 if result.status == "CANCELLED":
                     outcome["state"] = "CANCELLED"
                 for event_id, item in zip(outcome["event_ids"], result.observations, strict=False):
-                    stored = s.one("SELECT evidence_json FROM observations WHERE event_id=?",
-                                   (event_id,))
+                    stored = s.one(
+                        "SELECT evidence_json FROM observations WHERE event_id = %s", (event_id,)
+                    )
                     evidence = json.loads(stored["evidence_json"])
                     evidence["read_observation"] = item.model_dump(
-                        mode="json", exclude={"text", "title"},
+                        mode="json",
+                        exclude={"text", "title"},
                     )
-                    s.execute("UPDATE observations SET evidence_json=? WHERE event_id=?",
-                              (encode(evidence), event_id))
+                    s.execute(
+                        "UPDATE observations SET evidence_json = %s WHERE event_id = %s",
+                        (encode(evidence), event_id),
+                    )
                 code = result.error_code
             # Uncertain usage retains the reservation. Oversized receipts cannot lower it.
             used_requests = result.used_requests
             used_bytes = result.used_bytes
-            if (used_requests is not None and used_requests > row["reserved_requests"]
-                or used_bytes is not None and used_bytes > row["reserved_bytes"]):
+            if (
+                used_requests is not None
+                and used_requests > row["reserved_requests"]
+                or used_bytes is not None
+                and used_bytes > row["reserved_bytes"]
+            ):
                 used_requests, used_bytes = None, None
                 outcome["state"] = "UNKNOWN"
             s.execute(
-                "UPDATE exploration_requests SET state=?,used_requests=?,used_bytes=?,"
-                "result_sha256=?,last_error_code=?,updated_at=? WHERE request_id=?",
-                (outcome["state"], used_requests, used_bytes, fingerprint, code,
-                 self.clock(), request_id),
+                "UPDATE exploration_requests SET state = %s, used_requests = %s, used_bytes = %s, "
+                "result_sha256 = %s, last_error_code = %s, updated_at = %s WHERE request_id = %s",
+                (
+                    outcome["state"],
+                    used_requests,
+                    used_bytes,
+                    fingerprint,
+                    code,
+                    self.clock(),
+                    request_id,
+                ),
             )
             s.execute(
-                "UPDATE reading_attempts SET state=?,result_sha256=?,result_event_ids_json=?,"
-                "observed_requests=?,observed_bytes=?,updated_at=? WHERE request_id=?",
-                (outcome["state"], fingerprint, encode(outcome["event_ids"]),
-                 result.observed_requests, result.observed_bytes, self.clock(), request_id),
+                "UPDATE reading_attempts SET state = %s, result_sha256 = %s, result_event_ids_json "
+                "= %s, observed_requests = %s, observed_bytes = %s, updated_at = %s WHERE "
+                "request_id = %s",
+                (
+                    outcome["state"],
+                    fingerprint,
+                    encode(outcome["event_ids"]),
+                    result.observed_requests,
+                    result.observed_bytes,
+                    self.clock(),
+                    request_id,
+                ),
             )
             # Wake the original Core worker after committing the correlated Reader result.
             job_queue.reader_ready(s, request_id, self.clock())
@@ -380,25 +590,41 @@ class ReadingService:
                 and video is not None and self.settings.bili_video.enabled) and (
                 outcome["state"] == "DONE"
             ):
-                for content in s.rows("SELECT item_id FROM content_items WHERE read_request_id=? "
-                                      "AND kind='link' AND redacted=0", (request_id,)):
+                for content in s.rows((
+                    'SELECT item_id FROM content_items WHERE read_request_id=%s AND'
+                    " kind='link' AND redacted=0"
+                ), (request_id,)):
                     for event_id in outcome["event_ids"]:
-                        source = s.one("SELECT source FROM events WHERE event_id=?", (event_id,))
+                        source = s.one("SELECT source FROM events WHERE event_id = %s", (event_id,))
                         if source["source"] != "observation.bilibili":
                             continue
                         try:
                             video.schedule(content["item_id"], event_id)
                         except CoreError as error:
-                            s.execute("UPDATE content_items SET error_code=?,updated_at=? "
-                                      "WHERE item_id=?", (error.code, self.clock(),
-                                                         content["item_id"]))
-                            s.audit("bili_video.unavailable", content["item_id"], request_id,
-                                    self.clock(), error_code=error.code)
+                            s.execute(
+                                "UPDATE content_items SET error_code = %s, updated_at = %s "
+                                "WHERE item_id = %s",
+                                (error.code, self.clock(), content["item_id"]),
+                            )
+                            s.audit(
+                                "bili_video.unavailable",
+                                content["item_id"],
+                                request_id,
+                                self.clock(),
+                                error_code=error.code,
+                            )
         if step and result.status != "SUCCESS":
-            self.exploration.goals.fail(step, code or "READ_FAILED", retryable=True,
-                execution_uncertain=(result.status == "UNKNOWN" or outcome["state"] == "UNKNOWN"
+            self.exploration.goals.fail(
+                step,
+                code or "READ_FAILED",
+                retryable=True,
+                execution_uncertain=(
+                    result.status == "UNKNOWN"
+                    or outcome["state"] == "UNKNOWN"
                     or result.status == "CANCELLED"
-                    and (used_requests is None or used_bytes is None)))
+                    and (used_requests is None or used_bytes is None)
+                ),
+            )
         if step and step["kind"] == "self":
             for event_id in outcome["event_ids"]:
                 self.exploration.social.consider(event_id)

@@ -65,7 +65,7 @@ def test_malformed_offer_is_bounded_and_cannot_enable_the_legacy_selection_path(
         value["offer_key"] = "meme:evt_other"
     else:
         value["candidates"][0]["url"] = "https://example.com/private"
-    core.store.execute("UPDATE runtime_meta SET value=? WHERE key='live_text_input:evt_test_1'",
+    core.store.execute("UPDATE runtime_meta SET value=%s WHERE key='live_text_input:evt_test_1'",
                        (encode({"event_id": "evt_test_1", "meme_offer": value}),))
     assert engine.intent("evt_test_1", "完整文字。⬡happy⬡").image is None
     assert "本轮只回复文字" in engine.instruction("evt_test_1")
@@ -89,7 +89,7 @@ def test_new_source_requires_both_bindings_and_probability_is_stable(core):
         ImageIntent(category="happy", candidate_id="a" * 64, offer_key="meme:evt_test_1")
     engine = expression(core, probability=0.35)
     selected = engine.intent("evt_test_1", "完整文字。⬡" + "a" * 64 + "⬡").image
-    with closing(Store(core.settings.database)) as reopened:
+    with closing(Store(core.store.database, core.store.state_directory)) as reopened:
         restarted = ExpressionEngine(reopened, engine.settings, core.clock)
         assert restarted.intent("evt_test_1", "完整文字。⬡" + "a" * 64 + "⬡").image == selected
 
@@ -130,7 +130,7 @@ def test_discovery_uses_native_jobs_and_a_single_consumable_attempt(core, tmp_pa
             assert settled["state"] == "SETTLED" and result(core, item) == settled
             with pytest.raises(CoreError, match="MEME_DISCOVERY_RESULT_CONFLICT"):
                 result(core, item, download_bytes=127)
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (item["job_id"],)) == {
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (item["job_id"],)) == {
                 "state": "SUCCEEDED",
             }
             assert not core.store.one("SELECT 1 FROM model_usage")
@@ -167,7 +167,7 @@ def test_expired_reserved_lease_survives_restart_as_unknown_without_replay(
             item = claim(core)
             reservation(core, item)
             core.clock.advance(core.settings.lease_seconds + 1)
-            reopened = Store(core.settings.database)
+            reopened = Store(core.store.database, core.store.state_directory)
             try:
                 meme_service.recover(reopened, core.settings, core.clock())
                 assert reopened.one("SELECT state FROM meme_discovery_reservations") == {

@@ -99,7 +99,7 @@ def test_signed_shortlink_read_continues_into_latest_reply_once(
                               core.clock) as worker:
                         assert worker.store is not core.store
                         assert worker.claim_job("wait-for-original-reader") is None
-                        assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?",
+                        assert core.store.one('SELECT state,attempts FROM jobs WHERE job_id=%s',
                                               (accepted["job_id"],)) == {
                             "state": "RETRY_WAIT", "attempts": 0,
                         }
@@ -143,17 +143,17 @@ def test_signed_shortlink_read_continues_into_latest_reply_once(
             assert core.store.rows("SELECT origin_event_id FROM outbox") == [
                 {"origin_event_id": latest["event_id"]},
             ]
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (old["job_id"],)) == {
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (old["job_id"],)) == {
                 "state": "CANCELLED",
             }
             assert core.store.rows("SELECT scenario,state FROM model_usage") == [
                 {"scenario": "chat", "state": "SETTLED"},
             ] * 3
             sources = {row["event_id"] for row in core.store.rows(
-                "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],),
+                'SELECT event_id FROM job_sources WHERE job_id=%s', (accepted["job_id"],),
             )}
             assert {first["event_id"], latest["event_id"], observation["event_id"]} <= sources
-            assert not core.store.one("SELECT 1 FROM event_dependencies WHERE event_id=?",
+            assert not core.store.one('SELECT 1 FROM event_dependencies WHERE event_id=%s',
                                       (latest["event_id"],))
     run(scenario())
 
@@ -191,7 +191,7 @@ def test_followup_reuses_existing_state_without_requeue(core, tmp_path, monkeypa
                 else:
                     assert "text" not in row
                 assert not core.content.status(latest["event_id"])["pending"]
-            assert core.store.one("SELECT attempts FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT attempts FROM jobs WHERE job_id=%s',
                                   (accepted["job_id"],))["attempts"] == (
                 0 if stage == "queued" else 1)
             assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == (
@@ -220,7 +220,7 @@ def test_followup_is_explicit_and_locally_bound(
             assert bool(selected) is inherits, {
                 "source_ids": core.store.rows("SELECT source_event_id FROM events "
                                               "WHERE source='qq.onebot'"),
-                "references": core.store.rows("SELECT * FROM runtime_meta WHERE key LIKE ?",
+                "references": core.store.rows('SELECT * FROM runtime_meta WHERE key LIKE %s',
                                                (FOLLOWUP + "%",)),
             }
             checked = await validate(client, item)
@@ -250,7 +250,7 @@ def test_followup_never_overrides_revocation(core, tmp_path, monkeypatch, change
             elif change == "new_turn":
                 await admit(client, core, config, plan, 3, "先聊别的")
             elif change == "epoch":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     advance_epoch(core.store)
             elif change == "expired":
                 core.clock.advance(31)
@@ -270,15 +270,15 @@ def test_followup_never_overrides_revocation(core, tmp_path, monkeypatch, change
                 "used_requests": 1, "used_bytes": 200,
             }
             if change == "original_recall":
-                assert not core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                assert not core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                           (latest["event_id"],))["redacted"]
-                assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                       (first["event_id"],))["redacted"]
     run(scenario())
 
 
 def test_erasure_replay_removes_followup_authority_without_erasing_new_input(
-    core, tmp_path, monkeypatch,
+    empty_database, core, tmp_path, monkeypatch,
 ):
     async def scenario():
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
@@ -287,7 +287,8 @@ def test_erasure_replay_removes_followup_authority_without_erasing_new_input(
             await lease(client)
             latest, _ = await admit(client, core, config, plan, 2, "继续看看")
             await select_read(core)
-            archive, destination = tmp_path / "followup.enc", tmp_path / "restored.db"
+            archive = tmp_path / "followup.enc"
+            restored_state = tmp_path / "restored-state"
             key = Fernet.generate_key()
             backup(core.settings.database, archive, key)
             response = await client.post(
@@ -295,16 +296,19 @@ def test_erasure_replay_removes_followup_authority_without_erasing_new_input(
                 config, plan, core.clock.now, number=1,
             ))
             assert response.status_code == 200, response.text
-            restore(archive, destination, key, core.settings.erasure_ledger)
-            with Core(core.settings.model_copy(update={"database": str(destination)}),
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
+            with Core(core.settings.model_copy(update={
+                "database": empty_database, "state_directory": str(restored_state),
+            }),
                       clock=core.clock) as restored:
                 assert followup_item(restored.store, restored.settings, latest["event_id"],
                                      clock=restored.clock) is None
-                assert not restored.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                assert not restored.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                                               (FOLLOWUP + latest["event_id"],))
-                assert restored.store.one("SELECT redacted FROM events WHERE event_id=?",
+                assert restored.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                           (first["event_id"],))["redacted"]
-                assert not restored.store.one("SELECT redacted FROM events WHERE event_id=?",
+                assert not restored.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                               (latest["event_id"],))["redacted"]
                 assert restored.store.one("SELECT context_json FROM reading_attempts") == {
                     "context_json": "{}",

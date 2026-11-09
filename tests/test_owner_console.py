@@ -60,7 +60,7 @@ def test_empty_views_report_real_empty_and_unobserved_states(client):
     value = overview.json()
     assert value["runtime"]["worker"]["state"] == "UNOBSERVED"
     assert value["runtime"]["state"] == "ATTENTION"
-    assert value["budget"]["daily_limit_micro_cny"] == 20_000_000
+    assert "daily_limit_micro_cny" not in value["budget"]
     assert value["budget"]["used_micro_cny"] == 0
     assert value["budget"]["settled_micro_cny"] == 0
 
@@ -101,7 +101,7 @@ def test_configuration_is_versioned_encrypted_idempotent_and_requires_restart(cl
 
 def test_memory_correction_and_erasure_keep_receipts_without_private_copies(client, core):
     source = ingest(core, text="我喜欢龙井茶")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         memory_id = core.memory.add(Candidate(subject="user", kind="preference", fact_key="tea",
             content="主人喜欢龙井茶", evidence_event_id=source["event_id"],
             evidence_quote="我喜欢龙井茶"), core.clock(), confirmed=True)
@@ -130,11 +130,12 @@ def test_cloud_budget_change_uses_its_own_version_and_preserves_native_rows(clie
     headers = login(client)
     policy = client.get("/v1/console/configuration").json()["cloud_budget"]
     response = client.put("/v1/console/cloud-budget", json={
-        "expected_version": policy["version"], "changes": {"daily_micro_cny": 18_000_000},
+        "expected_version": policy["version"], "changes": {"usd_to_cny_micro": 9_000_000},
     }, headers=headers)
     assert response.status_code == 200, response.text
     overview = client.get("/v1/console/overview").json()
-    assert overview["budget"]["daily_limit_micro_cny"] == 18_000_000
+    assert overview["budget"]["config"]["usd_to_cny_micro"] == 9_000_000
+    assert overview["budget"]["version"] == policy["version"] + 1
     assert client.get("/v1/console/configuration").json()["version"] == 0
     assert not core.store.rows("SELECT * FROM model_usage")
 
@@ -312,6 +313,8 @@ def test_memory_projection_pages_native_candidates_and_keeps_literal_unicode_sea
 @pytest.mark.parametrize("invalid", [
     "negative", "tombstone", "expired", "conversation", "upstream", "future", "ended",
 ])
+
+
 @pytest.mark.parametrize("confirmed", [False, True])
 def test_memory_projection_preserves_native_source_and_validity_filters(
     client, core, invalid, confirmed,
@@ -325,10 +328,10 @@ def test_memory_projection_preserves_native_source_and_validity_filters(
     if invalid == "negative":
         core.store.execute("UPDATE memory_evidence SET polarity=-1")
     elif invalid == "tombstone":
-        core.store.execute("INSERT INTO runtime_meta VALUES (?, 'erased')",
+        core.store.execute("INSERT INTO runtime_meta VALUES (%s, 'erased')",
                            ("erased_event:" + source["event_id"],))
     elif invalid == "expired":
-        core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s',
                            (after(core.clock(), -366 * 86400), source["event_id"]))
     elif invalid == "conversation":
         core.store.execute("UPDATE conversations SET scope='group'")
@@ -336,11 +339,13 @@ def test_memory_projection_preserves_native_source_and_validity_filters(
         upstream = ingest(core, 2, "原始来源")
         core.store.insert("event_dependencies", event_id=source["event_id"],
                           source_event_id=upstream["event_id"])
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (upstream["event_id"],))
+        core.store.execute((
+            'UPDATE events SET redacted=1 WHERE event_id=%s'
+        ), (upstream["event_id"],))
     elif invalid == "future":
-        core.store.execute("UPDATE memories SET valid_from=?", (after(core.clock(), 1),))
+        core.store.execute('UPDATE memories SET valid_from=%s', (after(core.clock(), 1),))
     else:
-        core.store.execute("UPDATE memories SET valid_to=?", (core.clock(),))
+        core.store.execute('UPDATE memories SET valid_to=%s', (core.clock(),))
     result = client.get("/v1/console/memories")
     assert result.status_code == 200, result.text
     assert result.json()["items"] == []
@@ -381,8 +386,10 @@ def test_memory_projection_does_not_mask_disabled_access_as_an_empty_collection(
 
 def source_projection_records(core):
     source = ingest(core, 1, "主人发送的图片")
-    core.store.execute("UPDATE events SET body_json=?,event_type='message.media_received' "
-                       "WHERE event_id=?", (encode({"text": "", "media": []}), source["event_id"]))
+    core.store.execute((
+        "UPDATE events SET body_json=%s,event_type='message.media_received' "
+        'WHERE event_id=%s'
+    ), (encode({"text": "", "media": []}), source["event_id"]))
     now = core.clock()
     core.store.insert(
         "content_items", item_id="content_console", owner_event_id=source["event_id"],
@@ -408,10 +415,10 @@ def test_content_and_meme_views_require_current_private_source_custody(client, c
         assert response.status_code == 200, response.text
         assert len(response.json()["items"]) == 1
     if invalid == "expired":
-        core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s',
                            (after(core.clock(), -366 * 86400), source["event_id"]))
     elif invalid == "tombstone":
-        core.store.execute("INSERT INTO runtime_meta VALUES (?, 'erased')",
+        core.store.execute("INSERT INTO runtime_meta VALUES (%s, 'erased')",
                            ("erased_event:" + source["event_id"],))
     elif invalid == "conversation":
         core.store.execute("UPDATE conversations SET scope='group'")
@@ -419,7 +426,9 @@ def test_content_and_meme_views_require_current_private_source_custody(client, c
         upstream = ingest(core, 2, "上游原始证据")
         core.store.insert("event_dependencies", event_id=source["event_id"],
                           source_event_id=upstream["event_id"])
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (upstream["event_id"],))
+        core.store.execute((
+            'UPDATE events SET redacted=1 WHERE event_id=%s'
+        ), (upstream["event_id"],))
     for view in ("content", "memes"):
         response = client.get("/v1/console/" + view)
         assert response.status_code == 200 and response.json()["items"] == []
@@ -430,12 +439,12 @@ def test_content_and_meme_views_require_current_private_source_custody(client, c
 def test_content_and_meme_views_check_independent_related_sources(client, core):
     _, job = source_projection_records(core)
     related = ingest(core, 2, "另一个被引用的来源")
-    core.store.execute("UPDATE content_items SET source_event_id=?", (related["event_id"],))
+    core.store.execute('UPDATE content_items SET source_event_id=%s', (related["event_id"],))
     core.store.insert("job_sources", job_id=job, event_id=related["event_id"])
     login(client)
     assert len(client.get("/v1/console/content").json()["items"]) == 1
     assert len(client.get("/v1/console/memes").json()["items"]) == 1
-    core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (related["event_id"],))
+    core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (related["event_id"],))
     assert client.get("/v1/console/content").json()["items"] == []
     assert client.get("/v1/console/memes").json()["items"] == []
 
@@ -446,7 +455,7 @@ def test_overview_review_count_matches_visible_sources_and_reports_disabled_as_u
     _, source = stored_memory(core, review=True)
     login(client)
     assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 1
-    core.store.execute("INSERT INTO runtime_meta VALUES (?, 'erased')",
+    core.store.execute("INSERT INTO runtime_meta VALUES (%s, 'erased')",
                        ("erased_event:" + source["event_id"],))
     assert client.get("/v1/console/memories", params={"review": "true"}).json()["items"] == []
     assert client.get("/v1/console/overview").json()["counts"]["review_memories"] == 0
@@ -487,6 +496,8 @@ def test_life_projection_rejects_diary_erasure_during_combined_read(client, core
     ("https://[::1]:443/", "https://[::1]"),
     ("https://例子.测试", "https://xn--fsqu00a.xn--0zwm56d"),
 ])
+
+
 def test_console_origin_matches_browser_serialization(supplied, canonical):
     assert operator_config.ConsoleConfig(public_origin=supplied).public_origin == canonical
 
@@ -496,6 +507,8 @@ def test_console_origin_matches_browser_serialization(supplied, canonical):
     "https://@console.example.test", "https://console.example.test/path",
     "https://console.example.test?x=1", "https://console.example.test#fragment",
 ])
+
+
 def test_console_origin_rejects_invalid_ports_and_non_origin_parts(supplied):
     with pytest.raises(ValidationError):
         operator_config.ConsoleConfig(public_origin=supplied)
@@ -530,5 +543,5 @@ def test_console_budget_reports_restore_reconciliation_without_new_spendable_poo
     assert value["runtime"]["state"] == "ATTENTION"
     assert value["budget"]["restore_reconciliation_required"]
     assert value["budget"]["restored_history_may_be_incomplete"]
-    assert value["budget"]["remaining_micro_cny"] == 0
-    assert value["budget"]["admission_blocked"]
+    assert "remaining_micro_cny" not in value["budget"]
+    assert "admission_blocked" not in value["budget"]

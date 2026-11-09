@@ -144,7 +144,7 @@ def check_independent_life_worker(core, tmp_path, monkeypatch, scenario):
             stopped = await http.post("/internal/v1/owner-authority/stop", headers=control,
                 json={"authority": grant.authority, "operation_id": "life-source-phase-complete"})
             assert stopped.status_code == 200, stopped.text
-            conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+            conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                           (inbound["event_id"],))["conversation_id"]
             scope = LifeShadowApproval(scope="owner_private_life_shadow_v1",
                 authorization_sha256="e" * 64, conversation_id=conversation,
@@ -201,10 +201,10 @@ def check_independent_life_worker(core, tmp_path, monkeypatch, scenario):
                 assert result["text"] == "" and result["state"] != "SHADOW"
             else:
                 assert result["state"] == "SHADOW"
-            usage = core.store.one("SELECT * FROM model_usage WHERE job_id=?", (result["job_id"],))
+            usage = core.store.one('SELECT * FROM model_usage WHERE job_id=%s', (result["job_id"],))
             assert usage["state"] == ("UNKNOWN" if scenario == "unknown" else "SETTLED")
             assert usage["billed_micro_usd"] > 0
-            assert core.store.one("SELECT io_started_at FROM model_admissions WHERE request_id=?",
+            assert core.store.one('SELECT io_started_at FROM model_admissions WHERE request_id=%s',
                                   (usage["request_id"],))["io_started_at"]
             preview = await http.get("/internal/v2/life/topics", headers=control)
             assert preview.status_code == 200 and preview.headers["Cache-Control"] == "no-store"
@@ -224,10 +224,10 @@ def check_independent_life_worker(core, tmp_path, monkeypatch, scenario):
             if scenario == "unknown":
                 repeated = await process_worker(core, tmp_path, scenario, source_id, restart=True)
                 assert repeated["provider_calls"] == 0
-                assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                       (usage["request_id"],)) == usage
             if interrupted:
-                assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                       (result["job_id"],))["state"] == "CANCELLED"
                 status = owner_authority.status(core.store, core.settings, core.clock)
                 assert status["state"] == "ACTIVE"
@@ -239,12 +239,12 @@ def check_independent_life_worker(core, tmp_path, monkeypatch, scenario):
                 ))) as foreground:
                     core.model = ModelClient(core.settings, foreground)
                     assert await core.run_once("next-foreground")
-                assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
+                assert core.store.one('SELECT state FROM jobs WHERE event_id=%s',
                                       (next_owner["event_id"],))["state"] == "SUCCEEDED"
                 new_outbox = [row for row in core.store.rows("SELECT * FROM outbox")
                               if row["message_id"] not in baseline_ids]
                 assert new_outbox and all(row["origin_event_id"] == next_owner["event_id"]
                                           for row in new_outbox)
-                assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                       (usage["request_id"],)) == usage
     run(exercise())

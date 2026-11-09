@@ -34,7 +34,7 @@ def test_native_upload_is_one_shot_and_sdk_consumes_image(core, tmp_path, mime, 
                                                  max_daily_image_bytes=800 * 1024**2)
         async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
             event, image = await admit_image(core, client, config, plan, tmp_path)
-            job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (event["event_id"],))
             assert core.claim_job("wait-for-original", job_id=job["job_id"]) is None
             body = pixels(mime)
             if at_limit:
@@ -186,17 +186,17 @@ def test_native_upload_rechecks_original_source_and_lease(core, tmp_path, bounda
             elif boundary == "expired":
                 core.clock.advance(61)
             elif boundary == "source_replaced":
-                row = core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                row = core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                      (event["event_id"],))
                 changed = json.loads(row["body_json"])
                 changed["rich"]["segments"][0]["source_sha256"] = "f" * 64
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                    (encode(changed), event["event_id"]))
             elif boundary == "recall":
                 from companion.owner_authority_protocol import OwnerCapture
                 from tests.support.owner_recall import receipt
 
-                saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                saved = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                     ("owner_input:" + event["event_id"],))["value"])
                 capture = OwnerCapture.model_validate(saved["capture"])
                 withdrawn = await client.post("/internal/v1/owner-authority/inputs/recall",
@@ -241,7 +241,7 @@ def test_superseding_text_reuses_the_original_image_lease_and_bytes(core, tmp_pa
             provider = Provider(answer("结合原图回答。"))
             async with worker_for(core, provider) as worker:
                 assert await worker.run_once("latest-image-consumer")
-            status = core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+            status = core.store.one('SELECT state,last_error_code FROM jobs WHERE event_id=%s',
                                     (latest["event_id"],))
             assert status["state"] == "SUCCEEDED", status
             assert len(provider.requests) == 1
@@ -280,10 +280,15 @@ def test_unknown_image_model_call_is_not_replayed_after_restart(core, tmp_path):
             assert len(calls) == 1
             assert core.store.rows("SELECT * FROM model_usage") == before
             assert_failure_notice(core)
-            failed = core.store.one("SELECT job_id,last_error_code FROM jobs WHERE event_id=?",
+            failed = core.store.one('SELECT job_id,last_error_code FROM jobs WHERE event_id=%s',
                                      (event["event_id"],))
-            receipts = core.store.rows("SELECT safe_detail_json FROM audit_log "
-                "WHERE action='job.failed' AND entity_id=? ORDER BY rowid", (failed["job_id"],))
+            receipts = core.store.rows((
+                (
+                    'SELECT safe_detail_json FROM audit_log WHERE '
+                    "action='job.failed' AND entity_id=%s ORDER BY "
+                    'record_sequence'
+                )
+            ), (failed["job_id"],))
             assert [json.loads(row["safe_detail_json"]) for row in receipts] == [
                 {"code": "MODEL_RETRYABLE", "state": "RETRY_WAIT"},
                 {"code": "CONVERSATION_OUTCOME_UNAVAILABLE", "state": "FAILED"}]
@@ -307,7 +312,7 @@ def test_native_recall_erases_uploaded_original_and_rejects_replay(core, tmp_pat
             row = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
             path = image_spool.directory(core.store) / (row["item_id"] + ".raw")
             assert path.exists()
-            saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            saved = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                 ("owner_input:" + event["event_id"],))["value"])
             notice = receipt(core, OwnerCapture.model_validate(saved["capture"]), plan.key)
             withdrawn = await client.post("/internal/v1/owner-authority/inputs/recall",

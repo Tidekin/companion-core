@@ -34,6 +34,8 @@ def test_bilibili_discovery_reads_the_bounded_public_feed_once():
 @pytest.mark.parametrize("status,code", [(302, "UPSTREAM_HTTP_ERROR"),
                                         (403, "UPSTREAM_ACCESS_LIMIT"),
                                         (412, "UPSTREAM_ACCESS_LIMIT")])
+
+
 def test_discovery_access_failure_does_not_switch_targets(status, code):
     result, backend = run(read(response(status=status),
                                item={**ITEM, "operation": "discover", "url": ""}))
@@ -79,10 +81,15 @@ def test_nightly_recovers_legacy_unadmitted_reflection_without_regenerating_diar
     assert core.consolidation.status(first)["state"] == "COMPLETE"
     assert core.consolidation.status(second)["state"] == "PARTIAL"
     # A previous release recorded an unadmitted quota failure, then a clean window STOP.
-    core.store.execute("UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL "
-                       "WHERE local_date=?", (second.isoformat(),))
-    core.store.execute("UPDATE consolidation_runs SET state='CANCELLED',"
-                       "last_error_code='LIVE_WINDOW_STOPPED' WHERE local_date=?",
+    core.store.execute((
+        "UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL WHERE"
+        ' local_date=%s'
+    ), (second.isoformat(),))
+    core.store.execute((
+        'UPDATE consolidation_runs SET '
+        "state='CANCELLED',last_error_code='LIVE_WINDOW_STOPPED' WHERE "
+        'local_date=%s'
+    ),
                        (second.isoformat(),))
     before = list(model.calls)
     core.settings.reflection_max_daily_calls = 3
@@ -101,10 +108,10 @@ def test_waiting_reflection_never_reuses_changed_or_erased_sources(core, change)
     waiting = run(core.reflections.run_day(second))
     assert waiting["state"] == "RETRY_WAIT"
     if change == "erasure":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_20"], core.clock())
     else:
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_20'",
+        core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_20'",
                            ('{"text":"来源发生变化","media":[]}',))
     core.clock.now = datetime.fromisoformat(waiting["next_attempt_at"])
     assert run(core.reflections.run_day(second))["state"] == "CANCELLED"
@@ -114,6 +121,8 @@ def test_waiting_reflection_never_reuses_changed_or_erased_sources(core, change)
 
 @pytest.mark.parametrize("code", ["MODEL_RETRYABLE", "SCENARIO_CALL_LIMIT",
                                  "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"])
+
+
 def test_unknown_reflection_is_not_replayed_as_an_admission_retry(core, code):
     from companion.contracts import CoreError
 
@@ -139,7 +148,7 @@ def test_stop_cancels_an_unadmitted_reflection_wait(core):
     assert waiting["state"] == "RETRY_WAIT"
     with core.store.transaction():
         private_life.stop_work(core.store, core.clock())
-    row = core.store.one("SELECT * FROM reflection_runs WHERE run_id=?", (waiting["run_id"],))
+    row = core.store.one('SELECT * FROM reflection_runs WHERE run_id=%s', (waiting["run_id"],))
     assert row["state"] == "CANCELLED" and row["last_error_code"] == "LIVE_WINDOW_STOPPED"
     assert row["model_request_id"] is None
 
@@ -147,6 +156,8 @@ def test_stop_cancels_an_unadmitted_reflection_wait(core):
 @pytest.mark.parametrize("payload", [{"code": 0, "data": {}},
                                      {"code": 0, "data": {"list": ["invalid"]}},
                                      {"code": -101}])
+
+
 def test_discovery_invalid_feed_never_falls_back_to_a_page(payload):
     result, backend = run(read(response(payload),
                                item={**ITEM, "operation": "discover", "url": ""}))
@@ -199,8 +210,8 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
     async def scenario():
         options = dict(diary_enabled=True, consolidation_enabled=True, reflection_enabled=True,
             goals_enabled=True, exploration_enabled=True, reflection_max_daily_calls=1,
-            reflection_min_sources=1, reflection_daily_micro_usd=50000,
-            reflection_monthly_micro_usd=100000, extraction_min_events=40,
+            reflection_min_sources=1,
+             extraction_min_events=40,
             wake_max_daily_runs=0, content_enabled=True, observation_enabled=True,
             exploration_daily_requests=8, exploration_monthly_requests=30,
             exploration_daily_bytes=4_194_304,
@@ -230,13 +241,18 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
                 assert await core.consolidation.run_once()
             assert core.consolidation.status(first)["state"] == "COMPLETE"
             assert core.consolidation.status(second)["state"] == "PARTIAL"
-            pending = core.store.one("SELECT * FROM reflection_runs WHERE local_date=?",
+            pending = core.store.one('SELECT * FROM reflection_runs WHERE local_date=%s',
                                      (second.isoformat(),))
             assert pending["state"] == "RETRY_WAIT" and pending["model_request_id"] is None
-            core.store.execute("UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL "
-                               "WHERE local_date=?", (second.isoformat(),))
-            core.store.execute("UPDATE consolidation_runs SET state='CANCELLED',"
-                "last_error_code='LIVE_WINDOW_STOPPED' WHERE local_date=?", (second.isoformat(),))
+            core.store.execute((
+                'UPDATE reflection_runs SET '
+                "state='FAILED',next_attempt_at=NULL WHERE local_date=%s"
+            ), (second.isoformat(),))
+            core.store.execute((
+                'UPDATE consolidation_runs SET '
+                "state='CANCELLED',last_error_code='LIVE_WINDOW_STOPPED' "
+                'WHERE local_date=%s'
+            ), (second.isoformat(),))
             diaries = core.store.rows("SELECT * FROM diary_runs ORDER BY local_date")
             existing_usage = core.store.rows("SELECT * FROM model_usage")
             baseline_sends = len(sends)
@@ -269,10 +285,12 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
                     await asyncio.gather(task, return_exceptions=True)
             assert len(instances) == 2 and all(instance is not core for instance in instances)
             assert calls.count(REFLECTION_RULES) == 1
-            assert core.store.rows("SELECT * FROM diary_runs WHERE local_date IN (?,?) "
-                "ORDER BY local_date", (first.isoformat(), second.isoformat())) == diaries
+            assert core.store.rows((
+                'SELECT * FROM diary_runs WHERE local_date IN (%s,%s) ORDER '
+                'BY local_date'
+            ), (first.isoformat(), second.isoformat())) == diaries
             for row in existing_usage:
-                assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                       (row["request_id"],)) == row
             assert len(sends) == baseline_sends + 1
             with core.store.transaction():
@@ -295,7 +313,10 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
                 assert await tick(bridge.client, reader, "bili")
                 assert not await tick(bridge.client, reader, "bili")
             assert core.goals.get(goal["goal_id"])["state"] == "DONE"
-            assert core.store.rows("SELECT result_status FROM observations ORDER BY rowid") == [
+            assert core.store.rows(
+                'SELECT result_status FROM observations ORDER BY '
+                'record_sequence'
+            ) == [
                 {"result_status": "DISCOVERED"}, {"result_status": "FETCHED"}]
             assert len(backend.requests) == 2
             assert backend.server_names == ["api.bilibili.com"] * 2

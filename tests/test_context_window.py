@@ -185,7 +185,7 @@ def test_explicit_none_retains_the_original_journal_and_admission_contract(core,
     job_id = authorized_job(core)
     request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock(),
                                 clock=core.clock)
-    saved = core.store.one("SELECT snapshot_json FROM model_admissions WHERE request_id=?",
+    saved = core.store.one('SELECT snapshot_json FROM model_admissions WHERE request_id=%s',
                            (request_id,))["snapshot_json"]
     journal = Path(core.settings.paid_model.journal_path)
     original = journal.read_bytes()
@@ -203,7 +203,7 @@ def test_explicit_none_retains_the_original_journal_and_admission_contract(core,
                                   request_id, MESSAGES, "chat", core.clock)
 
     run(exercise())
-    assert core.store.one("SELECT snapshot_json FROM model_admissions WHERE request_id=?",
+    assert core.store.one('SELECT snapshot_json FROM model_admissions WHERE request_id=%s',
                           (request_id,))["snapshot_json"] == saved
     assert "max_context_tokens" not in saved
 
@@ -231,7 +231,7 @@ def test_signed_http_ingress_to_independent_worker_enforces_loaded_joint_window(
             source = await entry.admit(1, "synthetic joint-window source")
             job_id = entry.accepted[source["event_id"]]["job_id"]
             settings = core.settings.model_dump(mode="json")
-            for key in ("model_key", "bridge_token", "control_token"):
+            for key in ("database", "model_key", "bridge_token", "control_token"):
                 settings[key] = getattr(core.settings, key).get_secret_value()
             path = tmp_path / "context-window-worker.json"
             path.write_text(encode({"settings": settings, "now": core.clock(), "job_id": job_id}),
@@ -249,7 +249,9 @@ def test_signed_http_ingress_to_independent_worker_enforces_loaded_joint_window(
                 raise
             assert process.returncode == 0, stderr.decode("utf-8", errors="replace")
             assert json.loads(stdout) == {"mock_provider_requests": int(allowed)}
-            row = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job_id,))
+            row = core.store.one((
+                'SELECT state,last_error_code FROM jobs WHERE job_id=%s'
+            ), (job_id,))
             assert row["state"] == ("SUCCEEDED" if allowed else "FAILED"), row
             if not allowed:
                 assert row["last_error_code"] == "MODEL_CONTEXT_LIMIT"

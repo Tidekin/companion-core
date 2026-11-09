@@ -15,7 +15,7 @@
 | 使用 | 主人当前消息里出现已推断的说法时，聊天上下文附一条“主人用语参考”，注明是推测、不要模仿、不要解释给主人听 | 无 |
 
 MaiBot 推断一次要三次调用（带上下文、只看词、比较两者）。这里用一次结构化输出代替，
-费用有上限：每天默认最多 $0.02（`jargon.daily_micro_usd`），并且后台调用会给聊天让路。
+真实费用和用量沿用原账本记录，后台调用会给聊天让路。
 
 ## 只读什么
 
@@ -34,7 +34,7 @@ MaiBot 推断一次要三次调用（带上下文、只看词、比较两者）�
 
 ## 配置
 
-`[jargon]` 表：`enabled`（默认开）、`daily_micro_usd`、`batch_messages`、`max_output_tokens`、
+`[jargon]` 表：`enabled`（默认开）、`batch_messages`、`max_output_tokens`、
 `max_attempts`、`max_context_terms`。控制台“记忆与日记”分组里叫“学习主人的黑话”。
 
 ## 数据

@@ -12,9 +12,13 @@ from companion import budget, operator_config, runtime_config
 from companion.contracts import CoreError
 from companion.conversation_policy import PARTICIPATION_V1, PARTICIPATION_V2
 from companion.core import Core
+from companion.legacy_import import import_sqlite_backup, migrate_sqlite
 from companion.model import ModelResponse
-from companion.store import encode
+from companion.postgres import Database, migrate
+from companion.store import Store, encode
 from tests.conftest import ingest
+from tests.support.historical_schema import historical_database
+from tests.support.release_migration import open_historical, rows
 from tests.support.runtime_configuration import hot as hot
 from tests.support.runtime_configuration import save, task
 
@@ -117,7 +121,10 @@ def test_invalid_text_and_corrupt_snapshot_cannot_partially_apply(hot):
     assert runtime_config.boundary(hot.store, hot.settings, hot.clock) == good
     job = task(hot)
     key = runtime_config.identity(hot.settings, good)
-    hot.store.execute("UPDATE operator_runtime_snapshots SET expression_json=? WHERE snapshot_id=?",
+    hot.store.execute((
+        'UPDATE operator_runtime_snapshots SET expression_json=%s WHERE '
+        'snapshot_id=%s'
+    ),
         (encode({"format_version": 2, "conversation_policy": {"mode": "OFF"},
                  "style_live_enabled": False, "encrypted_guidance": None}), key))
     with pytest.raises(CoreError, match="CONFIGURATION_SNAPSHOT_INVALID"):
@@ -138,8 +145,10 @@ def test_expression_values_keep_contracts_and_still_obey_real_input_limit(hot, t
     assert paid_budget.snapshot(candidate) == contract
     assert owner_authority.capability_hashes(candidate) == capabilities
     job_id = authorized_job(hot)
-    job = hot.store.one("SELECT j.*,e.body_json,e.conversation_id FROM jobs j "
-                       "JOIN events e USING(event_id) WHERE job_id=?", (job_id,))
+    job = hot.store.one((
+        'SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events e '
+        'USING(event_id) WHERE job_id=%s'
+    ), (job_id,))
     messages = hot.context(job)
     assert "表" * 2000 in messages[0]["content"]
     with pytest.raises(CoreError, match="MODEL_INPUT_LIMIT"):
@@ -169,8 +178,10 @@ def legacy_binding(core, job):
         base_sha256=original["base_sha256"], chat_time_labels=int(original["chat_time_labels"]),
         created_at=core.clock())
     task_key = "job:" + job["job_id"]
-    core.store.execute("UPDATE operator_task_configuration SET snapshot_id=?,binding_sha256=? "
-        "WHERE task_key=?", (key, sign([task_key, key]), task_key))
+    core.store.execute((
+        'UPDATE operator_task_configuration SET '
+        'snapshot_id=%s,binding_sha256=%s WHERE task_key=%s'
+    ), (key, sign([task_key, key]), task_key))
     return key
 
 
@@ -190,7 +201,7 @@ def test_legacy_task_and_model_identity_survive_upgrade_save_and_restart(hot, ve
              conversation_guidance=TEXT, style_live={"enabled": True},
              turn_taking={"silence_enabled": True}, input_debounce={"quiet_seconds": 5})
         runtime_config.boundary(old.store, settings, old.clock)
-        old.store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL WHERE job_id=?",
+        old.store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL WHERE job_id=%s",
                           (job["job_id"],))
     reloaded = operator_config.load(hot.settings)
     with Core(reloaded, hot.model, hot.clock) as resumed:
@@ -202,41 +213,45 @@ def test_legacy_task_and_model_identity_survive_upgrade_save_and_restart(hot, ve
         original = runtime_config.get(resumed.store, reloaded, "job:" + job["job_id"])
         assert original.format_version == 1 and runtime_config.identity(reloaded, original) == key
         assert not original.silence_enabled and original.debounce.quiet_seconds == 2
-        reloaded.monthly_limit_micro_usd += 1
+        reloaded.reflection_max_daily_calls += 1
         with pytest.raises(CoreError, match="CONFIGURATION_STARTUP_IDENTITY_CHANGED"):
             resumed.context(retry)
 
 
-def test_populated_snapshot_migration_preserves_legacy_evidence_and_fences_downgrade(hot, tmp_path):
+def test_populated_snapshot_migration_preserves_legacy_evidence_and_fences_downgrade(
+    hot, tmp_path, empty_database
+):
     from contextlib import closing
-    from types import SimpleNamespace
 
     from alembic import command
     from alembic.config import Config
 
-    from companion.store import Store, migrate
 
     path = tmp_path / "legacy-snapshots.db"
-    settings = hot.settings.model_copy(update={"database": str(path)})
-    migrate(str(path), "0056_watch_ledger_goal_reads")
-    with closing(Store(str(path))) as store:
-        old = SimpleNamespace(store=store, settings=settings, clock=hot.clock)
-        key = legacy_binding(old, {"job_id": "migration"})
-        store.insert("operator_task_configuration", task_key="job:migration", snapshot_id=key,
-            binding_sha256=runtime_config._digest(settings, ["job:migration", key]),
-            created_at=hot.clock())
-        before = store.rows("SELECT * FROM operator_task_configuration")
-    migrate(str(path), "0057_expression_configuration")
+    settings = hot.settings
+    key = legacy_binding(hot, {"job_id": "migration"})
+    hot.store.insert("operator_task_configuration", task_key="job:migration", snapshot_id=key,
+        binding_sha256=runtime_config._digest(settings, ["job:migration", key]),
+        created_at=hot.clock())
+    historical_database(hot.store, path, "0056_watch_ledger_goal_reads")
+    with closing(open_historical(path)) as db:
+        before = rows(db, "SELECT * FROM operator_task_configuration")
+    migrate_sqlite(path, "0057_expression_configuration")
     cfg = Config()
     cfg.set_main_option("script_location", "migrations")
     cfg.set_main_option("sqlalchemy.url", "sqlite:///" + path.resolve().as_posix())
-    with closing(Store(str(path))) as store:
-        legacy = runtime_config.get(store, settings, "job:migration")
-        assert runtime_config.identity(settings, legacy) == key and legacy.format_version == 1
-        assert store.rows("SELECT * FROM operator_task_configuration") == before
+    with closing(open_historical(path)) as db:
+        assert rows(db, "SELECT * FROM operator_task_configuration") == before
     command.downgrade(cfg, "0056_watch_ledger_goal_reads")
-    migrate(str(path), "0057_expression_configuration")
-    with closing(Store(str(path))) as store:
-        runtime_config.boundary(store, settings, hot.clock)
+    migrate_sqlite(path)
+    migrate(empty_database)
+    import_sqlite_backup(path, empty_database)
+    with Database(empty_database) as database, closing(Store(database, tmp_path)) as imported:
+        legacy = runtime_config.get(imported, settings, "job:migration")
+        assert runtime_config.identity(settings, legacy) == key and legacy.format_version == 1
+        runtime_config.boundary(imported, settings, hot.clock)
+        guarded = historical_database(imported, tmp_path / "retained.db",
+                                      "0057_expression_configuration")
+    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + guarded.resolve().as_posix())
     with pytest.raises(RuntimeError, match="CONFIGURATION_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"):
         command.downgrade(cfg, "0056_watch_ledger_goal_reads")

@@ -77,8 +77,9 @@ def source(store, settings, approval, event_id, *, item_id=None):
         from companion.reading import followup_item
 
         consumer = store.one(
-            "SELECT e.event_id FROM events e JOIN conversations c USING(conversation_id) "
-            "WHERE e.conversation_id=? AND e.reply_revision=c.reply_revision AND e.redacted=0",
+            'SELECT e.event_id FROM events AS e JOIN conversations AS c USING (conversation_id) '
+            'WHERE e.conversation_id = %s AND e.reply_revision = c.reply_revision AND e.redacted = '
+            '0',
             (event["conversation_id"],),
         )
         inherited = followup_item(store, settings, consumer["event_id"]) if consumer else None

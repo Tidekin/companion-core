@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from companion import owner_authority as authority
 from companion import paid_budget
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import (
     AuthorityPreview,
@@ -42,6 +43,27 @@ def test_revision_idempotency_and_current_policy(core, tmp_path):
         authority.activate(core.store, core.settings, core.clock, request)
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_REVISION_CHANGED"):
         activate(core, policy, operation="operation-activate-2")
+
+
+@pytest.mark.parametrize("snapshot", [True, False])
+@pytest.mark.parametrize(("ledger", "error"), [
+    ("paid", "OWNER_AUTHORITY_CUSTODY_REQUIRED"), ("erasure", "ERASURE_LEDGER_INVALID"),
+])
+def test_every_current_check_reopens_the_original_ledgers(core, tmp_path, snapshot, ledger, error):
+    policy = prepare(core, tmp_path)
+    active, _ = activate(core, policy)
+    path = Path(core.settings.paid_model.journal_path if ledger == "paid"
+                else core.settings.erasure_ledger)
+    original = path.read_bytes()
+    try:
+        with core.store.read_snapshot() if snapshot else core.store.transaction():
+            view = authority.current(core.store, core.settings, core.clock, purpose="evaluation")
+            assert view.authority.as_dict() == active["authority"]
+            path.write_bytes(original + b"{invalid}\n")
+            with pytest.raises(CoreError, match=error):
+                authority.current(core.store, core.settings, core.clock, purpose="evaluation")
+    finally:
+        path.write_bytes(original)
 
 
 def test_stop_survives_removed_settings_and_does_not_claim_quiescence(core, tmp_path):
@@ -80,7 +102,7 @@ def test_restore_generation_cannot_restore_authority(core, tmp_path):
         authority.restore(core.store)
     assert authority.status(core.store, core.settings, core.clock)["state"] == "OFF"
     # Even changing the local mode pointer cannot bypass the restore generation.
-    core.store.execute("UPDATE runtime_meta SET value='ENABLED' WHERE key=?", (authority.MODE,))
+    core.store.execute("UPDATE runtime_meta SET value='ENABLED' WHERE key=%s", (authority.MODE,))
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_REQUIRED"):
         authority.current(core.store, core.settings, core.clock)
 
@@ -149,7 +171,7 @@ def test_projection_preserves_resolved_path_alias_and_mismatch(core, tmp_path, m
     directory = tmp_path / "alias"
     directory.mkdir()
     saved_path = directory / ".." / (path.name if matching else "another-journal.jsonl")
-    core.store.execute("UPDATE owner_authority_revisions SET journal_path=?", (str(saved_path),))
+    core.store.execute("UPDATE owner_authority_revisions SET journal_path=%s", (str(saved_path),))
     with core.store.transaction():
         if matching:
             authority.validate_projection(core.store, records, journal_id, path)
@@ -187,7 +209,7 @@ def test_projection_checks_changed_policy_and_each_redaction(core, tmp_path, cha
         value = json.loads(core.store.one("SELECT policy_json FROM owner_authority_revisions "
                                          "WHERE revision=2")["policy_json"])
         value["authorization_sha256"] = "e" * 64
-        core.store.execute("UPDATE owner_authority_revisions SET policy_json=? WHERE revision=2",
+        core.store.execute("UPDATE owner_authority_revisions SET policy_json=%s WHERE revision=2",
                            (json.dumps(value),))
     else:
         core.store.execute("UPDATE owner_authority_revisions SET policy_redacted=1 "
@@ -209,6 +231,7 @@ def test_control_api_rejects_bridge_credential_and_activates_exact_preview(core,
     core.settings.control_token = SecretStr("synthetic-owner-control-token")
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     client = TestClient(app)
     request = AuthorityPreview(expected_revision=0, policy=policy).model_dump(mode="json")
     bridge = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
@@ -233,17 +256,22 @@ def test_native_encrypted_restore_never_reactivates_grant(core, tmp_path):
 
     from companion.backup import backup, restore
     from companion.runtime import Runtime
+    from tests.postgres_fixture import isolated_database
 
     policy = prepare(core, tmp_path)
     activate(core, policy)
-    path, restored, key = tmp_path / "snapshot.enc", tmp_path / "restored.db", Fernet.generate_key()
+    path, key = tmp_path / "snapshot.enc", Fernet.generate_key()
     backup(core.settings.database, path, key)
-    restore(path, restored, key, core.settings.erasure_ledger)
-    settings = core.settings.model_copy(update={"database": str(restored)})
-    with Runtime(settings, core.clock) as runtime:
-        assert authority.status(runtime.store, settings, core.clock)["state"] == "OFF"
-        assert runtime.store.one("SELECT value FROM runtime_meta WHERE key=?",
-                                 (authority.GENERATION,))["value"] != "initial"
+    with isolated_database() as database:
+        state = tmp_path / "restored-state"
+        restore(path, database, key, core.settings.erasure_ledger, state_directory=state)
+        settings = core.settings.model_copy(update={
+            "database": database, "state_directory": str(state),
+        })
+        with Runtime(settings, core.clock) as runtime:
+            assert authority.status(runtime.store, settings, core.clock)["state"] == "OFF"
+            assert runtime.store.one("SELECT value FROM runtime_meta WHERE key=%s",
+                                     (authority.GENERATION,))["value"] != "initial"
 
 
 def test_source_erasure_scrubs_policy_but_preserves_journal_evidence(core, tmp_path):
@@ -262,7 +290,7 @@ def test_source_erasure_scrubs_policy_but_preserves_journal_evidence(core, tmp_p
     )
     policy = policy.model_copy(update={"purposes": ["life"], "life_shadow": scope})
     activated, _ = activate(core, policy)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
     row = core.store.one("SELECT * FROM owner_authority_revisions")
     assert row["policy_json"] == "{}" and row["policy_redacted"] == 1
@@ -335,7 +363,7 @@ def test_job_authority_requires_native_unexpired_lease(core, tmp_path):
     policy = prepare(core, tmp_path)
     activate(core, policy)
     job_id = core.new_job(source["event_id"], "evaluation", "native-evaluation-test", core.clock())
-    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=%s", (job_id,))
     with core.store.transaction():
         authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
                            purpose="evaluation")
@@ -343,11 +371,11 @@ def test_job_authority_requires_native_unexpired_lease(core, tmp_path):
         authority.check_job(core.store, core.settings, core.clock, job,
                             purpose="evaluation", executing=True)
     core.store.execute("UPDATE jobs SET state='RUNNING',lease_token='lease-owner-test',"
-                       "lease_until=? WHERE job_id=?", (after(core.clock(), 30), job["job_id"]))
-    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+                       "lease_until=%s WHERE job_id=%s", (after(core.clock(), 30), job["job_id"]))
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=%s", (job["job_id"],))
     authority.check_job(core.store, core.settings, core.clock, job,
                         purpose="evaluation", executing=True)
-    core.store.execute("UPDATE jobs SET lease_until=? WHERE job_id=?",
+    core.store.execute("UPDATE jobs SET lease_until=%s WHERE job_id=%s",
                        (core.clock(), job["job_id"]))
     with pytest.raises(CoreError, match="JOB_LEASE_LOST"):
         authority.check_job(core.store, core.settings, core.clock, job,
@@ -362,7 +390,7 @@ def test_revision_cannot_reauthorize_a_bound_job(core, tmp_path):
     policy = prepare(core, tmp_path)
     activate(core, policy)
     job_id = core.new_job(source["event_id"], "evaluation", "native-evaluation-test", core.clock())
-    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=%s", (job_id,))
     with core.store.transaction():
         authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
                            purpose="evaluation")
@@ -397,7 +425,7 @@ def test_pending_external_erasure_fences_current_use_without_repairing_original_
     with monkeypatch.context() as patch:
         patch.setattr(core.ledger, "apply", interrupted)
         with pytest.raises(RuntimeError, match="synthetic erasure apply crash"):
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [source["event_id"]], core.clock())
     original = Path(core.settings.erasure_ledger).read_bytes()
     with pytest.raises(CoreError, match="ERASURE_REPLAY_REQUIRED"):

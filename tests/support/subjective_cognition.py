@@ -21,7 +21,7 @@ def prepare(core):
 def read(core, number, topic, url, *, said="想找点东西看看", commitment=False):
     """One real chain: owner message -> native goal -> leased step -> Reader receipt."""
     ingest(core, number, said)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=?",
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=%s",
                        (f"evt_test_{number}",))
     proposal = GoalProposal(topic=topic, source_event_ids=[f"evt_test_{number}"],
                             scope=GoalScope(operation="read_content", url=url))
@@ -41,8 +41,12 @@ def judge(core, event_id, rating, take):
     """A settled Watch Ledger judgement; the paid path itself is covered below."""
     entry_id = "watch_" + event_id
     core.store.execute(
-        "INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_ref,depth,state,rating,"
-        "take,topic_tags_json,created_at,updated_at) SELECT ?,event_id,'web',canonical_url,"
-        "'text','JUDGED',?,?,'[]',?,? FROM observations WHERE event_id=?",
+        (
+            'INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_'
+            'ref,depth,state,rating,take,topic_tags_json,created_at,updated_a'
+            't) SELECT '
+            "%s,event_id,'web',canonical_url,'text','JUDGED',%s,%s,'[]',%s,%s"
+            ' FROM observations WHERE event_id=%s'
+        ),
         (entry_id, rating, take, core.clock(), core.clock(), event_id))
     return entry_id

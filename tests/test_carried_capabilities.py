@@ -16,6 +16,7 @@ from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
 from tests.model_carry_support import MESSAGES
 from tests.owner_model_fixtures import authorized_job
+from tests.postgres_fixture import logical_state
 from tests.sdk_reader_fixture import answer, call
 from tests.support.bili_video_entrypoint import URL, reader_files, reader_once, upstream
 from tests.support.carried_capabilities import reader_carry
@@ -33,18 +34,18 @@ def test_carried_unknown_does_not_block_reader_or_model_readiness(
     if later_unknown:
         current_unknown(core)
     journal = Path(core.settings.paid_model.journal_path)
-    before = list(core.store.db.iterdump()), journal.read_bytes()
+    before = logical_state(core.store), journal.read_bytes()
     ready = public_source_readiness(core.store, core.settings, core.clock, "bili")
     assert ready["state"] == "READY", ready
     rows = snapshot(core.store, core.settings, core.clock)["capabilities"]
     assert next(row for row in rows if row["id"] == "reading.bili")["state"] == "READY"
     assert not any("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" in row["reason_codes"] for row in rows)
-    assert (list(core.store.db.iterdump()), journal.read_bytes()) == before
-    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+    assert (logical_state(core.store), journal.read_bytes()) == before
+    assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                           (case.request_id,))["state"] == "UNKNOWN"
     with pytest.raises(CoreError, match="REPLY_CANCELLED"):
         budget.reserve(core.store, core.settings, case.job_id, "chat", MESSAGES, core.clock())
-    assert (list(core.store.db.iterdump()), journal.read_bytes()) == before
+    assert (logical_state(core.store), journal.read_bytes()) == before
 
 
 @pytest.mark.parametrize("boundary", ["unclosed", "stop", "journal"])
@@ -64,7 +65,8 @@ def test_unverified_or_unclosed_liability_keeps_reader_unavailable(core, tmp_pat
     if boundary == "unclosed":
         assert ready["state"] == "READY", ready
         rows = snapshot(core.store, core.settings, core.clock)["capabilities"]
-        assert any("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" in row["reason_codes"] for row in rows)
+        assert not any("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" in row["reason_codes"]
+                       for row in rows)
     else:
         assert ready["state"] != "READY", ready
 
@@ -88,7 +90,7 @@ def test_signed_link_after_carry_reaches_independent_reader_and_sdk_context(
         request, private = prepared(core, tmp_path, case.request_id)
         result = model_accounting.record(core.store, core.settings, request, private, core.clock)
         assert result["accounted_micro_usd"] > request["previous_accounted_micro_usd"]
-    financial = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (case.request_id,))
+    financial = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (case.request_id,))
     config = BridgeConfig(owner_qq_id=core.settings.owner_qq_id,
         bot_qq_id=core.settings.bot_qq_id,
         bridge_token=core.settings.bridge_token.get_secret_value(),
@@ -116,7 +118,7 @@ def test_signed_link_after_carry_reaches_independent_reader_and_sdk_context(
                 "requests"] == []
 
     run(scenario())
-    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?", (case.request_id,)) == (
+    assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (case.request_id,)) == (
         financial)
 
 
@@ -145,9 +147,9 @@ def test_owner_authority_chat_waits_out_a_provider_slot_race(core, tmp_path):
     # single provider slot before admission must wait, not fail silently.
     reader_carry(core, tmp_path)
     job_id = authorized_job(core, number=3)
-    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+    job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job_id,))
     attempts = job["attempts"]
     core.fail_job(job, "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED")
-    assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?", (job_id,)) == {
+    assert core.store.one('SELECT state,attempts FROM jobs WHERE job_id=%s', (job_id,)) == {
         "state": "RETRY_WAIT", "attempts": attempts - 1}
-    assert core.store.rows("SELECT * FROM model_usage WHERE job_id=?", (job_id,)) == []
+    assert core.store.rows('SELECT * FROM model_usage WHERE job_id=%s', (job_id,)) == []

@@ -63,7 +63,7 @@ def test_song_partition_keeps_its_own_indices_between_text_bubbles(core, tmp_pat
             assert [json.loads(row["content_json"])["reply_part"]["kind"] for row in rows] == [
                 "text", "singing", "singing", "text"]
             assert len(rows) == len(result.payload.audio) + 2
-            original = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job["job_id"],))
+            original = core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s', (job["job_id"],))
             for index, row in enumerate(rows[1:-1]):
                 binding = core.voice.jobs._delivery_binding(original, row["message_id"])
                 assert binding is not None
@@ -126,14 +126,16 @@ def test_singing_source_fences_every_unsent_part(core, tmp_path, monkeypatch, ch
             elif change == "expiry":
                 core.clock.advance(301)
             elif change == "source":
-                core.store.execute("UPDATE content_items SET target_url=?", (URL + "changed",))
+                core.store.execute('UPDATE content_items SET target_url=%s', (URL + "changed",))
             elif change == "receipt_text":
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                     (json.dumps({"state": "TEXT", "job_id": job["job_id"]}),
                      "voice_reply:" + rows[0]["message_id"]))
             else:
-                core.store.execute("UPDATE agent_tool_calls SET args_sha256=? "
-                                   "WHERE tool_name='sing_song'", ("f" * 64,))
+                core.store.execute((
+                    'UPDATE agent_tool_calls SET args_sha256=%s WHERE '
+                    "tool_name='sing_song'"
+                ), ("f" * 64,))
             with pytest.raises(CoreError):
                 with core.store.transaction():
                     if change == "receipt_text":

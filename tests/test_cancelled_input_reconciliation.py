@@ -41,12 +41,13 @@ def test_stopped_input_requires_original_native_materials(
             if mutation != "active":
                 await stop_host(active)
             if mutation in {"erased", "settled_recalled"}:
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event_id], core.clock())
             elif mutation == "privacy_epoch":
-                advance_epoch(core.store)
+                with core.store.transaction(control_write=True):
+                    advance_epoch(core.store)
             if mutation == "source":
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                    (encode({"text": "changed"}), event_id))
             if mutation in {"model", "outbox"}:
                 job = core.store.one("SELECT * FROM jobs")
@@ -67,7 +68,7 @@ def test_stopped_input_requires_original_native_materials(
             elif mutation == "admission_authority":
                 core.store.execute("UPDATE model_admissions SET authority_json='{}'")
             elif mutation == "delivery_content":
-                core.store.execute("UPDATE outbox SET content_json=?",
+                core.store.execute('UPDATE outbox SET content_json=%s',
                                    (encode({"text": "changed"}),))
             accounting = {table: core.store.rows(f"SELECT * FROM {table}") for table in (
                 "model_usage", "model_admissions", "outbox")}
@@ -107,7 +108,7 @@ def test_stopped_input_requires_original_native_materials(
                     else:
                         capture = json.loads(runtime.db.execute(
                             "SELECT capture_json FROM window_inputs").fetchone()[0])
-                        core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                        core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                            (encode({"text": "changed"}), event_id))
                         proof = await active.client.post(
                             "/internal/v1/owner-authority/inputs/state", json=capture)

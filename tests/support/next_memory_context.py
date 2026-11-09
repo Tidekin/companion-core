@@ -7,6 +7,6 @@ def context(core):
 
 
 def episode(core, *numbers):
-    events = [core.store.one("SELECT * FROM events WHERE event_id=?", (f"evt_test_{n}",))
+    events = [core.store.one("SELECT * FROM events WHERE event_id=%s", (f"evt_test_{n}",))
               for n in numbers]
     return core.memory.episodes(events, core.clock())

@@ -1,5 +1,6 @@
 import json
 import os
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from companion.executive_protocol import (
 )
 from companion.executor_budget_proxy import create_budget_proxy
 from companion.executor_gateway import FileExecutor, create_executor_app, receipt
+from companion.postgres import Database
 from companion.privacy import advance_epoch
 from tests.conftest import run
 from tests.support.executive import TOKEN, FakeExecutor, configured, envelope, proposal
@@ -51,14 +53,14 @@ def test_readonly_idempotency_real_receipt_observation_and_ancestry(core):
     result = executive.get(task["task_id"])
     assert result["state"] == "SUCCEEDED"
     observation = core.store.one(
-        "SELECT * FROM observations WHERE event_id=?", (result["result_event_id"],)
+        'SELECT * FROM observations WHERE event_id=%s', (result["result_event_id"],)
     )
     assert observation["source_kind"] == "tool_result"
     assert observation["result_status"] == "FETCHED"
     assert executive.sources(task["task_id"]) == ["evt_test_1"]
     assert (
         core.store.one(
-            "SELECT * FROM event_dependencies WHERE event_id=?", (result["result_event_id"],)
+            'SELECT * FROM event_dependencies WHERE event_id=%s', (result["result_event_id"],)
         )["source_event_id"]
         == "evt_test_1"
     )
@@ -116,46 +118,42 @@ def test_revocation_during_execution_never_accepts_late_result(core):
     assert core.store.rows("SELECT * FROM observations") == []
 
 
-def test_monthly_reservations_include_first_local_day(core):
+def test_monthly_money_limit_is_advisory_and_each_unknown_tool_charge_remains(core):
     fake = FakeExecutor()
     fake.fail = True
     core.clock.now = datetime.fromisoformat("2026-09-30T16:00:00+00:00")
     executive = configured(core, fake)
-    executive.config.monthly_micro_usd = 1500
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     executive.submit(proposal())
     assert run(executive.run_one())
     core.clock.advance(10 * 86400)
     second = executive.submit(proposal(2))
     assert run(executive.run_one())
-    assert executive.get(second["task_id"])["last_error_code"] == "TOOL_BUDGET_EXHAUSTED"
-    assert len(fake.calls) == 1
+    assert executive.get(second["task_id"])["last_error_code"] == "EXECUTION_UNCERTAIN"
+    assert len(fake.calls) == 2
+    assert core.store.one("SELECT sum(billed_micro_usd) AS n FROM tool_tasks")["n"] == 0
 
 
-def test_tool_cost_respects_shared_model_monthly_budget(core):
+def test_tool_runs_beyond_advisory_shared_monthly_amount(core):
     fake = FakeExecutor()
     executive = configured(core, fake)
-    core.settings.monthly_limit_micro_usd = 1000
-    executive.config.endpoints["windows"].max_cost_micro_usd = 500
     job = core.store.one("SELECT job_id FROM jobs")["job_id"]
     budget.reserve(
         core.store, core.settings, job, "chat", [{"role": "user", "content": "hello"}], core.clock()
     )
     task = executive.submit(proposal())
     assert run(executive.run_one())
-    assert executive.get(task["task_id"])["last_error_code"] == "TOOL_BUDGET_EXHAUSTED"
-    assert not fake.calls
+    assert executive.get(task["task_id"])["state"] == "SUCCEEDED"
+    assert len(fake.calls) == 1
 
 
 def test_unknown_does_not_retry_and_retains_budget(core):
     fake = FakeExecutor()
     fake.fail = True
     executive = configured(core, fake)
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     task = executive.submit(proposal())
     assert run(executive.run_one())
     row = executive.get(task["task_id"])
-    assert row["state"] == "UNKNOWN" and row["billed_micro_usd"] == 1000
+    assert row["state"] == "UNKNOWN" and row["billed_micro_usd"] == 0
     assert not row["result_event_id"] and not run(executive.run_one())
     assert len(fake.calls) == 1
 
@@ -222,7 +220,9 @@ def test_erasure_hook_redacts_scope_approval_and_evidence(core):
         executive.submit(proposal(capability="windows.write_text", text="private draft"))
 
 
-def test_restore_revokes_queued_approval_and_running_becomes_unknown(core, tmp_path):
+def test_restore_revokes_queued_approval_and_running_becomes_unknown(
+    empty_database, core, tmp_path,
+):
     from cryptography.fernet import Fernet
 
     from companion.backup import backup, restore
@@ -235,30 +235,31 @@ def test_restore_revokes_queued_approval_and_running_becomes_unknown(core, tmp_p
     executive.decide(
         second["task_id"], ToolDecision(decision="APPROVE", scope_sha256=second["scope_sha256"])
     )
-    key, archive, destination = (
+    key, archive, restored_state = (
         Fernet.generate_key(),
         tmp_path / "tools.enc",
-        tmp_path / "restore.db",
+        tmp_path / "restored-state",
     )
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    restored = Store(destination)
-    try:
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as restored,
+    ):
         assert (
-            restored.one("SELECT state FROM tool_tasks WHERE task_id=?", (first["task_id"],))[
+            restored.one("SELECT state FROM tool_tasks WHERE task_id=%s", (first["task_id"],))[
                 "state"
             ]
             == "UNKNOWN"
         )
         assert (
-            restored.one("SELECT state FROM tool_tasks WHERE task_id=?", (second["task_id"],))[
+            restored.one("SELECT state FROM tool_tasks WHERE task_id=%s", (second["task_id"],))[
                 "state"
             ]
             == "CANCELLED"
         )
         assert restored.one("SELECT revoked_at FROM tool_approvals")["revoked_at"]
-    finally:
-        restored.close()
 
 
 def test_receipt_digest_and_task_identity_are_checked(core):
@@ -357,7 +358,7 @@ def test_core_approval_http_gateway_real_file_and_observation(core, tmp_path):
         assert run(executive.run_one())
         result = executive.get(read["task_id"])
         event = core.store.one(
-            "SELECT body_json FROM events WHERE event_id=?", (result["result_event_id"],)
+            'SELECT body_json FROM events WHERE event_id=%s', (result["result_event_id"],)
         )
         assert json.loads(event["body_json"])["text"] == "exact bytes 测试"
     finally:
@@ -378,6 +379,8 @@ def test_core_approval_http_gateway_real_file_and_observation(core, tmp_path):
         "dir./x.txt",
     ],
 )
+
+
 def test_gateway_rejects_outside_scope_paths(tmp_path, path):
     backend = FileExecutor({"work": tmp_path})
     result = run(backend.execute(envelope(arguments={"path": path})))
@@ -407,7 +410,7 @@ def test_gateway_mcp_exposes_only_scoped_executor(tmp_path):
         app.state.db.close()
 
 
-def test_proxy_enforces_budget_calls_tokens_and_revocation():
+def test_proxy_keeps_call_token_and_revocation_controls_with_advisory_money():
     upstream_calls = []
 
     def upstream(request):
@@ -446,13 +449,19 @@ def test_proxy_enforces_budget_calls_tokens_and_revocation():
             client.post("/v1/chat/completions", headers=scoped_auth, json=body).status_code == 429
         )
         usage = client.get("/internal/v1/reservations/" + grant["token"], headers=auth).json()
-        assert usage["calls"] == 1 and usage["reserved_micro_usd"] > 0
+        assert usage == {"calls": 1, "billed_micro_usd": 0, "input_tokens": 0,
+                         "output_tokens": 0, "unknown_calls": 1}
         client.delete("/internal/v1/reservations/" + grant["token"], headers=auth)
         assert (
             client.post("/v1/chat/completions", headers=scoped_auth, json=body).status_code == 403
         )
-        small = envelope(max_cost_micro_usd=1).model_dump()
-        assert client.post("/internal/v1/reservations", headers=auth, json=small).status_code == 429
+        small = envelope().model_dump()
+        reduced = client.post("/internal/v1/reservations", headers=auth, json=small)
+        assert reduced.status_code == 200
+        small_usage = client.get("/internal/v1/reservations/" + reduced.json()["token"],
+                                 headers=auth).json()
+        assert small_usage["calls"] == small_usage["billed_micro_usd"] == 0
+        assert small_usage["unknown_calls"] == 0
     assert len(upstream_calls) == 1
 
 
@@ -543,25 +552,18 @@ def test_core_tool_routes_require_owner_control_and_exact_scope(core):
         assert client.post("/internal/v1/tasks", json=body, headers=bridge).status_code == 403
 
 
-def test_model_budget_counts_tool_unknown_reservations(core):
+def test_unknown_tool_cost_remains_while_fresh_model_reservation_continues(core):
     adapter = FakeExecutor()
     adapter.fail = True
     executive = configured(core, adapter)
-    endpoint = core.settings.executive.endpoints["windows"]
-    endpoint.max_cost_micro_usd = 1000
-    core.settings.monthly_limit_micro_usd = 1000
     executive.submit(proposal())
     assert run(executive.run_one())
     assert core.store.one("SELECT state FROM tool_tasks")["state"] == "UNKNOWN"
-    with pytest.raises(CoreError, match="MONTHLY_BUDGET_EXHAUSTED"):
-        budget.reserve(
-            core.store,
-            core.settings,
-            None,
-            "chat",
-            [{"role": "user", "content": "test"}],
-            core.clock(),
-        )
+    before = core.store.one("SELECT state,billed_micro_usd FROM tool_tasks")
+    budget.reserve(core.store, core.settings, None, "chat",
+                   [{"role": "user", "content": "test"}], core.clock())
+    assert core.store.one("SELECT state,billed_micro_usd FROM tool_tasks") == before
+    assert core.store.one("SELECT state FROM model_usage")["state"] == "RESERVED"
 
 
 def test_settings_reject_reusing_executor_and_bridge_tokens(core):
@@ -634,8 +636,8 @@ def test_open_file_retains_original_object_and_windows_holds_parent(tmp_path):
 def test_executive_worker_has_dedicated_single_instance_lock(tmp_path):
     from companion.worker_lock import single_worker
 
-    database = tmp_path / "worker.db"
-    with single_worker(database, "executive-worker"), single_worker(database, "worker"):
+    state_directory = tmp_path / "state"
+    with single_worker(state_directory, "executive-worker"), single_worker(state_directory):
         with pytest.raises(CoreError, match="WORKER_ALREADY_RUNNING"):
-            with single_worker(database, "executive-worker"):
+            with single_worker(state_directory, "executive-worker"):
                 pass

@@ -16,6 +16,7 @@ from companion.voice_jobs import erase_voice_jobs, restore_voice_jobs
 from companion.voice_protocol import VoiceDeliveryEnvelope, VoiceLeaseRef, canonical_bytes, digest
 from companion_voice_node.worker import local_manifest
 from tests.conftest import run
+from tests.support.unchanged_transactions import readonly_service_call
 from tests.support.voice_flow import (
     delivery_check,
     finish_node,
@@ -189,15 +190,15 @@ def test_reply_policy_does_not_speak_every_reply(core, monkeypatch, policy):
 def test_voice_choice_preserves_existing_picture_expression(core, monkeypatch):
     flow, _, message_id, _, _ = flow_fixture(core, monkeypatch,
                                             reply=VoiceReplyPolicy(mode="auto"))
-    original = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    original = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
     content = {**json.loads(original["content_json"]), "image": {"asset_id": "existing-meme"}}
-    core.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+    core.store.execute('UPDATE outbox SET content_json=%s,content_sha256=%s WHERE message_id=%s',
                        (encode(content), transport.digest(content), message_id))
-    original = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    original = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
         (owner_delivery.DELIVERY + message_id,))["value"])
-    updated = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    updated = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
     job = owner_delivery._job(core.store, original["job_id"])
-    core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+    core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                        (encode(owner_delivery._material(core.store, updated,
                             job,
                             voice_authority.current(core.store, core.settings, core.clock),
@@ -206,7 +207,7 @@ def test_voice_choice_preserves_existing_picture_expression(core, monkeypatch):
                         owner_delivery.DELIVERY + message_id))
     assert prepare(core, flow, message_id).state == "TEXT"
     assert not core.store.rows("SELECT * FROM voice_jobs")
-    current = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    current = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
     assert current["delivery_key"] == original["delivery_key"]
     assert json.loads(current["content_json"]) == content
 
@@ -237,7 +238,7 @@ def test_asr_record_limit_marks_partial_without_accepting_extra_upload(core, mon
 
 def test_asr_gate_context_and_no_memory_or_owner_text_upgrade(core, monkeypatch):
     flow, jobs, _, event_id, key = flow_fixture(core, monkeypatch, make_reply=False)
-    body = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,))
+    body = core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event_id,))
     assert flow.input_status(event_id).state == "WAITING"
     status, data, proof = upload(core, flow, event_id, key, partial=True)
     assert flow.input_status(event_id).state == "WAITING"
@@ -258,10 +259,10 @@ def test_asr_gate_context_and_no_memory_or_owner_text_upgrade(core, monkeypatch)
         assert (
             flow.submit_signed_asr(event_id, data, upload_proof=proof)["job_id"] == status["job_id"]
         )
-    assert core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,)) == body
+    assert core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event_id,)) == body
     assert core.store.rows("SELECT * FROM memories") == []
     assert core.store.rows("SELECT * FROM model_usage") == []
-    metadata = encode(core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'voice_%'"))
+    metadata = encode(core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'voice_%%'"))
     assert "/forget all" not in metadata and TEXT not in metadata
     with core.store.transaction():
         erase_voice_jobs(core.store, [event_id])
@@ -329,8 +330,10 @@ def test_restore_invalidates_flow_metadata_even_before_audio_upload(core, monkey
     prepare(core, flow, message_id)
     with core.store.transaction():
         restore_voice_jobs(core.store)
-    values = core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'voice_input:%' "
-                             "OR key LIKE 'voice_reply:%'")
+    values = core.store.rows(
+        "SELECT value FROM runtime_meta WHERE key LIKE 'voice_input:%%' OR "
+        "key LIKE 'voice_reply:%%'"
+    )
     assert values and all(json.loads(row["value"])["state"] == "FENCED" for row in values)
     with pytest.raises(CoreError, match="VOICE_FLOW_FENCED"):
         flow.input_status(event_id)
@@ -345,7 +348,11 @@ def test_even_fallback_context_is_fenced_by_privacy_epoch(core, monkeypatch):
     assert flow.input_status(event_id).state == "FALLBACK"
     job = core.claim_job("fallback-proof")
     context = flow.for_context(event_id, job)
-    core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch','1')")
+    core.store.execute(
+        "INSERT INTO runtime_meta (key,value) VALUES ('privacy_epoch','1') ON"
+        ' CONFLICT(key) DO UPDATE SET '
+        'value=excluded.value,record_sequence=DEFAULT'
+    )
     with pytest.raises(CoreError, match="VOICE_CONTEXT_RESULT_CHANGED"):
         flow.check_context(job, context["proof"])
 
@@ -364,7 +371,7 @@ def test_real_native_asr_context_tts_outbox_send_check_and_counter_chain(
         nodes={"local": VoiceNode(token=config.credential,
                                   manifest_sha256=digest(local_manifest(config)))})
     capture, capture_key, _ = native_voice(core, tmp_path, config=core_voice)
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (capture.event_id,))
     original_body = event["body_json"]
     data, proof = signed_input(core, capture.event_id, capture_key, partial=True)
     calls = []
@@ -396,14 +403,13 @@ def test_real_native_asr_context_tts_outbox_send_check_and_counter_chain(
                     "Content-Type": "audio/wav",
                     "x-voice-proof": base64.urlsafe_b64encode(canonical_bytes(proof)).decode()})
                 assert uploaded.status_code == 200, uploaded.text
-                before_state = core.store.db.total_changes
-                recovered = await client.get(path + "/state")
+                with readonly_service_call(core.store, VoiceFlow, "input_receipt"):
+                    recovered = await client.get(path + "/state")
                 assert recovered.status_code == 200
                 assert recovered.json()["records"] == [{
                     "index": 0, "state": "QUEUED", "job_id": uploaded.json()["job_id"],
                     "input_sha256": proof.audio_sha256,
                     "source_proof_sha256": digest(proof), "upload_allowed": False}]
-                assert core.store.db.total_changes == before_state
                 assert "audio_base64" not in recovered.text and "transcript" not in recovered.text
                 await independent_node(node_config, certificate, counter, tmp_path,
                                        core.clock.now.timestamp())
@@ -458,7 +464,7 @@ def test_real_native_asr_context_tts_outbox_send_check_and_counter_chain(
                     original["content_sha256"])
                 assert core.store.rows(
                     "SELECT request_id,state,billed_micro_usd FROM model_usage") == usage
-                assert core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                assert core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                     (capture.event_id,))["body_json"] == original_body
                 assert len(child_receipts(counter)) == 2
                 assert core.store.rows("SELECT * FROM memories") == []

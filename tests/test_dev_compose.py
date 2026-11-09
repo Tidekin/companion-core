@@ -14,11 +14,13 @@ from pathlib import Path
 from time import monotonic
 
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 
 from scripts import smoke_dev_compose as smoke
 from scripts import verify_dev_compose as dev_compose
 from scripts.verify_dev_compose import (
     ROOT,
+    SYNTHETIC_DB_ENV,
     SYNTHETIC_TOKEN,
     compose_command,
     environment,
@@ -27,6 +29,7 @@ from scripts.verify_dev_compose import (
     verify,
 )
 from tests.native_probe_worker import NativeWatch
+from tests.postgres_fixture import isolated_database
 
 NATIVE_WORKER_HOST = "tests.native_probe_worker"
 NATIVE_TRACE_SIGNAL = getattr(signal, "SIGUSR1", None)
@@ -158,13 +161,13 @@ def test_native_probe_capture_preserves_failure_and_separates_exit_states(
 
 
 def test_native_probe_watch_forwards_original_native_call_and_close():
-    result, stop = object(), object()
+    result = object()
     calls = []
 
     class Native:
-        def watch(self, *args):
-            calls.append(args)
-            return result
+        def notifies(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            yield result
 
         def close(self):
             calls.append("close")
@@ -173,40 +176,41 @@ def test_native_probe_watch_forwards_original_native_call_and_close():
     native = Native()
     watch = NativeWatch(native)
     assert watch.native is native
-    assert watch.watch(50, 50, 60000, stop) is result
+    assert list(watch.notifies(timeout=60, stop_after=1)) == [result]
     assert watch.close() is result
-    assert calls == [(50, 50, 60000, stop), "close"]
+    assert calls == [((), {"timeout": 60, "stop_after": 1}), "close"]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Native SIGUSR1 capture requires Linux")
 def test_native_probe_linux_signal_captures_named_watch_and_reaps_own_child(tmp_path):
-    async def run():
-        watched = tmp_path / "watched"
-        watched.mkdir()
+    async def run(connection):
         log = tmp_path / "worker.log"
-        code = '''import faulthandler, signal, sys, threading
-from watchfiles._rust_notify import RustNotify
+        code = '''import faulthandler, os, signal, threading
+import psycopg
 from tests.native_probe_worker import NativeWatch
 signal.signal(signal.SIGUSR1, signal.SIG_DFL)
 faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
-native = RustNotify([sys.argv[1]], False, False, 300, False, False)
+native = psycopg.connect(os.environ["COMPANION_NATIVE_PROBE_DSN"], autocommit=True)
+native.execute("LISTEN native_probe_test")
 entered = threading.Event()
 class EnteredNative:
-    def watch(self, *args):
+    def notifies(self, *args, **kwargs):
         entered.set()
-        return native.watch(*args)
+        yield from native.notifies(*args, **kwargs)
     def close(self):
         return native.close()
 watch = NativeWatch(EnteredNative())
-thread = threading.Thread(target=watch.watch, args=(50, 50, 60000, threading.Event()))
+thread = threading.Thread(target=lambda: list(watch.notifies()))
 thread.start()
 assert entered.wait(5)
 print("READY", flush=True)
 thread.join()
 '''
         with log.open("wb") as output:
+            child_env = environment()
+            child_env["COMPANION_NATIVE_PROBE_DSN"] = connection.get_secret_value()
             child = await asyncio.create_subprocess_exec(
-                sys.executable, "-B", "-c", code, str(watched), cwd=ROOT, env=environment(),
+                sys.executable, "-B", "-c", code, cwd=ROOT, env=child_env,
                 stdout=asyncio.subprocess.PIPE, stderr=output,
             )
         try:
@@ -231,7 +235,8 @@ thread.join()
                 child.kill()
             await asyncio.wait_for(child.communicate(), 5)
 
-    asyncio.run(run())
+    with isolated_database() as connection:
+        asyncio.run(run(connection))
 
 
 @pytest.fixture(scope="module")
@@ -239,13 +244,14 @@ def native_config(tmp_path_factory):
     if shutil.which("docker") is None:
         pytest.skip("Docker Compose CLI required; native configuration coverage not performed")
     env_file = tmp_path_factory.mktemp("dev-compose-env") / "dev.env"
-    env_file.write_text(f"COMPANION_DEV_BRIDGE_TOKEN={SYNTHETIC_TOKEN}\n", encoding="utf-8")
+    env_file.write_text(f"COMPANION_DEV_BRIDGE_TOKEN={SYNTHETIC_TOKEN}\n" + SYNTHETIC_DB_ENV,
+                        encoding="utf-8")
     return render(ROOT, env_file, "companion-dev-test")
 
 
 def test_native_merge_rejects_host_and_root_pollution_and_separates_projects(native_config):
     assert verify()["native_compose_config"] == "PASS"
-    assert len(validate(native_config, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)) == 4
+    assert len(validate(native_config, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)) == 5
 
 
 @pytest.mark.parametrize("service", ["migrate", "companion-api", "companion-worker",
@@ -336,7 +342,7 @@ def test_render_missing_bind_false_uses_only_known_native_schema(
                 del mount["bind"]["create_host_path"]
     rendered = replay_render(monkeypatch, config, version)
     if legacy:
-        assert len(validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)) == 4
+        assert len(validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)) == 5
     else:
         with pytest.raises(ValueError, match="DEV_COMPOSE_ISOLATION_FAILED"):
             validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
@@ -399,7 +405,7 @@ def test_smoke_marks_render_phase_before_render_failure(monkeypatch, tmp_path):
     (RuntimeError("DEV_COMPOSE_RENDER_FAILED"), "DEV_COMPOSE_RENDER_FAILED"),
     (RuntimeError("DEV_COMPOSE_VERSION_FAILED"), "DEV_COMPOSE_VERSION_FAILED"),
     (subprocess.CalledProcessError(7, "DEV_SMOKE_COMMAND_FAILED",
-                                  "synthetic-private-output", "SQLITE_READONLY_TEXT"),
+                                  "synthetic-private-output", "POSTGRES_READ_ONLY"),
      "DEV_SMOKE_COMMAND_FAILED"),
     (subprocess.CalledProcessError(2, "DEV_SMOKE_EXPECTED_DIAGNOSTIC_MISSING",
                                   "synthetic-private-output", "synthetic-private-stderr"),
@@ -412,7 +418,7 @@ def test_smoke_report_exposes_only_fixed_error_codes(monkeypatch, tmp_path, caps
     for name in ("compose.yaml", "deploy/compose.dev.yaml", "scripts/verify_dev_compose.py",
                  "scripts/smoke_dev_compose.py", "tests/test_dev_compose.py",
                  "docs/dev-environment.md", "Dockerfile", "uv.lock",
-                 "deploy/qq-beta-core.example.toml"):
+                 "deploy/qq-beta-core.example.toml", "deploy/dev-postgres-init.sql"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("synthetic fixture", encoding="utf-8")
@@ -442,11 +448,11 @@ def test_smoke_report_exposes_only_fixed_error_codes(monkeypatch, tmp_path, caps
 
 
 @pytest.mark.parametrize("stderr,kind", [
-    ("sqlite3.OperationalError: attempt to write a readonly database", "SQLITE_READONLY_TEXT"),
-    ("sqlite3.OperationalError: unable to open database file", "SQLITE_CANTOPEN_TEXT"),
-    ("sqlite3.OperationalError: database is locked", "SQLITE_BUSY_TEXT"),
+    ("psycopg.errors.ReadOnlySqlTransaction: private query", "POSTGRES_READ_ONLY"),
+    ("psycopg.errors.InsufficientPrivilege: private relation", "POSTGRES_PRIVILEGE"),
+    ("psycopg.OperationalError: private DSN", "POSTGRES_OPERATIONAL"),
     ("BACKUP_DESTINATION_EXISTS", "BACKUP_DESTINATION_EXISTS"),
-    ("BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS", "BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS"),
+    ("POSTGRES_BACKUP_TOOL_FAILED", "POSTGRES_BACKUP_TOOL_FAILED"),
     ("AssertionError: synthetic-private-text", "PYTHON_ASSERTION"),
     ("PermissionError: synthetic-private-path", "PYTHON_PERMISSION"),
     ("synthetic-private-unrecognized", "UNCLASSIFIED"),
@@ -563,23 +569,40 @@ def test_native_one_off_options_parse_without_engine(native_config):
     assert result.returncode == 0, "DEV_COMPOSE_ONE_OFF_OPTIONS_REJECTED"
 
 
-def test_container_probe_contracts_through_native_api_and_independent_worker(tmp_path):
-    asyncio.run(native_probe_contracts(tmp_path))
+@pytest.fixture
+def probe_databases():
+    with isolated_database() as source, isolated_database() as before, isolated_database() as after:
+        yield source, before, after
 
 
-async def native_probe_contracts(tmp_path):
+def test_container_probe_contracts_through_native_api_and_independent_worker(
+    tmp_path, probe_databases,
+):
+    asyncio.run(native_probe_contracts(tmp_path, probe_databases))
+
+
+async def native_probe_contracts(tmp_path, databases):
     """Exercise the probe bodies natively; Docker mount/network evidence stays separate."""
-    database, ledger = tmp_path / "companion.sqlite3", tmp_path / "erasures.jsonl"
-    archive, recovered = tmp_path / "pre-init.enc", tmp_path / "recovered.sqlite3"
-    before_erasure = tmp_path / "recovered-before-erasure.sqlite3"
+    database, before, after = databases
+    ledger, archive = tmp_path / "erasures.jsonl", tmp_path / "pre-init.enc"
     env = {**environment(), "COMPANION_CONFIG": str(tmp_path / "absent.toml"),
            "COMPANION_MODE": "demo", "COMPANION_OWNER_QQ_ID": "10001",
            "COMPANION_BOT_QQ_ID": "10002", "COMPANION_BRIDGE_TOKEN": secrets.token_urlsafe(32),
-           "COMPANION_DATABASE": str(database), "COMPANION_ERASURE_LEDGER": str(ledger),
+           "COMPANION_DATABASE": database.get_secret_value(),
+           "COMPANION_ERASURE_LEDGER": str(ledger),
+           "COMPANION_STATE_DIRECTORY": str(tmp_path / "core-state"),
            "COMPANION_MEMORY_ENABLED": "false", "COMPANION_SEGMENTED_REPLY": "false",
-           "COMPANION_MODEL_KEY": "",
-           "COMPANION_MODEL_URL": "https://synthetic.invalid/v1",
+           "COMPANION_MODEL_KEY": "", "COMPANION_MODEL_URL": "https://synthetic.invalid/v1",
            "COMPANION_BACKUP_KEY": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()}
+    targets = {}
+    for phase, target in (("before", before), ("after", after)):
+        config = tmp_path / f"restore-{phase}.toml"
+        values = {"database": target.get_secret_value(), "state_directory": str(tmp_path / phase),
+                  "erasure_ledger": str(ledger), "owner_qq_id": "10001", "bot_qq_id": "10002",
+                  "bridge_token": env["COMPANION_BRIDGE_TOKEN"]}
+        config.write_text("".join(f"{k}={json.dumps(v)}\n" for k, v in values.items()), "utf8")
+        config.chmod(0o600)
+        targets[phase] = str(config)
     children, child_logs, stages = [], {}, []
     log_dir = tmp_path / "child-logs"
     log_dir.mkdir()
@@ -587,7 +610,8 @@ async def native_probe_contracts(tmp_path):
     def redact(text):
         for name in ("COMPANION_BRIDGE_TOKEN", "COMPANION_BACKUP_KEY"):
             text = text.replace(env[name], "[REDACTED]")
-        return text
+        password = conninfo_to_dict(env["COMPANION_DATABASE"]).get("password")
+        return text.replace(password, "[REDACTED]") if password else text
 
     def safe_text(text):
         return redact(text)[-8192:]
@@ -657,7 +681,6 @@ async def native_probe_contracts(tmp_path):
         children.append(await start("-m", "companion", "serve", "--port", str(port), role="api"))
         children.append(await start("-m", "companion", "worker", role="worker"))
         http_code = smoke.HTTP_PROBE.replace("127.0.0.1:8765", f"127.0.0.1:{port}")
-        http_code = http_code.replace("/data/companion.sqlite3", database.as_posix())
         for number in (1, 2, 3):
             result = json.loads(await command("-c", http_code, str(number), probe=number))
             assert result["independent_worker"] == "PASS"
@@ -668,18 +691,17 @@ async def native_probe_contracts(tmp_path):
                 process.terminate()
             await asyncio.wait_for(process.communicate(), 15)
     assert (await command("-c", smoke.SEED_RESERVATION)).strip() == "PASS"
-    await command("-m", "companion", "backup", str(archive), "--immutable-source")
-    await command("-m", "companion", "backup", str(archive), "--immutable-source", expected=2)
+    await command("-m", "companion", "backup", str(archive))
+    await command("-m", "companion", "backup", str(archive), expected=2)
     code = smoke.RESTORE_PROBE.replace("/data/pre-init.enc", archive.as_posix())
-    code = code.replace("/data/recovered-before-erasure.sqlite3", before_erasure.as_posix())
-    code = code.replace("/data/recovered.sqlite3", recovered.as_posix())
-    code = code.replace("/source/companion.sqlite3", database.as_posix())
     code = code.replace("/privacy/erasures.jsonl", ledger.as_posix())
-    await command("-m", "companion", "restore", str(archive), str(before_erasure))
-    assert json.loads(await command("-c", code, "before"))["pending_state"] == "DELIVERY_UNCERTAIN"
+    await command("-m", "companion", "restore", str(archive), targets["before"])
+    before_result = json.loads(await command("-c", code, "before", targets["before"]))
+    assert before_result["pending_state"] == "DELIVERY_UNCERTAIN"
     assert (await command("-c", smoke.ERASE_AFTER_BACKUP)).strip() == "PASS"
-    await command("-m", "companion", "restore", str(archive), str(recovered))
-    assert json.loads(await command("-c", code, "after"))["latest_ledger_replay"] == "PASS"
+    await command("-m", "companion", "restore", str(archive), targets["after"])
+    after_result = json.loads(await command("-c", code, "after", targets["after"]))
+    assert after_result["latest_ledger_replay"] == "PASS"
     await command("-m", "companion", "init")
     children = []
     try:
@@ -698,7 +720,8 @@ async def native_probe_contracts(tmp_path):
 
 
 @pytest.mark.parametrize("state", ["QUEUED", "RUNNING"])
-def test_native_probe_failure_keeps_worker_exit_and_safe_state(tmp_path, monkeypatch, state):
+def test_native_probe_failure_keeps_worker_exit_and_safe_state(tmp_path, monkeypatch, state,
+                                                             probe_databases):
     spawn = asyncio.create_subprocess_exec
     captured = {}
 
@@ -716,10 +739,11 @@ def test_native_probe_failure_keeps_worker_exit_and_safe_state(tmp_path, monkeyp
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_worker)
     probe = smoke.HTTP_PROBE
     if state == "RUNNING":
-        before = 'with sqlite3.connect("file:/data/companion.sqlite3?mode=ro", uri=True) as db:'
-        controlled = '''with sqlite3.connect(os.environ["COMPANION_DATABASE"]) as controlled:
-    controlled.execute("UPDATE jobs SET state='RUNNING' WHERE job_id=?", (first["job_id"],))
-    controlled.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('worker_loop',?)",
+        before = 'with psycopg.connect(os.environ["COMPANION_DATABASE"], autocommit=True,'
+        controlled = '''with psycopg.connect(os.environ["COMPANION_DATABASE"]) as controlled:
+    controlled.execute("UPDATE jobs SET state='RUNNING' WHERE job_id=%s", (first["job_id"],))
+    controlled.execute("INSERT INTO runtime_meta (key,value) VALUES ('worker_loop',%s) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (json.dumps({"session": "a" * 32, "sequence": 2,
                      "completed_at": datetime.now(UTC).isoformat(),
                      "stage": "WAITING_AFTER_POLL"}),))
@@ -728,7 +752,7 @@ def test_native_probe_failure_keeps_worker_exit_and_safe_state(tmp_path, monkeyp
         probe = probe.replace(before, controlled + before)
     monkeypatch.setattr(smoke, "HTTP_PROBE", probe)
     with pytest.raises(AssertionError) as failure:
-        asyncio.run(native_probe_contracts(tmp_path))
+        asyncio.run(native_probe_contracts(tmp_path, probe_databases))
     data = failure.value.args[0]
     assert isinstance(data, dict), "Native probe failure discarded child diagnostics"
     projection = json.loads(data["stderr"].split("INDEPENDENT_WORKER_DID_NOT_COMPLETE ")[1])

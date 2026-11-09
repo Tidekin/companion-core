@@ -195,10 +195,10 @@ def test_successful_history_can_share_after_future_read_permission_ends(
     job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
     assert job and run(core.run_once(job_id=job["job_id"]))
     bodies = [json.loads(row["content_json"])["text"] for row in
-              core.store.rows("SELECT content_json FROM outbox ORDER BY rowid")]
+              core.store.rows('SELECT content_json FROM outbox ORDER BY record_sequence')]
     assert bodies == [core.model.activity, BILI if source == "bilibili" else HEYBOX]
     assert json.loads(core.model.calls[0][0][-1]["content"])["text"] == event.payload.text
-    stored = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event.event_id,))
+    stored = core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event.event_id,))
     assert json.loads(stored["body_json"])["text"] == event.payload.text
     assert len(core.model.calls) == 1 and core.model.calls[0][1] == "activity"
 
@@ -257,7 +257,7 @@ def test_legacy_queued_alias_url_keeps_same_accepted_content(core, source, legac
     assert candidate
     # Before normalization, queued candidates retained the accepted URL verbatim.
     core.store.execute(
-        "UPDATE social_candidates SET canonical_url=? WHERE candidate_id=?",
+        'UPDATE social_candidates SET canonical_url=%s WHERE candidate_id=%s',
         (legacy_url, candidate),
     )
     assert core.social.consider(event.event_id) == candidate
@@ -265,7 +265,7 @@ def test_legacy_queued_alias_url_keeps_same_accepted_content(core, source, legac
     job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
     assert job and run(core.run_once(job_id=job["job_id"]))
     bodies = [json.loads(row["content_json"])["text"] for row in
-              core.store.rows("SELECT content_json FROM outbox ORDER BY rowid")]
+              core.store.rows('SELECT content_json FROM outbox ORDER BY record_sequence')]
     assert bodies == [core.model.activity, BILI if source == "bilibili" else HEYBOX]
     assert core.store.rows("SELECT * FROM exploration_requests") == []
     assert len(core.model.calls) == 1 and core.model.calls[0][1] == "activity"
@@ -288,12 +288,14 @@ def test_legacy_queued_url_still_rejects_invalid_or_different_source(core, sourc
     candidate = core.social.consider(event.event_id)
     assert candidate
     core.store.execute(
-        "UPDATE social_candidates SET canonical_url=? WHERE candidate_id=?",
+        'UPDATE social_candidates SET canonical_url=%s WHERE candidate_id=%s',
         (queued_url, candidate),
     )
     assert not core.social.flush()
     assert core.store.rows("SELECT * FROM outbox") == []
-    assert core.store.one("SELECT state FROM social_candidates WHERE candidate_id=?", (candidate,))[
+    assert core.store.one((
+        'SELECT state FROM social_candidates WHERE candidate_id=%s'
+    ), (candidate,))[
         "state"
     ] == "SKIPPED"
 
@@ -307,21 +309,21 @@ def test_queued_share_rechecks_same_platform_url_and_accepted_text(core, mutatio
     assert candidate
     if mutation == "platform":
         core.store.execute(
-            "UPDATE events SET source='observation.unknown' WHERE event_id=?", (event.event_id,)
+            "UPDATE events SET source='observation.unknown' WHERE event_id=%s", (event.event_id,)
         )
     elif mutation == "url":
         core.store.execute(
-            "UPDATE observations SET canonical_url=? WHERE event_id=?", (HEYBOX, event.event_id)
+            'UPDATE observations SET canonical_url=%s WHERE event_id=%s', (HEYBOX, event.event_id)
         )
     else:
         core.store.execute(
-            "UPDATE events SET body_json=? WHERE event_id=?",
+            'UPDATE events SET body_json=%s WHERE event_id=%s',
             (json.dumps({"title": "来源材料", "text": "未经读取的替换文本"}), event.event_id),
         )
     assert not core.social.flush()
     assert core.store.rows("SELECT * FROM outbox") == []
     assert (
-        core.store.one("SELECT state FROM social_candidates WHERE candidate_id=?", (candidate,))[
+        core.store.one('SELECT state FROM social_candidates WHERE candidate_id=%s', (candidate,))[
             "state"
         ]
         == "SKIPPED"

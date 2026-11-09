@@ -12,6 +12,7 @@ from companion import meme_service
 from companion.backup import backup, restore
 from companion.core import Core
 from companion.model import EXTRACT_RULES, ModelClient
+from companion.postgres import Database
 from companion.store import Store
 from tests.conftest import run
 from tests.meme_authority_fixture import admit
@@ -19,7 +20,7 @@ from tests.support.meme_service import claim, discovery_environment, reservation
 
 
 def test_restored_discovery_reservation_cannot_refund_unknown_post_snapshot_io(
-    core, tmp_path, monkeypatch,
+    core, tmp_path, monkeypatch, empty_database,
 ):
     async def prepare():
         async with discovery_environment(core, tmp_path, monkeypatch) as (event, _, _):
@@ -29,12 +30,16 @@ def test_restored_discovery_reservation_cannot_refund_unknown_post_snapshot_io(
             return item
 
     item = run(prepare())
-    archive, restored_path = tmp_path / "reserved.enc", tmp_path / "restored.sqlite3"
+    archive, restored_path = tmp_path / "reserved.enc", empty_database
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     assert result(core, item, "UNKNOWN")["state"] == "UNKNOWN"
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
-    with closing(Store(str(restored_path))) as restored:
+    restore(archive, restored_path, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with (
+        Database(restored_path) as database,
+        closing(Store(database, tmp_path / "restored-state")) as restored,
+    ):
         assert restored.one(
             "SELECT 1 FROM runtime_meta WHERE key='cloud_budget_restore_required'",
         )
@@ -79,18 +84,18 @@ def test_discovery_jobs_do_not_duplicate_or_enable_memory_extraction(
             item = claim(core)
             reservation(core, item)
             assert result(core, item)["state"] == "SETTLED"
-            core.store.execute("UPDATE jobs SET state=? WHERE job_id=?",
+            core.store.execute('UPDATE jobs SET state=%s WHERE job_id=%s',
                                (chat_state, chat["job_id"]))
             assert core.store.rows(
-                "SELECT kind,state FROM jobs WHERE event_id=? ORDER BY kind", (event["event_id"],),
+                'SELECT kind,state FROM jobs WHERE event_id=%s ORDER BY kind', (event["event_id"],),
             ) == [{"kind": "chat", "state": chat_state},
                   {"kind": "meme_discovery", "state": "SUCCEEDED"}]
             # Successful historical chats remain eligible after a newer turn.
             newer, accepted = await admit(client, config, plan, now, number=2)
             assert accepted.status_code == 202, accepted.text
-            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                (accepted.json()["job_id"],))
-            core.store.execute("UPDATE events SET memory_processed=1 WHERE event_id=?",
+            core.store.execute('UPDATE events SET memory_processed=1 WHERE event_id=%s',
                                (newer["event_id"],))
             # HTTP admission uses wall time; start the independent worker after
             # committed ingress rather than guessing how long fixture setup took.
@@ -102,7 +107,7 @@ def test_discovery_jobs_do_not_duplicate_or_enable_memory_extraction(
                     assert worker.store is not core.store
                     completed = await worker.extract_once()
             source = core.store.one(
-                "SELECT conversation_id,occurred_at FROM events WHERE event_id=?",
+                'SELECT conversation_id,occurred_at FROM events WHERE event_id=%s',
                 (event["event_id"],))
             expected = {"groups": {"g0": ["e0"]}, "events": [
                 {"ref": "e0", "text": event["payload"]["text"], "group": "g0",

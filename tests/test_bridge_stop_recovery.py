@@ -32,7 +32,7 @@ def damage(window, fault):
 def pending_history(core, job):
     """Original queued liabilities; no retired worker or admission writer is executed."""
     now = core.clock()
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED',last_error_code=NULL WHERE job_id=?",
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED',last_error_code=NULL WHERE job_id=%s",
                        (job["job_id"],))
     core.store.insert("outbox", message_id=uid("msg"), origin_event_id=job["event_id"],
         conversation_id=job["conversation_id"], action_type="qq.private.reply",
@@ -97,7 +97,8 @@ def test_journal_failure_revokes_historical_custody_through_api_and_independent_
                                     scope_options=options, rich_input_scope="references_v1") as (
             window, client, job,
         ):
-            running, queued, reserved = pending_history(core, job)
+            with core.store.transaction():
+                running, queued, reserved = pending_history(core, job)
             async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as model, (
                 private_http_client(window.plan.config.onebot_http_url,
                     window.plan.config.onebot_token, transport=httpx.MockTransport(forbidden))
@@ -116,10 +117,10 @@ def test_journal_failure_revokes_historical_custody_through_api_and_independent_
                             if window.plan.journal.exists() else None) == before
                     assert worker.store.one("SELECT state FROM outbox")["state"] == "CANCELLED"
                     assert worker.store.one(
-                        "SELECT state FROM exploration_requests WHERE request_id=?", (running,),
+                        'SELECT state FROM exploration_requests WHERE request_id=%s', (running,),
                     )["state"] == "UNKNOWN"
                     assert worker.store.one(
-                        "SELECT state FROM exploration_requests WHERE request_id=?", (queued,),
+                        'SELECT state FROM exploration_requests WHERE request_id=%s', (queued,),
                     )["state"] == "CANCELLED"
                     assert worker.exploration.lease("bili") is None
                     assert not await worker.run_once("after-stop")
@@ -131,7 +132,7 @@ def test_journal_failure_revokes_historical_custody_through_api_and_independent_
                     budget.settle(worker.store, worker.settings, reserved,
                                   ModelResponse("", 10, 1, 0))
                     assert worker.store.one(
-                        "SELECT state FROM model_usage WHERE request_id=?", (reserved,),
+                        'SELECT state FROM model_usage WHERE request_id=%s', (reserved,),
                     )["state"] == "SETTLED"
                     assert calls == []
 

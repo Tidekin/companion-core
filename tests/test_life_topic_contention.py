@@ -27,18 +27,21 @@ def test_idle_projection_does_not_block_an_independent_writer(core, monkeypatch)
         return sources(topic_id)
 
     monkeypatch.setattr(core.life_topics, "sources", inspect_source)
-    with closing(Store(core.settings.database)) as writer, ThreadPoolExecutor(1) as executor:
-        writer.execute("PRAGMA busy_timeout=50")
+    with (
+        closing(Store(core.store.database, core.store.state_directory)) as writer,
+        ThreadPoolExecutor(1) as executor,
+    ):
+        writer.execute("SET lock_timeout='50ms'")
         projection = executor.submit(core.life_topics.synchronize)
         try:
             assert entered.wait(10), "Life did not reach the idle source inspection"
             with writer.transaction():
-                writer.execute("INSERT INTO runtime_meta VALUES (?,?)",
+                writer.execute("INSERT INTO runtime_meta VALUES (%s,%s)",
                                ("independent_chat_write", "committed"))
         finally:
             release.set()
             projection.result(timeout=10)
-        assert writer.one("SELECT value FROM runtime_meta WHERE key=?",
+        assert writer.one("SELECT value FROM runtime_meta WHERE key=%s",
                           ("independent_chat_write",))["value"] == "committed"
 
 
@@ -47,7 +50,7 @@ def test_idle_native_projection_reuses_the_verified_budget_view(core, tmp_path, 
         async with environment(core, tmp_path) as (admit, _, reference):
             configure(core)
             capture, _ = await admit(1, "A synthetic unfinished export task for tomorrow.")
-            conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+            conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                           (capture.event_id,))["conversation_id"]
             grant(core, reference, scope(core, conversation, [capture.event_id], mode="selected"),
                   "idle-life-projection")
@@ -84,7 +87,7 @@ def test_unavailable_native_candidates_share_one_verified_budget_view(core, tmp_
         async with environment(core, tmp_path) as (admit, _, reference):
             configure(core)
             capture, _ = await admit(1, "A synthetic unfinished export task for tomorrow.")
-            conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+            conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                           (capture.event_id,))["conversation_id"]
             grant(core, reference, scope(core, conversation, [capture.event_id], mode="selected"),
                   "unavailable-life-scan")
@@ -94,9 +97,12 @@ def test_unavailable_native_candidates_share_one_verified_budget_view(core, tmp_
             topic = core.store.one("SELECT * FROM life_topics")
             for index in range(20):
                 core.store.execute(
-                    "INSERT INTO life_topics SELECT ?,conversation_id,?,'reading','DUE',?,"
-                    "expires_at,reason_code,revision,0,NULL,created_at,updated_at "
-                    "FROM life_topics WHERE topic_id=?",
+                    (
+                        'INSERT INTO life_topics SELECT %s,conversation_id,%s'
+                        ",'reading','DUE',%s,expires_at,reason_code,revision,"
+                        '0,NULL,created_at,updated_at FROM life_topics WHERE '
+                        'topic_id=%s'
+                    ),
                     (f"blocked_{index:02d}", f"blocked:{index}",
                      f"2000-01-01T00:00:{index:02d}+00:00", topic["topic_id"]))
             monkeypatch.setattr(core.life_topics, "synchronize", lambda: None)

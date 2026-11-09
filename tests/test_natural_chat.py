@@ -55,7 +55,7 @@ async def independent_chat(core, provider):
         headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
     ) as api, httpx.AsyncClient(transport=httpx.MockTransport(provider)) as external:
         with Core(core.settings, ModelClient(core.settings, external), core.clock) as worker:
-            assert worker.store is not core.store and worker.store.db is not core.store.db
+            assert worker.store.backend_pid != core.store.backend_pid
             api.context_test_core = core
             yield api, worker
 
@@ -126,7 +126,7 @@ def test_received_facts_reach_real_paid_model_and_duplicate_does_not_pay_twice(
             assert len(calls) == 1
             messages = core.store.rows("SELECT content_json FROM outbox")
             assert [json.loads(row["content_json"])["text"] for row in messages] == [wording]
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                   (accepted["job_id"],))["state"] == "SUCCEEDED"
             assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage") == [
                 {"state": "SETTLED", "billed_micro_usd": 44},
@@ -152,26 +152,19 @@ def test_failed_generation_keeps_one_fault_receipt_without_another_model_call(
         async with independent_chat(core, provider) as (api, worker):
             accepted = await accept(api, value)
             assert await worker.run_once("failed-natural-chat")
-            if failure == "unknown":
-                blocked = await api.post("/internal/v1/inbox/events", json=value,
-                    headers={"x-idempotency-key": value["event_id"]})
-                assert blocked.status_code == 503
-                assert blocked.json()["error"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
-            else:
-                await accept(api, value, duplicate=True)
+            await accept(api, value, duplicate=True)
             assert not await worker.run_once("failed-natural-chat-replay")
-            job = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+            job = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                  (accepted["job_id"],))
             code = "MODEL_INPUT_LIMIT" if failure == "budget" else "MODEL_INVALID_RESPONSE"
             assert job == {"state": "FAILED", "last_error_code": code}
-            receipts = core.store.rows("SELECT safe_detail_json FROM audit_log "
-                "WHERE action='job.failed' AND entity_id=?", (accepted["job_id"],))
+            receipts = core.store.rows((
+                'SELECT safe_detail_json FROM audit_log WHERE '
+                "action='job.failed' AND entity_id=%s"
+            ), (accepted["job_id"],))
             assert len(receipts) == 1
             assert json.loads(receipts[0]["safe_detail_json"]) == {"code": code, "state": "FAILED"}
-            if failure == "budget":
-                assert_failure_notice(core)
-            else:
-                assert core.store.rows("SELECT * FROM outbox") == []
+            assert_failure_notice(core)
             usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
             if failure == "budget":
                 assert calls == [] and usage == []
@@ -191,7 +184,7 @@ def test_source_erased_during_provider_response_never_publishes_old_reply(
 
     def provider(request):
         calls.append(request)
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [value["event_id"]], core.clock())
         return reply("已经撤回来源的旧回复")
 
@@ -201,9 +194,9 @@ def test_source_erased_during_provider_response_never_publishes_old_reply(
             assert await worker.run_once("recalled-natural-chat")
             assert not await worker.run_once("recalled-natural-chat-replay")
             assert len(calls) == 1 and core.store.rows("SELECT * FROM outbox") == []
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                   (accepted["job_id"],))["state"] == "CANCELLED"
-            assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+            assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                   (value["event_id"],))["redacted"] == 1
             assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage") == [
                 {"state": "SETTLED", "billed_micro_usd": 44},

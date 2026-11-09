@@ -73,8 +73,10 @@ def test_reserved_before_begin_send_closes_and_handoffs_without_owner_guess(
             # the token; supersession retains the original token as evidence.
             core.clock.advance(core.settings.lease_seconds + 1)
             recover_deliveries(core.store, core.clock())
-            assert core.store.one("SELECT state,attempt_count,lease_token FROM outbox "
-                "WHERE message_id=?", (item["message_id"],)) == {
+            assert core.store.one((
+                'SELECT state,attempt_count,lease_token FROM outbox WHERE '
+                'message_id=%s'
+            ), (item["message_id"],)) == {
                     "state": "CANCELLED" if superseded else "PENDING", "attempt_count": 0,
                     "lease_token": item["lease_token"] if superseded else None}
             stopped = await client.post("/internal/v1/owner-authority/stop", headers=owner,
@@ -164,8 +166,10 @@ def test_reserved_before_begin_send_closes_and_handoffs_without_owner_guess(
                 assert len(sends) == 1
                 assert spool.db.execute("SELECT state FROM window_attempts ORDER BY fence DESC "
                                         "LIMIT 1").fetchone() == ("ACK",)
-                assert core.store.one("SELECT state,attempt_count FROM outbox "
-                    "WHERE origin_event_id=?", (event["event_id"],)) == {
+                assert core.store.one((
+                    'SELECT state,attempt_count FROM outbox WHERE '
+                    'origin_event_id=%s'
+                ), (event["event_id"],)) == {
                         "state": "SENT", "attempt_count": 1}
                 raw = encode(raw_event(3, time=int(core.clock.now.timestamp()),
                                        text="保留已发送回执"))
@@ -230,7 +234,7 @@ def test_reserved_before_begin_send_closes_and_handoffs_without_owner_guess(
             assert await child("tests.owner_reconcile_process", *args) == receipt
             assert len(sends) == 2
             assert core.store.rows("SELECT * FROM model_usage") == fees
-            assert core.store.one("SELECT state,attempt_count FROM outbox WHERE message_id=?",
+            assert core.store.one('SELECT state,attempt_count FROM outbox WHERE message_id=%s',
                                    (ack_message,)) == {"state": "SENT", "attempt_count": 1}
             with Spool(replace(config, owner_authority=successor),
                        reconciliation_only=True) as spool:

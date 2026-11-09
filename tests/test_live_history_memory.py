@@ -43,13 +43,16 @@ async def native_combined(core, tmp_path, *, options=None, core_options=None,
     memory_id = fact(core, 900, "本次临时项目的验收代号是青竹七号。")
     outsider = fact(core, 901, "未批准的另一个项目代号是紫云三号。")
     # Preserve valid evidence; native owner-private recall excludes public facts.
-    core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=?", (outsider,))
+    core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=%s", (outsider,))
     scores = []
     original_recall = core.memory_context.recall_async
     prefetched_jobs = set()
 
     async def observed_recall(*args, **kwargs):
-        job = core.store.one("SELECT job_id FROM jobs WHERE state='RUNNING' ORDER BY rowid DESC")
+        job = core.store.one(
+            "SELECT job_id FROM jobs WHERE state='RUNNING' ORDER BY "
+            'record_sequence DESC'
+        )
         if job and job["job_id"] not in prefetched_jobs:
             prefetched_jobs.add(job["job_id"])
             if not prefetched:
@@ -133,13 +136,16 @@ def test_same_job_review_and_chat_use_authenticated_sent_history_and_native_fact
                 "assistant",
                 "tool",
             ]
-            stages = core.store.rows("SELECT job_id,scenario,state FROM model_usage ORDER BY rowid")
+            stages = core.store.rows(
+                'SELECT job_id,scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            )
             assert [r["scenario"] for r in stages] == ["chat"] * 4
             assert all(r["state"] == "SETTLED" for r in stages)
             assert stages[0]["job_id"] == stages[1]["job_id"]
             assert stages[2]["job_id"] == stages[3]["job_id"]
             frozen = core.store.rows(
-                "SELECT value FROM runtime_meta WHERE key LIKE ? OR key LIKE ?",
+                'SELECT value FROM runtime_meta WHERE key LIKE %s OR key LIKE %s',
                 (live_text.MEMORY + "%", live_text.CONTEXT + "%"),
             )
             assert "城西旧书店" not in encode(frozen) and "青竹七号" not in encode(frozen)
@@ -209,7 +215,9 @@ def test_empty_scoped_search_combines_history_with_native_recall_per_input(core,
 
 
 @pytest.mark.parametrize("erased", ["history", "corrected_fact_family"])
-def test_latest_ledger_replay_of_old_combined_backup_cannot_revive_sources(core, tmp_path, erased):
+def test_latest_ledger_replay_of_old_combined_backup_cannot_revive_sources(
+    empty_database, core, tmp_path, erased,
+):
     from companion.core import Core
 
     async def scenario():
@@ -224,32 +232,39 @@ def test_latest_ledger_replay_of_old_combined_backup_cannot_revive_sources(core,
                 assert await core.run_once()
                 assert await send()
             source = (
-                core.store.one("SELECT origin_event_id FROM outbox ORDER BY rowid LIMIT 1")[
+                core.store.one(
+                    'SELECT origin_event_id FROM outbox ORDER BY '
+                    'record_sequence LIMIT 1'
+                )[
                     "origin_event_id"
                 ]
                 if erased == "history"
                 else "evt_test_900"
             )
             key = Fernet.generate_key()
-            archive, destination = tmp_path / "before.enc", tmp_path / "restored.db"
+            archive = tmp_path / "before.enc"
+            restored_state = tmp_path / "restored-state"
             backup(core.settings.database, archive, key)
             await window.pause()
             if erased == "history":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [source], core.clock())
             else:
                 changed = core.memory.decide(
                     memory_id, "correct", core.clock(), "新的临时项目代号。"
                 )
                 core.memory.decide(changed["memory_id"], "forget", core.clock())
-            restore(archive, destination, key, core.settings.erasure_ledger)
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
             with Core(
-                core.settings.model_copy(update={"database": str(destination)}),
+                core.settings.model_copy(update={
+                    "database": empty_database, "state_directory": str(restored_state),
+                }),
                 core.model,
                 core.clock,
             ) as recovered:
                 assert (
-                    recovered.store.one("SELECT redacted FROM events WHERE event_id=?", (source,))[
+                    recovered.store.one('SELECT redacted FROM events WHERE event_id=%s', (source,))[
                         "redacted"
                     ]
                     == 1
@@ -260,19 +275,19 @@ def test_latest_ledger_replay_of_old_combined_backup_cannot_revive_sources(core,
                 )
                 if erased == "corrected_fact_family":
                     assert recovered.store.one(
-                        "SELECT content,status FROM memories WHERE memory_id=?", (memory_id,)
+                        'SELECT content,status FROM memories WHERE memory_id=%s', (memory_id,)
                     ) == {
                         "content": "",
                         "status": "FORGOTTEN",
                     }
                     assert not recovered.store.one(
-                        "SELECT 1 FROM memory_vectors WHERE memory_id=?", (memory_id,)
+                        'SELECT 1 FROM memory_vectors WHERE memory_id=%s', (memory_id,)
                     )
                     assert not recovered.store.one(
-                        "SELECT 1 FROM memory_revisions WHERE memory_id=?", (memory_id,)
+                        'SELECT 1 FROM memory_revisions WHERE memory_id=%s', (memory_id,)
                     )
                 assert recovered.store.one(
-                    "SELECT content,status FROM memories WHERE memory_id=?", (outsider,)
+                    'SELECT content,status FROM memories WHERE memory_id=%s', (outsider,)
                 ) == {
                     "content": "未批准的另一个项目代号是紫云三号。",
                     "status": "CONFIRMED",
@@ -293,35 +308,40 @@ def test_latest_ledger_replay_of_old_combined_backup_cannot_revive_sources(core,
 
 
 def mutate(core, kind):
-    event_id = core.store.one("SELECT origin_event_id FROM outbox ORDER BY rowid LIMIT 1")[
+    event_id = core.store.one(
+        'SELECT origin_event_id FROM outbox ORDER BY record_sequence LIMIT 1'
+    )[
         "origin_event_id"
     ]
     if kind == "fact":
         core.store.execute("UPDATE memories SET content='漂移事实' WHERE fact_key IS NOT NULL")
     elif kind == "expired_evidence":
         core.store.execute(
-            "UPDATE events SET ingested_at=? WHERE event_id='evt_test_900'",
+            "UPDATE events SET ingested_at=%s WHERE event_id='evt_test_900'",
             (after(core.clock(), -86400 * 3650),),
         )
     elif kind == "history":
         body = json.loads(
-            core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,))[
+            core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event_id,))[
                 "body_json"
             ]
         )
         body["text"] = "历史原件已漂移"
         core.store.execute(
-            "UPDATE events SET body_json=? WHERE event_id=?", (encode(body), event_id)
+            'UPDATE events SET body_json=%s WHERE event_id=%s', (encode(body), event_id)
         )
     elif kind == "PENDING":
-        core.store.execute("UPDATE outbox SET state='PENDING' WHERE origin_event_id=?", (event_id,))
+        core.store.execute((
+            "UPDATE outbox SET state='PENDING' WHERE origin_event_id=%s"
+        ), (event_id,))
     elif kind == "reply":
         core.store.execute(
-            "UPDATE outbox SET content_json=? WHERE origin_event_id=?",
+            'UPDATE outbox SET content_json=%s WHERE origin_event_id=%s',
             (encode({"text": "漂移回复"}), event_id),
         )
     elif kind == "epoch":
-        advance_epoch(core.store)
+        with core.store.transaction(control_write=True):
+            advance_epoch(core.store)
     elif kind in {"history_approval", "memory_approval"}:
         view = owner_authority.current(core.store, core.settings, core.clock)
         purpose = kind.removesuffix("_approval")
@@ -335,7 +355,7 @@ def mutate(core, kind):
         return policy, stopped["authority"]
     else:
         row = core.store.one(
-            "SELECT * FROM runtime_meta WHERE key=?", (owner_input.INPUT + event_id,)
+            'SELECT * FROM runtime_meta WHERE key=%s', (owner_input.INPUT + event_id,)
         )
         value = json.loads(row["value"])
         if kind == "signature":
@@ -345,7 +365,7 @@ def mutate(core, kind):
         else:
             raise AssertionError(kind)
         core.store.execute(
-            "UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), row["key"])
+            'UPDATE runtime_meta SET value=%s WHERE key=%s', (encode(value), row["key"])
         )
 
 
@@ -419,7 +439,7 @@ def test_both_source_scopes_recheck_before_next_model_io(core, tmp_path, monkeyp
             assert len(calls) == (4 if kind == "epoch" else 3)
             assert len(sends) == 1
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
-            job = core.store.one("SELECT state FROM jobs ORDER BY rowid DESC LIMIT 1")
+            job = core.store.one('SELECT state FROM jobs ORDER BY record_sequence DESC LIMIT 1')
             expected = (
                 "RETRY_WAIT" if kind == "epoch" or (
                     stage == "memory_tool" and kind in {"fact", "expired_evidence"})
@@ -497,7 +517,9 @@ def test_delivery_check_refuses_either_changed_scope_without_sending(core, tmp_p
             assert response.status_code >= 400
             assert len(calls) == 4 and len(sends) == 1
             assert (
-                core.store.one("SELECT state FROM outbox WHERE message_id=?", (row["message_id"],))[
+                core.store.one((
+                    'SELECT state FROM outbox WHERE message_id=%s'
+                ), (row["message_id"],))[
                     "state"
                 ]
                 == "SENDING"
@@ -526,7 +548,10 @@ def test_soft_capacity_keeps_current_input_and_native_fact_without_rewriting_fac
             assert await core.run_once()
             assert history_snapshot(core) == []
             snapshots = json.loads(core.store.one(
-                "SELECT snapshots_json FROM agent_conversations ORDER BY rowid DESC LIMIT 1"
+
+                    'SELECT snapshots_json FROM agent_conversations ORDER BY '
+                    'record_sequence DESC LIMIT 1'
+
             )["snapshots_json"])
             plan = next(item["metadata"]["core_context"] for item in snapshots
                         if item["kind"] == "context_plan")
@@ -539,7 +564,7 @@ def test_soft_capacity_keeps_current_input_and_native_fact_without_rewriting_fac
             assert json.loads(messages[-1]["content"])["state"] == "FOUND"
             assert messages[-3] == {"role": "user", "content": texts[-1]}
             assert core.store.one(
-                "SELECT status,content FROM memories WHERE memory_id=?", (memory_id,)
+                'SELECT status,content FROM memories WHERE memory_id=%s', (memory_id,)
             ) == {
                 "status": "CONFIRMED",
                 "content": "本次临时项目的验收代号是青竹七号。",
@@ -601,7 +626,7 @@ def test_five_total_attempt_cap_survives_combined_stages_and_fresh_core(core, tm
                 failed = restarted.store.one("SELECT event_id FROM jobs WHERE state='FAILED'")
                 assert_failure_notice(restarted, failed["event_id"])
             finally:
-                restarted.store.close()
+                restarted.close()
             assert len(calls) == 5
 
     run(scenario())
@@ -690,11 +715,13 @@ def test_fsynced_forget_with_rolled_back_db_blocks_the_next_model_http(
 
                 with monkeypatch.context() as patch:
                     patch.setattr(core.ledger, "apply", crash_apply)
-                    with pytest.raises(RuntimeError):
-                        with core.store.transaction():
+                    with pytest.raises(
+                        RuntimeError, match="SYNTHETIC_AFTER_FSYNC_BEFORE_DB_COMMIT",
+                    ):
+                        with core.store.transaction(control_write=True):
                             core.ledger.append(core.store, memory_id, core.clock())
                 assert (
-                    core.store.one("SELECT status FROM memories WHERE memory_id=?", (memory_id,))[
+                    core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_id,))[
                         "status"
                     ]
                     == "CONFIRMED"

@@ -16,6 +16,7 @@ from companion.privacy import epoch
 from companion.store import encode
 from companion.transport import begin_send, delivery_result, enqueue, lease_deliveries
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.consolidation import enable_nightly
 from tests.support.diary import DAY
 from tests.support.goals import result_for, setup_goal
@@ -24,7 +25,9 @@ from tests.support.p12_diary_life import source_with_older_parent
 from tests.support.source_grants import prepare
 
 
-def test_native_daily_pipeline_revision_next_day_and_latest_ledger_restore(core, tmp_path):
+def test_native_daily_pipeline_revision_next_day_and_latest_ledger_restore(
+    empty_database, core, tmp_path,
+):
     model = enable_nightly(core)
     core.consolidation.schedule_day(DAY)
     assert run(core.consolidation.run_once())
@@ -54,11 +57,15 @@ def test_native_daily_pipeline_revision_next_day_and_latest_ledger_restore(core,
     assert core.diary.get_day(next_day, core.settings.owner_qq_id)
     assert not core.store.rows("SELECT * FROM outbox")
 
-    key, archive, dest = Fernet.generate_key(), tmp_path / "life.enc", tmp_path / "restore.db"
+    key, archive = Fernet.generate_key(), tmp_path / "life.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     core.diary.forget(DAY, core.settings.owner_qq_id)
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         for instance in (core, restored):
             assert instance.diary.get_day(DAY, core.settings.owner_qq_id) is None
@@ -68,17 +75,17 @@ def test_native_daily_pipeline_revision_next_day_and_latest_ledger_restore(core,
             assert not instance.store.rows("SELECT * FROM outbox")
         assert core.diary.status(core.settings.owner_qq_id)["auto_share"] is False
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_goal_shadow_pause_failure_and_restart_keep_intention_separate_from_execution(core):
     goal_id = setup_goal(core)
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     shadow = core.goals.recent()[0]
     assert shadow["mode"] == "SHADOW" and shadow["state"] == "CANDIDATE"
     assert shadow["source_evidence"][0]["event_id"] == "evt_test_1"
     assert shadow["execution"] is shadow["result"] is shadow["delivery"] is None
-    assert shadow["phone_confirmation"] is None and core.store.db.total_changes == before
+    assert shadow["phone_confirmation"] is None and logical_state(core.store) == before
     core.goals.accept(goal_id)
     first = core.goals.claim()
     core.goals.pause_autonomy(True)
@@ -101,7 +108,7 @@ def test_goal_shadow_pause_failure_and_restart_keep_intention_separate_from_exec
         assert result["delivery"] is result["phone_confirmation"] is None
         assert not restarted.store.rows("SELECT * FROM outbox") and not core.model.calls
     finally:
-        restarted.store.close()
+        restarted.close()
 
 
 def test_completed_commitment_is_not_delivered_until_outbox_ack_and_never_claims_phone(core):
@@ -139,27 +146,33 @@ def queued_share(core):
     return core.store.one("SELECT * FROM outbox")
 
 
-def test_upstream_expiry_blocks_goal_acceptance_and_retracts_the_native_view(core, tmp_path):
+def test_upstream_expiry_blocks_goal_acceptance_and_retracts_the_native_view(
+    empty_database, core, tmp_path,
+):
     source = source_with_older_parent(core)
     proposal = GoalProposal(
         topic="下一步天文阅读", source_event_ids=[source],
         scope=GoalScope(operation="read_content", url=URL),
     )
     goal_id = core.goals.propose(proposal)
-    key, archive, dest = Fernet.generate_key(), tmp_path / "goal.enc", tmp_path / "restore.db"
+    key, archive = Fernet.generate_key(), tmp_path / "goal.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     core.clock.advance(2)
     with pytest.raises(CoreError, match="GOAL_SOURCE_UNAVAILABLE"):
         core.goals.accept(goal_id)
     assert core.goals.recent() == []
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (source,))["redacted"]
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (source,))["redacted"]
     assert core.store.rows("SELECT * FROM goal_steps") == []
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         assert restored.goals.recent() == []
     finally:
-        restored.store.close()
+        restored.close()
 
 
 @pytest.mark.parametrize("stage", ["consider", "flush", "lease", "begin"])
@@ -209,11 +222,11 @@ def test_share_final_dispatch_rejects_changed_source_candidate_content_and_disab
         core.store, core.settings, LeaseRequest(worker_id="fixture"), core.clock()
     )["items"][0]
     if mutation == "source":
-        core.store.execute("UPDATE observations SET source_sha256=?", ("0" * 64,))
+        core.store.execute('UPDATE observations SET source_sha256=%s', ("0" * 64,))
     elif mutation == "candidate":
         core.store.execute("UPDATE social_candidates SET state='SKIPPED'")
     elif mutation == "content":
-        core.store.execute("UPDATE outbox SET content_json=?", (encode({"text": "被替换的正文"}),))
+        core.store.execute('UPDATE outbox SET content_json=%s', (encode({"text": "被替换的正文"}),))
     elif mutation == "disabled":
         core.settings.social_enabled = False
     elif mutation == "action":
@@ -224,7 +237,7 @@ def test_share_final_dispatch_rejects_changed_source_candidate_content_and_disab
         core.store.execute("UPDATE conversations SET scope='group'")
     with pytest.raises(CoreError, match="NOTICE_"):
         begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
-    result = core.store.one("SELECT * FROM outbox WHERE message_id=?", (queued["message_id"],))
+    result = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (queued["message_id"],))
     assert result["state"] == "CANCELLED" and result["attempt_count"] == 0
     restarted = Core(core.settings, clock=core.clock)
     try:
@@ -232,7 +245,7 @@ def test_share_final_dispatch_rejects_changed_source_candidate_content_and_disab
             restarted.store, restarted.settings, LeaseRequest(worker_id="fixture"), core.clock()
         )["items"]
     finally:
-        restarted.store.close()
+        restarted.close()
 
 
 @pytest.mark.parametrize("uncertain", [False, True])
@@ -252,7 +265,7 @@ def test_source_expiry_never_claims_cancellation_after_io_started(core, uncertai
     assert not lease_deliveries(
         core.store, core.settings, LeaseRequest(worker_id="fixture"), core.clock()
     )["items"]
-    row = core.store.one("SELECT * FROM outbox")
+    row = core.store.one("SELECT * FROM outbox WHERE message_id=%s", (item["message_id"],))
     assert row["state"] == ("DELIVERY_UNCERTAIN" if uncertain else "SENDING")
     assert row["attempt_count"] == 1
 
@@ -275,12 +288,12 @@ def test_interest_or_goal_does_not_substitute_for_reader_grant(core):
     prepare(core)
     with core.store.transaction():
         request = core.exploration.create("heybox", "read", "no-grant", URL)
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     with pytest.raises(CoreError, match="SOURCE_GRANT_REQUIRED"):
         core.exploration.lease("heybox")
-    row = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?", (request,))
+    row = core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s', (request,))
     assert row["state"] == "QUEUED" and row["started_at"] is None
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     assert not core.store.rows("SELECT * FROM outbox") and not core.model.calls
 
 
@@ -302,7 +315,7 @@ def test_private_life_views_require_control_auth_never_cache_and_retract_on_forg
         before = client.get(path, headers=owner)
         assert before.status_code == 200 and before.json()["items"]
         assert before.headers["Cache-Control"] == "no-store"
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
         after = client.get(path, headers=owner)
         assert after.status_code == 200 and after.json()["items"] == []

@@ -40,7 +40,9 @@ def test_legacy_spool_preserves_non_exact_erasure_receipts(tmp_path, body):
         spool.close()
 
 
-def test_pre_event_backup_latest_ledger_blocks_pending_spool_resurrection(core, tmp_path):
+def test_pre_event_backup_latest_ledger_blocks_pending_spool_resurrection(
+    empty_database, core, tmp_path,
+):
     key = Fernet.generate_key()
     old_backup = tmp_path / "before-event.enc"
     backup(core.settings.database, old_backup, key)
@@ -50,11 +52,14 @@ def test_pre_event_backup_latest_ledger_blocks_pending_spool_resurrection(core, 
     with Spool(cfg) as spool:
         spool.put(payload)
         core.ingest(InboundEvent.model_validate(payload), payload["event_id"])
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [payload["event_id"]], core.clock())
-    restored_path = tmp_path / "restored.db"
-    restore(old_backup, restored_path, key, core.settings.erasure_ledger)
-    settings = core.settings.model_copy(update={"database": str(restored_path)})
+    restored_state = tmp_path / "restored-state"
+    restore(old_backup, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    settings = core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    })
     restored = Core(settings, FakeModel(), core.clock)
     try:
 
@@ -75,16 +80,16 @@ def test_pre_event_backup_latest_ledger_blocks_pending_spool_resurrection(core, 
         assert run(restored.run_once("offline-restore"))
         assert len(restored.store.rows("SELECT * FROM outbox")) == 1
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_complete_ledger_records_rebuild_missing_tombstones(core):
     payload = normalized()
     core.ingest(InboundEvent.model_validate(payload), payload["event_id"])
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [payload["event_id"]], core.clock())
     # Emulate a snapshot from the previous release with COMPLETE but no projection.
-    core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'erased_event:%'")
+    core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'erased_event:%%'")
     core.ledger.replay(core.store)
     import pytest
 
@@ -100,7 +105,7 @@ def test_legacy_astrbot_spool_consumes_exact_erasure_receipt_and_keeps_chat_movi
         key, payload = legacy_normalize(astrbot_event(), "10001", "10002")
         spool.put(key, payload)
         core.ingest(InboundEvent.model_validate(payload), key)
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [payload["event_id"]], core.clock())
 
         async def scenario():

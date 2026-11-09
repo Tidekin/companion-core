@@ -1,6 +1,8 @@
 """Shared durable state and identity bootstrap, independent of semantic services."""
 
-from companion.contracts import CoreError
+from pathlib import Path
+
+from companion.postgres import Database
 from companion.privacy import ErasureLedger
 from companion.store import Store, after, utcnow
 
@@ -8,28 +10,15 @@ from companion.store import Store, after, utcnow
 class Runtime:
     def __init__(self, settings, clock=utcnow):
         self.settings, self.clock = settings, clock
-        self.store = Store(settings.database)
+        Path(settings.state_directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+        # One persistent Runtime lease plus at most four finite API operations.
+        self.database = Database(settings.database, max_connections=5).__enter__()
+        self.store = None
         try:
+            self.store = Store(self.database, settings.state_directory)
+            self.store.bootstrap(settings.owner_qq_id, self.clock())
             self.ledger = ErasureLedger(settings.erasure_ledger)
             self.ledger.initialize(self.store)
-            with self.store.transaction():
-                for actor, kind in (
-                    ("owner", "owner"),
-                    ("companion", "companion"),
-                    ("system", "system"),
-                ):
-                    self.store.execute(
-                        "INSERT OR IGNORE INTO principals VALUES (?,?,?)",
-                        (actor, kind, self.clock()),
-                    )
-                # A persistent identity cannot silently be reassigned to a new QQ owner.
-                previous = self.store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
-                if previous and previous["value"] != settings.owner_qq_id:
-                    raise CoreError("OWNER_IDENTITY_MISMATCH", 503)
-                self.store.execute(
-                    "INSERT OR IGNORE INTO runtime_meta VALUES ('owner_qq_id',?)",
-                    (settings.owner_qq_id,),
-                )
         except BaseException:
             self.close()
             raise
@@ -41,21 +30,26 @@ class Runtime:
         self.close()
 
     def close(self):
-        self.store.close()
+        try:
+            if self.store is not None:
+                self.store.close()
+        finally:
+            self.database.close()
 
-    def expire_raw_events(self):
+    def expire_raw_events(self, *, include_rem=False):
+        """Return expired raw events, optionally counting expired REM records as well."""
         from companion.rem import expire as expire_rem
 
         now = self.clock()
         cutoff = after(now, -86400 * self.settings.raw_event_retention_days)
-        with self.store.transaction():
-            expire_rem(self.store, self.ledger, now)
+        with self.store.transaction(control_write=True):
+            rem_count = expire_rem(self.store, self.ledger, now)
             rows = self.store.rows(
-                "SELECT event_id FROM events WHERE redacted=0 AND ingested_at<? "
-                "ORDER BY rowid LIMIT 1000",
+                'SELECT event_id FROM events WHERE redacted = 0 AND ingested_at < %s ORDER BY '
+                'record_sequence NULLS FIRST LIMIT 1000',
                 (cutoff,),
             )
             if rows:
                 self.ledger.expire_events(self.store, [e["event_id"] for e in rows], now,
                                           retention_cutoff=cutoff)
-            return len(rows)
+            return len(rows) + (rem_count if include_rem else 0)

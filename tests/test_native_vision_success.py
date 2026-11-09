@@ -68,8 +68,10 @@ def test_new_images_reach_vision_reply_ack_and_following_text(
                                [{"type": "text", "data": {"text": question}}])
                 await until(lambda: len(core.store.rows("SELECT * FROM events")) == inputs,
                             tasks=tasks, deadline_seconds=20)
-                stored = core.store.rows("SELECT * FROM content_items WHERE kind='qq_image' "
-                                         "ORDER BY rowid")
+                stored = core.store.rows(
+                    "SELECT * FROM content_items WHERE kind='qq_image' ORDER "
+                    'BY record_sequence'
+                )
                 assert len(stored) == count and all(row["state"] == "SUCCEEDED" for row in stored)
                 assert [image_spool.get(core.store, row, core.clock(), 50000)[0]
                         for row in stored] == originals
@@ -94,9 +96,12 @@ def test_new_images_reach_vision_reply_ack_and_following_text(
                     "已按顺序看到图片颜色。", "可以，继续文字聊天。"]
                 assert downloads == list(range(count)) and len(uploads) == count
                 assert active.attempts() == {"ACK": 2}
-                assert core.store.rows("SELECT state FROM outbox ORDER BY rowid") == [
+                assert core.store.rows('SELECT state FROM outbox ORDER BY record_sequence') == [
                     {"state": "SENT"}, {"state": "SENT"}]
-                assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+                assert core.store.rows(
+                    'SELECT scenario,state FROM model_usage ORDER BY '
+                    'record_sequence'
+                ) == [
                     {"scenario": "chat", "state": "SETTLED"},
                     {"scenario": "chat", "state": "SETTLED"}]
                 assert active.runtime.row()["state"] == "ACTIVE"

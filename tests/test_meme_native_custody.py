@@ -104,20 +104,23 @@ async def rotation_case(core, tmp_path, monkeypatch, *, changed, responsibility,
             grant = SimpleNamespace(authority=active["authority"], key=key, policy=policy)
             config = replace(c.config, protocol_epoch=epoch)
         else:
-            # The original financial idle gate forbids rotation while UNKNOWN is held.
-            with pytest.raises(CoreError, match="LIVE_TEXT_INITIAL_WORK_MUST_BE_ZERO"):
-                activate(core, c.grant.policy, revision=1, operation="unknown-cannot-rotate")
-            grant, config = c.grant, c.config
+            original_usage = core.store.rows("SELECT * FROM model_usage")
+            active, _ = activate(core, c.grant.policy, revision=1,
+                                 operation="rotate-with-original-unknown")
+            assert core.store.rows("SELECT * FROM model_usage") == original_usage
+            grant = SimpleNamespace(authority=active["authority"], key=c.grant.key,
+                                    policy=c.grant.policy)
+            config = c.config
         event, response = await admit(c.client, config, grant, c.now, 2, text="太棒了，成功了")
         assert response.status_code == 202, response.text
         claimed = core.claim_job("rotated-offer", job_id=response.json()["job_id"])
         assert claimed is not None
-        job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (claimed["job_id"],))
+        job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (claimed["job_id"],))
         await c.retrieval.prepare(job)
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL WHERE job_id=?",
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL WHERE job_id=%s",
                            (job["job_id"],))
         if erase:
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [c.event["event_id"]], core.clock())
             assert core.store.one("SELECT asset_data FROM meme_captions")["asset_data"] is None
         original_fees = core.store.rows("SELECT * FROM model_usage")
@@ -135,10 +138,12 @@ async def rotation_case(core, tmp_path, monkeypatch, *, changed, responsibility,
         monkeypatch.setattr(c.service, "_reuse_compatible", measured_compatible)
         assert await c.service.run_once("refuse-incompatible-custody")
         assert reached == [original_captions[0]["job_id"]]
-        parent = core.store.one("SELECT job_id FROM jobs WHERE kind='meme_discovery' "
-                                "AND event_id=?",
+        parent = core.store.one((
+            "SELECT job_id FROM jobs WHERE kind='meme_discovery' AND "
+            'event_id=%s'
+        ),
                                 (event["event_id"],))
-        settled = core.store.one("SELECT * FROM meme_discovery_reservations WHERE job_id=?",
+        settled = core.store.one('SELECT * FROM meme_discovery_reservations WHERE job_id=%s',
                                  (parent["job_id"],))
         assert settled["state"] == "SETTLED" and settled["storage_bytes"] == 0
         assert settled["requests"] == len(c.upstream.calls) - before_calls == 5

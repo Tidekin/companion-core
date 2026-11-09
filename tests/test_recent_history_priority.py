@@ -39,9 +39,9 @@ def test_native_recent_turns_precede_fifteen_hot_sources(
                     source = await entry.admit(group * 5 + offset + 1,
                         f"old telescope project {group} observation {offset}")
                     # The old unsent sources form genuine episodes, not delivered turns.
-                    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=?",
+                    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=%s",
                                        (source["event_id"],))
-                    events.append(core.store.one("SELECT * FROM events WHERE event_id=?",
+                    events.append(core.store.one('SELECT * FROM events WHERE event_id=%s',
                                                  (source["event_id"],)))
                     core.clock.advance(1)
                 core.memory.episodes(events, core.clock())
@@ -65,15 +65,17 @@ def test_native_recent_turns_precede_fifteen_hot_sources(
                     job_id = entry.accepted[source["event_id"]]["job_id"]
                     assert await worker.run_once("recent-history", job_id=job_id)
                     assert (await entry.send(entry.client, entry.protocol))["worked"]
-                    sent = core.store.one("SELECT sent_at FROM outbox WHERE origin_event_id=?",
+                    sent = core.store.one('SELECT sent_at FROM outbox WHERE origin_event_id=%s',
                                            (source["event_id"],))
                     core.clock.now = max(core.clock.now, datetime.fromisoformat(sent["sent_at"]))
                     core.clock.advance(1)
                     recent.append(source["event_id"])
 
                 current = await entry.admit(999, "continue the recent ordinary conversation")
-                job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j "
-                    "JOIN events e USING(event_id) WHERE event_id=?", (current["event_id"],))
+                job = core.store.one((
+                    'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+                    'USING(event_id) WHERE event_id=%s'
+                ), (current["event_id"],))
                 eligible = owner_input.history_sources(core.store, core.settings, core.clock, job)
                 selected_recent = recent[-10:]
                 assert [source["event_id"] for source in eligible] == selected_recent
@@ -88,8 +90,10 @@ def test_native_recent_turns_precede_fifteen_hot_sources(
                 else:
                     assert await worker.run_once("recent-history-current", job_id=job["job_id"])
                     job_id, wire = job["job_id"], calls[-1]
-                row = core.store.one("SELECT snapshots_json FROM agent_conversations "
-                                     "WHERE job_id=?", (job_id,))
+                row = core.store.one((
+                    'SELECT snapshots_json FROM agent_conversations WHERE '
+                    'job_id=%s'
+                ), (job_id,))
                 snapshots = json.loads(row["snapshots_json"])
                 history = next(item["proof"] for item in snapshots if item["kind"] == "history")
                 assert [item["event_id"] for item in history] == selected_recent
@@ -118,7 +122,10 @@ def test_native_recent_turns_precede_fifteen_hot_sources(
                 assert core.settings.chat_thinking_tokens == 3072
                 assert (await entry.send(entry.client, entry.protocol))["worked"]
                 assert len(sends) == turns + 1
-                usage = core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid")
+                usage = core.store.rows(
+                    'SELECT scenario,state FROM model_usage ORDER BY '
+                    'record_sequence'
+                )
                 assert usage == [{"scenario": "chat", "state": "SETTLED"}] * (turns + 1)
                 assert not core.store.one("SELECT 1 FROM agent_tool_calls")
                 assert "old telescope" not in encode([message for message in wire["messages"]

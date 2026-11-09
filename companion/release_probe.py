@@ -1,7 +1,7 @@
 """Release planning probe: run the target code against a private copy of production data.
 
-The release plan starts this module inside the target Core image, with no network and
-with the production database, budget journal and erasure ledger replaced by copies.
+The release plan starts this module inside the target Core image, with access only to
+an isolated database copy, budget journal copy and erasure ledger copy.
 It reports what the release would need and never touches the originals: whether the
 schema must migrate (it migrates the copy and times it), whether the stored
 OwnerAuthority policy stays valid under the new code and current config, and what open
@@ -16,9 +16,9 @@ import time
 from companion import owner_authority
 from companion.config import Settings
 from companion.contracts import CoreError
-from companion.ops_status import snapshot
+from companion.ops_status import read_view, snapshot
 from companion.owner_authority_protocol import OwnerGrantPolicy
-from companion.store import Store, migrate
+from companion.store import migrate
 
 # Blockers a migration resolves on its own; anything else means the copy is not releasable.
 MIGRATION_BLOCKERS = {"MIGRATION_REQUIRED"}
@@ -31,6 +31,7 @@ def _summary(view):
         "expected_schema": database.get("expected_schema"),
         "integrity": database.get("integrity"),
         "blockers": sorted(view.get("blockers", [])),
+        "warnings": sorted(view.get("warnings", [])),
         "active_jobs": view.get("jobs", {}).get("active"),
         "open_deliveries": view.get("deliveries", {}).get("active"),
         "uncertain_deliveries": view.get("deliveries", {}).get("states", {}).get(
@@ -41,9 +42,10 @@ def _summary(view):
 
 def authority(settings):
     """State of the latest OwnerAuthority record and whether its policy still holds."""
-    store = Store(settings.database)
-    try:
-        if not store.one("SELECT 1 FROM sqlite_master WHERE name='owner_authority_revisions'"):
+    with read_view(settings) as store:
+        if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+            "relnamespace=current_schema()::regnamespace AND relname='owner_authority_revisions' "
+            "AND relkind IN ('r','p')"):
             return {"state": "ABSENT", "revision": None, "policy_problem": None}
         row = owner_authority._latest(store)
         if not row:
@@ -57,8 +59,8 @@ def authority(settings):
                 "purposes": sorted(policy.purposes),
                 "expires_at": policy.expires_at.isoformat() if policy.expires_at else None,
                 "policy_problem": problem.code if problem else None}
-    finally:
-        store.db.close()
+
+
 
 
 def probe(load=Settings.load):

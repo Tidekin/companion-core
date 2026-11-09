@@ -76,41 +76,43 @@ class ReflectionDecision(StrictModel):
 
 
 def erase_reflections(store, event_ids, clear_replies):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='reflection_runs' AND type='table'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='reflection_runs' AND relkind IN "
+        "('r','p')"):
         return
     runs = set()
     for event_id in event_ids:
         runs.update(
             row["run_id"]
             for row in store.rows(
-                "SELECT run_id FROM reflection_evidence WHERE event_id=?", (event_id,)
+                'SELECT run_id FROM reflection_evidence WHERE event_id = %s', (event_id,)
             )
         )
     if clear_replies:
         runs.update(
             row["run_id"]
             for row in store.rows(
-                "SELECT run_id FROM reflection_evidence WHERE outbox_message_id IS NOT NULL"
+                'SELECT run_id FROM reflection_evidence WHERE NOT outbox_message_id IS NULL'
             )
         )
     for run_id in runs:
         delegation.erase_suggestions(store, [row["suggestion_id"] for row in store.rows(
-            "SELECT suggestion_id FROM reflection_suggestions WHERE run_id=?", (run_id,))],
+            'SELECT suggestion_id FROM reflection_suggestions WHERE run_id = %s', (run_id,))],
             utcnow())
         store.execute(
-            "UPDATE reflection_suggestions SET content='',evidence_json='[]',state='REDACTED' "
-            "WHERE run_id=?",
+            "UPDATE reflection_suggestions SET content = '', evidence_json = '[]', state = "
+            "'REDACTED' WHERE run_id = %s",
             (run_id,),
         )
         store.execute(
-            "UPDATE reflection_runs SET state='CANCELLED',lease_token=NULL,"
-            "source_set_sha256='',last_error_code='PRIVACY_CHANGED' WHERE run_id=?",
+            "UPDATE reflection_runs SET state = 'CANCELLED', lease_token = NULL, source_set_sha256 "
+            "= '', last_error_code = 'PRIVACY_CHANGED' WHERE run_id = %s",
             (run_id,),
         )
-        store.execute("DELETE FROM reflection_evidence WHERE run_id=?", (run_id,))
+        store.execute('DELETE FROM reflection_evidence WHERE run_id = %s', (run_id,))
     store.execute(
-        "UPDATE reflection_runs SET state='CANCELLED',lease_token=NULL,"
-        "last_error_code='PRIVACY_CHANGED' WHERE state IN ('RUNNING','RETRY_WAIT')"
+        "UPDATE reflection_runs SET state = 'CANCELLED', lease_token = NULL, last_error_code = "
+        "'PRIVACY_CHANGED' WHERE state IN ('RUNNING', 'RETRY_WAIT')"
     )
 
 
@@ -146,53 +148,86 @@ class ReflectionService:
         s, now = self.store, self.clock()
         with s.transaction():
             prior = s.one(
-                "SELECT * FROM reflection_runs WHERE local_date=? AND timezone=?",
+                'SELECT reflection_runs.run_id AS run_id, reflection_runs.identity_id AS '
+                'identity_id, reflection_runs.local_date AS local_date, reflection_runs.timezone '
+                'AS timezone, reflection_runs.state AS state, reflection_runs.source_set_sha256 AS '
+                'source_set_sha256, reflection_runs.captured_privacy_epoch AS '
+                'captured_privacy_epoch, reflection_runs.lease_token AS lease_token, '
+                'reflection_runs.lease_until AS lease_until, reflection_runs.model_request_id AS '
+                'model_request_id, reflection_runs.last_error_code AS last_error_code, '
+                'reflection_runs.created_at AS created_at, reflection_runs.updated_at AS '
+                'updated_at, reflection_runs.next_attempt_at AS next_attempt_at FROM '
+                'reflection_runs AS reflection_runs WHERE reflection_runs.local_date = %s AND '
+                'reflection_runs.timezone = %s',
                 (day.isoformat(), self.settings.timezone),
             )
             if prior:
                 if prior["state"] == "RUNNING" and prior["lease_until"] <= now:
-                    budget.mark_reservation_unknown(s, prior["model_request_id"])
-                    s.execute(
-                        "UPDATE reflection_runs SET state='FAILED',lease_token=NULL,"
-                        "last_error_code='REFLECTION_LEASE_EXPIRED' WHERE run_id=?",
-                        (prior["run_id"],),
+                    request_id = prior["model_request_id"]
+                    if request_id:
+                        # Take the original fee before fencing the expired run.
+                        s.one("SELECT request_id FROM model_usage WHERE request_id = %s "
+                              "FOR UPDATE", (request_id,))
+                    failed = s.execute(
+                        "UPDATE reflection_runs SET state = 'FAILED', lease_token = NULL, "
+                        "last_error_code = 'REFLECTION_LEASE_EXPIRED' WHERE run_id = %s "
+                        "AND state = 'RUNNING' AND lease_token IS NOT DISTINCT FROM %s "
+                        "AND lease_until <= %s AND model_request_id IS NOT DISTINCT FROM %s",
+                        (prior["run_id"], prior["lease_token"], now, request_id),
                     )
+                    if failed:
+                        budget.mark_reservation_unknown(s, request_id)
+                    return None
+                if not retryable_admission(prior, now):
+                    return None
+                prior = s.one(
+                    "SELECT run_id, state, model_request_id, last_error_code, next_attempt_at, "
+                    "source_set_sha256 FROM reflection_runs WHERE run_id = %s "
+                    "FOR UPDATE SKIP LOCKED", (prior["run_id"],),
+                )
                 if not retryable_admission(prior, now):
                     return None
                 sources = self.sources(day)
                 if prior["source_set_sha256"] != source_hash(sources):
                     s.execute(
-                        "UPDATE reflection_runs SET state='CANCELLED',lease_token=NULL,"
-                        "next_attempt_at=NULL,last_error_code='REFLECTION_SOURCES_CHANGED' "
-                        "WHERE run_id=?", (prior["run_id"],),
+                        "UPDATE reflection_runs SET state = 'CANCELLED', lease_token = NULL, "
+                        "next_attempt_at = NULL, last_error_code = 'REFLECTION_SOURCES_CHANGED' "
+                        'WHERE run_id = %s', (prior["run_id"],),
                     )
                     return None
                 token = uid("reflection_lease")
                 s.execute(
-                    "UPDATE reflection_runs SET state='RUNNING',lease_token=?,lease_until=?,"
-                    "captured_privacy_epoch=?,next_attempt_at=NULL,last_error_code=NULL,"
-                    "updated_at=? WHERE run_id=?",
+                    "UPDATE reflection_runs SET state = 'RUNNING', lease_token = %s, lease_until = "
+                    '%s, captured_privacy_epoch = %s, next_attempt_at = NULL, last_error_code = '
+                    'NULL, updated_at = %s WHERE run_id = %s',
                     (token, after(now, self.settings.lease_seconds), epoch(s), now,
                      prior["run_id"]),
                 )
-                return {**s.one("SELECT * FROM reflection_runs WHERE run_id=?", (prior["run_id"],)),
+                return {**s.one('SELECT reflection_runs.run_id AS run_id, '
+                    'reflection_runs.identity_id AS identity_id, reflection_runs.local_date AS '
+                    'local_date, reflection_runs.timezone AS timezone, reflection_runs.state AS '
+                    'state, reflection_runs.source_set_sha256 AS source_set_sha256, '
+                    'reflection_runs.captured_privacy_epoch AS captured_privacy_epoch, '
+                    'reflection_runs.lease_token AS lease_token, reflection_runs.lease_until AS '
+                    'lease_until, reflection_runs.model_request_id AS model_request_id, '
+                    'reflection_runs.last_error_code AS last_error_code, '
+                    'reflection_runs.created_at AS created_at, reflection_runs.updated_at AS '
+                    'updated_at, reflection_runs.next_attempt_at AS next_attempt_at FROM '
+                    'reflection_runs AS reflection_runs WHERE reflection_runs.run_id = '
+                    '%s', (prior["run_id"],)),
                         "sources": sources}
             sources = self.sources(day)
             token, run_id = uid("reflection_lease"), uid("reflection")
-            s.insert(
-                "reflection_runs",
-                run_id=run_id,
-                identity_id="companion",
-                local_date=day.isoformat(),
-                timezone=self.settings.timezone,
-                state="RUNNING",
-                source_set_sha256=source_hash(sources),
-                captured_privacy_epoch=epoch(s),
-                lease_token=token,
-                lease_until=after(now, self.settings.lease_seconds),
-                created_at=now,
-                updated_at=now,
+            created = s.execute(
+                "INSERT INTO reflection_runs (run_id, identity_id, local_date, timezone, state, "
+                "source_set_sha256, captured_privacy_epoch, lease_token, lease_until, created_at, "
+                "updated_at) VALUES (%s, 'companion', %s, %s, 'RUNNING', %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (identity_id, local_date, timezone) DO NOTHING",
+                (run_id, day.isoformat(), self.settings.timezone, source_hash(sources), epoch(s),
+                 token, after(now, self.settings.lease_seconds), now, now),
             )
+            if not created:
+                return None
             for source in sources:
                 s.insert(
                     "reflection_evidence",
@@ -202,7 +237,18 @@ class ReflectionService:
                     outbox_message_id=source["outbox_message_id"],
                 )
             return {
-                **s.one("SELECT * FROM reflection_runs WHERE run_id=?", (run_id,)),
+                **s.one('SELECT reflection_runs.run_id AS run_id, reflection_runs.identity_id AS '
+                    'identity_id, reflection_runs.local_date AS local_date, '
+                    'reflection_runs.timezone AS timezone, reflection_runs.state AS state, '
+                    'reflection_runs.source_set_sha256 AS source_set_sha256, '
+                    'reflection_runs.captured_privacy_epoch AS captured_privacy_epoch, '
+                    'reflection_runs.lease_token AS lease_token, reflection_runs.lease_until AS '
+                    'lease_until, reflection_runs.model_request_id AS model_request_id, '
+                    'reflection_runs.last_error_code AS last_error_code, '
+                    'reflection_runs.created_at AS created_at, reflection_runs.updated_at AS '
+                    'updated_at, reflection_runs.next_attempt_at AS next_attempt_at FROM '
+                    'reflection_runs AS reflection_runs WHERE reflection_runs.run_id = '
+                    '%s', (run_id,)),
                 "sources": sources,
             }
 
@@ -214,14 +260,24 @@ class ReflectionService:
                 run["mood_proof"])
         if owner_authority.required(self.store, self.settings):
             admission = self.store.one(
-                "SELECT a.authority_json FROM model_admissions a JOIN reflection_runs r "
-                "ON r.model_request_id=a.request_id WHERE r.run_id=?", (run["run_id"],),
+                'SELECT a.authority_json FROM model_admissions AS a JOIN reflection_runs AS r ON '
+                'r.model_request_id = a.request_id WHERE r.run_id = %s', (run["run_id"],),
             )
             owner_authority.current(self.store, self.settings, self.clock, purpose="reflection",
                 authority=json.loads(admission["authority_json"]) if admission else None)
         else:
             private_life.ensure_active(self.store, self.settings, self.clock)
-        current = self.store.one("SELECT * FROM reflection_runs WHERE run_id=?", (run["run_id"],))
+        current = self.store.one('SELECT reflection_runs.run_id AS run_id, '
+            'reflection_runs.identity_id AS identity_id, reflection_runs.local_date AS local_date, '
+            'reflection_runs.timezone AS timezone, reflection_runs.state AS state, '
+            'reflection_runs.source_set_sha256 AS source_set_sha256, '
+            'reflection_runs.captured_privacy_epoch AS captured_privacy_epoch, '
+            'reflection_runs.lease_token AS lease_token, reflection_runs.lease_until AS '
+            'lease_until, reflection_runs.model_request_id AS model_request_id, '
+            'reflection_runs.last_error_code AS last_error_code, reflection_runs.created_at AS '
+            'created_at, reflection_runs.updated_at AS updated_at, reflection_runs.next_attempt_at '
+            'AS next_attempt_at FROM reflection_runs AS reflection_runs WHERE '
+            'reflection_runs.run_id = %s', (run["run_id"],))
         if (
             not current
             or current["state"] != "RUNNING"
@@ -245,11 +301,11 @@ class ReflectionService:
             if state in {"COMMITTED", "SKIPPED"}:
                 self.validate_lease(run)
             changed = self.store.execute(
-                "UPDATE reflection_runs SET state=?,lease_token=NULL,last_error_code=?,"
-                "next_attempt_at=?,updated_at=? WHERE run_id=? AND state='RUNNING' "
-                "AND lease_token=?",
+                'UPDATE reflection_runs SET state = %s, lease_token = NULL, last_error_code = %s, '
+                "next_attempt_at = %s, updated_at = %s WHERE run_id = %s AND state = 'RUNNING' AND "
+                'lease_token = %s',
                 (state, code, next_attempt_at, self.clock(), run["run_id"], run["lease_token"]),
-            ).rowcount
+            )
             if changed:
                 for suggestion in suggestions:
                     content = suggestion.text
@@ -337,10 +393,12 @@ class ReflectionService:
             try:
                 with self.store.transaction():
                     self.validate_lease(run)
-                    self.store.execute(
-                        "UPDATE reflection_runs SET model_request_id=? WHERE run_id=?",
-                        (request_id, run["run_id"]),
-                    )
+                    if not self.store.execute(
+                        "UPDATE reflection_runs SET model_request_id = %s WHERE run_id = %s "
+                        "AND state = 'RUNNING' AND lease_token = %s",
+                        (request_id, run["run_id"], run["lease_token"]),
+                    ):
+                        raise CoreError("REFLECTION_STALE_LEASE", 409)
             except BaseException:
                 budget.settle(self.store, self.settings, request_id)
                 raise
@@ -354,9 +412,9 @@ class ReflectionService:
                 self.clock,
                 source_check=lambda: self.validate_lease(run),
             )
-            usage = self.store.one("SELECT state FROM model_usage WHERE request_id=?",
+            usage = self.store.one('SELECT state FROM model_usage WHERE request_id = %s',
                                    (request_id,))
-            if not usage or usage["state"] != "SETTLED":
+            if not usage or usage["state"] not in {"SETTLED", "UNKNOWN"}:
                 raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
             draft = ReflectionDraft.model_validate_json(response.text)
             if len(draft.suggestions) > self.settings.reflection_daily_max_suggestions:
@@ -391,7 +449,17 @@ class ReflectionService:
             )
         except Exception as error:
             code = error.code if isinstance(error, CoreError) else "REFLECTION_INVALID_OUTPUT"
-            current = self.store.one("SELECT * FROM reflection_runs WHERE run_id=?",
+            current = self.store.one('SELECT reflection_runs.run_id AS run_id, '
+                'reflection_runs.identity_id AS identity_id, reflection_runs.local_date AS '
+                'local_date, reflection_runs.timezone AS timezone, reflection_runs.state AS state, '
+                'reflection_runs.source_set_sha256 AS source_set_sha256, '
+                'reflection_runs.captured_privacy_epoch AS captured_privacy_epoch, '
+                'reflection_runs.lease_token AS lease_token, reflection_runs.lease_until AS '
+                'lease_until, reflection_runs.model_request_id AS model_request_id, '
+                'reflection_runs.last_error_code AS last_error_code, reflection_runs.created_at AS '
+                'created_at, reflection_runs.updated_at AS updated_at, '
+                'reflection_runs.next_attempt_at AS next_attempt_at FROM reflection_runs AS '
+                'reflection_runs WHERE reflection_runs.run_id = %s',
                                      (run["run_id"],))
             if code in ADMISSION_RETRY_CODES and current and current["model_request_id"] is None:
                 local = datetime.fromisoformat(self.clock()).astimezone(
@@ -415,25 +483,28 @@ class ReflectionService:
 
     def status(self, day):
         return self.store.one(
-            "SELECT run_id,state,last_error_code,next_attempt_at FROM reflection_runs "
-            "WHERE local_date=? AND timezone=?",
+            'SELECT run_id, state, last_error_code, next_attempt_at FROM reflection_runs WHERE '
+            'local_date = %s AND timezone = %s',
             (day.isoformat(), self.settings.timezone),
         )
 
     def recent(self):
         self.expire_evidence()
         return self.store.rows(
-            "SELECT s.*,r.local_date FROM reflection_suggestions s JOIN reflection_runs r "
-            "USING(run_id) WHERE s.state<>'REDACTED' ORDER BY s.rowid DESC LIMIT 20"
+            'SELECT s.suggestion_id AS suggestion_id, s.run_id AS run_id, s.kind AS kind, '
+            's.content AS content, s.evidence_json AS evidence_json, s.state AS state, '
+            's.created_at AS created_at, s.updated_at AS updated_at, r.local_date AS local_date '
+            'FROM reflection_suggestions AS s JOIN reflection_runs AS r ON s.run_id = r.run_id '
+            "WHERE s.state <> 'REDACTED' ORDER BY s.record_sequence DESC NULLS LAST LIMIT 20"
         )
 
     def expire_evidence(self, *, owner_check=None):
         # A recent observation can depend on an older owner/source event. Apply the
         # same transitive lifetime check as Diary before displaying or deciding it.
-        with self.store.transaction():
+        with self.store.transaction(control_write=True):
             if owner_check is not None:
                 owner_check()
-            rows = self.store.rows("SELECT DISTINCT event_id FROM reflection_evidence")
+            rows = self.store.rows('SELECT DISTINCT event_id FROM reflection_evidence')
             expired = expired_sources(
                 self.store,
                 [row["event_id"] for row in rows],
@@ -454,10 +525,10 @@ class ReflectionService:
             if owner_check is not None:
                 owner_check()
             changed = self.store.execute(
-                "UPDATE reflection_suggestions SET state=?,updated_at=? WHERE suggestion_id=? "
-                "AND state<>'REDACTED'",
+                'UPDATE reflection_suggestions SET state = %s, updated_at = %s WHERE suggestion_id '
+                "= %s AND state <> 'REDACTED'",
                 (decision, self.clock(), suggestion_id),
-            ).rowcount
+            )
             if not changed:
                 raise CoreError("REFLECTION_NOT_FOUND", 404)
             if decision in {"REJECT", "NEED_MORE_EVIDENCE"}:

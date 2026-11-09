@@ -16,7 +16,7 @@ from tests.support.paid_model import approved_live
 def prepare(core, tmp_path, *, chat=False, **limits):
     source = None if chat else ingest(core, text="SYNTHETIC private source")
     if source:
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (source["job_id"],))
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (source["job_id"],))
     core.settings.evaluation_enabled = True
     core.settings.max_output_tokens = 2048
     approved_live(core, tmp_path, provider="deepseek", model="deepseek-flash",
@@ -40,7 +40,7 @@ def prepare(core, tmp_path, *, chat=False, **limits):
     ))
     if chat:
         source = admitted_chat(core, 1, text="SYNTHETIC private source")
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (source["job_id"],))
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (source["job_id"],))
     rows = []
     for repetition in range(3):
         for strategy in (("baseline", "participation_v1") if repetition % 2 == 0 else (

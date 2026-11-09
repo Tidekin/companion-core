@@ -18,7 +18,7 @@ async def ready(core, tmp_path, *, protocol_reply=None):
         model = Provider(answer("synthetic reply"))
         async with worker_for(core, model) as worker:
             assert await worker.run_once("preflight-fence-worker")
-        usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+        usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
         assert len(model.requests) == len(usage) == 1 and usage[0]["state"] == "SETTLED"
         yield active, sends, usage
-        assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid")[:1] == usage
+        assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')[:1] == usage

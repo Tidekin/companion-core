@@ -7,13 +7,13 @@ from companion import owner_delivery
 
 def assert_failure_notice(core, event_id=None):
     rows = core.store.rows("SELECT * FROM outbox" + (
-        " WHERE origin_event_id=?" if event_id is not None else ""),
+        " WHERE origin_event_id=%s" if event_id is not None else ""),
         (event_id,) if event_id is not None else ())
     assert len(rows) == 1, rows
     row = rows[0]
-    material = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    material = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=%s",
         (owner_delivery.DELIVERY + row["message_id"],))["value"])
-    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (material["job_id"],))
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=%s", (material["job_id"],))
     assert material["kind"] == owner_delivery.FAILURE_NOTICE
     assert material["failure_code"] == job["last_error_code"]
     assert job["kind"] == "chat" and job["state"] == "FAILED"

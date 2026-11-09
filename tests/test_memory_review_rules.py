@@ -9,14 +9,14 @@ from tests.support.confirmed_memory import remember
 def add_episode(core, number, content, fact_key):
     ev = event(core, number, content)
     core.ingest(ev, f"key-{number}")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         return core.memory.add(Candidate(
             subject="user", kind="episode", fact_key=fact_key, content=content,
             evidence_event_id=ev.event_id, evidence_quote=content), core.clock())
 
 
 def summary(core, number, text):
-    row = core.store.one("SELECT * FROM events WHERE event_id=?", (f"evt_test_{number}",))
+    row = core.store.one("SELECT * FROM events WHERE event_id=%s", (f"evt_test_{number}",))
     core.store.insert("conversation_summaries", summary_id=f"sum_{number}",
                       conversation_id=row["conversation_id"], first_event_id=row["event_id"],
                       last_event_id=row["event_id"], summary_text=text,
@@ -43,9 +43,9 @@ def test_correction_invalidates_only_derived_text_about_that_attribute(core):
     summary(core, 1, "聊到了饮料偏好")  # Covers the corrected fact's evidence.
     summary(core, 2, "主人说了住在哪里")  # Unrelated attribute.
     for number in (1, 2):
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.memory.episodes(core.store.rows(
-                "SELECT * FROM events WHERE event_id=?", (f"evt_test_{number}",)), core.clock())
+                "SELECT * FROM events WHERE event_id=%s", (f"evt_test_{number}",)), core.clock())
     episodes = {row["event_id"]: row["episode_id"] for row in core.store.rows(
         "SELECT event_id,episode_id FROM episode_events")}
     assert len(set(episodes.values())) == 2

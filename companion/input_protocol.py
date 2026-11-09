@@ -37,27 +37,34 @@ class RecallReceipt(live_text.WindowReference):
 class CancelBeforeSend(live_text.WindowReference):
     message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
     lease_token: str = Field(pattern=r"^lease_[a-f0-9]{32}$")
-    reply_revision: int | None = Field(default=None, ge=0, strict=True,
-                                       exclude_if=lambda value: value is None)
-    content_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$",
-                                      exclude_if=lambda value: value is None)
-    cause: Literal["OWNER_INPUT_PENDING"] | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+    reply_revision: int | None = Field(
+        default=None, ge=0, strict=True, exclude_if=lambda value: value is None
     )
-    pending_event_id: str | None = Field(default=None, pattern=r"^evt_[a-f0-9]{64}$",
-                                        exclude_if=lambda value: value is None)
+    content_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None
+    )
+    cause: Literal["OWNER_INPUT_PENDING"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    pending_event_id: str | None = Field(
+        default=None, pattern=r"^evt_[a-f0-9]{64}$", exclude_if=lambda value: value is None
+    )
 
 
 class OwnerCancelBeforeSend(AuthorityReference):
     message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
     lease_token: str = Field(pattern=r"^lease_[a-f0-9]{32}$")
     content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    reply_revision: int | None = Field(default=None, ge=0, strict=True,
-                                       exclude_if=lambda value: value is None)
+    reply_revision: int | None = Field(
+        default=None, ge=0, strict=True, exclude_if=lambda value: value is None
+    )
     cause: Literal["OWNER_INPUT_PENDING"] | None = Field(
-        default=None, exclude_if=lambda value: value is None)
-    pending_event_id: str | None = Field(default=None, pattern=r"^evt_[a-f0-9]{64}$",
-                                        exclude_if=lambda value: value is None)
+        default=None, exclude_if=lambda value: value is None
+    )
+    pending_event_id: str | None = Field(
+        default=None, pattern=r"^evt_[a-f0-9]{64}$", exclude_if=lambda value: value is None
+    )
 
 
 def approval_for_receipt(store, settings, window_sha256=None):
@@ -92,13 +99,20 @@ def recall_ledger_extension(store, settings, old_digest, new_digest):
             else:
                 prefix.extend(line)
                 found = hashlib.sha256(prefix).hexdigest() == old_digest
-        return bool(found and extension and all(
-            record.get("target_type") == "input_recall"
-            and record.get("state") in {"PENDING_TARGET", "RECALLED"}
-            and store.one("SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id=? "
-                          "AND state='COMPLETE'", (record["erasure_id"],))
-            for record in extension
-        ))
+        return bool(
+            found
+            and extension
+            and all(
+                record.get("target_type") == "input_recall"
+                and record.get("state") in {"PENDING_TARGET", "RECALLED"}
+                and store.one(
+                    "SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id = %s AND state = "
+                    "'COMPLETE'",
+                    (record["erasure_id"],),
+                )
+                for record in extension
+            )
+        )
     except (OSError, ValueError, KeyError, TypeError):
         return False
 
@@ -109,27 +123,41 @@ def _signature(approval, value, domain):
         for key in ("received_at", "occurred_at"):
             signed[key] = datetime.fromisoformat(value[key]).isoformat()
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(approval.capture_public_key or "")).verify(
-            bytes.fromhex(value["signature"]), domain + encode(signed).encode(),
+            bytes.fromhex(value["signature"]),
+            domain + encode(signed).encode(),
         )
     except (ValueError, KeyError, TypeError, InvalidSignature):
         raise CoreError("INPUT_LIFECYCLE_SIGNATURE_REQUIRED", 403) from None
 
 
 def _bound_epoch(store, approval, protocol_epoch):
-    epochs = {row["epoch"] for row in store.rows(
-        "SELECT DISTINCT json_extract(value,'$.capture.protocol_epoch') AS epoch "
-        "FROM runtime_meta WHERE key LIKE 'live_text_input:%' "
-        "AND json_extract(value,'$.window_sha256')=?", (approval.plan_sha256,),
-    ) if row["epoch"] is not None}
+    epochs = {
+        row["epoch"]
+        for row in store.rows(
+            (
+                (
+                    'SELECT DISTINCT (CASE WHEN value IS JSON THEN '
+                    "(value::json#>>'{capture,protocol_epoch}') END) AS "
+                    'epoch FROM runtime_meta WHERE key LIKE '
+                    "'live_text_input:%%' AND (CASE WHEN value IS JSON THEN "
+                    "(value::json#>>'{window_sha256}') END)=%s"
+                )
+            ),
+            (approval.plan_sha256,),
+        )
+        if row["epoch"] is not None
+    }
     if approval.handoff:
         epochs.add(approval.handoff.protocol_epoch)
     key = "input_protocol_epoch:" + approval.plan_sha256
-    saved = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+    saved = store.one("SELECT value FROM runtime_meta WHERE key = %s", (key,))
     if saved:
         epochs.add(saved["value"])
     if epochs and epochs != {protocol_epoch}:
         raise CoreError("INPUT_RECALL_PROTOCOL_EPOCH_CHANGED", 403)
-    store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)", (key, protocol_epoch))
+    store.execute(
+        "INSERT INTO runtime_meta VALUES (%s, %s) ON CONFLICT DO NOTHING", (key, protocol_epoch)
+    )
 
 
 def _source_approval(store, settings, approval, source_plan, source):
@@ -140,20 +168,28 @@ def _source_approval(store, settings, approval, source_plan, source):
             return current
         seen.add(current.plan_sha256)
         handoff = current.handoff
-        if (not handoff or handoff.protocol_epoch != source["protocol_epoch"]
-            or handoff.identity_sha256 != paid_budget.sha(
-                [settings.owner_qq_id, settings.bot_qq_id])):
+        if (
+            not handoff
+            or handoff.protocol_epoch != source["protocol_epoch"]
+            or handoff.identity_sha256
+            != paid_budget.sha([settings.owner_qq_id, settings.bot_qq_id])
+        ):
             return None
         previous = live_text._meta(store, live_text.HISTORY + handoff.predecessor_plan_sha256)
-        if (not previous or previous.get("state") != "RETIRED"
-            or previous.get("successor_plan_sha256") != current.plan_sha256):
+        if (
+            not previous
+            or previous.get("state") != "RETIRED"
+            or previous.get("successor_plan_sha256") != current.plan_sha256
+        ):
             return None
         try:
             current = type(approval).model_validate(previous["approval"])
         except (KeyError, ValueError, TypeError):
             return None
-        if (current.plan_sha256 != handoff.predecessor_plan_sha256
-            or current.window_id != handoff.predecessor_window_id):
+        if (
+            current.plan_sha256 != handoff.predecessor_plan_sha256
+            or current.window_id != handoff.predecessor_window_id
+        ):
             return None
     return None
 
@@ -177,8 +213,8 @@ def _capture_matches(store, settings, approval, source, event_id, occurred_at):
         or capture.get("source_event_id") != source["source_event_id"]
         or capture.get("event_id") != event_id
         or capture.get("input_sha256") != receipt.get("input_sha256")
-        or capture.get("identity_sha256") != paid_budget.sha(
-            [settings.owner_qq_id, settings.bot_qq_id])
+        or capture.get("identity_sha256")
+        != paid_budget.sha([settings.owner_qq_id, settings.bot_qq_id])
         or capture.get("protocol_epoch") != source["protocol_epoch"]
         or not original.starts_at <= original_time <= received < original.ends_at
         or not 0 <= (received - original_time).total_seconds() <= 30
@@ -188,20 +224,21 @@ def _capture_matches(store, settings, approval, source, event_id, occurred_at):
     # Standard friend_recall omits direction. A captured inbound is necessary;
     # conflicting outgoing evidence must never be guessed into an owner recall.
     return not store.one(
-        "SELECT 1 FROM outbox o JOIN conversations c USING(conversation_id) "
-        "WHERE o.provider_message_id=? AND c.platform_session_key=? LIMIT 1",
+        "SELECT 1 FROM outbox AS o JOIN conversations AS c USING (conversation_id) WHERE "
+        "o.provider_message_id = %s AND c.platform_session_key = %s LIMIT 1",
         (source["provider_message_id"], source["platform_session_key"]),
     )
 
 
 def receive_recall(store, settings, ledger, clock, body):
-    with store.transaction():
+    with store.transaction(control_write=True):
         approval = approval_for_receipt(store, settings, body.window_sha256)
         value = body.model_dump(mode="json")
         _signature(approval, value, RECALL_DOMAIN)
         try:
             source = input_recall.canonical_source(
-                bot_qq_id=settings.bot_qq_id, owner_qq_id=settings.owner_qq_id,
+                bot_qq_id=settings.bot_qq_id,
+                owner_qq_id=settings.owner_qq_id,
                 protocol_epoch=body.protocol_epoch,
                 provider_message_id=body.target_source_event_id.rsplit(":", 1)[-1],
             )
@@ -210,10 +247,11 @@ def receive_recall(store, settings, ledger, clock, body):
         occurred = body.occurred_at.astimezone(UTC).isoformat()
         if (
             body.target_source_event_id != source["source_event_id"]
-            or body.target_event_id != "evt_" + hashlib.sha256(
-                source["source_event_id"].encode()).hexdigest()
-            or body.recall_id != "recall_" + hashlib.sha256(
-                (source["source_event_id"] + occurred).encode()).hexdigest()
+            or body.target_event_id
+            != "evt_" + hashlib.sha256(source["source_event_id"].encode()).hexdigest()
+            or body.recall_id
+            != "recall_"
+            + hashlib.sha256((source["source_event_id"] + occurred).encode()).hexdigest()
             or body.identity_sha256 != paid_budget.sha([settings.owner_qq_id, settings.bot_qq_id])
             or not approval.starts_at <= body.occurred_at <= body.received_at < approval.ends_at
             or (body.received_at - datetime.fromisoformat(clock())).total_seconds() > 2
@@ -221,26 +259,49 @@ def receive_recall(store, settings, ledger, clock, body):
             raise CoreError("INPUT_RECALL_BINDING_CHANGED", 403)
         _bound_epoch(store, approval, body.protocol_epoch)
         matched = _capture_matches(
-            store, settings, approval, source, body.target_event_id, occurred,
+            store,
+            settings,
+            approval,
+            source,
+            body.target_event_id,
+            occurred,
         )
         result = input_recall.recall_input(
-            store, ledger, source, clock(), verified=matched, occurred_at=occurred,
+            store,
+            ledger,
+            source,
+            clock(),
+            verified=matched,
+            occurred_at=occurred,
             event_id=body.target_event_id if matched else None,
             retention_cutoff=after(clock(), -86400 * settings.raw_event_retention_days),
         )
-        row = store.one("SELECT reply_revision FROM events WHERE event_id=?",
-                        (body.target_event_id,))
-        return {"recall_id": body.recall_id, "target_event_id": body.target_event_id,
-                "state": result["state"], "duplicate": result["duplicate"],
-                "reply_revision": row["reply_revision"] if row else 0}
+        row = store.one(
+            "SELECT reply_revision FROM events WHERE event_id = %s", (body.target_event_id,)
+        )
+        return {
+            "recall_id": body.recall_id,
+            "target_event_id": body.target_event_id,
+            "state": result["state"],
+            "duplicate": result["duplicate"],
+            "reply_revision": row["reply_revision"] if row else 0,
+        }
 
 
 @contextmanager
-def admit_unrecalled(store, settings, ledger, clock, event):
+def admit_unrecalled(store, settings, ledger, clock, event, *, control_write=False):
     """Hold the write lock from recall reconciliation through inbox acceptance."""
-    with store.transaction():
-        _apply_pending_input(store, settings, ledger, clock, event)
-        if not input_recall.is_recalled(store, event.source_event_id):
+    while True:
+        with store.transaction(control_write=control_write):
+            marker = live_text._meta(store, input_recall.marker_key(event.source_event_id))
+            if marker and marker.get("state") == "PENDING_TARGET":
+                if not control_write:
+                    # Release the shared lock before taking the erasure lock, then recheck.
+                    control_write = True
+                    continue
+                _apply_pending_input(store, settings, ledger, clock, event)
+            if input_recall.is_recalled(store, event.source_event_id):
+                break
             yield
             return
     # A verified recall must commit before the Spool receives its terminal 410.
@@ -259,19 +320,35 @@ def _apply_pending_input(store, settings, ledger, clock, event):
     if not marker or marker.get("state") != "PENDING_TARGET":
         return
     approval = approval_for_receipt(store, settings)
-    source = input_recall.canonical_source(**{key: marker[key] for key in (
-        "bot_qq_id", "owner_qq_id", "protocol_epoch", "provider_message_id",
-        "platform_session_key",
-    )})
-    if (event.source_event_id != source["source_event_id"]
+    source = input_recall.canonical_source(
+        **{
+            key: marker[key]
+            for key in (
+                "bot_qq_id",
+                "owner_qq_id",
+                "protocol_epoch",
+                "provider_message_id",
+                "platform_session_key",
+            )
+        }
+    )
+    if (
+        event.source_event_id != source["source_event_id"]
         or event.event_id != "evt_" + hashlib.sha256(event.source_event_id.encode()).hexdigest()
         or event.actor.platform_user_id != settings.owner_qq_id
         or event.conversation.platform_session_key != source["platform_session_key"]
-        or not _capture_matches(store, settings, approval, source, event.event_id,
-                                marker["occurred_at"])):
+        or not _capture_matches(
+            store, settings, approval, source, event.event_id, marker["occurred_at"]
+        )
+    ):
         return
     input_recall.recall_input(
-        store, ledger, source, clock(), verified=True, occurred_at=marker["occurred_at"],
+        store,
+        ledger,
+        source,
+        clock(),
+        verified=True,
+        occurred_at=marker["occurred_at"],
         event_id=event.event_id,
         retention_cutoff=after(clock(), -86400 * settings.raw_event_retention_days),
     )
@@ -282,29 +359,68 @@ def input_state(store, settings, event_id):
     receipt = live_text._meta(store, live_text.INPUT + event_id)
     if not receipt or receipt.get("window_sha256") != approval.plan_sha256:
         raise CoreError("LIVE_TEXT_APPROVED_INPUT_REQUIRED", 404)
-    event = store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
-    job = store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
-    deliveries = store.rows("SELECT message_id,state FROM outbox WHERE origin_event_id=? "
-                            "AND action_type='qq.private.reply'", (event_id,))
-    erased = bool(store.one("SELECT 1 FROM runtime_meta WHERE key=?",
-                            ("erased_event:" + event_id,)))
+    event = store.one(
+        "SELECT events.event_id AS event_id, events.schema_version AS "
+        "schema_version, events.source AS source, events.source_event_id AS source_event_id, "
+        "events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type "
+        "AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, "
+        "events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS "
+        "trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, "
+        "events.redacted AS redacted, events.memory_processed AS memory_processed, "
+        "events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = "
+        "%s",
+        (event_id,),
+    )
+    job = store.one(
+        "SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, "
+        "jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS attempts, "
+        "jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS "
+        "lease_until, jobs.next_attempt_at AS next_attempt_at, jobs.last_error_code AS "
+        "last_error_code, jobs.created_at AS created_at, jobs.updated_at AS updated_at, "
+        "jobs.lease_token AS lease_token, jobs.context_tracked AS context_tracked, "
+        "jobs.authority_json AS authority_json FROM jobs AS jobs WHERE jobs.event_id = %s AND "
+        "jobs.kind = 'chat'",
+        (event_id,),
+    )
+    deliveries = store.rows(
+        "SELECT message_id, state FROM outbox WHERE origin_event_id = %s AND "
+        "action_type = 'qq.private.reply'",
+        (event_id,),
+    )
+    erased = bool(
+        store.one("SELECT 1 FROM runtime_meta WHERE key = %s", ("erased_event:" + event_id,))
+    )
     if erased or (event and event["redacted"]):
         state = "RECALLED"
     elif deliveries and all(item["state"] == "SENT" for item in deliveries):
         state = "ACK"
-    elif (event and not reply_revision.current(store, event_id)) or (
-        job and job["last_error_code"] in {reply_revision.SUPERSEDED, "REPLY_INTERRUPTED"}
-    ) or (
-        deliveries and all(item["state"] in {"SENT", "CANCELLED"} for item in deliveries)
-        and any(item["state"] == "CANCELLED" and live_text._meta(
-            store, "input_cancel_before_send:" + item["message_id"],
-        ) for item in deliveries)
+    elif (
+        (event and not reply_revision.current(store, event_id))
+        or (job and job["last_error_code"] in {reply_revision.SUPERSEDED, "REPLY_INTERRUPTED"})
+        or (
+            deliveries
+            and all(item["state"] in {"SENT", "CANCELLED"} for item in deliveries)
+            and any(
+                item["state"] == "CANCELLED"
+                and live_text._meta(
+                    store,
+                    "input_cancel_before_send:" + item["message_id"],
+                )
+                for item in deliveries
+            )
+        )
     ):
         state = "SUPERSEDED"
     elif job and job["state"] == "CANCELLED":
-        state = "RECALLED" if job["last_error_code"] in {
-            "INPUT_RECALLED", reply_revision.SOURCE_RECALLED,
-        } else "FAILED"
+        state = (
+            "RECALLED"
+            if job["last_error_code"]
+            in {
+                "INPUT_RECALLED",
+                reply_revision.SOURCE_RECALLED,
+            }
+            else "FAILED"
+        )
     elif job and job["state"] == "SUCCEEDED":
         state = "REPLIED"
     elif job and job["state"] in {"FAILED", "CANCELLED"}:
@@ -312,14 +428,21 @@ def input_state(store, settings, event_id):
     else:
         state = "RUNNING" if job and job["state"] == "RUNNING" else "QUEUED"
     return {
-        "window_sha256": approval.plan_sha256, "event_id": event_id,
+        "window_sha256": approval.plan_sha256,
+        "event_id": event_id,
         "input_sha256": receipt["input_sha256"],
-        "reply_revision": event["reply_revision"] if event else 0, "state": state,
-        "unsettled_model": bool(job and store.one(
-            "SELECT 1 FROM model_usage WHERE job_id=? AND state IN ('RESERVED','UNKNOWN')",
-            (job["job_id"],))),
-        "unsettled_delivery": any(item["state"] in {"SENDING", "DELIVERY_UNCERTAIN"}
-                                   for item in deliveries),
+        "reply_revision": event["reply_revision"] if event else 0,
+        "state": state,
+        "unsettled_model": bool(
+            job
+            and store.one(
+                "SELECT 1 FROM model_usage WHERE job_id = %s AND state IN ('RESERVED', 'UNKNOWN')",
+                (job["job_id"],),
+            )
+        ),
+        "unsettled_delivery": any(
+            item["state"] in {"SENDING", "DELIVERY_UNCERTAIN"} for item in deliveries
+        ),
         "reason": job["last_error_code"] if job else None,
     }
 
@@ -349,86 +472,160 @@ def cancel_before_send(store, settings, clock, body):
             approval = approval_for_receipt(store, settings, body.window_sha256)
         material = body.model_dump(mode="json")
         if not prior_cancellation(store, body.message_id, material):
-            row = store.one("SELECT o.*,e.reply_revision FROM outbox o JOIN events e "
-                            "ON e.event_id=o.origin_event_id WHERE o.message_id=?",
+            row = store.one((
+                (
+                    'SELECT o.message_id, o.origin_event_id, '
+                    'o.conversation_id, o.action_type, o.content_json, '
+                    'o.content_sha256, o.approval_id, o.state, '
+                    'o.delivery_key, o.lease_owner, o.lease_until, '
+                    'o.attempt_count, o.provider_message_id, '
+                    'o.last_error_code, o.created_at, o.updated_at, '
+                    'o.sent_at, o.lease_token, o.next_attempt_at, '
+                    'o.reply_group_id, o.segment_index, o.segment_count, '
+                    'o.reply_group_sha256, o.segment_interval_ms, '
+                    'o.delivery_lane, o.native_ack_json, '
+                    'o.authority_json,e.reply_revision FROM outbox o JOIN '
+                    'events e ON e.event_id=o.origin_event_id WHERE '
+                    'o.message_id=%s'
+                )
+            ),
                             (body.message_id,))
             if (not row or row["lease_token"] != body.lease_token
                 or row["state"] not in {"LEASED", "SENDING", "DELIVERY_UNCERTAIN", "CANCELLED"}):
                 raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
-            pending = (body.cause == "OWNER_INPUT_PENDING" and body.pending_event_id is not None
-                       and body.pending_event_id != row["origin_event_id"]
-                       and row["state"] in {"LEASED", "SENDING"})
+            pending = (
+                body.cause == "OWNER_INPUT_PENDING"
+                and body.pending_event_id is not None
+                and body.pending_event_id != row["origin_event_id"]
+                and row["state"] in {"LEASED", "SENDING"}
+            )
             if (body.cause is None) != (body.pending_event_id is None):
                 raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
-            record = live_text._meta(store, ("owner_delivery:" if native else private_life.DELIVERY)
-                                     + body.message_id)
-            expected = {**({"authority": body.authority} if native else {
-                            "plan_sha256": body.window_sha256}),
-                        "message_id": body.message_id, "event_id": row["origin_event_id"],
-                        "action_type": row["action_type"],
-                        "content_sha256": row["content_sha256"],
-                        "delivery_key": row["delivery_key"]}
-            bound_delivery = record and all(record.get(key) == value
-                                            for key, value in expected.items())
-            if native and (json.loads(row["authority_json"]) != body.authority
-                or not record or record.get("authority") != body.authority
+            record = live_text._meta(
+                store, ("owner_delivery:" if native else private_life.DELIVERY) + body.message_id
+            )
+            expected = {
+                **(
+                    {"authority": body.authority} if native else {"plan_sha256": body.window_sha256}
+                ),
+                "message_id": body.message_id,
+                "event_id": row["origin_event_id"],
+                "action_type": row["action_type"],
+                "content_sha256": row["content_sha256"],
+                "delivery_key": row["delivery_key"],
+            }
+            bound_delivery = record and all(
+                record.get(key) == value for key, value in expected.items()
+            )
+            if native and (
+                json.loads(row["authority_json"]) != body.authority
+                or not record
+                or record.get("authority") != body.authority
                 or body.content_sha256 != record.get("content_sha256")
-                or any(record.get(key) != value for key, value in expected.items()
-                       if key != "content_sha256")
-                or store.one("SELECT 1 FROM audit_log WHERE action='delivery.result' "
-                             "AND entity_id=?",
-                             (body.message_id,))):
+                or any(
+                    record.get(key) != value
+                    for key, value in expected.items()
+                    if key != "content_sha256"
+                )
+                or store.one(
+                    "SELECT 1 FROM audit_log WHERE action = 'delivery.result' AND entity_id = %s",
+                    (body.message_id,),
+                )
+            ):
                 raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
             if native and row["content_sha256"] != body.content_sha256:
                 erased_source = store.one(
-                    "SELECT 1 FROM job_sources s JOIN events e USING(event_id) "
-                    "WHERE s.job_id=? AND (e.redacted=1 OR EXISTS "
-                    "(SELECT 1 FROM runtime_meta WHERE key='erased_event:'||e.event_id)) LIMIT 1",
-                    (record.get("job_id"),))
+                    "SELECT 1 FROM job_sources AS s JOIN events AS e USING (event_id) WHERE "
+                    "s.job_id = %s AND (e.redacted = 1 OR EXISTS(SELECT 1 FROM runtime_meta WHERE "
+                    "key = 'erased_event:' || e.event_id)) LIMIT 1",
+                    (record.get("job_id"),),
+                )
                 if row["content_sha256"] != "" or not erased_source:
                     raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
-            poke_delivery = bool(store.one(
-                "SELECT 1 FROM poke_batches WHERE response_message_id=?", (body.message_id,),
-            ))
+            poke_delivery = bool(
+                store.one(
+                    "SELECT 1 FROM poke_batches WHERE response_message_id = %s",
+                    (body.message_id,),
+                )
+            )
             if poke_delivery:
-                erased = bool(store.one(
-                    "SELECT 1 FROM poke_batches p JOIN job_sources s USING(job_id) "
-                    "JOIN events e USING(event_id) WHERE p.response_message_id=? "
-                    "AND (e.redacted=1 OR EXISTS (SELECT 1 FROM runtime_meta "
-                    "WHERE key='erased_event:' || e.event_id)) LIMIT 1", (body.message_id,),
-                ))
-                identity = record and all(record.get(key) == value
-                    for key, value in expected.items() if key != "content_sha256")
-                if (row["action_type"] not in {"qq.private.reply", "qq.private.poke"}
-                    or body.reply_revision is not None or not identity
+                erased = bool(
+                    store.one(
+                        (
+                            'SELECT 1 FROM poke_batches AS p JOIN job_sources AS s '
+                            'USING (job_id) JOIN events AS e USING (event_id) WHERE '
+                            'p.response_message_id = %s AND (e.redacted = 1 OR '
+                            'EXISTS(SELECT 1 FROM runtime_meta WHERE key = '
+                            "'erased_event:' || e.event_id)) LIMIT 1"
+                        ),
+                        (body.message_id,),
+                    )
+                )
+                identity = record and all(
+                    record.get(key) == value
+                    for key, value in expected.items()
+                    if key != "content_sha256"
+                )
+                if (
+                    row["action_type"] not in {"qq.private.reply", "qq.private.poke"}
+                    or body.reply_revision is not None
+                    or not identity
                     or body.content_sha256 != record.get("content_sha256")
-                    or (row["content_sha256"] != body.content_sha256
-                        and not (erased and row["content_sha256"] == ""))
+                    or (
+                        row["content_sha256"] != body.content_sha256
+                        and not (erased and row["content_sha256"] == "")
+                    )
                     or (body.cause is not None and not pending)
-                    or store.one("SELECT 1 FROM audit_log WHERE action='delivery.result' "
-                                 "AND entity_id=?", (body.message_id,))):
+                    or store.one(
+                        "SELECT 1 FROM audit_log WHERE action = 'delivery.result' AND "
+                        "entity_id = %s",
+                        (body.message_id,),
+                    )
+                ):
                     raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
             elif row["action_type"] == "qq.private.reply":
                 if not reply_revision.owner_input(store, row["origin_event_id"]):
                     # Required notices have no owner-input revision. Their original
                     # Core authorization survives source erasure as a narrow proof
                     # of identity, never as renewed permission to dispatch.
-                    erased = bool(store.one("SELECT 1 FROM runtime_meta WHERE key=?",
-                                             ("erased_event:" + row["origin_event_id"],)))
-                    notice_identity = record and all(record.get(key) == value
-                        for key, value in expected.items() if key != "content_sha256")
-                    if (body.reply_revision is not None or not notice_identity
+                    erased = bool(
+                        store.one(
+                            "SELECT 1 FROM runtime_meta WHERE key = %s",
+                            ("erased_event:" + row["origin_event_id"],),
+                        )
+                    )
+                    notice_identity = record and all(
+                        record.get(key) == value
+                        for key, value in expected.items()
+                        if key != "content_sha256"
+                    )
+                    if (
+                        body.reply_revision is not None
+                        or not notice_identity
                         or (not native and record.get("window_notice") != "commitment")
-                        or (native and not store.one("SELECT 1 FROM jobs WHERE job_id=? "
-                            "AND kind='activity'", (record.get("job_id"),)))
+                        or (
+                            native
+                            and not store.one(
+                                "SELECT 1 FROM jobs WHERE job_id = %s AND kind = 'activity'",
+                                (record.get("job_id"),),
+                            )
+                        )
                         or body.content_sha256 != record.get("content_sha256")
-                        or (row["content_sha256"] != body.content_sha256
-                            and not (erased and row["content_sha256"] == ""))
+                        or (
+                            row["content_sha256"] != body.content_sha256
+                            and not (erased and row["content_sha256"] == "")
+                        )
                         or body.cause is not None
-                        or (row["state"] == "DELIVERY_UNCERTAIN"
-                            and (not erased or row["last_error_code"]))
-                        or store.one("SELECT 1 FROM audit_log WHERE action='delivery.result' "
-                                     "AND entity_id=?", (body.message_id,))):
+                        or (
+                            row["state"] == "DELIVERY_UNCERTAIN"
+                            and (not erased or row["last_error_code"])
+                        )
+                        or store.one(
+                            "SELECT 1 FROM audit_log WHERE action = 'delivery.result' AND "
+                            "entity_id = %s",
+                            (body.message_id,),
+                        )
+                    ):
                         raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
                 elif row["reply_revision"] != body.reply_revision:
                     raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
@@ -448,11 +645,20 @@ def cancel_before_send(store, settings, clock, body):
                     else:
                         reply_revision.check_delivery(store, body.message_id)
                 except CoreError as error:
-                    if error.code not in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED,
-                                          reply_revision.CANCELLED,
-                                          *({"POKE_CONTEXT_SUPERSEDED", "POKE_CONTEXT_CHANGED",
-                                             "PRIVATE_POKE_SOURCE_CHANGED"}
-                                            if poke_delivery else set())}:
+                    if error.code not in {
+                        reply_revision.SUPERSEDED,
+                        reply_revision.SOURCE_RECALLED,
+                        reply_revision.CANCELLED,
+                        *(
+                            {
+                                "POKE_CONTEXT_SUPERSEDED",
+                                "POKE_CONTEXT_CHANGED",
+                                "PRIVATE_POKE_SOURCE_CHANGED",
+                            }
+                            if poke_delivery
+                            else set()
+                        ),
+                    }:
                         raise
                 else:
                     raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)

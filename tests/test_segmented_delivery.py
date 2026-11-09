@@ -11,8 +11,10 @@ from cryptography.fernet import Fernet
 
 from companion.backup import backup, restore
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
+from companion.legacy_import import migrate_sqlite
+from companion.postgres import Database
 from companion.reply_segments import SegmentedReplyConfig
-from companion.store import Store, migrate
+from companion.store import Store
 from companion.transport import (
     begin_send,
     check_segment_ready,
@@ -24,7 +26,9 @@ from companion.transport import (
     reply_group,
 )
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.historical_schema import historical_database
+from tests.support.release_migration import one, open_historical, rows
 from tests.support.segmented_delivery import PARTS, acknowledge, freeze, lease
 
 
@@ -55,33 +59,43 @@ def test_group_is_atomic_idempotent_and_content_is_not_duplicated(core, monkeypa
     assert group["text"] == "".join(PARTS)
     assert [json.loads(row["content_json"])["text"] for row in group["rows"]] == PARTS
     assert all(set(json.loads(row["content_json"])) == {"text"} for row in group["rows"])
-    assert core.store.rows("PRAGMA foreign_key_check") == []
+    assert core.store.rows(
+        "SELECT conname FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+        "AND contype='f' AND NOT convalidated") == []
+
+
+def historical_parts(store, ids):
+    parts = rows(store, "SELECT message_id,content_json FROM outbox "
+                        "WHERE reply_group_id=(SELECT reply_group_id FROM outbox "
+                        "WHERE message_id=?) ORDER BY segment_index", (ids[0],))
+    assert [row["message_id"] for row in parts] == ids
+    return [json.loads(row["content_json"])["text"] for row in parts]
 
 
 def test_capacity_upgrade_preserves_existing_groups_indexes_and_foreign_keys(core, tmp_path):
     def index_definitions(store):
         # Batch recreation can reformat DDL without changing index semantics.
         return {row["name"]: "".join(row["sql"].split()) if row["sql"] else None
-                for row in store.rows("SELECT name,sql FROM sqlite_master WHERE type='index' "
+                for row in rows(store, "SELECT name,sql FROM sqlite_master WHERE type='index' "
                                       "AND tbl_name='outbox'")}
 
     _, ids = freeze(core)
     database = historical_database(core.store, tmp_path / "capacity.db", "0019_segmented_replies")
-    with closing(Store(database)) as store:
-        before = store.rows("SELECT * FROM outbox ORDER BY rowid")
+    with closing(open_historical(database)) as store:
+        before = rows(store, "SELECT * FROM outbox ORDER BY rowid")
         indexes = index_definitions(store)
-    migrate(database, "0020_reply_segment_capacity")
+    migrate_sqlite(database, "0020_reply_segment_capacity")
     migration = Config()
     migration.set_main_option("script_location", str(Path("migrations").resolve()))
     migration.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
-    with closing(Store(database)) as store:
-        assert store.rows("SELECT * FROM outbox ORDER BY rowid") == before
+    with closing(open_historical(database)) as store:
+        assert rows(store, "SELECT * FROM outbox ORDER BY rowid") == before
         assert index_definitions(store) == indexes
-        assert store.rows("PRAGMA foreign_key_check") == []
-        assert reply_group(store, ids[0])["text"] == "".join(PARTS)
+        assert rows(store, "PRAGMA foreign_key_check") == []
+        assert historical_parts(store, ids) == PARTS
     command.downgrade(migration, "0019_segmented_replies")
-    with closing(Store(database)) as store:
-        assert store.rows("SELECT * FROM outbox ORDER BY rowid") == before
+    with closing(open_historical(database)) as store:
+        assert rows(store, "SELECT * FROM outbox ORDER BY rowid") == before
     ingest(core, 2)
     job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
                          "WHERE j.event_id='evt_test_2'")
@@ -94,9 +108,9 @@ def test_capacity_upgrade_preserves_existing_groups_indexes_and_foreign_keys(cor
         RuntimeError, match="REPLY_CAPACITY_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW",
     ):
         command.downgrade(migration, "0019_segmented_replies")
-    with closing(Store(expanded_database)) as store:
-        assert reply_group(store, expanded[0])["text"] == "".join(PARTS + PARTS[:2])
-        assert store.rows("PRAGMA foreign_key_check") == []
+    with closing(open_historical(expanded_database)) as store:
+        assert historical_parts(store, expanded) == PARTS + PARTS[:2]
+        assert rows(store, "PRAGMA foreign_key_check") == []
 
 
 def test_two_workers_cannot_lease_later_parts_and_ack_starts_the_gap(core):
@@ -118,7 +132,9 @@ def test_two_workers_cannot_lease_later_parts_and_ack_starts_the_gap(core):
     acknowledge(core, third)
     assert lease(core) == []
     assert reply_group(core.store, ids[0], require_sent=True)["text"] == "".join(PARTS)
-    assert [r["attempt_count"] for r in core.store.rows("SELECT * FROM outbox ORDER BY rowid")] == [
+    assert [r["attempt_count"] for r in core.store.rows(
+        'SELECT * FROM outbox ORDER BY record_sequence'
+    )] == [
         1,
         1,
         1,
@@ -141,7 +157,7 @@ def test_partial_failure_cancels_remaining_parts_and_late_ack_cannot_resume(core
             recover_deliveries(core.store, core.clock())
     else:
         acknowledge(core, second, failure)
-    states = [r["state"] for r in core.store.rows("SELECT * FROM outbox ORDER BY rowid")]
+    states = [r["state"] for r in core.store.rows('SELECT * FROM outbox ORDER BY record_sequence')]
     assert states == [
         "SENT",
         "FAILED" if failure == "PERMANENT_FAILURE" else "DELIVERY_UNCERTAIN",
@@ -153,7 +169,7 @@ def test_partial_failure_cancels_remaining_parts_and_late_ack_cannot_resume(core
         reconcile_delivery(core.store, ids[1], "SENT", core.clock())
         assert lease(core) == []
         assert (
-            core.store.one("SELECT state FROM outbox WHERE message_id=?", (ids[2],))["state"]
+            core.store.one('SELECT state FROM outbox WHERE message_id=%s', (ids[2],))["state"]
             == "CANCELLED"
         )
 
@@ -164,19 +180,21 @@ def test_uncertain_result_cancels_its_own_suffix_and_recovery_repairs_other_grou
     begin_send(core.store, ids[0], item["lease_token"], core.clock(), core.settings)
     other = ingest(core, 2, origin=f"other:FriendMessage:{core.settings.owner_qq_id}")
     other_job = core.store.one(
-        "SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) WHERE job_id=?",
+        'SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) WHERE job_id=%s',
         (other["job_id"],),
     )
     other_ids = enqueue_reply_parts(core.store, other_job, PARTS, 1500, core.clock())
     # An older group already needs recovery. Reporting this message must only change its group.
-    core.store.execute("UPDATE outbox SET state='FAILED' WHERE message_id=?", (other_ids[0],))
+    core.store.execute("UPDATE outbox SET state='FAILED' WHERE message_id=%s", (other_ids[0],))
     delivery_result(core.store, core.settings, ids[0], DeliveryResult(
         lease_token=item["lease_token"], result="DELIVERY_UNCERTAIN",
     ), core.clock())
 
     def rows(job_id):
-        return core.store.rows("SELECT state,last_error_code,updated_at FROM outbox "
-                               "WHERE reply_group_id=? ORDER BY segment_index", (job_id,))
+        return core.store.rows((
+            'SELECT state,last_error_code,updated_at FROM outbox WHERE '
+            'reply_group_id=%s ORDER BY segment_index'
+        ), (job_id,))
 
     original = rows(job["job_id"])
     assert [row["state"] for row in original] == ["DELIVERY_UNCERTAIN", "CANCELLED", "CANCELLED"]
@@ -195,13 +213,15 @@ def test_new_accepted_owner_input_cancels_the_unsent_tail_but_duplicate_does_not
     acknowledge(core, first)
     ingest(core, text="一起聊一聊接下来的计划")
     assert (
-        core.store.one("SELECT state FROM outbox WHERE message_id=?", (ids[1],))["state"]
+        core.store.one('SELECT state FROM outbox WHERE message_id=%s', (ids[1],))["state"]
         == "PENDING"
     )
     ingest(core, 2, "先等一下，我想换个话题")
     core.clock.advance(10)
     assert lease(core) == []
-    assert [r["state"] for r in core.store.rows("SELECT * FROM outbox ORDER BY rowid")] == [
+    assert [r["state"] for r in core.store.rows(
+        'SELECT * FROM outbox ORDER BY record_sequence'
+    )] == [
         "SENT",
         "CANCELLED",
         "CANCELLED",
@@ -218,7 +238,9 @@ def test_late_ack_before_recovery_records_delivery_without_resuming_expired_chai
     ), core.clock())
     core.clock.advance(2)
     assert lease(core) == []
-    assert [row["state"] for row in core.store.rows("SELECT * FROM outbox ORDER BY rowid")] == [
+    assert [row["state"] for row in core.store.rows(
+        'SELECT * FROM outbox ORDER BY record_sequence'
+    )] == [
         "SENT", "CANCELLED", "CANCELLED",
     ]
     assert reply_group(core.store, ids[0], require_sent=True) is None
@@ -228,7 +250,7 @@ def test_late_ack_before_recovery_records_delivery_without_resuming_expired_chai
 def test_corrupt_group_cannot_be_leased_or_sent(core, mutation):
     _, ids = freeze(core)
     if mutation == "missing":
-        core.store.execute("DELETE FROM outbox WHERE message_id=?", (ids[-1],))
+        core.store.execute('DELETE FROM outbox WHERE message_id=%s', (ids[-1],))
     else:
         field, value = {
             "text": ("content_json", json.dumps({"text": "changed"})),
@@ -236,7 +258,7 @@ def test_corrupt_group_cannot_be_leased_or_sent(core, mutation):
             "manifest": ("reply_group_sha256", "0" * 64),
             "interval": ("segment_interval_ms", 0),
         }[mutation]
-        core.store.execute(f"UPDATE outbox SET {field}=? WHERE message_id=?", (value, ids[1]))
+        core.store.execute(f"UPDATE outbox SET {field}=%s WHERE message_id=%s", (value, ids[1]))
     with pytest.raises(CoreError, match="REPLY_GROUP"):
         check_segment_ready(core.store, ids[0], core.clock())
     with pytest.raises(CoreError, match="REPLY_GROUP"):
@@ -248,7 +270,7 @@ def test_core_splits_one_model_reply_but_preserves_default_single_reply(core):
     core.settings.segmented_reply = SegmentedReplyConfig(min_chars=4)
     ingest(core, text="".join(PARTS))
     assert run(core.run_once())
-    rows = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
+    rows = core.store.rows('SELECT * FROM outbox ORDER BY record_sequence')
     assert len(rows) == 3 and len(core.model.calls) == 1
     assert "".join(json.loads(row["content_json"])["text"] for row in rows) == "回复：" + "".join(
         PARTS
@@ -275,26 +297,32 @@ def test_new_input_accepted_during_generation_prevents_stale_segment_group(core)
     }
 
 
-def test_all_parts_are_erased_and_old_encrypted_backup_cannot_restore_them(core, tmp_path):
+def test_all_parts_are_erased_and_old_encrypted_backup_cannot_restore_them(
+    core, tmp_path, empty_database
+):
     job, ids = freeze(core)
     acknowledge(core, lease(core)[0])
     core.clock.advance(1.5)
     second = lease(core)[0]
     begin_send(core.store, ids[1], second["lease_token"], core.clock(), core.settings)
-    archive, restored_path = tmp_path / "before-erasure.enc", tmp_path / "restored.db"
+    archive, restored_path = tmp_path / "before-erasure.enc", empty_database
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     assert PARTS[0].encode() not in archive.read_bytes()
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
-    with closing(Store(str(restored_path))) as restored:
+    restore(archive, restored_path, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with (
+        Database(restored_path) as database,
+        closing(Store(database, tmp_path / "restored-state")) as restored,
+    ):
         for store in (core.store, restored):
             rows = store.rows("SELECT * FROM outbox ORDER BY segment_index")
             assert [row["message_id"] for row in rows] == ids
             assert [row["state"] for row in rows] == ["SENT", "DELIVERY_UNCERTAIN", "CANCELLED"]
             assert all(row["content_json"] == "{}" and row["content_sha256"] == "" for row in rows)
-            assert store.one("SELECT body_json,redacted FROM events WHERE event_id=?", (
+            assert store.one("SELECT body_json,redacted FROM events WHERE event_id=%s", (
                 job["event_id"],
             )) == {"body_json": "{}", "redacted": 1}
             with pytest.raises(CoreError, match="REPLY_GROUP_CHANGED"):
@@ -302,8 +330,14 @@ def test_all_parts_are_erased_and_old_encrypted_backup_cannot_restore_them(core,
             assert lease_deliveries(store, core.settings, LeaseRequest(
                 worker_id="restored-test", limit=5,
             ), core.clock())["items"] == []
-            assert store.rows("PRAGMA foreign_key_check") == []
-    assert all(part.encode() not in restored_path.read_bytes() for part in PARTS)
+            assert not store.rows(
+                "SELECT conname FROM pg_constraint "
+                "WHERE connamespace=current_schema()::regnamespace "
+                "AND contype='f' AND NOT convalidated"
+            )
+        assert all(
+            part not in json.dumps(logical_state(restored), ensure_ascii=False) for part in PARTS
+        )
 
 
 def test_downgrade_refuses_to_discard_existing_segment_group(core, tmp_path):
@@ -313,13 +347,13 @@ def test_downgrade_refuses_to_discard_existing_segment_group(core, tmp_path):
     config.set_main_option(
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
     config.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
-    with closing(Store(database)) as store:
-        before = store.rows("SELECT * FROM outbox ORDER BY rowid")
+    with closing(open_historical(database)) as store:
+        before = rows(store, "SELECT * FROM outbox ORDER BY rowid")
     with pytest.raises(RuntimeError, match="SEGMENTED_REPLIES_DOWNGRADE_REQUIRES_EXPLICIT_REVIEW"):
         command.downgrade(config, "0018_reflection_goal_lineage")
-    with closing(Store(database)) as store:
-        assert store.rows("SELECT * FROM outbox ORDER BY rowid") == before
-        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == (
+    with closing(open_historical(database)) as store:
+        assert rows(store, "SELECT * FROM outbox ORDER BY rowid") == before
+        assert one(store, "SELECT version_num FROM alembic_version")["version_num"] == (
             "0019_segmented_replies")
-        assert reply_group(store, ids[0])["text"] == "".join(PARTS)
-        assert not store.rows("PRAGMA foreign_key_check")
+        assert historical_parts(store, ids) == PARTS
+        assert not rows(store, "PRAGMA foreign_key_check")

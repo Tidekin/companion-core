@@ -13,6 +13,7 @@ from companion.owner_authority_protocol import AuthorityPreview
 from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
 from tests.model_carry_support import migrated
+from tests.postgres_fixture import logical_state
 from tests.support.core_http import real_core_http
 from tests.support.evaluation_authority_revision import revise, revised_policy, stop
 from tests.support.model_accounting import prepared
@@ -43,11 +44,11 @@ def test_discovered_link_and_revision_share_native_terminal_contract(core, tmp_p
         ) as client:
             event, _ = await admit(client, core, config, plan, 2, "看看 " + URL)
             _, accepted = await admit(client, core, config, plan, 3, "先不读了")
-            job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (accepted["job_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (accepted["job_id"],))
             reply_revision.remember_sources(core.store, job, [event["event_id"]])
-            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                (accepted["job_id"],))
-            item = core.store.one("SELECT * FROM content_items WHERE owner_event_id=?",
+            item = core.store.one('SELECT * FROM content_items WHERE owner_event_id=%s',
                                   (event["event_id"],))
             assert item["state"] == "WAITING" and item["read_request_id"] is None
             original = core.store.rows("SELECT * FROM model_usage")
@@ -65,7 +66,7 @@ def test_discovered_link_and_revision_share_native_terminal_contract(core, tmp_p
                 "preview_sha256": preview.json()["preview_sha256"]}, headers=control)
             assert active.status_code == 200, active.text
             assert core.store.rows("SELECT * FROM model_usage") == original
-            assert core.store.one("SELECT * FROM content_items WHERE item_id=?",
+            assert core.store.one('SELECT * FROM content_items WHERE item_id=%s',
                                   (item["item_id"],)) == item
             assert not core.store.one("SELECT 1 FROM exploration_requests")
 
@@ -89,11 +90,11 @@ def test_pending_known_bill_blocks_permission_preview(core, tmp_path, monkeypatc
         patch.setattr(paid_budget, "journal", unavailable)
         assert model_accounting.record(core.store, core.settings, request, evidence, core.clock)[
             "state"] == "PENDING_JOURNAL"
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     with pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
         owner_authority.preview(core.store, core.settings, core.clock,
             AuthorityPreview(expected_revision=4, policy=revised_policy(case)))
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert core.store.one("SELECT billed_micro_usd FROM model_usage")["billed_micro_usd"] == 5000
 
 
@@ -179,9 +180,9 @@ def test_native_source_erasure_keeps_revision_finance_and_blocks_new_authority(
     case.policy, case.successor = policy, active
     stop(core, case, "erase-authority-stop")
     before = core.store.rows("SELECT * FROM model_usage")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [source], core.clock())
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (source,)) == {
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (source,)) == {
         "redacted": 1}
     assert len(owner_authority.custody(
         core.store, core.settings, settlement=True)["model_carries"]) == 3

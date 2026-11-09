@@ -8,10 +8,10 @@ def appraise(core, number, text, reason="OWNER_AFFECTION"):
     core.settings.mood_enabled = True
     key = ingest(core, number, text)["event_id"]
     request_id = f"appraisal_{number}"
-    core.store.execute(
-        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
-        "output_tokens,occurred_at) VALUES (?, 'memory_extract','synthetic','synthetic',"
-        "'SETTLED',100,20,?)", (request_id, core.clock()),
+    core.store.insert(
+        "model_usage", usage_id=f"usage_{request_id}", request_id=request_id,
+        scenario="memory_extract", provider="synthetic", model="synthetic", state="SETTLED",
+        input_tokens=100, output_tokens=20, occurred_at=core.clock(),
     )
     signals = mood_appraisals.validate(core.store, [
         InteractionSignal(event_id=key, reason=reason, quote=text),

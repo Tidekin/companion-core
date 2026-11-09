@@ -70,7 +70,10 @@ def test_native_image_tail_never_sends_empty_or_replays_text(core, tmp_path, mon
             core, tmp_path, handoff=False, deferred=False, delayed=False,
             explicit=True, segmented=True)
     assert len(intercepted) == 1
-    rows = core.store.rows("SELECT state,attempt_count,content_json FROM outbox ORDER BY rowid")
+    rows = core.store.rows(
+        'SELECT state,attempt_count,content_json FROM outbox ORDER BY '
+        'record_sequence'
+    )
     assert [row["state"] for row in rows[:-1]] == ["SENT", "SENT", "SENT"]
     assert rows[-1]["state"] == ("LEASED" if boundary == "missing" else "CANCELLED")
     assert rows[-1]["attempt_count"] == 0

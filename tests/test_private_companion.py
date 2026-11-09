@@ -161,7 +161,7 @@ def test_independent_life_worker_finishes_nightly_memory_diary_reflection_goals(
                 assert core.store.one("SELECT COUNT(*) n FROM memories")["n"] == 1
                 assert (
                     core.store.one(
-                        "SELECT state FROM diary_runs WHERE local_date=?", (day.isoformat(),)
+                        'SELECT state FROM diary_runs WHERE local_date=%s', (day.isoformat(),)
                     )["state"]
                     == "COMMITTED"
                 )
@@ -449,7 +449,10 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
                 assert any(item["role"] == "tool" and "用户喜欢龙井茶" in json.dumps(
                     json.loads(item["content"]), ensure_ascii=False) for item in chat)
                 assert window.attempts() == {"ACK": 6}
-                assert core.store.rows("PRAGMA foreign_key_check") == []
+                assert not core.store.one(
+                    "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+                    "AND NOT convalidated"
+                )
 
     run(scenario())
 
@@ -677,8 +680,10 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
             def provider(request):
                 messages = json.loads(request.content)["messages"]
                 if change_during_dispatch and '"kind":"share"' in messages[-1]["content"]:
-                    core.store.execute("UPDATE observations SET source_sha256=? WHERE "
-                                       "result_status='FETCHED'", ("0" * 64,))
+                    core.store.execute((
+                        'UPDATE observations SET source_sha256=%s WHERE '
+                        "result_status='FETCHED'"
+                    ), ("0" * 64,))
                 return httpx.Response(200, json={
                     "choices": [{"message": {"content": "一起看看吧。"}}],
                     "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
@@ -743,7 +748,7 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
                     == "SENT"
                 )
                 observed = core.store.one(
-                    "SELECT * FROM observations WHERE event_id=?", (result["event_ids"][0],)
+                    'SELECT * FROM observations WHERE event_id=%s', (result["event_ids"][0],)
                 )
                 assert observed["result_status"] == "FETCHED"
                 with core.store.transaction():
@@ -756,13 +761,13 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
                 assert stopped["state"] == "STOPPED"
                 assert (
                     core.store.one(
-                        "SELECT state FROM exploration_requests WHERE request_id=?", (running,)
+                        'SELECT state FROM exploration_requests WHERE request_id=%s', (running,)
                     )["state"]
                     == "UNKNOWN"
                 )
                 assert (
                     core.store.one(
-                        "SELECT state FROM exploration_requests WHERE request_id=?", (queued,)
+                        'SELECT state FROM exploration_requests WHERE request_id=%s', (queued,)
                     )["state"]
                     == "CANCELLED"
                 )
@@ -773,7 +778,8 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
     run(scenario())
 
 
-@pytest.mark.parametrize("drift", ["content", "source", "usage", "privacy", "unknown"])
+@pytest.mark.parametrize("drift", ["content", "source", "usage", "measurement", "snapshot",
+                                  "privacy", "unknown"])
 def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path, drift):
     from companion.privacy import advance_epoch
     from companion.store import encode
@@ -804,36 +810,51 @@ def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path,
                 if drift == "content":
                     value = {"text": "替换的合成正文。"}
                     core.store.execute(
-                        "UPDATE outbox SET content_json=?,content_sha256=?",
+                        'UPDATE outbox SET content_json=%s,content_sha256=%s',
                         (encode(value), digest(value)),
                     )
                 elif drift == "source":
                     core.store.execute(
-                        "UPDATE events SET body_json=? WHERE source='qq.onebot'",
+                        "UPDATE events SET body_json=%s WHERE source='qq.onebot'",
                         (encode({"text": "替换的输入"}),),
                     )
                 elif drift == "usage":
-                    core.store.execute("UPDATE model_admissions SET payload_sha256=?", ("0" * 64,))
+                    core.store.execute('UPDATE model_admissions SET payload_sha256=%s', ("0" * 64,))
+                elif drift == "measurement":
+                    core.store.execute("UPDATE model_admissions SET measurement_json='{}'")
+                elif drift == "snapshot":
+                    core.store.execute("UPDATE model_admissions SET snapshot_json='{}'")
                 elif drift == "unknown":
                     core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
                 else:
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         advance_epoch(core.store)
-                original_usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
-                if drift in {"content", "source", "privacy"}:
+                original_usage = core.store.rows(
+                    'SELECT * FROM model_usage ORDER BY record_sequence'
+                )
+                if drift == "unknown":
+                    await window.pump()
+                    assert len(sends) == 1
+                    assert core.store.one("SELECT state FROM outbox")["state"] == "SENT"
+                elif drift in {"content", "source", "privacy"}:
                     await window.pump()
                     assert core.store.one("SELECT state FROM outbox")["state"] == "CANCELLED"
                 else:
                     with pytest.raises((CoreError, ValueError, httpx.HTTPStatusError)):
                         await window.pump()
-                assert not sends
-                assert not core.store.one("SELECT 1 FROM outbox WHERE state='SENT'")
-                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == original_usage
+                if drift != "unknown":
+                    assert not sends
+                    assert not core.store.one("SELECT 1 FROM outbox WHERE state='SENT'")
+                assert core.store.rows(
+                    'SELECT * FROM model_usage ORDER BY record_sequence'
+                ) == original_usage
 
     run(scenario())
 
 
-def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(core, tmp_path):
+def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(
+    empty_database, core, tmp_path,
+):
     number, text = 0, "/记住这个：我喜欢龙井茶"
 
     async def source(ws):
@@ -864,7 +885,7 @@ def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(co
                     await ingress(window)
                     assert await core.run_once()
                     row = core.store.one(
-                        "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC"
+                        'SELECT state,last_error_code FROM jobs ORDER BY record_sequence DESC'
                     )
                     assert row["state"] == "SUCCEEDED", row
                     await window.pump()
@@ -873,7 +894,8 @@ def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(co
                 memory = core.store.one("SELECT * FROM memories")
                 assert memory["status"] == "CONFIRMED"
                 key = Fernet.generate_key()
-                archive, restored = tmp_path / "before-forget.enc", tmp_path / "restored.db"
+                archive = tmp_path / "before-forget.enc"
+                restored_state = tmp_path / "restored-state"
                 backup(core.settings.database, str(archive), key)
                 text = "/忘记这一条 " + memory["memory_id"]
                 await turn()
@@ -882,10 +904,17 @@ def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(co
                 await turn()
                 assert len(sends) == 3
                 assert owner_authority.current(core.store, core.settings, core.clock)
-                restore(str(archive), str(restored), key, core.settings.erasure_ledger)
-                settings = core.settings.model_copy(update={"database": str(restored)})
+                restore(str(archive), empty_database, key, core.settings.erasure_ledger,
+                        state_directory=restored_state)
+                settings = core.settings.model_copy(update={
+                    "database": empty_database, "state_directory": str(restored_state),
+                })
                 with Core(settings, core.model, core.clock) as recovered:
                     assert not recovered.memory.search("龙井茶")
-                    assert recovered.store.rows("PRAGMA foreign_key_check") == []
+                    assert not recovered.store.one(
+                        "SELECT 1 FROM pg_constraint "
+                        "WHERE connamespace=current_schema()::regnamespace "
+                        "AND NOT convalidated"
+                    )
 
     run(scenario())

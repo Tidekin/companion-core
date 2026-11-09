@@ -8,24 +8,29 @@ from cryptography.fernet import Fernet
 from pydantic import SecretStr, ValidationError
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.backup import backup, restore
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
+from companion.legacy_import import migrate_sqlite
+from companion.postgres import Database
 from companion.privacy import epoch
 from companion.source_grants import SourceGrantRegistration, SourceGrantSnapshot, grant_tombstone
-from companion.store import Store, migrate
+from companion.store import Store
 from source_reader.accounts import source_grant
 from source_reader.heybox import HeyboxReader
 from source_reader.heybox_source import NativeHeyboxSource
 from source_reader.network import ReadFailure
 from source_reader.worker import read_result, tick
 from tests.conftest import run
+from tests.postgres_fixture import isolated_database
 from tests.support.exploration import configure
 from tests.support.heybox_reader import mock_pool
 from tests.support.historical_schema import historical_database
 from tests.support.input_reply_migration import config_for
 from tests.support.observation_capture import observation
 from tests.support.plugin_readonly import NOW_DT, grant
+from tests.support.release_migration import insert, one, open_historical, rows
 from tests.support.source_grants import (
     GRANT_ID,
     URL,
@@ -51,7 +56,7 @@ def test_expiry_and_future_read_revocation_retain_existing_history(core, stop):
         assert result["history_erased"] is False
     with pytest.raises(CoreError, match="SOURCE_GRANT_(EXPIRED|REVOKED)"):
         lease(core, snapshot, "read-2")
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (event_id,))
     assert not event["redacted"] and "private fixture" in event["body_json"]
     assert epoch(core.store) == before_epoch
     assert len(core.ledger.read()) == 1
@@ -93,7 +98,7 @@ def test_late_result_cannot_commit_after_authorization_changes(core, change, hot
         core.exploration.complete("heybox", item["request_id"], receipt(item, snapshot))
     assert not core.store.rows("SELECT * FROM observations")
     row = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (item["request_id"],)
     )
     assert row["reserved_requests"] == 1 and row["used_requests"] is None
 
@@ -103,6 +108,7 @@ def test_owner_registry_cannot_be_forged_by_reader_or_bridge_and_contains_no_cre
     core.settings.control_token = SecretStr("owner-control-" * 4)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     body = {"adapter_id": "heybox", **authorization(core).snapshot()}
 
     async def scenario():
@@ -137,8 +143,13 @@ def test_owner_registry_cannot_be_forged_by_reader_or_bridge_and_contains_no_cre
             assert rejected.status_code == 400 and "PRIVATE" not in rejected.text
 
     run(scenario())
-    columns = {row["name"] for row in core.store.rows("PRAGMA table_info(source_grant_revisions)")}
-    assert columns == {"grant_id", "epoch", "fingerprint", "expires_at", "created_at"}
+    columns = {row["name"] for row in core.store.rows(
+        "SELECT column_name AS name FROM information_schema.columns "
+        "WHERE table_schema=current_schema() AND table_name='source_grant_revisions'"
+    )}
+    assert columns == {
+        "grant_id", "epoch", "fingerprint", "expires_at", "created_at", "record_sequence",
+    }
 
 
 def test_open_ended_expiry_requires_explicit_registered_bilibili_authority(core, tmp_path):
@@ -164,27 +175,28 @@ def test_grant_migration_preserves_historical_revision_and_event_binding(core, t
     prior = "0064_life_topic_items"
     db = historical_database(core.store, tmp_path / "history.db", prior)
     revision = core.store.one("SELECT * FROM source_grant_revisions")
+    assert revision.pop("record_sequence") > 0
     for target in ("head", prior, "head"):
         if target == prior:
             command.downgrade(config_for(db), prior)
         else:
-            migrate(db)
-        with closing(Store(db)) as store:
-            assert store.rows("SELECT * FROM source_grant_revisions") == [revision]
-            assert store.one("SELECT * FROM source_grant_events") == {
+            migrate_sqlite(db)
+        with closing(open_historical(db)) as store:
+            assert rows(store, "SELECT * FROM source_grant_revisions") == [revision]
+            assert one(store, "SELECT * FROM source_grant_events") == {
                 "event_id": event_id, "grant_id": snapshot.grant_id, "grant_epoch": snapshot.epoch,
             }
-            assert not store.rows("PRAGMA foreign_key_check")
-    with closing(Store(db)) as store:
-        store.insert("source_grants", grant_id="grant_" + "2" * 32, source="bilibili",
-                     adapter_id="bili", created_at=core.clock())
-        store.insert("source_grant_revisions", grant_id="grant_" + "2" * 32, epoch=1,
-                     fingerprint="b" * 64, expires_at=None, created_at=core.clock())
+            assert not rows(store, "PRAGMA foreign_key_check")
+    with closing(open_historical(db)) as store:
+        insert(store, "source_grants", grant_id="grant_" + "2" * 32, source="bilibili",
+               adapter_id="bili", created_at=core.clock())
+        insert(store, "source_grant_revisions", grant_id="grant_" + "2" * 32, epoch=1,
+               fingerprint="b" * 64, expires_at=None, created_at=core.clock())
     with pytest.raises(RuntimeError, match="BILI_GRANT_DOWNGRADE_REQUIRES"):
         command.downgrade(config_for(db), prior)
-    with closing(Store(db)) as store:
-        assert store.one("SELECT count(*) n FROM source_grant_revisions")["n"] == 2
-        assert not store.rows("PRAGMA foreign_key_check")
+    with closing(open_historical(db)) as store:
+        assert one(store, "SELECT count(*) n FROM source_grant_revisions")["n"] == 2
+        assert not rows(store, "PRAGMA foreign_key_check")
 
 
 def test_registered_revision_and_adapter_are_exact_and_monotonic(core):
@@ -223,30 +235,36 @@ def test_forget_erases_derived_closure_and_newest_ledger_prevents_backup_resurre
     assert len(core.ledger.read()) == 2
     core.observations.grants.forget(GRANT_ID, core.ledger)
     assert len(core.ledger.read()) == 2
-    for path, archive in [(tmp_path / "old-empty.db", before), (tmp_path / "old-source.db", after)]:
-        restore(archive, path, key, core.settings.erasure_ledger)
-        with closing(Store(str(path))) as restored:
-            assert restored.one(
-                "SELECT 1 FROM runtime_meta WHERE key=?", (grant_tombstone(GRANT_ID),)
-            )
-            assert not restored.rows("SELECT * FROM observations WHERE redacted=0")
-            assert all(row["body_json"] == "{}" for row in restored.rows("SELECT * FROM events"))
-            assert not restored.rows("PRAGMA foreign_key_check")
-            if archive == after:
-                assert restored.one("SELECT status,content FROM memories") == {
-                    "status": "FORGOTTEN",
-                    "content": "",
-                }
-                assert not restored.rows("SELECT * FROM memory_vectors")
-                assert restored.one("SELECT status,body_md FROM diary_entries") == {
-                    "status": "REDACTED",
-                    "body_md": "",
-                }
-                assert restored.one("SELECT state,comparison_text FROM social_candidates") == {
-                    "state": "ERASED",
-                    "comparison_text": "",
-                }
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (derived.event_id,))[
+    for archive in (before, after):
+        state = tmp_path / archive.stem
+        with isolated_database() as destination:
+            restore(archive, destination, key, core.settings.erasure_ledger, state_directory=state)
+            with Database(destination) as db, closing(Store(db, state)) as restored:
+                assert restored.one(
+                    "SELECT 1 FROM runtime_meta WHERE key=%s", (grant_tombstone(GRANT_ID),)
+                )
+                assert not restored.rows("SELECT * FROM observations WHERE redacted=0")
+                events = restored.rows("SELECT body_json FROM events")
+                assert all(row["body_json"] == "{}" for row in events)
+                assert not restored.one(
+                    "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+                    "AND NOT convalidated"
+                )
+                if archive == after:
+                    assert restored.one("SELECT status,content FROM memories") == {
+                        "status": "FORGOTTEN",
+                        "content": "",
+                    }
+                    assert not restored.rows("SELECT * FROM memory_vectors")
+                    assert restored.one("SELECT status,body_md FROM diary_entries") == {
+                        "status": "REDACTED",
+                        "body_md": "",
+                    }
+                    assert restored.one("SELECT state,comparison_text FROM social_candidates") == {
+                        "state": "ERASED",
+                        "comparison_text": "",
+                    }
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (derived.event_id,))[
         "redacted"
     ]
     with pytest.raises(CoreError, match="FORGOTTEN"):
@@ -255,16 +273,24 @@ def test_forget_erases_derived_closure_and_newest_ledger_prevents_backup_resurre
         )
 
 
-def test_restoring_backup_revokes_future_reads_without_erasing_history(core, tmp_path):
+def test_restoring_backup_revokes_future_reads_without_erasing_history(
+    empty_database, core, tmp_path,
+):
     snapshot = prepare(core)
     event_id = accepted(core, snapshot)
-    archive, path, key = tmp_path / "history.enc", tmp_path / "restored.db", Fernet.generate_key()
+    archive = tmp_path / "history.enc"
+    restored_state = tmp_path / "restored-state"
+    key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     core.observations.grants.revoke(GRANT_ID)
-    restore(archive, path, key, core.settings.erasure_ledger)
-    with closing(Store(str(path))) as restored:
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as restored,
+    ):
         assert restored.one("SELECT revoked_at FROM source_grants")["revoked_at"]
-        assert not restored.one("SELECT redacted FROM events WHERE event_id=?", (event_id,))[
+        assert not restored.one("SELECT redacted FROM events WHERE event_id=%s", (event_id,))[
             "redacted"
         ]
 
@@ -274,16 +300,16 @@ def test_complete_projection_rebuilds_grant_tombstone_and_clears_late_stale_cont
     event_id = accepted(core, snapshot)
     core.observations.grants.forget(GRANT_ID, core.ledger)
     with core.store.transaction():
-        core.store.execute("DELETE FROM runtime_meta WHERE key=?", (grant_tombstone(GRANT_ID),))
+        core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (grant_tombstone(GRANT_ID),))
         core.store.execute(
-            "UPDATE events SET redacted=0,body_json=? WHERE event_id=?",
+            'UPDATE events SET redacted=0,body_json=%s WHERE event_id=%s',
             ('{"text":"PRIVATE_STALE_CONTENT"}', event_id),
         )
     core.ledger.replay(core.store)
     assert core.store.one(
-        "SELECT body_json,redacted FROM events WHERE event_id=?", (event_id,)
+        'SELECT body_json,redacted FROM events WHERE event_id=%s', (event_id,)
     ) == {"body_json": "{}", "redacted": 1}
-    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (grant_tombstone(GRANT_ID),))
+    assert core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s', (grant_tombstone(GRANT_ID),))
     assert len(core.ledger.read()) == 2
 
 
@@ -295,7 +321,7 @@ def test_empty_grant_forget_preserves_unrelated_history(core):
     event = observation(core)
     core.observations.append("public", event)
     core.observations.grants.forget(GRANT_ID, core.ledger)
-    assert not core.store.one("SELECT redacted FROM events WHERE event_id=?", (event.event_id,))[
+    assert not core.store.one('SELECT redacted FROM events WHERE event_id=%s', (event.event_id,))[
         "redacted"
     ]
 
@@ -372,16 +398,16 @@ def test_legacy_migration_inventory_preserves_unknown_records_without_invented_a
     event = observation(core, source="heybox")
     event.payload.url = URL
     core.observations.append("heybox", event)
-    before = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event.event_id,))
+    before = core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event.event_id,))
     database = historical_database(core.store, tmp_path / "grants.db", "0015_article_images")
-    migrate(database, "0016_source_grants")
-    with closing(Store(database)) as store:
+    migrate_sqlite(database, "0016_source_grants")
+    with closing(open_historical(database)) as store:
         assert (
-            store.one("SELECT body_json FROM events WHERE event_id=?", (event.event_id,)) == before
+            one(store, "SELECT body_json FROM events WHERE event_id=?", (event.event_id,)) == before
         )
-        assert store.one("SELECT event_id FROM source_grant_legacy_review") == {
+        assert one(store, "SELECT event_id FROM source_grant_legacy_review") == {
             "event_id": event.event_id
         }
-        assert not store.rows("SELECT * FROM source_grant_events")
-        assert not store.rows("SELECT * FROM source_grants")
-        assert not store.rows("PRAGMA foreign_key_check")
+        assert not rows(store, "SELECT * FROM source_grant_events")
+        assert not rows(store, "SELECT * FROM source_grants")
+        assert not rows(store, "PRAGMA foreign_key_check")

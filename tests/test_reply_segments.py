@@ -6,12 +6,14 @@ from companion.reply_segments import SegmentedReplyConfig, split_text
 
 @pytest.mark.parametrize("source", ["toml", "environment"])
 def test_segmented_reply_configuration_loads_through_normal_settings_entrypoint(
-    tmp_path, monkeypatch, source,
+    core, tmp_path, monkeypatch, source,
 ):
     from companion.config import Settings
 
     for field in Settings.model_fields:
         monkeypatch.delenv("COMPANION_" + field.upper(), raising=False)
+    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database.get_secret_value())
+    monkeypatch.setenv("COMPANION_STATE_DIRECTORY", core.settings.state_directory)
     path = tmp_path / "config.toml"
     contents = 'owner_qq_id="10001"\nbot_qq_id="10002"\nbridge_token="synthetic-config-token-32"\n'
     policy = SegmentedReplyConfig(max_segments=2, min_chars=8, interval_ms=500)

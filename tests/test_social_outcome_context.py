@@ -97,7 +97,9 @@ def test_receipt_with_stale_lease_cannot_inform_next_decision(core, tmp_path):
     receipt = json.loads(row["receipt_json"])
     receipt["lease_token"] = "lease_previous_attempt"
     # Keep the receipt hash valid so this exercises the original native lease binding.
-    core.store.execute("UPDATE social_autonomy_reservations SET receipt_json=?,receipt_sha256=? "
-                       "WHERE message_id=?", (encode(receipt), _sha(receipt), row["message_id"]))
+    core.store.execute((
+        'UPDATE social_autonomy_reservations SET '
+        'receipt_json=%s,receipt_sha256=%s WHERE message_id=%s'
+    ), (encode(receipt), _sha(receipt), row["message_id"]))
     assert module.context([source])["execution_outcomes"] == []
     assert len(core.store.rows("SELECT * FROM model_usage")) == 1

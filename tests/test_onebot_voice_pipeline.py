@@ -51,7 +51,7 @@ def finish_asr(core, text):
     _, response = claim(jobs)
     ref = VoiceLeaseRef.from_lease(response.lease)
     jobs.input("local", ref)
-    row = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (ref.job_id,))
+    row = core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s', (ref.job_id,))
     value = result(ref, operation="asr", seconds=row["input_duration_seconds"],
                    partial=bool(row["source_partial"]), text=text)
     control(jobs, ref, "RESULT_READY", "READY", result_sha256=value.result_sha256)

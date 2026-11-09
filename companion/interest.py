@@ -32,8 +32,8 @@ def read_origin(store, goal_id, urls):
     """A self goal whose target the owner sent is her starting point, not her own pick."""
     urls = {url.rstrip("/") for url in urls if url}
     for row in store.rows(
-        "SELECT e.body_json FROM goal_evidence ge JOIN events e USING(event_id) "
-        "WHERE ge.goal_id=? AND e.actor_id='owner' AND e.redacted=0", (goal_id,),
+        'SELECT e.body_json FROM goal_evidence AS ge JOIN events AS e USING (event_id) WHERE '
+        "ge.goal_id = %s AND e.actor_id = 'owner' AND e.redacted = 0", (goal_id,),
     ):
         body = json.loads(row["body_json"])
         said = " ".join(str(body.get(key) or "") for key in ("text", "url"))
@@ -44,14 +44,16 @@ def read_origin(store, goal_id, urls):
 
 def judgement(store, settings, event_id, item_ref, cutoff):
     """Her live judgement of this read, or of a later deeper read of the same item."""
-    if not store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='watch_ledger'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='watch_ledger' AND relkind IN "
+        "('r','p')"):
         return None
     entry = store.one(
-        "SELECT w.entry_id,w.source_event_id,w.rating,w.take,w.updated_at "
-        "FROM watch_ledger w JOIN events e ON e.event_id=w.source_event_id "
-        "JOIN observations o ON o.event_id=w.source_event_id WHERE w.state='JUDGED' "
-        "AND e.redacted=0 AND o.redacted=0 AND (w.source_event_id=? OR w.item_ref=?) "
-        "ORDER BY w.updated_at DESC LIMIT 1", (event_id, item_ref),
+        'SELECT w.entry_id, w.source_event_id, w.rating, w.take, w.updated_at FROM watch_ledger AS '
+        'w JOIN events AS e ON e.event_id = w.source_event_id JOIN observations AS o ON o.event_id '
+        "= w.source_event_id WHERE w.state = 'JUDGED' AND e.redacted = 0 AND o.redacted = 0 AND "
+        '(w.source_event_id = %s OR w.item_ref = %s) ORDER BY w.updated_at DESC NULLS LAST LIMIT '
+        '1', (event_id, item_ref),
     )
     if (not entry or expired_sources(store, [entry["source_event_id"]], cutoff)
             or sensitive(entry["take"]) or redact(entry["take"], settings) != entry["take"]):
@@ -65,18 +67,17 @@ def exploration_evidence(store, settings, trait_id, now):
     """Only completed self goals count; repeats never add another independent experience."""
     cutoff = after(now, -86400 * settings.raw_event_retention_days)
     rows = store.rows(
-        "SELECT e.event_id,e.occurred_at,e.source,o.source_sha256,o.canonical_url,"
-        "o.result_status,o.evidence_json,(SELECT MIN(g.goal_id) FROM goals g "
-        "WHERE g.kind='self' AND g.state='DONE' AND g.redacted=0 "
-        "AND g.result_event_id=e.event_id AND substr(g.topic,1,80)=tr.topic) AS goal_id "
-        "FROM trait_evidence t JOIN observations o USING(event_id) "
-        "JOIN events e USING(event_id) JOIN traits tr USING(trait_id) "
-        "WHERE t.trait_id=? AND tr.category='interest' AND o.redacted=0 AND e.redacted=0 "
-        "AND e.ingested_at>=? AND e.occurred_at<=? AND o.result_status IN ('FETCHED','WATCHED') "
-        "AND o.source_sha256<>'' AND o.canonical_url<>'' AND EXISTS (SELECT 1 FROM goals g "
-        "WHERE g.kind='self' AND g.state='DONE' AND g.redacted=0 "
-        "AND g.result_event_id=e.event_id AND substr(g.topic,1,80)=tr.topic) "
-        "ORDER BY e.occurred_at,e.event_id",
+        'SELECT e.event_id, e.occurred_at, e.source, o.source_sha256, o.canonical_url, '
+        'o.result_status, o.evidence_json, (SELECT MIN(g.goal_id) FROM goals AS g WHERE g.kind = '
+        "'self' AND g.state = 'DONE' AND g.redacted = 0 AND g.result_event_id = e.event_id AND "
+        'SUBSTRING(g.topic FROM 1 FOR 80) = tr.topic) AS goal_id FROM trait_evidence AS t JOIN '
+        'observations AS o USING (event_id) JOIN events AS e USING (event_id) JOIN traits AS tr '
+        "USING (trait_id) WHERE t.trait_id = %s AND tr.category = 'interest' AND o.redacted = 0 "
+        'AND e.redacted = 0 AND e.ingested_at >= %s AND e.occurred_at <= %s AND o.result_status IN '
+        "('FETCHED', 'WATCHED') AND o.source_sha256 <> '' AND o.canonical_url <> '' AND "
+        "EXISTS(SELECT 1 FROM goals AS g WHERE g.kind = 'self' AND g.state = 'DONE' AND g.redacted "
+        '= 0 AND g.result_event_id = e.event_id AND SUBSTRING(g.topic FROM 1 FOR 80) = tr.topic) '
+        'ORDER BY e.occurred_at NULLS FIRST, e.event_id NULLS FIRST',
         (trait_id, cutoff, now),
     )
     evidence, hashes, urls = [], set(), set()
@@ -194,17 +195,18 @@ def profile(store, settings, now, requester):
     owner = []
     cutoff = after(now, -86400 * settings.raw_event_retention_days)
     for row in store.rows(
-        "SELECT memory_id,content,fact_key FROM memories WHERE subject='user' "
-        "AND kind='preference' AND status='CONFIRMED' AND needs_review=0 AND confidence>0 "
-        "AND privacy_scope='private' ORDER BY updated_at DESC,memory_id LIMIT 40"
+        "SELECT memory_id, content, fact_key FROM memories WHERE subject = 'user' AND kind = "
+        "'preference' AND status = 'CONFIRMED' AND needs_review = 0 AND confidence > 0 AND "
+        "privacy_scope = 'private' ORDER BY updated_at DESC NULLS LAST, memory_id NULLS FIRST "
+        'LIMIT 40'
     ):
         evidence = store.rows(
-            "SELECT e.event_id,e.source,e.occurred_at FROM memory_evidence me "
-            "JOIN events e USING(event_id) JOIN conversations c USING(conversation_id) "
-            "WHERE me.memory_id=? AND e.redacted=0 AND e.actor_id='owner' "
-            "AND e.privacy_scope='private' AND c.scope='private' AND c.owner_actor_id='owner' "
-            "AND e.ingested_at>=? AND e.occurred_at<=? AND e.source IN "
-            "('qq.onebot','owner.decision') ORDER BY e.occurred_at,e.event_id",
+            'SELECT e.event_id, e.source, e.occurred_at FROM memory_evidence AS me JOIN events AS '
+            'e USING (event_id) JOIN conversations AS c USING (conversation_id) WHERE me.memory_id '
+            "= %s AND e.redacted = 0 AND e.actor_id = 'owner' AND e.privacy_scope = 'private' AND "
+            "c.scope = 'private' AND c.owner_actor_id = 'owner' AND e.ingested_at >= %s AND "
+            "e.occurred_at <= %s AND e.source IN ('qq.onebot', 'owner.decision') ORDER BY "
+            'e.occurred_at NULLS FIRST, e.event_id NULLS FIRST',
             (row["memory_id"], cutoff, now),
         )
         if evidence and not expired_sources(store, [e["event_id"] for e in evidence], cutoff):
@@ -212,8 +214,8 @@ def profile(store, settings, now, requester):
                 owner.append({**row, "namespace": "owner.preference", "evidence": evidence})
     interests = []
     for row in store.rows(
-        "SELECT trait_id,topic FROM traits WHERE category='interest' "
-        "ORDER BY updated_at DESC,trait_id LIMIT 40"
+        "SELECT trait_id, topic FROM traits WHERE category = 'interest' ORDER BY updated_at DESC "
+        'NULLS LAST, trait_id NULLS FIRST LIMIT 40'
     ):
         evidence = exploration_evidence(store, settings, row["trait_id"], now)
         state, sessions, days = tendency(evidence, settings, now)
@@ -244,7 +246,12 @@ def profile(store, settings, now, requester):
 def record_exploration(store, settings, goal, event_id, now):
     # Caller owns the goal-completion transaction and has verified its result and source closure.
     topic = goal["topic"][:80]
-    prior = store.one("SELECT * FROM traits WHERE category='interest' AND topic=?", (topic,))
+    prior = store.one('SELECT traits.trait_id AS trait_id, traits.category AS category, '
+        'traits.topic AS topic, traits.strength AS strength, traits.confidence AS confidence, '
+        'traits.status AS status, traits.independent_sessions AS independent_sessions, '
+        'traits.independent_days AS independent_days, traits.version AS version, '
+        'traits.last_evidence_at AS last_evidence_at, traits.updated_at AS updated_at FROM traits '
+        "AS traits WHERE traits.category = 'interest' AND traits.topic = %s", (topic,))
     trait_id = prior["trait_id"] if prior else uid("trait")
     if not prior:
         store.insert(
@@ -258,13 +265,15 @@ def record_exploration(store, settings, goal, event_id, now):
             updated_at=now,
         )
     store.execute(
-        "INSERT OR IGNORE INTO trait_evidence VALUES (?,?,1,0.5,?)", (trait_id, event_id, now)
+        'INSERT INTO trait_evidence VALUES (%s, %s, 1, 0.5, %s) ON CONFLICT DO '
+        'NOTHING', (trait_id, event_id, now)
     )
     evidence = exploration_evidence(store, settings, trait_id, now)
     state, independent, days = tendency(evidence, settings, now)
     store.execute(
-        "UPDATE traits SET status=?,independent_sessions=?,independent_days=?,strength=?,"
-        "confidence=?,last_evidence_at=?,updated_at=?,version=version+1 WHERE trait_id=?",
+        'UPDATE traits SET status = %s, independent_sessions = %s, independent_days = %s, strength '
+        '= %s, confidence = %s, last_evidence_at = %s, updated_at = %s, version = version + 1 '
+        'WHERE trait_id = %s',
         (
             state,
             independent,

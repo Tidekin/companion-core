@@ -93,7 +93,7 @@ def test_proactive_suffix_preflight_failure_keeps_bridge_recoverable(
     async def scenario():
         async with ready(core, tmp_path) as (active, sends):
             assert await active.pump() and len(sends) == 1
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             prefix = core.store.one("SELECT * FROM outbox WHERE segment_index=0")
             calls, proofs = [], []
 
@@ -143,7 +143,7 @@ def test_proactive_suffix_preflight_failure_keeps_bridge_recoverable(
                     {"state": "CANCELLED", "attempt_count": 0}]
                 assert not await active.pump()
             assert core.store.one("SELECT * FROM outbox WHERE segment_index=0") == prefix
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usage
             active.restart()
             assert active.runtime.row()["state"] == "ACTIVE"
             assert not active.runtime.stop_path.exists()
@@ -156,7 +156,7 @@ def test_proactive_cancellation_lost_ack_resumes_and_next_owner_turn_works(core,
     async def scenario():
         async with ready(core, tmp_path) as (active, sends):
             assert await active.pump() and len(sends) == 1
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             proofs = []
 
             async def lose_begin(request):
@@ -191,7 +191,7 @@ def test_proactive_cancellation_lost_ack_resumes_and_next_owner_turn_works(core,
             denied = await active.client.post("/internal/v1/owner-authority/expired-preflight",
                                               json=forged)
             assert denied.status_code == 403
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usage
             raw = encode(raw_event(2, text="合成的新消息", time=int(core.clock.now.timestamp())))
             event = normalize(raw, active.config, now=core.clock.now.timestamp())
             assert active.runtime.persist_capture(event, raw, received_at=core.clock.now,
@@ -206,7 +206,9 @@ def test_proactive_cancellation_lost_ack_resumes_and_next_owner_turn_works(core,
             assert await active.pump() and len(sends) == 2
             assert active.attempts() == {"ACK": 2, "NOT_SENT": 1}
             assert active.runtime.row()["state"] == "ACTIVE"
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid")[:1] == usage
+            assert core.store.rows(
+                'SELECT * FROM model_usage ORDER BY record_sequence'
+            )[:1] == usage
 
     run(scenario())
 

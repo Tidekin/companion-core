@@ -86,7 +86,7 @@ def test_wake_planner_uses_companion_pause(core):
     delegate(core, capability="wake", allow_pause=True)
     submit(core, "pause", True)
     core.wake.evaluate()
-    decision = core.store.one("SELECT * FROM wake_decisions ORDER BY rowid DESC LIMIT 1")
+    decision = core.store.one('SELECT * FROM wake_decisions ORDER BY record_sequence DESC LIMIT 1')
     assert decision["reason_code"] == "COMPANION_PAUSED"
 
 
@@ -117,7 +117,7 @@ def test_reflection_adjustment_applies_and_erasure_withdraws_it(core):
     assert row["state"] == "ACTIVE" and row["suggestion_id"]
     assert delegation.effective(core.store, core.settings, "wake", "wake_max_daily_runs",
                                 core.clock()) == 1
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_3"], core.clock())
     row = core.store.one("SELECT * FROM capability_overrides")
     assert row["state"] == "REVERTED" and row["reason"] == ""
@@ -137,19 +137,23 @@ def test_reflection_without_delegation_cannot_adjust(core):
     assert core.store.rows("SELECT * FROM capability_overrides") == []
 
 
-def test_restore_discards_adjustments(core, tmp_path):
+def test_restore_discards_adjustments(empty_database, core, tmp_path):
     delegate(core, ranges={"wake_max_daily_runs": {"min": 1}})
     submit(core, "wake_max_daily_runs", 1)
-    key, archive, dest = Fernet.generate_key(), tmp_path / "a.enc", tmp_path / "restored.db"
+    key, archive = Fernet.generate_key(), tmp_path / "a.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         assert restored.store.one("SELECT state FROM capability_overrides")["state"] == "DISCARDED"
         assert delegation.effective(restored.store, restored.settings, "wake",
                                     "wake_max_daily_runs", core.clock()) == 3
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_console_autonomy_routes_require_session_and_are_idempotent(core, monkeypatch):

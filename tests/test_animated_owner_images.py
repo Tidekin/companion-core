@@ -215,7 +215,9 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
         content = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
         assert content["state"] == "SUCCEEDED"
         assert content["media_sha256"] == hashlib.sha256(original).hexdigest()
-        assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+        assert core.store.rows(
+            'SELECT scenario,state FROM model_usage ORDER BY record_sequence'
+        ) == [
             {"scenario": "chat", "state": "SETTLED"},
             {"scenario": "chat", "state": "SETTLED"}]
         assert core.store.one("SELECT COUNT(*) n FROM captured_images")["n"] == 1

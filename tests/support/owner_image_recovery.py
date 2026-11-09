@@ -8,7 +8,7 @@ from tests.sdk_reader_fixture import answer
 
 
 async def run_worker(core, tmp_path, number, response):
-    job = core.store.one("SELECT * FROM jobs ORDER BY rowid DESC LIMIT 1")
+    job = core.store.one("SELECT * FROM jobs ORDER BY record_sequence DESC LIMIT 1")
     config_path, output = tmp_path / f"recovery-{number}.pickle", tmp_path / f"wire-{number}.json"
     config_path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
                                          [answer(response)], "SUCCEEDED", str(output))))

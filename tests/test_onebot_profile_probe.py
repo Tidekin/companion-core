@@ -37,6 +37,7 @@ async def source_window(core, tmp_path, source, *, live, approved, scope_options
     from dataclasses import replace
 
     from companion.api import create_app
+    from companion.api_store import ApiStore
     from tests.support.onebot import provider
 
     core.settings.social_autonomy = scope_options["core_options"]["social_autonomy"]
@@ -46,6 +47,7 @@ async def source_window(core, tmp_path, source, *, live, approved, scope_options
         cfg = replace(cfg, **bridge_options)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     def native(request):
         return protocol_reply(request) or provider(request, [])
@@ -479,8 +481,10 @@ def test_continuous_probe_real_core_http_independent_worker_and_native_profile_a
                         model=worker.model, clock=worker.clock)
                     planned = await module.plan("native-profile-worker",
                         profile_fields=["nickname"], profile_memory_ids=[memory])
-                    conversation = worker.store.one("SELECT conversation_id FROM conversations "
-                        "WHERE platform_session_key=?", (window.config.origin,))
+                    conversation = worker.store.one((
+                        'SELECT conversation_id FROM conversations WHERE '
+                        'platform_session_key=%s'
+                    ), (window.config.origin,))
                     queue(module, planned, conversation["conversation_id"])
 
                 async with asyncio.timeout(20):

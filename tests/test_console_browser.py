@@ -349,7 +349,7 @@ def test_console_cognition_pagination_does_not_restore_erased_snapshot(
                         finished.set()
                 else:
                     # The next native page is fresh but the already loaded page is erased.
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, ["evt_test_32"], core.clock())
                     await route.continue_()
 
@@ -357,7 +357,7 @@ def test_console_cognition_pagination_does_not_restore_erased_snapshot(
             await page.get_by_role("button", name="更早的目标", exact=True).click()
             if refresh_during_read:
                 await asyncio.wait_for(held.wait(), timeout=10)
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, ["evt_test_32"], core.clock())
                 await page.get_by_role("button", name="刷新当前页面").click()
                 await page.locator("#page[aria-busy=false]").wait_for()

@@ -31,8 +31,10 @@ def turn(core, number, text, answer=None, *, deliver=True):
     assert run(core.run_once("worker"))
     if deliver:
         core.store.execute(
-            "UPDATE outbox SET state='SENT',sent_at=? WHERE origin_event_id=? "
-            "AND state='PENDING'", (core.clock(), result["event_id"]))
+            (
+                "UPDATE outbox SET state='SENT',sent_at=%s WHERE "
+                "origin_event_id=%s AND state='PENDING'"
+            ), (core.clock(), result["event_id"]))
     return result
 
 

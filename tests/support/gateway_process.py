@@ -14,6 +14,7 @@ from companion import gateway, paid_budget
 from companion.config import Settings
 from companion.gateway_api import create_app
 from companion.model import ModelClient
+from companion.postgres import Database
 from companion.store import Store
 
 settings = Settings.model_validate_json(Path(sys.argv[2]).read_bytes())
@@ -46,7 +47,13 @@ else:
             "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
 
     async def run():
-        with closing(Store(settings.database)) as store:
+        with Database(settings.database, max_connections=1) as database, closing(
+            Store(database, settings.state_directory),
+        ) as store:
+            if "--wait-ready" in sys.argv:
+                print("GATEWAY_WORKER_READY", flush=True)
+                if sys.stdin.readline().strip() != "run":
+                    raise RuntimeError("synthetic worker gate was not released")
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
                 await gateway.run_once(store, settings, ModelClient(settings, client))
 

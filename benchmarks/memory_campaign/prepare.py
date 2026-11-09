@@ -41,6 +41,7 @@ def write_configs(r):
             table("provider", cfg["provider"]), table("credentials", cfg["credentials"]),
             table("budget", {"total_cny": budget["deepseek_total_cny"],
                              "inference_cny": budget["deepseek_inference_cny"]}),
+            table("postgres", cfg["postgres"]),
             table("pricing", cfg["pricing"]), table("native", cfg["native"]),
             table("history_grant", cfg["history_grant"]), table("parser", cfg["parser"])])
         paths[arm] = r.root / f"{arm}.toml"
@@ -55,7 +56,10 @@ def source(r):
         ["git", "-C", r.cfg["source_checkout"], "rev-parse", commit + "^{commit}"],
         text=True).strip() for arm, commit in r.cfg["arms"].items()}
     save(r.root / "source-freeze.json", {
-        "status": "SOURCE_AND_SETTINGS_FROZEN_BEFORE_BANK", "at": datetime.now(UTC).isoformat(),
+        "status": ("SOURCE_AND_SETTINGS_FROZEN_BEFORE_INFERENCE"
+                   if (r.bank / "bundle-manifest.json").exists()
+                   else "SOURCE_AND_SETTINGS_FROZEN_BEFORE_BANK"),
+        "at": datetime.now(UTC).isoformat(),
         "arms": commits, "settings": {k: r.cfg[k] for k in (
             "native", "history_grant", "provider", "pricing", "rag", "grading")},
         "round_json_sha256": sha(r.root / "round.json"), "provider_calls": 0})

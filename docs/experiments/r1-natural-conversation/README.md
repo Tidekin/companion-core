@@ -27,6 +27,12 @@
 在本工作树运行 Python；可用仓库已安装的虚拟环境。输出目录必须是本工作树 `.local`
 内的全新目录，不能覆盖已冻结计划。已有 pilot 和合成计划应直接复用。
 
+原生 PostgreSQL 版本的 `prepare` 需要按
+[迁移说明](../../postgresql-migration.md) 配置隔离测试集群
+`COMPANION_POSTGRES_TEST_CONFIG`。
+它从空白原生模板为每个 case 创建独立数据库，结束时删除数据库；
+合成材料和独立凭证仍写入上述工作区目录。`blind` 不连接数据库。
+
 ```powershell
 python scripts/evaluate_r1_conversation.py prepare --output .local/r1-synthetic-plan-new
 python scripts/evaluate_r1_conversation.py prepare --private-baseline <本地受保护原文路径> --repetitions 3 --output .local/r1-private/pilot-new

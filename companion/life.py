@@ -61,12 +61,12 @@ class LifeService:
         if command in {"结束话题", "不再跟进"}:
             from companion.life_topics import LifeTopics
 
-            source = self.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+            source = self.store.one('SELECT conversation_id FROM events WHERE event_id = %s',
                                     (event_id,))
             topics = self.store.rows(
-                "SELECT topic_id FROM life_topics WHERE conversation_id=? "
-                "AND state<>'EXPIRED' AND reason_code<>'OWNER_CLOSED' "
-                "AND expires_at>? AND (?='' OR topic_id=?)",
+                'SELECT topic_id FROM life_topics WHERE conversation_id = %s AND state <> '
+                "'EXPIRED' AND reason_code <> 'OWNER_CLOSED' AND expires_at > %s AND (%s = '' OR "
+                'topic_id = %s)',
                 (source["conversation_id"], self.clock(), arguments, arguments),
             )
             service = LifeTopics(self.store, self.settings, self.clock)
@@ -211,14 +211,14 @@ class LifeService:
             urls = GoalScope.model_validate_json(goal["scope_json"]).targets()
             if goal["result_event_id"]:
                 event = self.store.one(
-                    "SELECT body_json FROM events WHERE event_id=? AND redacted=0",
+                    'SELECT body_json FROM events WHERE event_id = %s AND redacted = 0',
                     (goal["result_event_id"],),
                 )
                 if event:
                     item["verified_result"] = json.loads(event["body_json"])["text"][:300]
                     item["result_event_id"] = goal["result_event_id"]
-                observation = self.store.one("SELECT canonical_url,evidence_json FROM observations "
-                    "WHERE event_id=?", (goal["result_event_id"],))
+                observation = self.store.one('SELECT canonical_url, evidence_json FROM '
+                    'observations WHERE event_id = %s', (goal["result_event_id"],))
                 if observation:
                     urls.extend([observation["canonical_url"], json.loads(
                         observation["evidence_json"] or "{}").get("requested_url", "")])

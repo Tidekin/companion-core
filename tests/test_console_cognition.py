@@ -106,7 +106,7 @@ def test_goal_console_keeps_history_without_continuation_authority(client, core,
     if blocked == "disabled":
         core.settings.goals_enabled = False
     else:
-        core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=?",
+        core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=%s",
                            (steps[0],))
     login(client)
     item = client.get("/v1/console/goals").json()["items"][0]
@@ -133,7 +133,7 @@ def test_tool_list_shows_the_exact_scope_an_approval_releases(client, core):
     body = {"decision": "APPROVE", "scope_sha256": item["scope_sha256"]}
     response = client.post(url, json=body, headers={**headers, "Idempotency-Key": "approve-1"})
     assert response.status_code == 200, response.text
-    assert core.store.one("SELECT state FROM tool_tasks WHERE task_id=?",
+    assert core.store.one('SELECT state FROM tool_tasks WHERE task_id=%s',
                           (task["task_id"],))["state"] == "QUEUED"
 
 
@@ -144,7 +144,7 @@ def test_tool_scope_that_no_longer_matches_its_digest_is_not_shown(client, core)
     task = executive.submit(proposal(3, "windows.write_text", text="原始内容"))
     scope = json.loads(task["scope_json"])
     scope["arguments"]["text"] = "被改过的内容"
-    core.store.execute("UPDATE tool_tasks SET scope_json=? WHERE task_id=?",
+    core.store.execute('UPDATE tool_tasks SET scope_json=%s WHERE task_id=%s',
                        (json.dumps(scope, ensure_ascii=False), task["task_id"]))
     login(client)
     item = next(row for row in client.get("/v1/console/tools").json()["items"]
@@ -162,9 +162,11 @@ def test_tool_scope_hides_arguments_when_owner_sources_are_unavailable(client, c
     login(client)
     if source_state == "expired":
         cutoff = after(core.clock(), -86400 * core.settings.raw_event_retention_days - 1)
-        core.store.execute("UPDATE events SET ingested_at=? WHERE event_id='evt_test_1'", (cutoff,))
+        core.store.execute((
+            "UPDATE events SET ingested_at=%s WHERE event_id='evt_test_1'"
+        ), (cutoff,))
     elif source_state == "missing_evidence":
-        core.store.execute("DELETE FROM tool_evidence WHERE task_id=?", (task["task_id"],))
+        core.store.execute('DELETE FROM tool_evidence WHERE task_id=%s', (task["task_id"],))
     else:
         core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
     response = client.get("/v1/console/tools")
@@ -194,9 +196,10 @@ def test_tool_scope_privacy_change_during_http_read_fails_closed(client, core, m
         result = project(view_core, row)
         assert result["text"]["value"] == text
         if change == "epoch":
-            advance_epoch(core.store)
+            with core.store.transaction(control_write=True):
+                advance_epoch(core.store)
         else:
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
         return result
 

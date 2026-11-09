@@ -106,4 +106,4 @@ async def admit(client, core, entry, number, text, *, reference=None):
         peer=("127.0.0.1", 3001), media=prepared["media"])
     assert await entry.runtime.flush_one(client)
     event = prepared["event"]
-    return event, core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+    return event, core.store.one('SELECT * FROM jobs WHERE event_id=%s', (event["event_id"],))

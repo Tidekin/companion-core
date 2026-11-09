@@ -31,11 +31,11 @@ def rejected_response(core, response):
             with pytest.raises(CoreError) as caught:
                 await budget.complete(ModelClient(core.settings, client), core.store, core.settings,
                                       request_id, MESSAGES, "chat", core.clock)
-            before = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+            before = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,))
             # A duplicate recovery callback cannot discard known usage or reduce
             # the amount already settled by the calling seam.
             budget.settle(core.store, core.settings, request_id)
-            after = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+            after = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,))
             assert after == before
             return caught.value.code, after
 
@@ -66,7 +66,7 @@ def test_invalid_reply_preserves_large_known_usage_and_blocks_new_io(
     records = [json.loads(line) for line in Path(approval.journal_path).read_text().splitlines()]
     assert records[-1]["minimum_micro_usd"] >= 90000
     assert any(row["kind"] == "blocked" for row in records)
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, authorized_job(core),
             "chat", MESSAGES, core.clock())
 

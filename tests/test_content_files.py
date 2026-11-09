@@ -15,14 +15,19 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.file_evidence import PrivateFilesConfig
+from companion.legacy_import import migrate_sqlite
 from companion.privacy import advance_epoch
-from companion.store import Store, migrate
 from tests.conftest import run
+from tests.postgres_fixture import isolated_database
 from tests.support.input_reply_migration import config_for
 from tests.support.qq_files import IMAGE, prepared, signed_upload
 from tests.support.release_migration import (
     TIMES,
     assert_old_columns_unchanged,
+    insert,
+    one,
+    open_historical,
+    rows,
     seed_legacy,
     table_snapshot,
 )
@@ -61,9 +66,9 @@ def test_upload_only_stages_and_worker_commits_existing_observation_chain(core, 
     calls = []
 
     def parse(*args, **kwargs):
-        assert not core.store.db.in_transaction
+        assert not core.store.in_transaction
         assert kwargs["image"] == IMAGE
-        assert kwargs["workspace"] == Path(core.settings.database).parent
+        assert kwargs["workspace"] == Path(core.settings.state_directory)
         calls.append(args)
         return synthetic_parser(*args, **kwargs)
 
@@ -80,7 +85,7 @@ def test_upload_only_stages_and_worker_commits_existing_observation_chain(core, 
     assert core.store.one("SELECT * FROM event_dependencies")["source_event_id"] == event_id
     assert not core.store.rows("SELECT * FROM model_usage")
     assert not core.store.rows("SELECT * FROM exploration_requests")
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                               (qq_files.STAGED + row["item_id"],))
     assert list(image_spool.directory(core.store).glob("*.raw")) == []
     context = core.content.context(event_id)
@@ -193,7 +198,7 @@ def test_bad_upload_never_creates_an_original(core, monkeypatch, failure):
         content_files.stage_file(core.content, event_id, "file:0", uploaded, mime,
                                  claim["lease_token"], proof)
     assert not image_spool.directory(core.store).exists()
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE ?",
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key LIKE %s',
                               (qq_files.STAGED + "%",))
 
 
@@ -216,9 +221,10 @@ def test_late_parser_result_cannot_revive_changed_sources(core, monkeypatch, cha
         if change == "new_input":
             core.store.execute("UPDATE conversations SET reply_revision=reply_revision+1")
         elif change == "privacy":
-            advance_epoch(core.store)
+            with core.store.transaction(control_write=True):
+                advance_epoch(core.store)
         elif change == "erase":
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [event_id], core.clock())
         elif change == "stale_lease":
             core.store.execute("UPDATE content_items SET lease_token='content_lease_stale'")
@@ -244,7 +250,7 @@ def test_damaged_staged_input_is_rejected_before_parser(core, monkeypatch, damag
         original = path.read_bytes()
         path.write_bytes(original[:-1] + b"X")
     else:
-        core.store.execute("UPDATE runtime_meta SET value='{' WHERE key LIKE ?",
+        core.store.execute("UPDATE runtime_meta SET value='{' WHERE key LIKE %s",
                            (qq_files.STAGED + "%",))
     assert run(content_files.run_file_once(core.content,
         parse=lambda *args, **kwargs: pytest.fail("tampered original reached parser")))
@@ -312,41 +318,44 @@ def test_task_cancellation_fences_result_and_discards_original(core, monkeypatch
 def test_erasure_replay_removes_copied_file_spool_and_metadata(core, monkeypatch, tmp_path):
     _, _, _, event_id, _, _, _, _ = stage(core, monkeypatch)
     key, archive = Fernet.generate_key(), tmp_path / "files.enc"
-    destination = tmp_path / "restore.db"
+    state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    copied = destination.parent / (destination.name + ".owner-images")
+    copied = image_spool.directory(core.store, state_directory=state)
     shutil.copytree(image_spool.directory(core.store), copied)
-    with core.store.transaction():
+    assert list(copied.glob("*.raw"))
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    assert list(copied.glob("*.raw")) == []
-    with Core(core.settings.model_copy(update={"database": str(destination)}),
-              clock=core.clock) as recovered:
-        row = recovered.store.one("SELECT * FROM content_items")
-        assert row["state"] == "ERASED" and row["attachment_json"] == "{}"
-        assert not recovered.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE ?",
-                                       (qq_files.STAGED + "%",))
-        assert not run(content_files.run_file_once(recovered.content,
-            parse=lambda *args, **kwargs: pytest.fail("erased file replayed")))
+    with isolated_database() as destination:
+        restore(archive, destination, key, core.settings.erasure_ledger, state_directory=state)
+        assert list(copied.glob("*.raw")) == []
+        settings = core.settings.model_copy(update={"database": destination,
+                                                    "state_directory": str(state)})
+        with Core(settings, clock=core.clock) as recovered:
+            row = recovered.store.one("SELECT * FROM content_items")
+            assert row["state"] == "ERASED" and row["attachment_json"] == "{}"
+            assert not recovered.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE %s",
+                                           (qq_files.STAGED + "%",))
+            assert not run(content_files.run_file_once(recovered.content,
+                parse=lambda *args, **kwargs: pytest.fail("erased file replayed")))
     assert list(copied.glob("*.raw")) == []
 
 
 def test_file_migration_preserves_old_content_and_refuses_lossy_downgrade(tmp_path):
     database, _, _ = seed_legacy(tmp_path, "0003_memory_index")
-    migrate(str(database), "0027_owner_console")
-    with closing(Store(str(database))) as store:
-        store.insert("content_items", item_id="content_" + "a" * 32, owner_event_id="evt_keep",
+    migrate_sqlite(str(database), "0027_owner_console")
+    with closing(open_historical(str(database))) as store:
+        insert(store, "content_items", item_id="content_" + "a" * 32, owner_event_id="evt_keep",
                      kind="qq_image", slot=0, state="UNKNOWN", captured_privacy_epoch=3,
                      reserved_bytes=1000, deadline=TIMES["keep"], created_at=TIMES["keep"],
                      updated_at=TIMES["keep"], media_sha256="b" * 64)
         old = table_snapshot(store, ("events", "content_items"))
-    migrate(str(database), "0028_private_files")
-    migrate(str(database), "0028_private_files")
-    with closing(Store(str(database))) as store:
-        row = store.one("SELECT * FROM content_items")
+    migrate_sqlite(str(database), "0028_private_files")
+    migrate_sqlite(str(database), "0028_private_files")
+    with closing(open_historical(str(database))) as store:
+        row = one(store, "SELECT * FROM content_items")
         assert row.pop("attachment_json") == "{}"
         assert_old_columns_unchanged(store, old)
-        assert store.rows("PRAGMA foreign_key_check") == []
+        assert rows(store, "PRAGMA foreign_key_check") == []
         store.execute("UPDATE content_items SET kind='qq_file'")
     with pytest.raises(RuntimeError, match="PRIVATE_FILES_DOWNGRADE_REQUIRES"):
         command.downgrade(config_for(database), "0027_owner_console")

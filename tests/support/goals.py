@@ -15,7 +15,7 @@ def setup_goal(
     enable_observations(core)
     ingest(core, number, "请阅读这篇天文文章")
     core.store.execute(
-        "UPDATE jobs SET state='SUCCEEDED' WHERE event_id=?", (f"evt_test_{number}",)
+        "UPDATE jobs SET state='SUCCEEDED' WHERE event_id=%s", (f"evt_test_{number}",)
     )
     proposal = GoalProposal(
         topic=topic,

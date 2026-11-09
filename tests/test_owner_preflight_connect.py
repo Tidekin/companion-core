@@ -44,7 +44,7 @@ def test_connection_failure_before_core_dispatch_retries_the_same_bound_prefligh
             result = await child("tests.owner_runtime_process", "--config", str(config),
                 "--now", core.clock(), "--reply", "合成第一段\n合成第二段\n合成第三段")
             assert result == {"worked": True, "calls": 1}
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             attempts, successful = [], []
             first = None
 
@@ -80,9 +80,11 @@ def test_connection_failure_before_core_dispatch_retries_the_same_bound_prefligh
             assert len(sends) == 3 and active.attempts() == {"ACK": 3}
             rows = core.store.rows("SELECT state,attempt_count FROM outbox ORDER BY segment_index")
             assert rows == [{"state": "SENT", "attempt_count": 1}] * 3
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
-            assert not core.store.one("SELECT 1 FROM runtime_meta "
-                                      "WHERE key LIKE 'input_cancel_before_send:%'")
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usage
+            assert not core.store.one(
+                'SELECT 1 FROM runtime_meta WHERE key LIKE '
+                "'input_cancel_before_send:%%'"
+            )
 
     run(scenario())
 
@@ -123,7 +125,7 @@ def test_preconnect_retry_stops_at_the_original_lease_and_live_local_fences(
                 assert str(error) in {"OWNER_RUNTIME_STOPPED", "OWNER_INPUT_PENDING"}
             assert len(waits) == len(requests) == 1
             assert 0 < waits[0] <= 0.1 and not sends
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usage
             if boundary == "lease_expiry":
                 assert active.attempts() == {"NOT_SENT": 1}
                 assert core.store.one("SELECT state FROM outbox")["state"] == "CANCELLED"

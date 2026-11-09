@@ -4,7 +4,7 @@ import copy
 import hashlib
 import socket
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,6 +27,7 @@ from companion.memory_control import (
     load_grant,
     stopped_workers,
 )
+from companion.postgres import Database
 from companion.privacy import advance_epoch, epoch
 from companion.store import Store, encode
 from companion.worker_lock import single_worker
@@ -236,7 +237,8 @@ def test_current_scope_is_revalidated_at_commit(core, change):
     if change == "expiry":
         core.clock.advance(601)
     elif change == "privacy":
-        advance_epoch(core.store)
+        with core.store.transaction(control_write=True):
+            advance_epoch(core.store)
     elif change == "owner":
         core.settings.owner_qq_id = "10009"
     elif change == "ledger":
@@ -245,7 +247,7 @@ def test_current_scope_is_revalidated_at_commit(core, change):
     elif change == "writer":
         core.settings.diary_enabled = True
     else:
-        core.store.execute("UPDATE memories SET content='来源发生变化' WHERE memory_id=?", (mid,))
+        core.store.execute("UPDATE memories SET content='来源发生变化' WHERE memory_id=%s", (mid,))
     with pytest.raises(CoreError):
         service(core, approval).apply(body)
     assert not core.store.rows("SELECT * FROM memory_revisions")
@@ -286,7 +288,7 @@ def test_restart_replay_is_idempotent_and_later_privacy_change_does_not_report_s
     approval = grant(core, cfg, text)
     body = captured(core, cfg, approval, text)
     first = service(core, approval).apply(body)
-    store = Store(core.settings.database)
+    store = Store(core.store.database, core.store.state_directory)
     try:
         restarted = StoppedMemoryControl(store, core.settings, core.ledger, core.clock,
             approval, paid_budget.sha(approval.model_dump(mode="json")))
@@ -305,7 +307,8 @@ def test_restart_replay_is_idempotent_and_later_privacy_change_does_not_report_s
         different["capture"]["evidence_sha256"] = "d" * 64
         with pytest.raises(CoreError):
             restarted.apply(different)
-        advance_epoch(store)
+        with store.transaction(control_write=True):
+            advance_epoch(store)
         with pytest.raises(CoreError, match="RESULT_STALE"):
             restarted.apply(body)
     finally:
@@ -313,7 +316,9 @@ def test_restart_replay_is_idempotent_and_later_privacy_change_does_not_report_s
     assert core.store.one("SELECT COUNT(*) n FROM memories")["n"] == 1
 
 
-def test_old_backup_cannot_reuse_an_unconsumed_or_consumed_control_grant(core, tmp_path):
+def test_old_backup_cannot_reuse_an_unconsumed_or_consumed_control_grant(
+    core, tmp_path, empty_database
+):
     cfg = bridge(core)
     text = "/记住这个：项目的代号是青竹七号。"
     approval = grant(core, cfg, text)
@@ -322,19 +327,20 @@ def test_old_backup_cannot_reuse_an_unconsumed_or_consumed_control_grant(core, t
     archive = tmp_path / "before-control.enc"
     backup(core.settings.database, archive, key)
     service(core, approval).apply(body)
-    restored = tmp_path / "restored.db"
-    restore(archive, restored, key, core.settings.erasure_ledger)
-    store = Store(str(restored))
-    try:
+    restored = empty_database
+    restore(archive, restored, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with (
+        Database(restored) as database,
+        closing(Store(database, tmp_path / "restored-state")) as store,
+    ):
         # Keep exactly the original configuration to isolate the restore-generation barrier.
         replay = StoppedMemoryControl(store, core.settings, core.ledger, core.clock,
                                      approval, paid_budget.sha(approval.model_dump(mode="json")))
         with pytest.raises(CoreError, match="RESTORED_REAPPROVAL_REQUIRED"):
             replay.apply(body)
         assert not store.rows("SELECT * FROM memories")
-        assert store.one("SELECT value FROM runtime_meta WHERE key=?", (RESTORED,))
-    finally:
-        store.close()
+        assert store.one("SELECT value FROM runtime_meta WHERE key=%s", (RESTORED,))
 
 
 def test_forget_ledger_survives_commit_failure_and_retry_cannot_claim_success(core, monkeypatch):
@@ -346,8 +352,8 @@ def test_forget_ledger_survives_commit_failure_and_retry_cannot_claim_success(co
     original = core.store.transaction
 
     @contextmanager
-    def fail_commit():
-        with original():
+    def fail_commit(**options):
+        with original(**options):
             yield
             raise OSError("synthetic commit failure after fsynced Ledger append")
 
@@ -356,12 +362,14 @@ def test_forget_ledger_survives_commit_failure_and_retry_cannot_claim_success(co
         with pytest.raises(OSError):
             service(core, approval).apply(body)
     assert len(core.ledger.read()) == 2
-    assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (mid,)) == {
+    assert core.store.one('SELECT status FROM memories WHERE memory_id=%s', (mid,)) == {
         "status": "CONFIRMED"}
     with pytest.raises(CoreError, match="ERASURE_REPLAY_REQUIRED"):
         service(core, approval).apply(body)
     core.ledger.replay(core.store)
-    assert core.store.one("SELECT content FROM memories WHERE memory_id=?", (mid,))["content"] == ""
+    assert core.store.one((
+        'SELECT content FROM memories WHERE memory_id=%s'
+    ), (mid,))["content"] == ""
     with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
         service(core, approval).apply(body)
     assert len(core.ledger.read()) == 2
@@ -372,8 +380,11 @@ def test_forget_ledger_survives_commit_failure_and_retry_cannot_claim_success(co
 @pytest.mark.parametrize("kind", ["worker", "diary-worker", "life-worker",
                                  "executive-worker", "content-worker"])
 def test_control_process_cannot_coexist_with_any_business_worker(core, kind):
-    with stopped_workers(core.settings.database), pytest.raises(CoreError, match="ALREADY_RUNNING"):
-        with single_worker(core.settings.database, kind):
+    with (
+        stopped_workers(core.settings.state_directory),
+        pytest.raises(CoreError, match="ALREADY_RUNNING"),
+    ):
+        with single_worker(core.settings.state_directory, kind):
             pytest.fail("worker acquired the control process's lock")
 
 
@@ -408,7 +419,7 @@ def test_approval_file_is_the_same_canonical_scope_for_core_and_bridge(core, tmp
 def test_confirm_control_and_foreign_signature_domain(core):
     cfg = bridge(core)
     mid = remember(core, cfg)
-    core.store.execute("UPDATE memories SET status='HYPOTHESIS',confidence=0.5 WHERE memory_id=?",
+    core.store.execute("UPDATE memories SET status='HYPOTHESIS',confidence=0.5 WHERE memory_id=%s",
                        (mid,))
     text = f"/确认这一条 {mid}"
     approval = grant(core, cfg, text, operation="confirm", target=mid)
@@ -432,7 +443,7 @@ def test_concurrent_forget_scopes_append_only_one_erasure(core):
 
     def execute(item):
         number, approval = item
-        store = Store(core.settings.database)
+        store = Store(core.store.database, core.store.state_directory)
         try:
             control = StoppedMemoryControl(store, core.settings, core.ledger, core.clock,
                 approval, paid_budget.sha(approval.model_dump(mode="json")))
@@ -461,9 +472,10 @@ def test_control_refuses_inflight_chat_or_cost_without_resetting_it(core, pendin
     else:
         budget.reserve(core.store, core.settings, None, "chat",
                        [{"role": "user", "content": "合成尚未结算的请求"}], core.clock())
-        core.store.execute("UPDATE model_usage SET state=?", (pending,))
+        core.store.execute('UPDATE model_usage SET state=%s', (pending,))
     usage, jobs = (core.store.rows("SELECT * FROM " + table) for table in ("model_usage", "jobs"))
-    with pytest.raises(CoreError, match="INITIAL_WORK_MUST_BE_ZERO"):
+    code = "MEMORY_CONTROL_CUSTODY_CHANGED" if pending == "UNKNOWN" else "INITIAL_WORK_MUST_BE_ZERO"
+    with pytest.raises(CoreError, match=code):
         service(core, approval).apply(body)
     assert core.store.rows("SELECT * FROM model_usage") == usage
     assert core.store.rows("SELECT * FROM jobs") == jobs

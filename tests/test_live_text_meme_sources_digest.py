@@ -8,6 +8,7 @@ import pytest
 import companion_meme_sources
 from companion import live_text
 from companion.contracts import CoreError
+from tests.postgres_fixture import logical_state
 from tests.support.live_text_handoff import initial, journal_bytes
 
 
@@ -26,7 +27,7 @@ def test_shared_source_mutation_invalidates_original_approval(
     baseline = live_text.code_sha256()
     assert approval.core_code_sha256 == baseline
     assert live_text.guard(core.store, core.settings, core.clock)[0] == approval
-    before, journal = list(core.store.db.iterdump()), journal_bytes(core)
+    before, journal = logical_state(core.store), journal_bytes(core)
 
     target = copied / changed
     original = target.read_bytes() if target.exists() else None
@@ -35,7 +36,7 @@ def test_shared_source_mutation_invalidates_original_approval(
     assert live_text.code_sha256() != baseline
     with pytest.raises(CoreError, match="LIVE_TEXT_RUNTIME_CHANGED"):
         live_text.guard(core.store, core.settings, core.clock)
-    assert list(core.store.db.iterdump()) == before and journal_bytes(core) == journal
+    assert logical_state(core.store) == before and journal_bytes(core) == journal
     assert not core.store.rows("SELECT * FROM model_admissions")
     assert not core.store.rows("SELECT * FROM model_usage")
     assert not core.store.rows("SELECT * FROM outbox")

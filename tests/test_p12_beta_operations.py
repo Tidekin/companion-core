@@ -12,6 +12,7 @@ from companion.config import Settings
 from scripts.summarize_beta_feedback import summarize
 from scripts.validate_beta_feedback import validate_record
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.p12_beta_operations import ROOT, bundle, feedback, inspector, write
 
 
@@ -26,7 +27,7 @@ def test_real_inspector_read_and_summary_preserve_database_and_unknown_evidence(
     ingest(core, text="PRIVATE_OWNER_TEXT", at="2026-10-21T16:01:00+00:00")
     run(core.run_once("worker"))
     core.store.execute("UPDATE outbox SET state='SENT'")
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     model_calls = len(core.model.calls)
     report = inspect_context(core.settings, "trace_test_1")
     assert report["trace"]["event_occurred_at_utc"] == "2026-10-21T16:01:00+00:00"
@@ -43,7 +44,7 @@ def test_real_inspector_read_and_summary_preserve_database_and_unknown_evidence(
     assert result["evidence_authenticated"] is result["runtime_authorized"] is False
     assert "PRIVATE_OWNER_TEXT" not in json.dumps(result)
     assert "PRIVATE_REASON_NEVER_PRINT" not in json.dumps(result)
-    assert list(core.store.db.iterdump()) == before and len(core.model.calls) == model_calls
+    assert logical_state(core.store) == before and len(core.model.calls) == model_calls
     core.store.execute("UPDATE events SET redacted=1")
     assert inspect_context(core.settings, "trace_test_1")["trace"]["event_occurred_at_utc"] is None
 

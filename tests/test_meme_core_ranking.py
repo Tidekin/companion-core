@@ -71,7 +71,7 @@ def test_partial_index_batches_32_and_never_reranks_after_later_cache_fill(
     store_rows = c.core.store.rows
 
     def rows(sql, params=()):
-        if sql.startswith("SELECT a.asset_id,a.asset_sha256,src.caption_job_id"):
+        if sql.startswith("SELECT a.asset_id, a.asset_sha256, src.caption_job_id"):
             return [
                 {
                     "asset_id": b.asset_id,
@@ -114,7 +114,7 @@ def test_partial_index_batches_32_and_never_reranks_after_later_cache_fill(
     run(c.service.prepare_offer(c.job))
     assert c.retrieval.check(c.job) == saved and len(calls) == 1
     # A separate synthetic first generation sees hot coverage, with the same tie rule.
-    c.core.store.execute("DELETE FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],))
+    c.core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (OFFER + c.job["event_id"],))
     run(c.service.prepare_offer(c.job))
     hot = c.retrieval.check(c.job)
     assert hot["ranking"]["header"]["mode"] == "SEMANTIC"
@@ -125,7 +125,7 @@ def test_partial_index_batches_32_and_never_reranks_after_later_cache_fill(
     )[:8]
     hot["offer"]["candidates"].reverse()
     c.core.store.execute(
-        "UPDATE runtime_meta SET value=? WHERE key=?", (encode(hot), OFFER + c.job["event_id"])
+        'UPDATE runtime_meta SET value=%s WHERE key=%s', (encode(hot), OFFER + c.job["event_id"])
     )
     with pytest.raises(CoreError, match="MEME_OFFER_BINDING_INVALID"):
         c.retrieval.check(c.job)
@@ -152,7 +152,7 @@ def test_no_intent_empty_proof_cannot_claim_query_inference(runtime_case, monkey
         header["query_vector_sha256"] = index.vector_sha(vector_bytes)
         header["mode"] = "SEMANTIC"
     c.core.store.execute(
-        "UPDATE runtime_meta SET value=? WHERE key=?", (encode(saved), OFFER + c.job["event_id"])
+        'UPDATE runtime_meta SET value=%s WHERE key=%s', (encode(saved), OFFER + c.job["event_id"])
     )
     with pytest.raises(CoreError, match="MEME_OFFER_BINDING_INVALID"):
         c.retrieval.check(c.job)
@@ -177,7 +177,7 @@ def test_unindexed_selected_candidate_records_actual_batch_limit(runtime_case, m
     original_rows = c.core.store.rows
 
     def rows(sql, params=()):
-        if sql.startswith("SELECT a.asset_id,a.asset_sha256,src.caption_job_id"):
+        if sql.startswith("SELECT a.asset_id, a.asset_sha256, src.caption_job_id"):
             return [
                 {
                     "asset_id": b.asset_id,

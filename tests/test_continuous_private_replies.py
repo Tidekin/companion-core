@@ -63,7 +63,10 @@ def test_two_rapid_messages_and_duplicate_share_one_authenticated_connection(cor
             assert not await core.run_once()
             assert await active.pump()
             assert len(calls) == len(sends) == 1 and active.attempts() == {"ACK": 1}
-            jobs = core.store.rows("SELECT state,last_error_code FROM jobs ORDER BY rowid")
+            jobs = core.store.rows(
+                'SELECT state,last_error_code FROM jobs ORDER BY '
+                'record_sequence'
+            )
             assert jobs[0]["state"] == "CANCELLED" and jobs[1]["state"] == "SUCCEEDED"
             assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
             assert any(x["stage"] == "duplicate_suppressed" for x in active.events)
@@ -433,7 +436,7 @@ def test_segment_waits_for_bridge_ack_interval_after_core_result_response_delay(
                 else:
                     assert not await active.pump() and len(sends) == 1
                 remaining = core.store.one(
-                    "SELECT state FROM outbox ORDER BY rowid LIMIT 1 OFFSET 1")
+                    'SELECT state FROM outbox ORDER BY record_sequence LIMIT 1 OFFSET 1')
                 assert remaining["state"] == "CANCELLED"
             assert core.clock.now <= initial + timedelta(seconds=0.7)
             assert not core.store.one("SELECT 1 FROM outbox WHERE state IN ('LEASED','SENDING')")

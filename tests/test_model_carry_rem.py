@@ -113,7 +113,7 @@ def test_rem_keeps_current_input_uncertainty_fenced_until_normal_handoff(
     active, _ = activate(core, policy, revision=6, operation="rem-after-normal-handoff")
     assert active["authority"]["revision"] == 7
     assert core.store.rows("SELECT * FROM model_usage") == before
-    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                           (request_id,))["state"] == "UNKNOWN"
 
 
@@ -131,8 +131,8 @@ def test_http_rem_revision_reaches_independent_native_worker(
         core.authorized_model_test_capture = same, case.key
         core.authorized_model_test_jobs = {}
     source_job = authorized_job(core, number=3 if renew_closed_history else 2)
-    source = core.store.one("SELECT event_id FROM jobs WHERE job_id=?", (source_job,))["event_id"]
-    with core.store.transaction():
+    source = core.store.one('SELECT event_id FROM jobs WHERE job_id=%s', (source_job,))["event_id"]
+    with core.store.transaction(control_write=True):
         core.memory.add(Candidate(subject="user", kind="fact", fact_key="private-rem-material",
             content="synthetic model boundary source",
             evidence_quote="synthetic model boundary source",

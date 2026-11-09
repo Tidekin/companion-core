@@ -14,8 +14,15 @@ from companion_delivery_protocol.authority import AuthorityRef, validate_authori
 
 def _source(store, original, saved, owner_id):
     """Reuse signed input identity checks without requiring current execution authority."""
-    row = store.one("SELECT e.*,c.scope,c.owner_actor_id,c.platform_session_key FROM events e "
-                    "JOIN conversations c USING(conversation_id) WHERE e.event_id=?",
+    row = store.one('SELECT e.event_id AS event_id, e.schema_version AS schema_version, e.source '
+        'AS source, e.source_event_id AS source_event_id, e.conversation_id AS conversation_id, '
+        'e.actor_id AS actor_id, e.event_type AS event_type, e.occurred_at AS occurred_at, '
+        'e.ingested_at AS ingested_at, e.privacy_scope AS privacy_scope, e.body_json AS body_json, '
+        'e.trace_id AS trace_id, e.idempotency_key AS idempotency_key, e.fingerprint AS '
+        'fingerprint, e.redacted AS redacted, e.memory_processed AS memory_processed, '
+        'e.reply_revision AS reply_revision, c.scope AS scope, c.owner_actor_id AS owner_actor_id, '
+        'c.platform_session_key AS platform_session_key FROM events AS e JOIN conversations AS c '
+        'ON e.conversation_id = c.conversation_id WHERE e.event_id = %s',
                     (original.event_id,))
     try:
         body = json.loads(row["body_json"])
@@ -36,16 +43,30 @@ def _source(store, original, saved, owner_id):
 
 
 def _cleared_after(store, created_at):
-    return bool(store.one("SELECT 1 FROM privacy_erasure_ledger WHERE state='COMPLETE' "
-                          "AND erased_at>=? LIMIT 1", (created_at,)))
+    return bool(store.one("SELECT 1 FROM privacy_erasure_ledger WHERE state = 'COMPLETE' AND "
+        'erased_at >= %s LIMIT 1', (created_at,)))
 
 
 def _deliveries(store, rows, jobs, *, erased):
     """Terminal states retain the original native delivery identity and frozen bytes."""
     for row in rows:
-        saved = store.one("SELECT value FROM runtime_meta WHERE key=?",
+        saved = store.one('SELECT value FROM runtime_meta WHERE key = %s',
                           ("owner_delivery:" + row["message_id"],))
-        original = store.one("SELECT * FROM outbox WHERE message_id=?", (row["message_id"],))
+        original = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+            'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+            'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+            'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+            'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+            'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+            'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+            'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+            'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at '
+            'AS next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+            'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+            'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+            'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+            'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id '
+            '= %s', (row["message_id"],))
         try:
             material = json.loads(saved["value"]) if saved else {}
             job = jobs.get(material.get("job_id"))
@@ -74,7 +95,7 @@ def read(store, settings, capture, *, model_requests=None):
 
 
 def _read(store, settings, capture, *, model_requests=None):
-    with nullcontext() if store.db.in_transaction else store.transaction():
+    with nullcontext() if store.in_transaction else store.transaction():
         native_poke = isinstance(capture, OwnerPokeCapture)
         if native_poke:
             original, _, source = poke.verify_original(
@@ -84,13 +105,13 @@ def _read(store, settings, capture, *, model_requests=None):
             original, view = owner_input.verify(store, settings, capture.model_dump(mode="json"))
             input_hash = original.input_sha256
         event_id = original.event_id
-        erased = bool(store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+        erased = bool(store.one('SELECT 1 FROM runtime_meta WHERE key = %s',
                                  ("erased_event:" + event_id,)))
-        event = store.one("SELECT event_id,redacted,fingerprint,reply_revision "
-                          "FROM events WHERE event_id=?",
+        event = store.one('SELECT event_id, redacted, fingerprint, reply_revision FROM events '
+            'WHERE event_id = %s',
                           (event_id,))
         revision = event.pop("reply_revision") if event else 0
-        saved = store.one("SELECT value FROM runtime_meta WHERE key=?",
+        saved = store.one('SELECT value FROM runtime_meta WHERE key = %s',
                           ((poke.INPUT if native_poke else owner_input.INPUT) + event_id,))
         head = owner_authority._latest(store)
         ref = original.authority
@@ -110,18 +131,18 @@ def _read(store, settings, capture, *, model_requests=None):
         if not native_poke and event and not erased:
             _source(store, original, saved_capture, view.policy.owner_qq_id)
         maximum = wire.MAX_INPUT_DELIVERIES
-        jobs = store.rows("SELECT j.job_id,j.kind,j.state,j.authority_json FROM jobs j "
-            "WHERE j.event_id=? OR EXISTS (SELECT 1 FROM job_sources s "
-            "WHERE s.job_id=j.job_id AND s.event_id=?) ORDER BY j.job_id LIMIT ?",
+        jobs = store.rows('SELECT j.job_id, j.kind, j.state, j.authority_json FROM jobs AS j WHERE '
+            'j.event_id = %s OR EXISTS(SELECT 1 FROM job_sources AS s WHERE s.job_id = j.job_id '
+            'AND s.event_id = %s) ORDER BY j.job_id NULLS FIRST LIMIT %s',
             (event_id, event_id, maximum + 1))
         job_map = {job["job_id"]: job for job in jobs}
         ids = list(job_map)
-        placeholders = ",".join("?" for _ in ids)
+        placeholders = ",".join('%s' for _ in ids)
         models = store.rows("SELECT m.request_id,m.state,m.job_id,a.request_id AS admission,"
             "a.authority_json,a.logical_request_id FROM model_usage m "
             "LEFT JOIN model_admissions a USING(request_id) "
             f"WHERE m.job_id IN ({placeholders}) OR a.logical_request_id IN ({placeholders}) "
-            "ORDER BY m.request_id LIMIT ?", (*ids, *ids, maximum + 1)) if ids else []
+            "ORDER BY m.request_id LIMIT %s", (*ids, *ids, maximum + 1)) if ids else []
         for model in models:
             job = job_map.get(model["job_id"])
             try:
@@ -139,47 +160,51 @@ def _read(store, settings, capture, *, model_requests=None):
             model_requests.extend(models)
         # Frozen responsibility survives a changed/null origin pointer. Inspect only
         # source-linked identity metadata; _deliveries checks the selected original records.
-        deliveries = store.rows("SELECT o.message_id,o.state,o.attempt_count,o.authority_json "
-            "FROM outbox o LEFT JOIN runtime_meta m ON m.key='owner_delivery:' || o.message_id "
-            "WHERE o.origin_event_id=? OR CASE WHEN json_valid(m.value) THEN "
-            "json_extract(m.value,'$.event_id')=? OR "
-            f"json_extract(m.value,'$.job_id') IN ({placeholders or 'NULL'}) ELSE 0 END "
-            "ORDER BY o.message_id LIMIT ?", (event_id, event_id, *ids, maximum + 1))
+        deliveries = store.rows((
+            'SELECT o.message_id,o.state,o.attempt_count,'
+            'o.authority_json FROM outbox o LEFT JOIN runtime_meta '
+            "m ON m.key='owner_delivery:' || o.message_id WHERE "
+            'o.origin_event_id=%s OR CASE WHEN (m.value IS JSON) '
+            'THEN (CASE WHEN m.value IS JSON THEN '
+            "(m.value::json#>>'{event_id}') END)=%s OR (CASE WHEN "
+            "m.value IS JSON THEN (m.value::json#>>'{job_id}') END) "
+            'IN ('
+            f"{placeholders or 'NULL'}"
+            ') ELSE false END ORDER BY o.message_id LIMIT %s'
+        ), (event_id, event_id, *ids, maximum + 1))
         _deliveries(store, deliveries, job_map, erased=erased)
         # Native link discovery does not dispatch a read. Retain the row and its
         # identity while distinguishing pristine declarations from admitted work.
-        reads = store.rows("SELECT item_id AS id,CASE WHEN ? AND kind='link' "
-            "AND state='WAITING' AND redacted=0 AND read_request_id IS NULL "
-            "AND lease_token IS NULL AND lease_until IS NULL AND started_at IS NULL "
-            "AND reserved_bytes=0 AND usage_request_id IS NULL AND source_event_id IS NULL "
-            "AND output_event_id IS NULL AND media_sha256='' AND fingerprint='' "
-            "AND error_code IS NULL THEN 'DISCOVERED' ELSE state END AS state "
-            "FROM content_items WHERE owner_event_id=? ORDER BY item_id LIMIT ?",
+        reads = store.rows("SELECT item_id AS id, CASE WHEN %s AND kind = 'link' AND state = "
+            "'WAITING' AND redacted = 0 AND read_request_id IS NULL AND lease_token IS NULL AND "
+            'lease_until IS NULL AND started_at IS NULL AND reserved_bytes = 0 AND '
+            'usage_request_id IS NULL AND source_event_id IS NULL AND output_event_id IS NULL AND '
+            "media_sha256 = '' AND fingerprint = '' AND error_code IS NULL THEN 'DISCOVERED' ELSE "
+            'state END AS state FROM content_items WHERE owner_event_id = %s ORDER BY item_id '
+            'NULLS FIRST LIMIT %s',
             (settings.owner_runtime.mode == "ENABLED", event_id, maximum + 1))
-        reads.extend(store.rows("SELECT request_id AS id,state FROM exploration_requests WHERE "
-            "request_id IN (SELECT read_request_id FROM content_items WHERE owner_event_id=?) "
-            "ORDER BY request_id LIMIT ?", (event_id, maximum + 1)))
-        tools = store.rows("SELECT t.task_id,t.state FROM tool_tasks t JOIN tool_evidence e "
-            "USING(task_id) WHERE e.event_id=? ORDER BY t.task_id LIMIT ?",
+        reads.extend(store.rows('SELECT request_id AS id, state FROM exploration_requests WHERE '
+            'request_id IN (SELECT read_request_id FROM content_items WHERE owner_event_id = %s) '
+            'ORDER BY request_id NULLS FIRST LIMIT %s', (event_id, maximum + 1)))
+        tools = store.rows('SELECT t.task_id, t.state FROM tool_tasks AS t JOIN tool_evidence AS e '
+            'USING (task_id) WHERE e.event_id = %s ORDER BY t.task_id NULLS FIRST LIMIT %s',
             (event_id, maximum + 1))
         # UNKNOWN retains the outcome and liability. Only a token-bound cleanup
         # receipt, retired lease and idle node prove that its execution has ended.
-        voices = store.rows("SELECT v.job_id AS id,v.state,v.cleanup_state,"
-            "v.state IN ('QUEUED','LEASED','RUNNING','UNKNOWN') AND NOT ("
-            "v.state='UNKNOWN' AND v.content_retired=1 AND v.cleanup_state='CONFIRMED' "
-            "AND v.cleanup_confirmed_at IS NOT NULL AND v.stop_token_sha256 IS NOT NULL "
-            "AND v.lease_json IS NULL AND v.lease_token_sha256 IS NULL AND EXISTS ("
-            "SELECT 1 FROM voice_node_state n WHERE n.node_id=v.node_id "
-            "AND n.resource_state='READY' AND n.active_job_id IS NULL "
-            "AND n.claim_job_id IS NULL AND n.recovery_required=0 AND n.last_error_code IS NULL "
-            "AND (NOT EXISTS (SELECT 1 FROM runtime_meta WHERE key='voice_restore_required') "
-            "OR n.recovered_incarnation=(SELECT value FROM runtime_meta "
-            "WHERE key='voice_incarnation')))) "
-            "OR v.cleanup_state='PENDING' AS active FROM voice_jobs v "
-            "WHERE v.event_id=? ORDER BY v.job_id LIMIT ?", (event_id, maximum + 1))
+        voices = store.rows('SELECT v.job_id AS id, v.state, v.cleanup_state, v.state IN '
+            "('QUEUED', 'LEASED', 'RUNNING', 'UNKNOWN') AND NOT (v.state = 'UNKNOWN' AND "
+            "v.content_retired = 1 AND v.cleanup_state = 'CONFIRMED' AND NOT "
+            'v.cleanup_confirmed_at IS NULL AND NOT v.stop_token_sha256 IS NULL AND v.lease_json '
+            'IS NULL AND v.lease_token_sha256 IS NULL AND EXISTS(SELECT 1 FROM voice_node_state AS '
+            "n WHERE n.node_id = v.node_id AND n.resource_state = 'READY' AND n.active_job_id IS "
+            'NULL AND n.claim_job_id IS NULL AND n.recovery_required = 0 AND n.last_error_code IS '
+            "NULL AND (NOT EXISTS(SELECT 1 FROM runtime_meta WHERE key = 'voice_restore_required') "
+            'OR n.recovered_incarnation = (SELECT value FROM runtime_meta WHERE key = '
+            "'voice_incarnation')))) OR v.cleanup_state = 'PENDING' AS active FROM voice_jobs AS v "
+            'WHERE v.event_id = %s ORDER BY v.job_id NULLS FIRST LIMIT %s', (event_id, maximum + 1))
         reads.extend({**item, "active": bool(item["active"])} for item in voices)
-        videos = store.rows("SELECT item_id AS id,state FROM bili_video_items "
-            "WHERE owner_event_id=? ORDER BY item_id LIMIT ?", (event_id, maximum + 1))
+        videos = store.rows('SELECT item_id AS id, state FROM bili_video_items WHERE '
+            'owner_event_id = %s ORDER BY item_id NULLS FIRST LIMIT %s', (event_id, maximum + 1))
         reads.extend({**item, "active": item["state"] in {
             "DECLARED", "PREPARED", "ANALYZED", "UNKNOWN"}} for item in videos)
         complete = all(len(items) <= maximum for items in (jobs, models, deliveries, reads, tools))
@@ -187,9 +212,9 @@ def _read(store, settings, capture, *, model_requests=None):
         # exploration request, which `reads` already includes. Judge it there; the digest
         # keeps the stored rows unchanged.
         delegated = {row["id"] for row in store.rows(
-            "SELECT item_id AS id FROM content_items WHERE owner_event_id=? AND kind='link' "
-            "AND state='WAITING' AND read_request_id IN (SELECT request_id "
-            "FROM exploration_requests) LIMIT ?", (event_id, maximum + 1))}
+            "SELECT item_id AS id FROM content_items WHERE owner_event_id = %s AND kind = 'link' "
+            "AND state = 'WAITING' AND read_request_id IN (SELECT request_id FROM "
+            'exploration_requests) LIMIT %s', (event_id, maximum + 1))}
         unsettled_work = any(item["state"] not in wire.JOB_TERMINAL
                              for item in jobs + tools) or any(
             item["id"] not in delegated and item.get("active", item["state"] in {
@@ -197,8 +222,8 @@ def _read(store, settings, capture, *, model_requests=None):
                 for item in reads)
         unsettled_model = any(item["state"] != "SETTLED" for item in models)
         unsettled_delivery = any(item["state"] not in wire.DELIVERY_TERMINAL for item in deliveries)
-        primary = store.rows("SELECT job_id,state,authority_json FROM jobs "
-            "WHERE event_id=? AND kind=? LIMIT 2", (event_id, "poke" if native_poke else "chat"))
+        primary = store.rows('SELECT job_id, state, authority_json FROM jobs WHERE event_id = %s '
+            'AND kind = %s LIMIT 2', (event_id, "poke" if native_poke else "chat"))
         bound = bool(len(primary) == 1
                      and json.loads(primary[0]["authority_json"]) == original.authority)
         suppressed = bool(native_poke and event and saved and not jobs and not deliveries)

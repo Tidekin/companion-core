@@ -2,7 +2,6 @@
 
 import asyncio
 import importlib
-import sqlite3
 from functools import partial
 
 import httpx
@@ -18,12 +17,13 @@ from companion.worker_wakeup import Wakeup
 
 
 @pytest.fixture
-def worker_settings(tmp_path):
+def worker_settings(tmp_path, empty_database):
     settings = Settings(
         owner_qq_id="10001",
         bot_qq_id="10002",
         bridge_token="test-token-" * 4,
-        database=str(tmp_path / "core.db"),
+        database=empty_database,
+        state_directory=str(tmp_path / "state"),
         erasure_ledger=str(tmp_path / "privacy.jsonl"),
         memory_enabled=True,
     )
@@ -99,7 +99,7 @@ def test_nonsemantic_worker_enters_own_loop_and_closes_store(
     assert len(worked) == 1
     assert unavailable_semantics == []
     assert len(opened_stores) == 1
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+    with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
         opened_stores[0].one("SELECT 1")
 
 
@@ -122,7 +122,7 @@ def test_shared_bootstrap_rejects_identity_or_ledger_mismatch_and_closes_store(
     assert unavailable_semantics == []
     assert len(opened_stores) == 2
     for store in opened_stores:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
             store.one("SELECT 1")
 
 
@@ -138,7 +138,7 @@ def test_semantic_worker_still_fails_closed_and_closes_store(
         asyncio.run(getattr(module, entry)(worker_settings))
     assert len(unavailable_semantics) == 1
     assert len(opened_stores) == 1
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+    with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
         opened_stores[0].one("SELECT 1")
 
 
@@ -182,17 +182,17 @@ def test_content_worker_finishes_queued_article_images_without_semantic_startup(
     assert len(calls) == 1
     assert calls[0].method == "POST"
     assert len(opened_stores) == 1
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+    with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
         opened_stores[0].one("SELECT 1")
     with Runtime(settings, clock) as runtime:
         image = runtime.store.one("SELECT * FROM content_items WHERE kind='link_image'")
         assert image["state"] == "SUCCEEDED"
         assert (image["owner_event_id"], image["source_event_id"]) == (owner_id, article_id)
         assert runtime.store.one(
-            "SELECT result_status FROM observations WHERE event_id=?", (image["output_event_id"],)
+            'SELECT result_status FROM observations WHERE event_id=%s', (image["output_event_id"],)
         ) == {"result_status": "FETCHED"}
         assert runtime.store.one(
-            "SELECT state FROM model_usage WHERE request_id=?", (image["usage_request_id"],)
+            'SELECT state FROM model_usage WHERE request_id=%s', (image["usage_request_id"],)
         ) == {"state": "SETTLED"}
 
 
@@ -223,7 +223,7 @@ def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_ret
         asyncio.run(service.run_once())
     image = core.store.one("SELECT * FROM content_items WHERE kind='link_image'")
     usage = core.store.one(
-        "SELECT * FROM model_usage WHERE request_id=?", (image["usage_request_id"],),
+        'SELECT * FROM model_usage WHERE request_id=%s', (image["usage_request_id"],),
     )
     assert len(fetches) == 1 and vision.calls == []
     assert usage["state"] == "RESERVED" and usage["billed_micro_usd"] > 0
@@ -249,11 +249,11 @@ def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_ret
     assert fetches == provider_calls == unavailable_semantics == []
     assert len(opened_stores) == 2
     for store in opened_stores:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
             store.one("SELECT 1")
     with Runtime(settings, clock) as runtime:
         recovered = runtime.store.one(
-            "SELECT * FROM content_items WHERE item_id=?", (image["item_id"],),
+            'SELECT * FROM content_items WHERE item_id=%s', (image["item_id"],),
         )
         assert recovered["state"] == "UNKNOWN"
         assert recovered["error_code"] == "CONTENT_PROCESSOR_LOST"
@@ -261,7 +261,7 @@ def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_ret
         assert (recovered["owner_event_id"], recovered["source_event_id"]) == (owner_id, article_id)
         assert recovered["reserved_bytes"] == image["reserved_bytes"]
         assert runtime.store.one(
-            "SELECT * FROM model_usage WHERE request_id=?", (image["usage_request_id"],),
+            'SELECT * FROM model_usage WHERE request_id=%s', (image["usage_request_id"],),
         ) == {**usage, "state": "UNKNOWN"}
 
 
@@ -276,5 +276,5 @@ def test_init_bootstraps_identity_without_semantic_index(
     assert "identity and erasure ledger initialized" in capsys.readouterr().out
     assert unavailable_semantics == []
     assert len(opened_stores) == 1
-    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+    with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
         opened_stores[0].one("SELECT 1")

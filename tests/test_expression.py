@@ -39,12 +39,12 @@ def queued(core, number=1, text="做到了", reply="真不错。⬡happy⬡"):
     ingest(core, number, text)
     event_id = f"evt_test_{number}"
     conversation = core.store.one(
-        "SELECT conversation_id FROM events WHERE event_id=?", (event_id,)
+        'SELECT conversation_id FROM events WHERE event_id=%s', (event_id,)
     )
     message_id = engine(core).enqueue(
         event_id, conversation["conversation_id"], reply, core.clock()
     )
-    return core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    return core.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
 
 
 def picture(root, name="happy/a.png", size=(32, 24), color="green"):
@@ -165,12 +165,13 @@ def test_only_direct_meme_requests_bypass_spontaneous_sampling(core, monkeypatch
 def test_direct_meme_request_requires_current_owner_private_source(core, change):
     ingest(core, text="请发一张表情包")
     if change == "control":
-        core.store.execute("UPDATE events SET body_json=json_set(body_json,'$.control_command',1)")
+        core.store.execute("UPDATE events SET body_json="
+                           "jsonb_set(body_json::jsonb,'{control_command}','1')::text")
     else:
         field, value = {"source": ("source", "system.activity"),
                         "actor": ("actor_id", "system"), "privacy": ("privacy_scope", "public"),
                         "redacted": ("redacted", 1)}[change]
-        core.store.execute("UPDATE events SET " + field + "=?", (value,))
+        core.store.execute("UPDATE events SET " + field + "=%s", (value,))
     core.settings.expression_selection_probability = 0
     assert not engine(core)._selection_allowed("evt_test_1", "meme:evt_test_1")
 
@@ -179,12 +180,12 @@ def test_outbox_cooldown_and_repeat_window_survive_restart_without_starvation(co
     first = queued(core)
     # Pending and uncertain sends count too: neither can establish non-delivery.
     core.store.execute(
-        "UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=?", (first["message_id"],)
+        "UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=%s", (first["message_id"],)
     )
     second = queued(core, 2, reply="另一个好消息。⬡like⬡")
     assert "image" not in json.loads(second["content_json"])
     core.clock.advance(1801)
-    reopened = Store(core.settings.database)
+    reopened = Store(core.store.database, core.settings.state_directory)
     try:
         restarted = ExpressionEngine(reopened, engine(core).settings, core.clock)
         assert restarted.intent("evt_test_2", "真不错。⬡happy⬡").image is None
@@ -205,28 +206,32 @@ def test_many_text_replies_do_not_evict_active_image_cooldown(core):
 
 @pytest.mark.parametrize("sending", [False, True])
 def test_expression_erasure_and_old_backup_replay_clear_text_and_media_intent(
-    core, tmp_path, sending
+    empty_database, core, tmp_path, sending
 ):
     row = queued(core)
     if sending:
         item = lease(core)[0]
         begin_send(core.store, item["message_id"], item["lease_token"], core.clock())
-    key, archive, dest = Fernet.generate_key(), tmp_path / "before.enc", tmp_path / "restored.db"
+    key, archive = Fernet.generate_key(), tmp_path / "before.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         for instance in (core, restored):
             stored = instance.store.one(
-                "SELECT * FROM outbox WHERE message_id=?", (row["message_id"],)
+                'SELECT * FROM outbox WHERE message_id=%s', (row["message_id"],)
             )
             assert stored["content_json"] == "{}" and stored["content_sha256"] == ""
             assert stored["state"] == ("DELIVERY_UNCERTAIN" if sending else "CANCELLED")
             assert engine(instance).intent("evt_test_1", "文字。⬡happy⬡").image is None
     finally:
-        restored.store.close()
+        restored.close()
     with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
         engine(core).enqueue(
             "evt_test_1", row["conversation_id"], "文字", core.clock(), key="fresh"
@@ -408,7 +413,7 @@ def test_erasure_after_image_preparation_prevents_any_platform_send(core, tmp_pa
     sent = []
 
     def build(text, image):
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
         return text, image
 
@@ -449,12 +454,14 @@ def test_core_chat_creates_expression_intent_in_normal_outbox(core):
     }
 
 
-def test_expression_categories_from_environment_validate(monkeypatch, tmp_path):
+def test_expression_categories_from_environment_validate(core, monkeypatch, tmp_path):
     from pydantic import ValidationError
 
     from companion.config import Settings
 
     monkeypatch.setenv("COMPANION_CONFIG", str(tmp_path / "absent.toml"))
+    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database.get_secret_value())
+    monkeypatch.setenv("COMPANION_STATE_DIRECTORY", core.settings.state_directory)
     monkeypatch.setenv("COMPANION_OWNER_QQ_ID", "10001")
     monkeypatch.setenv("COMPANION_BOT_QQ_ID", "10002")
     monkeypatch.setenv("COMPANION_BRIDGE_TOKEN", "config-test-token-" * 3)

@@ -2,17 +2,23 @@
 
 import asyncio
 import json
+import os
 import re
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from companion.budget import token_upper_bound
-from companion.config import Settings
-from companion.contracts import InboundEvent
-from companion.core import Core
-from companion.model import ModelResponse
-from companion.store import encode, migrate
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from companion.budget import token_upper_bound  # noqa: E402
+from companion.config import Settings  # noqa: E402
+from companion.contracts import InboundEvent  # noqa: E402
+from companion.core import Core  # noqa: E402
+from companion.model import ModelResponse  # noqa: E402
+from companion.store import encode, migrate  # noqa: E402
+from tests.postgres_fixture import isolated_database  # noqa: E402
 
 
 class FixtureModel:
@@ -51,14 +57,22 @@ class FixtureModel:
         return ModelResponse(text, estimate, len(text.encode()), 0)
 
 
-async def replay():
-    with tempfile.TemporaryDirectory(dir=".local", prefix="replay-") as directory:
+async def replay(*, scratch=None):
+    scratch = Path(scratch) if scratch is not None else ROOT / ".local/test-temp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    with isolated_database() as database, tempfile.TemporaryDirectory(
+        dir=scratch, prefix="replay-",
+    ) as directory:
         model = FixtureModel()
         cfg = Settings(
             owner_qq_id="10001",
             bot_qq_id="10002",
             bridge_token="fixture-token-" * 3,
-            database=directory + "/data.db",
+            database=database,
+            state_directory=directory + "/state",
+            embedding_cache_dir=os.environ.get(
+                "COMPANION_TEST_EMBEDDING_CACHE", str(ROOT / "data/embedding-cache"),
+            ),
             erasure_ledger=directory + "/privacy.jsonl",
             memory_enabled=True,
             proactive_enabled=False,
@@ -110,7 +124,7 @@ async def replay():
                 "max_chat_input_token_upper_bound": max(model.chat_bounds),
                 "context_soft_bound": cfg.context_soft_tokens,
                 "public_actions": core.store.one(
-                    "SELECT COUNT(*) AS n FROM outbox WHERE action_type LIKE 'qzone.%'"
+                    "SELECT COUNT(*) AS n FROM outbox WHERE action_type LIKE %s", ("qzone.%",)
                 )["n"],
                 "real_model_extraction_accuracy": "not measured",
                 "real_model_hallucination_rate": "not measured",
@@ -118,7 +132,7 @@ async def replay():
             assert extracted == 30 and recall == 30 and report["public_actions"] == 0, report
             return report
         finally:
-            core.store.close()
+            core.close()
 
 
 if __name__ == "__main__":

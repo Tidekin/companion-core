@@ -8,6 +8,6 @@ def seed(core, count=4):
 
 
 def withdraw(core, event_id="evt_test_1"):
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
     assert core.diary.get_day(DAY, core.settings.owner_qq_id) is None

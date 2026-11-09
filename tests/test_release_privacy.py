@@ -26,7 +26,7 @@ from tests.support.observation_capture import enable_observations, observation
 @pytest.mark.parametrize("day_alias", ["20261018", "2026-W42-7"])
 @pytest.mark.parametrize("operation", ["read", "correct"])
 def test_historical_diary_date_aliases_are_erased_live_and_after_restore(
-    core, tmp_path, day_alias, operation
+    empty_database, core, tmp_path, day_alias, operation
 ):
     seed_day(core)
     generate(core)
@@ -44,15 +44,19 @@ def test_historical_diary_date_aliases_are_erased_live_and_after_restore(
         "diary_timezone": core.settings.timezone,
     }
     core.store.execute(
-        "UPDATE events SET body_json=? WHERE event_id='evt_test_10'", (encode(legacy_body),)
+        "UPDATE events SET body_json=%s WHERE event_id='evt_test_10'", (encode(legacy_body),)
     )
-    archive, destination = tmp_path / "before-erasure.enc", tmp_path / "restored.db"
+    archive = tmp_path / "before-erasure.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     core.diary.forget(DAY, "10001")
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         copies = {}
@@ -71,7 +75,7 @@ def test_historical_diary_date_aliases_are_erased_live_and_after_restore(
             for label in ("live", "restored")
         }
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def prepare_idle_conversation(core, text="今天计划读一本小说"):
@@ -131,10 +135,10 @@ def test_life_pause_during_activity_model_prevents_new_proactive_output(core):
                                "WHERE scenario='activity'")
         assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
         assert usage[0]["billed_micro_usd"] > 0
-        assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job,)) == {
+        assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job,)) == {
             "state": "CANCELLED"}
         assert not core.store.one(
-            "SELECT 1 FROM life_activity_results WHERE job_id=? AND text<>''", (job,))
+            "SELECT 1 FROM life_activity_results WHERE job_id=%s AND text<>''", (job,))
         assert not core.store.one(
             "SELECT 1 FROM outbox WHERE action_type='qq.private.proactive' "
             "AND state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
@@ -271,14 +275,14 @@ def test_diary_read_expires_older_ancestors_without_background_worker(core):
     core.clock.advance(13 * 3600)
     cutoff = after(core.clock(), -2 * 86400)
     assert (
-        core.store.one("SELECT ingested_at FROM events WHERE event_id=?", (observed,))[
+        core.store.one('SELECT ingested_at FROM events WHERE event_id=%s', (observed,))[
             "ingested_at"
         ]
         > cutoff
     )
     assert core.diary.get_day(day, "10001") is None
     assert core.store.one("SELECT redacted FROM events WHERE event_id='evt_test_1'")["redacted"]
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (observed,))["redacted"]
+    assert core.store.one('SELECT redacted FROM events WHERE event_id=%s', (observed,))["redacted"]
 
 
 def test_diary_generation_discards_result_when_ancestor_expires_during_model(core):
@@ -305,12 +309,14 @@ def seed_completed_legacy_diary_erasure(core):
         ingest(core, number, f"/读日记 {day}")
         assert run(core.run_once())
     core.store.execute(
-        "UPDATE outbox SET state='SENT',sent_at=? WHERE origin_event_id IN "
-        "('evt_test_20','evt_test_21')",
+        (
+            "UPDATE outbox SET state='SENT',sent_at=%s WHERE origin_event_id "
+            "IN ('evt_test_20','evt_test_21')"
+        ),
         (core.clock(),),
     )
     core.store.execute(
-        "UPDATE events SET body_json=? WHERE event_id='evt_test_20'",
+        "UPDATE events SET body_json=%s WHERE event_id='evt_test_20'",
         (
             encode(
                 {
@@ -327,16 +333,16 @@ def seed_completed_legacy_diary_erasure(core):
     budget.settle(core.store, core.settings, request_id)
     independent = core.diary.get_day(other_day, "10001")["entry_id"]
     unchanged = {
-        "entry": core.store.one("SELECT * FROM diary_entries WHERE entry_id=?", (independent,)),
+        "entry": core.store.one('SELECT * FROM diary_entries WHERE entry_id=%s', (independent,)),
         "evidence": core.store.rows(
-            "SELECT * FROM diary_evidence WHERE entry_id=? ORDER BY source_id", (independent,)
+            'SELECT * FROM diary_evidence WHERE entry_id=%s ORDER BY source_id', (independent,)
         ),
         "revisions": core.store.rows(
-            "SELECT * FROM diary_revisions WHERE entry_id=? ORDER BY revision_id", (independent,)
+            'SELECT * FROM diary_revisions WHERE entry_id=%s ORDER BY revision_id', (independent,)
         ),
         "event": core.store.one("SELECT * FROM events WHERE event_id='evt_test_21'"),
         "reply": core.store.one("SELECT * FROM outbox WHERE origin_event_id='evt_test_21'"),
-        "usage": core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,)),
+        "usage": core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,)),
     }
     assert unchanged["usage"]["state"] == "UNKNOWN"
     assert unchanged["usage"]["billed_micro_usd"] > 0
@@ -353,29 +359,33 @@ def seed_completed_legacy_diary_erasure(core):
     }
     with core.ledger.path.open("a", encoding="utf-8") as stream:
         stream.write(encode(record) + "\n")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         target = core.store.one(
-            "SELECT entry_id FROM diary_entries WHERE local_date=?", (DAY.isoformat(),)
+            'SELECT entry_id FROM diary_entries WHERE local_date=%s', (DAY.isoformat(),)
         )["entry_id"]
         core.store.execute(
-            "UPDATE diary_entries SET title='',body_md='',source_set_sha256='',status='DELETED' "
-            "WHERE entry_id=?",
+            (
+                'UPDATE diary_entries SET '
+                "title='',body_md='',source_set_sha256='',status='DELETED' "
+                'WHERE entry_id=%s'
+            ),
             (target,),
         )
         for table in ("diary_evidence", "diary_revisions"):
-            core.store.execute(f"DELETE FROM {table} WHERE entry_id=?", (target,))
+            core.store.execute(f"DELETE FROM {table} WHERE entry_id=%s", (target,))
         core.store.execute(
-            "UPDATE diary_runs SET state='CANCELLED',lease_token=NULL,"
-            "last_error_code='DIARY_DELETED' "
-            "WHERE local_date=?",
+            (
+                "UPDATE diary_runs SET state='CANCELLED',lease_token=NULL,las"
+                "t_error_code='DIARY_DELETED' WHERE local_date=%s"
+            ),
             (DAY.isoformat(),),
         )
         core.store.execute(
-            "INSERT INTO runtime_meta VALUES (?,?)",
+            'INSERT INTO runtime_meta (key,value) VALUES (%s,%s)',
             (f"diary_deleted:{core.settings.timezone}:{DAY}", record["erasure_id"]),
         )
         core.store.execute(
-            "INSERT INTO privacy_erasure_ledger VALUES (?,?,?,?,?,'COMPLETE')",
+            "INSERT INTO privacy_erasure_ledger VALUES (%s,%s,%s,%s,%s,'COMPLETE')",
             (record["erasure_id"], "diary", record["memory_id"], record["at"], record["seq"]),
         )
         advance_epoch(core.store)
@@ -404,18 +414,18 @@ def assert_legacy_copy_repaired_without_collateral_changes(instance, unchanged):
     ) == {"content_json": "{}", "content_sha256": ""}
     entry_id = unchanged["entry"]["entry_id"]
     assert (
-        instance.store.one("SELECT * FROM diary_entries WHERE entry_id=?", (entry_id,))
+        instance.store.one('SELECT * FROM diary_entries WHERE entry_id=%s', (entry_id,))
         == unchanged["entry"]
     )
     assert (
         instance.store.rows(
-            "SELECT * FROM diary_evidence WHERE entry_id=? ORDER BY source_id", (entry_id,)
+            'SELECT * FROM diary_evidence WHERE entry_id=%s ORDER BY source_id', (entry_id,)
         )
         == unchanged["evidence"]
     )
     assert (
         instance.store.rows(
-            "SELECT * FROM diary_revisions WHERE entry_id=? ORDER BY revision_id", (entry_id,)
+            'SELECT * FROM diary_revisions WHERE entry_id=%s ORDER BY revision_id', (entry_id,)
         )
         == unchanged["revisions"]
     )
@@ -429,14 +439,16 @@ def assert_legacy_copy_repaired_without_collateral_changes(instance, unchanged):
     )
     assert (
         instance.store.one(
-            "SELECT * FROM model_usage WHERE request_id=?", (unchanged["usage"]["request_id"],)
+            'SELECT * FROM model_usage WHERE request_id=%s', (unchanged["usage"]["request_id"],)
         )
         == unchanged["usage"]
     )
 
 
 @pytest.mark.parametrize("entrypoint", ["startup", "repeat_forget", "post_delete_backup"])
-def test_already_completed_legacy_erasure_repairs_copies_idempotently(core, tmp_path, entrypoint):
+def test_already_completed_legacy_erasure_repairs_copies_idempotently(
+    empty_database, core, tmp_path, entrypoint,
+):
     unchanged = seed_completed_legacy_diary_erasure(core)
     ledger_bytes = core.ledger.path.read_bytes()
     instance = core
@@ -446,12 +458,16 @@ def test_already_completed_legacy_erasure_repairs_copies_idempotently(core, tmp_
         elif entrypoint == "repeat_forget":
             core.diary.forget(DAY, "10001")
         else:
-            archive, destination = tmp_path / "after-complete.enc", tmp_path / "recovered.db"
+            archive = tmp_path / "after-complete.enc"
+            restored_state = tmp_path / "restored-state"
             key = Fernet.generate_key()
             backup(core.settings.database, archive, key)
-            restore(archive, destination, key, core.settings.erasure_ledger)
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
             instance = Core(
-                core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+                core.settings.model_copy(update={
+                    "database": empty_database, "state_directory": str(restored_state),
+                }), clock=core.clock
             )
         assert_legacy_copy_repaired_without_collateral_changes(instance, unchanged)
         repaired_epoch = instance.store.one(
@@ -467,18 +483,20 @@ def test_already_completed_legacy_erasure_repairs_copies_idempotently(core, tmp_
         assert core.ledger.path.read_bytes() == ledger_bytes
     finally:
         if instance is not core:
-            instance.store.close()
+            instance.close()
 
 
 @pytest.mark.parametrize("command", ["/读日记", "/日记列表"])
-def test_legacy_diary_repair_preserves_newer_independent_readbacks(core, tmp_path, command):
+def test_legacy_diary_repair_preserves_newer_independent_readbacks(
+    empty_database, core, tmp_path, command,
+):
     seed_completed_legacy_diary_erasure(core)
     core.ledger.replay(core.store)
     core.clock.advance(60)
     ingest(core, 22, command)
     assert run(core.run_once())
     core.store.execute(
-        "UPDATE outbox SET state='SENT',sent_at=? WHERE origin_event_id='evt_test_22'",
+        "UPDATE outbox SET state='SENT',sent_at=%s WHERE origin_event_id='evt_test_22'",
         (core.clock(),),
     )
     expected_event = core.store.one("SELECT * FROM events WHERE event_id='evt_test_22'")
@@ -497,14 +515,18 @@ def test_legacy_diary_repair_preserves_newer_independent_readbacks(core, tmp_pat
     assert_newer_copy_unchanged(core.store)
     core.diary.forget(DAY, "10001")
     assert_newer_copy_unchanged(core.store)
-    archive, destination = tmp_path / "newer-readback.enc", tmp_path / "newer-restored.db"
+    archive = tmp_path / "newer-readback.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         assert_newer_copy_unchanged(restored.store)
     finally:
-        restored.store.close()
+        restored.close()

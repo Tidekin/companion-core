@@ -9,7 +9,7 @@ from tests.support.owner_runtime import chat
 
 def reasoning_chat(core, tmp_path, reasoning="合成的私人推理", *, empty=False, tool=False):
     capture, job = chat(core, tmp_path)
-    core.store.execute("UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=?",
+    core.store.execute("UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=%s",
                        (job["job_id"],))
     requests = []
 
@@ -33,7 +33,7 @@ def reasoning_chat(core, tmp_path, reasoning="合成的私人推理", *, empty=F
             assert await core.run_once("reasoning-worker", job_id=job["job_id"])
 
     asyncio.run(scenario())
-    rows = core.store.rows("SELECT * FROM model_usage WHERE job_id=? ORDER BY rowid",
+    rows = core.store.rows('SELECT * FROM model_usage WHERE job_id=%s ORDER BY record_sequence',
                            (job["job_id"],))
     assert len(rows) == len(requests)
     return capture, job, rows, requests

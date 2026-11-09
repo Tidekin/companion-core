@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import closing
 
 import httpx
 import pytest
@@ -6,7 +7,9 @@ from pydantic import SecretStr
 
 from companion.contracts import CoreError
 from companion.model import ModelClient
+from companion.postgres import Database
 from tests.owner_model_fixtures import authorized_job
+from tests.postgres_fixture import copy_database
 from tests.support.paid_model import approved_live
 
 
@@ -125,28 +128,22 @@ def test_approved_call_requires_durable_admission_and_uses_shared_window(core, t
 @pytest.mark.parametrize(
     "changes,code",
     [
-        ({"per_attempt_micro_usd": 1}, "ATTEMPT"),
-        ({"daily_micro_usd": 1}, "DAILY"),
-        ({"monthly_micro_usd": 1}, "MONTHLY"),
-        ({"window_micro_usd": 1}, "WINDOW"),
-        ({"per_request_micro_usd": 1}, "REQUEST"),
         ({"max_output_tokens": 128}, "OUTPUT"),
         ({"live_approved": False}, "LIVE_OPT_IN_REQUIRED"),
     ],
 )
-def test_limits_reject_with_no_model_io(core, tmp_path, changes, code):
+
+
+def test_resource_and_live_approval_limits_refuse_before_io(core, tmp_path, changes, code):
     from companion import budget
 
     approved_live(core, tmp_path, **changes)
+    def reserve():
+        return budget.reserve(core.store, core.settings, authorized_job(core), "chat",
+                              [{"role": "user", "content": "hello"}], core.clock())
+
     with pytest.raises(CoreError, match=code):
-        budget.reserve(
-            core.store,
-            core.settings,
-            authorized_job(core),
-            "chat",
-            [{"role": "user", "content": "hello"}],
-            core.clock(),
-        )
+        reserve()
     assert core.store.rows("SELECT * FROM model_usage") == []
     assert core.model.calls == []
 
@@ -154,13 +151,13 @@ def test_limits_reject_with_no_model_io(core, tmp_path, changes, code):
 @pytest.mark.parametrize(
     "scenario", ["chat", "memory_review", "memory_extract", "diary", "reflection", "activity"]
 )
+
+
 def test_all_scenarios_share_daily_call_limit(core, tmp_path, scenario):
     from companion import budget, owner_authority
     from companion.model import ModelResponse
 
     core.settings.proactive_enabled = True
-    core.settings.reflection_daily_micro_usd = 50000
-    core.settings.reflection_monthly_micro_usd = 50000
     approved_live(core, tmp_path, daily_calls=1)
     job_id = authorized_job(core, purposes=("chat", "memory", "diary", "reflection", "proactive"))
     messages = [{"role": "user", "content": "hello"}]
@@ -169,10 +166,10 @@ def test_all_scenarios_share_daily_call_limit(core, tmp_path, scenario):
     target = job_id
     if scenario not in {"chat", "memory_review"}:
         # This accounting unit finishes its synthetic chat before background admission.
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job_id,))
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (job_id,))
         target = None
         if scenario == "activity":
-            event_id = core.store.one("SELECT event_id FROM jobs WHERE job_id=?",
+            event_id = core.store.one('SELECT event_id FROM jobs WHERE job_id=%s',
                                       (job_id,))["event_id"]
             with core.store.transaction():
                 target = core.new_job(event_id, "activity", "budget-activity", core.clock())
@@ -184,7 +181,7 @@ def test_all_scenarios_share_daily_call_limit(core, tmp_path, scenario):
     assert core.model.calls == []
 
 
-def test_unknown_keeps_upper_cost_concurrency_and_fresh_window_cannot_reset_it(core, tmp_path):
+def test_unknown_keeps_original_cost_and_absent_response_cannot_replay(core, tmp_path):
     from companion import budget
 
     approval = approved_live(core, tmp_path, concurrency=1)
@@ -202,7 +199,7 @@ def test_unknown_keeps_upper_cost_concurrency_and_fresh_window_cannot_reset_it(c
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_PAID_POLICY_CHANGED"):
         budget.reserve(core.store, core.settings, job_id, "chat", messages, core.clock())
     core.settings.paid_model = approval
-    with pytest.raises(CoreError, match="CONCURRENCY"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, job_id, "chat", messages, core.clock())
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
         "state": "UNKNOWN",
@@ -270,7 +267,7 @@ def test_multi_connection_reservations_are_atomic(core, tmp_path):
     job_id = authorized_job(core)
 
     def attempt(_):
-        store = Store(core.settings.database)
+        store = Store(core.database, core.settings.state_directory)
         try:
             return budget.reserve(
                 store,
@@ -312,6 +309,8 @@ def test_window_total_survives_month_boundary_and_daily_timezone_rollover(core, 
 @pytest.mark.parametrize(
     "bad_usage", [None, (999999, 1, 0), (30, 9999, 0), (30, 1, 40), (True, 2, 0)]
 )
+
+
 def test_missing_or_anomalous_usage_never_refunds_unknown(core, tmp_path, bad_usage):
     from companion import budget
     from companion.model import ModelResponse
@@ -324,7 +323,8 @@ def test_missing_or_anomalous_usage_never_refunds_unknown(core, tmp_path, bad_us
     response = ModelResponse("ok", *bad_usage) if bad_usage else None
     budget.settle(core.store, core.settings, request, response)
     usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
-    assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] >= before
+    assert usage["state"] == ("SETTLED" if bad_usage == (999999, 1, 0) else "UNKNOWN")
+    assert usage["billed_micro_usd"] >= before
 
 
 def test_price_change_retains_snapshot_and_permanently_blocks_next_admission(core, tmp_path):
@@ -338,7 +338,7 @@ def test_price_change_retains_snapshot_and_permanently_blocks_next_admission(cor
     core.settings.input_rate += 1
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
     core.settings.input_rate -= 1
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, authorized_job(core),
                                "chat", messages, core.clock())
     assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
@@ -352,18 +352,14 @@ def test_multiprocess_concurrency_and_abrupt_exit_preserve_reservations(core, tm
 
     approved_live(core, tmp_path, concurrency=1)
     job_id = authorized_job(core)
-    script = tmp_path / "reserve.py"
-    script.write_text(
-        "import sys\nfrom tests.process_helpers import reservation_process\n"
-        "reservation_process(*sys.argv[1:])\n",
-        encoding="utf-8",
-    )
+    from tests.support.evaluation_process import process_config
+
+    private_config = tmp_path / "reservation-settings.json"
+    process_config(core, private_config)
     command = [
-        sys.executable,
-        str(script),
-        core.settings.database,
-        core.settings.model_dump_json(),
-        core.clock(),
+        sys.executable, "-B", "-c",
+        "import sys; from tests.process_helpers import reservation_process; "
+        "reservation_process(*sys.argv[1:])", str(private_config), core.clock(),
         job_id,
     ]
     processes = [
@@ -415,7 +411,7 @@ def test_crash_after_fsync_before_db_commit_blocks_old_database(core, tmp_path, 
     assert core.model.calls == []
 
 
-def test_restored_database_cannot_start_new_paid_window(core, tmp_path):
+def test_restored_database_cannot_start_new_paid_window(empty_database, core, tmp_path):
     from cryptography.fernet import Fernet
 
     from companion import budget
@@ -425,11 +421,11 @@ def test_restored_database_cannot_start_new_paid_window(core, tmp_path):
     approved_live(core, tmp_path)
     messages = [{"role": "user", "content": "hello"}]
     budget.reserve(core.store, core.settings, authorized_job(core), "chat", messages, core.clock())
-    archive, dest, key = tmp_path / "core.enc", tmp_path / "restore.db", Fernet.generate_key()
+    archive, dest, key = tmp_path / "core.enc", empty_database, Fernet.generate_key()
+    state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    store = Store(str(dest))
-    try:
+    restore(archive, dest, key, core.settings.erasure_ledger, state_directory=state)
+    with Database(dest) as database, closing(Store(database, state)) as store:
         core.settings.paid_model = core.settings.paid_model.model_copy(
             update={"window_id": "new-after-restore"}
         )
@@ -439,8 +435,6 @@ def test_restored_database_cannot_start_new_paid_window(core, tmp_path):
         with pytest.raises(CoreError, match="RECONCILIATION"):
             budget.paid_budget.journal(store, core.settings.paid_model)
         assert store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
-    finally:
-        store.close()
 
 
 @pytest.mark.parametrize("failure", [401, 429, 503, "timeout", "missing", "invalid_cache"])
@@ -503,6 +497,8 @@ def test_http_failures_retain_upper_reservations_without_automatic_retry(core, t
         ("payload", "PAYLOAD_CHANGED"),
     ],
 )
+
+
 def test_after_reserve_changes_fail_before_http(core, tmp_path, change, code):
     from datetime import timedelta
 
@@ -543,9 +539,9 @@ def test_after_reserve_changes_fail_before_http(core, tmp_path, change, code):
     assert calls == []
 
 
-def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(core, tmp_path):
-    import sqlite3
-
+def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(
+    empty_database, core, tmp_path,
+):
     from companion import budget
     from companion.store import Store
 
@@ -553,10 +549,8 @@ def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(core, tm
     messages = [{"role": "user", "content": "hello"}]
     request = budget.reserve(core.store, core.settings, authorized_job(core),
                            "chat", messages, core.clock())
-    snapshot = tmp_path / "before-io.db"
-    connection = sqlite3.connect(snapshot)
-    core.store.db.backup(connection)
-    connection.close()
+    snapshot = empty_database
+    copy_database(core.settings.database, snapshot, tmp_path)
     calls = []
 
     async def exercise():
@@ -577,8 +571,8 @@ def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(core, tm
                 "chat",
                 core.clock,
             )
-            old = Store(str(snapshot))
-            try:
+            with (Database(snapshot) as database,
+                  closing(Store(database, core.store.state_directory)) as old):
                 with pytest.raises(CoreError, match="RECONCILIATION"):
                     await budget.complete(
                         ModelClient(core.settings, client),
@@ -589,14 +583,12 @@ def test_pre_io_database_rollback_cannot_replay_http_with_newer_journal(core, tm
                         "chat",
                         core.clock,
                     )
-            finally:
-                old.close()
 
     asyncio.run(exercise())
     assert len(calls) == 1
 
 
-def test_legacy_unknown_without_admission_blocks_paid_account(core, tmp_path):
+def test_legacy_unknown_retains_original_evidence_without_blocking_fresh_admission(core, tmp_path):
     from companion import budget
 
     approved_live(core, tmp_path)
@@ -606,15 +598,13 @@ def test_legacy_unknown_without_admission_blocks_paid_account(core, tmp_path):
                       scenario="chat", provider=core.settings.provider,
                       model=core.settings.model_name, billed_micro_usd=100,
                       state="UNKNOWN", pricing_known=1, occurred_at=core.clock())
-    with pytest.raises(CoreError, match="LEGACY_USAGE_RECONCILIATION"):
-        budget.reserve(
-            core.store,
-            core.settings,
-            job_id,
-            "chat",
-            [{"role": "user", "content": "hello"}],
-            core.clock(),
-        )
+    budget.reserve(core.store, core.settings, job_id, "chat",
+                   [{"role": "user", "content": "hello"}], core.clock())
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage "
+                          "WHERE request_id='model_historical'") == {
+        "state": "UNKNOWN", "billed_micro_usd": 100,
+    }
+    assert len(core.store.rows("SELECT * FROM model_usage")) == 2
     assert core.model.calls == []
 
 
@@ -628,7 +618,7 @@ def test_provider_invoice_discrepancy_stops_new_calls_and_records_upper_differen
                            "chat", messages, core.clock())
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
     budget.record_provider_discrepancy(core.store, core.settings, request, 8000, "USD", "e" * 64)
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, authorized_job(core),
                                "chat", messages, core.clock())
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
@@ -720,7 +710,10 @@ def test_extraction_and_reconciliation_share_one_logical_request_cap(core, tmp_p
                 assert await worker.run_once("budget-extraction-chat")
                 assert not await worker.extract_once()
             assert len(model.requests) == 2
-            assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+            assert core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            ) == [
                 {"scenario": "chat", "state": "SETTLED"},
                 {"scenario": "memory_extract", "state": "SETTLED"},
             ]
@@ -862,19 +855,22 @@ def test_stopping_admission_does_not_discard_later_inflight_cost_evidence(core, 
                            "chat", messages, core.clock())
     budget.settle(core.store, core.settings, first, ModelResponse("ok", 999999, 2))
     budget.settle(core.store, core.settings, second, ModelResponse("ok", 888888, 2))
-    rows = core.store.rows("SELECT state,billed_micro_usd FROM model_usage ORDER BY rowid")
+    rows = core.store.rows(
+        'SELECT state,billed_micro_usd FROM model_usage ORDER BY '
+        'record_sequence'
+    )
     assert rows == [
-        {"state": "UNKNOWN", "billed_micro_usd": 1000003},
-        {"state": "UNKNOWN", "billed_micro_usd": 888892},
+        {"state": "SETTLED", "billed_micro_usd": 1000003},
+        {"state": "SETTLED", "billed_micro_usd": 888892},
     ]
     budget.record_provider_discrepancy(core.store, core.settings, second, 2000000, "USD", "f" * 64)
     assert (
-        core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=?", (second,))[
+        core.store.one('SELECT billed_micro_usd FROM model_usage WHERE request_id=%s', (second,))[
             "billed_micro_usd"
         ]
         == 2000000
     )
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
         budget.reserve(core.store, core.settings, authorized_job(core),
                                "chat", messages, core.clock())
 
@@ -928,13 +924,17 @@ def test_known_cost_uses_reserved_accounting_custody_after_live_config_changes(
 
     asyncio.run(exercise())
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
-        "state": "UNKNOWN",
+        "state": "UNKNOWN" if change == "write_failure" else "SETTLED",
         "billed_micro_usd": 900004,
     }
     core.settings.paid_model = original_approval
-    with pytest.raises(CoreError, match="RECONCILIATION"):
+    if change == "write_failure":
+        with pytest.raises(CoreError, match="MODEL_OUTCOME_UNKNOWN"):
+            budget.reserve(core.store, core.settings, authorized_job(core),
+                           "chat", messages, core.clock())
+    else:
         budget.reserve(core.store, core.settings, authorized_job(core),
-                               "chat", messages, core.clock())
+                       "chat", messages, core.clock())
     assert len(calls) == 1
 
 
@@ -953,9 +953,7 @@ def test_invoice_survives_disabled_live_approval(core, tmp_path):
     }
 
 
-def test_unknown_settlement_cannot_be_rolled_back_to_reserved(core, tmp_path):
-    import sqlite3
-
+def test_unknown_settlement_cannot_be_rolled_back_to_reserved(empty_database, core, tmp_path):
     from companion import budget
     from companion.store import Store
 
@@ -963,12 +961,9 @@ def test_unknown_settlement_cannot_be_rolled_back_to_reserved(core, tmp_path):
     messages = [{"role": "user", "content": "hello"}]
     request = budget.reserve(core.store, core.settings, authorized_job(core),
                            "chat", messages, core.clock())
-    path = tmp_path / "before-unknown.db"
-    connection = sqlite3.connect(path)
-    core.store.db.backup(connection)
-    connection.close()
+    path = empty_database
+    copy_database(core.settings.database, path, tmp_path)
     budget.settle(core.store, core.settings, request)
-    old = Store(str(path))
     calls = []
 
     async def exercise():
@@ -991,11 +986,10 @@ def test_unknown_settlement_cannot_be_rolled_back_to_reserved(core, tmp_path):
                     core.clock,
                 )
 
-    try:
+    with (Database(path) as database,
+          closing(Store(database, core.store.state_directory)) as old):
         asyncio.run(exercise())
         assert calls == []
-    finally:
-        old.close()
 
 
 def test_open_ended_approval_keeps_hash_shape_and_caps(core, tmp_path):
@@ -1011,13 +1005,15 @@ def test_open_ended_approval_keeps_hash_shape_and_caps(core, tmp_path):
     later = datetime.fromisoformat("2036-10-01T00:00:00+08:00")
     assert paid_budget.active(approval, later) and paid_budget.rates_valid(approval, later)
     assert not paid_budget.active(approval, approval.starts_at - timedelta(seconds=1))
-    assert approval.daily_micro_usd == 200000 and approval.window_calls == 20
+    assert approval.daily_calls == 10 and approval.window_calls == 20
 
 
 @pytest.mark.parametrize("changes", [
     {"rates_valid_until": None},
     {"expires_at": None, "rates_valid_until": "2026-09-01T00:00:00+08:00"},
 ])
+
+
 def test_finite_approval_needs_rate_validity_and_open_rates_follow_start(core, tmp_path, changes):
     with pytest.raises(ValueError):
         approved_live(core, tmp_path, **changes)

@@ -29,14 +29,20 @@ def failure_text(code):
 
 
 def _job(store, job_id):
-    return store.one("SELECT j.*,e.conversation_id,e.body_json FROM jobs j "
-                     "JOIN events e USING(event_id) WHERE job_id=?", (job_id,))
+    return store.one('SELECT j.job_id AS job_id, j.event_id AS event_id, j.kind AS kind, j.state '
+        'AS state, j.idempotency_key AS idempotency_key, j.attempts AS attempts, j.max_attempts AS '
+        'max_attempts, j.lease_owner AS lease_owner, j.lease_until AS lease_until, '
+        'j.next_attempt_at AS next_attempt_at, j.last_error_code AS last_error_code, j.created_at '
+        'AS created_at, j.updated_at AS updated_at, j.lease_token AS lease_token, '
+        'j.context_tracked AS context_tracked, j.authority_json AS authority_json, '
+        'e.conversation_id AS conversation_id, e.body_json AS body_json FROM jobs AS j JOIN events '
+        'AS e ON j.event_id = e.event_id WHERE j.job_id = %s', (job_id,))
 
 
 def _snapshots(store, job):
     if job["kind"] != "chat" or reply_revision.control_job(store, job):
         return []
-    row = store.one("SELECT phase,snapshots_json FROM agent_conversations WHERE job_id=?",
+    row = store.one('SELECT phase, snapshots_json FROM agent_conversations WHERE job_id = %s',
                      (job["job_id"],))
     try:
         snapshots = json.loads(row["snapshots_json"]) if row else []
@@ -59,13 +65,14 @@ def _history_proof(store, job, snapshots):
         raise CoreError(reply_revision.CANCELLED, 409) from error
 
 
-def _images(store, settings, clock, job, snapshots, *, executing):
+def _images(store, settings, clock, job, snapshots, *, executing, _item_ids=None):
     from companion import agent_images
 
     try:
         saved = [item["item_ids"] for item in snapshots if item["kind"] == "images"]
         # A frozen text reply consumes the signed evidence, not original pixels.
-        actual = agent_images.context_item_ids(store, settings, clock, job, executing=executing)
+        actual = agent_images.context_item_ids(store, settings, clock, job, executing=executing,
+                                               _item_ids=_item_ids)
         if saved != ([actual] if actual else []):
             raise ValueError("original image snapshots changed")
     except (ValueError, KeyError, TypeError, CoreError) as error:
@@ -101,25 +108,33 @@ def _readings(store, settings, clock, job, snapshots, *, executing):
 
 
 def _sources(store, settings, clock, job, *, executing=False):
+    from companion.conversation_guard import read
+
     if job is None:
         raise CoreError("OWNER_DELIVERY_JOB_REQUIRED", 403)
+    reads = read(store, job)
     view = owner_authority.check_job(store, settings, clock, job,
         purpose="poke" if job["kind"] == "poke" else owner_authority.model_purpose(
             store, job["kind"], job["job_id"]),
-        executing=executing)
-    reply_revision.check_job(store, job)
+        executing=executing, _reads=reads)
+    reply_revision._checked_job(job, reads.reply)
     from companion import runtime_config
 
     # Older prepared deliveries retain their original responsibility. New tasks
     # carry a signed configuration binding as well as their existing source proof.
-    runtime_config.get(store, settings, "job:" + job["job_id"])
+    if reads.configuration is not None:
+        runtime_config._bound_snapshot(store, settings, "job:" + job["job_id"],
+                                        reads.configuration["binding"],
+                                        reads.configuration["snapshot"])
     snapshots, history = [], []
     if job["kind"] == "chat":
-        owner_input.source(store, settings, view, job["event_id"], clock(), allow_commands=True)
+        owner_input._checked_source(store, settings, view, job["event_id"], clock(),
+                                     allow_commands=True, _loaded=reads.source)
         snapshots = _snapshots(store, job)
         history = _history_proof(store, job, snapshots)
         owner_input.check_history(store, settings, clock, job, history)
-        _images(store, settings, clock, job, snapshots, executing=executing)
+        _images(store, settings, clock, job, snapshots, executing=executing,
+                 _item_ids=reads.image_item_ids)
         _memories(store, settings, clock, view, snapshots)
         _readings(store, settings, clock, job, snapshots, executing=executing)
         from companion.agent_singing import revalidate
@@ -142,34 +157,51 @@ def _context_hashes(history, snapshots):
 
 
 def _usage(store, job, view, snapshots, message_id, *, group=None):
+    from companion import authority_custody
     from companion.transport import reply_group
 
     preview = next((s for s in snapshots if s["kind"] == "video_preview_reply"), None)
     unavailable = (_preview_request(store, job, group or reply_group(store, message_id), preview)
                    if preview else None)
-    rows = store.rows("SELECT m.request_id,m.state,m.scenario,a.authority_json "
-                      "FROM model_usage m LEFT JOIN model_admissions a USING(request_id) "
-                      "WHERE m.job_id=? ORDER BY m.rowid", (job["job_id"],))
+    rows = store.rows('SELECT m.request_id, m.state, m.scenario, a.authority_json, '
+        'a.measurement_json, a.payload_sha256, a.snapshot_json, a.contract_sha256, '
+        'a.journal_path, a.journal_id, '
+        "CASE WHEN m.state='UNKNOWN' THEN EXISTS(SELECT 1 FROM agent_conversations AS c, "
+        "jsonb_array_elements(c.conversation_json::jsonb->'messages') AS response(value) "
+        "WHERE c.job_id=m.job_id AND c.phase IN ('OUTPUT','COMPLETE') "
+        "AND response.value->>'kind'='response' "
+        "AND response.value->'metadata'->>'core_request_id'=m.request_id) "
+        "OR (m.scenario='activity' AND EXISTS(SELECT 1 FROM life_activity_results l "
+        "WHERE l.job_id=m.job_id AND l.state='SHADOW' AND l.text<>'')) "
+        "OR (m.scenario='qq_poke' AND EXISTS(SELECT 1 FROM poke_batches p "
+        "WHERE p.job_id=m.job_id AND p.decision_sha256 IS NOT NULL)) ELSE false END "
+        'AS response_recorded FROM model_usage '
+        'AS m LEFT JOIN model_admissions AS a USING (request_id) WHERE m.job_id = %s ORDER BY '
+        'm.record_sequence NULLS FIRST', (job["job_id"],))
     if (any(not (row["state"] == "SETTLED" or (
-            row["state"] == "UNKNOWN" and row["scenario"] == "content_video"
-            and row["request_id"] == unavailable)) or not row["authority_json"]
+            row["state"] == "UNKNOWN" and (row["response_recorded"]
+                or row["scenario"] != ("qq_poke" if job["kind"] == "poke" else job["kind"])
+                or (
+                row["scenario"] == "content_video" and row["request_id"] == unavailable))))
+            or not row["authority_json"]
             or json.loads(row["authority_json"]) != view.authority.as_dict() for row in rows)
         or not reply_revision.control_job(store, job)
         and not any(row["scenario"] == ("qq_poke" if job["kind"] == "poke" else job["kind"])
                     for row in rows)):
         raise CoreError("OWNER_DELIVERY_SETTLED_MODEL_REQUIRED", 403)
+    authority_custody.check_admissions(store, view, rows)
     return [row["request_id"] for row in rows]
 
 
 def _preview_request(store, job, group, proof):
     """Only the settled parent tool call's pre-dispatch text may use this exception."""
-    tool = store.one("SELECT t.metadata_json,t.result_json,c.output_text "
-        "FROM agent_tool_calls t JOIN agent_conversations c USING(job_id) "
-        "JOIN model_usage m ON m.request_id=t.model_request_id AND m.job_id=t.job_id "
-        "JOIN model_usage v ON v.job_id=t.job_id AND v.request_id=? AND v.scenario='content_video' "
-        "WHERE t.job_id=? AND t.tool_call_id=? AND t.tool_name='understand_video' "
-        "AND t.state='RETURNED' AND c.request_id=m.request_id AND m.state='SETTLED' "
-        "AND m.scenario='chat'", (proof["request_id"], job["job_id"], proof["call_id"]))
+    tool = store.one('SELECT t.metadata_json, t.result_json, c.output_text FROM agent_tool_calls '
+        'AS t JOIN agent_conversations AS c USING (job_id) JOIN model_usage AS m ON m.request_id = '
+        't.model_request_id AND m.job_id = t.job_id JOIN model_usage AS v ON v.job_id = t.job_id '
+        "AND v.request_id = %s AND v.scenario = 'content_video' WHERE t.job_id = %s AND "
+        "t.tool_call_id = %s AND t.tool_name = 'understand_video' AND t.state = 'RETURNED' AND "
+        "c.request_id = m.request_id AND m.state IN ('SETTLED','UNKNOWN') AND m.scenario = "
+        "'chat'", (proof["request_id"], job["job_id"], proof["call_id"]))
     if not tool or not group:
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     metadata = json.loads(tool["metadata_json"] or "{}")
@@ -186,7 +218,15 @@ def _preview_request(store, job, group, proof):
 def _material(store, row, job, view, requests, context_hashes, *, meme_binding=None):
     from companion.agent_output import reply_format, song_choice
 
-    event = store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
+    event = store.one('SELECT events.event_id AS event_id, events.schema_version AS '
+        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
+        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
+        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
+        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
+        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
+        '%s', (row["origin_event_id"],))
     if (not event or row["origin_event_id"] != job["event_id"]
         or row["conversation_id"] != job["conversation_id"]
         or row["action_type"] not in ({"qq.private.reply", "qq.private.poke"}
@@ -242,7 +282,15 @@ def _failure_view(store, settings, clock, job):
 
 
 def _failure_material(store, row, job, view):
-    event = store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
+    event = store.one('SELECT events.event_id AS event_id, events.schema_version AS '
+        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
+        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
+        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
+        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
+        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
+        '%s', (row["origin_event_id"],))
     content = {"text": failure_text(job["last_error_code"])}
     if (not event or row["origin_event_id"] != job["event_id"]
             or row["conversation_id"] != job["conversation_id"]
@@ -270,11 +318,25 @@ def record_failure_notice(store, settings, clock, job_id, message_id):
     It carries no model output, so it needs no settled model call; it is valid only
     while the job stays FAILED and its original owner input is still admitted.
     """
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("owner delivery recording requires the enqueue transaction")
     job = _job(store, job_id)
     view = _failure_view(store, settings, clock, job)
-    row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    row = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+        'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+        'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+        'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+        'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+        'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+        'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+        'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+        'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at AS '
+        'next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+        'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+        'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+        'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+        'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id = '
+        '%s', (message_id,))
     if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
         raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
     material = _failure_material(store, row, job, view)
@@ -309,12 +371,12 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
     """Pin each native Outbox item in the transaction that creates its complete group."""
     from companion.transport import reply_group, segment_envelopes
 
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("owner delivery recording requires the enqueue transaction")
     if not message_ids:
         return
     view, snapshots, context_hashes = _sources(store, settings, clock, job, executing=executing)
-    first = store.one("SELECT action_type FROM outbox WHERE message_id=?", (message_ids[0],))
+    first = store.one('SELECT action_type FROM outbox WHERE message_id=%s', (message_ids[0],))
     group = None if first and first["action_type"] == "qq.private.poke" else reply_group(
         store, message_ids[0])
     requests = _usage(store, job, view, snapshots, message_ids[0], group=group)
@@ -349,7 +411,21 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
                    for item in envelopes.values())):
             raise CoreError("OWNER_DELIVERY_GROUP_CHANGED", 403)
     for message_id in message_ids:
-        row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+        row = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+            'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+            'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+            'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+            'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+            'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+            'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+            'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+            'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at '
+            'AS next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+            'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+            'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+            'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+            'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id '
+            '= %s', (message_id,))
         if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
             raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
         material = _material(store, row, job, view, requests, context_hashes,
@@ -362,15 +438,26 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
 
 
 def check_delivery(store, settings, clock, message_id, *, check=None):
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         return store.read_or_write(
             lambda: check_delivery(store, settings, clock, message_id, check=check))
     from companion.social import proactive_allowed
     from companion.transport import check_segment_ready, reply_group
 
-    row = store.one("SELECT o.*,c.scope,c.owner_actor_id FROM outbox o "
-                    "JOIN conversations c USING(conversation_id) WHERE message_id=?", (message_id,))
-    saved = store.one("SELECT value FROM runtime_meta WHERE key=?", (DELIVERY + message_id,))
+    row = store.one('SELECT o.message_id AS message_id, o.origin_event_id AS origin_event_id, '
+        'o.conversation_id AS conversation_id, o.action_type AS action_type, o.content_json AS '
+        'content_json, o.content_sha256 AS content_sha256, o.approval_id AS approval_id, o.state '
+        'AS state, o.delivery_key AS delivery_key, o.lease_owner AS lease_owner, o.lease_until AS '
+        'lease_until, o.attempt_count AS attempt_count, o.provider_message_id AS '
+        'provider_message_id, o.last_error_code AS last_error_code, o.created_at AS created_at, '
+        'o.updated_at AS updated_at, o.sent_at AS sent_at, o.lease_token AS lease_token, '
+        'o.next_attempt_at AS next_attempt_at, o.reply_group_id AS reply_group_id, o.segment_index '
+        'AS segment_index, o.segment_count AS segment_count, o.reply_group_sha256 AS '
+        'reply_group_sha256, o.segment_interval_ms AS segment_interval_ms, o.delivery_lane AS '
+        'delivery_lane, o.native_ack_json AS native_ack_json, o.authority_json AS authority_json, '
+        'c.scope AS scope, c.owner_actor_id AS owner_actor_id FROM outbox AS o JOIN conversations '
+        'AS c ON o.conversation_id = c.conversation_id WHERE o.message_id = %s', (message_id,))
+    saved = store.one('SELECT value FROM runtime_meta WHERE key = %s', (DELIVERY + message_id,))
     if not row or not saved or (row["scope"], row["owner_actor_id"]) != ("private", "owner"):
         raise CoreError("OWNER_DELIVERY_BINDING_REQUIRED", 403)
     material = json.loads(saved["value"])
@@ -443,7 +530,21 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
 
 def asset_lease(store, clock, message_id, body, permission):
     """Check the asset request inside the caller's authorized delivery transaction."""
-    row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    row = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+        'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+        'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+        'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+        'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+        'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+        'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+        'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+        'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at AS '
+        'next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+        'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+        'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+        'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+        'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id = '
+        '%s', (message_id,))
     if (
         row["state"] not in {"LEASED", "SENDING"}
         or not row["lease_until"]
@@ -471,7 +572,7 @@ def send_check(store, settings, clock, body):
 
     with store.transaction(delivery_preflight=True):
         result = check_delivery(store, settings, clock, body.message_id, check=body)
-        content = json.loads(store.one("SELECT content_json FROM outbox WHERE message_id=?",
+        content = json.loads(store.one('SELECT content_json FROM outbox WHERE message_id = %s',
                                         (body.message_id,))["content_json"])
         if content.get("image") is not None:
             owner_authority.current(store, settings, clock,
@@ -481,7 +582,11 @@ def send_check(store, settings, clock, body):
 
             image_generation.check_send(store, settings, clock, body.authority)
         if body.voice is not None or store.one(
-            "SELECT 1 FROM runtime_meta WHERE key=? AND json_extract(value,'$.state')='AUDIO'",
+            (
+                'SELECT 1 FROM runtime_meta WHERE key=%s AND (CASE WHEN '
+                "value IS JSON THEN (value::json#>>'{state}') "
+                "END)='AUDIO'"
+            ),
             (REPLY_RECEIPT + body.message_id,),
         ):
             from companion.voice_flow import VoiceFlow

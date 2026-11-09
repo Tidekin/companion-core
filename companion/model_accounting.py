@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, ValidationError
 
-from companion import budget, cloud_budget, model_carry, owner_authority, paid_budget
+from companion import cloud_budget, model_carry, owner_authority, paid_budget
 from companion.contracts import CoreError, StrictModel
 from companion.store import utcnow
 from companion_delivery_protocol import timestamp
@@ -86,8 +86,27 @@ def evidence(path, expected):
 
 
 def _original(store, request_id):
-    admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
-    usage = store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+    admission = store.one('SELECT model_admissions.request_id AS request_id, '
+        'model_admissions.logical_request_id AS logical_request_id, model_admissions.attempt_id AS '
+        'attempt_id, model_admissions.attempt_number AS attempt_number, model_admissions.window_id '
+        'AS window_id, model_admissions.contract_sha256 AS contract_sha256, '
+        'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json AS '
+        'snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
+        'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
+        'output_bound, model_admissions.lease_token AS lease_token, model_admissions.lease_until '
+        'AS lease_until, model_admissions.io_started_at AS io_started_at, '
+        'model_admissions.journal_path AS journal_path, model_admissions.journal_id AS journal_id, '
+        'model_admissions.measurement_json AS measurement_json, model_admissions.authority_json AS '
+        'authority_json FROM model_admissions AS model_admissions WHERE '
+        'model_admissions.request_id = %s', (request_id,))
+    usage = store.one('SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS '
+        'request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
+        'model_usage.provider AS provider, model_usage.model AS model, model_usage.input_tokens AS '
+        'input_tokens, model_usage.cached_input_tokens AS cached_input_tokens, '
+        'model_usage.output_tokens AS output_tokens, model_usage.billed_micro_usd AS '
+        'billed_micro_usd, model_usage.is_estimate AS is_estimate, model_usage.occurred_at AS '
+        'occurred_at, model_usage.state AS state, model_usage.pricing_known AS pricing_known FROM '
+        'model_usage AS model_usage WHERE model_usage.request_id = %s', (request_id,))
     if not admission or not usage or not admission["io_started_at"]:
         raise ValueError("original dispatched admission required")
     frozen = json.loads(admission["snapshot_json"])
@@ -149,13 +168,8 @@ def fold(store, row, record_sha, journal_id, latest, closures, blocked, records)
     amount, status = _priced(request, admission, usage)
     codes = request.budget_limit_codes
     inherited = set(previous["request"]["budget_limit_codes"]) if previous else set()
-    frozen = json.loads(admission["snapshot_json"])
     if (codes != sorted(set(codes)) or inherited - set(codes)
-        or isinstance(request.basis, Estimate) and codes
-        or isinstance(request.basis, Statement) and (
-            amount > frozen["per_attempt_micro_usd"] and "ATTEMPT_AMOUNT" not in codes
-            or usage["scenario"] == "evaluation" and amount > 5000
-            and "EVALUATION_AMOUNT" not in codes)):
+        or isinstance(request.basis, Estimate) and codes):
         raise ValueError("model accounting budget stop changed")
     if (row["basis_micro_usd"] != amount or type(row["basis_micro_usd"]) is not int
         or row["billing_status"] != status
@@ -180,14 +194,13 @@ def fold(store, row, record_sha, journal_id, latest, closures, blocked, records)
         blocked.setdefault(request.request_id, record_sha)
 
 
-def validate_projection(store, records, replay=None):
-    saved = {row["key"].removeprefix(PROJECTION): row["value"] for row in store.rows(
-        "SELECT key,value FROM runtime_meta WHERE key>=? AND key<?",
-        (PROJECTION, "model_accounting;"))}
+def validate_projection(store, records, metadata, replay=None):
+    saved = {key.removeprefix(PROJECTION): value for key, value in metadata.items()
+             if key.startswith(PROJECTION)}
     if saved.keys() - records.keys():
         raise ValueError("accounting journal behind database")
     for operation, record in records.items():
-        usage = store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=?",
+        usage = store.one('SELECT billed_micro_usd FROM model_usage WHERE request_id = %s',
                           (record["request"]["request_id"],))
         if record["request_sha256"] == replay:
             if saved.get(operation) not in {None, record["sha256"]} or not usage:
@@ -195,17 +208,17 @@ def validate_projection(store, records, replay=None):
             continue
         if (saved.get(operation) != record["sha256"] or not usage
             or usage["billed_micro_usd"] < record["accounted_micro_usd"]
-            or record["request"]["budget_limit_codes"] and not store.one(
-                "SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")):
+            or record["request"]["budget_limit_codes"] and "model_budget_blocked" not in metadata):
             raise ValueError("accounting database behind journal")
     pending = {}
-    for row in store.rows("SELECT key,value FROM runtime_meta WHERE key>=? AND key<?",
-                          (PENDING, "model_accounting_pending;")):
-        item = Pending.model_validate_json(row["value"])
+    for key, value in metadata.items():
+        if not key.startswith(PENDING):
+            continue
+        item = Pending.model_validate_json(value)
         request = item.request
         admission, usage, binding = _original(store, request.request_id)
         amount, _ = _priced(request, admission, usage)
-        if (row["key"] != PENDING + request.operation_id
+        if (key != PENDING + request.operation_id
             or not isinstance(request.basis, Statement) or binding != request.binding_sha256
             or item.accounted_micro_usd != max(amount, request.previous_accounted_micro_usd)
             or usage["billed_micro_usd"] < item.accounted_micro_usd
@@ -217,11 +230,11 @@ def validate_projection(store, records, replay=None):
 
 def _supported(store, settings):
     if (not owner_authority.required(store, settings) or not model_carry.active(settings)
-        or store.one("SELECT 1 FROM runtime_meta WHERE key IN "
-                     "('model_budget_restore_required','cloud_budget_restore_required')")):
+        or store.one("SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_restore_required', "
+            "'cloud_budget_restore_required')")):
         raise CoreError("MODEL_ACCOUNTING_CUSTODY_REQUIRED", 409)
     model_carry.supported(store, settings)
-    owner = store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+    owner = store.one("SELECT value FROM runtime_meta WHERE key = 'owner_qq_id'")
     if not owner or owner["value"] != settings.owner_qq_id:
         raise CoreError("OWNER_IDENTITY_MISMATCH", 403)
 
@@ -237,8 +250,6 @@ def _prepare(store, settings, proposal, view):
     previous = _prior(view["model_accounting"], proposal.request_id)
     codes = []
     if isinstance(proposal.basis, Statement):
-        codes = budget._actual_limit_violations(store, admission,
-            json.loads(admission["snapshot_json"]), usage, proposal.basis.actual_micro_usd)
         if previous:
             codes += previous["request"]["budget_limit_codes"]
     request = Prepared(**proposal.model_dump(), journal_id=admission["journal_id"],
@@ -296,15 +307,17 @@ def _check_record(store, record, view):
 def _hold_known_statement(store, request, material, now):
     """Only reached after complete original/request validation, never for estimates."""
     held = material["accounted_micro_usd"]
-    store.execute("UPDATE model_usage SET billed_micro_usd=MAX(billed_micro_usd,?) "
-                  "WHERE request_id=?", (held, request.request_id))
+    store.execute('UPDATE model_usage SET billed_micro_usd = GREATEST(billed_micro_usd, %s) WHERE '
+        'request_id = %s', (held, request.request_id))
     pending = Pending(request=request, accounted_micro_usd=held)
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+    store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO '
+        'UPDATE SET value = excluded.value, record_sequence = DEFAULT',
                   (PENDING + request.operation_id, pending.model_dump_json()))
     if request.budget_limit_codes:
-        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('model_budget_blocked','1')")
-    if not store.one("SELECT 1 FROM audit_log WHERE action='model.accounting_pending' "
-                     "AND entity_id=?", (request.operation_id,)):
+        store.execute("INSERT INTO runtime_meta (key, value) VALUES ('model_budget_blocked', '1') "
+            'ON CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = DEFAULT')
+    if not store.one("SELECT 1 FROM audit_log WHERE action = 'model.accounting_pending' AND "
+        'entity_id = %s', (request.operation_id,)):
         store.audit("model.accounting_pending", request.operation_id, "operator", now,
                     request_sha256=material["request_sha256"], accounted_micro_usd=held)
     cloud_budget.sync_reference(store, "model", request.request_id)
@@ -325,7 +338,7 @@ def record(store, settings, value, evidence_path, clock=utcnow):
                 if existing["request_sha256"] != request_sha:
                     raise CoreError("MODEL_ACCOUNTING_OPERATION_CONFLICT", 409)
                 # Completed repeats already have a durable projection; interruptions need fsync.
-                projected = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                projected = store.one('SELECT value FROM runtime_meta WHERE key = %s',
                                       (PROJECTION + request.operation_id,))
                 if not projected or request.operation_id in view["model_accounting_pending"]:
                     try:
@@ -358,17 +371,21 @@ def record(store, settings, value, evidence_path, clock=utcnow):
                         return _hold_known_statement(store, request, material, clock())
                     raise
                 saved = view["model_accounting"][request.operation_id]
-            store.execute("UPDATE model_usage SET billed_micro_usd=MAX(billed_micro_usd,?) "
-                          "WHERE request_id=?", (saved["accounted_micro_usd"], request.request_id))
-            store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
+            store.execute('UPDATE model_usage SET billed_micro_usd = GREATEST(billed_micro_usd, '
+                '%s) WHERE request_id = %s', (saved["accounted_micro_usd"], request.request_id))
+            store.execute('INSERT INTO runtime_meta VALUES (%s, %s) ON CONFLICT DO NOTHING',
                           (PROJECTION + request.operation_id, saved["sha256"]))
             if request.budget_limit_codes:
-                store.execute("INSERT OR REPLACE INTO runtime_meta "
-                              "VALUES ('model_budget_blocked','1')")
-            store.execute("DELETE FROM runtime_meta WHERE key=?",
+                store.execute(
+                    "INSERT INTO runtime_meta (key, value) VALUES ('model_budget_blocked', '1') "
+                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
+                    "record_sequence = DEFAULT WHERE runtime_meta.value IS DISTINCT FROM "
+                    "excluded.value"
+                )
+            store.execute('DELETE FROM runtime_meta WHERE key = %s',
                           (PENDING + request.operation_id,))
-            if not store.one("SELECT 1 FROM audit_log WHERE action='model.accounting_recorded' "
-                             "AND entity_id=?", (request.operation_id,)):
+            if not store.one("SELECT 1 FROM audit_log WHERE action = 'model.accounting_recorded' "
+                'AND entity_id = %s', (request.operation_id,)):
                 store.audit("model.accounting_recorded", request.operation_id, "operator", clock(),
                             request_id=request.request_id, receipt_sha256=saved["sha256"],
                             billing_status=saved["billing_status"],

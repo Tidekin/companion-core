@@ -39,7 +39,7 @@ def test_skip_gets_one_new_native_attempt_and_retains_both_charges(core, outcome
     core.model = NoticeModel("[SKIP]")
     assert run(run_notice(core))
     first = core.store.one("SELECT * FROM model_usage")
-    current = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+    current = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],))
     assert (current["state"], current["attempts"], current["max_attempts"]) == ("RETRY_WAIT", 1, 2)
     assert first["state"] == "SETTLED" and first["billed_micro_usd"] > 0
     assert not core.store.rows("SELECT * FROM outbox")
@@ -50,7 +50,7 @@ def test_skip_gets_one_new_native_attempt_and_retains_both_charges(core, outcome
         "这次未能在约定时间内完成阅读。" if outcome == "failed" else "资料已经读到了。"
     )
     assert run(run_notice(core))
-    usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+    usages = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
     assert len(usages) == 2 and usages[0] == first
     assert len({row["request_id"] for row in usages}) == 2
     assert {row["job_id"] for row in usages} == {job["job_id"]}
@@ -95,7 +95,7 @@ def test_skip_gets_one_new_native_attempt_and_retains_both_charges(core, outcome
         "timeout",
     ],
 )
-def test_only_received_known_empty_required_reply_gets_another_reservation(core, tmp_path, first):
+def test_only_received_empty_required_reply_gets_one_more_attempt(core, tmp_path, first):
     job = failed_commitment(core, tmp_path)
     calls = []
 
@@ -135,7 +135,7 @@ def test_only_received_known_empty_required_reply_gets_another_reservation(core,
             assert await run_notice(core)
             before = core.store.rows("SELECT * FROM model_usage")
             known = first in {"skip", "empty", "empty_null_calls", "empty_list_calls"}
-            current = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+            current = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],))
             assert current["state"] == ("RETRY_WAIT" if known else "FAILED")
             assert current["max_attempts"] == (2 if known else 1)
             if first.endswith("_calls"):
@@ -146,9 +146,9 @@ def test_only_received_known_empty_required_reply_gets_another_reservation(core,
             core.clock.advance(6)
             assert await run_notice(core) is known
             assert len(calls) == (2 if known else 1)
-            after = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            after = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert after[0] == before[0]
-            admissions = core.store.rows("SELECT * FROM model_admissions ORDER BY rowid")
+            admissions = core.store.rows('SELECT * FROM model_admissions ORDER BY record_sequence')
             assert {row["logical_request_id"] for row in admissions} == {job["job_id"]}
             assert [row["attempt_number"] for row in admissions] == ([1, 2] if known else [1])
             assert len({row["request_id"] for row in admissions}) == len(admissions)
@@ -197,7 +197,7 @@ def test_retry_stays_bounded_by_native_attempt_budget_and_source_contracts(core,
             assert await run_notice(core)
             before = core.store.one("SELECT * FROM model_usage")
             if cap == "forget":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
             elif cap == "source_expiry":
                 core.clock.advance(core.settings.raw_event_retention_days * 86400 + 1)
@@ -208,7 +208,9 @@ def test_retry_stays_bounded_by_native_attempt_budget_and_source_contracts(core,
             core.clock.advance(60)
             assert not await run_notice(core)
             assert len(calls) == (2 if cap in {"attempts", "unknown_second"} else 1)
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid")[0] == before
+            assert core.store.rows(
+                'SELECT * FROM model_usage ORDER BY record_sequence'
+            )[0] == before
             assert not core.store.rows("SELECT * FROM outbox")
             assert not core.store.rows("SELECT * FROM jobs WHERE state='RETRY_WAIT'")
 

@@ -19,7 +19,7 @@ def enqueue(store, event_id, conversation_id, text, now, action="qq.private.repl
             reply_to=None):
     if action not in {"qq.private.reply", "qq.private.proactive"}:
         raise CoreError("CAPABILITY_DISABLED", 403)
-    with nullcontext() if store.db.in_transaction else store.transaction():
+    with nullcontext() if store.in_transaction else store.transaction():
         if action == "qq.private.reply":
             reply_revision.require_reply_source(store, event_id)
         content = {"text": text}
@@ -29,7 +29,7 @@ def enqueue(store, event_id, conversation_id, text, now, action="qq.private.repl
                 raise CoreError("INVALID_REPLY_QUOTE", 400)
             content["reply_to"] = {"message_id": reply_to}
         key = key or f"reply:{event_id}:v1"
-        previous = store.one("SELECT message_id FROM outbox WHERE delivery_key=?", (key,))
+        previous = store.one('SELECT message_id FROM outbox WHERE delivery_key = %s', (key,))
         if previous:
             return previous["message_id"]
         message_id = uid("msg")
@@ -52,12 +52,12 @@ def queue_delivery(store, message_id, event_id, conversation_id, action, content
 
 
 def set_content(store, message_id, content):
-    store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+    store.execute('UPDATE outbox SET content_json=%s,content_sha256=%s WHERE message_id=%s',
                   (encode(content), digest(content), message_id))
 
 
 def bind_authority(store, message_id, authority):
-    store.execute("UPDATE outbox SET authority_json=? WHERE message_id=?",
+    store.execute('UPDATE outbox SET authority_json=%s WHERE message_id=%s',
                   (encode(authority), message_id))
 
 
@@ -141,11 +141,11 @@ def enqueue_mixed_reply(store, job, contents, interval_ms, now):
 
 def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, version,
                       reply_to=None):
-    with nullcontext() if store.db.in_transaction else store.transaction():
+    with nullcontext() if store.in_transaction else store.transaction():
         reply_revision.check_job(store, job)
         source = store.one(
-            "SELECT j.job_id,j.kind,e.event_id,e.conversation_id,e.redacted "
-            "FROM jobs j JOIN events e USING(event_id) WHERE j.job_id=?", (job["job_id"],),
+            'SELECT j.job_id, j.kind, e.event_id, e.conversation_id, e.redacted FROM jobs AS j '
+            'JOIN events AS e USING (event_id) WHERE j.job_id = %s', (job["job_id"],),
         )
         if (not source or source["kind"] not in {"chat", "activity", "reply_recovery"}
             or action not in {"qq.private.reply", "qq.private.proactive"}
@@ -155,8 +155,22 @@ def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, 
         )):
             raise CoreError("REPLY_GROUP_SOURCE_CHANGED", 409)
         existing = store.rows(
-            "SELECT * FROM outbox WHERE origin_event_id=? AND action_type=? "
-            "ORDER BY rowid", (job["event_id"], action),
+            'SELECT outbox.message_id AS message_id, outbox.origin_event_id AS origin_event_id, '
+            'outbox.conversation_id AS conversation_id, outbox.action_type AS action_type, '
+            'outbox.content_json AS content_json, outbox.content_sha256 AS content_sha256, '
+            'outbox.approval_id AS approval_id, outbox.state AS state, outbox.delivery_key AS '
+            'delivery_key, outbox.lease_owner AS lease_owner, outbox.lease_until AS lease_until, '
+            'outbox.attempt_count AS attempt_count, outbox.provider_message_id AS '
+            'provider_message_id, outbox.last_error_code AS last_error_code, outbox.created_at AS '
+            'created_at, outbox.updated_at AS updated_at, outbox.sent_at AS sent_at, '
+            'outbox.lease_token AS lease_token, outbox.next_attempt_at AS next_attempt_at, '
+            'outbox.reply_group_id AS reply_group_id, outbox.segment_index AS segment_index, '
+            'outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+            'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+            'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+            'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE '
+            'outbox.origin_event_id = %s AND outbox.action_type = %s ORDER BY record_sequence '
+            'NULLS FIRST', (job["event_id"], action),
         )
         if existing:
             group = reply_group(store, existing[0]["message_id"])
@@ -184,8 +198,8 @@ def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, 
             if version in (2, 3):
                 set_content(store, message_id, content)
             store.execute(
-                "UPDATE outbox SET reply_group_id=?,segment_index=?,segment_count=?,"
-                "reply_group_sha256=?,segment_interval_ms=? WHERE message_id=?",
+                'UPDATE outbox SET reply_group_id = %s, segment_index = %s, segment_count = %s, '
+                'reply_group_sha256 = %s, segment_interval_ms = %s WHERE message_id = %s',
                 (job["job_id"], index, len(contents), group_hash, interval_ms, message_id),
             )
             ids.append(message_id)
@@ -194,7 +208,21 @@ def _enqueue_contents(store, job, parts, contents, interval_ms, now, *, action, 
 
 def reply_group(store, message_id, *, require_sent=False):
     """Read one immutable reply; missing/tampered parts are never repaired from a prefix."""
-    row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    row = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+        'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+        'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+        'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+        'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+        'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+        'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+        'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+        'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at AS '
+        'next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+        'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+        'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+        'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+        'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id = '
+        '%s', (message_id,))
     if not row:
         raise CoreError("REPLY_GROUP_MISSING", 409)
     try:
@@ -205,11 +233,25 @@ def reply_group(store, message_id, *, require_sent=False):
                 "rows": [row], "text": json.loads(row["content_json"])["text"],
                 "segmented": False,
             }
-        rows = store.rows("SELECT * FROM outbox WHERE reply_group_id=? ORDER BY segment_index",
+        rows = store.rows('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+            'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+            'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+            'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+            'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+            'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+            'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+            'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+            'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at '
+            'AS next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+            'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+            'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+            'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+            'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE '
+            'outbox.reply_group_id = %s ORDER BY outbox.segment_index NULLS FIRST',
                           (row["reply_group_id"],))
         source = store.one(
-            "SELECT j.event_id,e.conversation_id,j.kind,e.redacted FROM jobs j "
-            "JOIN events e USING(event_id) WHERE j.job_id=?", (row["reply_group_id"],),
+            'SELECT j.event_id, e.conversation_id, j.kind, e.redacted FROM jobs AS j JOIN events '
+            'AS e USING (event_id) WHERE j.job_id = %s', (row["reply_group_id"],),
         )
         if (
             not source or source["redacted"]
@@ -310,7 +352,7 @@ def _cancel_unsent(store, now, reason, condition, params, *, retain_lease=False)
     # Even when retiring its token, keep the lease deadline as evidence of a prior lease.
     retire = "" if retain_lease else "lease_token=NULL,"
     store.execute(
-        f"UPDATE outbox SET state='CANCELLED',{retire}updated_at=?,last_error_code=? "
+        f"UPDATE outbox SET state='CANCELLED',{retire}updated_at=%s,last_error_code=%s "
         "WHERE state IN ('PENDING','LEASED','RETRY_WAIT') AND " + condition,
         (now, reason, *params),
     )
@@ -318,43 +360,53 @@ def _cancel_unsent(store, now, reason, condition, params, *, retain_lease=False)
 
 def cancel_interrupted_replies(store, conversation_id, now):
     """An accepted legacy-mode input interrupts the conversation's unsent groups."""
-    if store.one("SELECT 1 FROM pragma_table_info('outbox') WHERE name='reply_group_id'"):
+    if store.one(
+        'SELECT 1 FROM information_schema.columns WHERE '
+        "table_schema=current_schema() AND table_name='outbox' AND "
+        "column_name='reply_group_id'"
+    ):
         _cancel_unsent(store, now, "REPLY_INTERRUPTED_BY_OWNER",
-                       "conversation_id=? AND reply_group_id IS NOT NULL",
+                       'conversation_id=%s AND reply_group_id IS NOT NULL',
                        (conversation_id,), retain_lease=True)
 
 
 def cancel_superseded_replies(store, conversation_id, event_id, now):
     _cancel_unsent(store, now, reply_revision.SUPERSEDED,
-                   "conversation_id=? AND action_type='qq.private.reply' AND origin_event_id!=? "
-                   "AND origin_event_id IN (SELECT event_id FROM events WHERE "
+                   (
+                       "conversation_id=%s AND action_type='qq.private.reply' AND "
+                       'origin_event_id!=%s AND origin_event_id IN (SELECT event_id'
+                       ' FROM events WHERE '
+                   )
                    + reply_revision.OWNER_INPUT + ")",
                    (conversation_id, event_id), retain_lease=True)
 
 
 def cancel_origin_replies(store, event_id, now):
     _cancel_unsent(store, now, reply_revision.SUPERSEDED,
-                   "origin_event_id=? AND action_type='qq.private.reply'", (event_id,),
+                   "origin_event_id=%s AND action_type='qq.private.reply'", (event_id,),
                    retain_lease=True)
 
 
 def mark_not_dispatched(store, message_id, now, *, attempt_count, reason="REPLY_NOT_DISPATCHED"):
     """Apply a verified Bridge non-dispatch receipt inside its settlement transaction."""
     store.execute(
-        "UPDATE outbox SET state='CANCELLED',updated_at=?,attempt_count=?,"
-        "last_error_code=? WHERE message_id=?",
+        (
+            'UPDATE outbox SET '
+            "state='CANCELLED',updated_at=%s,attempt_count=%s,last_error_code=%s "
+            'WHERE message_id=%s'
+        ),
         (now, attempt_count, reason, message_id),
     )
 
 
 def cancel_segment_tail(store, row, now, *, reason="REPLY_SEGMENT_CHAIN_STOPPED"):
     if row["reply_group_id"] is not None:
-        _cancel_unsent(store, now, reason, "reply_group_id=? AND segment_index>?",
+        _cancel_unsent(store, now, reason, 'reply_group_id=%s AND segment_index>%s',
                        (row["reply_group_id"], row["segment_index"]))
 
 
 def _cancel_blocked_delivery(store, row, now, reason):
-    _cancel_unsent(store, now, reason, "message_id=?", (row["message_id"],))
+    _cancel_unsent(store, now, reason, 'message_id=%s', (row["message_id"],))
     cancel_segment_tail(store, row, now)
 
 
@@ -370,10 +422,10 @@ def revoke_deliveries(store, condition, params=(), *, erase_content=False, reaso
     if erase_content:
         updates.extend(("content_json='{}'", "content_sha256=''"))
     if reason is not None:
-        updates.append("last_error_code=?")
+        updates.append('last_error_code=%s')
         values.append(reason)
     if now is not None:
-        updates.append("updated_at=?")
+        updates.append('updated_at=%s')
         values.append(now)
     store.execute(f"UPDATE outbox SET {','.join(updates)} WHERE {condition}", (*values, *params))
 
@@ -387,20 +439,22 @@ def restore_deliveries(store):
 
 def record_reconciled_outcome(store, message_id, outcome, at):
     """The caller has verified the original uncertain row or a durable owner resolution."""
-    store.execute("UPDATE outbox SET state=?,updated_at=?,sent_at=?,lease_token=NULL "
-                  "WHERE message_id=?",
+    store.execute((
+        'UPDATE outbox SET state=%s,updated_at=%s,sent_at=%s,lease_token=NULL WHERE'
+        ' message_id=%s'
+    ),
                   (outcome, at, at if outcome == "SENT" else None, message_id))
 
 
 def recover_deliveries(store, now):
     store.execute(
-        "UPDATE outbox SET state='PENDING',lease_token=NULL,lease_until=NULL "
-        "WHERE state='LEASED' AND lease_until<=?",
+        "UPDATE outbox SET state = 'PENDING', lease_token = NULL, lease_until = NULL WHERE state = "
+        "'LEASED' AND lease_until <= %s",
         (now,),
     )
     store.execute(
-        "UPDATE outbox SET state='DELIVERY_UNCERTAIN',updated_at=?,"
-        "last_error_code='SEND_LEASE_EXPIRED' WHERE state='SENDING' AND lease_until<=?",
+        "UPDATE outbox SET state = 'DELIVERY_UNCERTAIN', updated_at = %s, last_error_code = "
+        "'SEND_LEASE_EXPIRED' WHERE state = 'SENDING' AND lease_until <= %s",
         (now, now),
     )
     # Recovery must also find interrupted groups left by an earlier process.
@@ -412,14 +466,17 @@ def recover_deliveries(store, now):
 
 def set_proactive_paused(store, paused, now):
     """Change the owner's pause setting and revoke eligible work in the same transaction."""
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
+    store.execute((
+        "INSERT INTO runtime_meta (key,value) VALUES ('proactive_paused',%s) ON "
+        'CONFLICT(key) DO UPDATE SET value=excluded.value,record_sequence=DEFAULT'
+    ),
                   ("1" if paused else "0",))
     if paused:
         cancel_proactive_work(store, now)
 
 
 def retire_preflight_lease(store, message_id):
-    store.execute("DELETE FROM runtime_meta WHERE key=?", ("owner_preflight_lease:" + message_id,))
+    store.execute('DELETE FROM runtime_meta WHERE key=%s', ("owner_preflight_lease:" + message_id,))
 
 
 def cancel_proactive_work(store, now):
@@ -428,7 +485,8 @@ def cancel_proactive_work(store, now):
     job_queue.cancel_active(
         store,
         "kind='activity' AND event_id NOT IN "
-        "(SELECT event_id FROM events WHERE json_extract(body_json,'$.notice.kind') "
+        "(SELECT event_id FROM events WHERE (CASE WHEN body_json IS JSON "
+        "THEN body_json::json #>> '{notice,kind}' END) "
         "IN ('commitment','life'))",
         (),
         "AUTONOMY_PAUSED",
@@ -456,10 +514,10 @@ def _empty_delivery_poll(store, settings, request, now):
 
     # No recovery, tail cancellation or proactive cancellation can write in this
     # state. A committed WAL snapshot is sufficient to return an empty batch.
-    if store.one("SELECT 1 FROM outbox WHERE state IN "
-                 "('PENDING','RETRY_WAIT','LEASED','SENDING') LIMIT 1") or store.one(
-        "SELECT 1 FROM jobs WHERE kind='activity' "
-        "AND state IN ('QUEUED','RUNNING','RETRY_WAIT') LIMIT 1"
+    if store.one("SELECT 1 FROM outbox WHERE state IN ('PENDING', 'RETRY_WAIT', 'LEASED', "
+        "'SENDING') LIMIT 1") or store.one(
+        "SELECT 1 FROM jobs WHERE kind = 'activity' AND state IN ('QUEUED', 'RUNNING', "
+        "'RETRY_WAIT') LIMIT 1"
     ):
         return False
     _delivery_scope(store, settings, request, now)
@@ -488,21 +546,31 @@ def lease_deliveries(store, settings, request, now):
         # One delivery at a time per conversation. Uncertain items are never replayed;
         # later ordinary replies can continue so the owner can reconcile over QQ.
         rows = store.rows(
-            "SELECT o.*,c.platform_session_key FROM outbox o JOIN conversations c "
-            "ON c.conversation_id=o.conversation_id WHERE o.state IN ('PENDING','RETRY_WAIT') "
-            "AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=?) AND c.scope='private' "
-            "AND c.owner_actor_id='owner' AND o.delivery_lane=? AND ((? AND o.action_type IN "
-            "('qzone.publish','qq.profile.nickname','qq.profile.signature','qq.profile.avatar')) "
-            "OR (NOT ? AND o.action_type IN "
-            "('qq.private.reply','qq.private.proactive','qq.private.poke'))) "
-            "AND (o.action_type!='qq.private.poke' OR ?) "
-            "AND NOT EXISTS (SELECT 1 FROM outbox b "
-            "WHERE b.conversation_id=o.conversation_id AND b.delivery_lane=o.delivery_lane "
-            "AND b.rowid<o.rowid AND b.state IN "
-            "('PENDING','RETRY_WAIT','LEASED','SENDING')) "
-            "ORDER BY o.rowid LIMIT ?",
-            (now, request.delivery_lane, int(account), int(account),
-             int((owner or private_life.enabled(settings)) and poke.enabled(settings)),
+            'SELECT o.message_id AS message_id, o.origin_event_id AS origin_event_id, '
+            'o.conversation_id AS conversation_id, o.action_type AS action_type, o.content_json AS '
+            'content_json, o.content_sha256 AS content_sha256, o.approval_id AS approval_id, '
+            'o.state AS state, o.delivery_key AS delivery_key, o.lease_owner AS lease_owner, '
+            'o.lease_until AS lease_until, o.attempt_count AS attempt_count, o.provider_message_id '
+            'AS provider_message_id, o.last_error_code AS last_error_code, o.created_at AS '
+            'created_at, o.updated_at AS updated_at, o.sent_at AS sent_at, o.lease_token AS '
+            'lease_token, o.next_attempt_at AS next_attempt_at, o.reply_group_id AS '
+            'reply_group_id, o.segment_index AS segment_index, o.segment_count AS segment_count, '
+            'o.reply_group_sha256 AS reply_group_sha256, o.segment_interval_ms AS '
+            'segment_interval_ms, o.delivery_lane AS delivery_lane, o.native_ack_json AS '
+            'native_ack_json, o.authority_json AS authority_json, c.platform_session_key AS '
+            'platform_session_key FROM outbox AS o JOIN conversations AS c ON c.conversation_id = '
+            "o.conversation_id WHERE o.state IN ('PENDING', 'RETRY_WAIT') AND (o.next_attempt_at "
+            "IS NULL OR o.next_attempt_at <= %s) AND c.scope = 'private' AND c.owner_actor_id = "
+            "'owner' AND o.delivery_lane = %s AND ((%s AND o.action_type IN ('qzone.publish', "
+            "'qq.profile.nickname', 'qq.profile.signature', 'qq.profile.avatar')) OR (NOT %s AND "
+            "o.action_type IN ('qq.private.reply', 'qq.private.proactive', 'qq.private.poke'))) "
+            'AND (o.action_type <> \'qq.private.poke\' OR %s) AND NOT EXISTS(SELECT 1 AS "1" FROM '
+            'outbox AS b WHERE b.conversation_id = o.conversation_id AND b.delivery_lane = '
+            "o.delivery_lane AND b.record_sequence < o.record_sequence AND b.state IN ('PENDING', "
+            "'RETRY_WAIT', 'LEASED', 'SENDING')) ORDER BY o.record_sequence NULLS FIRST LIMIT %s "
+            'FOR UPDATE OF o SKIP LOCKED',
+            (now, request.delivery_lane, bool(account), bool(account),
+             bool((owner or private_life.enabled(settings)) and poke.enabled(settings)),
              request.limit),
         )
         items = []
@@ -545,7 +613,7 @@ def lease_deliveries(store, settings, request, now):
                     store, settings, lambda: now).policy.purposes)
                 and row["action_type"] in {"qq.private.reply", "qq.private.proactive"}
                 and "generated_image" not in json.loads(row["content_json"])
-                and not store.one("SELECT 1 FROM poke_batches WHERE response_message_id=?",
+                and not store.one('SELECT 1 FROM poke_batches WHERE response_message_id = %s',
                                   (row["message_id"],))):
                 from companion.voice_flow import VoiceFlow
 
@@ -565,8 +633,8 @@ def lease_deliveries(store, settings, request, now):
                     continue
             token = uid("lease")
             store.execute(
-                "UPDATE outbox SET state='LEASED',lease_owner=?,lease_token=?,"
-                "lease_until=?,updated_at=? WHERE message_id=?",
+                "UPDATE outbox SET state = 'LEASED', lease_owner = %s, lease_token = %s, "
+                'lease_until = %s, updated_at = %s WHERE message_id = %s',
                 (
                     request.worker_id,
                     token,
@@ -580,8 +648,8 @@ def lease_deliveries(store, settings, request, now):
                     account_actions.lease_receipt(store, settings, lambda: now,
                         row["message_id"], token, approval)
                 except CoreError as error:
-                    store.execute("UPDATE outbox SET state='CANCELLED',lease_token=NULL,"
-                                  "updated_at=?,last_error_code=? WHERE message_id=?",
+                    store.execute("UPDATE outbox SET state = 'CANCELLED', lease_token = NULL, "
+                        'updated_at = %s, last_error_code = %s WHERE message_id = %s',
                                   (now, error.code, row["message_id"]))
                     continue
             items.append(
@@ -613,13 +681,15 @@ def lease_deliveries(store, settings, request, now):
                 if (reply_revision.owner_input(store, row["origin_event_id"])
                     or reply_recovery.is_delivery(store, row["message_id"])):
                     items[-1]["reply_revision"] = store.one(
-                        "SELECT reply_revision FROM events WHERE event_id=?",
+                        'SELECT reply_revision FROM events WHERE event_id = %s',
                         (row["origin_event_id"],),
                     )["reply_revision"]
                 if preflight.eligible(items[-1]):
                     # Recovery clears expired LEASED tokens. Only the most recently
                     # issued envelope can settle a retired, unstarted lease.
-                    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                    store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON '
+                        'CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = '
+                        'DEFAULT',
                         ("owner_preflight_lease:" + row["message_id"], encode({
                             "item_sha256": digest(items[-1]), "lease_sha256": digest(token),
                             "lease_until": items[-1]["lease_until"]})))
@@ -636,7 +706,7 @@ def lease_deliveries(store, settings, request, now):
                 if (row["action_type"] == "qq.private.reply"
                     and reply_revision.owner_input(store, row["origin_event_id"])):
                     items[-1]["reply_revision"] = store.one(
-                        "SELECT reply_revision FROM events WHERE event_id=?",
+                        'SELECT reply_revision FROM events WHERE event_id = %s',
                         (row["origin_event_id"],),
                     )["reply_revision"]
         return {"items": items}
@@ -647,18 +717,19 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
     with store.transaction(delivery_preflight=True):
         from companion import live_text, owner_authority, owner_delivery
 
-        if not store.one("SELECT 1 FROM outbox WHERE message_id=? AND state='LEASED' "
-                         "AND lease_token=? AND lease_until>?", (message_id, token, now)):
+        if not store.one("SELECT 1 FROM outbox WHERE message_id = %s AND state = 'LEASED' AND "
+            'lease_token = %s AND lease_until > %s', (message_id, token, now)):
             raise CoreError("STALE_DELIVERY_LEASE")
         reply_revision.check_delivery(store, message_id)
-        account = store.one("SELECT 1 FROM outbox WHERE message_id=? "
-                            "AND delivery_lane='qq_account'", (message_id,))
+        account = store.one('SELECT 1 FROM outbox WHERE message_id = %s AND delivery_lane = '
+            "'qq_account'", (message_id,))
         if account:
             from companion import account_actions
 
             if settings is None or clock is None:
                 raise CoreError("SOCIAL_LIVE_SCOPE_REQUIRED", 403)
-            row = store.one("SELECT authority_json FROM outbox WHERE message_id=?", (message_id,))
+            row = store.one('SELECT authority_json FROM outbox WHERE message_id = '
+                '%s', (message_id,))
             approval = account_actions.scope(store, settings, clock,
                 json.loads(row["authority_json"]), settings.social_autonomy.authorization_sha256,
                 message_id=message_id)
@@ -673,9 +744,11 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
             live_text.check_delivery(store, settings, clock, message_id)
             now = clock()
         pending = store.one(
-            "SELECT message_id,action_type,reply_group_id,segment_index FROM outbox "
-            "WHERE message_id=? AND state='LEASED' "
-            "AND lease_token=? AND lease_until>?",
+            (
+                'SELECT message_id,action_type,reply_group_id,segment_index FROM '
+                "outbox WHERE message_id=%s AND state='LEASED' AND lease_token=%s "
+                'AND lease_until>%s'
+            ),
             (message_id, token, now),
         )
         if pending:
@@ -692,10 +765,11 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
             _cancel_blocked_delivery(store, pending, now, problem)
         else:
             changed = store.execute(
-                "UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1,updated_at=? "
-                "WHERE message_id=? AND state='LEASED' AND lease_token=? AND lease_until>?",
+                "UPDATE outbox SET state = 'SENDING', attempt_count = attempt_count + 1, "
+                "updated_at = %s WHERE message_id = %s AND state = 'LEASED' AND lease_token = %s "
+                'AND lease_until > %s',
                 (now, message_id, token, now),
-            ).rowcount
+            )
             if changed != 1:
                 raise CoreError("STALE_DELIVERY_LEASE")
     if problem:
@@ -706,7 +780,21 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
 def delivery_result(store, settings, message_id, result, now):
     with store.transaction():
         row = store.one(
-            "SELECT * FROM outbox WHERE message_id=? AND lease_token=?",
+            'SELECT outbox.message_id AS message_id, outbox.origin_event_id AS origin_event_id, '
+            'outbox.conversation_id AS conversation_id, outbox.action_type AS action_type, '
+            'outbox.content_json AS content_json, outbox.content_sha256 AS content_sha256, '
+            'outbox.approval_id AS approval_id, outbox.state AS state, outbox.delivery_key AS '
+            'delivery_key, outbox.lease_owner AS lease_owner, outbox.lease_until AS lease_until, '
+            'outbox.attempt_count AS attempt_count, outbox.provider_message_id AS '
+            'provider_message_id, outbox.last_error_code AS last_error_code, outbox.created_at AS '
+            'created_at, outbox.updated_at AS updated_at, outbox.sent_at AS sent_at, '
+            'outbox.lease_token AS lease_token, outbox.next_attempt_at AS next_attempt_at, '
+            'outbox.reply_group_id AS reply_group_id, outbox.segment_index AS segment_index, '
+            'outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+            'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+            'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+            'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id '
+            '= %s AND outbox.lease_token = %s',
             (message_id, result.lease_token),
         )
         if not row:
@@ -767,9 +855,9 @@ def delivery_result(store, settings, message_id, result, now):
         if state in {"SENT", "FAILED", "DELIVERY_UNCERTAIN"}:
             cumulative.send_result(store, message_id, state, now)
         store.execute(
-            "UPDATE outbox SET state=?,provider_message_id=?,native_ack_json=?,last_error_code=?,"
-            "sent_at=?,updated_at=?,next_attempt_at=?,attempt_count=attempt_count+? "
-            "WHERE message_id=?",
+            'UPDATE outbox SET state = %s, provider_message_id = %s, native_ack_json = %s, '
+            'last_error_code = %s, sent_at = %s, updated_at = %s, next_attempt_at = %s, '
+            'attempt_count = attempt_count + %s WHERE message_id = %s',
             (
                 state,
                 result.provider_message_id,
@@ -791,8 +879,8 @@ def delivery_result(store, settings, message_id, result, now):
         if row.get("reply_group_id"):
             if state == "SENT":
                 store.execute(
-                    "UPDATE outbox SET next_attempt_at=? WHERE reply_group_id=? "
-                    "AND segment_index=? AND state IN ('PENDING','RETRY_WAIT')",
+                    'UPDATE outbox SET next_attempt_at = %s WHERE reply_group_id = %s AND '
+                    "segment_index = %s AND state IN ('PENDING', 'RETRY_WAIT')",
                     (after(now, row["segment_interval_ms"] / 1000), row["reply_group_id"],
                      row["segment_index"] + 1),
                 )
@@ -815,11 +903,11 @@ def reconcile_delivery(store, message_id, outcome, now, settings=None, *,
         raise CoreError("INVALID_RECONCILIATION", 400)
     with store.transaction():
         changed = store.execute(
-            "UPDATE outbox SET state=?,updated_at=?,sent_at=?,lease_token=NULL "
-            "WHERE message_id=? AND state='DELIVERY_UNCERTAIN' AND action_type IN "
-            "('qq.private.reply','qq.private.proactive','qq.private.poke')",
+            'UPDATE outbox SET state = %s, updated_at = %s, sent_at = %s, lease_token = NULL WHERE '
+            "message_id = %s AND state = 'DELIVERY_UNCERTAIN' AND action_type IN "
+            "('qq.private.reply', 'qq.private.proactive', 'qq.private.poke')",
             (outcome, now, now if outcome == "SENT" else None, message_id),
-        ).rowcount
+        )
         if changed != 1:
             raise CoreError("NOT_UNCERTAIN")
         store.audit("delivery.owner_reconciled", message_id, "owner", now, outcome=outcome)

@@ -15,10 +15,10 @@ def test_diary_context_proof_rejects_changed_or_withdrawn_material(core, change)
     before = core.store.one("SELECT COUNT(*) n FROM diary_runs")["n"]
     core.diary.revalidate_context(proof)
     if change == "entry":
-        core.store.execute("UPDATE diary_entries SET body_md='Changed' WHERE entry_id=?",
+        core.store.execute("UPDATE diary_entries SET body_md='Changed' WHERE entry_id=%s",
                            (entry["entry_id"],))
     elif change == "source":
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
+        core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s',
                            (proof["source_event_ids"][0],))
     elif change == "forget":
         core.diary.forget(DAY, core.settings.owner_qq_id)

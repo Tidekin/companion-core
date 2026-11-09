@@ -84,8 +84,10 @@ def capture_input(core, number=1):
         input_sha256=capture.input_sha256, evidence_sha256="e" * 64, capture=capture,
     ))
     core.ingest(inbound, inbound.event_id)
-    return core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
-                          "WHERE j.event_id=?", (inbound.event_id,))
+    return core.store.one((
+        'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+        'USING(event_id) WHERE j.event_id=%s'
+    ), (inbound.event_id,))
 
 
 def send_next(core):
@@ -96,7 +98,7 @@ def send_next(core):
     item = leased[0]
     transport.begin_send(core.store, item["message_id"], item["lease_token"], core.clock(),
                          core.settings, clock=core.clock)
-    row = core.store.one("SELECT * FROM outbox WHERE message_id=?", (item["message_id"],))
+    row = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (item["message_id"],))
     checked = live_text.send_check(core.store, core.settings, core.clock, live_text.SendCheck(
         window_sha256=core.settings.live_text_window.plan_sha256,
         event_id=row["origin_event_id"], message_id=item["message_id"],
@@ -163,7 +165,7 @@ def test_segmented_receipts_share_one_model_result_and_history_is_one_complete_t
             assert len(rows) == 2 and len(host.calls) == 1
             usage = core.store.rows("SELECT * FROM model_usage")
             assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
-            receipts = [json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            receipts = [json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                 (owner_delivery.DELIVERY + row["message_id"],))["value"]) for row in rows]
             assert all(r["request_ids"] == [usage[0]["request_id"]] for r in receipts)
             envelopes = [transport.segment_envelope(core.store, row["message_id"]) for row in rows]
@@ -196,8 +198,10 @@ def test_native_segment_limit_preserves_full_text_and_each_new_turn(core, tmp_pa
             for turn in range(2):
                 job = await host.admit()
                 assert await core.run_once()
-                rows = core.store.rows("SELECT * FROM outbox WHERE origin_event_id=? "
-                                       "ORDER BY segment_index", (job["event_id"],))
+                rows = core.store.rows((
+                    'SELECT * FROM outbox WHERE origin_event_id=%s ORDER BY '
+                    'segment_index'
+                ), (job["event_id"],))
                 assert len(rows) == count
                 assert "".join(json.loads(row["content_json"])["text"] for row in rows) == reply
                 for _ in rows:
@@ -205,7 +209,7 @@ def test_native_segment_limit_preserves_full_text_and_each_new_turn(core, tmp_pa
                     core.clock.advance(0.5)
                 assert len(host.calls) == turn + 1
                 assert len(host.sends) == count * (turn + 1)
-                assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],))[
+                assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],))[
                     "state"] == "SUCCEEDED"
     run(scenario())
 
@@ -223,7 +227,7 @@ def test_any_changed_segment_manifest_invalidates_delivery_and_history(
             await host.send()
             core.clock.advance(0.5)
             await host.send()
-            core.store.execute("UPDATE outbox SET reply_group_sha256=? WHERE message_id=?",
+            core.store.execute('UPDATE outbox SET reply_group_sha256=%s WHERE message_id=%s',
                                ("f" * 64, rows[segment_index]["message_id"]))
             with pytest.raises(CoreError):
                 owner_delivery.check_delivery(core.store, core.settings, core.clock,
@@ -253,7 +257,7 @@ def test_native_delivery_reuses_group_only_in_the_current_snapshot(core, tmp_pat
                                               first["message_id"])
             assert reads == [1]
             # A different transaction cannot use a prior authorization/group result.
-            core.store.execute("UPDATE outbox SET reply_group_sha256=? WHERE message_id=?",
+            core.store.execute('UPDATE outbox SET reply_group_sha256=%s WHERE message_id=%s',
                                ("f" * 64, first["message_id"]))
             with pytest.raises(CoreError), core.store.transaction():
                 owner_delivery.check_delivery(core.store, core.settings, core.clock,
@@ -271,16 +275,18 @@ def test_partial_group_is_absent_before_history_limit_and_complete_group_is_one_
                           "WHERE j.event_id='evt_test_2'")
     parts = ["这是第一条。", "这是第二条。", "这是第三条。"]
     ids = transport.enqueue_reply_parts(core.store, job, parts, 500, core.clock())
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job["job_id"],))
-    core.store.execute("UPDATE outbox SET state='SENT' WHERE origin_event_id=?", (job["event_id"],))
-    core.store.execute("UPDATE outbox SET state=? WHERE message_id=?", (state, ids[1]))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (job["job_id"],))
+    core.store.execute((
+        "UPDATE outbox SET state='SENT' WHERE origin_event_id=%s"
+    ), (job["event_id"],))
+    core.store.execute('UPDATE outbox SET state=%s WHERE message_id=%s', (state, ids[1]))
     current = current_job(core)
     sources = dialogue_history.recent_sent_sources(
         core.store, current["conversation_id"], current["event_id"], 1,
     )
     assert len(sources) == 1 and sources[0]["event_id"] == "evt_test_1"
     assert "reply_segments" not in sources[0]
-    core.store.execute("UPDATE outbox SET state='SENT' WHERE message_id=?", (ids[1],))
+    core.store.execute("UPDATE outbox SET state='SENT' WHERE message_id=%s", (ids[1],))
     sources = dialogue_history.recent_sent_sources(
         core.store, current["conversation_id"], current["event_id"], 1,
     )
@@ -303,16 +309,16 @@ def test_remaining_send_slots_include_queued_parts_and_retry_attempts_from_this_
         core.store.insert("runtime_meta", key=live_text.INPUT + f"evt_test_{number}", value=encode({
             "window_sha256": approval.plan_sha256 if number < 4 else "old-window",
         }))
-    core.store.execute("UPDATE outbox SET state='SENT',attempt_count=1 WHERE message_id=?",
+    core.store.execute("UPDATE outbox SET state='SENT',attempt_count=1 WHERE message_id=%s",
                        (ids[0],))
-    core.store.execute("UPDATE outbox SET state='RETRY_WAIT',attempt_count=1 WHERE message_id=?",
+    core.store.execute("UPDATE outbox SET state='RETRY_WAIT',attempt_count=1 WHERE message_id=%s",
                        (ids[1],))
-    core.store.execute("UPDATE outbox SET attempt_count=99 WHERE message_id=?", (ids[3],))
+    core.store.execute('UPDATE outbox SET attempt_count=99 WHERE message_id=%s', (ids[3],))
     assert live_text.remaining_send_slots(core.store, approval) == 1
-    core.store.execute("UPDATE outbox SET state='SENDING',attempt_count=2 WHERE message_id=?",
+    core.store.execute("UPDATE outbox SET state='SENDING',attempt_count=2 WHERE message_id=%s",
                        (ids[1],))
     assert live_text.remaining_send_slots(core.store, approval) == 1
-    core.store.execute("UPDATE outbox SET state='RETRY_WAIT',attempt_count=3 WHERE message_id=?",
+    core.store.execute("UPDATE outbox SET state='RETRY_WAIT',attempt_count=3 WHERE message_id=%s",
                        (ids[1],))
     assert live_text.remaining_send_slots(core.store, approval) == -1
 
@@ -328,11 +334,11 @@ def test_damaged_group_cannot_be_reclassified_as_single_message_history(core, co
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     current = current_job(core)
     if corruption == "missing":
-        core.store.execute("DELETE FROM outbox WHERE message_id=?", (ids[0],))
+        core.store.execute('DELETE FROM outbox WHERE message_id=%s', (ids[0],))
     elif corruption == "unbound":
-        core.store.execute("UPDATE outbox SET reply_group_id=NULL WHERE message_id=?", (ids[-1],))
+        core.store.execute('UPDATE outbox SET reply_group_id=NULL WHERE message_id=%s', (ids[-1],))
     else:
-        core.store.execute("UPDATE outbox SET content_json=? WHERE message_id=?",
+        core.store.execute('UPDATE outbox SET content_json=%s WHERE message_id=%s',
                            (encode({"text": "被替换的正文。"}), ids[0]))
     assert dialogue_history.recent_sent_sources(
         core.store, current["conversation_id"], current["event_id"], 2,
@@ -346,13 +352,13 @@ def test_reply_limit_applies_to_the_full_answer_before_any_segment_is_deliverabl
             job = await host.admit()
             assert await core.run_once()
             assert len(host.calls) == 1
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],))[
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],))[
                 "state"] == "FAILED"
             # No segment of the over-long answer exists; only Core's fixed notice does.
             rows = core.store.rows("SELECT delivery_key,content_json FROM outbox")
             assert [(row["delivery_key"], json.loads(row["content_json"])) for row in rows] == [
                 (f"failure:{job['job_id']}:v1", {"text": owner_delivery.FAILURE_TEXT})]
             assert [json.loads(row["value"])["kind"] for row in core.store.rows(
-                "SELECT value FROM runtime_meta WHERE key LIKE 'owner_delivery:%'")] == [
+                "SELECT value FROM runtime_meta WHERE key LIKE 'owner_delivery:%%'")] == [
                 owner_delivery.FAILURE_NOTICE]
     run(scenario())

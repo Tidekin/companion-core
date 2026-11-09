@@ -29,21 +29,33 @@ ROW_FIELDS = {
 
 
 def _meta(store, key):
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+    row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
     return json.loads(row["value"]) if row else None
 
 
 def _put(store, key, value):
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(value)))
+    store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO '
+        'UPDATE SET value = excluded.value, record_sequence = DEFAULT', (key, encode(value)))
 
 
 def _transaction(store):
-    return nullcontext() if store.db.in_transaction else store.transaction()
+    return nullcontext() if store.in_transaction else store.transaction()
 
 
 def _row(store, message_id):
-    row = store.one("SELECT o.*,c.scope,c.owner_actor_id FROM outbox o "
-                    "JOIN conversations c USING(conversation_id) WHERE message_id=?", (message_id,))
+    row = store.one('SELECT o.message_id AS message_id, o.origin_event_id AS origin_event_id, '
+        'o.conversation_id AS conversation_id, o.action_type AS action_type, o.content_json AS '
+        'content_json, o.content_sha256 AS content_sha256, o.approval_id AS approval_id, o.state '
+        'AS state, o.delivery_key AS delivery_key, o.lease_owner AS lease_owner, o.lease_until AS '
+        'lease_until, o.attempt_count AS attempt_count, o.provider_message_id AS '
+        'provider_message_id, o.last_error_code AS last_error_code, o.created_at AS created_at, '
+        'o.updated_at AS updated_at, o.sent_at AS sent_at, o.lease_token AS lease_token, '
+        'o.next_attempt_at AS next_attempt_at, o.reply_group_id AS reply_group_id, o.segment_index '
+        'AS segment_index, o.segment_count AS segment_count, o.reply_group_sha256 AS '
+        'reply_group_sha256, o.segment_interval_ms AS segment_interval_ms, o.delivery_lane AS '
+        'delivery_lane, o.native_ack_json AS native_ack_json, o.authority_json AS authority_json, '
+        'c.scope AS scope, c.owner_actor_id AS owner_actor_id FROM outbox AS o JOIN conversations '
+        'AS c ON o.conversation_id = c.conversation_id WHERE o.message_id = %s', (message_id,))
     if (not row or row["action_type"] not in wire.ACTIONS or row["scope"] != "private"
         or row["owner_actor_id"] != "owner"
         or (row["action_type"] in wire.ACCOUNT_ACTIONS) != (row["delivery_lane"] == "qq_account")):
@@ -65,13 +77,26 @@ def _custody(store, message_id):
     projection = _meta(store, cumulative.PROJECTION)
     if projection:
         return SimpleNamespace(journal_path=projection["journal_path"])
-    original = store.one("SELECT authority_json FROM outbox WHERE message_id=?", (message_id,))
+    original = store.one('SELECT authority_json FROM outbox WHERE message_id = %s', (message_id,))
     if original and original["authority_json"] != "{}":
         from companion_delivery_protocol.authority import AuthorityRef
 
         ref = AuthorityRef.from_dict(json.loads(original["authority_json"]))
-        revision = store.one("SELECT * FROM owner_authority_revisions "
-                             "WHERE grant_id=? AND revision=?", (ref.grant_id, ref.revision))
+        revision = store.one('SELECT owner_authority_revisions.grant_id AS grant_id, '
+            'owner_authority_revisions.revision AS revision, '
+            'owner_authority_revisions.operation_id AS operation_id, '
+            'owner_authority_revisions.request_sha256 AS request_sha256, '
+            'owner_authority_revisions.state AS state, owner_authority_revisions.policy_json AS '
+            'policy_json, owner_authority_revisions.policy_sha256 AS policy_sha256, '
+            'owner_authority_revisions.policy_redacted AS policy_redacted, '
+            'owner_authority_revisions.restore_generation AS restore_generation, '
+            'owner_authority_revisions.predecessor_sha256 AS predecessor_sha256, '
+            'owner_authority_revisions.record_sha256 AS record_sha256, '
+            'owner_authority_revisions.journal_id AS journal_id, '
+            'owner_authority_revisions.journal_path AS journal_path, '
+            'owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS '
+            'owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND '
+            'owner_authority_revisions.revision = %s', (ref.grant_id, ref.revision))
         from companion.owner_authority import reference
 
         if revision is None or reference(revision) != ref:
@@ -143,8 +168,8 @@ def _binding(store, proof, *, recorded=None):
             or paid_budget.sha(content if proof["payload_kind"] == "content_sha256"
                                else content["text"]) != proof["payload_sha256"]):
             raise ValueError("original delivery content changed")
-    elif not (store.one("SELECT 1 FROM events e JOIN runtime_meta r "
-                       "ON r.key='erased_event:'||e.event_id WHERE e.event_id=? AND e.redacted=1",
+    elif not (store.one('SELECT 1 FROM events AS e JOIN runtime_meta AS r ON r.key = '
+        "'erased_event:' || e.event_id WHERE e.event_id = %s AND e.redacted = 1",
                        (row["origin_event_id"],))
               or reply_content_erased_by_memory(store, row)):
         raise ValueError("unproved erased delivery")
@@ -180,7 +205,40 @@ def _voice_binding(store, proof, history, row, content_hash):
 
     given = proof.get("voice_check")
     value = _meta(store, "voice_reply:" + row["message_id"])
-    job = (store.one("SELECT * FROM voice_jobs WHERE job_id=?", (given["job_id"],))
+    job = (store.one('SELECT voice_jobs.job_id AS job_id, voice_jobs.operation AS operation, '
+        'voice_jobs.event_id AS event_id, voice_jobs.native_source_event_id AS '
+        'native_source_event_id, voice_jobs.conversation_id AS conversation_id, '
+        'voice_jobs.message_id AS message_id, voice_jobs.source_segment_index AS '
+        'source_segment_index, voice_jobs.source_sha256 AS source_sha256, '
+        'voice_jobs.source_input_sha256 AS source_input_sha256, voice_jobs.source_proof_sha256 AS '
+        'source_proof_sha256, voice_jobs.identity_sha256 AS identity_sha256, '
+        'voice_jobs.window_sha256 AS window_sha256, voice_jobs.captured_privacy_epoch AS '
+        'captured_privacy_epoch, voice_jobs.captured_reply_revision AS captured_reply_revision, '
+        'voice_jobs.outbox_content_sha256 AS outbox_content_sha256, voice_jobs.outbox_delivery_key '
+        'AS outbox_delivery_key, voice_jobs.node_id AS node_id, voice_jobs.manifest_sha256 AS '
+        'manifest_sha256, voice_jobs.config_sha256 AS config_sha256, voice_jobs.config_json AS '
+        'config_json, voice_jobs.generation AS generation, voice_jobs.state AS state, '
+        'voice_jobs.input_mime AS input_mime, voice_jobs.input_sha256 AS input_sha256, '
+        'voice_jobs.input_bytes AS input_bytes, voice_jobs.input_duration_seconds AS '
+        'input_duration_seconds, voice_jobs.source_partial AS source_partial, '
+        'voice_jobs.input_blob AS input_blob, voice_jobs.result_blob AS result_blob, '
+        'voice_jobs.result_sha256 AS result_sha256, voice_jobs.result_bytes AS result_bytes, '
+        'voice_jobs.lease_token_sha256 AS lease_token_sha256, voice_jobs.lease_json AS lease_json, '
+        'voice_jobs.lease_issued_at AS lease_issued_at, voice_jobs.lease_until AS lease_until, '
+        'voice_jobs.started_at AS started_at, voice_jobs.completed_at AS completed_at, '
+        'voice_jobs.created_at AS created_at, voice_jobs.updated_at AS updated_at, '
+        'voice_jobs.deadline_at AS deadline_at, voice_jobs.result_expires_at AS result_expires_at, '
+        'voice_jobs.last_error_code AS last_error_code, voice_jobs.stop_token_sha256 AS '
+        'stop_token_sha256, voice_jobs.incarnation AS incarnation, voice_jobs.content_retired AS '
+        'content_retired, voice_jobs.cleanup_state AS cleanup_state, voice_jobs.cleanup_epoch AS '
+        'cleanup_epoch, voice_jobs.cleanup_confirmed_at AS cleanup_confirmed_at, '
+        'voice_jobs.authority_json AS authority_json, voice_jobs.singing_context_json AS '
+        'singing_context_json, voice_jobs.reserved_output_bytes AS reserved_output_bytes, '
+        'voice_jobs.source_budget_at AS source_budget_at, voice_jobs.source_reserved_requests AS '
+        'source_reserved_requests, voice_jobs.source_reserved_bytes AS source_reserved_bytes, '
+        'voice_jobs.source_used_requests AS source_used_requests, voice_jobs.source_used_bytes AS '
+        'source_used_bytes FROM voice_jobs AS voice_jobs WHERE voice_jobs.job_id = '
+        '%s', (given["job_id"],))
            if given else None)
     approval = history["approval"]
     if given and approval.get("voice_scope") != "owner_voice_v1":
@@ -190,9 +248,37 @@ def _voice_binding(store, proof, history, row, content_hash):
         voice_policy_sha256=approval.get("voice_policy_sha256"))
 
 def _account_binding(store, proof, history, row, authority, recorded):
-    reservation = store.one("SELECT * FROM social_autonomy_reservations WHERE message_id=?",
+    reservation = store.one('SELECT social_autonomy_reservations.plan_id AS plan_id, '
+        'social_autonomy_reservations.message_id AS message_id, '
+        'social_autonomy_reservations.action_type AS action_type, '
+        'social_autonomy_reservations.semantic_sha256 AS semantic_sha256, '
+        'social_autonomy_reservations.reserved_day AS reserved_day, '
+        'social_autonomy_reservations.reserved_at AS reserved_at, '
+        'social_autonomy_reservations.dispatched_at AS dispatched_at, '
+        'social_autonomy_reservations.released_at AS released_at, '
+        'social_autonomy_reservations.receipt_json AS receipt_json, '
+        'social_autonomy_reservations.receipt_sha256 AS receipt_sha256 FROM '
+        'social_autonomy_reservations AS social_autonomy_reservations WHERE '
+        'social_autonomy_reservations.message_id = %s',
                             (row["message_id"],))
-    plan = store.one("SELECT * FROM social_autonomy_plans WHERE plan_id=?",
+    plan = store.one('SELECT social_autonomy_plans.plan_id AS plan_id, '
+        'social_autonomy_plans.idempotency_key AS idempotency_key, '
+        'social_autonomy_plans.request_sha256 AS request_sha256, '
+        'social_autonomy_plans.candidate_sha256 AS candidate_sha256, social_autonomy_plans.state '
+        'AS state, social_autonomy_plans.policy_version AS policy_version, '
+        'social_autonomy_plans.policy_sha256 AS policy_sha256, '
+        'social_autonomy_plans.authorization_sha256 AS authorization_sha256, '
+        'social_autonomy_plans.binding_sha256 AS binding_sha256, social_autonomy_plans.timezone AS '
+        'timezone, social_autonomy_plans.policy_json AS policy_json, '
+        'social_autonomy_plans.input_snapshot_json AS input_snapshot_json, '
+        'social_autonomy_plans.source_snapshot_sha256 AS source_snapshot_sha256, '
+        'social_autonomy_plans.plan_json AS plan_json, social_autonomy_plans.payload_sha256 AS '
+        'payload_sha256, social_autonomy_plans.model_request_id AS model_request_id, '
+        'social_autonomy_plans.last_error_code AS last_error_code, social_autonomy_plans.redacted '
+        'AS redacted, social_autonomy_plans.created_at AS created_at, '
+        'social_autonomy_plans.expires_at AS expires_at, social_autonomy_plans.updated_at AS '
+        'updated_at FROM social_autonomy_plans AS social_autonomy_plans WHERE '
+        'social_autonomy_plans.plan_id = %s',
                     (proof["account_plan_id"],))
     approval = history["approval"]
     if (not reservation or not plan or not authority
@@ -336,15 +422,37 @@ def _input_closure(store, proof, delivery, outcome, account, *, global_models=Tr
         return None
     """Freeze one bounded native snapshot; the current decision has no circular hash."""
     event_id, message_id = proof["event_id"], proof["message_id"]
-    event = store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
+    event = store.one('SELECT events.event_id AS event_id, events.schema_version AS '
+        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
+        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
+        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
+        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
+        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
+        '%s', (event_id,))
     if not event or not wire.hash_value(event["fingerprint"]):
         raise ValueError("original input fingerprint required")
     maximum = wire.MAX_INPUT_DELIVERIES
-    jobs = store.rows("SELECT j.job_id,j.event_id,j.kind,j.state,j.context_tracked,j.created_at,"
-        "j.updated_at,j.last_error_code FROM jobs j WHERE j.event_id=? OR EXISTS "
-        "(SELECT 1 FROM job_sources s WHERE s.job_id=j.job_id AND s.event_id=?) "
-        "ORDER BY j.job_id LIMIT ?", (event_id, event_id, maximum + 1))
-    outbox = store.rows("SELECT * FROM outbox WHERE origin_event_id=? ORDER BY message_id LIMIT ?",
+    jobs = store.rows('SELECT j.job_id, j.event_id, j.kind, j.state, j.context_tracked, '
+        'j.created_at, j.updated_at, j.last_error_code FROM jobs AS j WHERE j.event_id = %s OR '
+        'EXISTS(SELECT 1 FROM job_sources AS s WHERE s.job_id = j.job_id AND s.event_id = %s) '
+        'ORDER BY j.job_id NULLS FIRST LIMIT %s', (event_id, event_id, maximum + 1))
+    outbox = store.rows('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+        'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+        'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+        'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+        'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+        'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+        'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+        'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+        'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at AS '
+        'next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+        'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+        'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+        'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+        'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE '
+        'outbox.origin_event_id = %s ORDER BY outbox.message_id NULLS FIRST LIMIT %s',
                         (event_id, maximum + 1))
     complete = len(jobs) <= maximum and len(outbox) <= maximum
     jobs = jobs[:maximum]
@@ -380,30 +488,33 @@ def _input_closure(store, proof, delivery, outcome, account, *, global_models=Tr
     if len(requests) > maximum:
         complete = False
     request_ids = sorted(requests)[:maximum]
-    placeholders = ",".join("?" for _ in request_ids) or "NULL"
+    placeholders = ",".join('%s' for _ in request_ids) or "NULL"
     models = store.rows(
         "SELECT request_id,job_id,state,billed_micro_usd,input_tokens,output_tokens "
         f"FROM model_usage WHERE request_id IN ({placeholders}) OR job_id IN "
-        "(SELECT j.job_id FROM jobs j WHERE j.event_id=? OR EXISTS "
-        "(SELECT 1 FROM job_sources s WHERE s.job_id=j.job_id AND s.event_id=?)) "
-        "ORDER BY request_id LIMIT ?", (*request_ids, event_id, event_id, maximum + 1))
-    global_unsettled = store.rows("SELECT request_id,state FROM model_usage WHERE state!='SETTLED' "
-        "ORDER BY request_id LIMIT ?", (maximum + 1,)) if global_models else []
-    reads = store.rows("SELECT item_id AS id,state,read_request_id,usage_request_id "
-        "FROM content_items WHERE owner_event_id=? ORDER BY item_id LIMIT ?",
+        "(SELECT j.job_id FROM jobs j WHERE j.event_id=%s OR EXISTS "
+        "(SELECT 1 FROM job_sources s WHERE s.job_id=j.job_id AND s.event_id=%s)) "
+        "ORDER BY request_id LIMIT %s", (*request_ids, event_id, event_id, maximum + 1))
+    global_unsettled = store.rows('SELECT request_id, state FROM model_usage WHERE state <> '
+        "'SETTLED' ORDER BY request_id NULLS FIRST LIMIT "
+        '%s', (maximum + 1,)) if global_models else []
+    reads = store.rows('SELECT item_id AS id, state, read_request_id, usage_request_id FROM '
+        'content_items WHERE owner_event_id = %s ORDER BY item_id NULLS FIRST LIMIT %s',
         (event_id, maximum + 1))
-    reads.extend(store.rows("SELECT request_id AS id,state FROM exploration_requests WHERE "
-        "request_id IN (SELECT read_request_id FROM content_items WHERE owner_event_id=?) "
-        "ORDER BY request_id LIMIT ?", (event_id, maximum + 1)))
+    reads.extend(store.rows('SELECT request_id AS id, state FROM exploration_requests WHERE '
+        'request_id IN (SELECT read_request_id FROM content_items WHERE owner_event_id = %s) ORDER '
+        'BY request_id NULLS FIRST LIMIT %s', (event_id, maximum + 1)))
     for table, identity, owner, states in (
         ("voice_jobs", "job_id", "event_id", {"QUEUED", "LEASED", "RUNNING", "UNKNOWN"}),
         ("bili_video_items", "item_id", "owner_event_id",
          {"DECLARED", "PREPARED", "ANALYZED", "UNKNOWN"}),
     ):
-        if store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)):
+        if store.one("SELECT 1 FROM pg_catalog.pg_class "
+        "WHERE relnamespace=current_schema()::regnamespace "
+        "AND relname=%s AND relkind IN ('r','p')", (table,)):
             cleanup = ",cleanup_state" if table == "voice_jobs" else ""
             extra = store.rows(f"SELECT {identity} AS id,state{cleanup} FROM {table} "
-                               f"WHERE {owner}=? ORDER BY {identity} LIMIT ?",
+                               f"WHERE {owner}=%s ORDER BY {identity} LIMIT %s",
                                (event_id, maximum + 1))
             reads.extend({**item, "active": item["state"] in states
                           or item.get("cleanup_state") == "PENDING"} for item in extra)
@@ -525,7 +636,7 @@ def validate_journal_record(store, row, record_sha256, lifecycle, journal_id, au
         if row["input_closure"] is not None:
             current = next(item for item in row["input_closure"]["deliveries"]
                            if item["message_id"] == proof["message_id"])
-            event = store.one("SELECT fingerprint FROM events WHERE event_id=?",
+            event = store.one('SELECT fingerprint FROM events WHERE event_id = %s',
                               (proof["event_id"],))
             if (not event or event["fingerprint"] != row["input_closure"]["source_sha256"]
                 or current["provider_receipt_sha256"] != _provider_receipt(original)):
@@ -544,10 +655,9 @@ def replay_matches(row, selector):
         and row["outcome"] == selector["outcome"])
 
 
-def validate_projection(store, resolutions, selector=None):
-    projected = {row["key"].removeprefix(PROJECTION): json.loads(row["value"])
-                 for row in store.rows("SELECT key,value FROM runtime_meta WHERE substr(key,1,?)=?",
-                                       (len(PROJECTION), PROJECTION))}
+def validate_projection(store, resolutions, metadata, selector=None):
+    projected = {key.removeprefix(PROJECTION): json.loads(value)
+                 for key, value in metadata.items() if key.startswith(PROJECTION)}
     if set(projected) - set(resolutions):
         raise ValueError("owner resolution journal behind database")
     for message_id, row in resolutions.items():
@@ -576,7 +686,7 @@ def _ready(store, custody, proof, now):
     if (not native and (not lifecycle or lifecycle["state"] != "STOPPED"
         or lifecycle["plan_sha256"] != proof["plan_sha256"]
         or lifecycle["window_id"] != proof["window_id"] or history["state"] != "STOPPED"
-        or not store.one("SELECT 1 FROM runtime_meta WHERE key=? AND value='OWNER_STOP'",
+        or not store.one("SELECT 1 FROM runtime_meta WHERE key = %s AND value = 'OWNER_STOP'",
                          ("live_text_stopped:" + proof["plan_sha256"],)))
         or wire.timestamp(proof["quiesced_at"]) > wire.timestamp(now)
         or row["state"] not in {"SENDING", "DELIVERY_UNCERTAIN"}
@@ -644,8 +754,8 @@ def _project(store, custody, view, row, now):
     if view["cumulative"]["policy"]:
         _put(store, cumulative.PROJECTION,
              cumulative.binding(view["cumulative"], custody.journal_path, view["head_sha256"]))
-    if not store.one("SELECT 1 FROM audit_log WHERE action='delivery.owner_reconciled' "
-                     "AND entity_id=?", (message_id,)):
+    if not store.one("SELECT 1 FROM audit_log WHERE action = 'delivery.owner_reconciled' AND "
+        'entity_id = %s', (message_id,)):
         store.audit("delivery.owner_reconciled", message_id, "owner", now, outcome=outcome,
                     owner_operation_id=row["owner_operation_id"], record_sha256=row["sha256"])
     from companion.goals import acknowledge_commitment_delivery

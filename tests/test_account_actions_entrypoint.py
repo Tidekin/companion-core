@@ -17,6 +17,7 @@ from tests.social_model_transport import next_social_turn
 from tests.support.core_http import real_core_http
 from tests.support.social_autonomy import read_public
 from tests.support.social_owner_authority import authorize
+from tests.support.unchanged_transactions import unchanged_transactions
 
 
 @pytest.mark.parametrize("outcome", ["SUCCEEDED", "REJECTED", "UNKNOWN", "CANCELLED", "ERASED"])
@@ -30,7 +31,7 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
     ref = read_public(core, "bilibili")
     owner = ingest(core, 99, "用于绑定的合成输入", origin="onebot-direct:FriendMessage:10001")
     conversation = core.store.one(
-        "SELECT conversation_id FROM events WHERE event_id=?", (owner["event_id"],)
+        'SELECT conversation_id FROM events WHERE event_id=%s', (owner["event_id"],)
     )["conversation_id"]
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     policy = SocialAutonomyConfig(
@@ -134,7 +135,7 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
                     }
                     if outcome in {"CANCELLED", "ERASED"}:
                         if outcome == "ERASED":
-                            with worker.store.transaction():
+                            with worker.store.transaction(control_write=True):
                                 worker.ledger.expire_events(worker.store, [ref], worker.clock())
                         cancelled = await client.post(
                             "/internal/v1/account-actions/cancel-before-send",
@@ -184,12 +185,11 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
                             await client.post(path + "/result", json=body)
                         ).json() == sent.json()
                         if outcome == "REJECTED":
-                            before = core.store.db.total_changes
-                            conflict = await client.post(path + "/result", json={**body,
-                                "account_action_receipt": {**receipt,
-                                    "native_receipt_sha256": "e" * 64}})
+                            with unchanged_transactions(core):
+                                conflict = await client.post(path + "/result", json={**body,
+                                    "account_action_receipt": {**receipt,
+                                        "native_receipt_sha256": "e" * 64}})
                             assert conflict.status_code == 409
-                            assert core.store.db.total_changes == before
                         stored = core.store.one(
                             "SELECT receipt_json FROM social_autonomy_reservations"
                         )
@@ -209,3 +209,23 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
                     assert len(calls) == 1
 
     run(scenario())
+
+
+@pytest.mark.parametrize("rollback", [False, True])
+def test_transaction_observer_detects_net_zero_writes_on_independent_store(core, rollback):
+    from contextlib import closing
+
+    from companion.store import Store
+
+    with closing(Store(core.database, core.settings.state_directory)) as peer:
+        assert peer.backend_pid != core.store.backend_pid
+        with pytest.raises(AssertionError, match="request changed business rows"):
+            with unchanged_transactions(core):
+                try:
+                    with peer.transaction():
+                        peer.execute("INSERT INTO runtime_meta VALUES ('zero-net-write','1')")
+                        peer.execute("DELETE FROM runtime_meta WHERE key='zero-net-write'")
+                        if rollback:
+                            raise ValueError("synthetic rejected operation")
+                except ValueError:
+                    pass

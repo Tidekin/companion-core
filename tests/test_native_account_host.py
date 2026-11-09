@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.model import ModelClient
 from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.outbound import deliver_tick
@@ -51,6 +52,7 @@ def test_account_host_checked_native_delivery(core, tmp_path, outcome):
     cfg, frozen = prepared_host(core, tmp_path)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     sent = []
 
     def native(request):
@@ -104,7 +106,7 @@ def test_account_host_checked_native_delivery(core, tmp_path, outcome):
                 if sent:
                     assert sent[0] == {"content": frozen.proposal.text, "ugc_right": 16,
                                        "target_uins": [int(cfg.owner_qq_id)]}
-                assert core.store.one("SELECT attempt_count FROM outbox WHERE message_id=?",
+                assert core.store.one('SELECT attempt_count FROM outbox WHERE message_id=%s',
                                       (frozen.message_id,))["attempt_count"] == 1
                 if outcome == "ack_handoff":
                     runtime.stop()
@@ -181,7 +183,7 @@ def test_production_delivery_loop_in_independent_process(core, tmp_path, fence):
                 if child.returncode is None:
                     child.kill()
                     await child.wait()
-            assert core.store.one("SELECT state,attempt_count FROM outbox WHERE message_id=?",
+            assert core.store.one('SELECT state,attempt_count FROM outbox WHERE message_id=%s',
                 (frozen.message_id,)) == {"state": "CANCELLED" if fence else "SENT",
                                          "attempt_count": 1}
 

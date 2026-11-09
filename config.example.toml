@@ -3,7 +3,8 @@ mode = "live"
 # Optional replacement for the selected conversation policy's expression guidance.
 # Only used for ENABLED chat policy; blank restores the built-in strategy (max 2000 chars).
 # conversation_guidance = "Respond to one concrete detail in your own words."
-database = "data/companion.sqlite3"
+# Supply the complete private connection information through COMPANION_DATABASE.
+database = "host=postgres dbname=companion user=companion"
 erasure_ledger = "privacy/erasures.jsonl"
 timezone = "Asia/Shanghai"
 provider = "deepseek"
@@ -23,9 +24,6 @@ max_recent_messages = 12
 input_rate = 300000
 cached_input_rate = 6000
 output_rate = 1200000
-monthly_limit_micro_usd = 20000000
-autonomous_daily_micro_usd = 200000
-memory_daily_micro_usd = 50000
 # Owner bursts are answered once: a new message waits 2 s (5 s while the chat is active),
 # each further message 2 s more, at most 8 s per batch. Commands are never delayed.
 # To answer every message at once, add `[input_debounce]` with `enabled = false`.
@@ -69,7 +67,6 @@ diary_max_output_tokens = 700
 diary_max_body_chars = 2400
 diary_catchup_days = 3
 diary_max_attempts = 2
-diary_daily_micro_usd = 50000
 diary_auto_share = false
 # Optional HTTP diary administration: set a distinct COMPANION_DIARY_ADMIN_TOKEN.
 # The Bridge token cannot list, export, edit, or delete diaries over this API.
@@ -89,8 +86,6 @@ reflection_daily_max_suggestions = 3
 reflection_min_sources = 3
 reflection_max_daily_calls = 1
 reflection_max_output_tokens = 600
-reflection_daily_micro_usd = 0
-reflection_monthly_micro_usd = 0
 goals_enabled = false
 goals_max_active = 10
 goal_max_attempts = 3
@@ -119,7 +114,6 @@ expression_cooldown_minutes = 30
 expression_meme_categories = ["happy", "like", "surprised", "morning", "sleep"]
 meme_discovery_enabled = false
 meme_semantics_enabled = false
-meme_caption_daily_micro_usd = 0
 meme_caption_max_output_tokens = 2000
 # Caption calls also require paid_model.meme_input with max_images_per_request <= 5,
 # and an approved private window. See docs/qq-beta/memes-semantic.md.
@@ -141,13 +135,10 @@ android_enabled = false
 enabled = false
 allow_changes = false
 daily_calls = 0
-daily_micro_usd = 0
-monthly_micro_usd = 0
 
 # Explicit short owner sessions; configure HTTPS providers and bounded costs before enabling.
 [media]
 enabled = false
-daily_micro_usd = 0
 max_session_seconds = 180
 max_session_bytes = 2000000
 max_chunk_bytes = 64000
@@ -158,18 +149,15 @@ max_images_per_event = 2
 # 可设正整数或 "unlimited"；需同时配置 paid_model.image_input.max_images_per_request。
 # 图片+已批准记忆使用 per_request_calls=3；具体窗口配置见 docs/qq-input-understanding.md。
 max_images_per_article = 32
-article_image_micro_usd = 50000
 use_chat_model_for_vision = false
 max_image_bytes = 1000000
 max_daily_image_bytes = 32000000
 max_daily_images = 32
-image_daily_micro_usd = 0
 wait_seconds = 30
 
 # Explicit opt-in: use_chat_model_for_vision=true reuses the chat URL/model/key.
 # deepseek-flash supports image input; both cost limits must be positive before calls.
 [content.vision]
-max_request_micro_usd = 0
 
 # Generated chat replies are split into semantic text bubbles by default. To send one
 # message instead, put `segmented_reply = false` above the first [table] of this file.
@@ -192,23 +180,18 @@ max_request_micro_usd = 0
 # [image_generation]
 # enabled = false
 # sizes = ["1024x1024"]
-# daily_micro_usd = 200000
 # max_daily_images = 10
 # cooldown_seconds = 300
 # [image_generation.endpoint]
 # url = "https://api.openai.com/v1/images/generations"
 # model = "gpt-image-1"
-# max_request_micro_usd = 40000
 # Switch url/model/key any time in the Console configuration page; the next chat uses it.
 # Startup alternative: COMPANION_IMAGE_GENERATION as JSON. Never put the key in this file.
 
 # Optional owner-private media and account actions. All top-level capabilities remain off.
 # Activation prerequisites, signed scopes and deployment: docs/qq-beta/media-autonomy.md.
-# These planning ceilings attach to native model/tool charges; they do not enable a provider.
+# Frozen conversion metadata for native model/tool cost records.
 [cloud_budget]
-daily_micro_cny = 20000000
-video_per_item_micro_cny = 1000000
-asr_per_item_micro_cny = 500000
 usd_to_cny_micro = 8000000
 fx_source = "operator_planning_estimate"
 fx_validity_seconds = 2592000
@@ -337,7 +320,6 @@ profile_daily_limit = 1
 qzone_cooldown_seconds = 3600
 profile_cooldown_seconds = 604800
 model_daily_calls = 4
-model_daily_micro_usd = 100000
 decision_interval_seconds = 3600
 max_publish_chars = 500
 max_nickname_chars = 24
@@ -358,15 +340,12 @@ max_asset_dimension = 2048
 # Execution requires memory/rem owner purposes, the exact REM policy fingerprint,
 # and usable confirmed memories. Explicit enabled=false still disables this feature.
 enabled = true
-daily_micro_usd = 10000
-monthly_micro_usd = 100000
 
 [watch_ledger]
 # Her own one-line judgement of each completed Bilibili/Heybox read (docs/watch-ledger.md).
 # Like rem, watch_review stays out of the paid contract snapshot; its daily cap applies at
 # reservation. Needs the exploration purpose. Env: COMPANION_WATCH_LEDGER='{"enabled": true}'.
 enabled = false
-daily_micro_usd = 20000
 max_output_tokens = 200
 lookback_hours = 72
 max_attempts = 2

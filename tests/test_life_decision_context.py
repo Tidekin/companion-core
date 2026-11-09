@@ -40,7 +40,7 @@ def test_explicit_feedback_changes_actual_model_input_and_choice(core, tmp_path,
     core.model.callback = provider
     job = core.life_topics.schedule()
     assert job and run(core.run_once(job_id=job))
-    row = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (job,))
+    row = core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (job,))
     assert row["action"] == ("SHARE" if affect else "SKIP")
     assert len(core.model.calls) == 1
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
@@ -67,7 +67,7 @@ def test_actual_goal_failure_informs_one_bounded_later_choice(core, tmp_path):
     })
     first = core.life_topics.schedule()
     assert first and run(core.run_once(job_id=first))
-    result = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (first,))
+    result = core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (first,))
     assert result["goal_id"]
     step = core.goals.claim()
     assert step and core.goals.fail(step, "SOURCE_NOT_AVAILABLE")
@@ -143,9 +143,9 @@ def test_native_read_receipt_supplies_interest_or_blocks_continuation(
 
     core.model.callback = provider
     assert run(core.run_once(job_id=second))
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (second,))["state"] == (
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (second,))["state"] == (
         "SUCCEEDED"
-    ), core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (second,))
+    ), core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s', (second,))
     assert {item["event_id"] for item in seen[0]["sources"]} == {
         "evt_test_1", "evt_test_2", *result["event_ids"],
     }
@@ -166,17 +166,17 @@ def test_native_read_receipt_supplies_interest_or_blocks_continuation(
         retained["related_trait_ids"], ["unrelated-trait"], "unrelated-trait", None, [],
     ):
         changed = {**proposal, "related_trait_ids": invalid}
-        core.store.execute("UPDATE life_activity_results SET proposal_json=? WHERE job_id=?",
+        core.store.execute('UPDATE life_activity_results SET proposal_json=%s WHERE job_id=%s',
                            (encode(changed), second))
         with pytest.raises(CoreError, match="LIFE_DRAFT_CHANGED"):
             core.life_topics.retained_result(second)
-    core.store.execute("UPDATE life_activity_results SET proposal_json=? WHERE job_id=?",
+    core.store.execute('UPDATE life_activity_results SET proposal_json=%s WHERE job_id=%s',
                        (retained["result"]["proposal_json"], second))
     assert core.life_topics.retained_result(second)["result"]["text"]
     if autonomy:
         assert context["autonomy_guidance"]["depth_control"][0]["independent_sessions"] == 1
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    saved = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (second,))
+    saved = core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (second,))
     assert saved["state"] == "INVALIDATED" and saved["text"] == ""
     assert len(core.model.calls) == 2

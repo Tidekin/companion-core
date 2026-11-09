@@ -47,7 +47,7 @@ def run_worker(path, now, job_id, expected):
                     assert await core.run_once("independent-prefetch", job_id=job_id)
                 finally:
                     SemanticIndex.warmup = warmup
-                row = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                row = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                      (job_id,))
                 assert row["state"] == "SUCCEEDED", row
         assert len(calls) == 1

@@ -193,8 +193,11 @@ def test_bridge_hands_off_across_an_unbound_core_stop_chain(core, tmp_path, monk
             if case == "bound_work":
                 now = core.clock()
                 core.store.execute(
-                    "INSERT INTO jobs(job_id,kind,state,idempotency_key,created_at,updated_at,"
-                    "authority_json) VALUES('job_chain','life','QUEUED','chain-key',?,?,?)",
+                    (
+                        'INSERT INTO jobs(job_id,kind,state,idempotency_key,c'
+                        "reated_at,updated_at,authority_json) VALUES('job_cha"
+                        "in','life','QUEUED','chain-key',%s,%s,%s)"
+                    ),
                     (now, now, encode(unbound)))
             await post("/internal/v1/owner-authority/stop",
                        {"authority": unbound, "operation_id": "chain-stop-2"})

@@ -40,7 +40,7 @@ class MemeDiscovery:
                 meme_service.DiscoveryCheck(**self._witness(claim)))
             if (private_life.owner_waiting(s, self.settings, self.clock())
                 or private_life.busy(s, self.clock())
-                or s.one("SELECT 1 FROM outbox WHERE state IN ('PENDING','LEASED','SENDING')")):
+                or s.one("SELECT 1 FROM outbox WHERE state IN ('PENDING', 'LEASED', 'SENDING')")):
                 raise CoreError("MEME_DISCOVERY_PREEMPTED", 409)
 
     def _held(self, event_id):
@@ -61,10 +61,9 @@ class MemeDiscovery:
             # caption is not permission to re-download that entry or charge it again;
             # leave its original responsibility intact and advance to other entries.
             retained = self.store.rows(
-                "SELECT DISTINCT a.metadata_json FROM meme_assets a "
-                "JOIN meme_asset_sources src USING(asset_id) "
-                "JOIN meme_captions c ON c.job_id=src.caption_job_id "
-                "WHERE a.state='STAGED' AND a.custody_sha256=?", (custody,))
+                'SELECT DISTINCT a.metadata_json FROM meme_assets AS a JOIN meme_asset_sources AS '
+                'src USING (asset_id) JOIN meme_captions AS c ON c.job_id = src.caption_job_id '
+                "WHERE a.state = 'STAGED' AND a.custody_sha256 = %s", (custody,))
             result = set()
             for row in retained:
                 meta = json.loads(row["metadata_json"])
@@ -74,13 +73,11 @@ class MemeDiscovery:
         # Only material that is captioned or still awaiting its caption counts as held; a
         # failed or UNKNOWN caption keeps its original refusal path on re-acquisition.
         return {json.loads(row["metadata_json"])["asset_url"] for row in self.store.rows(
-            "SELECT DISTINCT a.metadata_json FROM meme_assets a "
-            "JOIN meme_asset_sources src USING(asset_id) "
-            "JOIN jobs j ON j.job_id=src.caption_job_id "
-            "JOIN meme_captions c ON c.job_id=src.caption_job_id "
-            "WHERE a.state='STAGED' AND a.custody_sha256=? AND (j.state IN "
-            "('QUEUED','RUNNING','RETRY_WAIT') OR (j.state='SUCCEEDED' "
-            "AND c.result_json IS NOT NULL))", (custody,))}
+            'SELECT DISTINCT a.metadata_json FROM meme_assets AS a JOIN meme_asset_sources AS src '
+            'USING (asset_id) JOIN jobs AS j ON j.job_id = src.caption_job_id JOIN meme_captions '
+            "AS c ON c.job_id = src.caption_job_id WHERE a.state = 'STAGED' AND a.custody_sha256 = "
+            "%s AND (j.state IN ('QUEUED', 'RUNNING', 'RETRY_WAIT') OR (j.state = 'SUCCEEDED' AND "
+            'NOT c.result_json IS NULL))', (custody,))}
 
     def _result(self, claim, outcome, usage):
         return meme_service.DiscoveryResult(**self._witness(claim), outcome=outcome,
@@ -96,7 +93,7 @@ class MemeDiscovery:
                 meme_service.DiscoveryCheck(**self._witness(claim)))
             if (private_life.owner_waiting(s, self.settings, self.clock())
                 or private_life.busy(s, self.clock())
-                or s.one("SELECT 1 FROM outbox WHERE state IN ('PENDING','LEASED','SENDING')")):
+                or s.one("SELECT 1 FROM outbox WHERE state IN ('PENDING', 'LEASED', 'SENDING')")):
                 raise CoreError("MEME_DISCOVERY_PREEMPTED", 409)
             custody = meme_assets.original_custody(s, self.settings, claim["event_id"])
             new_ids = {}
@@ -104,7 +101,12 @@ class MemeDiscovery:
                 item = {"asset_sha256": image.sha256,
                         "source_sha256": meme_assets.source_digest(meta), "metadata": meta}
                 asset_id = meme_assets.asset_id(custody, item)
-                prior = s.one("SELECT * FROM meme_assets WHERE asset_id=?", (asset_id,))
+                prior = s.one('SELECT meme_assets.asset_id AS asset_id, meme_assets.custody_sha256 '
+                    'AS custody_sha256, meme_assets.asset_sha256 AS asset_sha256, '
+                    'meme_assets.source_sha256 AS source_sha256, meme_assets.record_sha256 AS '
+                    'record_sha256, meme_assets.state AS state, meme_assets.mime AS mime, '
+                    'meme_assets.data AS data, meme_assets.metadata_json AS metadata_json FROM '
+                    'meme_assets AS meme_assets WHERE meme_assets.asset_id = %s', (asset_id,))
                 if prior and (prior["state"] != "STAGED"
                               or prior["record_sha256"] != meme_assets.record_digest(item)):
                     raise CoreError("MEME_ASSET_UNAVAILABLE", 409)
@@ -146,11 +148,27 @@ class MemeDiscovery:
     def _close(self, claim, usage, complete):
         """Read the original attempt after the writer ended; never replay acquisition."""
         s = self.store
-        if s.db.in_transaction:
+        if s.in_transaction:
             raise CoreError("MEME_DISCOVERY_COMMIT_UNCERTAIN", 503)
         meme_service._owned(s, claim["job_id"],
                             meme_service.DiscoveryCheck(**self._witness(claim)))
-        row = s.one("SELECT * FROM meme_discovery_reservations WHERE job_id=? AND attempt_key=?",
+        row = s.one('SELECT meme_discovery_reservations.job_id AS job_id, '
+            'meme_discovery_reservations.attempt_key AS attempt_key, '
+            'meme_discovery_reservations.day AS day, meme_discovery_reservations.state AS state, '
+            'meme_discovery_reservations.reserved_queries AS reserved_queries, '
+            'meme_discovery_reservations.queries AS queries, '
+            'meme_discovery_reservations.reserved_requests AS reserved_requests, '
+            'meme_discovery_reservations.requests AS requests, '
+            'meme_discovery_reservations.reserved_download_bytes AS reserved_download_bytes, '
+            'meme_discovery_reservations.download_bytes AS download_bytes, '
+            'meme_discovery_reservations.reserved_storage_bytes AS reserved_storage_bytes, '
+            'meme_discovery_reservations.storage_bytes AS storage_bytes, '
+            'meme_discovery_reservations.reserved_model_cost AS reserved_model_cost, '
+            'meme_discovery_reservations.model_cost AS model_cost, '
+            'meme_discovery_reservations.created_at AS created_at, '
+            'meme_discovery_reservations.updated_at AS updated_at FROM meme_discovery_reservations '
+            'AS meme_discovery_reservations WHERE meme_discovery_reservations.job_id = %s AND '
+            'meme_discovery_reservations.attempt_key = %s',
                     (claim["job_id"], claim["attempt_key"]))
         if not row:
             raise CoreError("MEME_DISCOVERY_COMMIT_UNCERTAIN", 503)
@@ -162,7 +180,11 @@ class MemeDiscovery:
         # A complete original transaction cannot leave caption writes with RESERVED.
         # Such a contradictory readback grants neither a retry nor a guessed settlement.
         if row["state"] == "RESERVED" and s.one(
-            "SELECT 1 FROM meme_captions WHERE json_extract(context_json,'$.discovery_job_id')=?",
+            (
+                'SELECT 1 FROM meme_captions WHERE (CASE WHEN '
+                'context_json IS JSON THEN '
+                "(context_json::json#>>'{discovery_job_id}') END)=%s"
+            ),
             (claim["job_id"],),
         ):
             raise CoreError("MEME_DISCOVERY_COMMIT_UNCERTAIN", 503)
@@ -172,10 +194,27 @@ class MemeDiscovery:
             meme_service.result(s, self.settings, self.clock, claim["job_id"],
                                 self._result(claim, outcome, actual))
         except BaseException:
-            if s.db.in_transaction:
+            if s.in_transaction:
                 raise
-            saved = s.one("SELECT * FROM meme_discovery_reservations WHERE job_id=? "
-                          "AND attempt_key=?", (claim["job_id"], claim["attempt_key"]))
+            saved = s.one('SELECT meme_discovery_reservations.job_id AS job_id, '
+                'meme_discovery_reservations.attempt_key AS attempt_key, '
+                'meme_discovery_reservations.day AS day, meme_discovery_reservations.state AS '
+                'state, meme_discovery_reservations.reserved_queries AS reserved_queries, '
+                'meme_discovery_reservations.queries AS queries, '
+                'meme_discovery_reservations.reserved_requests AS reserved_requests, '
+                'meme_discovery_reservations.requests AS requests, '
+                'meme_discovery_reservations.reserved_download_bytes AS reserved_download_bytes, '
+                'meme_discovery_reservations.download_bytes AS download_bytes, '
+                'meme_discovery_reservations.reserved_storage_bytes AS reserved_storage_bytes, '
+                'meme_discovery_reservations.storage_bytes AS storage_bytes, '
+                'meme_discovery_reservations.reserved_model_cost AS reserved_model_cost, '
+                'meme_discovery_reservations.model_cost AS model_cost, '
+                'meme_discovery_reservations.created_at AS created_at, '
+                'meme_discovery_reservations.updated_at AS updated_at FROM '
+                'meme_discovery_reservations AS meme_discovery_reservations WHERE '
+                'meme_discovery_reservations.job_id = %s AND '
+                'meme_discovery_reservations.attempt_key = '
+                '%s', (claim["job_id"], claim["attempt_key"]))
             if (not saved or saved["state"] != outcome
                 or any(saved[key] != getattr(actual, key) for key in meme_service.FIELDS)):
                 raise

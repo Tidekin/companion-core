@@ -20,16 +20,17 @@ def _hash(value):
 
 def _load(store, key, *, work=None):
     if work is not None:
-        size = store.one("SELECT octet_length(value) AS size FROM runtime_meta WHERE key=?",
+        size = store.one('SELECT OCTET_LENGTH(value) AS size FROM runtime_meta WHERE key = %s',
                          (key,))
         if not size:
             return None
         if not work.take("text_bytes", size["size"]):
             raise retrieval_work.WorkLimit("enrichment_text_bytes")
-        row = store.one("SELECT value FROM runtime_meta WHERE key=? AND octet_length(value)=?",
+        row = store.one('SELECT value FROM runtime_meta WHERE key = %s AND OCTET_LENGTH(value) = '
+            '%s',
                         (key, size["size"]))
     else:
-        row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+        row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
     if row:
         try:
             return json.loads(row["value"])
@@ -39,18 +40,19 @@ def _load(store, key, *, work=None):
 
 
 def _save(store, key, value):
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(value)))
+    store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO '
+        'UPDATE SET value = excluded.value, record_sequence = DEFAULT', (key, encode(value)))
 
 
-def _settled(store, request_id):
-    return store.one("SELECT 1 FROM model_usage WHERE request_id=? "
-                     "AND scenario='memory_extract' AND state='SETTLED'", (request_id,))
+def _recorded_usage(store, request_id):
+    return store.one('SELECT 1 FROM model_usage WHERE request_id = %s AND scenario = '
+        "'memory_extract' AND state IN ('SETTLED','UNKNOWN')", (request_id,))
 
 
 def _valid(memory, record, now, content_hash, *, work=None):
     try:
         if (record["content_sha256"] != content_hash
-            or not _settled(memory.store, record["request_id"])
+            or not _recorded_usage(memory.store, record["request_id"])
             or record["source_event_ids"] != record["proof"]["source_event_ids"]):
             return False
         MemoryContext(memory).revalidate(record["proof"], now, work=work)
@@ -99,12 +101,12 @@ def validate_summaries(memory, events, summaries, now):
 
 def _importance(store, memory_id, records):
     value = sum(record["salience"] for record in records) / (10 * len(records)) if records else 0.5
-    store.execute("UPDATE memories SET importance=? WHERE memory_id=? AND importance!=?",
+    store.execute('UPDATE memories SET importance = %s WHERE memory_id = %s AND importance <> %s',
                   (value, memory_id, value))
     if records:
         _save(store, IMPORTANCE + memory_id, records)
     else:
-        store.execute("DELETE FROM runtime_meta WHERE key=?", (IMPORTANCE + memory_id,))
+        store.execute('DELETE FROM runtime_meta WHERE key = %s', (IMPORTANCE + memory_id,))
     return value
 
 
@@ -119,8 +121,8 @@ def refresh_importance(memory, row, now):
                and type(record.get("salience")) is int and 1 <= record["salience"] <= 10
                and isinstance(record.get("proof"), dict)
                and record["proof"].get("event_ids") == [record.get("event_id")]
-               and memory.store.one("SELECT 1 FROM memory_evidence WHERE memory_id=? "
-                                    "AND event_id=? AND polarity=1",
+               and memory.store.one('SELECT 1 FROM memory_evidence WHERE memory_id = %s AND '
+                   'event_id = %s AND polarity = 1',
                                     (row["memory_id"], record.get("event_id")))
                and _valid(memory, record, now, _hash(row["content"]),
                           work=retrieval_work.current())] \
@@ -134,7 +136,7 @@ def refresh_importance(memory, row, now):
 def record(memory, candidates, memory_ids, events, summaries, request_id, now, *, reference_ids=()):
     """Commit only inside the original source-checked EXTRACT/REVIEW transaction."""
     store = memory.store
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("MEMORY_ENRICHMENT_REQUIRES_TRANSACTION")
     if not summaries and not any(candidate.salience is not None for candidate in candidates):
         return
@@ -142,15 +144,23 @@ def record(memory, candidates, memory_ids, events, summaries, request_id, now, *
 
     if not any(contract.name == "memory-enrichment" for contract in cleanup_contracts()):
         raise CoreError("MEMORY_ENRICHMENT_ERASURE_REQUIRED", 503)
-    if not _settled(store, request_id):
+    if not _recorded_usage(store, request_id):
         raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
     validate_summaries(memory, events, summaries, now)
     for candidate, memory_id in zip(candidates, memory_ids, strict=True):
         if candidate.salience is None:
             continue
-        row = store.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
-        if not store.one("SELECT 1 FROM memory_evidence WHERE memory_id=? AND event_id=? "
-                          "AND polarity=1", (memory_id, candidate.evidence_event_id)):
+        row = store.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
+            'memories.kind AS kind, memories.content AS content, memories.status AS status, '
+            'memories.origin AS origin, memories.confidence AS confidence, memories.importance AS '
+            'importance, memories.privacy_scope AS privacy_scope, memories.supersedes_memory_id AS '
+            'supersedes_memory_id, memories.created_at AS created_at, memories.updated_at AS '
+            'updated_at, memories.valid_from AS valid_from, memories.valid_to AS valid_to, '
+            'memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS fact_key, '
+            'memories.needs_review AS needs_review FROM memories AS memories WHERE '
+            'memories.memory_id = %s', (memory_id,))
+        if not store.one('SELECT 1 FROM memory_evidence WHERE memory_id = %s AND event_id = %s AND '
+            'polarity = 1', (memory_id, candidate.evidence_event_id)):
             raise CoreError("MEMORY_MATCH_STALE", 409)
         refresh_importance(memory, row, now)
         saved = _load(store, IMPORTANCE + memory_id) or []
@@ -166,7 +176,12 @@ def record(memory, candidates, memory_ids, events, summaries, request_id, now, *
         if len(matched) != 1:
             continue
         episode_id = matched[0]["episode_id"]
-        episode = store.one("SELECT * FROM episodes WHERE episode_id=?", (episode_id,))
+        episode = store.one('SELECT episodes.episode_id AS episode_id, episodes.title AS title, '
+            'episodes.summary AS summary, episodes.conversation_id AS conversation_id, '
+            'episodes.privacy_scope AS privacy_scope, episodes.started_at AS started_at, '
+            'episodes.ended_at AS ended_at, episodes.status AS status, episodes.extractor_version '
+            'AS extractor_version, episodes.created_at AS created_at FROM episodes AS episodes '
+            'WHERE episodes.episode_id = %s', (episode_id,))
         ordered = sorted((event for event in events if event["event_id"] in ids),
                          key=lambda event: (event["occurred_at"], event["ingested_at"],
                                             event["event_id"]))
@@ -179,13 +194,13 @@ def record(memory, candidates, memory_ids, events, summaries, request_id, now, *
                         {"title": item.title, "summary": item.summary}, now)
         value["event_ids"] = ids
         value["conversation_summary_ids"] = [row["summary_id"] for row in store.rows(
-            "SELECT summary_id FROM conversation_summaries WHERE conversation_id=? "
-            "AND first_event_id=? AND last_event_id=?", (episode["conversation_id"],
+            'SELECT summary_id FROM conversation_summaries WHERE conversation_id = %s AND '
+            'first_event_id = %s AND last_event_id = %s', (episode["conversation_id"],
                 ordered[0]["event_id"], ordered[-1]["event_id"]))]
-        store.execute("UPDATE episodes SET title=?,summary=?,extractor_version=? "
-                      "WHERE episode_id=?", (item.title, item.summary, VERSION, episode_id))
-        store.execute("UPDATE conversation_summaries SET summary_text=?,summarizer_version=? "
-                      "WHERE conversation_id=? AND first_event_id=? AND last_event_id=?",
+        store.execute('UPDATE episodes SET title = %s, summary = %s, extractor_version = %s WHERE '
+            'episode_id = %s', (item.title, item.summary, VERSION, episode_id))
+        store.execute('UPDATE conversation_summaries SET summary_text = %s, summarizer_version = '
+            '%s WHERE conversation_id = %s AND first_event_id = %s AND last_event_id = %s',
                       (item.summary, VERSION, episode["conversation_id"],
                        ordered[0]["event_id"], ordered[-1]["event_id"]))
         _save(store, SUMMARY + episode_id, value)
@@ -194,10 +209,11 @@ def record(memory, candidates, memory_ids, events, summaries, request_id, now, *
 def summary(memory, episode_id, source_event_ids, now):
     work = retrieval_work.current()
     value = _load(memory.store, SUMMARY + episode_id, work=work)
-    row = memory.store.one("SELECT title,summary,extractor_version,status FROM episodes "
-                            "WHERE episode_id=?", (episode_id,))
+    row = memory.store.one('SELECT title, summary, extractor_version, status FROM episodes WHERE '
+        'episode_id = %s', (episode_id,))
     actual_ids = [item["event_id"] for item in memory.store.rows(
-        "SELECT event_id FROM episode_events WHERE episode_id=? ORDER BY event_id LIMIT 21",
+        'SELECT event_id FROM episode_events WHERE episode_id = %s ORDER BY event_id NULLS FIRST '
+        'LIMIT 21',
         (episode_id,))]
     if (not isinstance(value, dict) or not row or row["status"] != "ACTIVE"
         or row["extractor_version"] != VERSION
@@ -213,13 +229,14 @@ def summary(memory, episode_id, source_event_ids, now):
 def erase(store, event_ids):
     """Native erasure/replay removes derived material without touching original costs."""
     affected = set(event_ids)
-    for row in store.rows("SELECT key,value FROM runtime_meta WHERE substr(key,1,?)=? "
-                          "OR substr(key,1,?)=?", (len(SUMMARY), SUMMARY,
+    for row in store.rows('SELECT key, value FROM runtime_meta WHERE SUBSTRING(key FROM 1 FOR %s) '
+        '= %s OR SUBSTRING(key FROM 1 FOR %s) = %s', (len(SUMMARY), SUMMARY,
                                                    len(IMPORTANCE), IMPORTANCE)):
         value = None
         if row["key"].startswith(IMPORTANCE):
             memory_id = row["key"][len(IMPORTANCE):]
-            if not store.one("SELECT 1 FROM memories WHERE memory_id=? AND status!='FORGOTTEN'",
+            if not store.one('SELECT 1 FROM memories WHERE memory_id = %s AND status <> '
+                "'FORGOTTEN'",
                               (memory_id,)):
                 _importance(store, memory_id, [])
                 continue
@@ -237,12 +254,13 @@ def erase(store, event_ids):
                 continue
         except (ValueError, TypeError, KeyError):
             pass
-        store.execute("DELETE FROM runtime_meta WHERE key=?", (row["key"],))
+        store.execute('DELETE FROM runtime_meta WHERE key = %s', (row["key"],))
         if row["key"].startswith(SUMMARY):
-            store.execute("UPDATE episodes SET title='',summary='',status='REDACTED' "
-                          "WHERE episode_id=?", (row["key"][len(SUMMARY):],))
+            store.execute("UPDATE episodes SET title = '', summary = '', status = 'REDACTED' WHERE "
+                'episode_id = %s', (row["key"][len(SUMMARY):],))
             ids = value.get("conversation_summary_ids", []) if isinstance(value, dict) else []
-            store.execute("DELETE FROM conversation_summaries WHERE summary_id IN "
-                          "(SELECT value FROM json_each(?))", (encode(ids),))
+            store.execute('DELETE FROM conversation_summaries WHERE summary_id IN (SELECT value '
+                'COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+                'parsed(value))', (encode(ids),))
         else:
             _importance(store, row["key"][len(IMPORTANCE):], [])

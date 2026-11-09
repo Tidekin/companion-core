@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from companion import meme_service, owner_authority, owner_delivery, owner_input
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.contracts import CoreError, LeaseRequest
 from companion.expression import ExpressionEngine, MemeOffer
 from companion.owner_authority_protocol import AuthorityStop, OwnerCapture, OwnerSendCheck
@@ -42,13 +43,14 @@ def test_static_offer_api_keeps_signature_separate_and_freezes_retry(core, tmp_p
     capture, offer = source(core, tmp_path)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     client = TestClient(app)
     headers = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
     path = "/internal/v1/owner-authority/inputs/approve"
     body = {**capture.model_dump(mode="json"), "meme_offer": offer.model_dump()}
     response = client.post(path, json=body, headers=headers)
     assert response.status_code == 200, response.text
-    saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    saved = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
         (owner_input.INPUT + capture.event_id,))["value"])
     assert saved["capture"] == capture.model_dump(mode="json")
     assert saved["meme_offer"] == offer.model_dump()
@@ -68,7 +70,7 @@ def test_static_offer_requires_both_purposes(core, tmp_path, purposes):
     capture, offer = source(core, tmp_path, purposes=purposes)
     with pytest.raises(CoreError):
         owner_input.approve(core.store, core.settings, core.clock, capture, meme_offer=offer)
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                               (owner_input.INPUT + capture.event_id,))
 
 
@@ -87,7 +89,7 @@ def test_static_offer_cannot_outlive_source_or_current_permission(core, tmp_path
     elif change == "revision":
         core.store.execute("UPDATE conversations SET reply_revision=reply_revision+1")
     else:
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (capture.event_id,))
+        core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (capture.event_id,))
     assert engine._offer(capture.event_id) == (True, None)
 
 

@@ -6,7 +6,6 @@ import httpx
 import pytest
 
 from companion import owner_authority
-from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import REVIEW_RULES, ModelClient
 from companion.store import encode
@@ -75,19 +74,19 @@ def test_invalid_memory_tool_arguments_recover_within_sdk_budget_without_candida
                     monkeypatch.setattr(worker.memory_context, "recall_async", prefetch)
                     source, accepted = await admit(2, "🤔")
                     assert await worker.run_once("invalid-memory-arguments")
-                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                    assert core.store.one("SELECT state FROM jobs WHERE job_id=%s",
                         (accepted["job_id"],)) == {"state": "SUCCEEDED"}
                     assert len(calls) == 2 <= core.settings.paid_model.per_request_calls
                     assert core.store.rows("SELECT * FROM memories") == before
-                    assert not core.store.rows("SELECT * FROM agent_tool_calls WHERE job_id=?",
+                    assert not core.store.rows("SELECT * FROM agent_tool_calls WHERE job_id=%s",
                                                (accepted["job_id"],))
                     assert queries == ["🤔"]
                     consumed = {row["event_id"] for row in core.store.rows(
-                        "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],))}
+                        "SELECT event_id FROM job_sources WHERE job_id=%s", (accepted["job_id"],))}
                     assert (seed.event_id in consumed) is prefetched
                     assert_settled_calls(core, 2)
                     assert json.loads(core.store.one(
-                        "SELECT content_json FROM outbox WHERE origin_event_id=?",
+                        "SELECT content_json FROM outbox WHERE origin_event_id=%s",
                         (source.event_id,))["content_json"])["text"] == "在想什么呢？"
                     assert not await worker.run_once("no-extra-paid-review")
                 with Core(core.settings, ModelClient(core.settings, transport),
@@ -114,7 +113,7 @@ def test_repeated_invalid_memory_tool_arguments_stop_at_sdk_retry_limit(core, tm
                 with Core(core.settings, ModelClient(core.settings, transport),
                           core.clock) as worker:
                     assert await worker.run_once("bounded-sdk-retry")
-                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                    assert core.store.one("SELECT state FROM jobs WHERE job_id=%s",
                         (accepted["job_id"],)) == {"state": "FAILED"}
                     assert not await worker.run_once("no-job-retry-after-sdk-exhaustion")
             assert len(calls) == 2 <= core.settings.paid_model.per_request_calls
@@ -154,13 +153,13 @@ def test_emoji_memory_candidates_are_evaluated_in_the_same_sdk_conversation(
                     before = core.store.rows("SELECT * FROM memories")
                     source, accepted = await admit(2, "🤔")
                     assert await worker.run_once("native-memory-relevance")
-                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                    assert core.store.one("SELECT state FROM jobs WHERE job_id=%s",
                         (accepted["job_id"],)) == {"state": "SUCCEEDED"}
                     assert len(calls) == 2
                     assert_settled_calls(core, 2)
                     assert core.store.rows("SELECT * FROM memories") == before
                     assert json.loads(core.store.one(
-                        "SELECT content_json FROM outbox WHERE origin_event_id=?",
+                        "SELECT content_json FROM outbox WHERE origin_event_id=%s",
                         (source.event_id,))["content_json"])["text"] == reply
                     assert owner_authority.current(core.store, core.settings, core.clock
                         ).authority.as_dict() == reference
@@ -168,7 +167,7 @@ def test_emoji_memory_candidates_are_evaluated_in_the_same_sdk_conversation(
 
 
 @pytest.mark.parametrize("prefetched", [False, True], ids=["empty-prefetch", "pinned-prefetch"])
-def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(
+def test_tool_response_with_unknown_cost_continues_without_repayment(
     core, tmp_path, monkeypatch, prefetched,
 ):
     async def scenario():
@@ -176,8 +175,9 @@ def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(
 
         def provider(request):
             calls.append(json.loads(request.content)["messages"])
-            assert len(calls) == 1
-            return tool_response(usage=False)
+            assert len(calls) <= 2
+            return (tool_response(usage=False) if len(calls) == 1
+                    else httpx.Response(200, json=answer("在想什么呢？")))
 
         async with environment(core, tmp_path) as (admit, _, _):
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
@@ -191,32 +191,33 @@ def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(
 
                     async def prefetch(query, *args, **kwargs):
                         queries.append(query)
-                        assert query == "🤔", "Unknown provider usage reached tool lookup"
+                        assert query in {"🤔", "*"}
                         return await lookup(query, *args, **kwargs) if prefetched else {"rows": []}
 
                     monkeypatch.setattr(worker.memory_context, "recall_async", prefetch)
                     source, accepted = await admit(2, "🤔")
                     assert await worker.run_once("unknown-tool-accounting")
-                    assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                    assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=%s",
                         (accepted["job_id"],)) == {
-                            "state": "FAILED", "last_error_code": "MODEL_OUTCOME_UNKNOWN"}
+                            "state": "SUCCEEDED", "last_error_code": None}
                     usage = core.store.one("SELECT u.state,u.billed_micro_usd,a.reserved_micro_usd "
-                        "FROM model_usage u JOIN model_admissions a USING(request_id)")
+                        "FROM model_usage u JOIN model_admissions a USING(request_id) "
+                        "ORDER BY u.record_sequence LIMIT 1")
                     assert usage["state"] == "UNKNOWN"
                     assert usage["billed_micro_usd"] == usage["reserved_micro_usd"] > 0
-                    assert queries == ["🤔"]
+                    assert queries[0] == "🤔"
                     consumed = {row["event_id"] for row in core.store.rows(
-                        "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],))}
+                        "SELECT event_id FROM job_sources WHERE job_id=%s", (accepted["job_id"],))}
                     assert (seed.event_id in consumed) is prefetched
                     assert core.store.rows("SELECT * FROM memories") == before
-                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                    assert core.store.rows("SELECT * FROM outbox WHERE origin_event_id=%s",
                                                (source.event_id,))
-                    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
-                        owner_authority.current(core.store, core.settings, core.clock)
+                    assert owner_authority.current(core.store, core.settings, core.clock)
+                    assert len(core.store.rows("SELECT * FROM model_usage")) == 2
                 with Core(core.settings, ModelClient(core.settings, transport),
                           core.clock) as restarted:
                     assert not await restarted.run_once("no-unknown-replay")
-                assert len(calls) == 1
+                assert len(calls) == 2
     run(scenario())
 
 
@@ -232,7 +233,7 @@ def test_memory_tool_result_cannot_override_recall_or_supersession(core, tmp_pat
                 return tool_response()
             assert FACT in tool_result(messages)
             assert seed.event_id in {row["event_id"] for row in core.store.rows(
-                "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],))}
+                "SELECT event_id FROM job_sources WHERE job_id=%s", (accepted["job_id"],))}
             if interruption == "recall":
                 recalled = await recall(seed)
                 assert recalled.status_code == 200, recalled.text
@@ -248,11 +249,11 @@ def test_memory_tool_result_cannot_override_recall_or_supersession(core, tmp_pat
                     assert await worker.run_once("seed-owner-fact")
                     source, accepted = await admit(2, "🤔")
                     assert await worker.run_once("interrupted-memory-answer")
-                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                    assert core.store.one("SELECT state FROM jobs WHERE job_id=%s",
                         (accepted["job_id"],)) == {"state": "CANCELLED"}
                     assert len(calls) == 2
                     assert_settled_calls(core, 2)
-                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=%s",
                                                (source.event_id,))
                     assert owner_authority.current(core.store, core.settings, core.clock
                         ).authority.as_dict() == reference
@@ -281,13 +282,13 @@ def test_invalid_memory_write_review_rejects_new_fact_with_bounded_paid_retries(
                         assert await worker.run_once("invalid-write-review")
                         final = attempt + 1 == core.settings.max_attempts
                         assert core.store.one(
-                            "SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                            "SELECT state,last_error_code FROM jobs WHERE job_id=%s",
                             (accepted["job_id"],)) == {
                                 "state": "FAILED" if final else "RETRY_WAIT",
                                 "last_error_code": "MEMORY_REVIEW_INVALID"}
                         assert core.store.rows("SELECT * FROM memories") == before
-                        assert not core.store.rows("SELECT 1 FROM memory_evidence WHERE event_id=?",
-                                                   (source.event_id,))
+                        assert not core.store.rows(
+                            "SELECT 1 FROM memory_evidence WHERE event_id=%s", (source.event_id,))
                         core.clock.advance(60)
                     assert len(calls) == core.settings.max_attempts
                     assert_settled_calls(core, len(calls), scenario="memory_review")

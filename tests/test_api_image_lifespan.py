@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -205,7 +204,7 @@ def test_api_lifespan_image_upload_calls_model_and_worker_continues_same_budget(
         assert paid_budget.journal(core.store, core.settings.paid_model)["head_sha256"]
     assert clients == []
     for instance in instances:
-        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
             instance.store.one("SELECT 1")
 
 
@@ -243,7 +242,7 @@ def test_worker_loop_waits_for_api_vision_and_preserves_unknown_block(
         prepared_requests.append(json.loads(request.content))
         admission = core.store.one("SELECT * FROM model_admissions")
         core.clock.now = datetime.fromisoformat(admission["lease_until"]) + timedelta(seconds=1)
-        assert core.store.one("SELECT lease_until FROM jobs WHERE job_id=?",
+        assert core.store.one('SELECT lease_until FROM jobs WHERE job_id=%s',
                               (job_id,))["lease_until"] > core.clock()
 
     native_worker_transport(monkeypatch, provider,
@@ -257,7 +256,7 @@ def test_worker_loop_waits_for_api_vision_and_preserves_unknown_block(
             task = asyncio.create_task(__main__.worker(core.settings))
             try:
                 await until(lambda: scans, tasks=[task], deadline_seconds=20)
-                assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?",
+                assert core.store.one('SELECT state,attempts FROM jobs WHERE job_id=%s',
                                       (job_id,)) == {"state": "QUEUED", "attempts": 0}
                 assert core.store.one("SELECT state FROM content_items")["state"] == "FETCHING"
                 assert calls == [] and core.store.rows("SELECT * FROM model_admissions") == []
@@ -290,14 +289,15 @@ def test_worker_loop_waits_for_api_vision_and_preserves_unknown_block(
                         assert usage[0]["billed_micro_usd"] == 0
                     else:
                         assert len(calls) == 1 and usage[0]["billed_micro_usd"] > 0
-                    if outcome == "settled":
+                    if outcome in {"settled", "unknown"}:
                         await until(lambda: core.store.one("SELECT 1 FROM outbox"),
                                     tasks=[task], deadline_seconds=10)
-                        assert usage[0]["state"] == "SETTLED"
+                        assert usage[0]["state"] == (
+                            "UNKNOWN" if outcome == "unknown" else "SETTLED")
                     else:
                         assert usage[0]["state"] == (
                             "UNKNOWN" if outcome == "unknown" else "SETTLED")
-                        await until(lambda: core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                        await until(lambda: core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                             (job_id,))["state"] != "RUNNING", tasks=[task], deadline_seconds=10)
                         if outcome == "admission_expired":
                             assert_failure_notice(core)
@@ -317,13 +317,17 @@ def test_worker_loop_waits_for_api_vision_and_preserves_unknown_block(
                         else:
                             assert not core.store.one("SELECT 1 FROM outbox")
                         if outcome == "unknown":
-                            assert core.store.one("SELECT state,last_error_code FROM jobs "
-                                "WHERE job_id=?", (job_id,)) == {
+                            assert core.store.one((
+                                'SELECT state,last_error_code FROM jobs WHERE'
+                                ' job_id=%s'
+                            ), (job_id,)) == {
                                     "state": "FAILED",
                                     "last_error_code": "MODEL_OUTCOME_UNKNOWN"}
                         else:
-                            assert core.store.one("SELECT state,last_error_code FROM jobs "
-                                "WHERE job_id=?", (job_id,)) == {
+                            assert core.store.one((
+                                'SELECT state,last_error_code FROM jobs WHERE'
+                                ' job_id=%s'
+                            ), (job_id,)) == {
                                     "state": "FAILED",
                                     "last_error_code": "JOB_LEASE_LOST"}
             finally:

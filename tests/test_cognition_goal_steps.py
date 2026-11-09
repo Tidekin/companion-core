@@ -7,6 +7,7 @@ from companion.api import create_app
 from companion.cognition_read import CognitionRead
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode, uid
+from tests.postgres_fixture import logical_state
 from tests.support.cognition_goal_steps import finish_record, retained_plan
 from tests.support.owner_authority import activate
 from tests.support.owner_authority_setup import prepare
@@ -19,25 +20,29 @@ def read(core, goal):
 def test_first_done_step_never_completes_parent_or_writes(core):
     goal, steps = retained_plan(core)
     finish_record(core, steps[0], 1)
-    before = core.store.db.total_changes
-    item = read(core, goal)[0]
-    assert item["execution"]["state"] == "planned"
-    assert [s["step_id"] for s in item["steps"]] == steps
-    assert [s["state"] for s in item["steps"]] == ["DONE", "WAITING_DECISION", "WAITING_DECISION"]
-    assert item["verified_completed_steps"] == 1
-    assert "step" not in item and core.store.db.total_changes == before
-    core.store.execute("UPDATE goals SET state='DONE' WHERE goal_id=?", (goal,))
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        item = read(core, goal)[0]
+        assert item["execution"]["state"] == "planned"
+        assert [s["step_id"] for s in item["steps"]] == steps
+        assert [s["state"] for s in item["steps"]] == [
+            "DONE", "WAITING_DECISION", "WAITING_DECISION",
+        ]
+        assert item["verified_completed_steps"] == 1
+        assert "step" not in item
+    assert logical_state(core.store) == before
+    core.store.execute("UPDATE goals SET state='DONE' WHERE goal_id=%s", (goal,))
     assert read(core, goal)[0]["execution"]["state"] == "UNKNOWN"
 
 
 def test_parent_done_requires_all_real_results_and_exact_final_result(core):
     goal, steps = retained_plan(core)
     outcomes = [finish_record(core, step, i) for i, step in enumerate(steps, 1)]
-    core.store.execute("UPDATE goals SET state='DONE',result_event_id=? WHERE goal_id=?",
+    core.store.execute("UPDATE goals SET state='DONE',result_event_id=%s WHERE goal_id=%s",
                         (outcomes[-1], goal))
     item = read(core, goal)[0]
     assert item["execution"]["state"] == "done" and item["verified_completed_steps"] == 3
-    core.store.execute("UPDATE observations SET result_status='UNKNOWN' WHERE event_id=?",
+    core.store.execute("UPDATE observations SET result_status='UNKNOWN' WHERE event_id=%s",
                         (outcomes[1],))
     assert read(core, goal)[0]["execution"]["state"] == "UNKNOWN"
     assert read(core, goal)[0]["steps"][1]["outcome_event_id"] is None
@@ -46,9 +51,9 @@ def test_parent_done_requires_all_real_results_and_exact_final_result(core):
 def test_later_step_uncertainty_survives_parent_cancellation(core):
     goal, steps = retained_plan(core)
     finish_record(core, steps[0], 1)
-    core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=?",
+    core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=%s",
                         (steps[2],))
-    core.store.execute("UPDATE goals SET state='CANCELLED' WHERE goal_id=?", (goal,))
+    core.store.execute("UPDATE goals SET state='CANCELLED' WHERE goal_id=%s", (goal,))
     assert read(core, goal)[0]["execution"]["state"] == "UNKNOWN"
 
 
@@ -57,7 +62,7 @@ def test_withdrawn_step_source_hides_plan_even_when_initial_roots_live(core):
     outcome = finish_record(core, steps[0], 1)
     core.store.insert("goal_step_evidence", step_id=steps[1], event_id=outcome)
     assert read(core, goal)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [outcome], core.clock())
     assert not read(core, goal)
 
@@ -121,7 +126,7 @@ def test_stop_does_not_remove_valid_historical_steps(core, tmp_path):
 
 def test_committed_temporary_reorder_positions_are_not_a_valid_visible_plan(core):
     goal, steps = retained_plan(core)
-    core.store.execute("UPDATE goal_steps SET position=4 WHERE step_id=?", (steps[0],))
+    core.store.execute('UPDATE goal_steps SET position=4 WHERE step_id=%s', (steps[0],))
     item = read(core, goal)[0]
     assert item["execution"]["state"] == "UNKNOWN"
     assert all(step["execution"]["state"] == "UNKNOWN" for step in item["steps"])
@@ -130,14 +135,15 @@ def test_committed_temporary_reorder_positions_are_not_a_valid_visible_plan(core
 def test_three_completed_steps_with_last_parked_position_cannot_report_completion(core):
     goal, steps = retained_plan(core)
     outcomes = [finish_record(core, step, i) for i, step in enumerate(steps, 1)]
-    core.store.execute("UPDATE goals SET state='DONE',result_event_id=? WHERE goal_id=?",
+    core.store.execute("UPDATE goals SET state='DONE',result_event_id=%s WHERE goal_id=%s",
                         (outcomes[-1], goal))
     assert read(core, goal)[0]["execution"]["state"] == "done"
-    core.store.execute("UPDATE goal_steps SET position=4 WHERE step_id=?", (steps[-1],))
-    before = core.store.db.total_changes
-    item = read(core, goal)[0]
-    assert item["execution"]["state"] == "UNKNOWN"
-    assert item["verified_completed_steps"] == 0
-    assert [step["position"] for step in item["steps"]] == [1, 2, 4]
-    assert all(step["execution"]["state"] == "UNKNOWN" for step in item["steps"])
-    assert core.store.db.total_changes == before
+    core.store.execute('UPDATE goal_steps SET position=4 WHERE step_id=%s', (steps[-1],))
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        item = read(core, goal)[0]
+        assert item["execution"]["state"] == "UNKNOWN"
+        assert item["verified_completed_steps"] == 0
+        assert [step["position"] for step in item["steps"]] == [1, 2, 4]
+        assert all(step["execution"]["state"] == "UNKNOWN" for step in item["steps"])
+    assert logical_state(core.store) == before

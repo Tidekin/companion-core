@@ -52,10 +52,10 @@ def due(store, settings, conversation_id, event_id, body, now):
         return None
     key = BATCH_KEY + conversation_id
     waiting = store.one(
-        "SELECT 1 FROM jobs j JOIN events e USING(event_id) WHERE e.conversation_id=? "
-        "AND e.event_id!=? AND j.kind='chat' AND j.state='QUEUED' AND j.attempts=0 "
-        "AND j.next_attempt_at>?", (conversation_id, event_id, now))
-    start = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+        'SELECT 1 FROM jobs AS j JOIN events AS e USING (event_id) WHERE e.conversation_id = %s '
+        "AND e.event_id <> %s AND j.kind = 'chat' AND j.state = 'QUEUED' AND j.attempts = 0 AND "
+        'j.next_attempt_at > %s', (conversation_id, event_id, now))
+    start = store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
     if waiting and start:
         opened = start["value"]
         if opened.startswith("{"):
@@ -73,15 +73,16 @@ def due(store, settings, conversation_id, event_id, body, now):
                   if settings.operator_hot_reload else config.timing())
         since = after(now, -timing.active_window_seconds)
         active = store.one(
-            "SELECT 1 FROM events WHERE conversation_id=? AND event_id!=? AND actor_id='owner' "
-            "AND ingested_at>=? LIMIT 1", (conversation_id, event_id, since),
+            'SELECT 1 FROM events WHERE conversation_id = %s AND event_id <> %s AND actor_id = '
+            "'owner' AND ingested_at >= %s LIMIT 1", (conversation_id, event_id, since),
         ) or store.one(
-            "SELECT 1 FROM outbox WHERE conversation_id=? AND sent_at>=? LIMIT 1",
+            'SELECT 1 FROM outbox WHERE conversation_id = %s AND sent_at >= %s LIMIT 1',
             (conversation_id, since),
         )
         wait = timing.active_seconds if active else timing.quiet_seconds
         opened = now
-        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode({
+        store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO '
+            'UPDATE SET value = excluded.value, record_sequence = DEFAULT', (key, encode({
             "opened": now, "timing": timing.model_dump()})))
     if not (body.get("text") or "").strip():
         wait = max(wait, timing.media_seconds)

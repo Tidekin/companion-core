@@ -119,12 +119,12 @@ def test_slash_delivery_reconciliation_does_not_replay_uncertain_send(core):
     assert message in reply(core, 2)
     ingest(core, 3, f"核对发送 {message} 已发送")
     assert run(core.run_once())
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (message,)) == {
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (message,)) == {
         "state": "DELIVERY_UNCERTAIN"
     }
     ingest(core, 4, f"/核对发送：{message} 已发送")
     assert run(core.run_once())
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (message,)) == {
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (message,)) == {
         "state": "SENT"
     }
     assert len(core.model.calls) == 1
@@ -151,14 +151,14 @@ def test_slash_diary_usage_has_complete_new_syntax(core):
 def test_slash_pause_and_resume_require_complete_no_argument_command(core, pause, resume, key):
     core.settings.diary_enabled = True
     ingest(core, 1, "/" + pause + " 只是讨论")
-    assert not core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+    assert not core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))
     assert run(core.run_once())
-    assert not core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+    assert not core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))
     ingest(core, 2, " \n/" + pause + "\t ")
     if key in {"diary_paused", "proactive_paused"}:
-        assert core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))["value"] == "1"
+        assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))["value"] == "1"
     assert run(core.run_once())
-    assert core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))["value"] == "1"
+    assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))["value"] == "1"
     ingest(core, 3, "/" + resume)
     assert run(core.run_once())
-    assert core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))["value"] == "0"
+    assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))["value"] == "0"

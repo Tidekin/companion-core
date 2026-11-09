@@ -1,15 +1,16 @@
 """Native fixtures separate bounded work, recall quality and source authority."""
 
 import asyncio
-import sqlite3
 
 import numpy as np
+import psycopg
 import pytest
 
 from companion import memory_index_work, memory_references, retrieval, retrieval_work
 from companion.contracts import CoreError
 from companion.memory_context import MemorySources
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.confirmed_memory import remember
 from tests.support.retrieval_query_reuse import Encoder
 from tests.support.retrieval_work_bounds import assert_bounded
@@ -59,27 +60,28 @@ def test_nested_reply_scopes_cannot_reset_allowance_and_other_replies_are_indepe
 
 
 def test_optional_sql_interrupt_never_replaces_store_handler_or_aborts_writer(core, monkeypatch):
-    seen = []
-    core.store.db.set_progress_handler(lambda: seen.append(1) and 0, 1)
-    monkeypatch.setitem(retrieval_work.LIMITS, "sql_steps", 3000)
+    core.store.execute("SET statement_timeout='5s'")
+    monkeypatch.setitem(retrieval_work.LIMITS, "sql_milliseconds", 25)
     try:
         with retrieval_work.scope() as work:
-            with pytest.raises(retrieval_work.WorkLimit, match="MEMORY_RETRIEVAL_LIMIT"):
-                work.rows(core.store, "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL "
-                          "SELECT x+1 FROM n WHERE x<100000) SELECT sum(x) FROM n", limit=1)
-            assert not seen and not core.store.db.in_transaction
+            with pytest.raises(retrieval_work.WorkLimit) as caught:
+                work.rows(core.store, "SELECT pg_sleep(1)", limit=1)
+            assert caught.value.reason == "sql_milliseconds"
+            assert not core.store.in_transaction
+            assert core.store.one("SHOW statement_timeout")["statement_timeout"] == "5s"
             with core.store.transaction():
                 core.store.execute("INSERT INTO runtime_meta VALUES ('bounded-test','ok')")
-                with pytest.raises(retrieval_work.WorkLimit):
+                with pytest.raises(retrieval_work.WorkLimit) as refusal:
                     work.rows(core.store, "SELECT 1", limit=1)
-            assert seen and core.store.one(
+                assert refusal.value.reason == "nomination_requires_committed_snapshot"
+            assert core.store.one(
                 "SELECT value FROM runtime_meta WHERE key='bounded-test'")["value"] == "ok"
             assert_bounded(work.receipt())
         with retrieval_work.scope() as work:
-            with pytest.raises(sqlite3.OperationalError, match="no such table"):
+            with pytest.raises(psycopg.errors.UndefinedTable):
                 work.rows(core.store, "SELECT * FROM definitely_missing", limit=1)
     finally:
-        core.store.db.set_progress_handler(None, 0)
+        core.store.execute("RESET statement_timeout")
 
 
 def test_too_many_evidence_roots_are_partial_coverage_and_never_a_truncated_fact(core):
@@ -92,7 +94,7 @@ def test_too_many_evidence_roots_are_partial_coverage_and_never_a_truncated_fact
     assert len(MemorySources(core.memory, core.clock()).evidence(target)) == 65
     with pytest.raises(retrieval_work.WorkLimit):
         core.memory_context.pin(core.clock(), rows=[{
-            **core.store.one("SELECT * FROM memories WHERE memory_id=?", (target,)),
+            **core.store.one('SELECT * FROM memories WHERE memory_id=%s', (target,)),
             "evidence_ids": [f"evt_test_{number}" for number in range(1, 66)],
         }])
 
@@ -102,7 +104,7 @@ def test_cached_semantic_nominee_remains_subject_to_live_evidence(core, monkeypa
     model = Encoder((1., 0.))
     monkeypatch.setattr(core.memory.index, "warmup", lambda: model)
     core.memory.index.scores("初始化", [core.store.one(
-        "SELECT * FROM memories WHERE memory_id=?", (old,))])
+        'SELECT * FROM memories WHERE memory_id=%s', (old,))])
     for number in range(2, 110):
         remember(core, number, f"合成资料{number}在档案室。", confirmed=True)
     # No lexical overlap; the old cached row lies beyond the recency nominee head.
@@ -158,7 +160,7 @@ def test_vector_warmer_is_one_bounded_unit_and_rejects_withdrawal(core, monkeypa
     assert core.store.one("SELECT COUNT(*) n FROM memory_vectors")["n"] == 8
 
     async def withdrawn(*args, revalidate):
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_17"], core.clock())
         revalidate()
 
@@ -191,13 +193,13 @@ def test_history_and_episode_limits_are_partial_without_snapshot_write_retry(cor
 
     target = remember(core, 1, "相机放在湖蓝色硬壳箱。", confirmed=True)
     episode(core, 1)
-    monkeypatch.setitem(retrieval_work.LIMITS, "sql_steps", 0)
+    monkeypatch.setitem(retrieval_work.LIMITS, "sql_milliseconds", 0)
     history = core.memory_context.history(target, core.clock())
     assert history["retrieval_coverage"]["coverage_limited"]
     conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id='evt_test_1'")
     with retrieval_work.scope():
-        before = core.store.db.total_changes
+        before = logical_state(core.store)
         result = core.store.read_or_write(lambda: core.memory_context.continuation(
             conversation["conversation_id"], core.clock()))
         assert not result["items"] and result["retrieval_coverage"]["coverage_limited"]
-        assert not core.store.db.in_transaction and core.store.db.total_changes == before
+        assert not core.store.in_transaction and logical_state(core.store) == before

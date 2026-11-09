@@ -5,7 +5,6 @@ import json
 import pytest
 
 from companion import social_profile_sources
-from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
 from companion.social_autonomy import _sha
 from companion.social_autonomy_protocol import ProfileBaseline
@@ -13,7 +12,7 @@ from companion.social_autonomy_runtime import run_once
 from companion.store import encode
 from tests.conftest import ingest, run
 from tests.social_profile_support import confirmed_profile_material
-from tests.support.social_autonomy import background, dispatch, queue
+from tests.support.social_autonomy import background, deferred_admission, dispatch, queue
 
 
 def setup(core, **kwargs):
@@ -43,7 +42,7 @@ def test_profile_material_requires_owner_decision_and_every_source(core, change)
     if change in {"auto_confirmed", "missing_audit"}:
         core.store.execute("DELETE FROM audit_log WHERE action='memory.owner_decision'")
     elif change == "wrong_command":
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_801'",
+        core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_801'",
                            (encode({"text": "/确认这一条 mem_another"}),))
     elif change == "wrong_actor":
         core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id='evt_test_801'")
@@ -54,16 +53,22 @@ def test_profile_material_requires_owner_decision_and_every_source(core, change)
                           polarity=1, created_at=core.clock())
     elif change == "missing_parent":
         # Dependency corruption cannot silently drop a missing source.
-        core.store.db.execute("PRAGMA foreign_keys=OFF")
-        core.store.insert("event_dependencies", event_id="evt_test_800", source_event_id="missing")
-        core.store.db.execute("PRAGMA foreign_keys=ON")
-    elif change == "revoked_confirmation":
         with core.store.transaction():
+            core.store.execute("ALTER TABLE event_dependencies DROP CONSTRAINT "
+                               "fk_event_dependencies_source_event_id")
+            core.store.insert("event_dependencies", event_id="evt_test_800",
+                              source_event_id="missing")
+            core.store.execute("ALTER TABLE event_dependencies ADD CONSTRAINT "
+                               "fk_event_dependencies_source_event_id FOREIGN KEY(source_event_id) "
+                               "REFERENCES events(event_id) DEFERRABLE INITIALLY IMMEDIATE "
+                               "NOT VALID")
+    elif change == "revoked_confirmation":
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_801"], core.clock())
     elif change == "needs_review":
-        core.store.execute("UPDATE memories SET needs_review=1 WHERE memory_id=?", (memory_id,))
+        core.store.execute('UPDATE memories SET needs_review=1 WHERE memory_id=%s', (memory_id,))
     else:
-        core.store.execute("UPDATE memories SET subject='project' WHERE memory_id=?", (memory_id,))
+        core.store.execute("UPDATE memories SET subject='project' WHERE memory_id=%s", (memory_id,))
     with pytest.raises(CoreError):
         plan(module, memory_id)
     assert not module.model.calls and not core.store.rows("SELECT * FROM model_usage")
@@ -94,7 +99,7 @@ def test_profile_material_is_revalidated_at_freeze_and_dispatch(core, boundary, 
     module, memory_id, public, conversation = setup(core)
 
     def invalidate():
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             if revoke == "forget":
                 core.memory.decide(memory_id, "forget", core.clock())
             elif revoke == "recall_confirmation":
@@ -124,7 +129,7 @@ def test_owner_correction_uses_actual_command_and_preserves_new_proof(core):
                    origin="onebot-direct:FriendMessage:10001")
     result = core.memory.decide(old, "correct", core.clock(), text,
                                 evidence_event_id=event["event_id"])
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (event["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (event["job_id"],))
     material = social_profile_sources.material(core.store, core.settings, core.clock(),
                                                [result["memory_id"]])
     assert material[0]["content"] == text
@@ -142,8 +147,10 @@ def test_legacy_public_profile_plan_is_rejected_without_replaying_liability(core
     legacy.pop("purpose")
     legacy.pop("profile_material")
     legacy["sources"] = module.context(source_ids=[public])["sources"]
-    core.store.execute("UPDATE social_autonomy_plans SET input_snapshot_json=?,"
-                       "source_snapshot_sha256=? WHERE plan_id=?",
+    core.store.execute((
+        'UPDATE social_autonomy_plans SET '
+        'input_snapshot_json=%s,source_snapshot_sha256=%s WHERE plan_id=%s'
+    ),
                        (encode(legacy), _sha(legacy), row["plan_id"]))
     usage = core.store.rows("SELECT * FROM model_usage")
     if state == "READY":
@@ -167,23 +174,22 @@ def test_legacy_public_profile_plan_is_rejected_without_replaying_liability(core
 @pytest.mark.parametrize("forget", [False, True])
 def test_deferred_profile_reuses_native_job_and_rechecks_owner_material(core, forget):
     module, memory_id, _, _ = setup(core)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        plan(module, memory_id)
-    before = core.store.one("SELECT * FROM social_autonomy_plans")
-    job = core.store.one("SELECT * FROM jobs WHERE kind='social_plan'")
-    assert job["state"] == "QUEUED"
-    assert not module.model.calls and not core.store.rows("SELECT * FROM model_usage")
-    if forget:
-        core.memory.decide(memory_id, "forget", core.clock())
-    core.settings.cloud_budget = CloudBudgetConfig()
+    with deferred_admission():
+        with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+            plan(module, memory_id)
+        before = core.store.one("SELECT * FROM social_autonomy_plans")
+        job = core.store.one("SELECT * FROM jobs WHERE kind='social_plan'")
+        assert job["state"] == "QUEUED"
+        assert not module.model.calls and not core.store.rows("SELECT * FROM model_usage")
+        if forget:
+            core.memory.decide(memory_id, "forget", core.clock())
     core.clock.advance(60)
     # Isolate this existing retry from independent public candidates.
     from companion import social_plan_jobs
     retry = social_plan_jobs.claim(module, "profile-retry-worker")
     if forget:
         assert retry is None
-        assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],)) == {
+        assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],)) == {
             "state": "CANCELLED"}
         assert not core.store.rows("SELECT * FROM model_usage")
     else:

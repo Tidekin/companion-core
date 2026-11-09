@@ -7,7 +7,6 @@ from pydantic import ValidationError
 
 from companion import account_actions, notices, owner_authority, social_plan_jobs
 from companion.affect import AffectEngine
-from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
 from companion.life_protocol import LifeShadowApproval
 from companion.owner_authority_protocol import OwnerRuntimeConfig
@@ -15,7 +14,7 @@ from companion.store import after, uid
 from tests.conftest import ingest, run
 from tests.support.life_topics import bug, due, proposal
 from tests.support.owner_authority import activate
-from tests.support.social_autonomy import background, planned, queue
+from tests.support.social_autonomy import background, deferred_admission, planned, queue
 from tests.support.social_owner_authority import (
     authorize,
     stop,
@@ -40,13 +39,13 @@ def test_life_job_pins_original_owner_revision_and_never_rebinds(core, tmp_path)
     policy, ref = life_authorized(core, tmp_path)
     job_id = due(core)
     assert job_id
-    saved = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+    saved = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job_id,))
     assert json.loads(saved["authority_json"]) == ref
     stop(core, ref)
     activate(core, policy, revision=2, operation="replace-life-policy")
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_REVISION_CHANGED"):
         notices.validate(core.store, core.settings, saved, core.clock())
-    assert core.store.one("SELECT authority_json FROM jobs WHERE job_id=?", (job_id,)) == {
+    assert core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s', (job_id,)) == {
         "authority_json": saved["authority_json"],
     }
     assert core.model.calls == []
@@ -120,20 +119,20 @@ def test_social_stop_during_paid_request_discards_result_without_repayment(core,
 
 def test_social_native_retry_keeps_authority_and_is_cancelled_after_revision(core, tmp_path):
     module, source, _ = background(core, max_output_tokens=512)
-    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    policy, ref = authorize(core, tmp_path, module=module)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        planned(module, source)
-    job = core.store.one("SELECT * FROM jobs WHERE kind='social_plan'")
-    assert job and json.loads(job["authority_json"]) == ref
-    core.clock.advance(61)
-    stop(core, ref)
-    activate(core, policy, revision=2, operation="revision-before-social-retry")
-    assert social_plan_jobs.claim(module, "retry-worker") is None
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],)) == {
-        "state": "CANCELLED",
-    }
-    assert module.model.calls == []
+    with deferred_admission():
+        policy, ref = authorize(core, tmp_path, module=module)
+        with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+            planned(module, source)
+        job = core.store.one("SELECT * FROM jobs WHERE kind='social_plan'")
+        assert job and json.loads(job["authority_json"]) == ref
+        core.clock.advance(61)
+        stop(core, ref)
+        activate(core, policy, revision=2, operation="revision-before-social-retry")
+        assert social_plan_jobs.claim(module, "retry-worker") is None
+        assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],)) == {
+            "state": "CANCELLED",
+        }
+        assert module.model.calls == []
 
 
 def test_native_outbox_pins_authority_and_stop_preserves_no_io_receipt(core, tmp_path):
@@ -143,7 +142,7 @@ def test_native_outbox_pins_authority_and_stop_preserves_no_io_receipt(core, tmp
     token = uid("lease")
     # Native hook test. Shared transport/API migration has its own integration receipt.
     with core.store.transaction():
-        core.store.execute("UPDATE outbox SET state='LEASED',lease_token=?,lease_until=?",
+        core.store.execute("UPDATE outbox SET state='LEASED',lease_token=%s,lease_until=%s",
                            (token, after(core.clock(), 60)))
         view = account_actions.scope(core.store, core.settings, core.clock, ref,
                                      frozen.authorization_sha256, message_id=frozen.message_id)
@@ -192,7 +191,7 @@ def test_owner_bound_source_erasure_during_model_keeps_cost_and_removes_draft(co
     authorize(core, tmp_path, module=module)
 
     def erase():
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
 
     module.model.callback = erase

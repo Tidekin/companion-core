@@ -18,7 +18,20 @@ def prepare(store, custody, proof, now):
     if prior is not None and prior["quiescence"] != proof:
         raise CoreError("DELIVERY_NOT_SENT_CONFLICT", 409)
     view = paid_budget.journal(store, custody, allow_settlement=True, initialize=False)
-    stop = store.one("SELECT * FROM owner_authority_revisions WHERE grant_id=? AND revision=?",
+    stop = store.one('SELECT owner_authority_revisions.grant_id AS grant_id, '
+        'owner_authority_revisions.revision AS revision, owner_authority_revisions.operation_id AS '
+        'operation_id, owner_authority_revisions.request_sha256 AS request_sha256, '
+        'owner_authority_revisions.state AS state, owner_authority_revisions.policy_json AS '
+        'policy_json, owner_authority_revisions.policy_sha256 AS policy_sha256, '
+        'owner_authority_revisions.policy_redacted AS policy_redacted, '
+        'owner_authority_revisions.restore_generation AS restore_generation, '
+        'owner_authority_revisions.predecessor_sha256 AS predecessor_sha256, '
+        'owner_authority_revisions.record_sha256 AS record_sha256, '
+        'owner_authority_revisions.journal_id AS journal_id, '
+        'owner_authority_revisions.journal_path AS journal_path, '
+        'owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS '
+        'owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND '
+        'owner_authority_revisions.revision = %s',
                      (proof["authority"]["grant_id"], proof["authority"]["revision"] + 1))
     owner_delivery_reconciliation.stopped(store, proof, stop, current=True)
     if (prior is None and (not view["owner_authority"]
@@ -33,7 +46,7 @@ def prepare(store, custody, proof, now):
         or recovery._meta(store, recovery.PROJECTION + proof["message_id"]) is not None
         or proof["message_id"] in view["send_resolutions"]
         or "send:" + wire.digest(proof["message_id"]) in view["cumulative"]["operations"]
-        or store.one("SELECT 1 FROM audit_log WHERE entity_id=? AND action='delivery.result'",
+        or store.one("SELECT 1 FROM audit_log WHERE entity_id = %s AND action = 'delivery.result'",
                      (proof["message_id"],))
         or owner_authority._meta(store, owner_authority.GENERATION)
         != proof["authority"]["restore_generation"]):
@@ -52,7 +65,7 @@ def prepare(store, custody, proof, now):
              "at": now, "delivery": original, "quiescence": proof}
     value["receipt_sha256"] = wire.digest(value)
     no_io.receipt(value)
-    store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+    store.execute('INSERT INTO runtime_meta VALUES (%s, %s)',
                   (PREFIX + proof["message_id"], encode(value)))
     store.audit("delivery.not_sent", proof["message_id"], "bridge", now,
                 receipt_sha256=value["receipt_sha256"], quiescence_sha256=wire.digest(proof))
@@ -65,5 +78,6 @@ def candidate(store, proof):
         or proof.get("original_result_sha256") is not None
         or proof.get("action_type") != "qq.private.reply"):
         return False
-    row = store.one("SELECT attempt_count FROM outbox WHERE message_id=?", (proof["message_id"],))
+    row = store.one('SELECT attempt_count FROM outbox WHERE message_id = '
+        '%s', (proof["message_id"],))
     return bool(row and row["attempt_count"] == 0)

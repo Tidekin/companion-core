@@ -41,7 +41,7 @@ def test_delivery_failure_boundary_retains_actual_uncertainty(
             model = Provider(answer("synthetic reply"))
             async with worker_for(core, model) as worker:
                 assert await worker.run_once("lease-boundary-worker")
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert len(model.requests) == len(usage) == 1
             assert usage[0]["state"] == "SETTLED"
             spool, runtime = native_spool(core, tmp_path, config, plan)
@@ -99,7 +99,9 @@ def test_delivery_failure_boundary_retains_actual_uncertainty(
                 assert result[1] == "accepted"
                 body = json.loads(result[0])
                 assert outbox["attempt_count"] == 1
-                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+                assert core.store.rows(
+                    'SELECT * FROM model_usage ORDER BY record_sequence'
+                ) == usage
                 if boundary == "ack":
                     assert len(sends) == 1 and guard.dispatched
                     assert attempt == "ACK" and outbox["state"] == "SENT"

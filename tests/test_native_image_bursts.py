@@ -254,7 +254,8 @@ def test_image_burst_and_latest_text_keep_all_originals_in_order(
                     total_inputs = count + 1
                 await until(lambda: len(core.store.rows("SELECT * FROM events")) == total_inputs,
                             tasks=tasks, deadline_seconds=20)
-                job = core.store.one("SELECT * FROM jobs WHERE kind='chat' ORDER BY rowid DESC")
+                job = core.store.one("SELECT * FROM jobs WHERE kind='chat' "
+                                     "ORDER BY record_sequence DESC LIMIT 1")
                 if mode != "staged":
                     assert core.claim_job("wait-for-originals", job_id=job["job_id"]) is None
                 release.set()
@@ -271,8 +272,11 @@ def test_image_burst_and_latest_text_keep_all_originals_in_order(
                 assert core.store.rows("SELECT scenario,state FROM model_usage") == [
                     {"scenario": "chat", "state": "SETTLED"}]
                 assert [row["media_sha256"] for row in core.store.rows(
-                    "SELECT c.media_sha256 FROM agent_image_inputs a JOIN content_items c "
-                    "USING(item_id) WHERE a.job_id=? ORDER BY a.position", (job["job_id"],))] == [
+                    (
+                        'SELECT c.media_sha256 FROM agent_image_inputs a JOIN'
+                        ' content_items c USING(item_id) WHERE a.job_id=%s '
+                        'ORDER BY a.position'
+                    ), (job["job_id"],))] == [
                     hashlib.sha256(data).hexdigest() for data in originals]
                 assert active.runtime.row()["state"] == "ACTIVE"
                 active.runtime.verify()

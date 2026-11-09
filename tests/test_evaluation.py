@@ -65,7 +65,7 @@ def test_expired_source_is_not_reauthorized_by_fresh_consent(core, tmp_path):
     from companion.store import after
 
     manifest = prepare(core, tmp_path)
-    core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?", (
+    core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s', (
         after(core.clock(), -86400 * (core.settings.raw_event_retention_days + 1)),
         manifest.source_event_ids[0]))
     with pytest.raises(CoreError, match="SOURCE_EXPIRED"):
@@ -92,7 +92,7 @@ def test_preexisting_cumulative_liability_blocks_evaluation(core, tmp_path):
                            [{"role": "user", "content": "prior responsibility"}], core.clock(),
                            clock=core.clock)
     budget.settle(core.store, core.settings, prior, ModelResponse("old", 30, 2))
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (normal["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (normal["job_id"],))
     submitted = evaluation.submit(core, authorize(core, manifest))
     calls = []
     work(core, lambda req: (calls.append(1) or response(req)))
@@ -102,6 +102,8 @@ def test_preexisting_cumulative_liability_blocks_evaluation(core, tmp_path):
 
 @pytest.mark.parametrize("condition", ["revoked", "expired", "source", "window", "disabled",
                                        "new_owner"])
+
+
 def test_changes_block_execution_without_io(core, tmp_path, condition):
     manifest = prepare(core, tmp_path, chat=condition == "new_owner")
     request = authorize(core, manifest)
@@ -111,7 +113,7 @@ def test_changes_block_execution_without_io(core, tmp_path, condition):
     elif condition == "expired":
         core.clock.advance(601)
     elif condition == "source":
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
+        core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s',
                            (manifest.source_event_ids[0],))
     elif condition == "window":
         core.settings.paid_model = core.settings.paid_model.model_copy(
@@ -120,16 +122,16 @@ def test_changes_block_execution_without_io(core, tmp_path, condition):
         core.settings.evaluation_enabled = False
     else:
         newer = admitted_chat(core)
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (newer["job_id"],))
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (newer["job_id"],))
     calls = []
     work(core, lambda req: (calls.append(1) or response(req)))
     assert calls == []
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (submitted["job_id"],))[
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (submitted["job_id"],))[
         "state"] in {"FAILED", "CANCELLED"}
 
 
 @pytest.mark.parametrize("failure", ["timeout", "usage_missing", "amount_overrun"])
-def test_unknown_stops_remaining_calls_and_never_retries(core, tmp_path, failure):
+def test_result_checkpoint_controls_continuation(core, tmp_path, failure):
     manifest = prepare(core, tmp_path)
     submitted = evaluation.submit(core, authorize(core, manifest))
     calls = []
@@ -144,16 +146,24 @@ def test_unknown_stops_remaining_calls_and_never_retries(core, tmp_path, failure
             body["usage"]["prompt_tokens"] = 17000  # $0.0051 exceeds experiment attempt bound.
         return httpx.Response(200, json=body)
     work(core, handler)
-    assert len(calls) == 1
-    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
-    assert all(r["state"] == "NOT_STARTED" for r in result(core, submitted)["requests"][1:])
+    expected = 1 if failure == "timeout" else 6
+    assert len(calls) == expected
+    states = core.store.rows("SELECT state FROM model_usage")
+    assert all(r["state"] == ("SETTLED" if failure == "amount_overrun" else "UNKNOWN")
+               for r in states)
+    if failure == "timeout":
+        assert all(r["state"] == "NOT_STARTED"
+                   for r in result(core, submitted)["requests"][1:])
+    else:
+        assert result(core, submitted)["state"] == "SUCCEEDED"
+        assert len(core.store.rows("SELECT * FROM evaluation_results")) == expected
     assert not work(core, handler)
-    assert len(calls) == 1
+    assert len(calls) == expected
 
 
-def test_normal_task_spend_competes_for_same_cloud_ceiling(core, tmp_path):
+def test_normal_task_and_evaluation_preserve_shared_advisory_cloud_ledger(core, tmp_path):
     manifest = prepare(core, tmp_path, chat=True)
-    cap = core.settings.cloud_budget.model_copy(update={"daily_micro_cny": 30000})
+    cap = core.settings.cloud_budget.model_copy(update={})
     core.settings.cloud_budget = cap
     # Native preceding charge; no evaluation-local balance can discard this liability.
     normal = admitted_chat(core)
@@ -161,13 +171,14 @@ def test_normal_task_spend_competes_for_same_cloud_ceiling(core, tmp_path):
     prior = budget.reserve(core.store, core.settings, normal["job_id"], "chat",
                            [{"role": "user", "content": "prior"}], core.clock(), clock=core.clock)
     budget.settle(core.store, core.settings, prior, ModelResponse("old", 30, 2048))
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (normal["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (normal["job_id"],))
     submitted = evaluation.submit(core, authorize(core, manifest))
     calls = []
     work(core, lambda req: (calls.append(1) or response(req)))
-    assert calls == []
-    assert result(core, submitted)["state"] == "FAILED"
-    assert result(core, submitted)["error_code"] == "CLOUD_DAILY_BUDGET_EXHAUSTED"
+    assert len(calls) == 6
+    assert result(core, submitted)["state"] == "SUCCEEDED"
+    assert core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=%s",
+                          (prior,))["billed_micro_usd"] > 0
 
 
 def test_source_revoke_during_transport_hook_fences_request(core, tmp_path):
@@ -218,20 +229,24 @@ def test_expired_lease_keeps_unknown_in_original_journal(core, tmp_path):
                             initialize=False)
 
 
-def test_erasure_and_old_backup_replay_remove_inputs_results_keep_cost(core, tmp_path):
+def test_erasure_and_old_backup_replay_remove_inputs_results_keep_cost(
+    core, tmp_path, empty_database
+):
     manifest = prepare(core, tmp_path)
     submitted = evaluation.submit(core, authorize(core, manifest))
     work(core)
-    archived, restored = tmp_path / "old.bin", tmp_path / "restored.sqlite3"
+    archived, restored = tmp_path / "old.bin", empty_database
     key = Fernet.generate_key()
     backup(core.settings.database, archived, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, manifest.source_event_ids, core.clock())
     assert core.store.one("SELECT manifest_json FROM evaluation_runs")["manifest_json"] == "{}"
     assert core.store.rows("SELECT * FROM evaluation_results") == []
     assert core.store.one("SELECT SUM(billed_micro_usd) n FROM model_usage")["n"] == 72
-    restore(archived, restored, key, core.settings.erasure_ledger)
-    restored_settings = core.settings.model_copy(update={"database": str(restored)})
+    restore(archived, restored, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    restored_settings = core.settings.model_copy(update={"database": restored,
+            "state_directory": str(tmp_path / "restored-state")})
     with Runtime(restored_settings, core.clock) as runtime:
         assert runtime.store.one("SELECT redacted FROM evaluation_runs")["redacted"] == 1
         assert runtime.store.rows("SELECT * FROM evaluation_results") == []

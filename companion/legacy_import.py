@@ -14,8 +14,21 @@ from psycopg import sql
 from pydantic import SecretStr
 
 SOURCE_REVISION = "0068_image_review_target"
-TARGET_REVISION = "pg0001_core"
+TARGET_REVISION = "pg0002_relationship_standing"
 
+
+def migrate_sqlite(path, revision="head"):
+    from alembic import command
+    from alembic.config import Config
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    migrations = Path(__file__).parent.parent / "migrations"
+    if not migrations.exists():
+        migrations = Path(__file__).parent / "migrations"
+    cfg = Config()
+    cfg.set_main_option("script_location", str(migrations))
+    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + Path(path).resolve().as_posix())
+    command.upgrade(cfg, revision)
 
 def import_sqlite_backup(path, conninfo: SecretStr):
     """Import once, compare every business row before commit, and return content-free counts.

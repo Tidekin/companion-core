@@ -51,12 +51,11 @@ def _candidates(module):
     cfg, s, now = module.config, module.store, module.clock()
     sources, seen = [], set()
     for row in s.rows(
-        "SELECT o.event_id FROM observations o JOIN events e USING(event_id) "
-        "WHERE o.result_status='FETCHED' AND o.source_kind='text' AND o.redacted=0 "
-        "AND e.redacted=0 AND e.event_type='content.observed' "
-        "AND e.source IN ('observation.bilibili','observation.heybox','observation.web') "
-        "AND e.ingested_at>=? AND e.occurred_at<=? "
-        "ORDER BY e.ingested_at DESC,o.event_id DESC LIMIT ?",
+        'SELECT o.event_id FROM observations AS o JOIN events AS e USING (event_id) WHERE '
+        "o.result_status = 'FETCHED' AND o.source_kind = 'text' AND o.redacted = 0 AND e.redacted "
+        "= 0 AND e.event_type = 'content.observed' AND e.source IN ('observation.bilibili', "
+        "'observation.heybox', 'observation.web') AND e.ingested_at >= %s AND e.occurred_at <= %s "
+        'ORDER BY e.ingested_at DESC NULLS LAST, o.event_id DESC NULLS LAST LIMIT %s',
         (after(now, -86400 * module.settings.raw_event_retention_days), now, _SCAN_LIMIT),
     ):
         try:
@@ -78,8 +77,9 @@ def _candidates(module):
         except CoreError:
             continue
     if any(profile["field"] == "avatar" for profile in profiles):
-        for row in s.rows("SELECT asset_id FROM social_autonomy_assets WHERE revoked_at IS NULL "
-                          "AND expires_at>? ORDER BY created_at DESC,asset_id LIMIT ?",
+        for row in s.rows('SELECT asset_id FROM social_autonomy_assets WHERE revoked_at IS NULL '
+            'AND expires_at > %s ORDER BY created_at DESC NULLS LAST, asset_id NULLS FIRST LIMIT '
+            '%s',
                           (now, _SCAN_LIMIT)):
             try:
                 assets.extend(module.context(asset_ids=[row["asset_id"]])["assets"])
@@ -149,9 +149,9 @@ def _profile_candidate(module):
 
 
 def _cancel(store, plan_id, code, now):
-    store.execute("UPDATE social_autonomy_plans SET state='CANCELLED',last_error_code=?,"
-                  "updated_at=? WHERE plan_id=? AND state='READY' AND NOT EXISTS "
-                  "(SELECT 1 FROM social_autonomy_reservations r WHERE r.plan_id=?)",
+    store.execute("UPDATE social_autonomy_plans SET state = 'CANCELLED', last_error_code = %s, "
+        "updated_at = %s WHERE plan_id = %s AND state = 'READY' AND NOT EXISTS(SELECT 1 FROM "
+        'social_autonomy_reservations AS r WHERE r.plan_id = %s)',
                   (code, now, plan_id, plan_id))
     store.audit("social.runtime_cancelled", plan_id, plan_id, now, error_code=code)
 
@@ -159,28 +159,27 @@ def _cancel(store, plan_id, code, now):
 def _expire(store, now):
     with store.transaction():
         recovered_jobs = social_plan_jobs.recover(store, now)
-        rows = store.rows("SELECT p.plan_id FROM social_autonomy_plans p WHERE p.state='READY' "
-                          "AND p.expires_at<=? AND NOT EXISTS (SELECT 1 FROM "
-                          "social_autonomy_reservations r WHERE r.plan_id=p.plan_id) "
-                          "ORDER BY p.expires_at,p.plan_id LIMIT ?", (now, _SCAN_LIMIT))
+        rows = store.rows('SELECT p.plan_id FROM social_autonomy_plans AS p WHERE p.state = '
+            "'READY' AND p.expires_at <= %s AND NOT EXISTS(SELECT 1 FROM "
+            'social_autonomy_reservations AS r WHERE r.plan_id = p.plan_id) ORDER BY p.expires_at '
+            'NULLS FIRST, p.plan_id NULLS FIRST LIMIT %s', (now, _SCAN_LIMIT))
         for row in rows:
             _cancel(store, row["plan_id"], "SOCIAL_PLAN_EXPIRED", now)
         abandoned = store.rows(
-            "SELECT p.plan_id,m.state AS usage_state FROM social_autonomy_plans p "
-            "LEFT JOIN model_usage m ON m.request_id=p.model_request_id "
-            "LEFT JOIN model_admissions a ON a.request_id=p.model_request_id "
-            "WHERE p.state='PLANNING' AND p.expires_at<=? "
-            "AND (m.request_id IS NULL OR (m.state='SETTLED' AND m.scenario='social_autonomy')) "
-            "AND (a.request_id IS NULL OR a.lease_until<=?) "
-            "AND NOT EXISTS (SELECT 1 FROM social_autonomy_reservations r "
-            "WHERE r.plan_id=p.plan_id) ORDER BY p.expires_at,p.plan_id LIMIT ?",
+            'SELECT p.plan_id, m.state AS usage_state FROM social_autonomy_plans AS p LEFT JOIN '
+            'model_usage AS m ON m.request_id = p.model_request_id LEFT JOIN model_admissions AS a '
+            "ON a.request_id = p.model_request_id WHERE p.state = 'PLANNING' AND p.expires_at <= "
+            "%s AND (m.request_id IS NULL OR (m.state = 'SETTLED' AND m.scenario = "
+            "'social_autonomy')) AND (a.request_id IS NULL OR a.lease_until <= %s) AND NOT "
+            'EXISTS(SELECT 1 FROM social_autonomy_reservations AS r WHERE r.plan_id = p.plan_id) '
+            'ORDER BY p.expires_at NULLS FIRST, p.plan_id NULLS FIRST LIMIT %s',
             (now, now, _SCAN_LIMIT),
         )
         for row in abandoned:
             code = ("SOCIAL_PLAN_RESULT_LOST" if row["usage_state"] == "SETTLED"
                     else "SOCIAL_PLAN_EXPIRED_UNADMITTED")
-            store.execute("UPDATE social_autonomy_plans SET state='CANCELLED',last_error_code=?,"
-                          "updated_at=? WHERE plan_id=? AND state='PLANNING'",
+            store.execute("UPDATE social_autonomy_plans SET state = 'CANCELLED', last_error_code = "
+                "%s, updated_at = %s WHERE plan_id = %s AND state = 'PLANNING'",
                           (code, now, row["plan_id"]))
             store.audit("social.runtime_cancelled", row["plan_id"], row["plan_id"], now,
                         error_code=code)
@@ -220,26 +219,38 @@ async def run_once(store, settings, model, clock=utcnow, *, worker_id="social-wo
     except CoreError:
         return changed
     conversation = store.one(
-        "SELECT conversation_id FROM conversations WHERE platform='qq.onebot' "
-        "AND scope='private' AND owner_actor_id='owner' AND platform_session_key=?",
+        "SELECT conversation_id FROM conversations WHERE platform = 'qq.onebot' AND scope = "
+        "'private' AND owner_actor_id = 'owner' AND platform_session_key = %s",
         ("onebot-direct:FriendMessage:" + settings.owner_qq_id,),
     )
     if not conversation:
         return changed
     conversation = conversation["conversation_id"]
-    ready = store.one("SELECT p.plan_id FROM social_autonomy_plans p WHERE p.state='READY' "
-                      "AND p.redacted=0 AND NOT EXISTS (SELECT 1 FROM "
-                      "social_autonomy_reservations r WHERE r.plan_id=p.plan_id) "
-                      "AND json_extract(p.plan_json,'$.schema_version')<>2 "
-                      "ORDER BY p.created_at,p.plan_id LIMIT 1")
+    ready = store.one(
+        'SELECT p.plan_id FROM social_autonomy_plans p WHERE '
+        "p.state='READY' AND p.redacted=0 AND NOT EXISTS "
+        '(SELECT 1 FROM social_autonomy_reservations r WHERE '
+        'r.plan_id=p.plan_id) AND (CASE WHEN p.plan_json IS '
+        "JSON THEN ((p.plan_json::json#>>'{schema_version}'))::n"
+        'umeric END)<>2 ORDER BY p.created_at,p.plan_id LIMIT 1'
+    )
     if ready:
         return _enqueue(module, ready["plan_id"], conversation) or changed
     if model is None:
         return changed
     retry = social_plan_jobs.claim(module, worker_id)
     if retry:
-        row = store.one("SELECT p.* FROM social_autonomy_jobs r JOIN social_autonomy_plans p "
-                        "USING(plan_id) WHERE r.job_id=?", (retry["job_id"],))
+        row = store.one('SELECT p.plan_id AS plan_id, p.idempotency_key AS idempotency_key, '
+            'p.request_sha256 AS request_sha256, p.candidate_sha256 AS candidate_sha256, p.state '
+            'AS state, p.policy_version AS policy_version, p.policy_sha256 AS policy_sha256, '
+            'p.authorization_sha256 AS authorization_sha256, p.binding_sha256 AS binding_sha256, '
+            'p.timezone AS timezone, p.policy_json AS policy_json, p.input_snapshot_json AS '
+            'input_snapshot_json, p.source_snapshot_sha256 AS source_snapshot_sha256, p.plan_json '
+            'AS plan_json, p.payload_sha256 AS payload_sha256, p.model_request_id AS '
+            'model_request_id, p.last_error_code AS last_error_code, p.redacted AS redacted, '
+            'p.created_at AS created_at, p.expires_at AS expires_at, p.updated_at AS updated_at '
+            'FROM social_autonomy_jobs AS r JOIN social_autonomy_plans AS p ON r.plan_id = '
+            'p.plan_id WHERE r.job_id = %s', (retry["job_id"],))
         try:
             messages, _ = module._messages(json.loads(row["input_snapshot_json"]), module.config)
             plan = await module._run_plan(row["plan_id"], row["model_request_id"], messages,
@@ -264,7 +275,24 @@ async def run_once(store, settings, model, clock=utcnow, *, worker_id="social-wo
         if not candidate:
             continue
         key, inputs = candidate
-        previous = store.one("SELECT * FROM social_autonomy_plans WHERE idempotency_key=?", (key,))
+        previous = store.one('SELECT social_autonomy_plans.plan_id AS plan_id, '
+            'social_autonomy_plans.idempotency_key AS idempotency_key, '
+            'social_autonomy_plans.request_sha256 AS request_sha256, '
+            'social_autonomy_plans.candidate_sha256 AS candidate_sha256, '
+            'social_autonomy_plans.state AS state, social_autonomy_plans.policy_version AS '
+            'policy_version, social_autonomy_plans.policy_sha256 AS policy_sha256, '
+            'social_autonomy_plans.authorization_sha256 AS authorization_sha256, '
+            'social_autonomy_plans.binding_sha256 AS binding_sha256, '
+            'social_autonomy_plans.timezone AS timezone, social_autonomy_plans.policy_json AS '
+            'policy_json, social_autonomy_plans.input_snapshot_json AS input_snapshot_json, '
+            'social_autonomy_plans.source_snapshot_sha256 AS source_snapshot_sha256, '
+            'social_autonomy_plans.plan_json AS plan_json, social_autonomy_plans.payload_sha256 AS '
+            'payload_sha256, social_autonomy_plans.model_request_id AS model_request_id, '
+            'social_autonomy_plans.last_error_code AS last_error_code, '
+            'social_autonomy_plans.redacted AS redacted, social_autonomy_plans.created_at AS '
+            'created_at, social_autonomy_plans.expires_at AS expires_at, '
+            'social_autonomy_plans.updated_at AS updated_at FROM social_autonomy_plans AS '
+            'social_autonomy_plans WHERE social_autonomy_plans.idempotency_key = %s', (key,))
         if not previous:
             break
         if (module.retryable_unadmitted(previous)
@@ -279,13 +307,13 @@ async def run_once(store, settings, model, clock=utcnow, *, worker_id="social-wo
     try:
         plan = await module.plan(key, **inputs)
     except CoreError:
-        return bool(store.one("SELECT 1 FROM social_autonomy_plans WHERE idempotency_key=?",
+        return bool(store.one('SELECT 1 FROM social_autonomy_plans WHERE idempotency_key = %s',
                               (key,))) or changed
     except Exception:
         # plan() has already recorded the failure and native fee/uncertainty.
         # Only absorb a failure with that durable record; programming errors
         # before a decision exists must remain visible to the worker.
-        if store.one("SELECT 1 FROM social_autonomy_plans WHERE idempotency_key=?", (key,)):
+        if store.one('SELECT 1 FROM social_autonomy_plans WHERE idempotency_key = %s', (key,)):
             return True
         raise
     if plan["state"] == "READY":

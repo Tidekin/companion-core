@@ -58,7 +58,7 @@ def test_native_file_http_upload_and_guarded_worker(core, tmp_path):
 
             assert await content_files.run_file_once(core.content, parse=parser)
             assert calls == [data]
-            row = core.store.one("SELECT * FROM content_items WHERE owner_event_id=?",
+            row = core.store.one('SELECT * FROM content_items WHERE owner_event_id=%s',
                                  (event["event_id"],))
             assert row["state"] == "SUCCEEDED", dict(row)
             observed = core.store.one("SELECT * FROM observations")
@@ -203,7 +203,7 @@ def test_native_file_reaches_sdk_in_independent_worker(core, tmp_path):
         configure(core)
         async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
             event, data = await upload(core, client, config, plan, tmp_path)
-            job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (event["event_id"],))
             arguments, output = tmp_path / "file-worker.pickle", tmp_path / "file-wire.json"
             arguments.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
                                                 data, str(output))))
@@ -240,7 +240,7 @@ def test_native_file_original_survives_new_turn_until_its_own_deadline(core, tmp
             event, data = await upload(core, client, config, plan, tmp_path)
             await admit_image(core, client, config, plan, tmp_path, number=43, message=[
                 {"type": "text", "data": {"text": "补充说明"}}])
-            job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (event["event_id"],))
             assert job["state"] == "CANCELLED"
             with Core(core.settings, clock=core.clock) as restarted:
                 row = restarted.store.one("SELECT * FROM content_items WHERE kind='qq_file'")
@@ -304,7 +304,7 @@ def test_native_file_guards_final_download_and_upload(core, tmp_path, boundary):
                 assert len(lookups) == 1
                 assert len(downloads) == (0 if boundary == "dns_stop" else 1)
                 assert core.store.one("SELECT state FROM content_items")["state"] == "FETCHING"
-                assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE ?",
+                assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key LIKE %s',
                                            ("live_text_file_upload:%",))
                 assert not core.store.one("SELECT 1 FROM model_usage")
             finally:
@@ -323,7 +323,7 @@ def test_native_file_retirement_never_dispatches_parser(core, tmp_path, retire):
         async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
             event, _ = await upload(core, client, config, plan, tmp_path)
             row = core.store.one("SELECT * FROM content_items WHERE kind='qq_file'")
-            proof = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            proof = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                 (qq_files.STAGED + row["item_id"],))["value"])
             if retire == "stop":
                 owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
@@ -334,7 +334,7 @@ def test_native_file_retirement_never_dispatches_parser(core, tmp_path, retire):
                     proof["lease_token"], proof["media_sha256"], proof["mime"], proof["bytes"],
                     proof) == proof
             elif retire == "recall":
-                saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                saved = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                     ("owner_input:" + event["event_id"],))["value"])
                 notice = receipt(core, OwnerCapture.model_validate(saved["capture"]), plan.key)
                 withdrawn = await client.post("/internal/v1/owner-authority/inputs/recall",

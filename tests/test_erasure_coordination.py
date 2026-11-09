@@ -8,6 +8,7 @@ from cryptography.fernet import Fernet
 import companion.affect as affect
 from companion import budget
 from companion.backup import backup, restore
+from companion.postgres import Database
 from companion.privacy import epoch
 from companion.store import Store
 from companion.transport import enqueue
@@ -20,18 +21,18 @@ def test_replay_contract_discovery_does_not_hold_database_write_lock(core, monke
 
     original = erasure.contract_signature
     ledger = core.ledger.path.read_bytes()
-    with closing(Store(core.settings.database)) as other:
-        other.execute("PRAGMA busy_timeout=0")
+    with closing(Store(core.store.database, core.settings.state_directory)) as other:
+        assert other.backend_pid != core.store.backend_pid
 
         def discover():
             signature = original()
-            with other.transaction():
-                other.execute("INSERT INTO runtime_meta VALUES ('synthetic-concurrent-boot','1')")
+            with other.transaction(control_write=True):
+                other.insert("runtime_meta", key="synthetic-concurrent-boot", value="1")
             return signature
 
         monkeypatch.setattr(erasure, "contract_signature", discover)
         core.ledger.replay(core.store)
-    assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                           (erasure.CONTRACT_KEY,))["value"] == original()
     assert core.ledger.path.read_bytes() == ledger
 
@@ -40,7 +41,7 @@ def legacy_complete_with_stale_affect(core):
     core.settings.affect_enabled = True
     ingest(core, 1, "简短一点")
     evidence = core.store.one("SELECT * FROM affect_evidence")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert core.store.one("SELECT state FROM privacy_erasure_ledger")["state"] == "COMPLETE"
     # A synthetic old implementation marked COMPLETE while omitting this module.
@@ -52,36 +53,41 @@ def legacy_complete_with_stale_affect(core):
     message = enqueue(
         core.store, event["event_id"], event["conversation_id"], "独立的新回复", core.clock()
     )
-    core.store.execute("UPDATE outbox SET state='SENDING' WHERE message_id=?", (message,))
+    core.store.execute("UPDATE outbox SET state='SENDING' WHERE message_id=%s", (message,))
     usage = budget.reserve(core.store, core.settings, None, "chat", [], core.clock())
     budget.settle(core.store, core.settings, usage)
-    return message, core.store.one("SELECT * FROM model_usage WHERE request_id=?", (usage,))
+    return message, core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (usage,))
 
 
 def test_old_complete_backup_repairs_sourced_projection_without_reclearing_new_replies(
-    core, tmp_path
+    empty_database, core, tmp_path
 ):
     message, usage = legacy_complete_with_stale_affect(core)
-    archive, destination = tmp_path / "legacy.enc", tmp_path / "restored.sqlite3"
+    archive = tmp_path / "legacy.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     ledger_bytes = core.ledger.path.read_bytes()
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    with closing(Store(str(destination))) as store:
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as store,
+    ):
         assert store.rows("SELECT * FROM affect_evidence") == []
         assert store.one("SELECT redacted FROM events WHERE event_id='evt_test_1'")["redacted"] == 1
         assert store.one("SELECT redacted FROM events WHERE event_id='evt_test_2'")["redacted"] == 0
-        reply = store.one("SELECT * FROM outbox WHERE message_id=?", (message,))
+        reply = store.one("SELECT * FROM outbox WHERE message_id=%s", (message,))
         assert "独立的新回复" in reply["content_json"]
         assert reply["state"] == "DELIVERY_UNCERTAIN"
         assert (
-            store.one("SELECT * FROM model_usage WHERE request_id=?", (usage["request_id"],))
+            store.one("SELECT * FROM model_usage WHERE request_id=%s", (usage["request_id"],))
             == usage
         )
         completed_epoch = epoch(store)
         core.ledger.replay(store)
         assert epoch(store) == completed_epoch
-        assert store.one("SELECT * FROM outbox WHERE message_id=?", (message,)) == reply
+        assert store.one("SELECT * FROM outbox WHERE message_id=%s", (message,)) == reply
     assert core.ledger.path.read_bytes() == ledger_bytes
 
 
@@ -97,7 +103,7 @@ def test_handler_failure_rolls_back_db_but_fsynced_record_replays(core, monkeypa
 
     monkeypatch.setattr(affect, "erase_affect", fail_after_cleanup)
     with pytest.raises(RuntimeError, match="SYNTHETIC_HANDLER_FAILURE"):
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert len(core.ledger.read()) == 2
     assert core.store.rows("SELECT * FROM privacy_erasure_ledger") == []
@@ -115,15 +121,15 @@ def test_handler_failure_rolls_back_db_but_fsynced_record_replays(core, monkeypa
 
 
 def test_old_complete_repairs_derived_ids_recorded_before_dependency_links_were_erased(
-    core, tmp_path
+    empty_database, core, tmp_path
 ):
     ingest(core, 1, "合成来源内容")
     enable_observations(core)
     item = observation(core, source_event_ids=["evt_test_1"])
     core.observations.append("reader", item)
-    saved_event = core.store.one("SELECT * FROM events WHERE event_id=?", (item.event_id,))
+    saved_event = core.store.one('SELECT * FROM events WHERE event_id=%s', (item.event_id,))
     saved_projection = core.store.one(
-        "SELECT * FROM observations WHERE event_id=?", (item.event_id,)
+        'SELECT * FROM observations WHERE event_id=%s', (item.event_id,)
     )
     core.store.insert(
         "memories",
@@ -146,26 +152,29 @@ def test_old_complete_repairs_derived_ids_recorded_before_dependency_links_were_
         polarity=1,
         created_at=core.clock(),
     )
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     record = core.ledger.read()[1]
     assert item.event_id not in record["event_ids"]
     assert core.store.rows("SELECT * FROM event_dependencies") == []
     assert (
         core.store.one(
-            "SELECT value FROM runtime_meta WHERE key=?", ("erased_event:" + item.event_id,)
+            'SELECT value FROM runtime_meta WHERE key=%s', ("erased_event:" + item.event_id,)
         )["value"]
         == record["erasure_id"]
     )
     # Explicit attribution survived, even though an old completed snapshot kept
     # a derived module's body/projection and its dependency links are already gone.
     core.store.execute(
-        "UPDATE events SET body_json=?,redacted=0 WHERE event_id=?",
+        'UPDATE events SET body_json=%s,redacted=0 WHERE event_id=%s',
         (saved_event["body_json"], item.event_id),
     )
     core.store.execute(
-        "UPDATE observations SET source_sha256=?,canonical_url=?,"
-        "evidence_json=?,redacted=0 WHERE event_id=?",
+        (
+            'UPDATE observations SET '
+            'source_sha256=%s,canonical_url=%s,evidence_json=%s,redacted=0 '
+            'WHERE event_id=%s'
+        ),
         (
             saved_projection["source_sha256"],
             saved_projection["canonical_url"],
@@ -192,16 +201,21 @@ def test_old_complete_repairs_derived_ids_recorded_before_dependency_links_were_
         content_hash="a" * 64,
         vector=b"\0" * 16,
     )
-    archive, destination = tmp_path / "derived.enc", tmp_path / "derived-restored.sqlite3"
+    archive = tmp_path / "derived.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    with closing(Store(str(destination))) as store:
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as store,
+    ):
         assert store.one(
-            "SELECT body_json,redacted FROM events WHERE event_id=?", (item.event_id,)
+            "SELECT body_json,redacted FROM events WHERE event_id=%s", (item.event_id,)
         ) == {"body_json": "{}", "redacted": 1}
         assert store.one(
-            "SELECT source_sha256,canonical_url,redacted FROM observations WHERE event_id=?",
+            "SELECT source_sha256,canonical_url,redacted FROM observations WHERE event_id=%s",
             (item.event_id,),
         ) == {"source_sha256": "", "canonical_url": "", "redacted": 1}
         assert store.one(
@@ -210,11 +224,12 @@ def test_old_complete_repairs_derived_ids_recorded_before_dependency_links_were_
         assert store.rows("SELECT * FROM memory_vectors") == []
 
 
-def test_old_complete_handler_failure_prevents_restored_file_publication(
-    core, monkeypatch, tmp_path
+def test_old_complete_handler_failure_leaves_restore_target_empty(
+    empty_database, core, monkeypatch, tmp_path
 ):
     legacy_complete_with_stale_affect(core)
-    archive, destination = tmp_path / "legacy-failure.enc", tmp_path / "not-published.sqlite3"
+    archive = tmp_path / "legacy-failure.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     original = affect.erase_affect
@@ -225,6 +240,11 @@ def test_old_complete_handler_failure_prevents_restored_file_publication(
 
     monkeypatch.setattr(affect, "erase_affect", failure)
     with pytest.raises(RuntimeError, match="SYNTHETIC_REPLAY_HANDLER_FAILURE"):
-        restore(archive, destination, key, core.settings.erasure_ledger)
-    assert not destination.exists()
+        restore(archive, empty_database, key, core.settings.erasure_ledger,
+                state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as target,
+    ):
+        assert not target.has_table("events")
     assert core.store.rows("SELECT * FROM affect_evidence")

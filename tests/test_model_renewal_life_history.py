@@ -79,7 +79,7 @@ def test_selected_to_history_renewal_cli_http_and_independent_life_worker(
             assert first["provider_calls"] == 1 and first["results"][0]["state"] == "SHADOW"
             second = await process_worker(core, tmp_path, "bug", source, restart=True)
             assert second["provider_calls"] == 0
-            assert all(core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+            assert all(core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                      (row["request_id"],)) == row for row in before)
     run(scenario())
 

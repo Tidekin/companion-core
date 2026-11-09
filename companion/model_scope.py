@@ -54,7 +54,14 @@ def prepare_input(store, settings, clock, wire, approval, request_id, logical_id
 def check_sources(store, settings, clock, job_id, messages, inputs, source_check):
     from companion import reply_revision
 
-    job = store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)) if job_id is not None else None
+    job = store.one((
+        'SELECT jobs.job_id, jobs.event_id, jobs.kind, jobs.state, '
+        'jobs.idempotency_key, jobs.attempts, jobs.max_attempts, '
+        'jobs.lease_owner, jobs.lease_until, jobs.next_attempt_at, '
+        'jobs.last_error_code, jobs.created_at, jobs.updated_at, '
+        'jobs.lease_token, jobs.context_tracked, jobs.authority_json FROM '
+        'jobs WHERE job_id=%s'
+    ), (job_id,)) if job_id is not None else None
     if job:
         reply_revision.check_job(store, job)
     if source_check is not None:
@@ -133,11 +140,18 @@ def journal_binding(store, scenario, request_id):
 def freeze_authority(store, settings, clock, scenario, job_id, request_id, owner):
     if scenario == "evaluation":
         owner = owner_authority.check_job(
-            store, settings, clock, store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)),
+            store, settings, clock, store.one((
+                'SELECT jobs.job_id, jobs.event_id, jobs.kind, jobs.state, '
+                'jobs.idempotency_key, jobs.attempts, jobs.max_attempts, '
+                'jobs.lease_owner, jobs.lease_until, jobs.next_attempt_at, '
+                'jobs.last_error_code, jobs.created_at, jobs.updated_at, '
+                'jobs.lease_token, jobs.context_tracked, jobs.authority_json '
+                'FROM jobs WHERE job_id=%s'
+            ), (job_id,)),
             purpose="evaluation", executing=True,
         )
     if owner is not None:
-        store.execute("UPDATE model_admissions SET authority_json=? WHERE request_id=?",
+        store.execute('UPDATE model_admissions SET authority_json=%s WHERE request_id=%s',
                       (encode(owner.authority.as_dict()), request_id))
     elif scenario != "gateway":
         from companion.private_life import freeze_model

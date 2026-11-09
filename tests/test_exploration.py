@@ -1,6 +1,7 @@
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from threading import Barrier
 
 import httpx
@@ -13,6 +14,7 @@ from companion.contracts import CoreError, LeaseRequest
 from companion.core import Core
 from companion.exploration import ReadItem, ReadResult, content_target
 from companion.observation import ObservationEvent
+from companion.postgres import Database
 from companion.privacy import epoch
 from companion.store import Store
 from companion.transport import begin_send, lease_deliveries
@@ -46,12 +48,12 @@ def test_discover_read_provenance_and_idempotency(core):
     )
     assert core.goals.get(goal["goal_id"])["state"] == "DONE"
     observation = core.store.one(
-        "SELECT * FROM observations WHERE event_id=?", (result["event_ids"][0],)
+        'SELECT * FROM observations WHERE event_id=%s', (result["event_ids"][0],)
     )
     assert observation["result_status"] == "FETCHED"
     assert (
         core.store.one(
-            "SELECT * FROM event_dependencies WHERE event_id=?", (result["event_ids"][0],)
+            'SELECT * FROM event_dependencies WHERE event_id=%s', (result["event_ids"][0],)
         )["source_event_id"]
         == source["event_id"]
     )
@@ -153,7 +155,9 @@ def test_discovery_generates_no_tools_from_injected_text(core):
     assert not core.model.calls
 
 
-def test_erase_during_read_rejects_old_output_and_restore_clears_sources(core, tmp_path):
+def test_erase_during_read_rejects_old_output_and_restore_clears_sources(
+    empty_database, core, tmp_path,
+):
     configure(core)
     result, _ = discover(core)
     _, item = read_goal(core)
@@ -161,7 +165,7 @@ def test_erase_during_read_rejects_old_output_and_restore_clears_sources(core, t
     archive = tmp_path / "before-read.bin"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [secret_source], core.clock())
     with pytest.raises(CoreError):
         core.exploration.complete(
@@ -174,14 +178,15 @@ def test_erase_during_read_rejects_old_output_and_restore_clears_sources(core, t
                 items=[ReadItem(title="旧内容", text="旧资料", url=URL)],
             ),
         )
-    restored = tmp_path / "restore.db"
-    restore(archive, restored, key, core.settings.erasure_ledger)
-    s = Store(str(restored))
-    try:
+    restored_state = tmp_path / "restored-state"
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as s,
+    ):
         assert s.one("SELECT * FROM goals")["topic"] == ""
         assert all(row["url"] == "" for row in s.rows("SELECT * FROM exploration_requests"))
-    finally:
-        s.close()
 
 
 def test_sharing_uses_same_outbox_and_common_proactive_limit(core, monkeypatch):
@@ -215,7 +220,10 @@ def test_sharing_uses_same_outbox_and_common_proactive_limit(core, monkeypatch):
     outbox = core.store.one("SELECT * FROM outbox WHERE action_type='qq.private.proactive'")
     assert json.loads(outbox["content_json"])["text"] == core.model.activity
     assert [json.loads(row["content_json"])["text"] for row in core.store.rows(
-        "SELECT content_json FROM outbox WHERE action_type='qq.private.proactive' ORDER BY rowid"
+
+            'SELECT content_json FROM outbox WHERE '
+            "action_type='qq.private.proactive' ORDER BY record_sequence"
+
     )] == [core.model.activity, URL]
     assert "看完" not in outbox["content_json"]
     core.settings.quiet_start, core.settings.quiet_end = 0, 23
@@ -244,7 +252,7 @@ def test_similar_content_different_urls_is_suppressed(core, monkeypatch):
                 ],
             ),
         )
-    rows = core.store.rows("SELECT * FROM social_candidates ORDER BY rowid")
+    rows = core.store.rows('SELECT * FROM social_candidates ORDER BY record_sequence')
     assert rows[0]["state"] == "CANDIDATE"
     assert rows[1]["reason_code"] == "SIMILAR_CONTENT"
 
@@ -387,12 +395,16 @@ def test_real_chinese_embeddings_detect_paraphrased_shares(core):
     assert not semantic_duplicate(text, ["今天分享一道番茄炒蛋的家常菜做法。"], core.settings)
 
 
-@pytest.mark.parametrize("paraphrase", [False, True])
-def test_concurrent_shares_recheck_duplicates(core, monkeypatch, paraphrase):
+@pytest.mark.parametrize("relationship,expected", [
+    ("identical", 1), ("paraphrased", 1), ("distinct", 2),
+])
+def test_concurrent_shares_recheck_duplicates(core, monkeypatch, relationship, expected):
     configure(core, social=True)
-    monkeypatch.setattr("companion.social.semantic_duplicate", lambda *args: True)
-    for number in range(2):
-        text = "相同的实际读取内容" + ("另一种表述" if paraphrase and number else "")
+    monkeypatch.setattr("companion.social.semantic_duplicate",
+                        lambda *args: relationship != "distinct")
+    first = "相同的实际读取内容"
+    versions = {"identical": first, "paraphrased": "另一种表述", "distinct": "独立的新消息"}
+    for number, text in enumerate((first, versions[relationship])):
         core.observations.append(
             "bili",
             ObservationEvent(
@@ -423,22 +435,27 @@ def test_concurrent_shares_recheck_duplicates(core, monkeypatch, paraphrase):
         def query(sql, params=()):
             nonlocal synchronized
             result = original(sql, params)
-            if "AND (canonical_url=? OR content_sha256=?)" in sql and not synchronized:
+            if "AND (canonical_url = %s OR content_sha256 = %s)" in sql and not synchronized:
                 synchronized = True
                 barrier.wait(timeout=10)
             return result
 
         instance.store.one = query
         try:
-            return instance.social.consider(f"concurrent_share_{number}")
+            result = instance.social.consider(f"concurrent_share_{number}")
+            assert synchronized
+            return result
         finally:
-            instance.store.close()
+            instance.close()
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(consider, (0, 1)))
-    assert (
-        core.store.one("SELECT COUNT(*) n FROM social_candidates WHERE state='CANDIDATE'")["n"] == 1
-    )
+    states = core.store.rows("SELECT state,reason_code FROM social_candidates")
+    assert len(states) == 2
+    assert sum(row["state"] == "CANDIDATE" for row in states) == expected
+    if expected == 1:
+        reason = "DUPLICATE_CONTENT" if relationship == "identical" else "SIMILAR_CONTENT"
+        assert {"state": "SKIPPED", "reason_code": reason} in states
 
 
 def test_unknown_zero_usage_cannot_release_reserved_traffic(core):

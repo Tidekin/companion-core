@@ -53,16 +53,17 @@ def test_appraisals_decay_with_half_life(core):
 @pytest.mark.parametrize("damage", ["erase", "quote", "usage", "scenario"])
 def test_still_valid_filters_invalid_appraisals_from_projection(core, damage):
     key = appraise(core, 1, "测试")
-    assert len(core.mood.snapshot()["signals"]) == 1
+    original = core.mood.snapshot()["signals"]
+    assert len(original) == 1
     if damage == "erase":
         erase(core, [key])
     elif damage == "quote":
-        core.store.execute("UPDATE events SET body_json='{}' WHERE event_id=?", (key,))
+        core.store.execute("UPDATE events SET body_json='{}' WHERE event_id=%s", (key,))
     elif damage == "usage":
         core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
     else:
         core.store.execute("UPDATE model_usage SET scenario='chat'")
-    assert core.mood.snapshot()["signals"] == []
+    assert core.mood.snapshot()["signals"] == (original if damage == "usage" else [])
 
 
 def test_capped_enforcement_during_projection(core):
@@ -98,10 +99,10 @@ def test_appraisals_contribute_to_immediate_and_undertone(core):
 
 def test_deterministic_signal_wins_for_the_same_owner_event(core):
     key = feedback(core, text="这个想法很有意思")
-    core.store.execute(
-        "INSERT INTO model_usage(request_id,scenario,provider,model,state,occurred_at) "
-        "VALUES ('duplicate','memory_extract','synthetic','synthetic','SETTLED',?)",
-        (core.clock(),),
+    core.store.insert(
+        "model_usage", usage_id="usage_duplicate", request_id="duplicate",
+        scenario="memory_extract", provider="synthetic", model="synthetic",
+        state="SETTLED", occurred_at=core.clock(),
     )
     signals = mood_appraisals.validate(core.store, [InteractionSignal(
         event_id=key, reason="OWNER_AFFECTION", quote="这个想法很有意思")], {key})

@@ -120,16 +120,16 @@ class SemanticIndex:
             return []
         filters, params = "", [INDEX_VERSION]
         if memory_ids is not None:
-            filters += "AND m.memory_id IN (SELECT value FROM json_each(?)) "
-            params.append(encode(memory_ids))
+            filters += "AND m.memory_id = ANY(%s::text[]) "
+            params.append(list(memory_ids))
         if subjects:
-            filters += "AND m.subject IN (SELECT value FROM json_each(?)) "
-            params.append(encode(subjects))
+            filters += "AND m.subject = ANY(%s::text[]) "
+            params.append(list(subjects))
         rows = work.rows(self.store,
             "SELECT v.memory_id,v.vector FROM memory_vectors v JOIN memories m USING(memory_id) "
-            "WHERE v.model_version=? AND length(v.vector)<=2048 "
+            "WHERE v.model_version=%s AND octet_length(v.vector)<=2048 "
             "AND m.status IN ('CONFIRMED','HYPOTHESIS') AND m.privacy_scope='private' "
-            "AND m.confidence>0 " + filters + "ORDER BY v.rowid LIMIT ?",
+            "AND m.confidence>0 " + filters + "ORDER BY v.record_sequence LIMIT %s",
             (*params, ceiling), limit=ceiling)
         if len(rows) == ceiling:
             work.mark("vector_pool")
@@ -170,8 +170,12 @@ class SemanticIndex:
         cached = {
             row["memory_id"]: row
             for row in self.store.rows(
-                "SELECT * FROM memory_vectors WHERE model_version=? "
-                "AND memory_id IN (SELECT value FROM json_each(?))",
+                'SELECT memory_vectors.memory_id AS memory_id, memory_vectors.model_version AS '
+                'model_version, memory_vectors.content_hash AS content_hash, memory_vectors.vector '
+                'AS vector FROM memory_vectors AS memory_vectors WHERE '
+                'memory_vectors.model_version = %s AND memory_vectors.memory_id IN (SELECT '
+                'parsed.value COLLATE "C" AS _col_0 FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS '
+                'JSON)) AS parsed(value))',
                 (INDEX_VERSION, encode([row["memory_id"] for row in rows])),
             )
         }
@@ -208,9 +212,11 @@ class SemanticIndex:
                 vectors[row["memory_id"]] = vector
                 # A concurrent forget/correction must not recreate a stale derived index.
                 self.store.execute(
-                    "INSERT OR REPLACE INTO memory_vectors "
-                    "SELECT memory_id,?,?,? FROM memories WHERE memory_id=? AND content=? "
-                    "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0",
+                    "INSERT INTO memory_vectors (memory_id,model_version,content_hash,vector) "
+                    "SELECT memory_id,%s,%s,%s FROM memories WHERE memory_id=%s AND content=%s "
+                    "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0 FOR SHARE "
+                    "ON CONFLICT (memory_id) DO UPDATE SET model_version=excluded.model_version,"
+                    "content_hash=excluded.content_hash,vector=excluded.vector,record_sequence=DEFAULT",
                     (INDEX_VERSION, key, vector.tobytes(), row["memory_id"], row["content"]),
                 )
         # Only the bounded, source-validated candidate set reaches scoring.

@@ -73,12 +73,12 @@ def test_erasure_removes_sources_meaning_and_finally_the_term(core, tmp_path):
     for number in (5, 6, 7):
         say(core, number, f"摸鱼王第{number}次")
     step(core)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_5"], core.clock())
     row = terms(core)["摸鱼王"]
     assert row["state"] == "CANDIDATE" and row["meaning"] is None
     assert "evt_test_5" not in json.loads(row["refs_json"])
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_2", "evt_test_6", "evt_test_7"],
                                   core.clock())
     assert terms(core) == {}
@@ -139,9 +139,9 @@ def test_owner_forget_while_inference_is_in_flight(core, tmp_path):
     work = core.store.one("SELECT * FROM jargon_work WHERE kind='infer'")
     assert work["state"] == "CANCELLED" and work["error_code"] == "JARGON_SOURCE_CHANGED"
     assert not step(core) and len(provider.calls) == 2
-    assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE scenario=?",
+    assert core.store.one('SELECT COUNT(*) n FROM model_usage WHERE scenario=%s',
                           (jargon.SCENARIO,))["n"] == 2  # One extraction and one inference.
-    usage = core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+    usage = core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                            (work["model_request_id"],))
     assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
 
@@ -150,8 +150,11 @@ def test_chat_context_carries_meanings_only_for_terms_in_the_message(core):
     core.settings.jargon = JargonConfig()
     say(core, 1, "摸鱼王又上线了")
     core.store.execute(
-        "INSERT INTO jargon_terms(term,refs_json,uses,state,meaning,inferred_uses,created_at,"
-        "updated_at) VALUES('摸鱼王','[\"evt_test_1\"]',4,'INFERRED','主人自己',4,?,?)",
+        (
+            'INSERT INTO jargon_terms(term,refs_json,uses,state,meaning,infer'
+            'red_uses,created_at,updated_at) '
+            'VALUES(\'摸鱼王\',\'["evt_test_1"]\',4,\'INFERRED\',\'主人自己\',4,%s,%s)'
+        ),
         (core.clock(), core.clock()))
     ingest(core, 2, "摸鱼王今天不想动")
     job = core.claim_job("worker")
@@ -172,8 +175,11 @@ def test_console_lists_and_forgets_terms_with_a_receipt(core):
 
     say(core, 1, "摸鱼王又上线了")
     core.store.execute(
-        "INSERT INTO jargon_terms(term,refs_json,uses,state,meaning,inferred_uses,created_at,"
-        "updated_at) VALUES('摸鱼王','[\"evt_test_1\"]',4,'INFERRED','主人自己',4,?,?)",
+        (
+            'INSERT INTO jargon_terms(term,refs_json,uses,state,meaning,infer'
+            'red_uses,created_at,updated_at) '
+            'VALUES(\'摸鱼王\',\'["evt_test_1"]\',4,\'INFERRED\',\'主人自己\',4,%s,%s)'
+        ),
         (core.clock(), core.clock()))
     core.settings.console.enabled = True
     core.settings.console.public_origin = ORIGIN

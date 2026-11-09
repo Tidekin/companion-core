@@ -2,13 +2,16 @@
 
 import json
 from pathlib import Path
+from unittest.mock import Mock
 
+import psycopg
 import pytest
 
 from companion import beta_observation, cognition_read
 from companion.agent_messages import to_runtime_response
 from companion.model import ModelResponse, ModelResponseError
 from companion.store import encode
+from tests.postgres_fixture import logical_state
 from tests.support.cache_usage_presence import ABSENT, attempt
 from tests.support.paid_model import approved_live
 
@@ -22,15 +25,19 @@ def test_overview_counts_only_current_sources_and_original_usage(core, tmp_path)
     assert summary == dict(calls=1, observed_calls=1, cache_calls=1, uncertain_calls=0,
                            cached=40, fresh=40, unknown_input=0, output=3,
                            billed_micro_usd=row["billed_micro_usd"], complete=True)
-    core.store.execute("UPDATE events SET redacted=1 WHERE event_id IN "
-                       "(SELECT event_id FROM job_sources WHERE job_id=?)", (row["job_id"],))
+    core.store.execute((
+        'UPDATE events SET redacted=1 WHERE event_id IN (SELECT event_id FROM'
+        ' job_sources WHERE job_id=%s)'
+    ), (row["job_id"],))
     assert overview(core)["model"]["calls"] == 0
 
 
 def projections(core, row):
     item = cognition_read.CognitionRead(core).page("model", record_id=row["request_id"])["items"][0]
-    trace = core.store.one("SELECT e.trace_id FROM jobs j JOIN events e USING(event_id) "
-                           "WHERE j.job_id=?", (row["job_id"],))["trace_id"]
+    trace = core.store.one((
+        'SELECT e.trace_id FROM jobs j JOIN events e USING(event_id) WHERE '
+        'j.job_id=%s'
+    ), (row["job_id"],))["trace_id"]
     inspected = beta_observation.inspect_context(core.settings, trace)
     calls = inspected["trace"]["jobs"][0]["model_calls"]
     call = next(c for c in calls if c["request_ref_sha256"] == beta_observation._hash(
@@ -120,10 +127,11 @@ def test_untrusted_or_manual_marker_cannot_change_valid_settlement(core, tmp_pat
 def test_ambiguous_original_diagnostic_only_hides_cache(core, tmp_path, damage):
     approved_live(core, tmp_path)
     _, row, record = attempt(core, cache=40)
+    expected = {"state": "NOT_RECORDED", "cached_input_tokens": None}
     detail = json.loads(record["safe_detail_json"])
     raw = record["safe_detail_json"]
     if damage in {"missing", "wrong_request"}:
-        core.store.execute("DELETE FROM audit_log WHERE audit_id=?", (record["audit_id"],))
+        core.store.execute('DELETE FROM audit_log WHERE audit_id=%s', (record["audit_id"],))
         if damage == "wrong_request":
             core.store.audit("model.usage_diagnostic", "other-request", "budget", core.clock(),
                              **detail)
@@ -143,19 +151,25 @@ def test_ambiguous_original_diagnostic_only_hides_cache(core, tmp_path, damage):
             detail["actual_usage_known"] = 1
         elif damage == "marker":
             detail["cache_usage_present"] = 1
-        raw = {"corrupt": "{bad", "oversized": "x" * 16385, "array": "[]",
+        raw = {"corrupt": "{bad", "oversized": json.dumps({"padding": "x" * 16385}), "array": "[]",
                "nonfinite": raw[:-1] + ',"extra":NaN}', "deep": "[" * 2000 + "]" * 2000,
                "duplicate_key": raw[:-1] + ',"cache_usage_present":true}'}.get(
                    damage, encode(detail))
-        # Model storage corruption explicitly; normal writes reject invalid JSON.
-        core.store.execute("PRAGMA ignore_check_constraints=ON")
-        try:
-            core.store.execute("UPDATE audit_log SET safe_detail_json=? WHERE audit_id=?",
-                               (raw, record["audit_id"]))
-        finally:
-            core.store.execute("PRAGMA ignore_check_constraints=OFF")
-    before = list(core.store.db.iterdump())
+        update = "UPDATE audit_log SET safe_detail_json=%s WHERE audit_id=%s"
+        if damage in {"corrupt", "nonfinite"}:
+            with pytest.raises(psycopg.errors.CheckViolation):
+                core.store.execute(update, (raw, record["audit_id"]))
+            # Retain parser coverage for corrupt reads alongside the native write rejection.
+            view = Mock()
+            view.rows.return_value = [{"safe_detail_json": raw}]
+            admission = core.store.one("SELECT * FROM model_admissions WHERE request_id=%s",
+                                       (row["request_id"],))
+            assert cognition_read.cache_usage(view, row, admission) == expected
+            expected = {"state": "RECORDED", "cached_input_tokens": 40}
+        else:
+            core.store.execute(update, (raw, record["audit_id"]))
+    before = logical_state(core.store)
     ledger = Path(core.settings.paid_model.journal_path).read_bytes()
-    assert projections(core, row) == {"state": "NOT_RECORDED", "cached_input_tokens": None}
-    assert list(core.store.db.iterdump()) == before
+    assert projections(core, row) == expected
+    assert logical_state(core.store) == before
     assert Path(core.settings.paid_model.journal_path).read_bytes() == ledger

@@ -122,7 +122,7 @@ def test_no_chat_interest_read_can_become_a_private_diary(core, tmp_path, worthy
     if worthy:
         assert quote in entry["body_md"] and take in entry["body_md"]
         source = core.store.one("SELECT result_event_id FROM goals WHERE state='DONE'")
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source["result_event_id"]], core.clock())
         assert core.diary.get_day(day, cfg.owner_qq_id) is None
     else:
@@ -148,11 +148,18 @@ def test_open_topic_has_priority_and_pause_and_daily_limit_still_apply(core):
     core.clock.advance(core.settings.proactive_idle_seconds + 1)
     assert topic and not core.wake.evaluate()
     core.store.execute("UPDATE life_topics SET state='CLOSED'")
-    core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused','1')")
+    core.store.execute(
+        "INSERT INTO runtime_meta (key,value) VALUES ('life_paused','1') ON "
+        'CONFLICT(key) DO UPDATE SET '
+        'value=excluded.value,record_sequence=DEFAULT'
+    )
     assert not core.wake.evaluate()
     core.store.execute("DELETE FROM runtime_meta WHERE key='life_paused'")
     core.clock.advance(core.settings.wake_min_interval_minutes * 60 + 1)
     core.settings.wake_max_daily_runs = 0
     assert not core.wake.evaluate()
-    assert core.store.one("SELECT reason_code FROM wake_decisions ORDER BY rowid DESC LIMIT 1") == {
+    assert core.store.one(
+        'SELECT reason_code FROM wake_decisions ORDER BY record_sequence DESC'
+        ' LIMIT 1'
+    ) == {
         "reason_code": "DAILY_LIMIT"}

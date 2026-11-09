@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+from contextlib import closing
 from datetime import datetime
 
 import httpcore
@@ -10,10 +11,12 @@ from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.exploration import ReadResult, content_target
 from companion.observation import ArticleEvidence
+from companion.postgres import Database
 from companion.store import Store
 from companion_onebot_bridge.rich_input import discovered_url as canonical_link
 from source_reader.heybox import HeyboxReader, SourceAPI
@@ -225,6 +228,7 @@ def test_native_short_share_http_worker_keeps_ordered_media_and_provenance(core,
     ingest(core, text=target)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     async def scenario():
         pool, backend = mock_pool(response(post))
@@ -383,12 +387,13 @@ def test_ambiguous_or_hostile_share_identifiers_are_rejected(url):
         content_target(url)
 
 
-def test_heybox_http_core_context_and_erasure_restore(core, tmp_path):
+def test_heybox_http_core_context_and_erasure_restore(empty_database, core, tmp_path):
     configure(core)
     core.settings.content_enabled = True
     ingest(core, text=URL)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     async def scenario():
         pool, backend = mock_pool(response(POST))
@@ -421,14 +426,18 @@ def test_heybox_http_core_context_and_erasure_restore(core, tmp_path):
     assert run(core.run_once())
     key, archive = Fernet.generate_key(), tmp_path / "before.enc"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    restore(archive, tmp_path / "restored.db", key, core.settings.erasure_ledger)
-    restored = Store(str(tmp_path / "restored.db"))
-    try:
+    restored_state = tmp_path / "restored-state"
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as restored,
+    ):
         assert (
             restored.one(
-                "SELECT evidence_json FROM observations WHERE event_id=?", (row["event_id"],)
+                "SELECT evidence_json FROM observations WHERE event_id=%s", (row["event_id"],)
             )["evidence_json"]
             == "{}"
         )
@@ -436,9 +445,10 @@ def test_heybox_http_core_context_and_erasure_restore(core, tmp_path):
             item["redacted"] and not item["target_url"]
             for item in restored.rows("SELECT * FROM content_items")
         )
-        assert not restored.rows("PRAGMA foreign_key_check")
-    finally:
-        restored.close()
+        assert not restored.one(
+            "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+            "AND NOT convalidated"
+        )
 
 
 def test_forged_article_positions_or_images_are_rejected(core):

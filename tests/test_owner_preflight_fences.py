@@ -127,9 +127,11 @@ def test_new_input_after_probe_keeps_final_send_fence_and_next_turn_progress(cor
             assert len(next_model.requests) == 1
             assert await active.pump()
             assert len(sends) == 1 and active.attempts() == {"ACK": 1, "NOT_SENT": 1}
-            assert core.store.rows("SELECT state FROM outbox ORDER BY rowid") == [
+            assert core.store.rows('SELECT state FROM outbox ORDER BY record_sequence') == [
                 {"state": "CANCELLED"}, {"state": "SENT"}]
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid")[:1] == usage
+            assert core.store.rows(
+                'SELECT * FROM model_usage ORDER BY record_sequence'
+            )[:1] == usage
             active.runtime.verify()
 
     run(scenario())

@@ -16,14 +16,14 @@ async def warm_once(memory, clock, guard):
     if not memory.settings.memory_enabled or not guard():
         return False
     store = memory.store
-    saved = store.one("SELECT value FROM runtime_meta WHERE key=?", (KEY,))
+    saved = store.one('SELECT value FROM runtime_meta WHERE key = %s', (KEY,))
     saved = json.loads(saved["value"]) if saved else {}
     cursor = saved.get("cursor", 0) if saved.get("version") == INDEX_VERSION else 0
     headers = store.rows(
-        "SELECT m.rowid AS cursor,m.memory_id,octet_length(m.content) AS text_bytes,"
-        "v.memory_id AS indexed FROM memories m LEFT JOIN memory_vectors v "
-        "ON v.memory_id=m.memory_id AND v.model_version=? WHERE m.rowid>? "
-        "ORDER BY m.rowid LIMIT ?", (INDEX_VERSION, cursor, SCAN_ROWS))
+        'SELECT m.record_sequence AS cursor, m.memory_id, OCTET_LENGTH(m.content) AS text_bytes, '
+        'v.memory_id AS indexed FROM memories AS m LEFT JOIN memory_vectors AS v ON v.memory_id = '
+        'm.memory_id AND v.model_version = %s WHERE m.record_sequence > %s ORDER BY '
+        'm.record_sequence NULLS FIRST LIMIT %s', (INDEX_VERSION, cursor, SCAN_ROWS))
     rows, used = [], 0
     sources = MemorySources(memory, clock(), bounded=True)
     for header in headers:
@@ -31,9 +31,17 @@ async def warm_once(memory, clock, guard):
             continue
         if used + header["text_bytes"] > TEXT_BYTES:
             continue
-        row = store.one("SELECT * FROM memories WHERE memory_id=? "
-            "AND octet_length(content)=? AND status IN ('CONFIRMED','HYPOTHESIS') "
-            "AND privacy_scope='private' AND confidence>0",
+        row = store.one('SELECT memories.memory_id AS memory_id, memories.subject AS subject, '
+            'memories.kind AS kind, memories.content AS content, memories.status AS status, '
+            'memories.origin AS origin, memories.confidence AS confidence, memories.importance AS '
+            'importance, memories.privacy_scope AS privacy_scope, memories.supersedes_memory_id AS '
+            'supersedes_memory_id, memories.created_at AS created_at, memories.updated_at AS '
+            'updated_at, memories.valid_from AS valid_from, memories.valid_to AS valid_to, '
+            'memories.last_reviewed_at AS last_reviewed_at, memories.fact_key AS fact_key, '
+            'memories.needs_review AS needs_review FROM memories AS memories WHERE '
+            'memories.memory_id = %s AND OCTET_LENGTH(memories.content) = %s AND memories.status '
+            "IN ('CONFIRMED', 'HYPOTHESIS') AND memories.privacy_scope = 'private' AND "
+            'memories.confidence > 0',
             (header["memory_id"], header["text_bytes"]))
         if not row:
             continue
@@ -56,7 +64,10 @@ async def warm_once(memory, clock, guard):
     next_cursor = headers[-1]["cursor"] if headers else 0
     if next_cursor != cursor:
         with store.transaction():
-            store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+            store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) '
+                'DO UPDATE SET value = excluded.value, record_sequence = DEFAULT',
                           (KEY, encode({"version": INDEX_VERSION, "cursor": next_cursor})))
-        return True
-    return bool(rows)
+    # Wrapping or advancing past cached rows is bookkeeping. Reporting it as
+    # work keeps a slow idle sweep alive whenever this one-second lane is due
+    # again. A full page still requests another bounded scan of the backlog.
+    return bool(rows) or len(headers) == SCAN_ROWS

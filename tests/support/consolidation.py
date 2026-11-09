@@ -40,8 +40,6 @@ def enable_nightly(core, seed=True):
         seed_day(core)
     core.settings.consolidation_enabled = True
     core.settings.reflection_enabled = True
-    core.settings.reflection_daily_micro_usd = 50000
-    core.settings.reflection_monthly_micro_usd = 100000
     model = ReflectionModel()
     core.model = core.diary.model = core.reflections.model = model
     return model

@@ -61,7 +61,7 @@ def test_native_nested_original_is_reused_or_retired_without_renewal(core, tmp_p
             latest, _ = await admit_image(core, client, config, plan, tmp_path, number=43,
                 message=[{"type": "text", "data": {"text": "继续刚才的话题。"}}])
             if lifecycle == "recall":
-                original = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                original = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                     ("owner_input:" + first["event_id"],))["value"])
                 withdrawn = await client.post("/internal/v1/owner-authority/inputs/recall",
                     json=receipt(core, OwnerCapture.model_validate(original["capture"]),

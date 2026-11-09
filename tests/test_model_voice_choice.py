@@ -153,7 +153,7 @@ def test_frozen_delivery_rejects_replacing_the_model_choice(core, tmp_path, choi
             del response["metadata"]["core_reply_format"]
         else:
             response.setdefault("metadata", {})["core_reply_format"] = "voice"
-        core.store.execute("UPDATE agent_conversations SET conversation_json=? WHERE job_id=?",
+        core.store.execute('UPDATE agent_conversations SET conversation_json=%s WHERE job_id=%s',
                            (json.dumps(conversation), saved["job_id"]))
         row = core.store.one("SELECT message_id FROM outbox ORDER BY segment_index LIMIT 1")
         with pytest.raises(CoreError, match="OWNER_DELIVERY_SOURCE_CHANGED"):

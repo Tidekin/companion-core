@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import zlib
+from contextlib import closing
 from datetime import datetime
 
 import httpcore
@@ -13,8 +14,10 @@ from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.backup import backup, restore
 from companion.observation import CommentEvidence, DanmakuEvidence, ReadingEvidence, SourceComment
+from companion.postgres import Database
 from companion.store import Store
 from source_reader.bili_discussion import danmaku
 from source_reader.bili_tools import BilibiliAccountHTTP
@@ -176,13 +179,16 @@ def test_cli_discussion_flag_rejects_other_source_before_io():
 
 
 @pytest.mark.parametrize("secret_field", [None, "comment_text", "comment_author", "danmaku_text"])
-def test_http_worker_context_privacy_and_credential_gate(core, tmp_path, secret_field):
+def test_http_worker_context_privacy_and_credential_gate(
+    empty_database, core, tmp_path, secret_field,
+):
     configure(core)
     core.settings.content_enabled = True
     core.settings.observation_adapters["bili"].reader_max_requests = 5
     ingest(core, text=ITEM["url"])
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     comments = copy.deepcopy(COMMENTS)
     xml = XML
     if secret_field == "comment_text":
@@ -222,14 +228,19 @@ def test_http_worker_context_privacy_and_credential_gate(core, tmp_path, secret_
     assert len(core.content.context_message("evt_test_1", 1000).encode()) <= 1000
     archive, key = tmp_path / "discussion.enc", Fernet.generate_key()
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    restore(archive, tmp_path / "restored.db", key, core.settings.erasure_ledger)
-    restored = Store(str(tmp_path / "restored.db"))
-    try:
+    restored_state = tmp_path / "restored-state"
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as restored,
+    ):
         assert all(row["evidence_json"] == "{}" and row["redacted"] for row in restored.rows(
             "SELECT evidence_json,redacted FROM observations"
         ))
-        assert not restored.rows("PRAGMA foreign_key_check")
-    finally:
-        restored.close()
+        assert not restored.one(
+            "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+            "AND NOT convalidated"
+        )

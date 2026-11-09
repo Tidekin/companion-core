@@ -61,6 +61,6 @@ async def native_continuity(core, tmp_path, *, turns=4, byte_limit=16000, texts=
 
 def history_snapshot(core):
     row = core.store.one(
-        "SELECT snapshots_json FROM agent_conversations ORDER BY rowid DESC LIMIT 1")
+        'SELECT snapshots_json FROM agent_conversations ORDER BY record_sequence DESC LIMIT 1')
     return next(item["proof"] for item in json.loads(row["snapshots_json"])
                 if item["kind"] == "history")

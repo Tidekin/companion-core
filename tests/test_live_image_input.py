@@ -121,11 +121,11 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
     def provider(request):
         calls.append(request)
         if failure == "media_after_dispatch":
-            core.store.execute("UPDATE content_items SET media_sha256=?", ("0" * 64,))
+            core.store.execute('UPDATE content_items SET media_sha256=%s', ("0" * 64,))
         if failure == "source_after_dispatch":
             source_id = core.store.one("SELECT event_id FROM events WHERE source='qq.onebot'")[
                 "event_id"]
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [source_id], core.clock())
         value = {"choices": [{"message": {"content": "合成图片分析"}}]}
         if failure != "unknown_usage":
@@ -163,10 +163,10 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
             event_id = core.store.one("SELECT event_id FROM events")["event_id"]
             if failure == "signature":
                 key = owner_input.INPUT + event_id
-                value = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                value = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                                   (key,))["value"])
                 value["capture"]["signature"] = "0" * 128
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                                    (encode(value), key))
             elif failure == "ledger":
                 def crash(*args):
@@ -174,7 +174,7 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
                 with monkeypatch.context() as patch:
                     patch.setattr(core.ledger, "apply", crash)
                     with pytest.raises(RuntimeError):
-                        with core.store.transaction():
+                        with core.store.transaction(control_write=True):
                             core.ledger.expire_events(core.store, [event_id], core.clock())
 
             async def mutate_upload(request):
@@ -193,7 +193,7 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
                     proof["lease_token"] = "content_lease_" + "0" * 32
                     request.headers["X-Content-Proof"] = encode(proof)
                 elif failure == "lease_before_upload":
-                    core.store.execute("UPDATE content_items SET lease_token=?",
+                    core.store.execute('UPDATE content_items SET lease_token=%s',
                                        ("content_lease_" + "0" * 32,))
             active.client.event_hooks["request"].append(mutate_upload)
             model_cases = {"unknown_usage", "source_after_dispatch", "media_after_dispatch",
@@ -218,6 +218,8 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
             assert not sends and len(calls) <= 1
             if failure in {"media_after_dispatch", "reserve"}:
                 assert_failure_notice(core)
+            elif failure == "unknown_usage":
+                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 1
             else:
                 assert not core.store.rows("SELECT * FROM outbox")
             assert not core.store.rows("SELECT * FROM observations")

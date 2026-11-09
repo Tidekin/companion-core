@@ -6,12 +6,12 @@ import json
 import os
 import secrets
 import signal
-import sqlite3
 import sys
 from contextlib import closing
 from pathlib import Path
 from time import monotonic
 
+import psycopg
 import pytest
 
 from companion import __main__, shutdown, worker_loop
@@ -102,8 +102,9 @@ def test_idle_wait_returns_promptly_on_stop(core, before_wait):
             shutdown.request()
             assert await asyncio.wait_for(pending, 2) == "shutdown"
             assert monotonic() - started < 1
-            # A later Wakeup close or cancellation still uses its own stop event.
-            assert not wake.stop.is_set()
+            # Shutdown finishes the finite wait; the context still owns LISTEN.
+            assert not wake.listener.closed
+        assert wake.listener.closed
 
     run(scenario())
 
@@ -172,15 +173,17 @@ def test_install_registers_handlers_and_second_interrupt_escapes(monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX signal delivery to a real worker")
-def test_real_worker_cli_exits_zero_on_sigterm_and_releases_lock(tmp_path):
-    database = tmp_path / "companion.sqlite3"
+def test_real_worker_cli_exits_zero_on_sigterm_and_releases_lock(tmp_path, empty_database):
+    database = empty_database
+    state_directory = tmp_path / "state"
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("COMPANION_", "ONEBOT_", "SNOWLUMA_"))}
     env.update({
         "COMPANION_CONFIG": str(tmp_path / "absent.toml"), "COMPANION_MODE": "demo",
         "COMPANION_OWNER_QQ_ID": "10001", "COMPANION_BOT_QQ_ID": "10002",
         "COMPANION_BRIDGE_TOKEN": secrets.token_urlsafe(32),
-        "COMPANION_DATABASE": str(database),
+        "COMPANION_DATABASE": database.get_secret_value(),
+        "COMPANION_STATE_DIRECTORY": str(state_directory),
         "COMPANION_ERASURE_LEDGER": str(tmp_path / "erasures.jsonl"),
         "COMPANION_MEMORY_ENABLED": "false", "COMPANION_MODEL_KEY": "",
         "COMPANION_MODEL_URL": "https://synthetic.invalid/v1",
@@ -201,8 +204,8 @@ def test_real_worker_cli_exits_zero_on_sigterm_and_releases_lock(tmp_path):
             deadline = monotonic() + 60
             while True:
                 assert process.returncode is None and monotonic() < deadline
-                with closing(sqlite3.connect(database)) as view:
-                    row = view.execute("SELECT value FROM runtime_meta WHERE key=?",
+                with closing(psycopg.connect(database.get_secret_value())) as view:
+                    row = view.execute("SELECT value FROM runtime_meta WHERE key=%s",
                                        (worker_loop.KEY,)).fetchone()
                 if row and json.loads(row[0])["stage"].startswith("WAITING"):
                     break
@@ -214,7 +217,7 @@ def test_real_worker_cli_exits_zero_on_sigterm_and_releases_lock(tmp_path):
             if process.returncode is None:
                 process.kill()
                 await process.communicate()
-        with single_worker(str(database)):
+        with single_worker(state_directory):
             pass
 
     run(scenario())

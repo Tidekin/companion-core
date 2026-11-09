@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import sqlite3
 import threading
 from contextlib import closing
 
+import psycopg
 import pytest
 from cryptography.fernet import Fernet
 
@@ -12,12 +14,20 @@ from companion import erasure, meme_assets, owner_authority
 from companion import meme_index as index
 from companion.backup import backup, restore
 from companion.contracts import CoreError
+from companion.legacy_import import (
+    SOURCE_REVISION,
+    TARGET_REVISION,
+    import_sqlite_backup,
+    migrate_sqlite,
+)
 from companion.meme_retrieval import OFFER
 from companion.owner_authority_protocol import AuthorityStop
+from companion.postgres import Database
 from companion.privacy import advance_epoch
 from companion.store import Store, encode
 from companion_meme_protocol import digest
 from tests.conftest import run
+from tests.postgres_fixture import isolated_database
 from tests.support.meme_core_runtime import runtime_case as runtime_case
 from tests.support.meme_index import Encoder, local_encoder, vector
 
@@ -30,7 +40,7 @@ def freeze(c, monkeypatch):
 
 
 def drop_offer(c):
-    c.core.store.execute("DELETE FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],))
+    c.core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (OFFER + c.job["event_id"],))
 
 
 def test_cold_hot_and_deleted_cache_preserve_one_frozen_arithmetic_proof(runtime_case, monkeypatch):
@@ -74,13 +84,13 @@ def test_semantic_candidate_with_zero_lexical_overlap_still_obeys_context(
 ):
     c = runtime_case
     caption = json.loads(
-        c.core.store.one("SELECT result_json FROM meme_captions WHERE job_id=?", (c.caption_id,))[
+        c.core.store.one('SELECT result_json FROM meme_captions WHERE job_id=%s', (c.caption_id,))[
             "result_json"
         ]
     )
     caption.update(description="柔软云朵", visible_text="", tags=["绒球"], use_when=["陪伴时刻"])
     c.core.store.execute(
-        "UPDATE meme_captions SET result_json=? WHERE job_id=?", (encode(caption), c.caption_id)
+        'UPDATE meme_captions SET result_json=%s WHERE job_id=%s', (encode(caption), c.caption_id)
     )
     saved, _ = freeze(c, monkeypatch)
     proof = next(iter(saved["ranking"]["selected"].values()))
@@ -102,13 +112,30 @@ def test_bad_derived_cache_is_precise_miss_then_rebuilt(runtime_case, monkeypatc
         "zero": ("vector", b"\x00" * 2048),
         "length": ("vector", b"\x00"),
     }[corruption]
-    c.core.store.execute("PRAGMA ignore_check_constraints=ON")
-    c.core.store.execute(f"UPDATE meme_vectors SET {field}=?", (bad,))
-    c.core.store.execute("PRAGMA ignore_check_constraints=OFF")
+    sql = f"UPDATE meme_vectors SET {field}=%s"
+    if corruption in {"length", "dimension"}:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            c.core.store.execute(sql, (bad,))
+        # Simulate a damaged read after verifying the native constraint rejects the write.
+        original = c.core.store.one
+        injected = []
+
+        def damaged_read(statement, params=()):
+            value = original(statement, params)
+            if value and not injected and value.get("cache_key") == row["cache_key"]:
+                injected.append(True)
+                return {**value, field: bad}
+            return value
+
+        monkeypatch.setattr(c.core.store, "one", damaged_read)
+    else:
+        c.core.store.execute(sql, (bad,))
     drop_offer(c)
     saved, calls = freeze(c, monkeypatch)
     assert saved["ranking"]["header"]["cache_hits"] == 0 and len(calls) == 1
-    assert c.core.store.one("SELECT * FROM meme_vectors") == row
+    rebuilt = c.core.store.one("SELECT * FROM meme_vectors")
+    assert rebuilt.pop("record_sequence") > row.pop("record_sequence")
+    assert rebuilt == row
 
 
 @pytest.mark.parametrize("runtime_case", ["two_sources"], indirect=True)
@@ -116,11 +143,13 @@ def test_same_bytes_cannot_borrow_another_licensed_sources_vector(runtime_case, 
     c = runtime_case
     assets = c.core.store.rows("SELECT asset_id FROM meme_assets ORDER BY asset_id")
     other = c.core.store.one(
-        "SELECT s.caption_job_id FROM meme_asset_sources s "
-        "JOIN meme_assets a ON a.asset_id=s.asset_id "
-        "JOIN meme_captions c ON c.job_id=s.caption_job_id "
-        "WHERE s.asset_id=? AND c.asset_sha256=a.asset_sha256 "
-        "AND c.source_sha256=a.source_sha256 ORDER BY s.caption_job_id",
+        (
+            'SELECT s.caption_job_id FROM meme_asset_sources s JOIN '
+            'meme_assets a ON a.asset_id=s.asset_id JOIN meme_captions c ON '
+            'c.job_id=s.caption_job_id WHERE s.asset_id=%s AND '
+            'c.asset_sha256=a.asset_sha256 AND '
+            'c.source_sha256=a.source_sha256 ORDER BY s.caption_job_id'
+        ),
         (assets[1]["asset_id"],),
     )
     binding, *_ = c.retrieval._resolve(assets[1]["asset_id"], other["caption_job_id"])
@@ -142,6 +171,8 @@ def test_same_bytes_cannot_borrow_another_licensed_sources_vector(runtime_case, 
 @pytest.mark.parametrize(
     "change", ["epoch", "erasure", "usage", "caption", "stop", "lease", "revision"]
 )
+
+
 def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypatch, change):
     c, release = runtime_case, threading.Event()
     before = c.core.store.rows("SELECT * FROM model_usage")
@@ -159,12 +190,13 @@ def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypat
         local_encoder(monkeypatch, Pending)
         request = asyncio.create_task(c.service.prepare_offer(c.job))
         await asyncio.wait_for(started.wait(), 2)
-        assert not c.core.store.db.in_transaction
+        assert not c.core.store.in_transaction
         try:
             if change == "epoch":
-                advance_epoch(c.core.store)
+                with c.core.store.transaction(control_write=True):
+                    advance_epoch(c.core.store)
             elif change == "erasure":
-                with c.core.store.transaction():
+                with c.core.store.transaction(control_write=True):
                     c.core.ledger.expire_events(
                         c.core.store, [c.source["event_id"]], c.core.clock()
                     )
@@ -172,11 +204,11 @@ def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypat
                 c.core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
             elif change == "caption":
                 row = c.core.store.one(
-                    "SELECT result_json FROM meme_captions WHERE job_id=?", (c.caption_id,)
+                    'SELECT result_json FROM meme_captions WHERE job_id=%s', (c.caption_id,)
                 )
                 result = json.loads(row["result_json"])
                 c.core.store.execute(
-                    "UPDATE meme_captions SET result_json=? WHERE job_id=?",
+                    'UPDATE meme_captions SET result_json=%s WHERE job_id=%s',
                     (encode({**result, "description": "修正的温暖抱抱"}), c.caption_id),
                 )
                 binding, *_ = c.retrieval._resolve(c.asset_id, c.caption_id)
@@ -194,12 +226,15 @@ def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypat
                 )
             elif change == "lease":
                 c.core.store.execute(
-                    "UPDATE jobs SET lease_token=NULL WHERE job_id=?", (c.job["job_id"],)
+                    'UPDATE jobs SET lease_token=NULL WHERE job_id=%s', (c.job["job_id"],)
                 )
             else:
                 c.core.store.execute(
-                    "UPDATE conversations SET reply_revision=reply_revision+1 "
-                    "WHERE conversation_id=?",
+                    (
+                        'UPDATE conversations SET '
+                        'reply_revision=reply_revision+1 WHERE '
+                        'conversation_id=%s'
+                    ),
                     (c.job["conversation_id"],),
                 )
         finally:
@@ -207,10 +242,18 @@ def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypat
         if change == "caption":
             await request  # An item not offered yet is left out, never re-captioned in place.
             return
+        if change == "usage":
+            await request
+            return
         with pytest.raises(CoreError):
             await request
 
     run(scenario())
+    if change == "usage":
+        assert c.retrieval.check(c.job)["offer"]["candidates"] == []
+        assert c.core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
+        assert len(c.core.store.rows("SELECT * FROM model_usage")) == len(before)
+        return
     assert c.core.store.rows("SELECT * FROM meme_vectors") == corrected
     if change == "caption":
         saved = c.retrieval.check(c.job)
@@ -218,7 +261,7 @@ def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypat
         assert saved["ranking"]["selected"] == {}
     else:
         assert not c.core.store.one(
-            "SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],)
+            'SELECT 1 FROM runtime_meta WHERE key=%s', (OFFER + c.job["event_id"],)
         )
     if change != "usage":
         assert c.core.store.rows("SELECT * FROM model_usage") == before
@@ -238,6 +281,8 @@ def test_after_await_current_facts_fence_cache_and_offer(runtime_case, monkeypat
         "outer_size",
     ],
 )
+
+
 def test_corrupt_frozen_proof_is_fenced_even_with_rehashed_binding(
     runtime_case, monkeypatch, field
 ):
@@ -265,7 +310,7 @@ def test_corrupt_frozen_proof_is_fenced_even_with_rehashed_binding(
         saved["padding"] = "x" * index.OFFER_BYTES
     saved["catalog_bindings"][sha]["ranking_sha256"] = index.ranking_sha(header, proof)
     c.core.store.execute(
-        "UPDATE runtime_meta SET value=? WHERE key=?", (encode(saved), OFFER + c.job["event_id"])
+        'UPDATE runtime_meta SET value=%s WHERE key=%s', (encode(saved), OFFER + c.job["event_id"])
     )
     with pytest.raises(CoreError):
         c.retrieval.check(c.job)
@@ -282,7 +327,7 @@ def test_legacy_and_opaque_records_remain_explicit_fences(runtime_case, record, 
         run(c.service.prepare_offer(c.job))
     assert (
         c.core.store.one(
-            "SELECT value FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],)
+            'SELECT value FROM runtime_meta WHERE key=%s', (OFFER + c.job["event_id"],)
         )["value"]
         == original
     )
@@ -303,12 +348,12 @@ def test_erasure_rollback_and_fsynced_replay_remove_vectors_and_whole_proof(
 
     monkeypatch.setattr(meme_assets, "erase", fail)
     with pytest.raises(RuntimeError, match="SYNTHETIC_CACHE_ERASURE_FAILURE"):
-        with c.core.store.transaction():
+        with c.core.store.transaction(control_write=True):
             c.core.ledger.expire_events(c.core.store, [c.source["event_id"]], c.core.clock())
     assert (
         json.loads(
             c.core.store.one(
-                "SELECT value FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],)
+                'SELECT value FROM runtime_meta WHERE key=%s', (OFFER + c.job["event_id"],)
             )["value"]
         )
         == saved
@@ -320,7 +365,7 @@ def test_erasure_rollback_and_fsynced_replay_remove_vectors_and_whole_proof(
     c.core.ledger.replay(c.core.store)
     assert not c.core.store.rows("SELECT * FROM meme_vectors")
     assert not c.core.store.one(
-        "SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],)
+        'SELECT 1 FROM runtime_meta WHERE key=%s', (OFFER + c.job["event_id"],)
     )
     assert c.core.store.rows("SELECT * FROM model_usage") == before
 
@@ -329,7 +374,7 @@ def test_revision_two_complete_repairs_only_original_derived_proof(runtime_case,
     c = runtime_case
     saved, _ = freeze(c, monkeypatch)
     cache = c.core.store.rows("SELECT * FROM meme_vectors")
-    with c.core.store.transaction():
+    with c.core.store.transaction(control_write=True):
         c.core.ledger.expire_events(c.core.store, [c.source["event_id"]], c.core.clock())
     for row in cache:
         c.core.store.insert("meme_vectors", **row)
@@ -339,22 +384,22 @@ def test_revision_two_complete_repairs_only_original_derived_proof(runtime_case,
         patch.setattr(erasure, "CONTRACT_REVISION", 2)
         old_signature = erasure.contract_signature()
     c.core.store.execute(
-        "UPDATE runtime_meta SET value=? WHERE key=?", (old_signature, erasure.CONTRACT_KEY)
+        'UPDATE runtime_meta SET value=%s WHERE key=%s', (old_signature, erasure.CONTRACT_KEY)
     )
     independent = "meme_offer:synthetic-later-unrelated"
     c.core.store.insert("runtime_meta", key=independent, value='{"keep":"later"}')
     c.core.ledger.replay(c.core.store)
     assert not c.core.store.rows("SELECT * FROM meme_vectors")
-    assert c.core.store.one("SELECT value FROM runtime_meta WHERE key=?", (independent,)) == {
+    assert c.core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (independent,)) == {
         "value": '{"keep":"later"}'
     }
     assert not c.core.store.one(
-        "SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],)
+        'SELECT 1 FROM runtime_meta WHERE key=%s', (OFFER + c.job["event_id"],)
     )
 
 
 def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
-    runtime_case, monkeypatch, tmp_path
+    runtime_case, monkeypatch, tmp_path, migrated_database
 ):
     c = runtime_case
     freeze(c, monkeypatch)
@@ -363,24 +408,30 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
     from tests.support.historical_schema import historical_database
 
     historical_database(c.core.store, legacy, "0047_meme_assets")
-    archive, restored, key = (
-        tmp_path / "pre0048.enc",
-        tmp_path / "restored.sqlite3",
-        Fernet.generate_key(),
-    )
-    backup(str(legacy), archive, key)
-    with c.core.store.transaction():
+    # Reopen the actual historical Fernet payload through the supported offline import.
+    key = Fernet.generate_key()
+    archive = tmp_path / "pre0048.enc"
+    archive.write_bytes(Fernet(key).encrypt(legacy.read_bytes()))
+    with c.core.store.transaction(control_write=True):
         c.core.ledger.expire_events(c.core.store, [c.source["event_id"]], c.core.clock())
-    restore(archive, restored, key, c.core.settings.erasure_ledger)
-    with closing(Store(str(restored))) as store:
-        assert (
-            store.one("SELECT version_num FROM alembic_version")["version_num"]
-            == "0068_image_review_target"
-        )
-        assert not store.rows("SELECT * FROM meme_vectors")
-        assert store.one("SELECT state FROM meme_assets")["state"] == "ERASED"
-        assert not store.one("SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],))
-        assert store.rows("SELECT * FROM model_usage") == before
+    source = tmp_path / "stopped.sqlite3"
+    source.write_bytes(Fernet(key).decrypt(archive.read_bytes()))
+    migrate_sqlite(source, SOURCE_REVISION)
+    native_archive = tmp_path / "native.enc"
+    with isolated_database(template=migrated_database) as imported:
+        import_sqlite_backup(source, imported)
+        backup(imported, native_archive, key)
+    state = tmp_path / "restored-state"
+    with isolated_database() as target:
+        restore(native_archive, target, key, c.core.settings.erasure_ledger, state_directory=state)
+        with Database(target) as database, closing(Store(database, state)) as store:
+            assert store.one("SELECT version_num FROM alembic_version") == {
+                "version_num": TARGET_REVISION}
+            assert not store.rows("SELECT * FROM meme_vectors")
+            assert store.one("SELECT state FROM meme_assets")["state"] == "ERASED"
+            assert not store.one("SELECT 1 FROM runtime_meta WHERE key=%s",
+                                 (OFFER + c.job["event_id"],))
+            assert store.rows("SELECT * FROM model_usage") == before
 
 
 def test_two_independent_connections_keep_the_first_offer_while_cpu_finishes(
@@ -401,7 +452,7 @@ def test_two_independent_connections_keep_the_first_offer_while_cpu_finishes(
                 return super().query_embed(query)
 
         calls = local_encoder(monkeypatch, Pending)
-        with closing(Store(c.core.settings.database)) as other:
+        with closing(Store(c.core.database, c.core.settings.state_directory)) as other:
             service = MemeCaptionService(other, c.core.settings, None, c.core.clock)
             first = asyncio.create_task(c.service.prepare_offer(c.job))
             await asyncio.wait_for(started.wait(), 2)
@@ -441,7 +492,7 @@ def test_optional_caller_exit_never_commits_late_cpu_result(runtime_case, monkey
                 with pytest.raises(asyncio.CancelledError):
                     await request
                 assert not c.core.store.one(
-                    "SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + c.job["event_id"],)
+                    'SELECT 1 FROM runtime_meta WHERE key=%s', (OFFER + c.job["event_id"],)
                 )
             else:
                 await request
@@ -463,8 +514,9 @@ def test_optional_caller_exit_never_commits_late_cpu_result(runtime_case, monkey
 
 def test_cache_capacity_uses_fresh_proof_without_inserting_another_slot(runtime_case, monkeypatch):
     c = runtime_case
-    job = c.core.store.one("SELECT * FROM jobs WHERE job_id=?", (c.caption_id,))
-    caption = c.core.store.one("SELECT * FROM meme_captions WHERE job_id=?", (c.caption_id,))
+    job = c.core.store.one('SELECT * FROM jobs WHERE job_id=%s', (c.caption_id,))
+    caption = c.core.store.one('SELECT * FROM meme_captions WHERE job_id=%s', (c.caption_id,))
+    del job["record_sequence"], caption["record_sequence"]
     binding, *_ = c.retrieval._resolve(c.asset_id, c.caption_id)
     encoded = index.pack(vector())
     # Synthetic settled-slot copies populate only the cache capacity fixture. They are
@@ -494,7 +546,7 @@ def test_cache_capacity_uses_fresh_proof_without_inserting_another_slot(runtime_
     assert next(iter(saved["ranking"]["selected"].values()))["basis"] == "SEMANTIC"
     assert c.core.store.one("SELECT COUNT(*) AS n FROM meme_vectors")["n"] == 4096
     assert not c.core.store.one(
-        "SELECT 1 FROM meme_vectors WHERE caption_job_id=?", (c.caption_id,)
+        'SELECT 1 FROM meme_vectors WHERE caption_job_id=%s', (c.caption_id,)
     )
     # Replacing the same exact slot remains possible at capacity.
     identity = index.CacheIdentity.source(
@@ -503,13 +555,13 @@ def test_cache_capacity_uses_fresh_proof_without_inserting_another_slot(runtime_
     with c.core.store.transaction():
         index.persist(c.core.store, identity, index.pack(vector(0, 1)))
     assert c.core.store.one("SELECT COUNT(*) AS n FROM meme_vectors")["n"] == 4096
-    assert c.core.store.one("SELECT vector FROM meme_vectors WHERE cache_key=?", (identity.key,))[
+    assert c.core.store.one('SELECT vector FROM meme_vectors WHERE cache_key=%s', (identity.key,))[
         "vector"
     ] == index.pack(vector(0, 1))
 
 
 def test_normal_downgrade_discards_only_projection_and_upgrade_rebuilds_empty(
-    runtime_case, monkeypatch, tmp_path
+    runtime_case, monkeypatch, tmp_path, migrated_database
 ):
     from pathlib import Path
 
@@ -518,7 +570,6 @@ def test_normal_downgrade_discards_only_projection_and_upgrade_rebuilds_empty(
 
     from companion.meme_core import MemeCaptionService
     from companion.meme_retrieval import MemeRetrieval
-    from companion.store import migrate
     from tests.support.historical_schema import historical_database
 
     c = runtime_case
@@ -530,12 +581,26 @@ def test_normal_downgrade_discards_only_projection_and_upgrade_rebuilds_empty(
     cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
     cfg.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
     command.downgrade(cfg, "0047_meme_assets")
-    with closing(Store(path)) as store:
-        retrieval = MemeRetrieval(MemeCaptionService(store, c.core.settings, None, c.core.clock))
-        assert not store.one("SELECT 1 FROM sqlite_master WHERE name='meme_vectors'")
-        assert store.rows("SELECT * FROM model_usage") == usage
-        assert store.rows("SELECT * FROM meme_assets") == assets
-        assert retrieval.check(c.job) == saved
-        migrate(path)
-        assert not store.rows("SELECT * FROM meme_vectors")
-        assert retrieval.check(c.job) == saved
+    # Old schemas carry the original offer and fee columns without a native record sequence.
+    with closing(sqlite3.connect(path)) as historical:
+        historical.row_factory = sqlite3.Row
+        assert historical.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='meme_vectors'").fetchone() is None
+        for table, expected in (("model_usage", usage), ("meme_assets", assets)):
+            rows = historical.execute(f"SELECT * FROM {table} ORDER BY rowid")
+            observed = [dict(row) for row in rows]
+            assert observed == [{k: v for k, v in row.items() if k != "record_sequence"}
+                                for row in expected]
+        offer = historical.execute("SELECT value FROM runtime_meta WHERE key=?",
+                                   (OFFER + c.job["event_id"],)).fetchone()
+        assert json.loads(offer[0]) == saved
+    migrate_sqlite(path, SOURCE_REVISION)
+    with isolated_database(template=migrated_database) as target:
+        import_sqlite_backup(path, target)
+        state = tmp_path / "import-state"
+        settings = c.core.settings.model_copy(update={"database": target,
+                                                      "state_directory": str(state)})
+        with Database(target) as database, closing(Store(database, state)) as store:
+            assert not store.rows("SELECT * FROM meme_vectors")
+            retrieval = MemeRetrieval(MemeCaptionService(store, settings, None, c.core.clock))
+            assert retrieval.check(c.job) == saved

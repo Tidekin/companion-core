@@ -33,7 +33,7 @@ GOAL_FIELDS = ("goal_id", "kind", "topic", "state", "priority", "next_due_at", "
                "reflection_suggestion_id", "steps")
 REFLECTION_FIELDS = ("suggestion_id", "run_id", "kind", "content", "state", "created_at",
                      "updated_at", "local_date")
-TOOL_LIMITS = ("max_cost_micro_usd", "max_model_calls", "max_input_bytes", "max_output_tokens",
+TOOL_LIMITS = ("max_model_calls", "max_input_bytes", "max_output_tokens",
                "timeout_seconds")
 TOOL_FIELDS = ("task_id", "executor_id", "capability", "risk_level", "state", "scope_sha256",
                "reserved_micro_usd", "billed_micro_usd", "dispatched_at", "last_error_code",
@@ -158,7 +158,7 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
         def apply(core, owner_check):
             from companion.mood import service_for_store
 
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 owner_check()
                 service = service_for_store(core.store, core.settings, core.clock, core.ledger)
                 return service.control(
@@ -341,8 +341,10 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
         core = app.state.core
         version = read_version(core.memory)
         rows = core.store.rows(
-            "SELECT " + ",".join(TOOL_FIELDS) + ",scope_json,redacted FROM tool_tasks "
-            "WHERE redacted=0 ORDER BY rowid DESC LIMIT 30"
+            "SELECT " + ",".join(TOOL_FIELDS) + (
+                ',scope_json,redacted FROM tool_tasks WHERE redacted=0 '
+                'ORDER BY record_sequence DESC LIMIT 30'
+            )
         )
         items = []
         for row in rows:
@@ -378,4 +380,3 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
     async def source_grant_action(grant_id: str, body: SourceGrantAction, request: Request,
                                   idempotency_key: str = Header(default="")):
         return await grant_action(request, idempotency_key, body.model_dump(), grant_id)
-

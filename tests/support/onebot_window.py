@@ -58,7 +58,7 @@ def input_approval(plan, raw):
 
 
 def reply_approval(plan, core):
-    row = core.store.one("SELECT * FROM outbox ORDER BY rowid DESC LIMIT 1")
+    row = core.store.one('SELECT * FROM outbox ORDER BY record_sequence DESC LIMIT 1')
     return {
         "window_sha256": plan.sha256,
         "event_id": row["origin_event_id"],

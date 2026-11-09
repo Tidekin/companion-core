@@ -21,8 +21,10 @@ def quoted_job(core, quote=QUOTE, reference="-42", *, extra=None):
     event = InboundEvent.model_validate(incoming)
     core.ingest(event, event.event_id)
     job = core.store.one(
-        "SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
-        "WHERE j.event_id=?", (event.event_id,),
+        (
+            'SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events'
+            ' e USING(event_id) WHERE j.event_id=%s'
+        ), (event.event_id,),
     )
     return job, incoming
 
@@ -33,9 +35,11 @@ def delivered(core, *, quote=QUOTE, origin=ORIGIN, state="SENT", number=1):
     incoming["source_event_id"] = incoming["source_event_id"].replace(ORIGIN, origin)
     event = InboundEvent.model_validate(incoming)
     saved = core.ingest(event, event.event_id)
-    row = core.store.one("SELECT * FROM events WHERE event_id=?", (event.event_id,))
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (saved["job_id"],))
+    row = core.store.one('SELECT * FROM events WHERE event_id=%s', (event.event_id,))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (saved["job_id"],))
     message_id = enqueue(core.store, event.event_id, row["conversation_id"], quote, core.clock())
-    core.store.execute("UPDATE outbox SET state=?,provider_message_id=?,sent_at=? "
-                       "WHERE message_id=?", (state, "-42", core.clock(), message_id))
+    core.store.execute((
+        'UPDATE outbox SET state=%s,provider_message_id=%s,sent_at=%s WHERE '
+        'message_id=%s'
+    ), (state, "-42", core.clock(), message_id))
     return message_id

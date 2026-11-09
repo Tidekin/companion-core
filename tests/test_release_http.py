@@ -138,7 +138,7 @@ def test_content_enabled_commands_and_following_chat_complete(core, command):
             core.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")["value"] == "1"
         )
     assert run(core.run_once())
-    assert core.store.rows("SELECT state FROM jobs ORDER BY rowid") == [
+    assert core.store.rows('SELECT state FROM jobs ORDER BY record_sequence') == [
         {"state": "SUCCEEDED"},
         {"state": "SUCCEEDED"},
     ]
@@ -151,7 +151,7 @@ def test_content_enabled_incomplete_command_falls_back_to_chat(core):
     ingest(core, 2, "普通后续对话")
     assert run(core.run_once())
     assert run(core.run_once())
-    assert core.store.rows("SELECT state FROM jobs ORDER BY rowid") == [
+    assert core.store.rows('SELECT state FROM jobs ORDER BY record_sequence') == [
         {"state": "SUCCEEDED"},
         {"state": "SUCCEEDED"},
     ]
@@ -218,5 +218,6 @@ def test_other_bounded_providers_reject_compression_before_reading(path):
             assert result.status_code == 502
             assert result.json()["detail"] == "MODEL_ENCODING_UNSUPPORTED"
             usage = client.get("/internal/v1/reservations/" + grant["token"], headers=auth).json()
-            assert usage["calls"] == 1 and usage["reserved_micro_usd"] > 0
+            assert usage["calls"] == usage["unknown_calls"] == 1
+            assert usage["billed_micro_usd"] == 0
     assert stream.read_chunks == 0

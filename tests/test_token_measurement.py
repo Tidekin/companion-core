@@ -100,7 +100,7 @@ def test_context_and_admission_measure_same_full_payload(core, tmp_path):
     assert fitted == required
     request = budget.reserve(core.store, core.settings, authorized_job(core),
         "chat", fitted, core.clock())
-    row = core.store.one("SELECT * FROM model_admissions WHERE request_id=?", (request,))
+    row = core.store.one('SELECT * FROM model_admissions WHERE request_id=%s', (request,))
     assert row["input_bound"] == limit
     assert json.loads(row["measurement_json"]) == (
         tm.measure_request(core.settings, fitted).receipt())

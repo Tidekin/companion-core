@@ -18,10 +18,38 @@ from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeCon
 from companion.store import encode
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import event, run
+from tests.postgres_fixture import logical_state
 from tests.support.core_http import real_core_http
 from tests.support.diary import DAY
 from tests.support.owner_authority import activate
 from tests.support.paid_model import approved_live
+
+
+async def worker_output(child, store, expected, starting_sequence, *, interval=30):
+    # A child may run several distinct nightly stages. Only a newly settled
+    # expected stage buys another interval; idle scans and repeated calls do not.
+    remaining = set(expected)
+    output = asyncio.create_task(child.communicate())
+    try:
+        while True:
+            try:
+                return await asyncio.wait_for(asyncio.shield(output), interval)
+            except TimeoutError:
+                if output.done():
+                    return output.result()
+                settled = store.rows(
+                    "SELECT DISTINCT scenario FROM model_usage WHERE record_sequence > %s "
+                    "AND state = 'SETTLED' AND scenario = ANY(%s)",
+                    (starting_sequence, list(remaining)),
+                )
+                if not settled:
+                    raise
+                remaining.difference_update(row["scenario"] for row in settled)
+    except BaseException:
+        if child.returncode is None:
+            child.kill()
+        await output
+        raise
 
 
 def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_path):
@@ -33,8 +61,6 @@ def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_p
     cfg.extraction_min_events = 3
     cfg.extraction_idle_seconds = 0
     cfg.consolidation_catchup_days = 1
-    cfg.reflection_daily_micro_usd = 50000
-    cfg.reflection_monthly_micro_usd = 100000
     later = core.clock.now
     core.clock.now = datetime.fromisoformat(DAY.isoformat() + "T04:00:00+00:00")
     key = Ed25519PrivateKey.generate()
@@ -95,12 +121,17 @@ def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_p
             core.clock.now = later
             queued_before = core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"]
             config = cfg.model_dump(mode="json")
-            config.update(model_key=cfg.model_key.get_secret_value(),
+            config.update(database=cfg.database.get_secret_value(),
+                          model_key=cfg.model_key.get_secret_value(),
                           bridge_token=cfg.bridge_token.get_secret_value())
             path = tmp_path / "nightly-settings.json"
             await asyncio.to_thread(path.write_text, encode(config), encoding="utf-8")
             results = []
-            for attempt in range(3):
+            expected_calls = (["memory_extract"], ["memory_review", "diary", "reflection"], [])
+            for attempt, expected in enumerate(expected_calls):
+                starting_sequence = core.store.one(
+                    "SELECT COALESCE(MAX(record_sequence), 0) AS seq FROM model_usage"
+                )["seq"]
                 child = await asyncio.create_subprocess_exec(
                     sys.executable, "-B", "-c",
                     "import sys; from tests.support.nightly_process import run_worker; "
@@ -109,20 +140,13 @@ def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_p
                     cwd=workspace,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
-                try:
-                    stdout, stderr = await asyncio.wait_for(child.communicate(), 30)
-                except BaseException:
-                    child.kill()
-                    await child.communicate()
-                    raise
+                stdout, stderr = await worker_output(child, core.store, expected, starting_sequence)
                 assert child.returncode == 0, stderr.decode("utf-8", errors="replace")
                 result = json.loads(stdout.decode("utf-8").splitlines()[-1])
                 assert result["pid"] != os.getpid()
                 assert all(unit["admissions"] <= 1 for unit in result["units"])
                 results.append(result)
-            assert results[0]["calls"] == ["memory_extract"]
-            assert results[1]["calls"] == ["memory_review", "diary", "reflection"]
-            assert results[2]["calls"] == []
+            assert [result["calls"] for result in results] == list(expected_calls)
             assert core.consolidation.status(DAY)["state"] == "COMPLETE"
             assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == queued_before
             conversation = core.store.one("SELECT conversation_id FROM events LIMIT 1")
@@ -136,14 +160,14 @@ def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_p
                 {"status": "HYPOTHESIS", "importance": 0.8}]
             episode = core.store.one("SELECT * FROM episodes WHERE status='ACTIVE'")
             ids = [row["event_id"] for row in core.store.rows(
-                "SELECT event_id FROM episode_events WHERE episode_id=? ORDER BY event_id",
+                "SELECT event_id FROM episode_events WHERE episode_id=%s ORDER BY event_id",
                 (episode["episode_id"],))]
-            changes = core.store.db.total_changes
+            before = logical_state(core.store)
             summary = core.memory.episode_summary(episode["episode_id"], ids, core.clock())
             assert summary["kind"] == "model_summary" and summary["title"] == "项目安排"
             assert "仍是待办事项" in summary["text"] and summary["text"] == episode["summary"]
-            assert core.store.db.total_changes == changes
-            assert core.store.one("SELECT scenario,state FROM model_usage WHERE request_id=?",
+            assert logical_state(core.store) == before
+            assert core.store.one("SELECT scenario,state FROM model_usage WHERE request_id=%s",
                                    (summary["request_id"],)) == {
                 "scenario": "memory_extract", "state": "SETTLED"}
             checkpoint = core.store.one("SELECT value FROM runtime_meta "

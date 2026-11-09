@@ -29,7 +29,7 @@ def test_real_api_retires_settled_failed_image_without_replay_or_refund(
             assert core.store.one("SELECT state FROM jobs")["state"] == "CANCELLED"
             assert core.store.one("SELECT state FROM content_items")["state"] == "UNKNOWN"
             if mutation in {"unknown", "reserved"}:
-                core.store.execute("UPDATE model_usage SET state=?", (mutation.upper(),))
+                core.store.execute('UPDATE model_usage SET state=%s', (mutation.upper(),))
             elif mutation == "missing_admission":
                 core.store.execute("DELETE FROM model_admissions")
             elif mutation == "admission_job":
@@ -37,7 +37,7 @@ def test_real_api_retires_settled_failed_image_without_replay_or_refund(
             elif mutation == "fee_reduced":
                 core.store.execute("UPDATE model_usage SET billed_micro_usd=0")
             elif mutation == "media_lease":
-                core.store.execute("UPDATE content_items SET lease_until=?", (
+                core.store.execute('UPDATE content_items SET lease_until=%s', (
                     core.settings.live_text_window.ends_at.isoformat(),
                 ))
             elif mutation in {"forged_count", "forged_fee"}:

@@ -1,5 +1,8 @@
 import json
+from contextlib import contextmanager
+from unittest.mock import patch
 
+from companion.contracts import CoreError
 from companion.model import ModelResponse
 from companion.reading_protocol import ReadObservation
 from companion.social_autonomy import SocialAutonomy
@@ -69,7 +72,7 @@ def background(core, **changes):
     module = service(core, **{"decision_interval_seconds": 0, "qzone_cooldown_seconds": 0,
                               "profile_cooldown_seconds": 0, **changes})
     module.model = MockPlanner()
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+    conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                   (accepted["event_id"],))["conversation_id"]
     return module, ref, conversation
 
@@ -102,12 +105,16 @@ def dispatch(module, frozen):
     """Exercise module transaction hooks against native Outbox states, with no protocol I/O."""
     token = uid("lease")
     with module.store.transaction():
-        module.store.execute("UPDATE outbox SET state='LEASED',lease_token=?,lease_until=? "
-                             "WHERE message_id=?",
+        module.store.execute((
+            "UPDATE outbox SET state='LEASED',lease_token=%s,lease_until=%s "
+            'WHERE message_id=%s'
+        ),
                              (token, after(module.clock(), 60), frozen.message_id))
         module.validate_delivery(frozen.message_id, token)
-        module.store.execute("UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1 "
-                             "WHERE message_id=?", (frozen.message_id,))
+        module.store.execute((
+            "UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1 "
+            'WHERE message_id=%s'
+        ), (frozen.message_id,))
         module.mark_dispatched(frozen.message_id, token)
     return token
 
@@ -125,6 +132,17 @@ def outcome(module, frozen, token, result):
                             native_retcode=native_code,
                             resource_id=resource)
     with module.store.transaction():
-        module.store.execute("UPDATE outbox SET state=?,provider_message_id=NULL "
-                             "WHERE message_id=?", (native, frozen.message_id))
+        module.store.execute((
+            'UPDATE outbox SET state=%s,provider_message_id=NULL WHERE '
+            'message_id=%s'
+        ), (native, frozen.message_id))
         return module.record_result(receipt)
+
+
+@contextmanager
+def deferred_admission():
+    """Exercise durable retry after a native nonmonetary admission refusal."""
+    with patch("companion.budget.reserve", side_effect=CoreError(
+        "MODEL_DAILY_BUDGET_EXHAUSTED", 429,
+    )):
+        yield

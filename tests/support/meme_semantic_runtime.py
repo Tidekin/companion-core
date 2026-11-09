@@ -49,7 +49,7 @@ class SemanticCore(CoreHTTP):
 
         super().__init__(runtime, event, **kwargs)
         self.caption = SimpleNamespace(submissions=[], polls=[], model_calls=[],
-                                       state="SUCCEEDED", after_get=None)
+                                       state="SUCCEEDED", missing_response=False, after_get=None)
         self.processed = set()
         self.semantic_calls = []
         self.query_started, self.query_release = asyncio.Event(), None
@@ -65,6 +65,8 @@ class SemanticCore(CoreHTTP):
 
         def answer(request):
             self.caption.model_calls.append(json.loads(request.content))
+            if self.caption.missing_response:
+                raise httpx.ReadTimeout("Synthetic caption response lost", request=request)
             value = {"choices": [{"message": {"content": json.dumps(CAPTION)}}]}
             if self.caption.state != "UNKNOWN":
                 value["usage"] = {"prompt_tokens": 1050, "completion_tokens": 100,
@@ -89,8 +91,10 @@ class SemanticCore(CoreHTTP):
         if path == BASE + "/query":
             # The foreground-query tests inspect the pre-generation phase. The
             # discovery tests above independently used completed foreground work.
-            self.core.store.execute("UPDATE jobs SET state='QUEUED' WHERE kind='chat' "
-                "AND state='SUCCEEDED' AND event_id=?",
+            self.core.store.execute((
+                "UPDATE jobs SET state='QUEUED' WHERE kind='chat' AND "
+                "state='SUCCEEDED' AND event_id=%s"
+            ),
                 (json.loads(request.content)["event_id"],))
             self.query_started.set()
             if self.query_release:

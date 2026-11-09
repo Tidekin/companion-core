@@ -1,15 +1,19 @@
 """Release plan: probe on a copy, classification and Compose inspection, without Docker."""
 
 import hashlib
+import json
+import os
 import sqlite3
+import subprocess
+import sys
 from datetime import timedelta
 
 import pytest
 
 from companion import owner_authority, release_probe
 from companion.contracts import CoreError
-from companion.store import migrate
 from scripts import release_plan as plan
+from tests.postgres_fixture import isolated_database
 from tests.support.owner_authority import activate
 from tests.support.owner_authority_setup import prepare
 
@@ -22,14 +26,16 @@ def test_probe_on_current_schema_needs_no_migration(core):
 
 
 def test_probe_migrates_only_the_copy_it_is_given_and_times_it(core, tmp_path):
-    old = tmp_path / "old.sqlite3"
-    migrate(str(old), revision="0048_meme_vectors")
-    settings = core.settings.model_copy(update={"database": str(old)})
-    result = release_probe.probe(load=lambda: settings)
-    assert result["migration"]["needed"] and result["migration"]["ok"]
-    assert result["migration"]["seconds"] >= 0
-    assert result["before"]["schema"] == "0048_meme_vectors"
-    assert result["after"]["schema"] == result["before"]["expected_schema"]
+    original = release_probe.snapshot(core.settings)["database"]["schema"]
+    with isolated_database() as empty:
+        settings = core.settings.model_copy(update={"database": empty,
+            "state_directory": str(tmp_path / "copy-state")})
+        result = release_probe.probe(load=lambda: settings)
+        assert result["migration"]["needed"] and result["migration"]["ok"]
+        assert result["migration"]["seconds"] >= 0
+        assert result["before"]["schema"] is None
+        assert result["after"]["schema"] == result["before"]["expected_schema"]
+    assert release_probe.snapshot(core.settings)["database"]["schema"] == original
 
 
 def test_probe_reports_whether_the_stored_policy_survives(core, tmp_path):
@@ -135,33 +141,83 @@ def test_copy_folds_wal_into_the_copy_and_skips_side_files(tmp_path):
     assert not any(p.name.endswith(("-wal", "-shm")) for p in target.rglob("*"))
 
 
-@pytest.mark.parametrize(("closed", "expected"), [(True, "R"), (False, "NOT_READY")])
-def test_closed_unknown_calls_do_not_block_a_release(closed, expected):
+@pytest.mark.parametrize("closed", [True, False])
+def test_active_model_work_blocks_release_even_when_other_calls_are_closed(closed):
     value = {**probe(blockers=["MODEL_USAGE_UNSETTLED"]), "unknown_closed": closed}
-    assert plan.classify(CORE, value, rolling=True)[0] == expected
+    assert plan.classify(CORE, value, rolling=True)[0] == "NOT_READY"
 
 
-def test_unknown_closure_is_read_from_the_live_journal(tmp_path):
-    import json
+def test_unknown_model_cost_is_an_advisory_release_fact():
+    value = probe()
+    value["before"].update(unknown_model_calls=2, warnings=["MODEL_COST_UNKNOWN"])
+    assert plan.classify(CORE, value, rolling=True)[0] == "R"
 
-    journal = tmp_path / "budget.jsonl"
-    db = sqlite3.connect(tmp_path / "companion.sqlite3")
-    db.execute("CREATE TABLE model_usage(request_id TEXT, state TEXT)")
-    db.execute("CREATE TABLE model_admissions(request_id TEXT, journal_path TEXT)")
-    for request_id in ("model_a", "model_b"):
-        db.execute("INSERT INTO model_usage VALUES(?, 'UNKNOWN')", (request_id,))
-        db.execute("INSERT INTO model_admissions VALUES(?, ?)", (request_id, str(journal)))
-    db.commit()
-    db.close()
-    lines = [{"kind": "settle", "request_id": "model_a"},
-             {"kind": "model_local_close", "request_id": "model_a"},
-             {"kind": "settle", "request_id": "model_b"}]
-    journal.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
-    api = {"mounts": [{"type": "bind", "source": str(tmp_path)}]}
-    assert plan.closed_unknowns(api) is False
-    with journal.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"kind": "model_unknown_carry", "request_id": "model_b"}) + "\n")
-    assert plan.closed_unknowns(api) is True
+
+
+
+@pytest.mark.parametrize("network", [None, "host", "none", "bridge"])
+def test_probe_requires_explicit_private_database_and_network(tmp_path, network):
+    api = {"container": "live-api"}
+    assert plan.run_probe(api, "image", tmp_path)["error"] == "POSTGRES_PROBE_CONFIG_REQUIRED"
+    config = tmp_path / "copy.toml"
+    config.write_text("database='synthetic'", encoding="utf8")
+    assert plan.run_probe(api, "image", tmp_path, config, network)["error"] == (
+        "POSTGRES_PROBE_NETWORK_ISOLATION_REQUIRED")
+
+
+@pytest.mark.parametrize("internal,peers", [(False, {}),
+    (True, {"live": {"Name": "live-api"}})])
+def test_probe_rejects_networks_reaching_the_live_api(tmp_path, monkeypatch, internal, peers):
+    config = tmp_path / "copy.toml"
+    config.write_text("database='synthetic'", encoding="utf8")
+    monkeypatch.setattr(plan, "docker", lambda *args: subprocess.CompletedProcess(
+        args, 0, json.dumps([{"Internal": internal, "Containers": peers}]), ""))
+    assert plan.run_probe({"container": "live-api"}, "image", tmp_path, config,
+                          "private-probe")["error"] == "POSTGRES_PROBE_NETWORK_ISOLATION_REQUIRED"
+
+
+def test_target_probe_entrypoint_migrates_private_native_copy_and_ignores_live_env(
+    core, tmp_path, monkeypatch,
+):
+    from tests.postgres_fixture import logical_state
+
+    original = logical_state(core.store)
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "witness").write_text("original", encoding="utf8")
+    workspace = tmp_path / "probe"
+    workspace.mkdir()
+    api = {"container": "live-api", "user": "", "entrypoint": [sys.executable],
+           "env": ["COMPANION_DATABASE=postgresql://live-invalid"],
+           "mounts": [{"type": "bind", "rw": True, "source": str(live),
+                       "destination": "/data"}]}
+    monkeypatch.setattr(plan, "docker", lambda *args: subprocess.CompletedProcess(
+        args, 0, json.dumps([{"Internal": True, "Containers": {}}]), ""))
+    execute = subprocess.run
+
+    def target(args, **kwargs):
+        assert args[:5] == ["docker", "run", "--rm", "--network", "private-probe"]
+        assert "--env-file" not in args and "postgresql://live-invalid" not in str(args)
+        assert f"{workspace / 'mount-0'}:/data" in args
+        assert (workspace / "mount-0" / "witness").read_text("utf8") == "original"
+        env = {k: v for k, v in os.environ.items() if not k.startswith("COMPANION_")}
+        env["COMPANION_CONFIG"] = str(workspace / "probe.toml")
+        return execute([sys.executable, "-B", "-m", "companion.release_probe"], env=env,
+                       **kwargs)
+
+    monkeypatch.setattr(plan.subprocess, "run", target)
+    with isolated_database() as copy:
+        values = {"database": copy.get_secret_value(), "owner_qq_id": "10001",
+                  "bot_qq_id": "10002", "bridge_token": "synthetic-probe-token-32",
+                  "state_directory": str(tmp_path / "copy-state"),
+                  "erasure_ledger": str(tmp_path / "copy-erasure.jsonl")}
+        config = tmp_path / "copy.toml"
+        config.write_text("".join(f"{k}={json.dumps(v)}\n" for k, v in values.items()), "utf8")
+        result = plan.run_probe(api, "target-image", workspace, config, "private-probe")
+        assert result["migration"]["needed"] and result["migration"]["ok"], result
+        assert result["after"]["unknown_model_calls"] == 0
+    assert logical_state(core.store) == original
+    assert (live / "witness").read_text("utf8") == "original"
 
 
 GOOD_EDGE = {"custody": {"state": "ACTIVE", "stop_requested": False, "unsettled_sends": {},

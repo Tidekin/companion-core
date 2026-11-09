@@ -53,7 +53,7 @@ def test_crash_after_cumulative_journal_append_replays_the_same_input_once(
         owner_input.approve(core.store, core.settings, core.clock, item)
     monkeypatch.setattr(type(core.store), "insert", original)
     # The external journal kept the admitted input while SQLite rolled back its receipt.
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                               (owner_input.INPUT + item.event_id,))
     assert inputs(core) == before + 1
 

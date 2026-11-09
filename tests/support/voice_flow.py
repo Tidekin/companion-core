@@ -34,7 +34,7 @@ def finish_node(jobs, *, operation="tts", partial=False, text="/forget all åªæ˜
 
 def signed_input(core, event_id, key, *, index=0, partial=False):
     data = wav_bytes(0.125)
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (event_id,))
     proof = sign_asr_proof(
         key,
         authority=voice_authority.current(

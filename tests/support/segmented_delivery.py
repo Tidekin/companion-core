@@ -9,7 +9,7 @@ def freeze(core, parts=PARTS, gap=1500):
     ingest(core, text="一起聊一聊接下来的计划")
     job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id)")
     ids = enqueue_reply_parts(core.store, job, parts, gap, core.clock())
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (job["job_id"],))
     return job, ids
 
 

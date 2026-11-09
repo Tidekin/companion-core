@@ -62,24 +62,26 @@ def test_correction_crash_recovers_same_fact_and_one_receipt(core, tmp_path, mon
                 with pytest.raises(ProcessExit):
                     await core.run_once("before-crash")
             committed = core.store.one(
-                "SELECT memory_id FROM memories WHERE supersedes_memory_id=?", (mid,),
+                'SELECT memory_id FROM memories WHERE supersedes_memory_id=%s', (mid,),
             )
             assert bool(committed) == (stage not in {"before_mutation", "before_commit"})
-            assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+            assert not core.store.rows('SELECT * FROM outbox WHERE origin_event_id=%s',
                                        (source["event_id"],))
             core.clock.advance(core.settings.lease_seconds + 1)
             with Core(core.settings, core.model, core.clock) as restarted:
                 assert await restarted.run_once("after-crash")
                 result = restarted.store.one(
-                    "SELECT memory_id,status FROM memories WHERE supersedes_memory_id=?", (mid,),
+                    'SELECT memory_id,status FROM memories WHERE supersedes_memory_id=%s', (mid,),
                 )
                 assert result["status"] == "CONFIRMED"
                 if committed:
                     assert result["memory_id"] == committed["memory_id"]
                 assert restarted.store.one("SELECT COUNT(*) n FROM memories")["n"] == 2
                 assert restarted.store.one("SELECT COUNT(*) n FROM memory_revisions")["n"] == 1
-                outbox = restarted.store.rows("SELECT content_json,state FROM outbox "
-                    "WHERE origin_event_id=?", (source["event_id"],))
+                outbox = restarted.store.rows((
+                    'SELECT content_json,state FROM outbox WHERE '
+                    'origin_event_id=%s'
+                ), (source["event_id"],))
                 assert len(outbox) == 1 and outbox[0]["state"] == "PENDING"
                 assert result["memory_id"] in outbox[0]["content_json"]
                 assert not restarted.store.rows("SELECT * FROM jobs WHERE state<>'SUCCEEDED'")
@@ -111,7 +113,7 @@ def test_correction_replay_rechecks_authority_and_cannot_recreate_erased_fact(
             if boundary == "forget":
                 assert "CONFIRMED" in await core.command_reply(job)
                 revised = core.store.one(
-                    "SELECT memory_id FROM memories WHERE supersedes_memory_id=?", (mid,),
+                    'SELECT memory_id FROM memories WHERE supersedes_memory_id=%s', (mid,),
                 )["memory_id"]
                 core.memory.decide(revised, "forget", core.clock())
             elif boundary == "stop":
@@ -128,7 +130,7 @@ def test_correction_replay_rechecks_authority_and_cannot_recreate_erased_fact(
                 assert failure.value.code == "JOB_LEASE_LOST"
             elif boundary == "expiry":
                 assert failure.value.code == "OWNER_AUTHORITY_EXPIRED"
-            assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+            assert not core.store.rows('SELECT * FROM outbox WHERE origin_event_id=%s',
                                        (source["event_id"],))
             if boundary == "forget":
                 assert core.store.one(

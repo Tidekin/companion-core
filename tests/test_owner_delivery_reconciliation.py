@@ -69,5 +69,5 @@ def test_native_resolution_rejects_changed_binding(core, tmp_path, mutation):
     proof["signature"] = key.sign(wire.signing_payload(proof)).hex()
     with pytest.raises(CoreError):
         reconciliation.prepare(core.store, core.settings, proof, core.clock())
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                            (proof["message_id"],))["state"] == "DELIVERY_UNCERTAIN"

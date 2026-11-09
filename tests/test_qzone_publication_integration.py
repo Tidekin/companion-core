@@ -33,7 +33,7 @@ async def retained_space_draft(core, entry, tmp_path):
     entry.runtime.stop()
     core.settings.life_loop = LifeLoopConfig(mode="SHADOW")
     core.settings.wake_enabled = True
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+    conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                  (event["event_id"],))["conversation_id"]
     scope = LifeShadowApproval(scope="owner_private_life_shadow_v1", authorization_sha256="b" * 64,
         conversation_id=conversation, source_event_ids=[source["event_id"]], purposes=[],

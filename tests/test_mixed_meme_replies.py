@@ -103,7 +103,6 @@ def test_current_catalog_meme_is_sent_between_voice_and_text(core, tmp_path, mon
         meme_discovery_enabled=True,
         meme_discovery_daily_download_bytes=32 * 1024 * 1024,
         meme_discovery_daily_storage_bytes=8 * 1024 * 1024,
-        meme_caption_daily_micro_usd=50000,
         expression_selection_probability=1.0,
         voice=voice_config(reply={"mode": "model"}),
         segmented_reply=SegmentedReplyConfig(max_segments="unlimited", interval_ms=0),
@@ -194,8 +193,10 @@ def test_current_catalog_meme_is_sent_between_voice_and_text(core, tmp_path, mon
                         number = 2
                         current = await admit()
                         assert await worker.run_once("mixed-meme-final")
-                        before = core.store.rows("SELECT content_json,state FROM outbox "
-                                                 "WHERE origin_event_id=? ORDER BY segment_index",
+                        before = core.store.rows((
+                            'SELECT content_json,state FROM outbox WHERE '
+                            'origin_event_id=%s ORDER BY segment_index'
+                        ),
                                                  (current,))
                         assert [json.loads(row["content_json"]).get("reply_part", {}).get("kind")
                                 for row in before] == ["voice", "meme", "text"], (
@@ -214,8 +215,10 @@ def test_current_catalog_meme_is_sent_between_voice_and_text(core, tmp_path, mon
                         encoded = sends[2]["message"][0]["data"]["file"].removeprefix("base64://")
                         assert base64.b64decode(encoded) == asset
                         rows = core.store.rows(
-                            "SELECT state,attempt_count FROM outbox "
-                            "WHERE origin_event_id=? ORDER BY segment_index",
+                            (
+                                'SELECT state,attempt_count FROM outbox WHERE'
+                                ' origin_event_id=%s ORDER BY segment_index'
+                            ),
                             (current,),
                         )
                         assert rows == [{"state": "SENT", "attempt_count": 1}] * 3

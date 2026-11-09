@@ -126,7 +126,7 @@ async def run_with_retries(core, label, job_id):
     await core.run_once(label, job_id=job_id)
     for _ in range(3):
         job = core.store.one(
-            "SELECT state,last_error_code,next_attempt_at FROM jobs WHERE job_id=?", (job_id,)
+            "SELECT state,last_error_code,next_attempt_at FROM jobs WHERE job_id=%s", (job_id,)
         )
         if job["state"] != "RETRY_WAIT" or job["last_error_code"] != "MODEL_RETRYABLE":
             return
@@ -194,18 +194,18 @@ class Harness:
         s, at = self.core.store, self.core.clock()
         job = s.one(
             "SELECT j.*,e.conversation_id,e.body_json,e.trace_id FROM jobs j JOIN"
-            " events e USING(event_id) WHERE job_id=?",
+            " events e USING(event_id) WHERE job_id=%s",
             (admitted["job_id"],),
         )
         # Fixture import: supplied assistant text is not a generated/provider/QQ receipt.
         with s.transaction():
             message = enqueue(s, event_id, job["conversation_id"], turn["助手回复"], at)
             s.execute(
-                "UPDATE outbox SET state='SENT',sent_at=?,updated_at=? WHERE message_id=?",
+                "UPDATE outbox SET state='SENT',sent_at=%s,updated_at=%s WHERE message_id=%s",
                 (at, at, message),
             )
             s.execute(
-                "UPDATE jobs SET state='SUCCEEDED',updated_at=? WHERE job_id=?",
+                "UPDATE jobs SET state='SUCCEEDED',updated_at=%s WHERE job_id=%s",
                 (at, admitted["job_id"]),
             )
         self.turn_ids.add(event_id)
@@ -241,7 +241,7 @@ class Harness:
         s = self.core.store
         return digest(
             {
-                table: s.rows(f"SELECT * FROM {table} ORDER BY rowid")
+                table: s.rows(f"SELECT * FROM {table} ORDER BY record_sequence")
                 for table in (
                     "memories",
                     "memory_evidence",
@@ -264,18 +264,18 @@ class Harness:
         assert all(row["event_id"] in self.turn_ids for row in active)
         assert all(row["occurred_at"] <= core.clock() for row in active)
         before_memory = self.memory_fingerprint()
-        corpus_summaries = s.rows("SELECT * FROM conversation_summaries ORDER BY rowid")
-        corpus_episodes = s.rows("SELECT * FROM episodes ORDER BY rowid")
+        corpus_summaries = s.rows("SELECT * FROM conversation_summaries ORDER BY record_sequence")
+        corpus_episodes = s.rows("SELECT * FROM episodes ORDER BY record_sequence")
         corpus_replies = s.rows(
             "SELECT o.* FROM outbox o JOIN events e ON e.event_id=o.origin_event_"
-            "id WHERE e.redacted=0 ORDER BY o.rowid"
+            "id WHERE e.redacted=0 ORDER BY o.record_sequence"
         )
         usage_before = {r["request_id"] for r in s.rows("SELECT request_id FROM model_usage")}
         admitted, event_id = self.ingest(q["question"], "exam-" + q["id"].replace("/", "-"))
-        s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (event_id,))
+        s.execute("UPDATE events SET memory_processed=1 WHERE event_id=%s", (event_id,))
         job = s.one(
             "SELECT j.*,e.conversation_id,e.body_json,e.trace_id FROM jobs j JOIN"
-            " events e USING(event_id) WHERE job_id=?",
+            " events e USING(event_id) WHERE job_id=%s",
             (admitted["job_id"],),
         )
         # Native history nomination, independently saved before any model answer.
@@ -287,11 +287,11 @@ class Harness:
         await run_with_retries(core, "public-memory-exam", admitted["job_id"])
         job = s.one(
             "SELECT j.*,e.conversation_id,e.body_json,e.trace_id FROM jobs j JOIN"
-            " events e USING(event_id) WHERE job_id=?",
+            " events e USING(event_id) WHERE job_id=%s",
             (admitted["job_id"],),
         )
         parts = s.rows(
-            "SELECT content_json,state FROM outbox WHERE origin_event_id=? ORDER BY rowid",
+            "SELECT content_json,state FROM outbox WHERE origin_event_id=%s ORDER BY record_sequence",
             (event_id,),
         )
         answer = "\n".join(json.loads(p["content_json"]).get("text", "") for p in parts)
@@ -340,7 +340,7 @@ class Harness:
             raise RuntimeError(
                 "NATIVE_EXAM_NONTERMINAL:" + job["state"] + ":" + str(job["last_error_code"])
             )
-        with s.transaction():
+        with s.transaction(control_write=True):
             core.ledger.expire_events(s, [event_id], core.clock())
             # Restore only the pre-exam fictional fixture summary snapshot. Native
             # erasure conservatively clears conversation-wide summaries. Money,
@@ -349,22 +349,22 @@ class Harness:
                 assert reply["origin_event_id"] in self.turn_ids
                 assert (
                     s.one(
-                        "SELECT redacted FROM events WHERE event_id=?", (reply["origin_event_id"],)
+                        "SELECT redacted FROM events WHERE event_id=%s", (reply["origin_event_id"],)
                     )["redacted"]
                     == 0
                 )
                 s.execute(
-                    "UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+                    "UPDATE outbox SET content_json=%s,content_sha256=%s WHERE message_id=%s",
                     (reply["content_json"], reply["content_sha256"], reply["message_id"]),
                 )
             for episode in corpus_episodes:
                 assert not s.one(
                     "SELECT 1 FROM episode_events x JOIN events e USING(event_id) WHERE x"
-                    ".episode_id=? AND e.redacted=1",
+                    ".episode_id=%s AND e.redacted=1",
                     (episode["episode_id"],),
                 )
                 s.execute(
-                    "UPDATE episodes SET title=?,summary=?,status=? WHERE episode_id=?",
+                    "UPDATE episodes SET title=%s,summary=%s,status=%s WHERE episode_id=%s",
                     (
                         episode["title"],
                         episode["summary"],
@@ -374,19 +374,19 @@ class Harness:
                 )
             for summary in corpus_summaries:
                 assert all(
-                    s.one("SELECT redacted FROM events WHERE event_id=?", (summary[k],))["redacted"]
+                    s.one("SELECT redacted FROM events WHERE event_id=%s", (summary[k],))["redacted"]
                     == 0
                     for k in ("first_event_id", "last_event_id")
                 )
                 if not s.one(
-                    "SELECT 1 FROM conversation_summaries WHERE summary_id=?",
+                    "SELECT 1 FROM conversation_summaries WHERE summary_id=%s",
                     (summary["summary_id"],),
                 ):
                     s.insert("conversation_summaries", **summary)
         assert self.memory_fingerprint() == before_memory, "EXAM_CHANGED_PERSISTENT_MEMORY"
-        assert s.one("SELECT redacted FROM events WHERE event_id=?", (event_id,))["redacted"] == 1
+        assert s.one("SELECT redacted FROM events WHERE event_id=%s", (event_id,))["redacted"] == 1
         if skipped:
-            terminal = s.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],))["state"]
+            terminal = s.one("SELECT state FROM jobs WHERE job_id=%s", (job["job_id"],))["state"]
             assert terminal == "CANCELLED", "NATIVE_EXAM_NOT_CANCELLED_BY_ERASURE"
             record.update(
                 status=terminal, native_state_before_skip=job["state"], infrastructure_error=True
@@ -399,7 +399,7 @@ class Harness:
                 "erased": True,
                 "memory_unchanged": True,
                 "budget_usage_retained": all(
-                    s.one("SELECT 1 FROM model_usage WHERE request_id=?", (u["request_id"],))
+                    s.one("SELECT 1 FROM model_usage WHERE request_id=%s", (u["request_id"],))
                     for u in usages
                 ),
             },

@@ -8,12 +8,12 @@ def policy(core, **changes):
     paid = core.settings.paid_model
     custody = paid_budget.journal(core.store, paid, allow_settlement=True)
     prior = custody["cumulative"]
-    caps = dict(micro_usd=10_000_000, model_attempts=100, input_tokens=1_000_000,
+    caps = dict(model_attempts=100, input_tokens=1_000_000,
                 output_tokens=1_000_000, owner_inputs=100, send_attempts=100)
     inventory = changes.get("legacy_window_inventory")
     if inventory is not None:
         inventory = cumulative.LegacyWindowInventory.model_validate(inventory)
-    values = dict(version=1, account_ref="b" * 64, policy_id=uid("quota"),
+    values = dict(version=2, account_ref="b" * 64, policy_id=uid("quota"),
         approval_sha256=cumulative.digest(uid("approval")), account_evidence_sha256="d" * 64,
         credential_sha256=cumulative.credential(core.settings, "b" * 64),
         key_ownership_sha256="e" * 64, provider=paid.provider, currency=paid.currency,

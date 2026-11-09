@@ -62,7 +62,7 @@ def test_fixed_candidate_timing(core, events, check_at, eligible, record_propert
     core.clock.advance(check_at - at)
     job = core.life_topics.schedule()
     material = json.loads(core.store.one(
-        "SELECT e.body_json FROM jobs j JOIN events e USING(event_id) WHERE j.job_id=?",
+        'SELECT e.body_json FROM jobs j JOIN events e USING(event_id) WHERE j.job_id=%s',
         (job,))["body_json"])["life_material"] if job else {}
     allowed = ("PRIVATE_MESSAGE_DRAFT" in material.get("allowed_destinations", [])
                and "evt_test_1" in material["source_events"])
@@ -76,7 +76,7 @@ def test_fixed_candidate_timing(core, events, check_at, eligible, record_propert
             "source_event_ids": ["evt_test_1"], "reason": "文件名有可核对的线索", "text": POINT,
         }, ensure_ascii=False)
         assert run(core.run_once("replay", job_id=job))
-        assert core.store.one("SELECT text FROM life_activity_results WHERE job_id=?",
+        assert core.store.one('SELECT text FROM life_activity_results WHERE job_id=%s',
                               (job,))["text"] == POINT
     assert allowed is eligible
 
@@ -94,7 +94,7 @@ def test_share_context_uses_actual_dialogue_and_chat_guidance(core):
     assert "光谱那一段很有意思" in messages[1]["content"]
     assert "解释恒星颜色" in messages[1]["content"]
     assert json.loads(messages[-1]["content"])["text"] == event.payload.text
-    assert core.store.one("SELECT 1 FROM job_sources WHERE job_id=? AND event_id='evt_test_22'",
+    assert core.store.one("SELECT 1 FROM job_sources WHERE job_id=%s AND event_id='evt_test_22'",
                           (job,))
 
 
@@ -114,7 +114,7 @@ def test_three_internal_choices_leave_contact_capacity_for_a_fourth_item(core):
         }, ensure_ascii=False)
         job = core.life_topics.schedule()
         assert job and run(core.run_once("replay", job_id=job))
-        assert core.store.one("SELECT action FROM life_activity_results WHERE job_id=?",
+        assert core.store.one('SELECT action FROM life_activity_results WHERE job_id=%s',
                               (job,))["action"] == action
     assert len(core.model.calls) == 4
     assert proactive_counts(core.store, core.settings, core.clock()) == (0, False)
@@ -171,7 +171,7 @@ def test_shared_time_and_sentence_frame_do_not_postpone_topic(core, first, secon
     old = core.store.one("SELECT * FROM life_topics")
     core.clock.advance(60)
     owner(core, 2, second)
-    assert core.store.one("SELECT * FROM life_topics WHERE topic_id=?", (old["topic_id"],)) == old
+    assert core.store.one('SELECT * FROM life_topics WHERE topic_id=%s', (old["topic_id"],)) == old
     assert core.store.one("SELECT COUNT(*) n FROM life_topics")["n"] == 2
 
 
@@ -191,20 +191,22 @@ def test_two_settled_preemptions_park_until_related_input(core):
     core.clock.advance(120)
     for index, unrelated in enumerate([BREAKFAST, "深夜听了爵士乐"], 2):
         job = core.life_topics.schedule()
-        assert core.store.one("SELECT topic_id FROM life_activity_results WHERE job_id=?",
+        assert core.store.one('SELECT topic_id FROM life_activity_results WHERE job_id=%s',
                               (job,))["topic_id"] == topic
         core.model.callback = lambda i=index, msg=unrelated: ingest(core, i, msg)
         assert run(core.run_once("replay", job_id=job))
         core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE kind='chat'")
         core.life_topics.synchronize()
         core.clock.advance(61)
-    state = core.store.one("SELECT state,reason_code FROM life_topics WHERE topic_id=?", (topic,))
+    state = core.store.one('SELECT state,reason_code FROM life_topics WHERE topic_id=%s', (topic,))
     assert state == {"state": "WAITING", "reason_code": "WAITING_FOR_NEW_EVIDENCE"}
-    outcomes = core.store.rows("SELECT state FROM life_activity_results WHERE topic_id=?", (topic,))
+    outcomes = core.store.rows((
+        'SELECT state FROM life_activity_results WHERE topic_id=%s'
+    ), (topic,))
     assert outcomes == [{"state": "INVALIDATED"}] * 2
     assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}] * 2
     owner(core, 4, "导出文件的问题有个新线索")
-    assert core.store.one("SELECT decision_count FROM life_topics WHERE topic_id=?", (topic,)) == {
+    assert core.store.one('SELECT decision_count FROM life_topics WHERE topic_id=%s', (topic,)) == {
         "decision_count": 1}
     core.clock.advance(120)
     core.life_topics.synchronize()

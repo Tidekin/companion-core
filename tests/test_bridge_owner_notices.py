@@ -50,7 +50,7 @@ def test_native_recall_queue_reaches_real_api_and_erases_original_input(
                     runtime.stop()
                     assert await owner_notices.flush_one(runtime, client)
                 runtime.verify(active=False)
-                stored = core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                stored = core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                         (event["event_id"],))
                 if early:
                     assert stored is None

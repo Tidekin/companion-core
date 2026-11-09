@@ -23,6 +23,7 @@ from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.sdk_reader_fixture import answer
 from tests.support.core_http import real_core_http
 from tests.support.native_account_host import configure_host
@@ -84,7 +85,7 @@ async def action_then_chat(core, tmp_path, monkeypatch, *, outcome="SUCCEEDED", 
                 assert len(native) == 1
                 expected = {"SUCCEEDED": "SENT", "REJECTED": "DELIVERY_UNCERTAIN",
                             "UNKNOWN": "DELIVERY_UNCERTAIN"}[outcome]
-                assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+                assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                                       (frozen.message_id,))["state"] == expected
                 if outcome != "SUCCEEDED":
                     yield frozen, None, cfg, native
@@ -97,7 +98,7 @@ async def action_then_chat(core, tmp_path, monkeypatch, *, outcome="SUCCEEDED", 
                                         peer=("127.0.0.1", 3001))
                 assert await runtime.flush_one(client)
                 job = core.claim_job("profile-result-chat") if claim else core.store.one(
-                    "SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event["event_id"],))
+                    "SELECT * FROM jobs WHERE event_id=%s AND kind='chat'", (event["event_id"],))
                 assert job["event_id"] == event["event_id"]
                 yield frozen, job, cfg, native
 
@@ -107,14 +108,13 @@ def test_chat_receives_actual_profile_result_even_while_background_work_yields(
 ):
     async def scenario():
         async with action_then_chat(core, tmp_path, monkeypatch) as (_, job, _, _):
-            before = (core.store.db.total_changes,
-                      len(core.store.rows("SELECT * FROM model_usage")))
-            reference = account_action_context.reference(core, job)
+            before = logical_state(core.store)
+            with core.store.read_snapshot():
+                reference = account_action_context.reference(core, job)
             assert reference is not None
             assert reference["data"]["records"][0]["result"] == "SUCCEEDED"
             assert reference["data"]["records"][0]["value"] == "星语"
-            assert (core.store.db.total_changes, len(core.store.rows("SELECT * FROM model_usage"))
-                    ) == before
+            assert logical_state(core.store) == before
             snapshots = []
             messages = core.context(job, memories=[], snapshots=snapshots)
             text = json.dumps(messages, ensure_ascii=False)
@@ -122,7 +122,7 @@ def test_chat_receives_actual_profile_result_even_while_background_work_yields(
             assert account_action_context.HEADING in text and "SUCCEEDED" in text
             assert any(s["kind"] == "account_actions" for s in snapshots)
             assert {"evt_test_800", "evt_test_801"} <= {r["event_id"] for r in core.store.rows(
-                "SELECT event_id FROM job_sources WHERE job_id=?", (job["job_id"],))}
+                'SELECT event_id FROM job_sources WHERE job_id=%s', (job["job_id"],))}
     run(scenario())
 
 
@@ -165,16 +165,18 @@ def test_invalidated_receipt_or_source_cannot_survive_model_await(
                 receipt = json.loads(row["receipt_json"])
                 receipt["native_retcode" if change == "receipt" else "lease_token"] = (
                     1400 if change == "receipt" else "lease_another")
-                core.store.execute("UPDATE social_autonomy_reservations SET receipt_json=?,"
-                    "receipt_sha256=?", (json.dumps(receipt), _sha(receipt)))
+                core.store.execute((
+                    'UPDATE social_autonomy_reservations SET '
+                    'receipt_json=%s,receipt_sha256=%s'
+                ), (json.dumps(receipt), _sha(receipt)))
             elif change == "payload":
-                core.store.execute("UPDATE outbox SET content_json='{}' WHERE message_id=?",
+                core.store.execute("UPDATE outbox SET content_json='{}' WHERE message_id=%s",
                                    (frozen.message_id,))
             elif change == "source":
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_800'",
+                core.store.execute("UPDATE events SET body_json=%s WHERE event_id='evt_test_800'",
                                    (json.dumps({"text": "changed evidence"}),))
             else:
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, ["evt_test_800"], core.clock())
             with pytest.raises(CoreError):
                 core._check_context_snapshots(job, snapshots)
@@ -186,7 +188,9 @@ def test_original_receipt_survives_native_authority_successor(core, tmp_path, mo
     async def scenario():
         async with action_then_chat(core, tmp_path, monkeypatch) as (frozen, job, _, _):
             view = owner_authority.current(core.store, core.settings, core.clock)
-            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job["job_id"],))
+            core.store.execute((
+                "UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s"
+            ), (job["job_id"],))
             stopped = owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                 operation_id="profile-history-stop", authority=view.authority.as_dict()))
             activate(core, view.policy, revision=stopped["authority"]["revision"],

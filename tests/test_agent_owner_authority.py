@@ -40,14 +40,14 @@ def test_prepared_tool_rechecks_native_authority_before_execution(owner_chat, bo
             operation_id="stop-sdk-tool-authority", authority=capture.authority))
     elif boundary == "revision":
         policy = owner_authority.current(core.store, core.settings, core.clock).policy
-        core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?",
+        core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=%s",
                            (job["job_id"],))
         activate(core, policy, revision=1, operation="revise-sdk-tool-authority")
     elif boundary == "lease":
-        core.store.execute("UPDATE jobs SET lease_token='different' WHERE job_id=?",
+        core.store.execute("UPDATE jobs SET lease_token='different' WHERE job_id=%s",
                            (job["job_id"],))
     else:
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (job["event_id"],))
+        core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (job["event_id"],))
     with pytest.raises(CoreError):
         asyncio.run(tools.tools["current_time"].function())
     assert not core.store.rows("SELECT * FROM model_usage")

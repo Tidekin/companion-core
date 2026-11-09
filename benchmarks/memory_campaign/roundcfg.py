@@ -20,7 +20,6 @@ if "scripts" in sys.modules and str(RUNNER / "scripts") not in list(
         getattr(sys.modules["scripts"], "__path__", [])):
     sys.modules["scripts"].__path__.append(str(RUNNER / "scripts"))
 
-ARMS = ("old", "new", "rag")
 DEFAULTS = {
     "workspace": "E:/Companion Core",
     "source_checkout": "E:/Companion Core/.local/worktrees/memory-recall-probes-20261102",
@@ -49,6 +48,8 @@ DEFAULTS = {
             "qwen_rate_cny_per_million": 5, "qwen_key_file": None},
     # Zero-material controls answered by the RAG generator (graded blind, reported apart).
     "controls": [],
+    "references": ["rag"],
+    "postgres": {"connections_file": ""},
     # judges: one name per vote (default: the provider model for every vote). anchors: a
     # jsonl of answers with known verdicts mixed into every batch; a batch that misjudges
     # one is discarded and its keys re-judged (make_anchors.py builds the file).
@@ -152,8 +153,12 @@ class Round:
 
     @property
     def graded_arms(self):
-        """Every answer set that is blind-graded: the compared arms, then the controls."""
-        return ARMS + self.controls
+        """Grade only the selected native runs, requested references and controls."""
+        return tuple(self.cfg["arms"]) + self.references + self.controls
+
+    @property
+    def references(self):
+        return tuple(self.cfg["references"])
 
     @property
     def answers_total(self):

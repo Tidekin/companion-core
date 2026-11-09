@@ -38,7 +38,10 @@ def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purpos
     if private:
         source_id = accepted["event_id"]
     else:
-        existing = core.store.one("SELECT request_id FROM exploration_requests ORDER BY rowid DESC")
+        existing = core.store.one(
+            'SELECT request_id FROM exploration_requests ORDER BY '
+            'record_sequence DESC'
+        )
         if existing:
             request_id = existing["request_id"]
         else:
@@ -65,7 +68,7 @@ def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purpos
         source_sha256=source["source_sha256"], expires_at=after(core.clock(), 3 * 86400),
         audience="owner_only", owner_qq_id=core.settings.owner_qq_id,
     )
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+    conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                   (accepted["event_id"],))["conversation_id"]
     scope = LifeShadowApproval(
         scope="owner_private_life_shadow_v1", authorization_sha256="c" * 64,
@@ -87,13 +90,13 @@ def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purpos
     job_id = core.life_topics.schedule()
     assert job_id
     assert run(core.run_once(job_id=job_id))
-    result = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (job_id,))
+    result = core.store.one('SELECT * FROM life_activity_results WHERE job_id=%s', (job_id,))
     assert result["state"] == "SHADOW", core.store.rows("SELECT * FROM jobs")
     return job_id, policy, ref, source_id
 
 
 def request(core, job_id, ref, action="qzone.publish"):
-    text = core.store.one("SELECT text FROM life_activity_results WHERE job_id=?",
+    text = core.store.one('SELECT text FROM life_activity_results WHERE job_id=%s',
                           (job_id,))["text"]
     return LifeConsumeRequest(authority=ref, action=action,
                               expected_content_sha256=paid_budget.sha({"text": text}))

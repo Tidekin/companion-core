@@ -82,7 +82,21 @@ def _owner_id(store, job, row):
 def _reply_id(store, job, message_id):
     from companion.transport import digest
 
-    row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    row = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+        'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+        'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+        'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+        'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+        'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+        'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+        'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+        'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at AS '
+        'next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+        'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+        'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+        'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+        'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id = '
+        '%s', (message_id,))
     if (not row or row["state"] != "SENT" or row["action_type"] != "qq.private.reply"
             or row["conversation_id"] != job["conversation_id"]
             or not row["provider_message_id"] or not row["content_sha256"]
@@ -106,7 +120,15 @@ def target(store, settings, clock, job, chosen):
 
     if settings.quote_policy == "never" or job["kind"] != "chat":
         return None
-    current = store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
+    current = store.one('SELECT events.event_id AS event_id, events.schema_version AS '
+        'schema_version, events.source AS source, events.source_event_id AS source_event_id, '
+        'events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type '
+        'AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, '
+        'events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS '
+        'trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+        'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+        'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
+        '%s', (job["event_id"],))
     if not current:
         return None
     sources = owner_input.history_sources(store, settings, clock, job)
@@ -147,10 +169,12 @@ def self_quote_indices(store, settings, job, body):
     from companion.transport import digest
 
     current = store.one(
-        "SELECT e.rowid,e.conversation_id,e.actor_id,e.privacy_scope,e.redacted,e.ingested_at,"
-        "e.source_event_id,"
-        "c.scope,c.owner_actor_id FROM events e JOIN conversations c USING(conversation_id) "
-        "WHERE e.event_id=?", (job["event_id"],),
+        (
+            'SELECT e.record_sequence AS rowid,e.conversation_id,e.actor_id,e.priva'
+            'cy_scope,e.redacted,e.ingested_at,e.source_event_id,c.scope,c.owner_ac'
+            'tor_id FROM events e JOIN conversations c USING(conversation_id) WHERE'
+            ' e.event_id=%s'
+        ), (job["event_id"],),
     )
     if not current or current["redacted"] or (
         current["actor_id"], current["privacy_scope"], current["scope"],
@@ -173,11 +197,26 @@ def self_quote_indices(store, settings, job, body):
             or nodes[0]["path"] not in ([], [0])):
             continue
         rows = store.rows(
-            "SELECT o.*,e.rowid AS source_rowid,e.redacted,e.actor_id,e.privacy_scope,"
-            "e.source,e.source_event_id,e.conversation_id AS source_conversation_id "
-            "FROM outbox o "
-            "JOIN events e ON e.event_id=o.origin_event_id "
-            "WHERE o.conversation_id=? AND o.provider_message_id=? LIMIT 2",
+            (
+                (
+                    'SELECT o.message_id, o.origin_event_id, '
+                    'o.conversation_id, o.action_type, o.content_json, '
+                    'o.content_sha256, o.approval_id, o.state, '
+                    'o.delivery_key, o.lease_owner, o.lease_until, '
+                    'o.attempt_count, o.provider_message_id, '
+                    'o.last_error_code, o.created_at, o.updated_at, '
+                    'o.sent_at, o.lease_token, o.next_attempt_at, '
+                    'o.reply_group_id, o.segment_index, o.segment_count, '
+                    'o.reply_group_sha256, o.segment_interval_ms, '
+                    'o.delivery_lane, o.native_ack_json, '
+                    'o.authority_json,e.record_sequence AS source_rowid,e.red'
+                    'acted,e.actor_id,e.privacy_scope,e.source,e.source_event'
+                    '_id,e.conversation_id AS source_conversation_id FROM '
+                    'outbox o JOIN events e ON e.event_id=o.origin_event_id '
+                    'WHERE o.conversation_id=%s AND o.provider_message_id=%s '
+                    'LIMIT 2'
+                )
+            ),
             (current["conversation_id"], segment["reference"]),
         )
         if len(rows) != 1:
@@ -206,8 +245,10 @@ def _reply_group(store, row):
     if not row["reply_group_id"] or (row["segment_count"] or 1) < 2:
         return None
     parts = store.rows(
-        "SELECT state,content_json FROM outbox WHERE reply_group_id=? "
-        "ORDER BY segment_index LIMIT 33", (row["reply_group_id"],))
+        (
+            'SELECT state,content_json FROM outbox WHERE reply_group_id=%s ORDER BY'
+            ' segment_index NULLS FIRST LIMIT 33'
+        ), (row["reply_group_id"],))
     if len(parts) != row["segment_count"] or any(part["state"] != "SENT" for part in parts):
         return None
     text = "\n".join(_bubble_text(json.loads(part["content_json"])["text"]) for part in parts)

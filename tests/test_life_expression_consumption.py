@@ -25,6 +25,18 @@ from tests.support.owner_authority import activate
 from tests.support.social_owner_authority import stop
 
 
+def test_diary_save_refuses_an_ordinary_transaction_before_writing(core, tmp_path):
+    core.settings.diary_enabled = True
+    job, _, authority, _ = prepared(core, tmp_path, destination="PRIVATE_DIARY", purposes=["diary"])
+    body = request(core, job, authority, "diary.save")
+    with core.store.transaction():
+        writes = core.store.change_token()["writes"]
+        with pytest.raises(RuntimeError, match="ERASURE_CONTROL_WRITE_REQUIRED"):
+            core.life_topics.consume(job, body, diary=core.diary)
+        assert core.store.change_token()["writes"] == writes
+    assert not core.store.rows("SELECT * FROM diary_entries")
+
+
 def test_private_life_segments_preserve_the_retained_draft_and_recheck_every_part(core, tmp_path):
     from companion import notices
 
@@ -49,7 +61,7 @@ def test_private_life_segments_preserve_the_retained_draft_and_recheck_every_par
                                         core.clock()) is None
     # A matching per-message digest must not hide a changed member of the frozen draft.
     changed = {"text": "被替换的尾段"}
-    core.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
+    core.store.execute('UPDATE outbox SET content_json=%s,content_sha256=%s WHERE message_id=%s',
                        (encode(changed), paid_budget.sha(changed), rows[-1]["message_id"]))
     assert notices.delivery_problem(core.store, core.settings, rows[0]["message_id"],
                                     core.clock()) is not None
@@ -103,11 +115,11 @@ def test_consumption_revalidates_exact_draft_and_native_authority(core, tmp_path
     if mutation == "body":
         core.store.execute("UPDATE life_activity_results SET text='modified'")
     elif mutation == "source":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
     elif mutation == "fiction":
         core.store.execute("UPDATE life_activity_results SET proposal_json="
-                           "json_set(proposal_json,'$.fiction',json('true'))")
+                           "jsonb_set(proposal_json::jsonb,'{fiction}','true')::text")
     elif mutation == "revision":
         activate(core, policy, revision=1, operation="revise-before-consume")
     else:
@@ -128,11 +140,11 @@ def test_consumed_public_plan_rechecks_before_native_dispatch(core, tmp_path, mu
     token = uid("lease")
     module = SocialAutonomy(core.store, core.settings, clock=core.clock)
     with core.store.transaction():
-        core.store.execute("UPDATE outbox SET state='LEASED',lease_token=?,lease_until=?",
+        core.store.execute("UPDATE outbox SET state='LEASED',lease_token=%s,lease_until=%s",
                            (token, after(core.clock(), 60)))
         module.validate_delivery(message_id, token)
     if mutation == "erase":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
     elif mutation == "stop":
         stop(core, ref)
@@ -159,8 +171,10 @@ def test_expired_private_life_draft_retires_instead_of_failing_every_lease(core,
     core.life_topics.consume(job_id, request(core, job_id, ref, "qq.private.proactive"))
     usage = core.store.rows("SELECT * FROM model_usage")
     expires = core.store.one(
-        "SELECT t.expires_at FROM life_topics t JOIN life_activity_results r USING(topic_id) "
-        "WHERE r.job_id=?", (job_id,))["expires_at"]
+        (
+            'SELECT t.expires_at FROM life_topics t JOIN '
+            'life_activity_results r USING(topic_id) WHERE r.job_id=%s'
+        ), (job_id,))["expires_at"]
     core.clock.advance((datetime.fromisoformat(expires)
                         - datetime.fromisoformat(core.clock())).total_seconds() + 1)
     lease = LeaseRequest(worker_id="owner-bridge", authority=ref)

@@ -47,7 +47,7 @@ def prepared(core, monkeypatch, *, make_reply=True, record_count=1,
     from tests.voice_owner_fixtures import native_reply, native_voice
 
     capture, capture_key, _ = native_voice(
-        core, Path(core.settings.database).parent, config=voice_config(**updates),
+        core, Path(core.settings.state_directory), config=voice_config(**updates),
         record=bool(record_count), record_count=record_count, expires_seconds=expires_seconds,
     )
     message_id = native_reply(core, TEXT) if make_reply else None
@@ -62,7 +62,7 @@ def create_tts(core, jobs, message_id):
 
 def create_asr(core, jobs, event_id, key, *, data=None, partial=False, proof_change=None):
     data = data if data is not None else wav_bytes(0.125)
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (event_id,))
     proof = sign_asr_proof(
         key,
         authority=voice_authority.current(

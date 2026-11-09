@@ -1,4 +1,7 @@
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import datetime
 
 import pytest
@@ -10,8 +13,10 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
 from companion.core import Core
 from companion.goals import GoalProposal
+from companion.store import Store, after
 from companion.transport import begin_send, delivery_result, lease_deliveries, reconcile_delivery
 from tests.conftest import ingest, run
+from tests.postgres_fixture import isolated_database
 from tests.support.goals import result_for, setup_goal
 from tests.support.observation_capture import observation
 
@@ -117,6 +122,40 @@ def test_lost_goal_lease_rejects_old_worker_output(core):
     assert core.goals.finish(new, result)["state"] == "DONE"
 
 
+@pytest.mark.parametrize("success", [True, False])
+def test_expiry_skips_goal_while_the_worker_finishes_its_step(core, monkeypatch, success):
+    goal = setup_goal(core, commitment=True)
+    step = core.goals.claim()
+    result = result_for(core, goal)
+    written, release = threading.Event(), threading.Event()
+    execute = core.store.execute
+
+    def pause_after_step(statement, parameters=()):
+        count = execute(statement, parameters)
+        if "UPDATE goal_steps SET state" in str(statement) and not written.is_set():
+            written.set()
+            assert release.wait(15)
+        return count
+
+    def finish():
+        if success:
+            return core.goals.finish(step, result)
+        return core.goals.fail(step, "FETCH_TIMEOUT")
+
+    # The second worker observes the deadline crossing during the first transaction.
+    later = after(core.clock(), 86401)
+    with Core(core.settings, core.model, lambda: later) as other, ThreadPoolExecutor(2) as pool:
+        monkeypatch.setattr(core.store, "execute", pause_after_step)
+        first = pool.submit(finish)
+        try:
+            assert written.wait(10)
+            assert pool.submit(other.goals.claim).result(timeout=10) is None
+        finally:
+            release.set()
+        assert first.result(timeout=10)
+    assert core.goals.get(goal)["state"] == ("DONE" if success else "FAILED")
+
+
 def test_commitment_ignores_temporary_affect_and_autonomy_pause(core):
     self_goal = setup_goal(core)
     core.goals.accept(self_goal)
@@ -194,27 +233,22 @@ def test_goal_source_forget_and_restore_erase_scope_outcomes_and_interest(core, 
     core.goals.accept(goal)
     step = core.goals.claim()
     core.goals.finish(step, result_for(core, goal))
-    key, archive, destination = (
-        Fernet.generate_key(),
-        tmp_path / "goals.enc",
-        tmp_path / "restored.db",
-    )
+    key, archive = Fernet.generate_key(), tmp_path / "goals.enc"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
-    )
-    try:
-        for instance in (core, restored):
-            assert instance.goals.recent() == []
-            raw = instance.store.one("SELECT * FROM goals")
-            assert raw["topic"] == "" and raw["scope_json"] == "{}"
-            assert not instance.store.rows("SELECT * FROM traits")
-            assert instance.observations.recent() == []
-    finally:
-        restored.store.close()
+    with isolated_database() as database:
+        state = tmp_path / "restored-state"
+        restore(archive, database, key, core.settings.erasure_ledger, state_directory=state)
+        settings = core.settings.model_copy(update={"database": database,
+                                                    "state_directory": str(state)})
+        with Core(settings, clock=core.clock) as restored:
+            for instance in (core, restored):
+                assert instance.goals.recent() == []
+                raw = instance.store.one("SELECT * FROM goals")
+                assert raw["topic"] == "" and raw["scope_json"] == "{}"
+                assert not instance.store.rows("SELECT * FROM traits")
+                assert instance.observations.recent() == []
 
 
 def test_wake_dedup_cooldown_and_daily_limit_survive_restart(core):
@@ -297,24 +331,39 @@ def test_restored_pending_commitment_feedback_is_never_blindly_replayed(core, tm
     core.goals.finish(step, result_for(core, goal))
     job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
     assert job and run(core.run_once(job_id=job["job_id"]))
-    key, archive, destination = (
-        Fernet.generate_key(),
-        tmp_path / "delivery.enc",
-        tmp_path / "restored.db",
-    )
+    key, archive = Fernet.generate_key(), tmp_path / "delivery.enc"
     backup(core.settings.database, archive, key)
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), clock=core.clock
-    )
-    try:
-        assert (
-            lease_deliveries(
-                restored.store, restored.settings, LeaseRequest(worker_id="bridge"), core.clock()
-            )["items"]
-            == []
-        )
-        assert restored.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
-        assert restored.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
-    finally:
-        restored.store.close()
+    with isolated_database() as database:
+        state = tmp_path / "restored-state"
+        restore(archive, database, key, core.settings.erasure_ledger, state_directory=state)
+        settings = core.settings.model_copy(update={"database": database,
+                                                    "state_directory": str(state)})
+        with Core(settings, clock=core.clock) as restored:
+            assert lease_deliveries(restored.store, restored.settings,
+                                    LeaseRequest(worker_id="bridge"), core.clock())["items"] == []
+            assert restored.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
+            assert restored.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
+
+
+def test_expiry_skips_locked_goals_and_rolls_back_failed_feedback(core, monkeypatch):
+    goal = setup_goal(core, commitment=True)
+    core.clock.advance(86401)
+    with (closing(Store(core.database, core.settings.state_directory)) as owner,
+          owner.transaction()):
+        owner.one("SELECT goal_id FROM goals WHERE goal_id=%s FOR UPDATE", (goal,))
+        assert core.goals.expire_commitments() == 0
+    before = core.goals.get(goal)
+
+    def fail(*args):
+        raise RuntimeError("feedback unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(core.goals, "feedback", fail)
+        with pytest.raises(RuntimeError, match="feedback unavailable"):
+            core.goals.expire_commitments()
+    assert core.goals.get(goal) == before
+    assert core.goals.expire_commitments() == 1
+    assert core.goals.expire_commitments() == 0
+    assert core.store.one("SELECT failure_code FROM commitments") == {
+        "failure_code": "DEADLINE_EXCEEDED",
+    }

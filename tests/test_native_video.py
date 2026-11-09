@@ -29,7 +29,7 @@ def test_native_sdk_motion_tool_uses_real_video_and_original_ledger(core, tmp_pa
             client, config, plan,
         ):
             event = await animation(core, client, config, plan, tmp_path, mime)
-            job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (event["event_id"],))
             config_path, output = tmp_path / "video-worker.pickle", tmp_path / "video-wire.json"
             config_path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
                 responses(), "SUCCEEDED", str(output))))
@@ -58,7 +58,10 @@ def test_native_sdk_motion_tool_uses_real_video_and_original_ledger(core, tmp_pa
                 colors = [frame.to_image().getpixel((2, 2)) for frame in (frames[0], frames[-1])]
                 assert colors[0] != colors[1]
             assert "one_animation_cycle" in encode(requests[2]["messages"])
-            assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+            assert core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            ) == [
                 {"scenario": "chat", "state": "SETTLED"},
                 {"scenario": "content_video", "state": "SETTLED"},
                 {"scenario": "chat", "state": "SETTLED"}]
@@ -83,7 +86,7 @@ def test_video_503_delivers_prepared_preview_without_repeating_io(core, tmp_path
             client, config, plan,
         ):
             event = await animation(core, client, config, plan, tmp_path, "image/gif")
-            job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (event["event_id"],))
             path, output = tmp_path / "worker.pickle", tmp_path / "requests.json"
             path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
                 [responses()[0], httpx.Response(503, json=body)], "SUCCEEDED", str(output))))
@@ -94,7 +97,7 @@ def test_video_503_delivers_prepared_preview_without_repeating_io(core, tmp_path
             assert process.returncode == 0, logs.decode(errors="replace")
             assert len(json.loads(output.read_text(encoding="utf-8"))) == 2
             usage = core.store.rows(
-                "SELECT scenario,state,billed_micro_usd FROM model_usage ORDER BY rowid")
+                'SELECT scenario,state,billed_micro_usd FROM model_usage ORDER BY record_sequence')
             assert [(r["scenario"], r["state"]) for r in usage] == [
                 ("chat", "SETTLED"), ("content_video", "SETTLED" if body else "UNKNOWN")]
             assert usage[1]["billed_micro_usd"] > 0

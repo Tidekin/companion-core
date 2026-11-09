@@ -34,17 +34,17 @@ def _lineage(store, job_id):
             raise ValueError("invalid caption ancestry")
         seen.add(job_id)
         row = store.one(
-            "SELECT c.job_id,c.request_sha256,c.asset_sha256,c.source_sha256,c.cache_key,"
-            "c.identity_json,c.usage_request_id,c.reuse_job_id,j.kind,j.event_id,j.state,"
-            "j.authority_json,j.last_error_code,e.source,e.event_type,e.actor_id,"
-            "v.scope,v.owner_actor_id FROM meme_captions c JOIN jobs j USING(job_id) "
-            "JOIN events e ON e.event_id=j.event_id JOIN conversations v "
-            "ON v.conversation_id=e.conversation_id WHERE c.job_id=?", (job_id,),
+            'SELECT c.job_id, c.request_sha256, c.asset_sha256, c.source_sha256, c.cache_key, '
+            'c.identity_json, c.usage_request_id, c.reuse_job_id, j.kind, j.event_id, j.state, '
+            'j.authority_json, j.last_error_code, e.source, e.event_type, e.actor_id, v.scope, '
+            'v.owner_actor_id FROM meme_captions AS c JOIN jobs AS j USING (job_id) JOIN events AS '
+            'e ON e.event_id = j.event_id JOIN conversations AS v ON v.conversation_id = '
+            'e.conversation_id WHERE c.job_id = %s', (job_id,),
         )
         if (not row or row["kind"] != "meme_caption" or row["source"] != "qq.onebot"
             or row["event_type"] != "message.received" or row["actor_id"] != "owner"
             or row["scope"] != "private" or row["owner_actor_id"] != "owner"
-            or not store.one("SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
+            or not store.one('SELECT 1 FROM job_sources WHERE job_id = %s AND event_id = %s',
                              (job_id, row["event_id"]))
             or any(not isinstance(row[k], str) or not SHA.fullmatch(row[k]) for k in (
                 "request_sha256", "asset_sha256", "source_sha256", "cache_key"))):
@@ -63,15 +63,15 @@ def _lineage(store, job_id):
 
 
 def _journals(store, nodes):
-    identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+    identity = store.one("SELECT value FROM runtime_meta WHERE key = 'model_budget_journal_id'")
     if not identity:
         raise ValueError("original journal identity missing")
     journals = {}
     for node in nodes:
         ref = AuthorityRef.from_dict(strict_json(node["authority_json"]))
-        original = store.one("SELECT grant_id,revision,policy_sha256,restore_generation,"
-                             "journal_path,journal_id FROM owner_authority_revisions "
-                             "WHERE grant_id=? AND revision=?", (ref.grant_id, ref.revision))
+        original = store.one('SELECT grant_id, revision, policy_sha256, restore_generation, '
+            'journal_path, journal_id FROM owner_authority_revisions WHERE grant_id = %s AND '
+            'revision = %s', (ref.grant_id, ref.revision))
         if (not original or owner_authority.reference(original) != ref
             or original["journal_id"] != identity["value"]):
             raise ValueError("original caption authority missing")
@@ -96,13 +96,24 @@ def _usage(store, nodes, journal_id):
         or len(set(retained)) > 1):
         raise ValueError("caption fee pointers disagree")
     pointers = encode(retained)
-    usages = store.rows("SELECT * FROM model_usage WHERE job_id IN "
-        "(SELECT value FROM json_each(?)) OR request_id IN (SELECT value FROM json_each(?))",
+    usages = store.rows('SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS '
+        'request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
+        'model_usage.provider AS provider, model_usage.model AS model, model_usage.input_tokens AS '
+        'input_tokens, model_usage.cached_input_tokens AS cached_input_tokens, '
+        'model_usage.output_tokens AS output_tokens, model_usage.billed_micro_usd AS '
+        'billed_micro_usd, model_usage.is_estimate AS is_estimate, model_usage.occurred_at AS '
+        'occurred_at, model_usage.state AS state, model_usage.pricing_known AS pricing_known FROM '
+        'model_usage AS model_usage WHERE model_usage.job_id IN (SELECT parsed.value COLLATE "C" '
+        'AS _col_0 FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) OR '
+        'model_usage.request_id IN (SELECT parsed.value COLLATE "C" AS _col_0 FROM '
+        'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value))',
         (ids, pointers))
-    admissions = store.rows("SELECT request_id,logical_request_id,authority_json,journal_id,"
-        "journal_path FROM model_admissions WHERE logical_request_id IN "
-        "(SELECT value FROM json_each(?)) OR request_id IN (SELECT value FROM json_each(?)) "
-        "OR request_id IN (SELECT value FROM json_each(?))",
+    admissions = store.rows('SELECT request_id, logical_request_id, authority_json, journal_id, '
+        'journal_path FROM model_admissions WHERE logical_request_id IN (SELECT value COLLATE "C" '
+        'FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) OR request_id IN '
+        '(SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+        'parsed(value)) OR request_id IN (SELECT value COLLATE "C" FROM '
+        'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value))',
         (ids, pointers, encode([u["request_id"] for u in usages])))
     if not usages and not admissions:
         if any(n["state"] not in {"FAILED", "CANCELLED"} for n in nodes):
@@ -132,9 +143,9 @@ def read(store, settings, job_id):
     if not isinstance(job_id, str) or not JOB.fullmatch(job_id):
         raise CoreError("MEME_RESPONSIBILITY_JOB_INVALID", 400)
     try:
-        with store.transaction():
-            if store.one("SELECT 1 FROM runtime_meta WHERE key IN "
-                         "('model_budget_restore_required','cloud_budget_restore_required')"):
+        with store.read_snapshot():
+            if store.one('SELECT 1 FROM runtime_meta WHERE key IN '
+                "('model_budget_restore_required', 'cloud_budget_restore_required')"):
                 raise CoreError("OWNER_AUTHORITY_RESTORE_RECONCILIATION_REQUIRED", 503)
             ledger = live_text._ledger_custody(store, settings)
             nodes = _lineage(store, job_id)

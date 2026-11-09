@@ -17,7 +17,7 @@ def test_strict_empty_offer_enqueues_once_and_staged_file_waits_for_original_cap
     async def scenario():
         async with native_case(core, tmp_path, monkeypatch) as c:
             await c.retrieval.prepare(c.job)
-            frozen = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            frozen = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                     ("meme_offer:" + c.event["event_id"],))["value"]
             await c.retrieval.prepare(c.job)
             assert not c.upstream.calls and not core.store.rows("SELECT * FROM model_usage")
@@ -38,7 +38,7 @@ def test_strict_empty_offer_enqueues_once_and_staged_file_waits_for_original_cap
             assert not caption["result_json"] and not core.store.rows("SELECT * FROM model_usage")
             with pytest.raises(CoreError, match="MEME_CAPTION_UNAVAILABLE"):
                 c.retrieval._resolve(asset["asset_id"], caption["job_id"])
-            assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                  ("meme_offer:" + c.event["event_id"],))["value"] == frozen
             calls = []
             assert await worker(core, calls)

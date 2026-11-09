@@ -14,7 +14,16 @@ def clean(text, settings):
 
 
 def generated(store, job, image_id, now):
-    row = store.one("SELECT * FROM generated_images WHERE image_id=?", (image_id,))
+    row = store.one('SELECT generated_images.image_id AS image_id, generated_images.job_id AS '
+        'job_id, generated_images.event_id AS event_id, generated_images.conversation_id AS '
+        'conversation_id, generated_images.tool_call_id AS tool_call_id, generated_images.state AS '
+        'state, generated_images.size AS size, generated_images.prompt_sha256 AS prompt_sha256, '
+        'generated_images.usage_request_id AS usage_request_id, generated_images.mime AS mime, '
+        'generated_images.sha256 AS sha256, generated_images.byte_length AS byte_length, '
+        'generated_images.message_id AS message_id, generated_images.error_code AS error_code, '
+        'generated_images.expires_at AS expires_at, generated_images.created_at AS created_at, '
+        'generated_images.updated_at AS updated_at FROM generated_images AS generated_images WHERE '
+        'generated_images.image_id = %s', (image_id,))
     if (not row or row["job_id"] != job["job_id"] or row["event_id"] != job["event_id"]
         or row["state"] != "SUCCEEDED" or row["expires_at"] <= now
         or not image_generation._path(store, image_id).is_file()):
@@ -77,11 +86,12 @@ def enqueue(core, job, now):
     for index, (request_id, song, segment) in songs.items():
         core.voice.freeze_song(ids[index], request_id, song, segment)
     for index, image_id in pictures.items():
-        row = core.store.one("SELECT message_id FROM generated_images WHERE image_id=?",
+        row = core.store.one('SELECT message_id FROM generated_images WHERE image_id = %s',
                              (image_id,))
         if row["message_id"] not in {None, ids[index]}:
             raise CoreError("GENERATED_IMAGE_ALREADY_BOUND", 409)
-        core.store.execute("UPDATE generated_images SET message_id=?,updated_at=? WHERE image_id=?",
+        core.store.execute('UPDATE generated_images SET message_id = %s, updated_at = %s WHERE '
+            'image_id = %s',
                            (ids[index], now, image_id))
     return ids
 

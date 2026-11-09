@@ -57,7 +57,7 @@ def test_life_read_plan_and_watch_redirect_keep_owner_recommendation(core):
     original = "https://example.org/original"
     _, source = read(core, 2, BAKING, "https://example.org/resolved", said="看看 " + original)
     judge(core, source, -1, "步骤太复杂")
-    core.store.execute("UPDATE observations SET evidence_json=? WHERE event_id=?",
+    core.store.execute('UPDATE observations SET evidence_json=%s WHERE event_id=%s',
                        (encode({"requested_url": original}), source))
     assert watch_ledger.recent(core.store)[0]["origin"] == watch_ledger.ORIGINS["owner_suggested"]
     assert core.life.context()[0]["origin"] == watch_ledger.ORIGINS["owner_suggested"]
@@ -83,14 +83,14 @@ def test_core_coalesces_memory_watch_and_life_without_losing_proofs(core):
     mid = core.memory.add(Candidate(subject="self", kind="fact", fact_key="star-view", content=fact,
         evidence_event_id="evt_test_1", evidence_quote="你刚才" + fact),
         core.clock(), confirmed=True)
-    row = core.store.one("SELECT * FROM memories WHERE memory_id=?", (mid,))
+    row = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (mid,))
     row["evidence_ids"] = ["evt_test_1"]
     snapshots = []
     job = current_job(core, text="天文资料你当时怎么看？")
     messages = core.context(job, memories=[row], snapshots=snapshots)
     assert encode(messages).count(fact) == 1
     assert {p["kind"] for p in snapshots} >= {"memory", "watch", "interest"}
-    pinned = core.store.rows("SELECT event_id FROM job_sources WHERE job_id=?", (job["job_id"],))
+    pinned = core.store.rows('SELECT event_id FROM job_sources WHERE job_id=%s', (job["job_id"],))
     assert {r["event_id"] for r in pinned} >= {source, "evt_test_1"}
     assert not core.model.calls
 
@@ -149,7 +149,7 @@ def test_frozen_judgement_revalidates_before_any_new_use(core, mutation):
     if mutation == "withdraw":
         watch_ledger.withdraw(core.store, entry, core.clock())
     elif mutation == "source":
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                            (encode({"text": "修订后的资料"}), source))
     else:
         core.store.execute("UPDATE traits SET topic='修订后的兴趣'")

@@ -5,6 +5,7 @@ operation has finished; materialized rows can outlive it. SQL uses Psycopg's nat
 parameters. This module neither translates SQLite SQL nor performs external work.
 """
 
+import hashlib
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -16,6 +17,18 @@ from psycopg_pool import ConnectionPool
 from pydantic import SecretStr
 
 WAKE_CHANNEL = "companion_wakeup"
+BUDGET_LEDGER = 1
+ERASURE_LEDGER = 2
+# The system view also joins every index and groups rows for scan statistics.
+# Custody needs only these same continuously updated per-transaction row counts.
+TRANSACTION_WRITE_COUNT = (
+    "COALESCE((SELECT sum(pg_stat_get_xact_tuples_inserted(c.oid) + "
+    "pg_stat_get_xact_tuples_updated(c.oid) + pg_stat_get_xact_tuples_deleted(c.oid)) "
+    "FROM pg_catalog.pg_class AS c WHERE c.relnamespace=current_schema()::regnamespace "
+    "AND c.relkind IN ('r','t','m','p') "
+    "AND current_schema() NOT IN ('pg_catalog','information_schema') "
+    "AND current_schema() !~ '^pg_toast'),0)::text"
+)
 
 
 def migrate(conninfo: SecretStr, revision="head"):
@@ -60,6 +73,7 @@ class Database:
         if not isinstance(conninfo, SecretStr):
             raise TypeError("database connection information must be SecretStr")
         self._conninfo = conninfo
+        self.cache_identity = hashlib.sha256(conninfo.get_secret_value().encode()).hexdigest()
         self._pool = ConnectionPool(
             conninfo.get_secret_value(), min_size=0, max_size=max_connections,
             max_waiting=16, timeout=timeout, open=False, configure=_configure,
@@ -105,28 +119,83 @@ class Session:
     def __init__(self, connection):
         self._connection = connection
         self._closed = False
+        self._ledger_locks = None
+
+    @property
+    def backend_pid(self):
+        if self._closed:
+            raise RuntimeError("POSTGRES_SESSION_CLOSED")
+        return self._connection.info.backend_pid
+
+    @property
+    def in_transaction(self):
+        return not self._closed and (
+            self._connection.info.transaction_status != TransactionStatus.IDLE)
 
     def execute(self, statement, parameters=()):
         if self._closed:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
-        return self._connection.execute(statement, parameters)
+        with self._connection.cursor() as cursor:
+            cursor.execute(statement, parameters)
+            return cursor.rowcount
 
     def one(self, statement, parameters=()):
-        return self.execute(statement, parameters).fetchone()
+        if self._closed:
+            raise RuntimeError("POSTGRES_SESSION_CLOSED")
+        with self._connection.cursor() as cursor:
+            cursor.execute(statement, parameters)
+            return cursor.fetchone()
 
     def rows(self, statement, parameters=()):
-        return self.execute(statement, parameters).fetchall()
+        if self._closed:
+            raise RuntimeError("POSTGRES_SESSION_CLOSED")
+        with self._connection.cursor() as cursor:
+            cursor.execute(statement, parameters)
+            return cursor.fetchall()
+
+    def bounded_read(self, statement, parameters, *, limit, timeout_ms):
+        """Materialize a finite optional SELECT without aborting its caller's snapshot.
+
+        Psycopg creates a savepoint inside an existing transaction. Read-only mode
+        refuses data-changing CTEs; cancellation rolls back only this optional read.
+        """
+        if self._closed:
+            raise RuntimeError("POSTGRES_SESSION_CLOSED")
+        if type(limit) is not int or limit < 1 or type(timeout_ms) is not int or timeout_ms < 1:
+            raise ValueError("invalid bounded read limits")
+        active = self.in_transaction
+        with self._connection.transaction():
+            if not active:
+                self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            settings = self.one(
+                "SELECT current_setting('transaction_read_only') AS readonly, "
+                "current_setting('statement_timeout') AS timeout"
+            )
+            if settings["readonly"] != "on":
+                raise RuntimeError("BOUNDED_READ_REQUIRES_READ_ONLY_SNAPSHOT")
+            self.execute("SELECT set_config('statement_timeout',%s,true)", (f"{timeout_ms}ms",))
+            with self._connection.cursor() as cursor:
+                cursor.execute(sql.SQL("SELECT * FROM ({}) AS bounded_result LIMIT %s").format(
+                    statement if isinstance(statement, sql.Composable) else sql.SQL(statement)),
+                    (*parameters, limit))
+                result = cursor.fetchmany(limit)
+            self.execute("SELECT set_config('statement_timeout',%s,true)", (settings["timeout"],))
+            return result
 
     @contextmanager
-    def transaction(self, *, readonly=False):
+    def transaction(self, *, readonly=False, rollback=False):
         if self._closed:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
         if self._connection.info.transaction_status != TransactionStatus.IDLE:
             raise RuntimeError("POSTGRES_TRANSACTION_ALREADY_ACTIVE")
-        with self._connection.transaction():
-            if readonly:
-                self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-            yield self
+        with self._connection.transaction(force_rollback=rollback):
+            self._ledger_locks = {}
+            try:
+                if readonly:
+                    self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                yield self
+            finally:
+                self._ledger_locks = None
 
     def custody_lock(self, key, *, shared=False):
         if self._connection.info.transaction_status != TransactionStatus.INTRANS:
@@ -140,3 +209,49 @@ class Session:
         if self._connection.info.transaction_status != TransactionStatus.INTRANS:
             raise RuntimeError("POSTGRES_TRANSACTION_REQUIRED")
         self.execute("SELECT pg_notify(%s, %s)", (WAKE_CHANNEL, ""))
+
+    def ledger_lock(self, domain, *, shared=False):
+        """Native transaction lock, scoped to this schema and a fixed ledger domain."""
+        self.ledger_locks(((domain, shared),))
+
+    def ledger_locks(self, domains):
+        """Acquire missing ledger locks in caller order; native locks outlive this call."""
+        if self._connection.info.transaction_status != TransactionStatus.INTRANS:
+            raise RuntimeError("POSTGRES_TRANSACTION_REQUIRED")
+        # A managed session keeps its configured schema for this finite scope.
+        # PostgreSQL retains these locks until commit/rollback; an exclusive
+        # acquisition also covers later shared requests. Upgrades still acquire.
+        known = dict(self._ledger_locks or {})
+        pending = []
+        for domain, shared in domains:
+            if type(domain) is not int or not 1 <= domain <= 16:
+                raise ValueError("invalid ledger lock domain")
+            held = known.get(domain)
+            if held is False or held is True and shared:
+                continue
+            pending.append((domain, bool(shared)))
+            known[domain] = bool(shared)
+        if not pending:
+            return
+        statements = []
+        for index, (_, shared) in enumerate(pending):
+            function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
+            statement = sql.SQL("SELECT {}(hashtext(current_schema()),%s)").format(
+                sql.Identifier(function))
+            if index:
+                statement += sql.SQL(" FROM {} ").format(sql.Identifier(f"ledger_{index - 1}"))
+            statements.append(statement)
+        if len(statements) == 1:
+            query = statements[0]
+        else:
+            # Each materialized CTE consumes its predecessor before taking the next
+            # lock. Data reads deliberately remain a later, separate SQL statement.
+            entries = [sql.SQL("{} AS MATERIALIZED ({})").format(
+                sql.Identifier(f"ledger_{index}"), statement)
+                for index, statement in enumerate(statements)]
+            query = (sql.SQL("WITH ") + sql.SQL(", ").join(entries)
+                     + sql.SQL(" SELECT * FROM {}").format(
+                         sql.Identifier(f"ledger_{len(statements) - 1}")))
+        self.execute(query, tuple(domain for domain, _ in pending))
+        if self._ledger_locks is not None:
+            self._ledger_locks.update(known)

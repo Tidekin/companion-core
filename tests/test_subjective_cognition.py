@@ -17,6 +17,7 @@ from companion.life_protocol import LifeDecision
 from companion.life_topics import interest_shift_supported
 from companion.store import encode
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.observation_capture import observation
 from tests.support.subjective_cognition import ASTRONOMY, BAKING, judge, prepare, read
 from tests.support.watch_ledger import ready
@@ -106,10 +107,10 @@ def test_guidance_offers_choices_between_interests_without_granting_anything(cor
     goal_b, b1 = read(core, 4, BAKING, "https://example.org/b1")
     judge(core, b1, -2, "全是广告")
     ids = ["evt_test_3", a3, "evt_test_4", b1]
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     context = decision_context(core.store, core.settings, [{"event_id": key} for key in ids],
                                "synthetic", core.clock())
-    assert core.store.db.total_changes == before
+    assert logical_state(core.store) == before
     guidance = {row["topic"]: row for row in context["autonomy_guidance"]["depth_control"]}
     astronomy, baking = guidance[ASTRONOMY], guidance[BAKING]
     # Earlier experiences under the same approval inform the view; IDs stay the anchor's.
@@ -156,7 +157,9 @@ def test_resting_interests_fade_without_losing_their_history(core):
     assert rested["status"] == "FADING" and rested["view"]["stance"] == "positive"
 
 
-def test_withdrawn_or_forgotten_sources_reevaluate_and_backups_do_not_restore(core, tmp_path):
+def test_withdrawn_or_forgotten_sources_reevaluate_and_backups_do_not_restore(
+    empty_database, core, tmp_path,
+):
     prepare(core)
     _, first = read(core, 1, ASTRONOMY, "https://example.org/w1")
     judge(core, first, 2, "第一篇很喜欢")
@@ -187,18 +190,22 @@ def test_withdrawn_or_forgotten_sources_reevaluate_and_backups_do_not_restore(co
     assert (corrected["stance"], corrected["judged_experiences"]) == ("positive", 1)
     # The withdrawn item is never judged again by a later scan.
     assert watch_ledger.scan(core.store, core.settings, core.clock()) == 0
-    archive, destination = tmp_path / "before.enc", tmp_path / "restored.db"
+    archive = tmp_path / "before.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [first], core.clock())
-    assert not core.store.one("SELECT 1 FROM watch_ledger WHERE source_event_id=?", (first,))
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    with Core(core.settings.model_copy(update={"database": str(destination),
-                                               "memory_enabled": False}),
+    assert not core.store.one('SELECT 1 FROM watch_ledger WHERE source_event_id=%s', (first,))
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with Core(core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+            'memory_enabled': False,
+        }),
               clock=core.clock) as restored:
         assert not restored.store.one(
-            "SELECT 1 FROM watch_ledger WHERE source_event_id=?", (first,))
+            'SELECT 1 FROM watch_ledger WHERE source_event_id=%s', (first,))
         views = interest.profile(restored.store, restored.settings, restored.clock(),
                                  restored.settings.owner_qq_id)["self.interest"]
         assert all(row["view"]["judged_experiences"] == 0 for row in views)
@@ -211,7 +218,7 @@ def test_only_completed_goal_web_reads_join_the_watch_ledger(core):
     core.observations.append("reader", observation(core, 2, text="随手抓取的页面",
                                                    payload={"text": "随手抓取的页面",
                                                             "url": "https://example.org/x"}))
-    core.store.execute("UPDATE events SET source='observation.web' WHERE event_id IN (?,?)",
+    core.store.execute("UPDATE events SET source='observation.web' WHERE event_id IN (%s,%s)",
                        (result, "obs_test_2"))
     with core.store.transaction():
         assert watch_ledger.scan(core.store, core.settings, core.clock()) == 1
@@ -246,7 +253,7 @@ def test_diary_sources_carry_her_own_takes_as_views_not_facts(core):
 def test_paid_judgement_of_a_goal_read_becomes_her_view(core, tmp_path):
     prepare(core)
     _, result = read(core, 1, ASTRONOMY, "https://example.org/paid")
-    core.store.execute("UPDATE events SET source='observation.web' WHERE event_id=?", (result,))
+    core.store.execute("UPDATE events SET source='observation.web' WHERE event_id=%s", (result,))
     take = {"rating": 2, "take": "原来星光颜色能看出温度", "topic_tags": ["天文"]}
     provider = ready(core, tmp_path, json.dumps(take, ensure_ascii=False))
     assert run(watch_ledger.run_once(core.store, core.settings, core.model, core.clock))
@@ -270,17 +277,17 @@ def test_watch_ledger_migration_keeps_entries_and_refuses_lossy_downgrade(tmp_pa
     from alembic import command
     from alembic.config import Config
 
-    from companion.store import migrate
+    from companion.legacy_import import migrate_sqlite
 
     path = tmp_path / "ledger.db"
-    migrate(str(path), "0055_runtime_configuration")
+    migrate_sqlite(path, "0055_runtime_configuration")
     now = "2026-10-31T00:00:00.000000+00:00"
     # A raw connection without foreign keys: only the ledger row's copy is under test.
     with closing(sqlite3.connect(path)) as db, db:
         db.execute("INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_ref,depth,"
                    "state,rating,take,created_at,updated_at) VALUES('watch_1','obs_1',"
                    "'bilibili','u','text','JUDGED',1,'不错',?,?)", (now, now))
-    migrate(str(path), "0056_watch_ledger_goal_reads")
+    migrate_sqlite(path, "0056_watch_ledger_goal_reads")
     with closing(sqlite3.connect(path)) as db, db:
         assert db.execute("SELECT take FROM watch_ledger").fetchone() == ("不错",)
         db.execute("UPDATE watch_ledger SET platform='web',state='WITHDRAWN'")

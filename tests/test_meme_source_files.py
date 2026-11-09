@@ -84,7 +84,7 @@ def test_caption_source_witness_persists_and_replay_never_rebills(
             completed = CaptionOutcome.model_validate_json(response.text)
             assert completed.state == "SUCCEEDED"
             assert completed.usage.state == "SETTLED" and completed.usage.billed_micro_usd > 0
-            stored = core.store.one("SELECT * FROM meme_captions WHERE job_id=?", (queued.job_id,))
+            stored = core.store.one('SELECT * FROM meme_captions WHERE job_id=%s', (queued.job_id,))
             assert json.loads(stored["source_json"]) == payload["source_evidence"]
             assert stored["source_sha256"] == payload["asset"]["source_evidence_sha256"]
             assert stored["asset_data"] == base64.b64decode(payload["asset"]["data_base64"])

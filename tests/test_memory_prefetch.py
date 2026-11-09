@@ -34,7 +34,7 @@ def test_shared_limit_note_reaches_real_worker_model_request(core, tmp_path, mon
                 200, json=answer("收到资料。"))) as worker:
                 assert await worker.run_once("limit-source")
             assert (await entry.send(entry.client, entry.protocol))["worked"]
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.memory.add(Candidate(subject="project", kind="fact", fact_key="prototype",
                     content=source["payload"]["text"], evidence_event_id=source["event_id"],
                     evidence_quote=source["payload"]["text"]), core.clock())
@@ -65,16 +65,16 @@ def test_prefetch_enters_first_request_without_tool_and_erases_with_source(core,
                 assert await worker.run_once("source-before-prefetch")
             assert (await entry.send(entry.client, entry.protocol))["worked"]
             assert len(sends) == 1
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 mid = core.memory.add(Candidate(subject="project", kind="fact",
                     fact_key="model_number", content=text,
                     evidence_event_id=original["event_id"], evidence_quote=text), core.clock())
             core.settings.max_recent_messages = 0
             fresh = await entry.admit(2, "葭岸项目的样机编号是多少？")
-            job_id = core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
+            job_id = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s',
                                    (fresh["event_id"],))["job_id"]
             config = core.settings.model_dump(mode="json")
-            for key in ("model_key", "bridge_token", "control_token"):
+            for key in ("database", "model_key", "bridge_token", "control_token"):
                 config[key] = getattr(core.settings, key).get_secret_value()
             settings_path = tmp_path / "prefetch-worker.json"
             settings_path.write_text(encode(config), encoding="utf-8")
@@ -95,20 +95,20 @@ def test_prefetch_enters_first_request_without_tool_and_erases_with_source(core,
                 if child.returncode is None:
                     child.kill()
                     await child.communicate()
-            saved = core.store.one("SELECT * FROM agent_conversations WHERE job_id=?", (job_id,))
+            saved = core.store.one('SELECT * FROM agent_conversations WHERE job_id=%s', (job_id,))
             snapshots = json.loads(saved["snapshots_json"])
             trace = next(row["retrieval"] for row in snapshots if row.get("retrieval"))
             assert trace["stage"] == "prefetch" and len(trace["query_sha256"]) == 64
             assert set(trace["selection"]["selected"]) == {mid}
             assert "葭岸项目的样机编号是多少" not in encode(trace)
-            assert not core.store.rows("SELECT * FROM agent_tool_calls WHERE job_id=?", (job_id,))
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            assert not core.store.rows('SELECT * FROM agent_tool_calls WHERE job_id=%s', (job_id,))
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert len(usage) == 2 and all(row["state"] == "SETTLED" for row in usage)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [original["event_id"]], core.clock())
-            saved = core.store.one("SELECT * FROM agent_conversations WHERE job_id=?", (job_id,))
+            saved = core.store.one('SELECT * FROM agent_conversations WHERE job_id=%s', (job_id,))
             assert saved["conversation_json"] is None and saved["snapshots_json"] == "[]"
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usage
             assert not core.memory.search("葭岸项目")
 
     run(scenario())
@@ -130,7 +130,7 @@ def test_prefetch_requires_memory_grant_and_enabled_setting(
                 200, json=answer("目前没有可用记录。"))) as worker:
                 monkeypatch.setattr(worker.memory_context, "recall_async", forbidden)
                 assert await worker.run_once("no-memory-read")
-            job = core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+            job = core.store.one('SELECT state,last_error_code FROM jobs WHERE event_id=%s',
                                   (source["event_id"],))
             assert job["state"] == "SUCCEEDED", job
             assert not core.store.rows("SELECT * FROM memory_vectors")
@@ -157,7 +157,7 @@ def test_invalidated_prefetch_cancels_and_unavailable_index_is_not_empty_history
             async with worker_for(core, forbidden) as worker:
                 monkeypatch.setattr(worker.memory_context, "recall_async", invalidated)
                 assert await worker.run_once("invalidated-prefetch")
-            row = core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+            row = core.store.one('SELECT state,last_error_code FROM jobs WHERE event_id=%s',
                                   (source["event_id"],))
             assert row == {"state": state, "last_error_code": stored_code}
             assert not core.store.rows("SELECT * FROM model_usage")
@@ -234,14 +234,14 @@ def test_raw_tool_fallback_uses_original_sources_and_erasure_fence(
                 result = json.loads(tool["content"])
                 assert "GL-84" in json.dumps(result["raw_turns"], ensure_ascii=False)
                 if erase_after_tool:
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [original["event_id"]], core.clock())
                 return httpx.Response(200, json=answer("编号是GL-84。"))
 
             async with worker_for(core, provider) as worker:
                 assert await worker.run_once("raw-fallback")
             assert len(calls) == 2
-            outbox = core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+            outbox = core.store.rows('SELECT * FROM outbox WHERE origin_event_id=%s',
                                      (fresh["event_id"],))
             assert bool(outbox) is not erase_after_tool
             assert all(row["state"] == "SETTLED" for row in core.store.rows(

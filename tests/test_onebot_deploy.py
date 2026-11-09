@@ -18,7 +18,7 @@ def test_demo_template_has_no_paid_or_autonomous_capability():
     )
     assert settings.mode == "demo"
     assert not settings.model_key.get_secret_value()
-    assert settings.monthly_limit_micro_usd == 0
+    assert settings.paid_model is None
     assert settings.input_rate == settings.cached_input_rate == settings.output_rate == 0
     assert all(not value for name, value in data.items() if name.endswith("_enabled"))
     assert data["executive"]["enabled"] is data["executive"]["allow_changes"] is False

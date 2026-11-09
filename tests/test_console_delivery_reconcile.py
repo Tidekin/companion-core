@@ -16,7 +16,7 @@ def client(core, monkeypatch):
 @pytest.mark.parametrize("outcome", ["SENT", "CANCELLED"])
 def test_owner_console_reconciles_native_poke_with_audit_and_no_retry(client, core, outcome):
     accepted = ingest(core, 1, "source")
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (accepted["event_id"],))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (accepted["event_id"],))
     message_id = uid("msg")
     content = {"kind": "poke", "target_user_id": core.settings.owner_qq_id}
     core.store.insert("outbox", message_id=message_id, origin_event_id=event["event_id"],
@@ -43,10 +43,12 @@ def test_owner_console_reconciles_native_poke_with_audit_and_no_retry(client, co
     assert client.post(path, json=body, headers=headers).json() == result.json()
     changed = "CANCELLED" if outcome == "SENT" else "SENT"
     assert client.post(path, json={"outcome": changed}, headers=headers).status_code == 409
-    row = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    row = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (message_id,))
     assert row["state"] == outcome and row["attempt_count"] == 1
     assert row["lease_token"] is row["native_ack_json"] is row["provider_message_id"] is None
     assert core.store.rows("SELECT * FROM model_usage") == before
     assert len(core.store.rows("SELECT * FROM outbox")) == 1
-    assert len(core.store.rows("SELECT * FROM audit_log WHERE action='delivery.owner_reconciled' "
-                                "AND entity_id=?", (message_id,))) == 1
+    assert len(core.store.rows((
+        "SELECT * FROM audit_log WHERE action='delivery.owner_reconciled' AND"
+        ' entity_id=%s'
+    ), (message_id,))) == 1

@@ -157,6 +157,9 @@ def public_repository(tmp_path):
     for spec in images.COMPONENTS.values():
         recipe = root / spec["recipe"]
         recipe.parent.mkdir(parents=True, exist_ok=True)
+        if spec is images.COMPONENTS["core"]:
+            recipe.write_bytes((images.ROOT / "Dockerfile").read_bytes())
+            continue
         recipe.write_text("FROM " + spec.get("base", "synthetic") + "\nCOPY "
                           + " ".join(sorted(spec["copies"])) + " /app\n")
     # Source-shaped files suffice; the test exercises Git archive and COPY boundaries.
@@ -313,6 +316,24 @@ def test_ui_environment_does_not_widen_python_image_privacy_allowlist():
 
     with pytest.raises(ValueError, match="ENV_NOT_ALLOWLISTED"):
         images.inspect_image("core", runner=runner)
+
+
+@pytest.mark.parametrize("original,replacement", [
+    (images.POSTGRES_IMAGE, "postgres:latest"),
+    ("AS postgres-client", "AS postgres-client\nRUN touch /usr/local/new-client"),
+    ("--from=postgres-client", "--from=unknown"),
+    ("/usr/lib/postgresql/16/bin/pg_dump", "/usr/bin/extra"),
+    ("/usr/local/lib/postgresql/", "/app/companion/"),
+])
+def test_postgres_client_stage_rejects_changed_provenance_and_copy_bounds(
+    public_repository, original, replacement,
+):
+    path = public_repository / "Dockerfile"
+    recipe = path.read_text()
+    assert original in recipe
+    path.write_text(recipe.replace(original, replacement, 1))
+    with pytest.raises(ValueError, match="PG_CLIENT_|COPY_SHAPE_CHANGED"):
+        images.check_public_inputs(public_repository)
 
 
 @pytest.mark.parametrize("fault", ["base", "copy"])

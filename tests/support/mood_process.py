@@ -41,7 +41,7 @@ def run_worker(settings_path, now):
     async def once(self, *args, **kwargs):
         await original_run(self, *args, **kwargs)
         print(json.dumps({"pid": os.getpid(), "calls": states, "jobs": self.store.rows(
-            "SELECT state,last_error_code FROM jobs ORDER BY rowid")}), flush=True)
+            'SELECT state,last_error_code FROM jobs ORDER BY record_sequence')}), flush=True)
         raise Finished
 
     Core.run_once = once

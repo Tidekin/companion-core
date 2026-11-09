@@ -38,7 +38,7 @@ def reserved(core, tmp_path, *, reserve_send=False, retained_lease=False):
         AuthorityStop(operation_id="stop-native-reserved", authority=capture.authority))
     if retained_lease:
         # Historical supersession keeps the authentic unstarted lease as evidence.
-        core.store.execute("UPDATE outbox SET lease_token=? WHERE message_id=?",
+        core.store.execute('UPDATE outbox SET lease_token=%s WHERE message_id=%s',
                            (item["lease_token"], item["message_id"]))
     proof = delivery_proof(core, capture, key, item, check,
         DeliveryResult(lease_token=item["lease_token"], result="DELIVERY_UNCERTAIN"), stopped)
@@ -50,14 +50,14 @@ def reserved(core, tmp_path, *, reserve_send=False, retained_lease=False):
 
 def test_superseded_retained_lease_closes_with_original_signed_no_io_proof(core, tmp_path):
     proof, _ = reserved(core, tmp_path, retained_lease=True)
-    before = core.store.one("SELECT * FROM outbox WHERE message_id=?", (proof["message_id"],))
+    before = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (proof["message_id"],))
     fees = core.store.rows("SELECT * FROM model_usage")
     journal = Path(core.settings.paid_model.journal_path).read_bytes()
     result = delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock())
     assert result["state"] == "NOT_SENT"
     assert result["receipt"]["quiescence"] == proof
     assert wire.digest(before["lease_token"]) == proof["lease_sha256"]
-    assert core.store.one("SELECT * FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT * FROM outbox WHERE message_id=%s',
                           (proof["message_id"],)) == before
     assert delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock()) == result
     assert core.store.rows("SELECT * FROM model_usage") == fees
@@ -77,8 +77,10 @@ def test_zero_send_is_native_not_sent_and_preserves_costs_and_original_attempt(c
     assert delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock()) == result
     assert core.store.one("SELECT COUNT(*) n FROM audit_log "
                           "WHERE action='delivery.not_sent'")["n"] == 1
-    assert core.store.one("SELECT attempt_count,lease_token,provider_message_id FROM outbox "
-                          "WHERE message_id=?", (proof["message_id"],)) == {
+    assert core.store.one((
+        'SELECT attempt_count,lease_token,provider_message_id FROM outbox '
+        'WHERE message_id=%s'
+    ), (proof["message_id"],)) == {
         "attempt_count": 0, "lease_token": None, "provider_message_id": None}
     assert core.store.rows("SELECT * FROM model_usage") == before
     assert Path(core.settings.paid_model.journal_path).read_bytes() == budget
@@ -104,32 +106,36 @@ def test_zero_send_requires_every_original_no_io_fact(core, tmp_path, change):
     elif change == "result":
         proof["original_result_sha256"] = "e" * 64
     elif change == "attempt":
-        core.store.execute("UPDATE outbox SET attempt_count=1 WHERE message_id=?",
+        core.store.execute('UPDATE outbox SET attempt_count=1 WHERE message_id=%s',
                            (proof["message_id"],))
     elif change == "provider":
-        core.store.execute("UPDATE outbox SET provider_message_id='provider-ack' "
-                           "WHERE message_id=?",
+        core.store.execute((
+            "UPDATE outbox SET provider_message_id='provider-ack' WHERE "
+            'message_id=%s'
+        ),
                            (proof["message_id"],))
     elif change == "ack":
-        core.store.execute("UPDATE outbox SET native_ack_json='{}' WHERE message_id=?",
+        core.store.execute("UPDATE outbox SET native_ack_json='{}' WHERE message_id=%s",
                            (proof["message_id"],))
     elif change == "delivery_result":
         core.store.audit("delivery.result", proof["message_id"], "delivery", core.clock(),
                          state="UNKNOWN")
     elif change == "retained_lease_mismatch":
-        core.store.execute("UPDATE outbox SET lease_token=? WHERE message_id=?",
+        core.store.execute('UPDATE outbox SET lease_token=%s WHERE message_id=%s',
                            ("lease_" + "f" * 32, proof["message_id"]))
     elif change == "content":
         proof["content_sha256"] = "d" * 64
     elif change == "source":
-        core.store.execute("UPDATE events SET body_json='{}' WHERE event_id=?",
+        core.store.execute("UPDATE events SET body_json='{}' WHERE event_id=%s",
                            (proof["event_id"],))
     elif change == "restore":
         with core.store.transaction():
             owner_authority.restore(core.store)
     elif change == "cleared_without_erasure":
-        core.store.execute("UPDATE outbox SET content_json='{}',content_sha256='' "
-                           "WHERE message_id=?", (proof["message_id"],))
+        core.store.execute((
+            "UPDATE outbox SET content_json='{}',content_sha256='' WHERE "
+            'message_id=%s'
+        ), (proof["message_id"],))
     elif change == "reactivated":
         from tests.support.owner_authority import activate
 
@@ -166,7 +172,7 @@ def test_retained_independent_send_liability_blocks_zero_counter(core, tmp_path,
     view = paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
     assert view["cumulative"]["operations"]["send:" + wire.digest(proof["message_id"])][
         "state"] == "RESERVED"
-    assert core.store.one("SELECT attempt_count FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT attempt_count FROM outbox WHERE message_id=%s',
                           (proof["message_id"],))["attempt_count"] == 0
     with pytest.raises(CoreError, match="DELIVERY_NOT_SENT_UNPROVEN"):
         delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock())
@@ -179,14 +185,14 @@ def test_erasure_retains_only_original_hashes_for_no_io_closure(core, tmp_path, 
     first = None
     if not before_receipt:
         first = delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock())
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         ErasureLedger(core.settings.erasure_ledger).expire_events(
             core.store, [proof["event_id"]], core.clock())
     result = delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock())
     assert result["state"] == "NOT_SENT"
     if first:
         assert result == first
-    assert core.store.one("SELECT content_json,content_sha256 FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT content_json,content_sha256 FROM outbox WHERE message_id=%s',
                           (proof["message_id"],)) == {"content_json": "{}", "content_sha256": ""}
     assert result["receipt"]["delivery"]["content_sha256"] == proof["content_sha256"]
 

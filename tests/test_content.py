@@ -82,7 +82,7 @@ def test_owner_link_read_is_durable_bound_and_enters_quoted_context(core):
     observation_id = response["event_ids"][0]
     assert (
         core.store.one(
-            "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (observation_id,)
+            'SELECT source_event_id FROM event_dependencies WHERE event_id=%s', (observation_id,)
         )["source_event_id"]
         == event_id
     )
@@ -199,10 +199,10 @@ def test_screenshot_download_is_reserved_and_can_only_be_claimed_once(core):
     assert service.status(event_id)["items"][0]["state"] == "UNKNOWN"
 
 
-@pytest.mark.parametrize("failure", ["price", "bytes", "count", "invalid", "dimension"])
+@pytest.mark.parametrize("failure", ["bytes", "count", "invalid", "dimension"])
 def test_image_validation_and_budgets_precede_provider_calls(core, failure):
     limits = {
-        "price": {"image_daily_micro_usd": 0},
+        "price": {},
         "bytes": {"max_daily_image_bytes": 0},
         "count": {"max_daily_images": 0},
     }
@@ -236,9 +236,8 @@ def test_vision_failure_keeps_reservation_and_cannot_be_replayed(core):
     }
 
 
-def test_vision_budget_includes_unknown_tool_costs(core):
+def test_vision_preserves_unknown_tool_cost_without_global_refusal(core):
     service, vision = enable(core)
-    core.settings.monthly_limit_micro_usd = 10
     core.store.insert(
         "tool_tasks",
         task_id="tool_budget",
@@ -257,9 +256,10 @@ def test_vision_budget_includes_unknown_tool_costs(core):
         updated_at=core.clock(),
     )
     event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
-    with pytest.raises(CoreError, match="CONTENT_VISION_BUDGET_EXHAUSTED"):
-        run(service.analyze_image(event_id, "image:0", png(), "image/png"))
-    assert vision.calls == []
+    run(service.analyze_image(event_id, "image:0", png(), "image/png"))
+    assert len(vision.calls) == 1
+    assert core.store.one("SELECT state,billed_micro_usd FROM tool_tasks") == {
+        "state": "UNKNOWN", "billed_micro_usd": 1}
 
 
 def test_link_images_have_get_only_origin_binding_and_separate_article_limit(core):
@@ -268,7 +268,7 @@ def test_link_images_have_get_only_origin_binding_and_separate_article_limit(cor
     service.schedule(event_id)
     obs_id = source_observation(core)
     service.register_link_images(event_id, obs_id, [CDN + "?imageMogr2/private", CDN + "2"])
-    rows = core.store.rows("SELECT * FROM content_items WHERE kind='link_image'")
+    rows = core.store.rows("SELECT * FROM content_items WHERE kind='link_image' ORDER BY slot")
     assert len(rows) == 2 and rows[0]["target_url"] == CDN
     calls = []
 
@@ -280,13 +280,13 @@ def test_link_images_have_get_only_origin_binding_and_separate_article_limit(cor
     assert run(service.run_once())
     assert len(vision.calls) == 1
     assert calls[0].method == "GET" and str(calls[0].url) == CDN
-    image_obs = core.store.one("SELECT output_event_id FROM content_items WHERE kind='link_image'")[
-        "output_event_id"
-    ]
+    image_obs = core.store.one(
+        "SELECT output_event_id FROM content_items WHERE kind='link_image' AND state='SUCCEEDED'"
+    )["output_event_id"]
     roots = {
         row["source_event_id"]
         for row in core.store.rows(
-            "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (image_obs,)
+            'SELECT source_event_id FROM event_dependencies WHERE event_id=%s', (image_obs,)
         )
     }
     assert roots == {event_id, obs_id}
@@ -323,7 +323,7 @@ def test_erasure_between_preflight_and_write_lock_cannot_restore_content(
         nonlocal erased
         if not erased:
             erased = True
-            with original():
+            with original(control_write=True):
                 core.ledger.expire_events(core.store, [observation_id or event_id], core.clock())
         with original():
             yield core.store
@@ -375,7 +375,7 @@ def test_content_erasure_during_vision_discards_late_result(core):
     event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
 
     def erase():
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [event_id], core.clock())
 
     vision.callback = erase
@@ -402,7 +402,7 @@ def test_image_hash_changed_during_vision_cannot_create_false_evidence(core):
     service, vision = enable(core)
     event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
     vision.callback = lambda: core.store.execute(
-        "UPDATE content_items SET media_sha256=?", ("0" * 64,),
+        'UPDATE content_items SET media_sha256=%s', ("0" * 64,),
     )
     with pytest.raises(CoreError, match="CONTENT_IMAGE_LEASE_EXPIRED"):
         run(service.analyze_image(event_id, "image:0", png(), "image/png"))
@@ -412,16 +412,22 @@ def test_image_hash_changed_during_vision_cannot_create_false_evidence(core):
     assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
 
 
-def test_content_erasure_and_backup_replay_clear_every_derived_image(core, tmp_path):
+def test_content_erasure_and_backup_replay_clear_every_derived_image(
+    empty_database, core, tmp_path,
+):
     service, _ = enable(core)
     event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
     run(service.analyze_image(event_id, "image:0", png(), "image/png"))
-    key, archive, dest = Fernet.generate_key(), tmp_path / "content.enc", tmp_path / "restored.db"
+    key, archive = Fernet.generate_key(), tmp_path / "content.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         for instance in (core, restored):
             row = instance.store.one("SELECT * FROM content_items")
@@ -432,4 +438,13 @@ def test_content_erasure_and_backup_replay_clear_every_derived_image(core, tmp_p
                 item["redacted"] for item in instance.store.rows("SELECT * FROM observations")
             )
     finally:
-        restored.store.close()
+        restored.close()
+
+
+def test_zero_vision_currency_amount_keeps_actual_charge(core):
+    service, vision = enable(core, )
+    event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
+    run(service.analyze_image(event_id, "image:0", png(), "image/png"))
+    assert len(vision.calls) == 1
+    usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
+    assert usage == {"state": "SETTLED", "billed_micro_usd": 10}

@@ -26,7 +26,10 @@ def queued(core, source="web", *, owner=True, hosts=None, grant=None):
     body = envelope(source, grant=grant.snapshot() if grant else None)
     if owner:
         accept(core, text="请阅读 " + body["observations"][0]["url"])
-    row = core.store.one("SELECT request_id FROM exploration_requests ORDER BY rowid DESC")
+    row = core.store.one(
+        'SELECT request_id FROM exploration_requests ORDER BY '
+        'record_sequence DESC'
+    )
     if not row:
         with core.store.transaction():
             request = core.exploration.create(

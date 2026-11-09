@@ -58,7 +58,7 @@ class VoiceInputStatus(VoiceDTO):
 
 
 def _require_transaction(store):
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("VOICE_FLOW_TRANSACTION_REQUIRED")
 
 
@@ -78,10 +78,10 @@ class VoiceFlow:
         self.jobs = VoiceJobs(store, settings, clock)
 
     def _transaction(self):
-        return nullcontext() if self.store.db.in_transaction else self.store.transaction()
+        return nullcontext() if self.store.in_transaction else self.store.transaction()
 
     def _read(self, key, *, allow_expired_input=False):
-        row = self.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+        row = self.store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
         if row is None:
             return None
         try:
@@ -98,10 +98,25 @@ class VoiceFlow:
             raise CoreError("VOICE_FLOW_RECEIPT_INVALID", 409) from None
 
     def _write(self, key, value):
-        self.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(value)))
+        self.store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) '
+            'DO UPDATE SET value = excluded.value, record_sequence = DEFAULT', (key, encode(value)))
 
     def _outbox(self, message_id):
-        row = self.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+        row = self.store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+            'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+            'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+            'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+            'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+            'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+            'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+            'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+            'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at '
+            'AS next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+            'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+            'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+            'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+            'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id '
+            '= %s', (message_id,))
         if not row:
             raise CoreError("VOICE_OUTBOX_SOURCE_REQUIRED", 403)
         return row
@@ -136,7 +151,44 @@ class VoiceFlow:
             if not value or value.get("state") != "AUDIO":
                 raise CoreError("SINGING_DELIVERY_FENCED", 409)
             song = self.jobs.singing_manifest(value["job_id"])
-            native = self.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (value["job_id"],))
+            native = self.store.one('SELECT voice_jobs.job_id AS job_id, voice_jobs.operation AS '
+                'operation, voice_jobs.event_id AS event_id, voice_jobs.native_source_event_id AS '
+                'native_source_event_id, voice_jobs.conversation_id AS conversation_id, '
+                'voice_jobs.message_id AS message_id, voice_jobs.source_segment_index AS '
+                'source_segment_index, voice_jobs.source_sha256 AS source_sha256, '
+                'voice_jobs.source_input_sha256 AS source_input_sha256, '
+                'voice_jobs.source_proof_sha256 AS source_proof_sha256, voice_jobs.identity_sha256 '
+                'AS identity_sha256, voice_jobs.window_sha256 AS window_sha256, '
+                'voice_jobs.captured_privacy_epoch AS captured_privacy_epoch, '
+                'voice_jobs.captured_reply_revision AS captured_reply_revision, '
+                'voice_jobs.outbox_content_sha256 AS outbox_content_sha256, '
+                'voice_jobs.outbox_delivery_key AS outbox_delivery_key, voice_jobs.node_id AS '
+                'node_id, voice_jobs.manifest_sha256 AS manifest_sha256, voice_jobs.config_sha256 '
+                'AS config_sha256, voice_jobs.config_json AS config_json, voice_jobs.generation AS '
+                'generation, voice_jobs.state AS state, voice_jobs.input_mime AS input_mime, '
+                'voice_jobs.input_sha256 AS input_sha256, voice_jobs.input_bytes AS input_bytes, '
+                'voice_jobs.input_duration_seconds AS input_duration_seconds, '
+                'voice_jobs.source_partial AS source_partial, voice_jobs.input_blob AS input_blob, '
+                'voice_jobs.result_blob AS result_blob, voice_jobs.result_sha256 AS result_sha256, '
+                'voice_jobs.result_bytes AS result_bytes, voice_jobs.lease_token_sha256 AS '
+                'lease_token_sha256, voice_jobs.lease_json AS lease_json, '
+                'voice_jobs.lease_issued_at AS lease_issued_at, voice_jobs.lease_until AS '
+                'lease_until, voice_jobs.started_at AS started_at, voice_jobs.completed_at AS '
+                'completed_at, voice_jobs.created_at AS created_at, voice_jobs.updated_at AS '
+                'updated_at, voice_jobs.deadline_at AS deadline_at, voice_jobs.result_expires_at '
+                'AS result_expires_at, voice_jobs.last_error_code AS last_error_code, '
+                'voice_jobs.stop_token_sha256 AS stop_token_sha256, voice_jobs.incarnation AS '
+                'incarnation, voice_jobs.content_retired AS content_retired, '
+                'voice_jobs.cleanup_state AS cleanup_state, voice_jobs.cleanup_epoch AS '
+                'cleanup_epoch, voice_jobs.cleanup_confirmed_at AS cleanup_confirmed_at, '
+                'voice_jobs.authority_json AS authority_json, voice_jobs.singing_context_json AS '
+                'singing_context_json, voice_jobs.reserved_output_bytes AS reserved_output_bytes, '
+                'voice_jobs.source_budget_at AS source_budget_at, '
+                'voice_jobs.source_reserved_requests AS source_reserved_requests, '
+                'voice_jobs.source_reserved_bytes AS source_reserved_bytes, '
+                'voice_jobs.source_used_requests AS source_used_requests, '
+                'voice_jobs.source_used_bytes AS source_used_bytes FROM voice_jobs AS voice_jobs '
+                'WHERE voice_jobs.job_id = %s', (value["job_id"],))
             if song is None or not native or not self.jobs._delivery_binding(native, message_id):
                 raise CoreError("SINGING_DELIVERY_FENCED", 409)
             return VoiceReplyDecision(state="AUDIO", job_id=value["job_id"])
@@ -165,7 +217,7 @@ class VoiceFlow:
                 and reply_format(self.store, row["origin_event_id"], row) != "voice"):
                 return self._text(row, None, "VOICE_MODEL_TEXT")
             source = self.store.one(
-                "SELECT body_json FROM events WHERE event_id=?", (row["origin_event_id"],)
+                'SELECT body_json FROM events WHERE event_id = %s', (row["origin_event_id"],)
             )
             voice_input = bool(source and _records(json.loads(source["body_json"])))
             if (
@@ -200,7 +252,7 @@ class VoiceFlow:
             datetime.fromisoformat(self.clock())
         ):
             completed = self.store.one(
-                "SELECT completed_at FROM voice_jobs WHERE job_id=?", (value["job_id"],)
+                'SELECT completed_at FROM voice_jobs WHERE job_id = %s', (value["job_id"],)
             )
             if (
                 not completed
@@ -229,7 +281,42 @@ class VoiceFlow:
                                    singing_index=index)
 
     def _freeze_audio(self, outbox, job_id, audio, *, singing_index=None):
-        row = self.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job_id,))
+        row = self.store.one('SELECT voice_jobs.job_id AS job_id, voice_jobs.operation AS '
+            'operation, voice_jobs.event_id AS event_id, voice_jobs.native_source_event_id AS '
+            'native_source_event_id, voice_jobs.conversation_id AS conversation_id, '
+            'voice_jobs.message_id AS message_id, voice_jobs.source_segment_index AS '
+            'source_segment_index, voice_jobs.source_sha256 AS source_sha256, '
+            'voice_jobs.source_input_sha256 AS source_input_sha256, voice_jobs.source_proof_sha256 '
+            'AS source_proof_sha256, voice_jobs.identity_sha256 AS identity_sha256, '
+            'voice_jobs.window_sha256 AS window_sha256, voice_jobs.captured_privacy_epoch AS '
+            'captured_privacy_epoch, voice_jobs.captured_reply_revision AS '
+            'captured_reply_revision, voice_jobs.outbox_content_sha256 AS outbox_content_sha256, '
+            'voice_jobs.outbox_delivery_key AS outbox_delivery_key, voice_jobs.node_id AS node_id, '
+            'voice_jobs.manifest_sha256 AS manifest_sha256, voice_jobs.config_sha256 AS '
+            'config_sha256, voice_jobs.config_json AS config_json, voice_jobs.generation AS '
+            'generation, voice_jobs.state AS state, voice_jobs.input_mime AS input_mime, '
+            'voice_jobs.input_sha256 AS input_sha256, voice_jobs.input_bytes AS input_bytes, '
+            'voice_jobs.input_duration_seconds AS input_duration_seconds, '
+            'voice_jobs.source_partial AS source_partial, voice_jobs.input_blob AS input_blob, '
+            'voice_jobs.result_blob AS result_blob, voice_jobs.result_sha256 AS result_sha256, '
+            'voice_jobs.result_bytes AS result_bytes, voice_jobs.lease_token_sha256 AS '
+            'lease_token_sha256, voice_jobs.lease_json AS lease_json, voice_jobs.lease_issued_at '
+            'AS lease_issued_at, voice_jobs.lease_until AS lease_until, voice_jobs.started_at AS '
+            'started_at, voice_jobs.completed_at AS completed_at, voice_jobs.created_at AS '
+            'created_at, voice_jobs.updated_at AS updated_at, voice_jobs.deadline_at AS '
+            'deadline_at, voice_jobs.result_expires_at AS result_expires_at, '
+            'voice_jobs.last_error_code AS last_error_code, voice_jobs.stop_token_sha256 AS '
+            'stop_token_sha256, voice_jobs.incarnation AS incarnation, voice_jobs.content_retired '
+            'AS content_retired, voice_jobs.cleanup_state AS cleanup_state, '
+            'voice_jobs.cleanup_epoch AS cleanup_epoch, voice_jobs.cleanup_confirmed_at AS '
+            'cleanup_confirmed_at, voice_jobs.authority_json AS authority_json, '
+            'voice_jobs.singing_context_json AS singing_context_json, '
+            'voice_jobs.reserved_output_bytes AS reserved_output_bytes, '
+            'voice_jobs.source_budget_at AS source_budget_at, voice_jobs.source_reserved_requests '
+            'AS source_reserved_requests, voice_jobs.source_reserved_bytes AS '
+            'source_reserved_bytes, voice_jobs.source_used_requests AS source_used_requests, '
+            'voice_jobs.source_used_bytes AS source_used_bytes FROM voice_jobs AS voice_jobs WHERE '
+            'voice_jobs.job_id = %s', (job_id,))
         content = json.loads(outbox["content_json"])
         choice = content.get("reply_part")
         if singing_index is not None and choice and (
@@ -395,7 +482,16 @@ class VoiceFlow:
                 or not voice_authority.permitted(self.store, self.settings, self.clock)
             ):
                 return VoiceInputStatus(state="NONE")
-            event = self.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
+            event = self.store.one('SELECT events.event_id AS event_id, events.schema_version AS '
+                'schema_version, events.source AS source, events.source_event_id AS '
+                'source_event_id, events.conversation_id AS conversation_id, events.actor_id AS '
+                'actor_id, events.event_type AS event_type, events.occurred_at AS occurred_at, '
+                'events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, '
+                'events.body_json AS body_json, events.trace_id AS trace_id, '
+                'events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+                'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+                'events.reply_revision AS reply_revision FROM events AS events WHERE '
+                'events.event_id = %s', (event_id,))
             if not event or not _records(json.loads(event["body_json"])):
                 return VoiceInputStatus(state="NONE")
             event, body, job = self._input_source(event_id, chat_job_id)
@@ -421,8 +517,8 @@ class VoiceFlow:
                 # resource responsibility for any input already released.
                 reason = ("VOICE_TRANSCRIPTION_EXPIRED" if expired_input
                           else "VOICE_INPUT_PRIVACY_EPOCH_CHANGED")
-                for row in self.store.rows("SELECT job_id FROM voice_jobs "
-                                           "WHERE event_id=? AND operation='asr'", (event_id,)):
+                for row in self.store.rows('SELECT job_id FROM voice_jobs WHERE event_id = %s AND '
+                    "operation = 'asr'", (event_id,)):
                     self.jobs.withdraw(row["job_id"], reason)
                 value = {
                     **authority, "state": "FALLBACK", "reason": reason,
@@ -475,7 +571,46 @@ class VoiceFlow:
             )
             for index in value["records"]:
                 row = self.store.one(
-                    "SELECT * FROM voice_jobs WHERE event_id=? AND source_segment_index=?",
+                    'SELECT voice_jobs.job_id AS job_id, voice_jobs.operation AS operation, '
+                    'voice_jobs.event_id AS event_id, voice_jobs.native_source_event_id AS '
+                    'native_source_event_id, voice_jobs.conversation_id AS conversation_id, '
+                    'voice_jobs.message_id AS message_id, voice_jobs.source_segment_index AS '
+                    'source_segment_index, voice_jobs.source_sha256 AS source_sha256, '
+                    'voice_jobs.source_input_sha256 AS source_input_sha256, '
+                    'voice_jobs.source_proof_sha256 AS source_proof_sha256, '
+                    'voice_jobs.identity_sha256 AS identity_sha256, voice_jobs.window_sha256 AS '
+                    'window_sha256, voice_jobs.captured_privacy_epoch AS captured_privacy_epoch, '
+                    'voice_jobs.captured_reply_revision AS captured_reply_revision, '
+                    'voice_jobs.outbox_content_sha256 AS outbox_content_sha256, '
+                    'voice_jobs.outbox_delivery_key AS outbox_delivery_key, voice_jobs.node_id AS '
+                    'node_id, voice_jobs.manifest_sha256 AS manifest_sha256, '
+                    'voice_jobs.config_sha256 AS config_sha256, voice_jobs.config_json AS '
+                    'config_json, voice_jobs.generation AS generation, voice_jobs.state AS state, '
+                    'voice_jobs.input_mime AS input_mime, voice_jobs.input_sha256 AS input_sha256, '
+                    'voice_jobs.input_bytes AS input_bytes, voice_jobs.input_duration_seconds AS '
+                    'input_duration_seconds, voice_jobs.source_partial AS source_partial, '
+                    'voice_jobs.input_blob AS input_blob, voice_jobs.result_blob AS result_blob, '
+                    'voice_jobs.result_sha256 AS result_sha256, voice_jobs.result_bytes AS '
+                    'result_bytes, voice_jobs.lease_token_sha256 AS lease_token_sha256, '
+                    'voice_jobs.lease_json AS lease_json, voice_jobs.lease_issued_at AS '
+                    'lease_issued_at, voice_jobs.lease_until AS lease_until, voice_jobs.started_at '
+                    'AS started_at, voice_jobs.completed_at AS completed_at, voice_jobs.created_at '
+                    'AS created_at, voice_jobs.updated_at AS updated_at, voice_jobs.deadline_at AS '
+                    'deadline_at, voice_jobs.result_expires_at AS result_expires_at, '
+                    'voice_jobs.last_error_code AS last_error_code, voice_jobs.stop_token_sha256 '
+                    'AS stop_token_sha256, voice_jobs.incarnation AS incarnation, '
+                    'voice_jobs.content_retired AS content_retired, voice_jobs.cleanup_state AS '
+                    'cleanup_state, voice_jobs.cleanup_epoch AS cleanup_epoch, '
+                    'voice_jobs.cleanup_confirmed_at AS cleanup_confirmed_at, '
+                    'voice_jobs.authority_json AS authority_json, voice_jobs.singing_context_json '
+                    'AS singing_context_json, voice_jobs.reserved_output_bytes AS '
+                    'reserved_output_bytes, voice_jobs.source_budget_at AS source_budget_at, '
+                    'voice_jobs.source_reserved_requests AS source_reserved_requests, '
+                    'voice_jobs.source_reserved_bytes AS source_reserved_bytes, '
+                    'voice_jobs.source_used_requests AS source_used_requests, '
+                    'voice_jobs.source_used_bytes AS source_used_bytes FROM voice_jobs AS '
+                    'voice_jobs WHERE voice_jobs.event_id = %s AND voice_jobs.source_segment_index '
+                    '= %s',
                     (event_id, index),
                 )
                 status = self.jobs.status(row["job_id"]) if row else None
@@ -554,7 +689,42 @@ class VoiceFlow:
         if proof.event_id != owner_event_id or proof.source_segment_index not in records:
             raise CoreError("VOICE_ASR_SOURCE_INVALID", 403)
         previous = self.store.one(
-            "SELECT * FROM voice_jobs WHERE event_id=? AND source_segment_index=?",
+            'SELECT voice_jobs.job_id AS job_id, voice_jobs.operation AS operation, '
+            'voice_jobs.event_id AS event_id, voice_jobs.native_source_event_id AS '
+            'native_source_event_id, voice_jobs.conversation_id AS conversation_id, '
+            'voice_jobs.message_id AS message_id, voice_jobs.source_segment_index AS '
+            'source_segment_index, voice_jobs.source_sha256 AS source_sha256, '
+            'voice_jobs.source_input_sha256 AS source_input_sha256, voice_jobs.source_proof_sha256 '
+            'AS source_proof_sha256, voice_jobs.identity_sha256 AS identity_sha256, '
+            'voice_jobs.window_sha256 AS window_sha256, voice_jobs.captured_privacy_epoch AS '
+            'captured_privacy_epoch, voice_jobs.captured_reply_revision AS '
+            'captured_reply_revision, voice_jobs.outbox_content_sha256 AS outbox_content_sha256, '
+            'voice_jobs.outbox_delivery_key AS outbox_delivery_key, voice_jobs.node_id AS node_id, '
+            'voice_jobs.manifest_sha256 AS manifest_sha256, voice_jobs.config_sha256 AS '
+            'config_sha256, voice_jobs.config_json AS config_json, voice_jobs.generation AS '
+            'generation, voice_jobs.state AS state, voice_jobs.input_mime AS input_mime, '
+            'voice_jobs.input_sha256 AS input_sha256, voice_jobs.input_bytes AS input_bytes, '
+            'voice_jobs.input_duration_seconds AS input_duration_seconds, '
+            'voice_jobs.source_partial AS source_partial, voice_jobs.input_blob AS input_blob, '
+            'voice_jobs.result_blob AS result_blob, voice_jobs.result_sha256 AS result_sha256, '
+            'voice_jobs.result_bytes AS result_bytes, voice_jobs.lease_token_sha256 AS '
+            'lease_token_sha256, voice_jobs.lease_json AS lease_json, voice_jobs.lease_issued_at '
+            'AS lease_issued_at, voice_jobs.lease_until AS lease_until, voice_jobs.started_at AS '
+            'started_at, voice_jobs.completed_at AS completed_at, voice_jobs.created_at AS '
+            'created_at, voice_jobs.updated_at AS updated_at, voice_jobs.deadline_at AS '
+            'deadline_at, voice_jobs.result_expires_at AS result_expires_at, '
+            'voice_jobs.last_error_code AS last_error_code, voice_jobs.stop_token_sha256 AS '
+            'stop_token_sha256, voice_jobs.incarnation AS incarnation, voice_jobs.content_retired '
+            'AS content_retired, voice_jobs.cleanup_state AS cleanup_state, '
+            'voice_jobs.cleanup_epoch AS cleanup_epoch, voice_jobs.cleanup_confirmed_at AS '
+            'cleanup_confirmed_at, voice_jobs.authority_json AS authority_json, '
+            'voice_jobs.singing_context_json AS singing_context_json, '
+            'voice_jobs.reserved_output_bytes AS reserved_output_bytes, '
+            'voice_jobs.source_budget_at AS source_budget_at, voice_jobs.source_reserved_requests '
+            'AS source_reserved_requests, voice_jobs.source_reserved_bytes AS '
+            'source_reserved_bytes, voice_jobs.source_used_requests AS source_used_requests, '
+            'voice_jobs.source_used_bytes AS source_used_bytes FROM voice_jobs AS voice_jobs WHERE '
+            'voice_jobs.event_id = %s AND voice_jobs.source_segment_index = %s',
             (owner_event_id, proof.source_segment_index),
         )
         if previous is None:
@@ -592,8 +762,46 @@ class VoiceFlow:
             source_hash = input_digest(body)
             records = []
             for index in indices:
-                row = self.store.one("SELECT * FROM voice_jobs WHERE event_id=? "
-                                     "AND operation='asr' AND source_segment_index=?",
+                row = self.store.one('SELECT voice_jobs.job_id AS job_id, voice_jobs.operation AS '
+                    'operation, voice_jobs.event_id AS event_id, voice_jobs.native_source_event_id '
+                    'AS native_source_event_id, voice_jobs.conversation_id AS conversation_id, '
+                    'voice_jobs.message_id AS message_id, voice_jobs.source_segment_index AS '
+                    'source_segment_index, voice_jobs.source_sha256 AS source_sha256, '
+                    'voice_jobs.source_input_sha256 AS source_input_sha256, '
+                    'voice_jobs.source_proof_sha256 AS source_proof_sha256, '
+                    'voice_jobs.identity_sha256 AS identity_sha256, voice_jobs.window_sha256 AS '
+                    'window_sha256, voice_jobs.captured_privacy_epoch AS captured_privacy_epoch, '
+                    'voice_jobs.captured_reply_revision AS captured_reply_revision, '
+                    'voice_jobs.outbox_content_sha256 AS outbox_content_sha256, '
+                    'voice_jobs.outbox_delivery_key AS outbox_delivery_key, voice_jobs.node_id AS '
+                    'node_id, voice_jobs.manifest_sha256 AS manifest_sha256, '
+                    'voice_jobs.config_sha256 AS config_sha256, voice_jobs.config_json AS '
+                    'config_json, voice_jobs.generation AS generation, voice_jobs.state AS state, '
+                    'voice_jobs.input_mime AS input_mime, voice_jobs.input_sha256 AS input_sha256, '
+                    'voice_jobs.input_bytes AS input_bytes, voice_jobs.input_duration_seconds AS '
+                    'input_duration_seconds, voice_jobs.source_partial AS source_partial, '
+                    'voice_jobs.input_blob AS input_blob, voice_jobs.result_blob AS result_blob, '
+                    'voice_jobs.result_sha256 AS result_sha256, voice_jobs.result_bytes AS '
+                    'result_bytes, voice_jobs.lease_token_sha256 AS lease_token_sha256, '
+                    'voice_jobs.lease_json AS lease_json, voice_jobs.lease_issued_at AS '
+                    'lease_issued_at, voice_jobs.lease_until AS lease_until, voice_jobs.started_at '
+                    'AS started_at, voice_jobs.completed_at AS completed_at, voice_jobs.created_at '
+                    'AS created_at, voice_jobs.updated_at AS updated_at, voice_jobs.deadline_at AS '
+                    'deadline_at, voice_jobs.result_expires_at AS result_expires_at, '
+                    'voice_jobs.last_error_code AS last_error_code, voice_jobs.stop_token_sha256 '
+                    'AS stop_token_sha256, voice_jobs.incarnation AS incarnation, '
+                    'voice_jobs.content_retired AS content_retired, voice_jobs.cleanup_state AS '
+                    'cleanup_state, voice_jobs.cleanup_epoch AS cleanup_epoch, '
+                    'voice_jobs.cleanup_confirmed_at AS cleanup_confirmed_at, '
+                    'voice_jobs.authority_json AS authority_json, voice_jobs.singing_context_json '
+                    'AS singing_context_json, voice_jobs.reserved_output_bytes AS '
+                    'reserved_output_bytes, voice_jobs.source_budget_at AS source_budget_at, '
+                    'voice_jobs.source_reserved_requests AS source_reserved_requests, '
+                    'voice_jobs.source_reserved_bytes AS source_reserved_bytes, '
+                    'voice_jobs.source_used_requests AS source_used_requests, '
+                    'voice_jobs.source_used_bytes AS source_used_bytes FROM voice_jobs AS '
+                    "voice_jobs WHERE voice_jobs.event_id = %s AND voice_jobs.operation = 'asr' "
+                    'AND voice_jobs.source_segment_index = %s',
                                      (event_id, index))
                 if row and (
                     row["captured_reply_revision"] != authority["reply_revision"]
@@ -701,7 +909,45 @@ class VoiceFlow:
                 raise CoreError("VOICE_CONTEXT_RESULT_CHANGED", 409)
             for item in selected:
                 payload = self.jobs.result(item["job_id"])
-                row = self.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (item["job_id"],))
+                row = self.store.one('SELECT voice_jobs.job_id AS job_id, voice_jobs.operation AS '
+                    'operation, voice_jobs.event_id AS event_id, voice_jobs.native_source_event_id '
+                    'AS native_source_event_id, voice_jobs.conversation_id AS conversation_id, '
+                    'voice_jobs.message_id AS message_id, voice_jobs.source_segment_index AS '
+                    'source_segment_index, voice_jobs.source_sha256 AS source_sha256, '
+                    'voice_jobs.source_input_sha256 AS source_input_sha256, '
+                    'voice_jobs.source_proof_sha256 AS source_proof_sha256, '
+                    'voice_jobs.identity_sha256 AS identity_sha256, voice_jobs.window_sha256 AS '
+                    'window_sha256, voice_jobs.captured_privacy_epoch AS captured_privacy_epoch, '
+                    'voice_jobs.captured_reply_revision AS captured_reply_revision, '
+                    'voice_jobs.outbox_content_sha256 AS outbox_content_sha256, '
+                    'voice_jobs.outbox_delivery_key AS outbox_delivery_key, voice_jobs.node_id AS '
+                    'node_id, voice_jobs.manifest_sha256 AS manifest_sha256, '
+                    'voice_jobs.config_sha256 AS config_sha256, voice_jobs.config_json AS '
+                    'config_json, voice_jobs.generation AS generation, voice_jobs.state AS state, '
+                    'voice_jobs.input_mime AS input_mime, voice_jobs.input_sha256 AS input_sha256, '
+                    'voice_jobs.input_bytes AS input_bytes, voice_jobs.input_duration_seconds AS '
+                    'input_duration_seconds, voice_jobs.source_partial AS source_partial, '
+                    'voice_jobs.input_blob AS input_blob, voice_jobs.result_blob AS result_blob, '
+                    'voice_jobs.result_sha256 AS result_sha256, voice_jobs.result_bytes AS '
+                    'result_bytes, voice_jobs.lease_token_sha256 AS lease_token_sha256, '
+                    'voice_jobs.lease_json AS lease_json, voice_jobs.lease_issued_at AS '
+                    'lease_issued_at, voice_jobs.lease_until AS lease_until, voice_jobs.started_at '
+                    'AS started_at, voice_jobs.completed_at AS completed_at, voice_jobs.created_at '
+                    'AS created_at, voice_jobs.updated_at AS updated_at, voice_jobs.deadline_at AS '
+                    'deadline_at, voice_jobs.result_expires_at AS result_expires_at, '
+                    'voice_jobs.last_error_code AS last_error_code, voice_jobs.stop_token_sha256 '
+                    'AS stop_token_sha256, voice_jobs.incarnation AS incarnation, '
+                    'voice_jobs.content_retired AS content_retired, voice_jobs.cleanup_state AS '
+                    'cleanup_state, voice_jobs.cleanup_epoch AS cleanup_epoch, '
+                    'voice_jobs.cleanup_confirmed_at AS cleanup_confirmed_at, '
+                    'voice_jobs.authority_json AS authority_json, voice_jobs.singing_context_json '
+                    'AS singing_context_json, voice_jobs.reserved_output_bytes AS '
+                    'reserved_output_bytes, voice_jobs.source_budget_at AS source_budget_at, '
+                    'voice_jobs.source_reserved_requests AS source_reserved_requests, '
+                    'voice_jobs.source_reserved_bytes AS source_reserved_bytes, '
+                    'voice_jobs.source_used_requests AS source_used_requests, '
+                    'voice_jobs.source_used_bytes AS source_used_bytes FROM voice_jobs AS '
+                    'voice_jobs WHERE voice_jobs.job_id = %s', (item["job_id"],))
                 if (
                     payload is None
                     or digest(payload) != item["result_sha256"]

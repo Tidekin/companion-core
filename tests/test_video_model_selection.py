@@ -47,7 +47,7 @@ async def resident(config_file):
         for _ in range(2):
             job_id = await asyncio.to_thread(input)
             assert await worker.run_once("resident-video-worker", job_id=job_id)
-            row = worker.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+            row = worker.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                    (job_id,))
             assert row["state"] == "SUCCEEDED", row
             print("DONE", flush=True)
@@ -69,7 +69,7 @@ def test_console_switch_pins_inflight_route_and_prices_new_video(core, tmp_path)
             async def gif(number):
                 event = await animation(core, client, config, plan, tmp_path,
                                         "image/gif", number=number)
-                return core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
+                return core.store.one('SELECT job_id FROM jobs WHERE event_id=%s',
                                       (event["event_id"],))["job_id"]
 
             login = await client.post("/v1/console/session", json={"password": PASSWORD},
@@ -125,9 +125,12 @@ def test_console_switch_pins_inflight_route_and_prices_new_video(core, tmp_path)
                 if proc.returncode is None:
                     proc.kill()
                     await proc.wait()
-            rows = core.store.rows("SELECT m.model,m.state,m.billed_micro_usd,a.measurement_json "
-                "FROM model_usage m JOIN model_admissions a USING(request_id) "
-                "WHERE m.scenario='content_video' ORDER BY m.rowid")
+            rows = core.store.rows(
+                'SELECT m.model,m.state,m.billed_micro_usd,a.measurement_json'
+                ' FROM model_usage m JOIN model_admissions a '
+                "USING(request_id) WHERE m.scenario='content_video' ORDER BY "
+                'm.record_sequence'
+            )
             assert [(r["model"], r["state"], r["billed_micro_usd"]) for r in rows] == [
                 ("configurable-video-one", "SETTLED", 140), ("second-model", "SETTLED", 70)]
             assert json.loads(rows[1]["measurement_json"])["video_profile"] == "second"

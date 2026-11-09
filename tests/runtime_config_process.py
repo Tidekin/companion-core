@@ -3,7 +3,6 @@
 import argparse
 import asyncio
 import json
-import sqlite3
 import sys
 import traceback
 from contextlib import closing
@@ -11,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+import psycopg
 
 from companion import operator_config, runtime_config
 from companion.__main__ import worker
@@ -39,13 +39,14 @@ async def main():
     def boundary(store, config, clock):
         nonlocal busy_boundaries
         if args.boundary_contention and completed == 1 and not busy_boundaries:
-            with closing(sqlite3.connect(config.database, isolation_level=None)) as writer:
-                writer.execute("BEGIN IMMEDIATE")
-                store.db.execute("PRAGMA busy_timeout=0")
+            with closing(psycopg.connect(config.database.get_secret_value())) as writer:
+                writer.execute(
+                    "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
+
                 try:
                     return native_boundary(store, config, clock)
-                except sqlite3.OperationalError as error:
-                    assert error.sqlite_errorcode == sqlite3.SQLITE_BUSY
+                except psycopg.errors.LockNotAvailable as error:
+                    assert error.sqlstate == "55P03" and not store.in_transaction
                     busy_boundaries += 1
                     raise
                 finally:

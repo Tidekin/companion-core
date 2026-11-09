@@ -2,23 +2,37 @@
 
 import asyncio
 import json
-import subprocess
 import sys
 from pathlib import Path
 
 import httpx
 import pytest
 
+from companion import operator_config
 from companion.image_input import ImageInputPolicy
 from companion.memory_context import MemoryContext
+from companion.memory_index_work import warm_once
 from companion.store import encode
 from companion_onebot_bridge import pending_media
 from tests.conftest import run
 from tests.sdk_reader_fixture import worker_for
+from tests.support.confirmed_memory import remember
 from tests.support.live_image_input import png
 from tests.support.native_consumer_entry import environment
 from tests.support.next_memory_worker import provider_response
 from tests.support.onebot_images import image_segment
+
+
+def test_completed_vector_scan_does_not_report_new_work(core):
+    mid = remember(core, 1, "项目代号是青栎帆船", confirmed=True)
+    assert core.memory.search("青栎帆船")[0]["memory_id"] == mid
+    assert core.store.one("SELECT COUNT(*) n FROM memory_vectors")["n"] == 1
+    assert not run(warm_once(core.memory, core.clock, lambda: True))
+    assert not run(warm_once(core.memory, core.clock, lambda: True))
+    assert core.store.one("SELECT COUNT(*) n FROM memory_vectors")["n"] == 1
+    assert not core.model.calls
+
+
 
 
 @pytest.mark.parametrize("batch,output_ceiling", [
@@ -77,22 +91,33 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch, o
             assert all(row["state"] == "SUCCEEDED" for row in core.store.rows(
                 "SELECT state FROM jobs"))
             assert not core.store.rows("SELECT * FROM episodes")
-            chat_usage = core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid")
+            chat_usage = core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            )
             assert chat_usage == [{"scenario": "chat", "state": "SETTLED"}] * len(messages)
-            config = core.settings.model_dump(mode="json")
-            for name in ("model_key", "bridge_token", "control_token"):
-                config[name] = getattr(core.settings, name).get_secret_value()
+            config = operator_config._raw(core.settings)
             settings_path = tmp_path / "worker-settings.json"
             await asyncio.to_thread(settings_path.write_text, encode(config), encoding="utf-8")
             script = ("import sys; "
                       "from tests.support.next_memory_worker import run_isolated_worker; "
                       "run_isolated_worker(sys.argv[1], sys.argv[2])")
             for attempt in range(3):
-                completed = await asyncio.to_thread(subprocess.run,
-                    [sys.executable, "-B", "-c", script, str(settings_path), core.clock()],
-                    cwd=workspace, capture_output=True, text=True,
-                    encoding="utf-8", timeout=30, check=True)
-                result = json.loads(completed.stdout.splitlines()[-1])
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "-B", "-c", script, str(settings_path), core.clock(),
+                    cwd=workspace, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                try:
+                    # Native database/model startup has its own bounded readiness gate;
+                    # the original 30-second processing deadline begins after that gate.
+                    ready = await asyncio.wait_for(process.stdout.readline(), 30)
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), 30)
+                    assert ready.rstrip(b"\r\n") == b"MEMORY_WORKER_READY", stderr.decode()
+                    assert process.returncode == 0, stderr.decode()
+                    result = json.loads(stdout.splitlines()[-1])
+                finally:
+                    if process.returncode is None:
+                        process.kill()
+                        await asyncio.wait_for(process.communicate(), 10)
                 expected = (["memory_extract", *(["memory_review"]
                             if batch != "only_media" else [])] if attempt == 0 else [])
                 assert result["calls"] == expected
@@ -104,7 +129,7 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch, o
             assert all(row["memory_processed"] for row in core.store.rows("SELECT * FROM events"))
             assert not core.store.rows("SELECT * FROM audit_log WHERE action='memory.batch_failed'")
             assert not core.store.rows(
-                "SELECT * FROM runtime_meta WHERE key LIKE 'extract_attempts:%'")
+                "SELECT * FROM runtime_meta WHERE starts_with(key,'extract_attempts:')")
             assert core.store.one("SELECT COUNT(*) n FROM episodes")["n"] == int(
                 batch != "only_media")
             assert core.store.one("SELECT COUNT(*) n FROM conversation_summaries")["n"] == int(
@@ -118,7 +143,10 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path, batch, o
                     for excerpt in item["excerpts"]] == expected_sources
             assert {r["event_id"] for r in core.store.rows(
                 "SELECT event_id FROM episode_events")} == set(expected_sources)
-            assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+            assert core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            ) == [
                 *chat_usage, {"scenario": "memory_extract", "state": "SETTLED"},
                 *([{"scenario": "memory_review", "state": "SETTLED"}]
                   if batch != "only_media" else [])]

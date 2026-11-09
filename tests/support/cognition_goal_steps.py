@@ -5,7 +5,7 @@ from tests.support.observation_capture import enable_observations, observation
 
 def retained_plan(core):
     goal = setup_goal(core)
-    core.store.execute("UPDATE goals SET state='WAITING_INPUT',scope_json=? WHERE goal_id=?",
+    core.store.execute("UPDATE goals SET state='WAITING_INPUT',scope_json=%s WHERE goal_id=%s",
         (encode({"operation": "read_plan", "urls": [f"https://example.org/{i}" for i in range(3)]}),
          goal))
     steps = []
@@ -25,10 +25,10 @@ def finish_record(core, step, number):
     core.settings.web_reading_enabled = True
     core.settings.web_reading_hosts = ("example.org",)
     roots = [r["event_id"] for r in core.store.rows(
-        "SELECT event_id FROM goal_step_evidence WHERE step_id=?", (step,))]
+        'SELECT event_id FROM goal_step_evidence WHERE step_id=%s', (step,))]
     item = observation(core, number, source="web", source_event_ids=roots,
                        text="retained real-source observation " + str(number))
     core.observations.append("reader", item, reading=True)
-    core.store.execute("UPDATE goal_steps SET state='DONE',outcome_event_id=? WHERE step_id=?",
+    core.store.execute("UPDATE goal_steps SET state='DONE',outcome_event_id=%s WHERE step_id=%s",
                         (item.event_id, step))
     return item.event_id

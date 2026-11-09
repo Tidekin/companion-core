@@ -42,13 +42,12 @@ def test_wake_missing_purpose_preserves_real_goal_and_steps(core, tmp_path, entr
         "purposes": [p for p in ("wake", "goals", "exploration") if p != missing],
     })
     activate(core, policy)
-    before = core.store.one("SELECT * FROM goals WHERE goal_id=?", (goal_id,))
-    changes = core.store.db.total_changes
-    assert not invoke(core, entry)
-    assert core.store.one("SELECT * FROM goals WHERE goal_id=?", (goal_id,)) == before
-    assert core.store.rows("SELECT * FROM goal_steps") == []
-    assert core.store.rows("SELECT * FROM wake_decisions") == []
-    assert core.store.db.total_changes == changes
+    before = core.store.one('SELECT * FROM goals WHERE goal_id=%s', (goal_id,))
+    with core.store.read_snapshot():
+        assert not invoke(core, entry)
+        assert core.store.one('SELECT * FROM goals WHERE goal_id=%s', (goal_id,)) == before
+        assert core.store.rows("SELECT * FROM goal_steps") == []
+        assert core.store.rows("SELECT * FROM wake_decisions") == []
 
 
 @pytest.mark.parametrize("entry", ["direct", "selector"])
@@ -124,8 +123,10 @@ def test_goal_from_superseded_grant_is_closed_and_next_goal_runs(core, tmp_path,
     assert core.store.one("SELECT decision,reason_code,goal_id FROM wake_decisions") == {
         "decision": "EXPLORE", "reason_code": "GOAL_DUE", "goal_id": current,
     }
-    assert core.store.one("SELECT action FROM audit_log WHERE entity_id=? "
-                          "AND action='goal.authority_rejected'", (stale,))
+    assert core.store.one((
+        'SELECT action FROM audit_log WHERE entity_id=%s AND '
+        "action='goal.authority_rejected'"
+    ), (stale,))
 
 
 @pytest.mark.parametrize("discovery", [0, 3])

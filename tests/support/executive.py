@@ -18,8 +18,6 @@ def configured(core, adapter=None, **changes):
     config = ExecutiveConfig(
         enabled=True,
         daily_calls=3,
-        daily_micro_usd=100000,
-        monthly_micro_usd=200000,
         endpoints={
             "windows": ExecutorEndpoint(
                 url="http://127.0.0.1:8991",
@@ -52,7 +50,6 @@ def envelope(**changes):
         capability="windows.read_text",
         workspace="work",
         arguments={"path": "result.txt"},
-        max_cost_micro_usd=50000,
         max_model_calls=1,
         max_input_bytes=16000,
         max_output_tokens=1024,

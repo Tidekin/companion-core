@@ -8,6 +8,7 @@ from cryptography.fernet import Fernet
 from pydantic import SecretStr
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.backup import backup, restore
 from companion.core import Core
 from companion.reading_protocol import ReadObservation
@@ -35,6 +36,7 @@ def test_actual_worker_overrun_blocks_next_admission_and_remains_visible(core, m
     monkeypatch.setattr(worker_v1, "WebHTTP", lambda hosts: WebHTTP(hosts, pool))
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     async def scenario():
         async with httpx.AsyncClient(
@@ -82,21 +84,25 @@ def test_uncertain_and_late_observed_overruns_cannot_release_daily_capacity(core
     assert core.store.one("SELECT observed_bytes FROM reading_attempts")["observed_bytes"] == 9000
 
 
-def test_observed_overrun_survives_source_erasure_and_old_backup_replay(core, tmp_path):
+def test_observed_overrun_survives_source_erasure_and_old_backup_replay(
+    core, tmp_path, empty_database,
+):
     limited(core)
     item = core.reading.lease("web")
     core.reading.complete("web", item["request_id"], ReadObservation(
         schema_version=1, lease_token=item["lease_token"], status="UNKNOWN", observations=[],
         observed_requests=1, observed_bytes=9000, error_code="UPSTREAM_TIMEOUT",
     ))
-    archive, destination = tmp_path / "reading.enc", tmp_path / "restored.db"
+    archive, destination = tmp_path / "reading.enc", empty_database
+    state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert not core.exploration.budget_available(for_read=True)
-    restore(archive, destination, key, core.settings.erasure_ledger)
-    with Core(core.settings.model_copy(update={"database": str(destination)}),
+    restore(archive, destination, key, core.settings.erasure_ledger, state_directory=state)
+    with Core(core.settings.model_copy(update={"database": destination,
+                                              "state_directory": str(state)}),
               FakeModel(), core.clock) as restored:
         attempt = restored.store.one("SELECT * FROM reading_attempts")
         assert attempt["context_json"] == "{}" and attempt["observed_bytes"] == 9000

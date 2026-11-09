@@ -46,7 +46,7 @@ def test_signed_pre_ingress_and_pending_chat_preempt_every_native_turn(core, tmp
     capture, _ = captured(core, tmp_path)
     assert foreground_clear(core)
     owner_input.approve(core.store, core.settings, core.clock, capture)
-    assert not core.store.one("SELECT 1 FROM events WHERE event_id=?", (capture.event_id,))
+    assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s', (capture.event_id,))
     assert not foreground_clear(core)
     assert run(native_selector(core, "owner-worker").step()).blocked
     core.ingest(inbound(core, capture), "owner-selector-ingress")
@@ -75,10 +75,9 @@ def test_deadlines_use_optional_owner_expiry_without_a_window(core, tmp_path, ki
         })
     activate(core, policy)
     assert core.settings.live_text_window is None
-    before = core.store.db.total_changes
-    start = datetime.fromisoformat(core.clock())
-    deadline = worker_deadlines.PROVIDERS[kind](core.store, core.settings, start)
-    assert core.store.db.total_changes == before
+    with core.store.read_snapshot():
+        start = datetime.fromisoformat(core.clock())
+        deadline = worker_deadlines.PROVIDERS[kind](core.store, core.settings, start)
     if expires:
         assert deadline == start + timedelta(seconds=60)
     else:

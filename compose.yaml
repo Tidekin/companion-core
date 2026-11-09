@@ -5,7 +5,7 @@ x-core: &core
   env_file: .env
   environment:
     COMPANION_CONFIG: /app/config.toml
-    COMPANION_DATABASE: /data/companion.sqlite3
+    COMPANION_STATE_DIRECTORY: /data
     COMPANION_ERASURE_LEDGER: /privacy/erasures.jsonl
     COMPANION_EMBEDDING_CACHE_DIR: /data/embedding-cache
   volumes:

@@ -38,12 +38,12 @@ def metadata(core, *, deadline=None, duration=60, enabled=True, grant=None):
     core.settings.exploration_monthly_requests = 1000
     core.settings.exploration_daily_deep_reads = 20
     content = core.store.one(
-        "SELECT * FROM content_items WHERE read_request_id=?", (item["request_id"],)
+        'SELECT * FROM content_items WHERE read_request_id=%s', (item["request_id"],)
     )
     assert content is not None
     if deadline is not None:
         core.store.execute(
-            "UPDATE content_items SET deadline=? WHERE item_id=?", (deadline, content["item_id"])
+            'UPDATE content_items SET deadline=%s WHERE item_id=%s', (deadline, content["item_id"])
         )
     evidence = body["observations"][0]["evidence"]
     evidence.update(
@@ -204,7 +204,7 @@ def paid_options(core, *, cloud=None, short_window=False, call_limit=4):
     options["core_options"].update(
         bili_video=config,
         cloud_budget=cloud or CloudBudgetConfig(),
-        content=ContentConfig(use_chat_model_for_vision=True, image_daily_micro_usd=1_000_000),
+        content=ContentConfig(use_chat_model_for_vision=True),
         observation_adapters={
             "bili": ObservationAdapterConfig(
                 source="bilibili",
@@ -313,7 +313,7 @@ async def paid_media(
         assert len(selectors) == 2 and all(row["state"] == "SETTLED" for row in selectors)
         yield module, child, prepare
         for row in selectors:
-            assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+            assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                   (row["request_id"],)) == row
         assert sends == []
 
@@ -329,8 +329,8 @@ def model_response(content, *, tokens=100):
 
 
 def phase_usage(core):
-    return core.store.rows("SELECT * FROM model_usage WHERE scenario LIKE 'content_video%' "
-                           "ORDER BY rowid")
+    return core.store.rows("SELECT * FROM model_usage WHERE scenario LIKE %s "
+                           "ORDER BY record_sequence", ("content_video%",))
 
 
 def phase_costs(core):

@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import sqlite3
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -55,7 +54,7 @@ async def readonly_window(
     calls, sends, scores = [], [], []
     original_scores = core.memory.index.scores_async
     # An existing out-of-scope fact with missing evidence must remain untouched.
-    core.store.execute("DELETE FROM memory_evidence WHERE memory_id=?", (outsider,))
+    core.store.execute('DELETE FROM memory_evidence WHERE memory_id=%s', (outsider,))
     core.memory.observe_trait(
         "未批准私密特征",
         core.store.one("SELECT * FROM events WHERE event_id='evt_test_901'"),
@@ -153,11 +152,11 @@ def test_native_bge_private_scope_and_sdk_calls_share_one_reply(core, tmp_path):
             assert len(value.calls) == 2
             assert value.scores and all(ids == [value.memory_id] for ids in value.scores)
             assert "紫云三号" not in encode(value.calls)
-            assert core.store.one("SELECT status,confidence FROM memories WHERE memory_id=?",
+            assert core.store.one('SELECT status,confidence FROM memories WHERE memory_id=%s',
                 (value.outsider,)) == {"status": "CONFIRMED", "confidence": 1.0}
-            assert core.store.one("SELECT 1 FROM memory_vectors WHERE memory_id=?",
+            assert core.store.one('SELECT 1 FROM memory_vectors WHERE memory_id=%s',
                                   (value.memory_id,))
-            assert not core.store.one("SELECT 1 FROM memory_vectors WHERE memory_id=?",
+            assert not core.store.one('SELECT 1 FROM memory_vectors WHERE memory_id=%s',
                                       (value.outsider,))
             result = json.loads(returned(value.calls[-1])[0]["content"])
             assert [row["memory_id"] for row in result["facts"]] == [value.memory_id]
@@ -166,8 +165,8 @@ def test_native_bge_private_scope_and_sdk_calls_share_one_reply(core, tmp_path):
             admissions = core.store.rows("SELECT * FROM model_admissions")
             assert len(admissions) == 2
             assert len({row["logical_request_id"] for row in admissions}) == 1
-            job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?", (source["event_id"],))
-            saved = core.store.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+            job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s', (source["event_id"],))
+            saved = core.store.one('SELECT snapshots_json FROM agent_conversations WHERE job_id=%s',
                                    (job["job_id"],))
             memories = [item for item in json.loads(saved["snapshots_json"])
                         if item["kind"] == "memory"]
@@ -286,21 +285,22 @@ def test_memory_proof_drift_after_model_receive_prevents_reply(core, tmp_path, m
             return httpx.Response(200, json=answer(calls=[
                 call("recall-project", "memory_recall", {"query": "*"})]))
         if mutation == "content":
-            core.store.execute("UPDATE memories SET content='漂移' WHERE memory_id=?",
+            core.store.execute("UPDATE memories SET content='漂移' WHERE memory_id=%s",
                                (value.memory_id,))
         elif mutation == "evidence":
-            core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
+            core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s',
                                (value.source["event_id"],))
         elif mutation == "status":
-            core.store.execute("UPDATE memories SET status='HYPOTHESIS' WHERE memory_id=?",
+            core.store.execute("UPDATE memories SET status='HYPOTHESIS' WHERE memory_id=%s",
                                (value.memory_id,))
         elif mutation == "needs_review":
-            core.store.execute("UPDATE memories SET needs_review=1 WHERE memory_id=?",
+            core.store.execute('UPDATE memories SET needs_review=1 WHERE memory_id=%s',
                                (value.memory_id,))
         elif mutation == "epoch":
-            advance_epoch(core.store)
+            with core.store.transaction(control_write=True):
+                advance_epoch(core.store)
         else:
-            core.store.execute("DELETE FROM memory_evidence WHERE memory_id=?", (value.memory_id,))
+            core.store.execute('DELETE FROM memory_evidence WHERE memory_id=%s', (value.memory_id,))
         return httpx.Response(200, json=answer("旧事实不能发送。"))
 
     async def scenario():
@@ -332,7 +332,7 @@ def test_native_memory_requests_share_the_five_call_cap(core, tmp_path):
             assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 5
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 3
             assert_failure_notice(core, source["event_id"])
-            assert core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+            assert core.store.one('SELECT state,last_error_code FROM jobs WHERE event_id=%s',
                 (source["event_id"],)) == {"state": "FAILED",
                                          "last_error_code": "MODEL_DAILY_BUDGET_EXHAUSTED"}
     run(scenario())
@@ -351,7 +351,7 @@ def test_duplicate_memory_tool_ids_across_requests_are_rejected(core, tmp_path):
             assert len(value.calls) == 2
             assert_settled_calls(core, 2)
             assert core.store.one("SELECT COUNT(*) n FROM agent_tool_calls")["n"] == 1
-            assert core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+            assert core.store.one('SELECT state,last_error_code FROM jobs WHERE event_id=%s',
                 (source["event_id"],)) == {"state": "FAILED",
                                          "last_error_code": "CONVERSATION_TOOL_ID_CONFLICT"}
             assert_failure_notice(core)
@@ -363,7 +363,7 @@ def test_duplicate_memory_tool_ids_across_requests_are_rejected(core, tmp_path):
 def test_empty_recall_continues_in_the_same_sdk_conversation(core, tmp_path):
     async def scenario():
         async with native_recall(core, tmp_path) as value:
-            core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+            core.store.execute('UPDATE memories SET valid_to=%s WHERE memory_id=%s',
                                (after(core.clock(), -1), value.memory_id))
             await value.capture()
             assert await value.worker.run_once("no-memory-candidate")
@@ -382,10 +382,10 @@ def test_empty_recall_continues_in_the_same_sdk_conversation(core, tmp_path):
 def test_source_drift_in_http_hook_is_rechecked_before_actual_model_io(core, tmp_path, stage):
     async def hook(request):
         if stage == "owner_input":
-            core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
+            core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s',
                                (source["event_id"],))
         elif returned(json.loads(request.content)):
-            core.store.execute("UPDATE memories SET confidence=0 WHERE memory_id=?",
+            core.store.execute('UPDATE memories SET confidence=0 WHERE memory_id=%s',
                                (value.memory_id,))
 
     async def scenario():
@@ -409,7 +409,7 @@ def test_final_native_send_check_rechecks_memory_and_history_proofs(core, tmp_pa
         async with native_recall(core, tmp_path) as value:
             source = await value.capture()
             assert await value.worker.run_once("source-bound-native-reply")
-            job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?", (source["event_id"],))
+            job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s', (source["event_id"],))
             client = value.entry.client
             leased = await client.post("/internal/v1/deliveries/lease", json={
                 "worker_id": "memory-final-check", "authority": value.entry.runtime.authority})
@@ -425,12 +425,13 @@ def test_final_native_send_check_rechecks_memory_and_history_proofs(core, tmp_pa
             assert positive.status_code == 200 and positive.json()["approved"]
             usage = core.store.rows("SELECT * FROM model_usage")
             if mutation == "source":
-                core.store.execute("UPDATE memories SET content='变更事实' WHERE memory_id=?",
+                core.store.execute("UPDATE memories SET content='变更事实' WHERE memory_id=%s",
                                    (value.memory_id,))
             elif mutation == "epoch":
-                advance_epoch(core.store)
+                with core.store.transaction(control_write=True):
+                    advance_epoch(core.store)
             else:
-                saved = core.store.one("SELECT * FROM agent_conversations WHERE job_id=?",
+                saved = core.store.one('SELECT * FROM agent_conversations WHERE job_id=%s',
                                        (job["job_id"],))
                 snapshots = json.loads(saved["snapshots_json"])
                 kind = "history" if mutation.startswith("history") else "memory"
@@ -445,13 +446,16 @@ def test_final_native_send_check_rechecks_memory_and_history_proofs(core, tmp_pa
                     else:
                         proof.append({"event_id": value.source["event_id"],
                                       "source_sha256": "a" * 64})
-                core.store.execute("UPDATE agent_conversations SET snapshots_json=? WHERE job_id=?",
+                core.store.execute((
+                    'UPDATE agent_conversations SET snapshots_json=%s WHERE '
+                    'job_id=%s'
+                ),
                                    (encode(snapshots), job["job_id"]))
             rejected = await client.post("/internal/v1/owner-authority/send-check", json=check)
             assert rejected.status_code in {403, 409}, rejected.text
             assert len(value.calls) == 2 and not value.sends
             assert core.store.rows("SELECT * FROM model_usage") == usage
-            assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+            assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                                  (item["message_id"],)) == {"state": "SENDING"}
     run(scenario())
 
@@ -489,16 +493,16 @@ def test_source_eligibility_cannot_be_replaced_with_an_approval_hash(core, tmp_p
         ):
             if change == "expired":
                 core.store.execute(
-                    "UPDATE events SET ingested_at=? WHERE event_id='evt_test_900'",
+                    "UPDATE events SET ingested_at=%s WHERE event_id='evt_test_900'",
                     (after(core.clock(), -86400 * 10000),),
                 )
             elif change == "unconfirmed":
                 core.store.execute(
-                    "UPDATE memories SET status='HYPOTHESIS' WHERE memory_id=?", (memory_id,)
+                    "UPDATE memories SET status='HYPOTHESIS' WHERE memory_id=%s", (memory_id,)
                 )
             elif change == "conflict":
                 core.store.execute(
-                    "UPDATE memories SET needs_review=1 WHERE memory_id=?", (memory_id,)
+                    'UPDATE memories SET needs_review=1 WHERE memory_id=%s', (memory_id,)
                 )
             else:
                 core.settings.live_text_window = core.settings.live_text_window.model_copy(
@@ -558,9 +562,11 @@ def test_historical_approved_scope_does_not_repair_or_vectorize_unapproved_facts
                                                    now=core.clock())
             assert [row["memory_id"] for row in rows] == [memory_id]
             assert scores and all(ids == [memory_id] for ids in scores)
-            assert core.store.one("SELECT status,confidence FROM memories WHERE memory_id=?",
+            assert core.store.one('SELECT status,confidence FROM memories WHERE memory_id=%s',
                                   (outsider,)) == {"status": "CONFIRMED", "confidence": 1.0}
-            assert not core.store.one("SELECT 1 FROM memory_vectors WHERE memory_id=?", (outsider,))
+            assert not core.store.one((
+                'SELECT 1 FROM memory_vectors WHERE memory_id=%s'
+            ), (outsider,))
             assert calls == sends == [] and epoch(core.store) == before
             assert not core.store.rows("SELECT * FROM model_usage")
     run(scenario())
@@ -568,7 +574,7 @@ def test_historical_approved_scope_does_not_repair_or_vectorize_unapproved_facts
 
 def test_candidate_vector_cache_does_not_consume_one_sql_variable_per_memory(core, monkeypatch):
     ids = [fact(core, number, f"第{number}个合成项目代号是青竹。") for number in range(4)]
-    rows = core.store.rows("SELECT * FROM memories ORDER BY rowid")
+    rows = core.store.rows('SELECT * FROM memories ORDER BY record_sequence')
     for row in rows:
         core.store.insert(
             "memory_vectors",
@@ -584,8 +590,15 @@ def test_candidate_vector_cache_does_not_consume_one_sql_variable_per_memory(cor
             query_embed=lambda query: iter([np.asarray([1.0], dtype="<f4")]),
         ),
     )
-    original = core.store.db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 2)
-    try:
-        assert core.memory.index.scores("合成查询", rows[:3]) == {key: 1.0 for key in ids[:3]}
-    finally:
-        core.store.db.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, original)
+    fetch = core.store.rows
+    bindings = []
+
+    def observed(statement, params=()):
+        bindings.append(len(params))
+        return fetch(statement, params)
+
+    monkeypatch.setattr(core.store, "rows", observed)
+    for count in (1, 3):
+        assert core.memory.index.scores("合成查询", rows[:count]) == {
+            key: 1.0 for key in ids[:count]}
+    assert bindings == [2, 2]  # Model version and one collection of candidate IDs.

@@ -6,7 +6,6 @@ from tests.support.meme_service import claim, reservation
 def configure(core, *, caption=False):
     core.settings.meme_discovery_enabled = True
     core.settings.meme_semantics_enabled = caption
-    core.settings.meme_caption_daily_micro_usd = 50000
     return {"max_output_tokens": 4096, **({"meme_input": ImageInputPolicy(
         approval_sha256="e" * 64, estimated_tokens_per_image=100,
         max_bytes_per_image=4000000, max_pixels_per_image=16000000,
@@ -16,7 +15,7 @@ def configure(core, *, caption=False):
 async def discovery(core, client, config, grant, now):
     event, response = await admit(client, config, grant, now)
     assert response.status_code == 202, response.text
-    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?",
+    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=%s",
                        (response.json()["job_id"],))
     queued = await client.post("/internal/v1/memes/discovery/submit", json={
         "event_id": event["event_id"], "reply_revision": 1,

@@ -14,17 +14,21 @@ from tests.support.native_segments import session
 def receipt_rows(core):
     # Model reply receipts only; a final failure adds Core's fixed failure notice.
     return core.store.rows(
-        "SELECT key,value FROM runtime_meta WHERE key LIKE 'owner_delivery:%' "
-        "AND json_extract(value,'$.kind') IS NOT 'failure_notice' ORDER BY key",
+        (
+            'SELECT key,value FROM runtime_meta WHERE key LIKE '
+            "'owner_delivery:%%' AND (CASE WHEN value IS JSON THEN "
+            "value::json #>> '{kind}' END) IS DISTINCT FROM 'failure_notice' "
+            'ORDER BY key'
+        ),
     )
 
 
 def model_replies(core):
-    return core.store.rows("SELECT * FROM outbox WHERE delivery_key NOT LIKE 'failure:%'")
+    return core.store.rows("SELECT * FROM outbox WHERE delivery_key NOT LIKE 'failure:%%'")
 
 
 def one_failure_notice(core):
-    rows = core.store.rows("SELECT content_json FROM outbox WHERE delivery_key LIKE 'failure:%'")
+    rows = core.store.rows("SELECT content_json FROM outbox WHERE delivery_key LIKE 'failure:%%'")
     assert [json.loads(row["content_json"]) for row in rows] == [
         {"text": owner_delivery.FAILURE_TEXT}]
 
@@ -44,7 +48,7 @@ def test_recording_a_group_validates_once_and_retains_all_receipts(core, tmp_pat
     original, recorded = owner_delivery.record_replies, []
 
     def record(store, settings, clock, job, ids):
-        assert store.db.in_transaction
+        assert store.in_transaction
         with monkeypatch.context() as patch:
             sources = count_calls(patch, owner_delivery, "_sources")
             usage = count_calls(patch, owner_delivery, "_usage")
@@ -78,7 +82,7 @@ def test_recording_requires_the_entire_ordered_group(core, tmp_path, monkeypatch
     original, errors = owner_delivery.record_replies, []
 
     def record(store, settings, clock, job, ids):
-        assert store.db.in_transaction and len(ids) == 2
+        assert store.in_transaction and len(ids) == 2
         supplied = {"incomplete": ids[:1], "reversed": ids[::-1], "duplicate": ids * 2}[invalid]
         try:
             original(store, settings, clock, job, supplied)
@@ -134,6 +138,8 @@ def test_recording_failure_rolls_back_all_receipts(core, tmp_path, monkeypatch):
     ("receipt", "OWNER_DELIVERY_SOURCE_CHANGED"),
     ("lease", "OWNER_DELIVERY_LEASE_LOST"),
 ])
+
+
 def test_each_send_boundary_rechecks_current_state(core, tmp_path, monkeypatch, change, error):
     async def scenario():
         async with session(core, tmp_path) as host:
@@ -156,22 +162,22 @@ def test_each_send_boundary_rechecks_current_state(core, tmp_path, monkeypatch, 
             usage = core.store.rows("SELECT * FROM model_usage")
             if change == "runtime":
                 core.settings.paid_model = core.settings.paid_model.model_copy(
-                    update={"daily_micro_usd": core.settings.paid_model.daily_micro_usd + 1})
+                    update={"window_calls": core.settings.paid_model.window_calls + 1})
             elif change == "stop":
                 owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                     operation_id="stop-native-validation-reuse", authority=ref))
             elif change == "receipt":
-                saved = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                saved = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                     (owner_delivery.DELIVERY + item["message_id"],))
                 value = json.loads(saved["value"]) | {"content_sha256": "0" * 64}
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                     (json.dumps(value), owner_delivery.DELIVERY + item["message_id"]))
             else:
                 core.clock.advance(core.settings.lease_seconds + 1)
             with pytest.raises(CoreError, match=error):
                 owner_delivery.send_check(core.store, core.settings, core.clock, check)
             assert len(sources) == 3
-            assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+            assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                                   (item["message_id"],))["state"] == "SENDING"
             assert core.store.rows("SELECT * FROM model_usage") == usage
             assert host.sends == []

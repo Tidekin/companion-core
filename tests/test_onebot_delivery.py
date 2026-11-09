@@ -3,6 +3,7 @@ import httpx
 import pytest
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.transport import reconcile_delivery, recover_deliveries
 from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.outbound import deliver_tick
@@ -60,6 +61,7 @@ def test_lost_core_ack_never_reissues_onebot_send(core, tmp_path, fault):
     cfg = config(data_dir=str(tmp_path / "bridge"), delivery_enabled=True)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     inner = httpx.ASGITransport(app=app)
     tripped = False
 
@@ -214,7 +216,7 @@ def test_unsafe_delivery_cannot_start_external_send(core, tmp_path, mutation):
                     core.settings.quiet_start, core.settings.quiet_end = 0, 0
                     core.store.execute("UPDATE outbox SET action_type='qq.private.proactive'")
                 if mutation == "content":
-                    core.store.execute("UPDATE outbox SET content_json=?", ('{"image":"bad"}',))
+                    core.store.execute('UPDATE outbox SET content_json=%s', ('{"image":"bad"}',))
                 if mutation != "disabled":
                     with pytest.raises(ValueError):
                         await deliver_tick(http, OneBotClient(cfg, protocol), spool)

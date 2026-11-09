@@ -21,7 +21,7 @@ def test_renewed_life_uses_native_cli_http_and_worker_without_replaying_unknown(
     monkeypatch,
 ):
     case = life_case(core, tmp_path, monkeypatch)
-    original = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (case.request_id,))
+    original = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (case.request_id,))
 
     async def scenario():
         async with (
@@ -76,7 +76,7 @@ def test_renewed_life_uses_native_cli_http_and_worker_without_replaying_unknown(
             )
             assert len(messages) == 1 and messages[0]["state"] == "PENDING", messages
             assert (
-                core.store.one("SELECT * FROM model_usage WHERE request_id=?", (case.request_id,))
+                core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (case.request_id,))
                 == original
             )
             assert all(case.capture.event_id not in encode(m) for m in first["materials"])

@@ -31,7 +31,7 @@ def test_native_reader_propagates_original_execution_uncertainty(
                 observed_requests=1, observed_bytes=100)
             result = core.reading.complete("bili", item["request_id"], receipt)
             assert calls == [uncertain]
-            step = core.store.one("SELECT state FROM goal_steps WHERE goal_id=? AND position=1",
+            step = core.store.one('SELECT state FROM goal_steps WHERE goal_id=%s AND position=1',
                                   (goal_id,))
             assert step["state"] == ("EXECUTION_UNCERTAIN" if uncertain else "FAILED")
             before = core.store.rows("SELECT * FROM exploration_requests")

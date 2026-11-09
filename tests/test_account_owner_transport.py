@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.contracts import LeaseRequest
 from tests.support.account_owner_transport import prepared
 from tests.support.core_http import real_core_http
@@ -22,6 +23,7 @@ def test_account_http_state_and_lease_use_exact_authority(core, tmp_path):
     ref, frozen = prepared(core, tmp_path)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     client = TestClient(app, headers={
         "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()})
     path = "/internal/v1/account-actions/profile-baselines/state"

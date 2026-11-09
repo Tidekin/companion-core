@@ -8,7 +8,10 @@ from tests.support.paid_model import approved_live
 
 async def run_notice(core):
     # The selector owns activity choice; ordinary run_once now selects foreground work.
-    job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' ORDER BY rowid LIMIT 1")
+    job = core.store.one(
+        "SELECT job_id FROM jobs WHERE kind='activity' ORDER BY "
+        'record_sequence LIMIT 1'
+    )
     assert job is not None
     return await core.run_once("notice-test", job_id=job["job_id"])
 

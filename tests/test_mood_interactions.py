@@ -9,6 +9,7 @@ from companion.memory import Memory
 from companion.mood import MoodService
 from companion.store import Store, encode
 from tests.conftest import ingest
+from tests.postgres_fixture import logical_state
 from tests.support.mood import erase, feedback
 
 
@@ -26,17 +27,19 @@ from tests.support.mood import erase, feedback
 ])
 def test_explicit_daily_appraisals_have_small_source_bound_impulses(core, text, reason, delta):
     key = feedback(core, text=text)
-    changes = core.store.db.total_changes
-    view = core.mood.snapshot()
-    assert view["version"] == "mood-2" and view["confidence"] == "limited"
-    assert len(view["signals"]) == 1
-    signal = view["signals"][0]
-    assert signal["kind"] == "interaction" and signal["reason"] == reason
-    assert signal["event_id"] == key and signal["delta"] == delta
-    assert signal["source_event_ids"] == ["evt_test_2", key]
-    assert list(view["immediate"].values()) == delta
-    assert not any(view["undertone"].values())
-    assert core.store.db.total_changes == changes and core.model.calls == []
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        view = core.mood.snapshot()
+        assert view["version"] == "mood-2" and view["confidence"] == "limited"
+        assert len(view["signals"]) == 1
+        signal = view["signals"][0]
+        assert signal["kind"] == "interaction" and signal["reason"] == reason
+        assert signal["event_id"] == key and signal["delta"] == delta
+        assert signal["source_event_ids"] == ["evt_test_2", key]
+        assert list(view["immediate"].values()) == delta
+        assert not any(view["undertone"].values())
+    assert logical_state(core.store) == before
+    assert core.model.calls == []
 
 
 @pytest.mark.parametrize("text", [
@@ -63,18 +66,18 @@ def test_no_substring_guessing_fiction_emotion_transfer_or_silence_inference(cor
 def test_appraisals_require_unambiguous_original_private_owner_input_and_delivery(core, damage):
     key = feedback(core, text="这个想法很有意思")
     if damage in {"quote", "rich", "media", "shared_content", "control_command", "diary_command"}:
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id=?", (
+        core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s', (
             encode({"text": "这个想法很有意思", damage: {"text": "引用或指令"}}), key,
         ))
     elif damage == "actor":
-        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=?", (key,))
+        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=%s", (key,))
     elif damage == "group":
         core.store.execute("UPDATE conversations SET scope='group'")
     elif damage == "simulated":
         core.store.execute("UPDATE events SET source='observation.simulation' "
                            "WHERE event_id='evt_test_2'")
     else:
-        core.store.execute("UPDATE outbox SET state=?", (damage,))
+        core.store.execute('UPDATE outbox SET state=%s', (damage,))
     assert core.mood.snapshot()["signals"] == []
 
 
@@ -83,7 +86,7 @@ def test_deictic_appraisal_does_not_guess_across_unanswered_topic_or_other_conve
     core, intervening_type,
 ):
     key = feedback(core, text="先换个话题")
-    core.store.execute("UPDATE events SET event_type=? WHERE event_id=?", (intervening_type, key))
+    core.store.execute('UPDATE events SET event_type=%s WHERE event_id=%s', (intervening_type, key))
     core.clock.advance(1)
     ingest(core, 10, "这个想法很有意思")
     assert core.mood.snapshot()["signals"] == []
@@ -97,11 +100,11 @@ def test_delayed_appraisal_is_not_bound_to_stale_reply_but_existing_mood_keeps_d
     before = core.mood.snapshot()
     core.clock.advance(3601)
     # Simulate an actually later event, rather than the age of reading a snapshot.
-    core.store.execute("UPDATE events SET occurred_at=?,ingested_at=? WHERE event_id=?",
+    core.store.execute('UPDATE events SET occurred_at=%s,ingested_at=%s WHERE event_id=%s',
                        (core.clock(), core.clock(), key))
     assert core.mood.snapshot()["signals"] == []
     # A valid old appraisal itself is retained and decays for the full normal window.
-    core.store.execute("UPDATE events SET occurred_at=?,ingested_at=? WHERE event_id=?",
+    core.store.execute('UPDATE events SET occurred_at=%s,ingested_at=%s WHERE event_id=%s',
                        (before["evaluated_at"], before["evaluated_at"], key))
     assert core.mood.snapshot()["expression"]["arousal"] == pytest.approx(
         .03 * 2 ** (-3601 / 10800), abs=1e-6,
@@ -137,19 +140,22 @@ def test_daily_sequence_conflicts_decays_and_rebuilds_without_model_or_writes(co
     feedback(core, 5, "这个回答让我有点失望")
     conflicting = core.mood.snapshot()
     assert conflicting["expression"]["pleasure"] < four["expression"]["pleasure"]
-    changes = core.store.db.total_changes
-    core.clock.advance(3 * 3600)
-    decayed = core.mood.snapshot()
-    for dimension in ("pleasure", "arousal", "dominance"):
-        assert decayed["immediate"][dimension] == pytest.approx(
-            conflicting["immediate"][dimension] / 2, abs=1e-6,
-        )
-    core.clock.advance(27 * 3600)
-    current = core.mood.snapshot()
-    with closing(Store(core.settings.database)) as reopened:
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        core.clock.advance(3 * 3600)
+        decayed = core.mood.snapshot()
+        for dimension in ("pleasure", "arousal", "dominance"):
+            assert decayed["immediate"][dimension] == pytest.approx(
+                conflicting["immediate"][dimension] / 2, abs=1e-6,
+            )
+        core.clock.advance(27 * 3600)
+        current = core.mood.snapshot()
+    with (closing(Store(core.database, core.settings.state_directory)) as reopened,
+          reopened.read_snapshot()):
         service = MoodService(Memory(reopened, core.settings, core.ledger), core.clock)
         assert service.snapshot() == current
-    assert core.store.db.total_changes == changes and core.model.calls == []
+    assert logical_state(core.store) == before
+    assert core.model.calls == []
 
 
 @pytest.mark.parametrize("source", ["evt_test_2", "evt_test_3"])

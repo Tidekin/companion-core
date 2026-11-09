@@ -43,8 +43,12 @@ class SingingPart(ReplyPart):
 
 
 class MixedReply(ReplyPart):
-    parts: list[Annotated[TextPart | VoicePart | MemePart | GeneratedImagePart | SingingPart,
-                          Field(discriminator="kind")]] = Field(min_length=1, max_length=32)
+    parts: list[
+        Annotated[
+            TextPart | VoicePart | MemePart | GeneratedImagePart | SingingPart,
+            Field(discriminator="kind"),
+        ]
+    ] = Field(min_length=1, max_length=32)
 
     @property
     def text(self):
@@ -91,40 +95,59 @@ def final_text(output):
 
 def reply_output(core, job):
     policy = core.settings.voice.reply
-    if (job["kind"] != "chat"
-        or not voice_authority.permitted(core.store, core.settings, core.clock)):
+    if job["kind"] != "chat" or not voice_authority.permitted(
+        core.store, core.settings, core.clock
+    ):
         return None
-    view = voice_authority.current(core.store, core.settings, core.clock,
-                                  authority=json.loads(job["authority_json"]))
-    can_speak = (policy.enabled and policy.mode == "model"
-                 and any(n.enabled and "tts" in n.capabilities
-                         for n in core.settings.voice.nodes.values()))
+    view = voice_authority.current(
+        core.store, core.settings, core.clock, authority=json.loads(job["authority_json"])
+    )
+    can_speak = (
+        policy.enabled
+        and policy.mode == "model"
+        and any(n.enabled and "tts" in n.capabilities for n in core.settings.voice.nodes.values())
+    )
     can_sing = core.settings.voice.singing is not None and "content" in view.policy.purposes
     if not can_speak and not can_sing:
         return None
-    return ToolOutput(MixedReply, name="reply_with_parts", description=(
-        "结束本轮，自主选择有序的独立气泡：text文字、voice朗读、meme表情、"
-        "generated_image已生成图片、singing完整歌曲。可混合、自由安排顺序，也可只选一种。"
-        "voice.text只写要朗读的话，成功后不会自动重复发送文字；需要补充文字时另列text。"
-        f"每条voice最多{policy.max_chars}字。代码、链接和长清单适合text。"
-        "meme只能引用本轮候选candidate_id，沿用严肃语境、概率和冷却限制。"
-        "generated_image只能引用本轮generate_image成功返回的image_id。"
-        "singing只能引用本轮sing_song返回READY的request_id，Core发送完整连续歌曲，"
-        "其text是内部介绍；要公开的介绍请另列text。每种图片和歌曲最多一项。"
-        "先完成必要查询；不得编造任务、图片路径、网址或声称已经发送。"))
+    return ToolOutput(
+        MixedReply,
+        name="reply_with_parts",
+        description=(
+            "结束本轮，自主选择有序的独立气泡：text文字、voice朗读、meme表情、"
+            "generated_image已生成图片、singing完整歌曲。可混合、自由安排顺序，也可只选一种。"
+            "voice.text只写要朗读的话，成功后不会自动重复发送文字；需要补充文字时另列text。"
+            f"每条voice最多{policy.max_chars}字。代码、链接和长清单适合text。"
+            "meme只能引用本轮候选candidate_id，沿用严肃语境、概率和冷却限制。"
+            "generated_image只能引用本轮generate_image成功返回的image_id。"
+            "singing只能引用本轮sing_song返回READY的request_id，Core发送完整连续歌曲，"
+            "其text是内部介绍；要公开的介绍请另列text。每种图片和歌曲最多一项。"
+            "先完成必要查询；不得编造任务、图片路径、网址或声称已经发送。"
+        ),
+    )
 
 
 def save_format(conversation, output):
     if isinstance(output, (MixedReply, LegacyVoiceReply)):
-        response = next(message for message in reversed(conversation.messages)
-                        if isinstance(message, ModelResponse))
+        response = next(
+            message
+            for message in reversed(conversation.messages)
+            if isinstance(message, ModelResponse)
+        )
         if isinstance(output, MixedReply):
-            selected = {"core_reply_format": "mixed",
-                        "core_reply_parts": output.model_dump(mode="json")}
+            selected = {
+                "core_reply_format": "mixed",
+                "core_reply_parts": output.model_dump(mode="json"),
+            }
         else:
-            selected = {"core_reply_format": "singing" if isinstance(output, LegacySongReply)
-                        else "voice", **({"core_singing_request_id": output.request_id}
-                                         if isinstance(output, LegacySongReply) else {})}
+            selected = {
+                "core_reply_format": "singing" if isinstance(output, LegacySongReply) else "voice",
+                **(
+                    {"core_singing_request_id": output.request_id}
+                    if isinstance(output, LegacySongReply)
+                    else {}
+                ),
+            }
         response.metadata = {**(response.metadata or {}), **selected}
         return output.text
     return output
@@ -132,20 +155,32 @@ def save_format(conversation, output):
 
 def _metadata(store, event_id):
     row = store.one(
-        "SELECT json_extract(m.value,'$.metadata') AS metadata "
-        "FROM agent_conversations c JOIN jobs j USING(job_id), "
-        "json_each(c.conversation_json,'$.messages') m "
-        "WHERE j.event_id=? AND j.kind='chat' AND c.phase IN ('OUTPUT','COMPLETE') "
-        "AND json_extract(m.value,'$.kind')='response' ORDER BY CAST(m.key AS INTEGER) DESC "
-        "LIMIT 1", (event_id,))
+        (
+            (
+                'SELECT (CASE WHEN m.value IS JSON THEN '
+                "(m.value::json#>>'{metadata}') END) AS metadata FROM "
+                'agent_conversations c JOIN jobs j USING(job_id), '
+                "json_array_elements(c.conversation_json::json->'message"
+                "s') WITH ORDINALITY AS m(value,position) WHERE "
+                "j.event_id=%s AND j.kind='chat' AND c.phase IN "
+                "('OUTPUT','COMPLETE') AND (CASE WHEN m.value IS JSON "
+                "THEN (m.value::json#>>'{kind}') END)='response' ORDER "
+                'BY m.position DESC LIMIT 1'
+            )
+        ),
+        (event_id,),
+    )
     return json.loads(row["metadata"]) if row and row["metadata"] else {}
 
 
 def composition(store, event_id):
     metadata = _metadata(store, event_id)
     try:
-        return (MixedReply.model_validate(metadata["core_reply_parts"])
-                if metadata.get("core_reply_format") == "mixed" else None)
+        return (
+            MixedReply.model_validate(metadata["core_reply_parts"])
+            if metadata.get("core_reply_format") == "mixed"
+            else None
+        )
     except (ValueError, TypeError, KeyError):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from None
 

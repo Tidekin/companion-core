@@ -140,7 +140,10 @@ def stranded(core, tmp_path, **approval_changes):
     }
     capture = OwnerCapture.model_validate(
         json.loads(
-            core.store.one("SELECT value FROM runtime_meta WHERE key LIKE 'owner_input:%'")["value"]
+            core.store.one(
+                'SELECT value FROM runtime_meta WHERE key LIKE '
+                "'owner_input:%%'"
+            )["value"]
         )["capture"]
     )
     return SimpleNamespace(

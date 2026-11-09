@@ -1,6 +1,8 @@
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from threading import Barrier
 
 import pytest
 from cryptography.fernet import Fernet
@@ -73,7 +75,7 @@ def test_nightly_own_memory_commit_can_advance_to_diary_and_reflection(
         from companion.memory_work import checkpoint_state
 
         if checkpoint_state(core.store)["batch"].get("phase") == "COMPLETE":
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, ["evt_test_2"], core.clock())
         return result
 
@@ -104,7 +106,7 @@ def test_nightly_crash_resume_reuses_completed_diary(core, monkeypatch):
         assert [scenario for _, scenario in model.calls].count("diary") == 1
         assert [scenario for _, scenario in model.calls].count("reflection") == 1
     finally:
-        restarted.store.close()
+        restarted.close()
 
 
 def test_nightly_resume_after_memory_commit_before_checkpoint(core, monkeypatch):
@@ -142,7 +144,7 @@ def test_nightly_resume_after_memory_commit_before_checkpoint(core, monkeypatch)
         assert [scenario for _, scenario in model.calls].count("memory_extract") == 1
         assert len(core.store.rows("SELECT * FROM memories")) == 1
     finally:
-        restarted.store.close()
+        restarted.close()
 
 
 def test_nightly_waiting_model_does_not_block_chat_or_allow_second_lease(core):
@@ -172,7 +174,7 @@ def test_nightly_waiting_model_does_not_block_chat_or_allow_second_lease(core):
                 == "SUCCEEDED"
             )
         finally:
-            second.store.close()
+            second.close()
             release.set()
         await task
 
@@ -186,7 +188,7 @@ def test_nightly_source_erasure_during_model_discards_result_and_restored_projec
     model = enable_nightly(core)
 
     def forget():
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_2"], core.clock())
 
     model.reflection_callback = forget
@@ -197,21 +199,26 @@ def test_nightly_source_erasure_during_model_discards_result_and_restored_projec
     assert not core.diary.get_day(DAY, "10001")
 
 
-def test_reflection_full_provenance_erasure_after_commit_and_restore(core, tmp_path):
+def test_reflection_full_provenance_erasure_after_commit_and_restore(
+    empty_database, core, tmp_path,
+):
     enable_nightly(core)
     assert run(core.reflections.run_day(DAY))["state"] == "COMMITTED"
-    key, archive, dest = (
+    key, archive, restored_state = (
         Fernet.generate_key(),
         tmp_path / "reflection.enc",
-        tmp_path / "restored.db",
+        tmp_path / "restored-state",
     )
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(
             core.store, ["evt_test_3"], core.clock()
         )  # Unquoted input still counts.
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    restored = Core(core.settings.model_copy(update={"database": str(dest)}), clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    restored = Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }), clock=core.clock)
     try:
         for instance in (core, restored):
             assert instance.reflections.recent() == []
@@ -219,7 +226,7 @@ def test_reflection_full_provenance_erasure_after_commit_and_restore(core, tmp_p
             assert row["content"] == "" and row["evidence_json"] == "[]"
             assert run(instance.reflections.run_day(DAY))["state"] == "CANCELLED"
     finally:
-        restored.store.close()
+        restored.close()
 
 
 @pytest.mark.parametrize(
@@ -230,6 +237,8 @@ def test_reflection_full_provenance_erasure_after_commit_and_restore(core, tmp_p
         ("activity", "UNSUPPORTED_ACTIVITY"),
     ],
 )
+
+
 def test_reflection_invalid_evidence_and_unsupported_activity_rejected(core, defect, code):
     model = enable_nightly(core)
 
@@ -248,25 +257,19 @@ def test_reflection_invalid_evidence_and_unsupported_activity_rejected(core, def
     assert not core.reflections.recent()
 
 
-@pytest.mark.parametrize("limit", ["disabled", "day", "month", "calls", "unknown"])
-def test_reflection_budget_is_independent_and_hard_bounded(core, limit):
+@pytest.mark.parametrize("limit", ["normal", "calls", "unknown"])
+def test_reflection_currency_is_advisory_and_call_count_is_bounded(core, limit):
     model = enable_nightly(core)
-    if limit == "disabled":
-        core.settings.reflection_daily_micro_usd = 0
-    elif limit == "day":
-        core.settings.reflection_daily_micro_usd = 1
-    elif limit == "month":
-        core.settings.reflection_monthly_micro_usd = 1
-    elif limit == "unknown":
+    if limit == "unknown":
         core.settings.input_rate = None
-    else:
+    elif limit == "calls":
         from companion import budget
 
         budget.reserve(core.store, core.settings, None, "reflection", [], core.clock())
     result = run(core.reflections.run_day(DAY))
-    expected = "RETRY_WAIT" if limit == "calls" else "FAILED"
+    expected = "RETRY_WAIT" if limit == "calls" else "COMMITTED"
     assert result["state"] == expected
-    assert not model.calls
+    assert len(model.calls) == (0 if limit == "calls" else 1)
     assert (
         run(core.reflections.run_day(DAY))["state"] == expected
     )  # Repeated ticks do not call again.
@@ -287,7 +290,7 @@ def test_shared_memory_lease_prevents_parallel_extraction_and_stale_commit(core)
     core.settings.extraction_min_events = 3
     core.settings.extraction_idle_seconds = 0
     lease = encode({"token": "other-process", "until": after(core.clock(), 60)})
-    core.store.execute("INSERT INTO runtime_meta VALUES ('memory_extraction_lease',?)", (lease,))
+    core.store.execute("INSERT INTO runtime_meta VALUES ('memory_extraction_lease',%s)", (lease,))
     assert not run(core.extract_once(DAY))
     assert not model.calls
     core.clock.advance(61)
@@ -303,6 +306,8 @@ def test_shared_memory_lease_prevents_parallel_extraction_and_stale_commit(core)
     "now,expected",
     [("2026-03-09T07:30:00+00:00", "2026-03-08"), ("2028-03-01T08:30:00+00:00", "2028-02-29")],
 )
+
+
 def test_nightly_calendar_dst_and_leap_day(core, now, expected):
     core.settings.timezone = "America/New_York"
     core.settings.consolidation_enabled = True
@@ -371,3 +376,41 @@ def test_observed_content_can_be_diary_evidence_without_pretending_it_was_watche
     body = core.diary.get_day(DAY, "10001")["body_md"]
     assert "发现的标题" in body and "我回复" not in body and "看完" not in body
     assert len(core.store.rows("SELECT * FROM diary_evidence")) == 4
+
+
+def test_due_schedule_reports_a_retryable_resume_once(core):
+    from companion import budget
+
+    enable_nightly(core)
+    core.settings.consolidation_catchup_days = 1
+    nightly = core.consolidation.schedule_day(DAY)
+    assert core.consolidation.schedule_due() == []
+    budget.reserve(core.store, core.settings, None, "reflection", [], core.clock())
+    reflection = run(core.reflections.run_day(DAY))
+    assert reflection["state"] == "RETRY_WAIT"
+    reflection = core.store.one(
+        "SELECT run_id, source_set_sha256, model_request_id FROM reflection_runs WHERE run_id=%s",
+        (reflection["run_id"],),
+    )
+    assert reflection["model_request_id"] is None
+    core.store.execute(
+        "UPDATE consolidation_runs SET state='PARTIAL',steps_json=%s,source_set_sha256=%s "
+        "WHERE run_id=%s", (encode({"reflection": "RETRY_WAIT"}), reflection["source_set_sha256"],
+                             nightly),
+    )
+    core.store.execute("UPDATE reflection_runs SET next_attempt_at=%s WHERE run_id=%s",
+                       (core.clock(), reflection["run_id"]))
+    usage = core.store.rows("SELECT * FROM model_usage")
+    ready = Barrier(2)
+
+    def schedule(service):
+        ready.wait(timeout=5)
+        return service.schedule_due()
+
+    with (Core(core.settings, core.model, core.clock) as peer,
+          ThreadPoolExecutor(max_workers=2) as pool):
+        results = list(pool.map(schedule, (core.consolidation, peer.consolidation)))
+    assert sorted(results) == [[], [nightly]]
+    assert core.consolidation.schedule_due() == []
+    assert core.consolidation.status(DAY)["state"] == "SCHEDULED"
+    assert core.store.rows("SELECT * FROM model_usage") == usage

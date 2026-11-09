@@ -73,7 +73,7 @@ def test_held_messages_are_admitted_in_order_with_their_original_receive_time(co
             assert await entry.runtime.flush_one(entry.client)
             # The second message supersedes the first one's reply, as for live input.
             assert [dict(row) for row in core.store.rows(
-                "SELECT state,last_error_code FROM jobs ORDER BY rowid")] == [
+                'SELECT state,last_error_code FROM jobs ORDER BY record_sequence')] == [
                 {"state": "CANCELLED", "last_error_code": "REPLY_SUPERSEDED"},
                 {"state": "QUEUED", "last_error_code": None}]
             assert (await entry.state(captures[1]))["state"] == "PENDING"

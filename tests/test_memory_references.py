@@ -1,5 +1,4 @@
 """New examples separate from the frozen714; only external model transport is synthetic."""
-
 import json
 
 import pytest
@@ -12,6 +11,7 @@ from companion.memory_context import MemorySources
 from companion.memory_work import checkpoint_state
 from companion.store import encode
 from tests.conftest import run
+from tests.postgres_fixture import isolated_database
 from tests.support.memory_references import TEXT, prepared
 from tests.support.voice_flow import finish_node, flow_fixture, upload
 
@@ -31,7 +31,7 @@ def test_reference_requires_exact_quote_owner_binding_and_cannot_confirm_or_crea
     with pytest.raises(CoreError):
         core.memory.add(item.model_copy(update={"evidence_quote": "模型瞎猜的内容"}), core.clock())
     memory_id = core.memory.add(item, core.clock())
-    row = core.store.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+    row = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (memory_id,))
     assert row["status"] == "HYPOTHESIS" and row["origin"] == "event_observed"
     assert "未由主人确认为事实" in row["content"] and TEXT in row["content"]
     assert MemorySources(core.memory, core.clock()).current(row)
@@ -55,28 +55,29 @@ def test_extraction_includes_reference_then_recall_pins_it_and_erasure_replays(c
     snapshot = tmp_path / "references.backup"
     backup(core.settings.database, str(snapshot), key)
     usage = core.store.rows("SELECT * FROM model_usage")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert not core.memory.search("十二月九日")
-    assert not core.store.rows("SELECT * FROM runtime_meta WHERE key LIKE ?", (refs.INPUT + "%",))
+    assert not core.store.rows('SELECT * FROM runtime_meta WHERE key LIKE %s', (refs.INPUT + "%",))
     assert core.store.rows("SELECT * FROM model_usage") == usage
-    core.store.close()
-    restored_path = str(tmp_path / "restored.db")
-    restore(str(snapshot), restored_path, key, core.settings.erasure_ledger)
     # The existing Core startup replays the Ledger before exposing memory.
     from companion.core import Core
 
-    restored_settings = core.settings.model_copy(update={"database": restored_path})
-    with Core(restored_settings, core.model, core.clock) as recovered:
-        assert not recovered.memory.search("十二月九日")
-        assert recovered.store.rows("SELECT * FROM model_usage") == usage
+    with isolated_database() as destination:
+        state = tmp_path / "restored-state"
+        restore(snapshot, destination, key, core.settings.erasure_ledger, state_directory=state)
+        restored_settings = core.settings.model_copy(update={
+            "database": destination, "state_directory": state})
+        with Core(restored_settings, core.model, core.clock) as recovered:
+            assert not recovered.memory.search("十二月九日")
+            assert recovered.store.rows("SELECT * FROM model_usage") == usage
 
 
 def test_reference_changed_during_extraction_prevents_summary_and_fact_commit(core):
     value, item = prepared(core)
     core.model.extraction = encode({"memories": [item.model_dump(mode="json")]})
     core.model.callback = lambda: core.store.execute(
-        "DELETE FROM runtime_meta WHERE key=?", (refs.INPUT + value["reference_id"],))
+        'DELETE FROM runtime_meta WHERE key=%s', (refs.INPUT + value["reference_id"],))
     assert not run(core.extract_once())
     assert not core.store.rows("SELECT * FROM memories")
     assert not core.store.rows("SELECT * FROM episodes")
@@ -97,14 +98,14 @@ def test_erasing_derived_observation_clears_pending_reference_candidates(core):
     core.model.extraction = encode({"memories": [item.model_dump(mode="json")]})
 
     def withdraw():
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [observed], core.clock())
 
     core.model.callback = withdraw
     assert not run(core.extract_once())
     assert checkpoint_state(core.store) is None
     assert not core.store.rows("SELECT * FROM memories")
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                               (refs.INPUT + value["reference_id"],))
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
 
@@ -126,7 +127,8 @@ def test_asr_snapshot_comes_from_successful_receipt_and_outlives_audio_ttl(core,
     finish_node(jobs, operation="asr", text="我刚才说的集合地点是南门")
     job = core.claim_job("transcript-reference")
     context = flow.for_context(event_id, job)
-    stored = core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE ?", (refs.INPUT + "%",))
+    stored = core.store.rows('SELECT value FROM runtime_meta WHERE key LIKE %s',
+                            (refs.INPUT + "%",))
     assert len(stored) == 1
     value = json.loads(stored[0]["value"])
     assert value["kind"] == "transcript" and value["text"] == "我刚才说的集合地点是南门"

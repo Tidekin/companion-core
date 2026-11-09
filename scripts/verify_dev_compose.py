@@ -8,6 +8,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+if __package__:
+    from .ci_container_artifacts import POSTGRES_IMAGE
+else:
+    from ci_container_artifacts import POSTGRES_IMAGE
+
 ROOT = Path(__file__).resolve().parents[1]
 CORE = {
     "migrate": ["init"],
@@ -19,6 +24,10 @@ CORE = {
 }
 SOURCE = {"/app/config.toml": "deploy/qq-beta-core.example.toml",
           "/app/companion": "companion", "/app/migrations": "migrations", "/app/db": "db"}
+SYNTHETIC_DB_ENV = "".join(
+    f"COMPANION_DEV_{role}_PASSWORD=synthetic-{role.lower()}-database-password-for-tests-only\n"
+    for role in ("ADMIN", "CORE", "ARCHIVE")
+)
 SYNTHETIC_TOKEN = "synthetic-dev-compose-token-" * 2
 
 
@@ -74,8 +83,31 @@ def validate(config, root, project, token):
 
     require(len(token) >= 32 and config["name"] == project)
     services = config["services"]
-    require(set(services) == {*CORE, "dev-backup"})
-    for name, service in services.items():
+    require(set(services) == {*CORE, "dev-backup", "dev-postgres"})
+    database = services["dev-postgres"]
+    credentials = database["environment"]
+    require(set(credentials) == {"POSTGRES_PASSWORD", "DEV_CORE_PASSWORD", "DEV_ARCHIVE_PASSWORD"})
+    require(all(isinstance(value, str) and len(value) >= 24 for value in credentials.values()))
+    require(len(set(credentials.values()) | {token}) == 4)
+    require(database["image"] == POSTGRES_IMAGE and database["user"] == "postgres")
+    require(not any(database.get(key) for key in (
+        "build", "ports", "privileged", "network_mode", "cap_add", "entrypoint", "command",
+        "env_file", "devices", "pid", "ipc",
+    )))
+    require(database.get("read_only") and database.get("cap_drop") == ["ALL"])
+    require(database.get("security_opt") == ["no-new-privileges:true"])
+    require(set(database["networks"]) == {"companion"})
+    db_mounts = {item["target"]: item for item in database["volumes"]}
+    require(len(database["volumes"]) == 2 and set(db_mounts) == {
+        "/var/lib/postgresql/data", "/docker-entrypoint-initdb.d/10-dev.sql"})
+    data = db_mounts["/var/lib/postgresql/data"]
+    require(data["type"] == "volume" and data["source"] == "dev-postgres-data")
+    setup = db_mounts["/docker-entrypoint-initdb.d/10-dev.sql"]
+    require(setup["type"] == "bind" and setup.get("read_only") is True)
+    require(Path(setup["source"]).resolve() == (root / "deploy/dev-postgres-init.sql").resolve())
+    require(setup.get("bind", {}).get("create_host_path") is False)
+    for name in (*CORE, "dev-backup"):
+        service = services[name]
         backup = name == "dev-backup"
         values = service["environment"]
         expected = {
@@ -86,7 +118,10 @@ def validate(config, root, project, token):
             "COMPANION_INPUT_RATE": "0", "COMPANION_CACHED_INPUT_RATE": "0",
             "COMPANION_OUTPUT_RATE": "0", "COMPANION_MONTHLY_LIMIT_MICRO_USD": "0",
             "COMPANION_AUTONOMOUS_DAILY_MICRO_USD": "0", "COMPANION_MEMORY_DAILY_MICRO_USD": "0",
-            "COMPANION_DATABASE": ("/source" if backup else "/data") + "/companion.sqlite3",
+            "COMPANION_DATABASE": "host=dev-postgres dbname=companion user="
+                                  + ("dev_archive" if backup else "dev_core"),
+            "PGPASSWORD": credentials["DEV_ARCHIVE_PASSWORD" if backup else "DEV_CORE_PASSWORD"],
+            "COMPANION_STATE_DIRECTORY": "/data",
             "COMPANION_ERASURE_LEDGER": "/privacy/erasures.jsonl",
             "COMPANION_EMBEDDING_CACHE_DIR": "/data/embedding-cache",
             "COMPANION_SEGMENTED_REPLY": "false",
@@ -102,7 +137,7 @@ def validate(config, root, project, token):
         require(service.get("cap_drop") == ["ALL"] and not service.get("cap_add"))
         require(service.get("security_opt") == ["no-new-privileges:true"])
         volumes = {entry["target"]: entry for entry in service["volumes"]}
-        targets = {*SOURCE, "/data", "/privacy"} | ({"/source"} if backup else set())
+        targets = {*SOURCE, "/data", "/privacy"}
         require(set(volumes) == targets and len(volumes) == len(service["volumes"]))
         for target, relative in SOURCE.items():
             entry = volumes[target]
@@ -111,8 +146,6 @@ def validate(config, root, project, token):
             require(entry.get("bind", {}).get("create_host_path") is False)
         expected_volumes = {"/data": "dev-snapshots" if backup else "core-data",
                             "/privacy": "erasure-ledger"}
-        if backup:
-            expected_volumes["/source"] = "core-data"
         for target, source in expected_volumes.items():
             entry = volumes[target]
             require(entry["type"] == "volume" and entry["source"] == source)
@@ -137,7 +170,7 @@ def validate(config, root, project, token):
     require(networks["companion"].get("internal") is True)
     require(networks["companion"]["name"] == f"{project}_companion")
     require(not networks["companion"].get("external"))
-    require(set(volumes) == {"core-data", "erasure-ledger", "dev-snapshots"})
+    require(set(volumes) == {"core-data", "erasure-ledger", "dev-snapshots", "dev-postgres-data"})
     for name, value in volumes.items():
         require(value["name"] == f"{project}_{name}")
         require(not value.get("external") and not value.get("driver_opts"))
@@ -154,7 +187,7 @@ def verify(root=ROOT):
         fixture = Path(directory)
         (fixture / "deploy").mkdir()
         for relative in ("compose.yaml", "deploy/compose.dev.yaml",
-                         "deploy/qq-beta-core.example.toml"):
+                         "deploy/qq-beta-core.example.toml", "deploy/dev-postgres-init.sql"):
             shutil.copyfile(root / relative, fixture / relative)
         for relative in ("companion", "migrations", "db"):
             (fixture / relative).mkdir()
@@ -166,7 +199,8 @@ def verify(root=ROOT):
         env_file = fixture / "dev.env"
         env_file.write_text(
             f"COMPANION_DEV_BRIDGE_TOKEN={SYNTHETIC_TOKEN}\n"
-            "COMPANION_DEV_BACKUP_KEY=synthetic-maintenance-only\n", encoding="utf-8",
+            "COMPANION_DEV_BACKUP_KEY=synthetic-maintenance-only\n" + SYNTHETIC_DB_ENV,
+            encoding="utf-8",
         )
         polluted = {**environment(), "COMPANION_MODE": "live",
                     "COMPANION_MODEL_KEY": "synthetic-host-poison",
@@ -183,7 +217,7 @@ def verify(root=ROOT):
             [*compose_command(fixture, env_file, "companion-dev-proof-a"), "config", "--services"],
             cwd=fixture, env=polluted, capture_output=True, text=True, check=True, timeout=60,
         )
-        assert set(default.stdout.split()) == {"companion-api", "companion-worker"}
+        assert set(default.stdout.split()) == {"companion-api", "companion-worker", "dev-postgres"}
     return {"evidence_type": "OFFLINE_FIXTURE", "native_compose_config": "PASS",
             "isolated_projects": 2, "all_core_services": 6,
             "missing_root_config": "PASS", "daemon_contacted": False,

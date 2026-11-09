@@ -40,7 +40,7 @@ def test_real_localhost_samples_use_wall_and_monotonic_time_without_worker_claim
     assert url.removeprefix("http://") == requests[0][2]
     text = output.read_text("utf-8")
     assert url not in text and core.settings.bridge_token.get_secret_value() not in text
-    assert core.settings.database not in text
+    assert core.settings.database.get_secret_value() not in text
 
 
 def test_remote_missing_schema_head_is_an_observed_blocker_not_a_clear_sample(
@@ -325,7 +325,7 @@ def test_https_requires_trusted_certificate_with_matching_ip_san(
     assert len(requests) == (1 if matches else 0)
 
 
-def test_valid_remote_unknown_counts_are_observed_as_blocked_not_rejected(core, tmp_path):
+def test_cost_unknown_is_observed_with_delivery_still_blocked(core, tmp_path):
     ingest(core)
     assert run(core.run_once("synthetic-ops-worker"))
     core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN'")
@@ -337,4 +337,5 @@ def test_valid_remote_unknown_counts_are_observed_as_blocked_not_rejected(core, 
     snapshot = records(output)[1]["snapshot"]
     assert snapshot["budget"]["unknown_calls"] == snapshot["budget"]["unsettled_calls"] == 1
     assert snapshot["deliveries"]["states"] == {"DELIVERY_UNCERTAIN": 1}
-    assert "MODEL_USAGE_UNSETTLED" in snapshot["blockers"]
+    assert "MODEL_COST_UNKNOWN" in snapshot["warnings"]
+    assert snapshot["blockers"] == ["DELIVERY_UNCERTAIN"]

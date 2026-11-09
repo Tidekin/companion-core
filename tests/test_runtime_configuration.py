@@ -2,11 +2,12 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 
 import pytest
 from pydantic import ValidationError
 
-from companion import operator_config, owner_authority, paid_budget, runtime_config
+from companion import budget, operator_config, owner_authority, paid_budget, runtime_config
 from companion.config import Settings
 from companion.contracts import CoreError
 from companion.core import Core
@@ -14,6 +15,7 @@ from companion.model import ModelResponse
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import Store
 from tests.conftest import ingest
+from tests.postgres_fixture import logical_state
 from tests.support.owner_console import PASSWORD, client, login  # noqa: F401
 from tests.support.owner_input import captured
 from tests.support.runtime_configuration import hot as hot
@@ -25,7 +27,8 @@ def labels(messages):
 
 
 def test_default_is_enabled_but_the_switch_is_deployment_custody():
-    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="t" * 40)
+    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="t" * 40,
+                        database="dbname=synthetic")
     assert settings.operator_hot_reload
     assert "operator_hot_reload" in operator_config.EXCLUDED
 
@@ -96,7 +99,7 @@ def test_mood_provenance_remains_live_across_configuration_switch(hot):
 def test_retry_after_restart_retains_original_configuration(hot):
     job = task(hot)
     save(hot, chat_time_labels=True)
-    hot.store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL WHERE job_id=?",
+    hot.store.execute("UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL WHERE job_id=%s",
                       (job["job_id"],))
     reloaded = operator_config.load(hot.settings)
     assert reloaded._operator_config_version == 1 and reloaded.chat_time_labels
@@ -119,7 +122,7 @@ def test_workers_switch_independently_and_idle_observation_does_not_write(hot):
 
     # Store is deliberately owned/closed by each independent connection.
     def run(kind):
-        store = Store(hot.settings.database)
+        store = Store(hot.store.database, hot.store.state_directory)
         try:
             return runtime_config.boundary(store, hot.settings, hot.clock, worker=kind)
         finally:
@@ -133,10 +136,10 @@ def test_workers_switch_independently_and_idle_observation_does_not_write(hot):
     assert {w["worker"]: w["active_version"] for w in view["workers"]} == {
         "worker": 0, "life-worker": 1, "content-worker": 1}
     runtime_config.boundary(hot.store, hot.settings, hot.clock)
-    changes = hot.store.db.total_changes
+    changes = logical_state(hot.store)
     hot.clock.advance(60)
     runtime_config.boundary(hot.store, hot.settings, hot.clock)
-    assert hot.store.db.total_changes == changes
+    assert logical_state(hot.store) == changes
     assert not operator_config.view(hot.store, hot.settings)["pending_reload"]
 
 
@@ -144,11 +147,13 @@ def test_workers_switch_independently_and_idle_observation_does_not_write(hot):
     {"max_output_tokens": 1024}, {"chat_thinking": "low"},
     {"memory_extract_max_output_tokens": 3072},
     {"segmented_reply": {"mode": "semantic"}}, {"model_name": "other-model"},
-    {"monthly_limit_micro_usd": 123456}, {"expression_selection_probability": 0.7},
+    {"reflection_max_daily_calls": 3}, {"expression_selection_probability": 0.7},
     {"quote_policy": "often"}, {"timeout_seconds": 60},
     {"mood_enabled": True}, {"input_debounce": {"enabled": True, "quiet_seconds": 3}},
     {"turn_taking": {"silence_enabled": True, "follow_up_daily_checks": 4}},
 ])
+
+
 def test_mixed_version_never_partially_applies(hot, changes):
     baseline = runtime_config.boundary(hot.store, hot.settings, hot.clock)
     view = save(hot, chat_time_labels=True, **changes)
@@ -197,7 +202,7 @@ def test_conflicting_version_payload_cannot_replace_an_effective_snapshot(hot):
     good = runtime_config.boundary(hot.store, hot.settings, hot.clock)
     encrypted = operator_config._cipher(hot.settings).encrypt(
         b'{"chat_time_labels":false}').decode()
-    hot.store.execute("UPDATE operator_configuration SET encrypted_overrides=?", (encrypted,))
+    hot.store.execute('UPDATE operator_configuration SET encrypted_overrides=%s', (encrypted,))
     assert runtime_config.boundary(hot.store, hot.settings, hot.clock) == good
     assert operator_config.view(hot.store, hot.settings)["error"] == (
         "CONFIGURATION_VERSION_CONFLICT")
@@ -209,7 +214,7 @@ def test_restart_can_recover_only_a_verified_effective_snapshot(hot):
     hot.store.execute("UPDATE operator_configuration SET encrypted_overrides='damaged'")
     recovered = operator_config.load(hot.settings)
     assert recovered._operator_config_version == 0 and not recovered.chat_time_labels
-    hot.settings.monthly_limit_micro_usd += 1
+    hot.settings.reflection_max_daily_calls += 1
     with pytest.raises(CoreError, match="OPERATOR_CONFIGURATION_UNREADABLE"):
         operator_config.load(hot.settings)
 
@@ -226,13 +231,53 @@ def test_switch_off_restores_startup_reads_and_retains_bound_tasks(hot):
 
 def test_snapshot_tampering_and_cold_changes_are_fenced(hot):
     job = task(hot)
-    hot.settings.monthly_limit_micro_usd += 1
+    hot.settings.reflection_max_daily_calls += 1
     with pytest.raises(CoreError, match="CONFIGURATION_STARTUP_IDENTITY_CHANGED"):
         hot.context(job)
-    hot.settings.monthly_limit_micro_usd -= 1
+    hot.settings.reflection_max_daily_calls -= 1
     hot.store.execute("UPDATE operator_runtime_snapshots SET chat_time_labels=1")
     with pytest.raises(CoreError, match="CONFIGURATION_SNAPSHOT_INVALID"):
         hot.context(job)
+
+
+@pytest.mark.parametrize("hot_reload", [True, False])
+@pytest.mark.parametrize("target", ["task_binding", "request_binding", "snapshot"])
+def test_request_rechecks_committed_binding_and_snapshot_changes(hot, hot_reload, target):
+    job = task(hot)
+    request = budget.reserve(hot.store, hot.settings, job["job_id"], "chat",
+                             [{"role": "user", "content": "hello"}], hot.clock())
+    hot.settings.operator_hot_reload = hot_reload
+    runtime_config.check_request(hot.store, hot.settings, request)
+    with closing(Store(hot.store.database, hot.store.state_directory)) as other:
+        if target == "snapshot":
+            other.execute("UPDATE operator_runtime_snapshots SET chat_time_labels=1")
+            code = "CONFIGURATION_SNAPSHOT_INVALID"
+        else:
+            key = "job:" + job["job_id"] if target == "task_binding" else "model:" + request
+            other.execute("UPDATE operator_task_configuration SET binding_sha256=%s "
+                          "WHERE task_key=%s", ("0" * 64, key))
+            code = "CONFIGURATION_TASK_BINDING_INVALID"
+    with pytest.raises(CoreError, match=code):
+        runtime_config.check_request(hot.store, hot.settings, request)
+    if target != "request_binding":
+        with pytest.raises(CoreError, match=code):
+            runtime_config.check(hot.store, hot.settings, "job:" + job["job_id"])
+
+
+@pytest.mark.parametrize("target", ["task", "request"])
+def test_request_requires_each_binding_before_comparing_versions(hot, target):
+    job = task(hot)
+    request = budget.reserve(hot.store, hot.settings, job["job_id"], "chat",
+                             [{"role": "user", "content": "hello"}], hot.clock())
+    runtime_config.check_request(hot.store, hot.settings, request)
+    key = "job:" + job["job_id"] if target == "task" else "model:" + request
+    with closing(Store(hot.store.database, hot.store.state_directory)) as other:
+        other.execute("DELETE FROM operator_task_configuration WHERE task_key=%s", (key,))
+    with pytest.raises(CoreError, match="CONFIGURATION_TASK_BINDING_REQUIRED"):
+        runtime_config.check_request(hot.store, hot.settings, request)
+    hot.settings.operator_hot_reload = False
+    with pytest.raises(CoreError, match="CONFIGURATION_REQUEST_CHANGED"):
+        runtime_config.check_request(hot.store, hot.settings, request)
 
 
 def test_pre_gallery_default_snapshot_survives_restart(hot, monkeypatch):
@@ -273,8 +318,11 @@ def test_owner_revocation_cannot_activate_a_new_runtime_version(hot, tmp_path):
 
 
 def test_restart_does_not_hide_a_changed_paid_contract(hot, tmp_path):
+    from companion.token_measurement import REVISION
     captured(hot, tmp_path)
-    save(hot, monthly_limit_micro_usd=hot.settings.monthly_limit_micro_usd + 1)
+    save(hot, token_measurement={"policy": "prefer_exact", "provider": "deepseek",
+        "endpoint": "https://api.deepseek.com", "model": "deepseek-flash",
+        "renderer": "deepseek-v4.1-flash-1017", "revision": REVISION})
     restarted = operator_config.load(hot.settings)
     view = operator_config.view(hot.store, restarted)
     assert not view["pending_restart"] and view["requires_reapproval"]

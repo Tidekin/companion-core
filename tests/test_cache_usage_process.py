@@ -28,6 +28,7 @@ def test_signed_entry_and_worker_keep_absent_cache_distinct_from_explicit_zero(c
             source = await entry.admit(1, "synthetic cache presence inspection")
             job_id = entry.accepted[source["event_id"]]["job_id"]
             settings = core.settings.model_dump(mode="json")
+            settings["database"] = core.settings.database.get_secret_value()
             for name in ("model_key", "bridge_token", "control_token"):
                 settings[name] = getattr(core.settings, name).get_secret_value()
             path, requests_path = tmp_path / "cache-worker.json", tmp_path / "requests.json"
@@ -47,9 +48,14 @@ def test_signed_entry_and_worker_keep_absent_cache_distinct_from_explicit_zero(c
             assert child.returncode == 0, stderr.decode("utf-8", errors="replace")
             assert json.loads(stdout) == {"mock_provider_requests": 2}
             requests = json.loads(requests_path.read_text("utf-8"))
-            rows = core.store.rows("SELECT m.*,a.payload_sha256,a.measurement_json,"
-                "a.input_bound,a.output_bound,a.reserved_micro_usd FROM model_usage m "
-                "JOIN model_admissions a USING(request_id) WHERE m.job_id=? ORDER BY m.rowid",
+            rows = core.store.rows((
+                (
+                    'SELECT m.*,a.payload_sha256,a.measurement_json,a.input_b'
+                    'ound,a.output_bound,a.reserved_micro_usd FROM '
+                    'model_usage m JOIN model_admissions a USING(request_id) '
+                    'WHERE m.job_id=%s ORDER BY m.record_sequence'
+                )
+            ),
                 (job_id,))
             assert len(rows) == 2
             for row, payload in zip(rows, requests, strict=True):
@@ -68,7 +74,7 @@ def test_signed_entry_and_worker_keep_absent_cache_distinct_from_explicit_zero(c
                 assert "cache_usage_present" not in encode(payload)
                 assert "user_id" not in payload
             # Read through the actual authenticated HTTP entry point, not an alternate DTO.
-            trace_id = core.store.one("SELECT trace_id FROM events WHERE event_id=?",
+            trace_id = core.store.one('SELECT trace_id FROM events WHERE event_id=%s',
                                       (source["event_id"],))["trace_id"]
             calls = beta_observation.inspect_context(core.settings, trace_id)["trace"]["jobs"][0][
                 "model_calls"]
@@ -96,7 +102,7 @@ def test_signed_entry_and_worker_keep_absent_cache_distinct_from_explicit_zero(c
             sent = await entry.send(entry.client, entry.protocol)
             assert sent["worked"] and len(sends) == 1
             assert sent["attempt_states"] == {"ACK": 1}
-            assert core.store.one("SELECT state FROM outbox WHERE origin_event_id=?",
+            assert core.store.one('SELECT state FROM outbox WHERE origin_event_id=%s',
                                   (source["event_id"],)) == {"state": "SENT"}
             assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == before
 

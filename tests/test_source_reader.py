@@ -16,11 +16,14 @@ from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.exploration import ReadResult
+from companion.legacy_import import migrate_sqlite
 from companion.observation import ReadingEvidence
-from companion.store import Store, migrate
+from companion.postgres import Database
+from companion.store import Store
 from companion.transport import digest
 from source_reader.bilibili import BilibiliReader, VideoPage, subtitle_excerpt
 from source_reader.network import (
@@ -36,6 +39,7 @@ from tests.conftest import ingest, run
 from tests.support.exploration import URL, configure, discover
 from tests.support.historical_schema import historical_database
 from tests.support.observation_capture import enable_observations, observation
+from tests.support.release_migration import insert, one, open_historical, rows
 from tests.support.source_reader import ITEM, META, NOW, PLAYER, SUBTITLE, Responses, read, response
 
 
@@ -312,14 +316,14 @@ def test_core_reserves_all_requests_reconciles_usage_and_keeps_unknown(core):
         ),
     )
     row = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (second["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (second["request_id"],)
     )
     assert row["used_requests"] is None and row["reserved_requests"] == 4
     assert not core.exploration.budget_available()
 
 
 def test_layered_evidence_survives_core_context_and_is_erased_after_old_backup_restore(
-    core, tmp_path
+    empty_database, core, tmp_path
 ):
     configure(core)
     core.settings.content_enabled = True
@@ -331,27 +335,32 @@ def test_layered_evidence_survives_core_context_and_is_erased_after_old_backup_r
     completed = core.exploration.complete("bili", lease["request_id"], receipt)
     assert core.exploration.complete("bili", lease["request_id"], receipt)["duplicate"]
     output = completed["event_ids"][0]
-    row = core.store.one("SELECT * FROM observations WHERE event_id=?", (output,))
+    row = core.store.one('SELECT * FROM observations WHERE event_id=%s', (output,))
     assert row["result_status"] == "FETCHED" and row["source_kind"] == "text"
     assert json.loads(row["evidence_json"])["reading"]["level"] == "L2"
     context = core.content.context_message("evt_test_1", 3000)
     assert '"level":"L2"' in context and '"part":1' in context
     key, archive = Fernet.generate_key(), tmp_path / "before.enc"
     backup(core.settings.database, archive, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
-    restore(archive, tmp_path / "restored.db", key, core.settings.erasure_ledger)
-    restored = Store(str(tmp_path / "restored.db"))
-    try:
-        row = restored.one("SELECT * FROM observations WHERE event_id=?", (output,))
+    restored_state = tmp_path / "restored-state"
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as restored,
+    ):
+        row = restored.one("SELECT * FROM observations WHERE event_id=%s", (output,))
         assert row["redacted"] and row["evidence_json"] == "{}"
         assert (
-            restored.one("SELECT body_json FROM events WHERE event_id=?", (output,))["body_json"]
+            restored.one("SELECT body_json FROM events WHERE event_id=%s", (output,))["body_json"]
             == "{}"
         )
-        assert not restored.rows("PRAGMA foreign_key_check")
-    finally:
-        restored.close()
+        assert not restored.one(
+            "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+            "AND NOT convalidated"
+        )
 
 
 def test_forged_scope_and_unreserved_usage_are_rejected(core):
@@ -411,6 +420,7 @@ def test_reader_http_roundtrip_uses_scoped_auth_and_persists_evidence(core):
     ingest(core, text=URL)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     async def scenario():
         backend = Responses(response(META), response(PLAYER), response(SUBTITLE))
@@ -465,7 +475,7 @@ def test_pre_v06_observation_fingerprint_still_replays(core):
     )
     old_receipt["payload"].pop("reading")
     old_receipt["payload"].pop("article")
-    assert core.store.one("SELECT fingerprint FROM events WHERE event_id=?", (item.event_id,))[
+    assert core.store.one('SELECT fingerprint FROM events WHERE event_id=%s', (item.event_id,))[
         "fingerprint"
     ] == digest(old_receipt)
     assert core.observations.append("reader", item)["duplicate"]
@@ -473,12 +483,11 @@ def test_pre_v06_observation_fingerprint_still_replays(core):
 
 def test_populated_0013_upgrade_keeps_historical_single_request_accounting(tmp_path):
     database = str(tmp_path / "legacy.db")
-    migrate(database, "0013_content")
-    store = Store(database)
-    try:
+    migrate_sqlite(database, "0013_content")
+    with closing(open_historical(database)) as store:
         for state in ("QUEUED", "RUNNING", "DONE", "UNKNOWN"):
-            store.insert(
-                "exploration_requests",
+            insert(
+                store, "exploration_requests",
                 request_id=state,
                 request_key=state,
                 adapter_id="bili",
@@ -492,15 +501,12 @@ def test_populated_0013_upgrade_keeps_historical_single_request_accounting(tmp_p
                 created_at=NOW,
                 updated_at=NOW,
             )
-        before = store.rows("SELECT * FROM exploration_requests ORDER BY rowid")
-    finally:
-        store.close()
-    migrate(database)
-    migrate(database)
-    store = Store(database)
-    try:
+        before = rows(store, "SELECT * FROM exploration_requests ORDER BY rowid")
+    migrate_sqlite(database)
+    migrate_sqlite(database)
+    with closing(open_historical(database)) as store:
         for old, new in zip(
-            before, store.rows("SELECT * FROM exploration_requests ORDER BY rowid"), strict=True
+            before, rows(store, "SELECT * FROM exploration_requests ORDER BY rowid"), strict=True
         ):
             assert new.pop("reserved_requests") == 1 and new.pop("used_requests") is None
             assert new.pop("source_grant_id") is None and new.pop("source_grant_epoch") is None
@@ -508,9 +514,7 @@ def test_populated_0013_upgrade_keeps_historical_single_request_accounting(tmp_p
             assert new.pop("query") is None
             assert new.pop("discovery_mode") == "default"
             assert new == old
-        assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
-    finally:
-        store.close()
+        assert one(store, "PRAGMA integrity_check")["integrity_check"] == "ok"
 
 
 @pytest.mark.parametrize("reservation", [1, 4])
@@ -523,8 +527,9 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(
     ingest(core, text=URL)
     lease = core.exploration.lease("bili")
     before = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (lease["request_id"],)
     )
+    assert before.pop("record_sequence") > 0
     assert before["authority_json"] == "{}"
     before_0014 = {
         key: value
@@ -536,25 +541,20 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
     cfg.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
-    with closing(Store(database)) as store:
+    select_request = "SELECT * FROM exploration_requests WHERE request_id=?"
+    parameters = (lease["request_id"],)
+    with closing(open_historical(database)) as store:
         if reservation == 4:
             with pytest.raises(RuntimeError, match="READER_BUDGET_DOWNGRADE"):
                 command.downgrade(cfg, "0013_content")
+            assert one(store, select_request, parameters) == before_0014
             assert (
-                store.one(
-                    "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
-                )
-                == before_0014
-            )
-            assert (
-                store.one("SELECT version_num FROM alembic_version")["version_num"]
+                one(store, "SELECT version_num FROM alembic_version")["version_num"]
                 == "0014_reader_budget"
             )
         else:
             command.downgrade(cfg, "0013_content")
-            after = store.one(
-                "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
-            )
+            after = one(store, select_request, parameters)
             assert after == {
                 key: value
                 for key, value in before.items()
@@ -563,10 +563,5 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(
                         "source_grant_id", "source_grant_epoch", "authority_json", "query",
                         "discovery_mode"}
             }
-            migrate(database)
-            assert (
-                store.one(
-                    "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
-                )
-                == before
-            )
+            migrate_sqlite(database)
+            assert one(store, select_request, parameters) == before

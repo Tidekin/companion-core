@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from pydantic_ai.toolsets import FunctionToolset
 
-from companion import agent_runtime
+from companion import agent_runtime, operator_config
 from companion.agent_persistence import ConversationStore
 from companion.api import create_app
 from companion.contracts import Candidate
@@ -47,9 +47,7 @@ def test_semantic_recovery_http_then_independent_worker_reextracts_and_commits(
     response = client.post(path, json={"confirm": True}, headers=headers)
     assert response.status_code == 200, response.text
     assert checkpoint_state(core.store)["batch"]["phase"] == "EXTRACT"
-    values = core.settings.model_dump(mode="json")
-    values.update(bridge_token=core.settings.bridge_token.get_secret_value(),
-                  control_token=core.settings.control_token.get_secret_value())
+    values = operator_config._raw(core.settings)
     config = tmp_path / "worker-config.json"
     config.write_text(encode(values), "utf-8")
     payload = tmp_path / "corrected-output.json"
@@ -91,7 +89,7 @@ with Core(cfg,model,lambda:sys.argv[2]) as worker:
     assert result["pid"] != os.getpid()
     assert result["calls"] == ["memory_extract", "memory_review"]
     assert checkpoint_state(core.store)["batch"]["phase"] == "COMPLETE"
-    rows = core.store.rows("SELECT valid_to,content FROM memories ORDER BY rowid")
+    rows = core.store.rows("SELECT valid_to,content FROM memories ORDER BY record_sequence")
     assert len(rows) == 2 and rows[0]["valid_to"] and rows[1]["content"] == CORRECTION
     assert all(r["state"] == "SETTLED" for r in core.store.rows("SELECT * FROM model_usage"))
 
@@ -108,7 +106,7 @@ def test_nonrepeat_boundary_survives_restart_tools_and_forget_erases_source(core
                 ids.append(core.memory.add(Candidate(subject="user", kind=kind,
                     fact_key=f"private-name-{n}", content=text, evidence_event_id=source.event_id,
                     evidence_quote=text), core.clock()))
-                core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+                core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                    (accepted["job_id"],))
             await admit(3, "那个私下称呼是什么？")
             provider = Provider(answer(calls=[call("boundary-once", "memory_recall", {})]),
@@ -135,16 +133,20 @@ def test_nonrepeat_boundary_survives_restart_tools_and_forget_erases_source(core
                         prompt = encode(request["messages"])
                         assert boundary in prompt and "普通追问不解除约定" in prompt
                         assert "不复述不等于已经删除" in prompt
-                    worker.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+                    worker.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                          (job["job_id"],))
                     await admit(4, "/忘记这一条 " + ids[0])
                     assert await worker.run_once("explicit-forget")
                     assert len(provider.requests) == 2  # Forget is a native control, not model I/O.
-                    assert worker.store.one("SELECT content,status FROM memories WHERE memory_id=?",
+                    assert worker.store.one((
+                        'SELECT content,status FROM memories WHERE memory_id=%s'
+                    ),
                                             (ids[0],)) == {"content": "", "status": "FORGOTTEN"}
-                    assert worker.store.one("SELECT content FROM memories WHERE memory_id=?",
+                    assert worker.store.one('SELECT content FROM memories WHERE memory_id=%s',
                                             (ids[1],))["content"] == boundary
-                    assert worker.store.one("SELECT conversation_json FROM agent_conversations "
-                                            "WHERE job_id=?", (job["job_id"],)) == {
+                    assert worker.store.one((
+                        'SELECT conversation_json FROM agent_conversations '
+                        'WHERE job_id=%s'
+                    ), (job["job_id"],)) == {
                                                 "conversation_json": None}
     run(scenario())

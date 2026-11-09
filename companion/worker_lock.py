@@ -6,11 +6,13 @@ from companion.contracts import CoreError
 
 
 @contextmanager
-def single_worker(database, kind="worker"):
+def single_worker(state_directory, kind="worker"):
     """OS-held lock releases on process death; no stale PID-file recovery needed."""
     if kind not in {"worker", "diary-worker", "life-worker", "executive-worker", "content-worker"}:
         raise ValueError("unknown worker lock")
-    path = Path(database).with_suffix(f".{kind}.lock")
+    directory = Path(state_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{kind}.lock"
     with path.open("a+b") as stream:
         stream.seek(0)
         if path.stat().st_size == 0:

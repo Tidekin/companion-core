@@ -85,7 +85,8 @@ def test_revoke_or_expiry_during_body_read_prevents_provider_dispatch(boundary):
                 usage = (
                     await client.get("/internal/v1/reservations/" + token, headers=HEADERS)
                 ).json()
-                assert usage == {"calls": 0, "reserved_micro_usd": 0}
+                assert usage == {"calls": 0, "billed_micro_usd": 0, "input_tokens": 0,
+                                 "output_tokens": 0, "unknown_calls": 0}
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
@@ -184,7 +185,8 @@ def test_inflight_revocation_retains_cost_reservation_and_never_repeats(unknown)
                 before = (
                     await client.get("/internal/v1/reservations/" + token, headers=HEADERS)
                 ).json()
-                assert before["calls"] == 1 and before["reserved_micro_usd"] > 0
+                assert before["calls"] == before["unknown_calls"] == 1
+                assert before["billed_micro_usd"] == 0
                 release.set()
                 assert (await asyncio.wait_for(task, 3)).status_code == (500 if unknown else 200)
                 assert (

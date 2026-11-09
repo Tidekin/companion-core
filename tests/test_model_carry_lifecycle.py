@@ -62,15 +62,19 @@ def test_authority_chain_batches_rows_and_equal_policy_bodies_per_call(core, tmp
         return original(value, *args, **kwargs)
 
     monkeypatch.setattr(OwnerGrantPolicy, "model_validate_json", parse)
-    core.store.db.set_trace_callback(queries.append)
-    try:
-        for _ in range(2):
-            with core.store.transaction():
-                model_carry.authority_chain(core.store, saved, revisions)
-    finally:
-        core.store.db.set_trace_callback(None)
-    assert len([query for query in queries if query.startswith(
-        "SELECT * FROM owner_authority_revisions")]) == 2
+    fetch = core.store.rows
+
+    def observed(statement, params=()):
+        if "FROM owner_authority_revisions" in statement:
+            queries.append(params)
+        return fetch(statement, params)
+
+    monkeypatch.setattr(core.store, "rows", observed)
+    for _ in range(2):
+        with core.store.transaction():
+            model_carry.authority_chain(core.store, saved, revisions)
+    expected = (saved["manifest"]["authority"]["grant_id"], 3, 7)
+    assert queries == [expected, expected]
     assert len(parsed) == 2  # No parsed policy is retained across calls.
     assert digest([saved, revisions]) == before
 
@@ -83,12 +87,12 @@ def test_authority_chain_rechecks_current_rows_and_redaction(core, tmp_path, cha
     if change == "missing":
         core.store.execute("DELETE FROM owner_authority_revisions WHERE revision=4")
     elif change == "record":
-        core.store.execute("UPDATE owner_authority_revisions SET record_sha256=? WHERE revision=4",
+        core.store.execute('UPDATE owner_authority_revisions SET record_sha256=%s WHERE revision=4',
                            ("0" * 64,))
     elif change == "policy":
         value = json.loads(revisions[1]["policy_json"])
         value["unknown_carry_sha256"] = "0" * 64
-        core.store.execute("UPDATE owner_authority_revisions SET policy_json=? WHERE revision=4",
+        core.store.execute('UPDATE owner_authority_revisions SET policy_json=%s WHERE revision=4',
                            (json.dumps(value),))
     else:
         core.store.execute("UPDATE owner_authority_revisions SET policy_redacted=1 "
@@ -128,7 +132,7 @@ def test_current_unknown_uses_true_local_close_and_same_approval(core, tmp_path)
     assert proof["carry_sha256"] == case.receipt["carry_sha256"]
     capture = json.loads(
         core.store.one(
-            "SELECT value FROM runtime_meta WHERE key=?",
+            'SELECT value FROM runtime_meta WHERE key=%s',
             ("owner_input:" + proof["inputs"][0]["event_id"],),
         )["value"]
     )["capture"]
@@ -166,8 +170,12 @@ def test_current_proof_stays_stable_with_approved_unadmitted_input(core, tmp_pat
     current_unknown(core)
     saved = json.loads(
         core.store.one(
-            "SELECT value FROM runtime_meta WHERE key LIKE 'owner_input:%' "
-            "AND json_extract(value,'$.capture.authority.revision')=3"
+
+                'SELECT value FROM runtime_meta WHERE key LIKE '
+                "'owner_input:%%' AND (CASE WHEN value IS JSON THEN "
+                "value::jsonb #> '{capture,authority,revision}' "
+                "END)='3'::jsonb"
+
         )["value"]
     )["capture"]
     value = {key: item for key, item in saved.items() if key != "signature"}

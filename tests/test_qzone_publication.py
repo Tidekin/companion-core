@@ -10,8 +10,10 @@ from pydantic import SecretStr
 
 from companion import qzone_publication as publication
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.backup import backup, restore
 from companion.contracts import CoreError, LeaseRequest
+from companion.postgres import Database
 from companion.social_autonomy import SocialAutonomy
 from companion.store import Store, after
 from companion.transport import begin_send, lease_deliveries
@@ -94,7 +96,7 @@ def test_negative_decisions_never_publish_and_do_not_rearm_on_replay(core, tmp_p
 def test_final_approval_is_bound_to_current_source_authority_and_expiry(core, tmp_path, change):
     module, result, ref, source = ready(core, tmp_path)
     if change == "source":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
     elif change == "stop":
         stop(core, ref)
@@ -120,6 +122,7 @@ def test_decision_route_is_owner_only_and_checks_exact_body(core, tmp_path):
     core.settings.control_token = SecretStr("synthetic-publication-control-" * 2)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app),
@@ -188,17 +191,26 @@ def test_public_review_is_never_auto_enqueued(core, tmp_path):
 
 
 @pytest.mark.parametrize("erase", [False, True])
-def test_restore_and_erasure_cannot_rearm_a_public_approval(core, tmp_path, erase):
+def test_restore_and_erasure_cannot_rearm_a_public_approval(empty_database, core, tmp_path, erase):
     module, result, _, source = ready(core, tmp_path)
     publication.decide(module, result["plan_id"], approval(result), "approve-publication")
-    archive, target, key = tmp_path / "public.enc", tmp_path / "restored.db", Fernet.generate_key()
+    archive = tmp_path / "public.enc"
+    restored_state = tmp_path / "restored-state"
+    key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     if erase:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
-    restore(archive, target, key, core.settings.erasure_ledger)
-    with closing(Store(str(target))) as store:
-        restored = SocialAutonomy(store, core.settings, clock=core.clock)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with (
+        Database(empty_database) as database,
+        closing(Store(database, restored_state)) as store,
+    ):
+        settings = core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        })
+        restored = SocialAutonomy(store, settings, clock=core.clock)
         assert store.one("SELECT state FROM outbox")["state"] == (
             "CANCELLED" if erase else "DELIVERY_UNCERTAIN")
         assert publication.view(restored, result["plan_id"])["text"] == ""
@@ -209,7 +221,10 @@ def test_restore_and_erasure_cannot_rearm_a_public_approval(core, tmp_path, eras
             assert store.one("SELECT redacted,plan_json,input_snapshot_json "
                              "FROM social_autonomy_plans") == {
                 "redacted": 1, "plan_json": "{}", "input_snapshot_json": "{}"}
-        assert not store.rows("PRAGMA foreign_key_check")
+        assert not store.one(
+            "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+            "AND NOT convalidated"
+        )
 
 
 def test_console_rechecks_rotated_credentials_inside_the_approval_transaction(

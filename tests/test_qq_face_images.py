@@ -203,10 +203,10 @@ def test_signed_face_graphic_crosses_api_independent_worker_and_qq_ack(core, tmp
             usage = core.store.rows("SELECT * FROM model_usage")
             if mode == "source_change":
                 body["rich"]["segments"][0]["face_id"] = "14"
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                     (json.dumps(body, ensure_ascii=False), owner["event_id"]))
             elif mode == "erasure":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [owner["event_id"]], core.clock())
             await active.pump()
             assert len(sends) == int(mode in {"inline", "deferred"})

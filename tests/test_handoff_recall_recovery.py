@@ -2,17 +2,20 @@
 
 import hashlib
 import json
-import sqlite3
-from contextlib import closing
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+import psycopg
 import pytest
+from psycopg import sql
 
 from companion import budget, input_recall, live_text, paid_budget
+from companion.backup import _client, _run
 from companion.config import LiveTextHandoff
 from companion.model import ModelResponse
 from companion.privacy import epoch
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.handoff_recall_recovery import approve_only
 from tests.support.input_protocol import environment, notice
 from tests.support.live_text_handoff import initial, journal_bytes, reference, stop_and_successor
@@ -53,7 +56,7 @@ async def successor(client, core, config):
 
 def snapshot(core):
     journal = Path(core.settings.paid_model.journal_path)
-    return (list(core.store.db.iterdump()), journal.read_bytes() if journal.exists() else None,
+    return (logical_state(core.store), journal.read_bytes() if journal.exists() else None,
             core.ledger.path.read_bytes() if core.ledger.path.exists() else None)
 
 
@@ -79,10 +82,10 @@ def test_signed_recall_before_inbox_can_prepare_without_recreating_erased_input(
             assert recalled.status_code == 200 and recalled.json()["state"] == "RECALLED"
             marker = live_text._meta(core.store, input_recall.marker_key(event["source_event_id"]))
             assert marker["state"] == "RECALLED" and marker["event_id"] == event["event_id"]
-            assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                   ("erased_event:" + event["event_id"],))["value"] == (
                                       marker["erasure_id"])
-            assert core.store.one("SELECT state FROM privacy_erasure_ledger WHERE erasure_id=?",
+            assert core.store.one('SELECT state FROM privacy_erasure_ledger WHERE erasure_id=%s',
                                   (marker["erasure_id"],)) == {"state": "COMPLETE"}
             assert core.ledger.read()[-1]["target_type"] == "input_recall"
             assert_no_inbox(core)
@@ -128,12 +131,12 @@ def test_missing_inbox_requires_complete_exact_independent_recall_proof(
                 live_text._put(core.store, key, {**source, "state": "RECALLED",
                     "erasure_id": "erase_forged", "event_id": event["event_id"],
                     "occurred_at": now.isoformat()})
-                core.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+                core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                                    ("erased_event:" + event["event_id"], "erase_forged"))
             elif case == "missing_marker":
-                core.store.execute("DELETE FROM runtime_meta WHERE key=?", (key,))
+                core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (key,))
             elif case == "wrong_event_marker":
-                core.store.execute("UPDATE runtime_meta SET value='erase_other' WHERE key=?",
+                core.store.execute("UPDATE runtime_meta SET value='erase_other' WHERE key=%s",
                                    ("erased_event:" + event["event_id"],))
             elif case == "missing_complete":
                 core.store.execute("DELETE FROM privacy_erasure_ledger")
@@ -147,7 +150,7 @@ def test_missing_inbox_requires_complete_exact_independent_recall_proof(
                 receipt["capture"][field] = value
                 live_text._put(core.store, live_text.INPUT + event["event_id"], receipt)
             elif case == "nonrecall_erasure":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
                 erased = core.ledger.read()[-1]
                 source = input_recall.canonical_source(
@@ -211,7 +214,7 @@ def test_abort_is_authenticated_cancel_only_with_one_independent_stop_fence(core
                 "ABORTED")
             assert live_text._meta(core.store, live_text.BINDING)["plan_sha256"] == old.plan_sha256
             assert live_text.stopped(core.store, old.plan_sha256)
-            assert not core.store.one("SELECT 1 FROM model_budget_windows WHERE window_id=?",
+            assert not core.store.one('SELECT 1 FROM model_budget_windows WHERE window_id=%s',
                                       (new.window_id,))
             assert_no_inbox(core)
             after = snapshot(core)
@@ -238,16 +241,20 @@ def test_abort_rejects_missing_changed_or_used_custody_without_writes(core, tmp_
     old = initial(core, tmp_path)
     _, new = stop_and_successor(core, tmp_path)
     if case == "no_stop":
-        core.store.execute("DELETE FROM runtime_meta WHERE key IN (?,?)",
+        core.store.execute('DELETE FROM runtime_meta WHERE key IN (%s,%s)',
                            (live_text.STOP + old.plan_sha256, "live_text_stopped"))
     elif case == "no_handoff":
         core.settings.live_text_window = new.model_copy(update={"handoff": None})
     elif case == "missing_binding":
-        core.store.execute("DELETE FROM runtime_meta WHERE key=?", (live_text.BINDING,))
+        core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (live_text.BINDING,))
     elif case == "wrong_owner":
         core.store.execute("UPDATE runtime_meta SET value='10009' WHERE key='owner_qq_id'")
     elif case == "wrong_epoch":
-        core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch','1')")
+        core.store.execute(
+            'INSERT INTO runtime_meta (key,value) VALUES '
+            "('privacy_epoch','1') ON CONFLICT(key) DO UPDATE SET "
+            'value=excluded.value,record_sequence=DEFAULT'
+        )
     elif case == "wrong_budget_head":
         core.settings.live_text_window = new.model_copy(update={
             "handoff": new.handoff.model_copy(update={"budget_journal_head_sha256": "0" * 64}),
@@ -255,7 +262,7 @@ def test_abort_rejects_missing_changed_or_used_custody_without_writes(core, tmp_
     elif case == "missing_journal":
         Path(core.settings.paid_model.journal_path).unlink()
     elif case == "changed_ledger":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [], core.clock())
     elif case == "prepared":
         live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))
@@ -271,7 +278,7 @@ def test_abort_rejects_missing_changed_or_used_custody_without_writes(core, tmp_
         core.store.insert("model_usage", usage_id="usage_unresolved", request_id="model_unresolved",
             scenario="chat", provider="synthetic", model="synthetic", input_tokens=0,
             output_tokens=0, billed_micro_usd=123, is_estimate=1, pricing_known=1,
-            state="UNKNOWN", occurred_at=core.clock())
+            state="RESERVED", occurred_at=core.clock())
 
     async def scenario():
         async with core_client(core) as client:
@@ -289,21 +296,21 @@ def test_abort_fsync_survives_failed_database_receipt_and_cannot_be_blindly_retr
     initial(core, tmp_path)
     _, new = stop_and_successor(core, tmp_path)
     core.store.execute(
-        "CREATE TRIGGER reject_abort_receipt BEFORE INSERT ON runtime_meta "
-        "WHEN NEW.key='live_text_window:" + new.plan_sha256 + "' "
-        "BEGIN SELECT RAISE(ABORT,'synthetic abort receipt failure'); END",
+        sql.SQL("ALTER TABLE runtime_meta ADD CONSTRAINT reject_abort_receipt "
+                "CHECK (key <> {}) NOT VALID").format(
+                    sql.Literal("live_text_window:" + new.plan_sha256))
     )
 
     async def scenario():
         async with core_client(core) as client:
             before = snapshot(core)
-            with pytest.raises(sqlite3.IntegrityError, match="synthetic abort receipt failure"):
+            with pytest.raises(psycopg.errors.CheckViolation, match="reject_abort_receipt"):
                 await client.post(ABORT, json=abort_body(new))
-            assert list(core.store.db.iterdump()) == before[0]
+            assert logical_state(core.store) == before[0]
             assert core.ledger.path.read_bytes() == before[2]
             assert journal_bytes(core).splitlines()[:-1] == before[1].splitlines()
             assert json.loads(journal_bytes(core).splitlines()[-1])["kind"] == "window_stop"
-            core.store.execute("DROP TRIGGER reject_abort_receipt")
+            core.store.execute("ALTER TABLE runtime_meta DROP CONSTRAINT reject_abort_receipt")
             fenced = snapshot(core)
             for endpoint, body in (
                 (ABORT, abort_body(new)), (HANDOFF, reference(new).model_dump()),
@@ -359,21 +366,30 @@ def test_abort_independent_stop_fence_survives_loss_of_database_abort_marker(
 
     async def scenario():
         async with core_client(core) as client:
-            with closing(sqlite3.connect(tmp_path / "before-abort.db")) as previous:
-                core.store.db.backup(previous)
-                aborted = await client.post(ABORT, json=abort_body(new))
-                assert aborted.status_code == 200, aborted.text
-                fenced_journal = journal_bytes(core)
-                if rollback == "database":
-                    previous.backup(core.store.db)
-                else:
-                    core.store.execute("DELETE FROM runtime_meta WHERE key=?",
-                                       (live_text.HISTORY + new.plan_sha256,))
-                before = snapshot(core)
-                rejected = await client.post(HANDOFF, json=reference(new).model_dump())
-                assert rejected.status_code in {409, 503}, rejected.text
-                assert rejected.json()["error"] in {
-                    "MODEL_BUDGET_RECONCILIATION_REQUIRED", "LIVE_TEXT_HANDOFF_STOP_REQUIRED",
-                }
-                assert snapshot(core) == before and journal_bytes(core) == fenced_journal
+            previous = logical_state(core.store)
+            dump = str(tmp_path / "before-abort.dump")
+            if rollback == "database":
+                with TemporaryDirectory(dir=tmp_path) as directory:
+                    with _client(core.settings.database, directory) as (_, environment):
+                        _run("pg_dump", ["--format=custom", "--no-owner", "--no-privileges",
+                                         "--file", dump], environment)
+            aborted = await client.post(ABORT, json=abort_body(new))
+            assert aborted.status_code == 200, aborted.text
+            fenced_journal = journal_bytes(core)
+            if rollback == "database":
+                with TemporaryDirectory(dir=tmp_path) as directory:
+                    with _client(core.settings.database, directory) as (_, environment):
+                        _run("pg_restore", ["--clean", "--if-exists", "--single-transaction",
+                                            "--no-owner", "--no-privileges", dump], environment)
+                assert logical_state(core.store) == previous
+            else:
+                core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
+                                   (live_text.HISTORY + new.plan_sha256,))
+            before = snapshot(core)
+            rejected = await client.post(HANDOFF, json=reference(new).model_dump())
+            assert rejected.status_code in {409, 503}, rejected.text
+            assert rejected.json()["error"] in {
+                "MODEL_BUDGET_RECONCILIATION_REQUIRED", "LIVE_TEXT_HANDOFF_STOP_REQUIRED",
+            }
+            assert snapshot(core) == before and journal_bytes(core) == fenced_journal
     run(scenario())

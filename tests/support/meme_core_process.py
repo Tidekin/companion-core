@@ -129,13 +129,13 @@ def check_signed_core_worker_and_bridge_delivery(runtime_case, tmp_path):
                             == c.data
                         )
                         assert c.core.store.one(
-                            "SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
+                            'SELECT 1 FROM job_sources WHERE job_id=%s AND event_id=%s',
                             (job["job_id"], c.source["event_id"]),
                         )
                         assert (
                             json.loads(
                                 c.core.store.one(
-                                    "SELECT value FROM runtime_meta WHERE key=?",
+                                    'SELECT value FROM runtime_meta WHERE key=%s',
                                     ("owner_delivery:" + row["message_id"],),
                                 )["value"]
                             )["meme_binding_version"]
@@ -178,7 +178,7 @@ def check_signed_core_worker_and_bridge_delivery(runtime_case, tmp_path):
                             "meme_runtime_sources",
                         }
                         assert db.execute("SELECT state FROM meme_pins").fetchone()[0] == "SENT"
-        usage = c.core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+        usage = c.core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
         assert len(usage) == len(original_usage) + 1 and usage[0] == original_usage[0]
         assert usage[-1]["state"] == "SETTLED"
         assert not c.core.store.rows("SELECT * FROM outbox WHERE state='DELIVERY_UNCERTAIN'")

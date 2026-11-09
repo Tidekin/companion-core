@@ -41,7 +41,8 @@ class Recorder:
         record = {"session": self.session, "sequence": self.sequence,
                   "completed_at": utcnow(), "stage": stage}
         self.store.execute(
-            "INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (KEY, encode(record)),
+            'INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO UPDATE SET '
+            'value = excluded.value, record_sequence = DEFAULT', (KEY, encode(record)),
         )
         self.last_write = now
         self.last_waiting = waiting
@@ -73,8 +74,8 @@ def _project(record, now):
 
 
 def snapshot(view, now):
-    row = view.one("SELECT CASE WHEN length(value)<=1024 THEN value END value "
-                   "FROM runtime_meta WHERE key=?", (KEY,))
+    row = view.one('SELECT CASE WHEN LENGTH(value) <= 1024 THEN value END AS value FROM '
+        'runtime_meta WHERE key = %s', (KEY,))
     if row is None:
         return {"state": "UNOBSERVED"}
     try:

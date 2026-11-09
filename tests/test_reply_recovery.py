@@ -125,7 +125,7 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
             active.spool = Spool(active.config)
             active.runtime = OwnerRuntime(active.spool, clock=lambda: core.clock.now)
             before = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             login = await active.client.post(
                 "/v1/console/session",
                 json={"password": "synthetic-owner-control-token"},
@@ -141,19 +141,19 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
             path = "/v1/console/deliveries/" + item["message_id"] + "/recovery"
             assert (await active.client.get(path)).status_code == 401
             receipt_key = "owner_delivery_not_sent:" + item["message_id"]
-            retained = core.store.one("SELECT value FROM runtime_meta WHERE key=?", (receipt_key,))
+            retained = core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (receipt_key,))
             with core.store.transaction():
-                core.store.execute("DELETE FROM runtime_meta WHERE key=?", (receipt_key,))
+                core.store.execute('DELETE FROM runtime_meta WHERE key=%s', (receipt_key,))
             assert (await active.client.get(path, headers=headers)).status_code == 409
             with core.store.transaction():
                 core.store.insert("runtime_meta", key=receipt_key, value=retained["value"])
                 core.store.execute(
-                    "UPDATE outbox SET attempt_count=1 WHERE message_id=?", (item["message_id"],)
+                    'UPDATE outbox SET attempt_count=1 WHERE message_id=%s', (item["message_id"],)
                 )
             assert (await active.client.get(path, headers=headers)).status_code == 409
             with core.store.transaction():
                 core.store.execute(
-                    "UPDATE outbox SET attempt_count=0 WHERE message_id=?", (item["message_id"],)
+                    'UPDATE outbox SET attempt_count=0 WHERE message_id=%s', (item["message_id"],)
                 )
             preview = await active.client.get(path, headers=headers)
             assert preview.status_code == 200, preview.text
@@ -178,8 +178,10 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
             assert created.json() == {"state": "QUEUED"}
             with core.store.transaction():
                 core.store.execute(
-                    "UPDATE console_operations SET state='STARTED',result_json=NULL "
-                    "WHERE request_id=?",
+                    (
+                        'UPDATE console_operations SET '
+                        "state='STARTED',result_json=NULL WHERE request_id=%s"
+                    ),
                     (headers["Idempotency-Key"],),
                 )
             assert (
@@ -190,10 +192,10 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
             )
             assert duplicate.status_code == 409
             assert len(core.store.rows("SELECT * FROM jobs WHERE kind='reply_recovery'")) == 1
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usage
             assert (
                 core.store.rows(
-                    "SELECT * FROM outbox WHERE message_id IN (?,?,?,?) ORDER BY segment_index",
+                    'SELECT * FROM outbox WHERE message_id IN (%s,%s,%s,%s) ORDER BY segment_index',
                     tuple(r["message_id"] for r in before),
                 )
                 == before
@@ -203,7 +205,7 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
                 from companion.privacy import ErasureLedger
 
                 if interrupt == "erase":
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         ErasureLedger(core.settings.erasure_ledger).expire_events(
                             core.store, [originals[0]["origin_event_id"]], core.clock()
                         )
@@ -257,7 +259,7 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
                 )
                 assert len(history) == 1 and history[0]["reply_text"] == "".join(parts)
             retained_prefix = core.store.one(
-                "SELECT * FROM outbox WHERE message_id=?", (prefix["message_id"],)
+                'SELECT * FROM outbox WHERE message_id=%s', (prefix["message_id"],)
             )
             if interrupt == "erase":
                 assert {
@@ -290,7 +292,7 @@ def test_console_copies_only_unstarted_suffix_and_preserves_original_ack(
             )
             assert active.runtime.row()["state"] == "ACTIVE"
             active.runtime.verify()
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usage
             # The dedicated producer keeps delivery liability in the existing
             # original-input completion receipt after the explicit operation.
             captured = json.loads(

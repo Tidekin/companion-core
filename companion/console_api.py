@@ -27,10 +27,15 @@ from companion.transport import reconcile_delivery, set_proactive_paused
 COOKIE = "companion_owner_session"
 # These native Memory failures leave no committed change after its transaction rolls back.
 # Keep allowlists at each caller: a generic CoreError is not proof of no effect.
-MEMORY_REJECTIONS = frozenset({
-    "MEMORY_NOT_FOUND", "MEMORY_NOT_ACTIVE", "CORRECTION_REQUIRED", "CREDENTIAL_MEMORY_DENIED",
-    "CORRECTION_NOT_APPLICABLE",
-})
+MEMORY_REJECTIONS = frozenset(
+    {
+        "MEMORY_NOT_FOUND",
+        "MEMORY_NOT_ACTIVE",
+        "CORRECTION_REQUIRED",
+        "CREDENTIAL_MEMORY_DENIED",
+        "CORRECTION_NOT_APPLICABLE",
+    }
+)
 
 
 class Login(StrictModel):
@@ -55,7 +60,8 @@ class Delegation(StrictModel):
     mode: Literal["owner", "propose", "self"]
     allow_pause: bool = Field(strict=True)
     ranges: dict[str, dict[str, StrictInt | StrictFloat]] = Field(
-        default_factory=dict, max_length=4)
+        default_factory=dict, max_length=4
+    )
 
 
 class AdjustmentDecision(StrictModel):
@@ -73,13 +79,17 @@ class _PrivateHeaders:
         async def private_start(message):
             if message["type"] == "http.response.start":
                 # The TLS proxy also owns static and internal-redirect headers.
-                MutableHeaders(scope=message).update({
-                    "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-                    "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
-                    "Content-Security-Policy": "default-src 'self'; script-src 'self'; "
-                    "style-src 'self'; img-src 'self' data:; connect-src 'self'; "
-                    "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-                })
+                MutableHeaders(scope=message).update(
+                    {
+                        "Cache-Control": "no-store",
+                        "X-Content-Type-Options": "nosniff",
+                        "Referrer-Policy": "no-referrer",
+                        "X-Frame-Options": "DENY",
+                        "Content-Security-Policy": "default-src 'self'; script-src 'self'; "
+                        "style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+                        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                    }
+                )
             await send(message)
 
         await self.app(scope, receive, private_start)
@@ -101,7 +111,8 @@ def _credential(settings):
 def _request_fields(request):
     """Materialize finite authentication and receipt fields before entering a worker."""
     return SimpleNamespace(
-        method=request.method, url=SimpleNamespace(path=request.url.path),
+        method=request.method,
+        url=SimpleNamespace(path=request.url.path),
         cookies={COOKIE: request.cookies.get(COOKIE, "")},
         headers={name: request.headers.get(name, "") for name in ("origin", "x-csrf-token")},
     )
@@ -114,10 +125,27 @@ def _check_owner(core, request):
     if not settings.control_token.get_secret_value():
         raise CoreError("CONSOLE_OWNER_CREDENTIAL_REQUIRED", 503)
     token = request.cookies.get(COOKIE, "")
-    row = core.store.one("SELECT * FROM console_sessions WHERE token_sha256=?",
-                         (digest(token),)) if token else None
-    if (not row or row["expires_at"] <= core.clock()
-        or not hmac.compare_digest(row["credential_tag"], _credential(settings))):
+    row = (
+        core.store.one(
+            (
+                'SELECT console_sessions.token_sha256 AS token_sha256, '
+                'console_sessions.csrf_token AS csrf_token, '
+                'console_sessions.credential_tag AS credential_tag, '
+                'console_sessions.created_at AS created_at, '
+                'console_sessions.expires_at AS expires_at FROM '
+                'console_sessions AS console_sessions WHERE '
+                'console_sessions.token_sha256 = %s'
+            ),
+            (digest(token),),
+        )
+        if token
+        else None
+    )
+    if (
+        not row
+        or row["expires_at"] <= core.clock()
+        or not hmac.compare_digest(row["credential_tag"], _credential(settings))
+    ):
         raise CoreError("CONSOLE_LOGIN_REQUIRED", 401)
     if request.method not in {"GET", "HEAD"}:
         _origin(request, settings)
@@ -126,8 +154,9 @@ def _check_owner(core, request):
     return row
 
 
-def _operation(core, request, key, body, apply, *, recover=None, rejected_errors=frozenset(),
-               owner_check=None):
+def _operation(
+    core, request, key, body, apply, *, recover=None, rejected_errors=frozenset(), owner_check=None
+):
     if not key or len(key) > 128 or not key.isascii():
         raise CoreError("IDEMPOTENCY_KEY_REQUIRED", 400)
     s = core.store
@@ -137,14 +166,25 @@ def _operation(core, request, key, body, apply, *, recover=None, rejected_errors
         if owner_check is not None:
             owner_check()
         now = core.clock()
-        row = s.one("SELECT * FROM console_operations WHERE request_id=?", (key,))
+        row = s.one(
+            "SELECT console_operations.request_id AS request_id, "
+            "console_operations.request_sha256 AS request_sha256, console_operations.state AS "
+            "state, console_operations.result_json AS result_json, console_operations.created_at "
+            "AS created_at, console_operations.updated_at AS updated_at FROM console_operations AS "
+            "console_operations WHERE console_operations.request_id = %s",
+            (key,),
+        )
         if row:
             if row["request_sha256"] != fingerprint:
                 raise CoreError("IDEMPOTENCY_CONFLICT", 409)
             if row["state"] == "REJECTED":
                 failure = json.loads(row["result_json"])
-                if (set(failure) != {"error", "status"} or failure["error"] not in rejected_errors
-                    or type(failure["status"]) is not int or not 400 <= failure["status"] < 500):
+                if (
+                    set(failure) != {"error", "status"}
+                    or failure["error"] not in rejected_errors
+                    or type(failure["status"]) is not int
+                    or not 400 <= failure["status"] < 500
+                ):
                     raise CoreError("CONSOLE_OPERATION_RECONCILIATION_REQUIRED", 409)
                 raise CoreError(failure["error"], failure["status"])
             if row["state"] != "COMPLETE":
@@ -154,31 +194,57 @@ def _operation(core, request, key, body, apply, *, recover=None, rejected_errors
             else:
                 return json.loads(row["result_json"])
         else:
-            s.insert("console_operations", request_id=key, request_sha256=fingerprint,
-                     state="STARTED", created_at=now, updated_at=now)
+            s.insert(
+                "console_operations",
+                request_id=key,
+                request_sha256=fingerprint,
+                state="STARTED",
+                created_at=now,
+                updated_at=now,
+            )
     # Native services own their transactions and erasure replay. A process death
     # between native commit and this receipt never blindly repeats the operation.
     if result is None:
         try:
             result = apply()
         except CoreError as error:
-            if error.code in rejected_errors and not s.db.in_transaction:
+            if error.code in rejected_errors and not s.in_transaction:
                 with s.transaction():
-                    s.execute("UPDATE console_operations SET state='REJECTED',result_json=?,"
-                              "updated_at=? WHERE request_id=? AND state='STARTED'",
-                              (encode({"error": error.code, "status": error.status}),
-                               core.clock(), key))
-                    s.audit("console.operation_rejected", key, "console", core.clock(),
-                            code=error.code, status=error.status)
+                    s.execute(
+                        "UPDATE console_operations SET state = 'REJECTED', result_json = %s, "
+                        "updated_at = %s WHERE request_id = %s AND state = 'STARTED'",
+                        (encode({"error": error.code, "status": error.status}), core.clock(), key),
+                    )
+                    s.audit(
+                        "console.operation_rejected",
+                        key,
+                        "console",
+                        core.clock(),
+                        code=error.code,
+                        status=error.status,
+                    )
             raise
-    safe = {name: result[name] for name in (
-        "memory_id", "state", "supersedes", "entry_id", "version", "enabled", "target",
-    ) if name in result}
+    safe = {
+        name: result[name]
+        for name in (
+            "memory_id",
+            "state",
+            "supersedes",
+            "entry_id",
+            "version",
+            "enabled",
+            "target",
+        )
+        if name in result
+    }
     if not safe:
         safe = {"state": "COMPLETE"}
     with s.transaction():
-        s.execute("UPDATE console_operations SET state='COMPLETE',result_json=?,updated_at=? "
-                  "WHERE request_id=?", (encode(safe), core.clock(), key))
+        s.execute(
+            "UPDATE console_operations SET state = 'COMPLETE', result_json = %s, updated_at "
+            "= %s WHERE request_id = %s",
+            (encode(safe), core.clock(), key),
+        )
         s.audit("console.operation", key, "console", core.clock(), route=request.url.path)
     return safe
 
@@ -222,42 +288,72 @@ def register_console_routes(app, settings):
         def issue(s):
             invalid = False
             with s.transaction():
+                # Include absent attempt/session rows in the owner's login limit.
+                s.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id' FOR UPDATE")
                 enabled()
                 _origin(captured, settings)
                 now = clock()
                 secret = settings.control_token.get_secret_value().encode()
                 client_tag = hmac.new(secret, host.encode(), hashlib.sha256).hexdigest()
-                s.execute("DELETE FROM console_login_attempts WHERE expires_at<=?", (now,))
-                row = s.one("SELECT * FROM console_login_attempts WHERE client_tag=?",
-                            (client_tag,))
+                s.execute("DELETE FROM console_login_attempts WHERE expires_at <= %s", (now,))
+                row = s.one(
+                    "SELECT console_login_attempts.client_tag AS client_tag, "
+                    "console_login_attempts.attempts AS attempts, "
+                    "console_login_attempts.expires_at AS expires_at FROM console_login_attempts "
+                    "AS console_login_attempts WHERE console_login_attempts.client_tag = %s",
+                    (client_tag,),
+                )
                 if row and row["attempts"] >= 5:
                     raise CoreError("CONSOLE_LOGIN_RATE_LIMIT", 429)
                 if not hmac.compare_digest(body.password.get_secret_value().encode(), secret):
-                    s.execute("INSERT INTO console_login_attempts VALUES (?,1,?) "
-                              "ON CONFLICT(client_tag) DO UPDATE SET attempts=attempts+1",
-                              (client_tag, after(now, 300)))
+                    s.execute(
+                        (
+                            (
+                                'INSERT INTO console_login_attempts VALUES (%s,1,%s) ON '
+                                'CONFLICT(client_tag) DO UPDATE SET '
+                                'attempts=console_login_attempts.attempts+1'
+                            )
+                        ),
+                        (client_tag, after(now, 300)),
+                    )
                     invalid = True
                 else:
-                    s.execute("DELETE FROM console_login_attempts WHERE client_tag=?",
-                              (client_tag,))
-                    s.execute("DELETE FROM console_sessions WHERE expires_at<=?", (now,))
-                    s.execute("DELETE FROM console_sessions WHERE token_sha256 IN "
-                              "(SELECT token_sha256 FROM console_sessions ORDER BY created_at DESC "
-                              "LIMIT -1 OFFSET ?)", (settings.console.max_sessions - 1,))
+                    s.execute(
+                        "DELETE FROM console_login_attempts WHERE client_tag = %s", (client_tag,)
+                    )
+                    s.execute("DELETE FROM console_sessions WHERE expires_at <= %s", (now,))
+                    s.execute(
+                        "DELETE FROM console_sessions WHERE token_sha256 IN (SELECT "
+                        "token_sha256 FROM console_sessions ORDER BY created_at DESC NULLS LAST "
+                        "OFFSET %s)",
+                        (settings.console.max_sessions - 1,),
+                    )
                     token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
                     seconds = settings.console.session_seconds
                     expires = after(now, seconds)
-                    s.insert("console_sessions", token_sha256=digest(token), csrf_token=csrf,
-                             credential_tag=_credential(settings), created_at=now,
-                             expires_at=expires)
+                    s.insert(
+                        "console_sessions",
+                        token_sha256=digest(token),
+                        csrf_token=csrf,
+                        credential_tag=_credential(settings),
+                        created_at=now,
+                        expires_at=expires,
+                    )
                     s.audit("console.login", "owner", "console", now)
             if invalid:
                 raise CoreError("CONSOLE_LOGIN_REQUIRED", 401)
             return token, csrf, expires, seconds
 
         token, csrf, expires, seconds = await app.state.api_store.run(issue)
-        response.set_cookie(COOKIE, token, max_age=seconds, secure=True,
-                            httponly=True, samesite="strict", path=prefix)
+        response.set_cookie(
+            COOKIE,
+            token,
+            max_age=seconds,
+            secure=True,
+            httponly=True,
+            samesite="strict",
+            path=prefix,
+        )
         return {"csrf_token": csrf, "expires_at": expires}
 
     owner_dependency = Depends(owner)
@@ -272,10 +368,13 @@ def register_console_routes(app, settings):
 
         def remove(store):
             with store.transaction():
-                current = _check_owner(SimpleNamespace(store=store, settings=settings, clock=clock),
-                                       captured)
-                store.execute("DELETE FROM console_sessions WHERE token_sha256=?",
-                              (current["token_sha256"],))
+                current = _check_owner(
+                    SimpleNamespace(store=store, settings=settings, clock=clock), captured
+                )
+                store.execute(
+                    "DELETE FROM console_sessions WHERE token_sha256 = %s",
+                    (current["token_sha256"],),
+                )
 
         await app.state.api_store.run(remove)
         response.delete_cookie(COOKIE, path=prefix, secure=True, httponly=True, samesite="strict")
@@ -287,25 +386,37 @@ def register_console_routes(app, settings):
 
     def publication_check(request):
         captured, clock = _request_fields(request), app.state.core.clock
-        return lambda store: _check_owner(SimpleNamespace(
-            store=store, settings=settings, clock=clock), captured)
+        return lambda store: _check_owner(
+            SimpleNamespace(store=store, settings=settings, clock=clock), captured
+        )
 
-    register_publication_routes(app, settings, prefix + "/qzone/publications", auth,
-                                publication_check)
+    register_publication_routes(
+        app, settings, prefix + "/qzone/publications", auth, publication_check
+    )
 
     async def write(request, key, body, apply, *, rejected_errors=frozenset()):
         clock, captured = app.state.core.clock, _request_fields(request)
 
         def execute(store):
-            context = SimpleNamespace(store=store, settings=settings, clock=clock,
-                                      ledger=ErasureLedger(settings.erasure_ledger))
+            context = SimpleNamespace(
+                store=store,
+                settings=settings,
+                clock=clock,
+                ledger=ErasureLedger(settings.erasure_ledger),
+            )
 
             def owner_check():
                 _check_owner(context, captured)
 
-            return _operation(context, captured, key, body,
-                lambda: apply(context, owner_check), owner_check=owner_check,
-                rejected_errors=rejected_errors)
+            return _operation(
+                context,
+                captured,
+                key,
+                body,
+                lambda: apply(context, owner_check),
+                owner_check=owner_check,
+                rejected_errors=rejected_errors,
+            )
 
         return await app.state.api_store.run(execute)
 
@@ -341,19 +452,30 @@ def register_console_routes(app, settings):
         return console_read.recall(app.state.core, q.strip(), limit)
 
     @app.post(prefix + "/memories/{memory_id}/decision", dependencies=auth)
-    async def memory_decision(memory_id: str, body: MemoryChange, request: Request,
-                              idempotency_key: str = Header(default="")):
+    async def memory_decision(
+        memory_id: str,
+        body: MemoryChange,
+        request: Request,
+        idempotency_key: str = Header(default=""),
+    ):
         origin = request.headers.get("origin", "")
 
         def apply(context, owner_check):
-            with context.store.transaction():
+            with context.store.transaction(control_write=True):
                 owner_check()
                 return Memory(context.store, settings, context.ledger).decide_from_console(
-                    memory_id, body.decision, context.clock(), body.corrected_content,
-                    operation_id=idempotency_key, origin=origin, owner_check=owner_check)
+                    memory_id,
+                    body.decision,
+                    context.clock(),
+                    body.corrected_content,
+                    operation_id=idempotency_key,
+                    origin=origin,
+                    owner_check=owner_check,
+                )
 
-        return await write(request, idempotency_key, body.model_dump(), apply,
-                           rejected_errors=MEMORY_REJECTIONS)
+        return await write(
+            request, idempotency_key, body.model_dump(), apply, rejected_errors=MEMORY_REJECTIONS
+        )
 
     from companion.console_cognition import register_console_cognition_routes
 
@@ -369,10 +491,12 @@ def register_console_routes(app, settings):
                 _check_owner(context, captured)
 
             def apply():
-                with store.transaction():
+                with store.transaction(control_write=True):
                     owner_check()
                     return AffectEngine(store, settings, clock).reset(
-                        settings.owner_qq_id, key, ErasureLedger(settings.erasure_ledger),
+                        settings.owner_qq_id,
+                        key,
+                        ErasureLedger(settings.erasure_ledger),
                     )
 
             return _operation(context, captured, key, body, apply, owner_check=owner_check)
@@ -392,15 +516,21 @@ def register_console_routes(app, settings):
                 grants = SourceGrantService(store, settings, clock)
                 if body["action"] == "revoke":
                     return grants.revoke(grant_id, owner_check=owner_check)
-                return grants.forget(grant_id, ErasureLedger(settings.erasure_ledger),
-                                     owner_check=owner_check)
+                return grants.forget(
+                    grant_id, ErasureLedger(settings.erasure_ledger), owner_check=owner_check
+                )
 
             return _operation(context, captured, key, body, apply, owner_check=owner_check)
 
         return await app.state.api_store.run(execute)
 
     register_console_cognition_routes(
-        app, prefix, auth, write, reset_affect, source_grant_action,
+        app,
+        prefix,
+        auth,
+        write,
+        reset_affect,
+        source_grant_action,
     )
 
     @app.get(prefix + "/thinking", dependencies=auth)
@@ -436,8 +566,12 @@ def register_console_routes(app, settings):
         return account_actions(app.state.core)
 
     @app.post(prefix + "/deliveries/{message_id}/reconcile", dependencies=auth)
-    async def reconcile(message_id: str, body: DeliveryReconciliation, request: Request,
-                        idempotency_key: str = Header(default="")):
+    async def reconcile(
+        message_id: str,
+        body: DeliveryReconciliation,
+        request: Request,
+        idempotency_key: str = Header(default=""),
+    ):
         from companion import delivery_reconciliation
 
         clock, captured = app.state.core.clock, _request_fields(request)
@@ -452,28 +586,51 @@ def register_console_routes(app, settings):
 
             def recovered(key, fingerprint):
                 # _operation already holds its checked receipt transaction here.
-                receipt = delivery_reconciliation.lookup(store, settings, message_id,
-                    operation_id=key, operation_sha256=fingerprint, outcome=body.outcome,
-                    repair=True, now=clock())
+                receipt = delivery_reconciliation.lookup(
+                    store,
+                    settings,
+                    message_id,
+                    operation_id=key,
+                    operation_sha256=fingerprint,
+                    outcome=body.outcome,
+                    repair=True,
+                    now=clock(),
+                )
                 return {"state": body.outcome} if receipt is not None else None
 
             with store.transaction():
                 owner_check()
-                if not store.one("SELECT 1 FROM console_operations WHERE request_id=?",
-                                 (idempotency_key,)):
-                    readiness = delivery_reconciliation.readiness(store, settings, message_id,
-                                                                  now=clock())
+                if not store.one(
+                    "SELECT 1 FROM console_operations WHERE request_id = %s", (idempotency_key,)
+                ):
+                    readiness = delivery_reconciliation.readiness(
+                        store, settings, message_id, now=clock()
+                    )
                     if not readiness["prepared"]:
                         raise CoreError(readiness["reason"] or "DELIVERY_QUIESCENCE_REQUIRED", 409)
 
             def apply():
                 with store.transaction():
                     owner_check()
-                    return reconcile_delivery(store, message_id, body.outcome, clock(), settings,
-                        operation_id=idempotency_key, operation_sha256=fingerprint)
+                    return reconcile_delivery(
+                        store,
+                        message_id,
+                        body.outcome,
+                        clock(),
+                        settings,
+                        operation_id=idempotency_key,
+                        operation_sha256=fingerprint,
+                    )
 
-            return _operation(context, captured, idempotency_key, material, apply,
-                              recover=recovered, owner_check=owner_check)
+            return _operation(
+                context,
+                captured,
+                idempotency_key,
+                material,
+                apply,
+                recover=recovered,
+                owner_check=owner_check,
+            )
 
         return await app.state.api_store.run(execute)
 
@@ -491,8 +648,12 @@ def register_console_routes(app, settings):
         return await app.state.api_store.run(execute)
 
     @app.post(prefix + "/deliveries/{message_id}/recovery", dependencies=auth)
-    async def recover_reply(message_id: str, body: RecoveryRequest, request: Request,
-                            idempotency_key: str = Header(default="")):
+    async def recover_reply(
+        message_id: str,
+        body: RecoveryRequest,
+        request: Request,
+        idempotency_key: str = Header(default=""),
+    ):
         from companion import reply_recovery
 
         captured, clock = _request_fields(request), app.state.core.clock
@@ -508,12 +669,27 @@ def register_console_routes(app, settings):
             def apply():
                 with store.transaction():
                     owner_check()
-                    return reply_recovery.create(store, settings, clock, message_id,
-                        body.expected_sha256, idempotency_key, fingerprint)
+                    return reply_recovery.create(
+                        store,
+                        settings,
+                        clock,
+                        message_id,
+                        body.expected_sha256,
+                        idempotency_key,
+                        fingerprint,
+                    )
 
-            return _operation(context, captured, idempotency_key, material, apply,
-                recover=lambda key, sha: reply_recovery.create(store, settings, clock, message_id,
-                    body.expected_sha256, key, sha), owner_check=owner_check)
+            return _operation(
+                context,
+                captured,
+                idempotency_key,
+                material,
+                apply,
+                recover=lambda key, sha: reply_recovery.create(
+                    store, settings, clock, message_id, body.expected_sha256, key, sha
+                ),
+                owner_check=owner_check,
+            )
 
         return await app.state.api_store.run(execute)
 
@@ -526,21 +702,31 @@ def register_console_routes(app, settings):
         return result
 
     @app.post(prefix + "/diary/{day}/correction", dependencies=auth)
-    async def correction(day: date, body: DiaryCorrection, request: Request,
-                         idempotency_key: str = Header(default="")):
+    async def correction(
+        day: date,
+        body: DiaryCorrection,
+        request: Request,
+        idempotency_key: str = Header(default=""),
+    ):
         def apply(context, owner_check):
-            return DiaryService(context.store, settings, None, context.ledger,
-                context.clock).correct(day, body.text, settings.owner_qq_id,
-                                       owner_check=owner_check)
+            return DiaryService(
+                context.store, settings, None, context.ledger, context.clock
+            ).correct(day, body.text, settings.owner_qq_id, owner_check=owner_check)
 
-        return await write(request, idempotency_key, body.model_dump(), apply,
-                           rejected_errors={"INVALID_DIARY_CORRECTION"})
+        return await write(
+            request,
+            idempotency_key,
+            body.model_dump(),
+            apply,
+            rejected_errors={"INVALID_DIARY_CORRECTION"},
+        )
 
     @app.post(prefix + "/diary/{day}/forget", dependencies=auth)
     async def forget(day: date, request: Request, idempotency_key: str = Header(default="")):
         def apply(context, owner_check):
-            return DiaryService(context.store, settings, None, context.ledger,
-                context.clock).forget(day, settings.owner_qq_id, owner_check=owner_check)
+            return DiaryService(
+                context.store, settings, None, context.ledger, context.clock
+            ).forget(day, settings.owner_qq_id, owner_check=owner_check)
 
         return await write(request, idempotency_key, {}, apply)
 
@@ -549,10 +735,12 @@ def register_console_routes(app, settings):
         def apply(core, owner_check):
             if body.target == "diary":
                 return DiaryService(core.store, settings, None, core.ledger, core.clock).set_mode(
-                    body.enabled, settings.owner_qq_id, owner_check=owner_check)
+                    body.enabled, settings.owner_qq_id, owner_check=owner_check
+                )
             if body.target == "life":
                 return GoalEngine(core.store, settings, core.ledger, core.clock).pause_autonomy(
-                    not body.enabled, owner_check=owner_check)
+                    not body.enabled, owner_check=owner_check
+                )
             if body.enabled and not settings.proactive_enabled:
                 raise CoreError("PROACTIVE_DISABLED_IN_CONFIG", 409)
             with core.store.transaction():
@@ -561,9 +749,13 @@ def register_console_routes(app, settings):
             return {"target": body.target, "enabled": body.enabled}
 
         # Both failures occur before their setters start a native transaction.
-        return await write(request, idempotency_key, body.model_dump(), apply,
-                          rejected_errors={"DIARY_DISABLED_IN_CONFIG",
-                                           "PROACTIVE_DISABLED_IN_CONFIG"})
+        return await write(
+            request,
+            idempotency_key,
+            body.model_dump(),
+            apply,
+            rejected_errors={"DIARY_DISABLED_IN_CONFIG", "PROACTIVE_DISABLED_IN_CONFIG"},
+        )
 
     @app.get(prefix + "/autonomy", dependencies=auth)
     async def autonomy():
@@ -572,8 +764,12 @@ def register_console_routes(app, settings):
             return delegation.view(core.store, settings, core.clock())
 
     @app.put(prefix + "/autonomy/{capability}", dependencies=auth)
-    async def change_autonomy(capability: str, body: Delegation, request: Request,
-                              idempotency_key: str = Header(default="")):
+    async def change_autonomy(
+        capability: str,
+        body: Delegation,
+        request: Request,
+        idempotency_key: str = Header(default=""),
+    ):
         if capability not in delegation.DELEGABLE:
             raise CoreError("DELEGATION_INVALID", 404)
         # Validate before taking an operation receipt so a rejected range never needs repair.
@@ -582,15 +778,26 @@ def register_console_routes(app, settings):
         def apply(core, owner_check):
             with core.store.transaction():
                 owner_check()
-                delegation.set_delegation(core.store, settings, capability, body.mode,
-                                          body.allow_pause, body.ranges, core.clock())
+                delegation.set_delegation(
+                    core.store,
+                    settings,
+                    capability,
+                    body.mode,
+                    body.allow_pause,
+                    body.ranges,
+                    core.clock(),
+                )
             return {"state": "COMPLETE"}
 
         return await write(request, idempotency_key, body.model_dump(), apply)
 
     @app.post(prefix + "/autonomy/adjustments/{override_id}/decision", dependencies=auth)
-    async def decide_adjustment(override_id: str, body: AdjustmentDecision, request: Request,
-                                idempotency_key: str = Header(default="")):
+    async def decide_adjustment(
+        override_id: str,
+        body: AdjustmentDecision,
+        request: Request,
+        idempotency_key: str = Header(default=""),
+    ):
         clock, captured = app.state.core.clock, _request_fields(request)
 
         def execute(store):
@@ -601,8 +808,9 @@ def register_console_routes(app, settings):
 
             with store.transaction():
                 owner_check()
-                if not store.one("SELECT 1 FROM console_operations WHERE request_id=?",
-                                 (idempotency_key,)):
+                if not store.one(
+                    "SELECT 1 FROM console_operations WHERE request_id = %s", (idempotency_key,)
+                ):
                     delegation.check_decision(store, settings, override_id, body.decision)
 
             def apply():
@@ -610,41 +818,68 @@ def register_console_routes(app, settings):
                     owner_check()
                     return delegation.decide(store, settings, override_id, body.decision, clock())
 
-            return _operation(context, captured, idempotency_key, body.model_dump(), apply,
-                              owner_check=owner_check)
+            return _operation(
+                context,
+                captured,
+                idempotency_key,
+                body.model_dump(),
+                apply,
+                owner_check=owner_check,
+            )
 
         return await app.state.api_store.run(execute)
 
     @app.get(prefix + "/configuration", dependencies=auth)
     async def configuration():
         core = app.state.core
-        return {**operator_config.view(core.store, settings),
-                "cloud_budget": cloud_budget.policy(core.store, settings, core.clock())}
+        return {
+            **operator_config.view(core.store, settings),
+            "cloud_budget": cloud_budget.policy(core.store, settings, core.clock()),
+        }
 
     @app.put(prefix + "/configuration", dependencies=auth)
-    async def change_configuration(body: operator_config.ConfigurationChange, request: Request,
-                                   idempotency_key: str = Header(default="")):
+    async def change_configuration(
+        body: operator_config.ConfigurationChange,
+        request: Request,
+        idempotency_key: str = Header(default=""),
+    ):
         if not idempotency_key or len(idempotency_key) > 128 or not idempotency_key.isascii():
             raise CoreError("IDEMPOTENCY_KEY_REQUIRED", 400)
         clock, captured = app.state.core.clock, _request_fields(request)
 
         def update(store):
             context = SimpleNamespace(store=store, settings=settings, clock=clock)
-            changed = operator_config.update(store, settings, body, idempotency_key, clock(),
-                owner_check=lambda: _check_owner(context, captured), clock=clock)
+            changed = operator_config.update(
+                store,
+                settings,
+                body,
+                idempotency_key,
+                clock(),
+                owner_check=lambda: _check_owner(context, captured),
+                clock=clock,
+            )
             return {**changed, "cloud_budget": cloud_budget.policy(store, settings, clock())}
 
         return await app.state.api_store.run(update)
 
     @app.put(prefix + "/cloud-budget", dependencies=auth)
-    async def cloud_budget_change(body: operator_config.ConfigurationChange, request: Request,
-                                  idempotency_key: str = Header(default="")):
+    async def cloud_budget_change(
+        body: operator_config.ConfigurationChange,
+        request: Request,
+        idempotency_key: str = Header(default=""),
+    ):
         clock, captured = app.state.core.clock, _request_fields(request)
 
         def update(store):
             context = SimpleNamespace(store=store, settings=settings, clock=clock)
-            return cloud_budget.configure(store, settings, body.model_dump(),
-                idempotency_key=idempotency_key, now=clock(),
-                owner_check=lambda: _check_owner(context, captured), clock=clock)
+            return cloud_budget.configure(
+                store,
+                settings,
+                body.model_dump(),
+                idempotency_key=idempotency_key,
+                now=clock(),
+                owner_check=lambda: _check_owner(context, captured),
+                clock=clock,
+            )
 
         return await app.state.api_store.run(update)

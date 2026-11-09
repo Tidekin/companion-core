@@ -19,14 +19,18 @@ KINDS = {
     "model": ("model_usage", "request_id"),
     "rem": ("rem_records", "rem_id"),
 }
-STATES = frozenset("PENDING SHADOW SKIPPED DEFERRED INVALIDATED CANDIDATE ACCEPTED QUEUED "
-                   "RUNNING DONE WAITING WAITING_INPUT WAITING_RESOURCE WAITING_DECISION "
-                   "RETRY_WAIT FAILED "
-                   "CANCELLED EXECUTION_UNCERTAIN COMMITTED SCHEDULED LEASED PARTIAL COMPLETE "
-                   "RESERVED SUCCEEDED UNKNOWN SETTLED".split())
-REASONS = frozenset("NO_CANDIDATE PAUSED QUIET_HOURS OWNER_REQUESTED_PAUSE RESOURCE_UNAVAILABLE "
-                    "DAILY_LIMIT COOLDOWN GOAL_DUE DISCOVERY_DUE PRIVACY_CHANGED "
-                    "OWNER_AUTHORITY_DISABLED OWNER_AUTHORITY_EXPIRED".split())
+STATES = frozenset(
+    "PENDING SHADOW SKIPPED DEFERRED INVALIDATED CANDIDATE ACCEPTED QUEUED "
+    "RUNNING DONE WAITING WAITING_INPUT WAITING_RESOURCE WAITING_DECISION "
+    "RETRY_WAIT FAILED "
+    "CANCELLED EXECUTION_UNCERTAIN COMMITTED SCHEDULED LEASED PARTIAL COMPLETE "
+    "RESERVED SUCCEEDED UNKNOWN SETTLED".split()
+)
+REASONS = frozenset(
+    "NO_CANDIDATE PAUSED QUIET_HOURS OWNER_REQUESTED_PAUSE RESOURCE_UNAVAILABLE "
+    "DAILY_LIMIT COOLDOWN GOAL_DUE DISCOVERY_DUE PRIVACY_CHANGED "
+    "OWNER_AUTHORITY_DISABLED OWNER_AUTHORITY_EXPIRED".split()
+)
 
 
 def symbol(value, allowed):
@@ -55,8 +59,13 @@ def measurement(value):
     if not receipt:
         return {"state": "NOT_RECORDED"}
     kind = receipt.get("count_kind")
-    result = {"state": "RECORDED", "count_kind": symbol(kind if isinstance(kind, str) else None, {
-        "exact_local_render", "provider_count", "estimate", "unsupported"})}
+    result = {
+        "state": "RECORDED",
+        "count_kind": symbol(
+            kind if isinstance(kind, str) else None,
+            {"exact_local_render", "provider_count", "estimate", "unsupported"},
+        ),
+    }
     for key in ("input_tokens", "reservation_margin", "output_allowance"):
         number = receipt.get(key)
         result[key] = number if type(number) is int and number >= 0 else None
@@ -65,11 +74,14 @@ def measurement(value):
 
 def observed_usage(row, admission):
     """Distinguish valid paid usage from demo, reservations and proven zero I/O."""
-    return bool(row["state"] == "SETTLED" and admission and admission["io_started_at"]
-                and all(type(row[key]) is int and row[key] > 0
-                        for key in ("input_tokens", "output_tokens"))
-                and type(row["cached_input_tokens"]) is int
-                and 0 <= row["cached_input_tokens"] <= row["input_tokens"])
+    return bool(
+        row["state"] == "SETTLED"
+        and admission
+        and admission["io_started_at"]
+        and all(type(row[key]) is int and row[key] > 0 for key in ("input_tokens", "output_tokens"))
+        and type(row["cached_input_tokens"]) is int
+        and 0 <= row["cached_input_tokens"] <= row["input_tokens"]
+    )
 
 
 def cache_usage(store, row, admission):
@@ -78,8 +90,9 @@ def cache_usage(store, row, admission):
     if not observed_usage(row, admission):
         return unknown
     records = store.rows(
-        "SELECT safe_detail_json FROM audit_log WHERE action='model.usage_diagnostic' "
-        "AND entity_id=? LIMIT 2", (row["request_id"],),
+        "SELECT safe_detail_json FROM audit_log WHERE action = 'model.usage_diagnostic' AND "
+        "entity_id = %s LIMIT 2",
+        (row["request_id"],),
     )
     if len(records) != 1:
         return unknown
@@ -100,13 +113,18 @@ def cache_usage(store, row, admission):
         if not isinstance(raw, str) or len(raw) > 16384:
             return unknown
         receipt = json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_constant)
-        if (not isinstance(receipt, dict) or receipt.get("cache_usage_present") is not True
-            or receipt.get("actual_usage_known") is not True):
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("cache_usage_present") is not True
+            or receipt.get("actual_usage_known") is not True
+        ):
             return unknown
-        for key, column in (("input_actual_tokens", "input_tokens"),
-                            ("output_actual_tokens", "output_tokens"),
-                            ("cached_input_tokens", "cached_input_tokens"),
-                            ("usage_priced_micro_usd", "billed_micro_usd")):
+        for key, column in (
+            ("input_actual_tokens", "input_tokens"),
+            ("output_actual_tokens", "output_tokens"),
+            ("cached_input_tokens", "cached_input_tokens"),
+            ("usage_priced_micro_usd", "billed_micro_usd"),
+        ):
             if type(receipt.get(key)) is not int or receipt[key] != row[column]:
                 return unknown
     except (ValueError, TypeError, RecursionError):
@@ -124,8 +142,7 @@ def decision_reason(row, settings):
         return {**result, "state": "UNKNOWN"}
     if redact(reason, settings) != reason or sensitive(reason):
         return {**result, "state": "REDACTED"}
-    return {**result, "state": "RECORDED", "text": reason[:160],
-            "truncated": len(reason) > 160}
+    return {**result, "state": "RECORDED", "text": reason[:160], "truncated": len(reason) > 160}
 
 
 def provider_reasoning(core, row, roots):
@@ -138,17 +155,21 @@ def provider_reasoning(core, row, roots):
     missing = {"state": "NOT_RECORDED"}
     if row["scenario"] != "chat" or not roots:
         return missing
-    saved = core.store.one("SELECT conversation_json FROM agent_conversations WHERE job_id=?",
-                           (row["job_id"],))
+    saved = core.store.one(
+        "SELECT conversation_json FROM agent_conversations WHERE job_id = %s", (row["job_id"],)
+    )
     if not saved or not saved["conversation_json"]:
         return missing
     try:
         conversation = ConversationTypeAdapter.validate_json(saved["conversation_json"])
         if conversation.conversation_id != row["job_id"]:
             return {"state": "INCONSISTENT"}
-        responses = [message for message in conversation.messages
-                     if isinstance(message, ModelResponse)
-                     and (message.metadata or {}).get("core_request_id") == row["request_id"]]
+        responses = [
+            message
+            for message in conversation.messages
+            if isinstance(message, ModelResponse)
+            and (message.metadata or {}).get("core_request_id") == row["request_id"]
+        ]
         if not responses:
             return missing
         if len(responses) != 1:
@@ -161,9 +182,12 @@ def provider_reasoning(core, row, roots):
         if diagnostic.get("state") != "RECORDED" or not text or len(text) > MAX_REASONING_CHARS:
             return missing
         cleaned = redact(text, core.settings)
-        return {"state": "RECORDED", "text": cleaned,
-                "truncated": diagnostic.get("truncated") is True,
-                "redacted": diagnostic.get("redacted") is True or cleaned != text}
+        return {
+            "state": "RECORDED",
+            "text": cleaned,
+            "truncated": diagnostic.get("truncated") is True,
+            "redacted": diagnostic.get("redacted") is True or cleaned != text,
+        }
     except (ValueError, TypeError, AttributeError, RecursionError):
         return {"state": "INCONSISTENT"}
 
@@ -191,16 +215,29 @@ class CognitionRead:
             raise CoreError("INVALID_COGNITION_SELECTION", 400)
         cursor = None
         if before is not None:
-            cursor = self.store.one(f"SELECT rowid AS position FROM {table} WHERE {key}=?",
-                                    (before,))
+            cursor = self.store.one(
+                f'SELECT record_sequence AS position FROM {table} WHERE {key}=%s', (before,)
+            )
             if cursor is None:
                 raise CoreError("COGNITION_CURSOR_UNAVAILABLE", 409)
         rows = self.store.rows(
-            f"SELECT rowid AS position,* FROM {table} WHERE (? IS NULL OR rowid<?) "
-            f"AND (? IS NULL OR {key}=?) "
-            "ORDER BY rowid DESC LIMIT ?",
-            (cursor and cursor["position"], cursor and cursor["position"],
-             record_id, record_id, limit + 1),
+            (
+                (
+                    'SELECT record_sequence AS position,* FROM '
+                    f'{table}'
+                    ' WHERE (CAST(%s AS BIGINT) IS NULL OR '
+                    'record_sequence<%s) AND (CAST(%s AS TEXT) IS NULL OR '
+                    f'{key}'
+                    '=%s) ORDER BY record_sequence DESC LIMIT %s'
+                )
+            ),
+            (
+                cursor and cursor["position"],
+                cursor and cursor["position"],
+                record_id,
+                record_id,
+                limit + 1,
+            ),
         )
         items = []
         for row in rows[:limit]:
@@ -210,20 +247,36 @@ class CognitionRead:
                 item["occurred_at"] = row["occurred_at" if kind == "model" else "created_at"]
                 items.append(item)
         check_version(self.core.memory, version)
-        return {"kind": kind, "items": items, "as_of": now, "privacy_epoch": version[0],
-                "next_cursor": rows[limit - 1][key] if len(rows) > limit else None,
-                "truncated": len(rows) > limit, "reasoning": "EXPOSED" if any(
-                    item.get("reasoning", {}).get("state") == "RECORDED" for item in items
-                ) else "NOT_EXPOSED",
-                "candidate_set": "NOT_RECORDED",
-                "record_status": "RECORDED" if items else "NOT_RECORDED"}
+        return {
+            "kind": kind,
+            "items": items,
+            "as_of": now,
+            "privacy_epoch": version[0],
+            "next_cursor": rows[limit - 1][key] if len(rows) > limit else None,
+            "truncated": len(rows) > limit,
+            "reasoning": "EXPOSED"
+            if any(item.get("reasoning", {}).get("state") == "RECORDED" for item in items)
+            else "NOT_EXPOSED",
+            "candidate_set": "NOT_RECORDED",
+            "record_status": "RECORDED" if items else "NOT_RECORDED",
+        }
 
     def _roots(self, kind, row):
         if kind == "wake":
             roots = [row["trigger_event_id"]] if row["trigger_event_id"] else []
             if row["goal_id"]:
-                goal = self.store.one("SELECT * FROM goals WHERE goal_id=? AND redacted=0",
-                                      (row["goal_id"],))
+                goal = self.store.one(
+                    "SELECT goals.goal_id AS goal_id, goals.kind AS kind, "
+                    "goals.topic AS topic, goals.scope_json AS scope_json, goals.proposal_key AS "
+                    "proposal_key, goals.state AS state, goals.priority AS priority, "
+                    "goals.next_due_at AS next_due_at, goals.last_error_code AS last_error_code, "
+                    "goals.version AS version, goals.result_event_id AS result_event_id, "
+                    "goals.created_at AS created_at, goals.updated_at AS updated_at, "
+                    "goals.redacted AS redacted, goals.reflection_suggestion_id AS "
+                    "reflection_suggestion_id, goals.authority_json AS authority_json FROM goals "
+                    "AS goals WHERE goals.goal_id = %s AND goals.redacted = 0",
+                    (row["goal_id"],),
+                )
                 if goal is None:
                     return [None]
                 evidence = self._roots("goal", goal)
@@ -236,21 +289,27 @@ class CognitionRead:
             # identities describe that decision's original candidate.
             return list(object_value(row["source_fingerprints_json"]))
         elif kind == "goal":
-            query, identifier = "goal_evidence WHERE goal_id=?", row["goal_id"]
+            query, identifier = "goal_evidence WHERE goal_id=%s", row["goal_id"]
         elif kind == "diary":
-            query = ("diary_evidence JOIN diary_entries USING(entry_id) WHERE run_id=? "
-                     "AND status='COMMITTED'")
+            query = (
+                "diary_evidence JOIN diary_entries USING(entry_id) WHERE"
+                " run_id=%s AND status='COMMITTED'"
+            )
             identifier = row["run_id"]
         elif kind in {"reflection", "nightly"}:
-            query = ("reflection_evidence" if kind == "reflection" else
-                     "consolidation_evidence") + " WHERE run_id=?"
+            query = (
+                "reflection_evidence" if kind == "reflection" else "consolidation_evidence"
+            ) + " WHERE run_id=%s"
             identifier = row["run_id"]
         else:
-            query, identifier = "job_sources WHERE job_id=?", row["job_id"]
-        return [r["event_id"] for r in self.store.rows(
-            "SELECT DISTINCT event_id FROM " + query + " ORDER BY event_id LIMIT 101",
-            (identifier,),
-        )]
+            query, identifier = "job_sources WHERE job_id=%s", row["job_id"]
+        return [
+            r["event_id"]
+            for r in self.store.rows(
+                "SELECT DISTINCT event_id FROM " + query + " ORDER BY event_id LIMIT 101",
+                (identifier,),
+            )
+        ]
 
     def _sources_visible(self, row, roots, sources):
         return (not row.get("redacted") and len(roots) <= 100 and all(
@@ -258,17 +317,19 @@ class CognitionRead:
         ))
 
     def _model_usage_rows(self, lower, upper):
-        query = ("SELECT m.request_id,m.job_id,m.state,m.input_tokens,m.cached_input_tokens,"
-                 "m.output_tokens,m.billed_micro_usd,m.occurred_at,a.io_started_at "
-                 "FROM model_usage m LEFT JOIN model_admissions a ON a.request_id=m.request_id "
-                 "WHERE m.occurred_at>=? AND m.occurred_at<?")
+        query = (
+            'SELECT m.request_id,m.job_id,m.state,m.input_tokens,m.cached_input_tok'
+            'ens,m.output_tokens,m.billed_micro_usd,m.occurred_at,a.io_started_at '
+            'FROM model_usage m LEFT JOIN model_admissions a ON '
+            'a.request_id=m.request_id WHERE m.occurred_at>=%s AND m.occurred_at<%s'
+        )
         after, params = "", (lower, upper)
         while True:
             rows = self.store.rows(query + after + " ORDER BY m.request_id LIMIT 256", params)
             yield from rows
             if len(rows) < 256:
                 return
-            after, params = " AND m.request_id>?", (lower, upper, rows[-1]["request_id"])
+            after, params = ' AND m.request_id>%s', (lower, upper, rows[-1]["request_id"])
 
     def daily_model_usage(self, local_day, timezone, now):
         """Count visible calls without loading prompts, reasoning or context measurements."""
@@ -334,37 +395,55 @@ class CognitionRead:
 
             fingerprints = object_value(row["source_fingerprints_json"])
             try:
-                if any(_source(self.store, self.core.settings, key, sources.now)["source_sha256"]
-                       != fingerprints[key] for key in roots):
+                if any(
+                    _source(self.store, self.core.settings, key, sources.now)["source_sha256"]
+                    != fingerprints[key]
+                    for key in roots
+                ):
                     return None
             except CoreError:
                 return None
         key = KINDS[kind][1]
-        item = {"id": row[key], "state": symbol(row.get("state"), STATES),
-                "source_event_ids": roots,
-                "source_evidence": "RECORDED" if roots else "NOT_RECORDED",
-                "reason_code": symbol(row.get("reason_code") or row.get("last_error_code"),
-                                      REASONS)}
+        item = {
+            "id": row[key],
+            "state": symbol(row.get("state"), STATES),
+            "source_event_ids": roots,
+            "source_evidence": "RECORDED" if roots else "NOT_RECORDED",
+            "reason_code": symbol(row.get("reason_code") or row.get("last_error_code"), REASONS),
+        }
         if kind == "wake":
             item["choice"] = symbol(row["decision"], {"SKIP", "EXPLORE", "OBSERVE"})
             item["state"] = "RECORDED"
             item["goal_id"] = row["goal_id"]
         elif kind == "life":
-            item.update(topic_id=row["topic_id"], choice=symbol(row["action"], {
-                "SKIP", "CONTINUE", "EXPLORE", "FOLLOW_UP", "SHARE", "DEFER"}),
-                reason_code="NOT_RECORDED")
+            item.update(
+                topic_id=row["topic_id"],
+                choice=symbol(
+                    row["action"], {"SKIP", "CONTINUE", "EXPLORE", "FOLLOW_UP", "SHARE", "DEFER"}
+                ),
+                reason_code="NOT_RECORDED",
+            )
             item["decision_reason"] = decision_reason(row, self.core.settings)
-            item["destination"] = symbol(row["destination"], {
-                "NONE", "PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "QZONE_DRAFT"})
-            item["candidate_reference"] = {"topic_id": row["topic_id"],
-                                           "topic_revision": row["topic_revision"],
-                                           "source_event_ids": roots,
-                                           "source_snapshot_sha256": row["source_sha256"],
-                                           "authority_sha256": row["authority_sha256"],
-                                           "allowed_items": {"state": "NOT_RECORDED"}}
-            job = self.store.one("SELECT job_id,state FROM jobs WHERE job_id=?", (row["job_id"],))
-            item["job"] = ({"job_id": job["job_id"], "state": symbol(job["state"], STATES)}
-                           if job else {"state": "NOT_RECORDED"})
+            item["destination"] = symbol(
+                row["destination"],
+                {"NONE", "PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "QZONE_DRAFT"},
+            )
+            item["candidate_reference"] = {
+                "topic_id": row["topic_id"],
+                "topic_revision": row["topic_revision"],
+                "source_event_ids": roots,
+                "source_snapshot_sha256": row["source_sha256"],
+                "authority_sha256": row["authority_sha256"],
+                "allowed_items": {"state": "NOT_RECORDED"},
+            }
+            job = self.store.one(
+                "SELECT job_id, state FROM jobs WHERE job_id = %s", (row["job_id"],)
+            )
+            item["job"] = (
+                {"job_id": job["job_id"], "state": symbol(job["state"], STATES)}
+                if job
+                else {"state": "NOT_RECORDED"}
+            )
         elif kind == "goal":
             from companion.cognition_goal import record
 
@@ -374,14 +453,24 @@ class CognitionRead:
             item.update(projected)
         elif kind == "nightly":
             steps = object_value(row["steps_json"])
-            item["steps"] = {name: symbol(steps.get(name), STATES) for name in (
-                "n1", "n2", "n3", "memory", "diary", "reflection", "goals")}
+            item["steps"] = {
+                name: symbol(steps.get(name), STATES)
+                for name in ("n1", "n2", "n3", "memory", "diary", "reflection", "goals")
+            }
         elif kind == "model":
-            item["usage"] = {key: row[key] for key in (
-                "input_tokens", "cached_input_tokens", "output_tokens", "billed_micro_usd",
-                "is_estimate")}
+            item["usage"] = {
+                key: row[key]
+                for key in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                    "billed_micro_usd",
+                    "is_estimate",
+                )
+            }
             admission = self.store.one(
-                "SELECT measurement_json,io_started_at FROM model_admissions WHERE request_id=?",
+                "SELECT measurement_json, io_started_at FROM model_admissions WHERE request_id = "
+                "%s",
                 (row["request_id"],),
             )
             item["measurement"] = measurement(admission and admission["measurement_json"])

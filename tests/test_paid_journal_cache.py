@@ -10,6 +10,7 @@ from time import sleep
 from types import SimpleNamespace
 
 import pytest
+from psycopg import sql
 
 from companion import budget, cumulative, paid_budget
 from companion.contracts import CoreError
@@ -56,17 +57,24 @@ def test_warm_chain_reads_complete_bytes_and_skips_only_chain_hashes(core, tmp_p
     monkeypatch.setattr(Path, "read_bytes", read_bytes)
     monkeypatch.setattr(paid_budget, "sha", sha)
     paid_budget._clear_codec()
-    core.store.db.set_trace_callback(queries.append)
-    try:
-        with core.store.transaction():
-            first = paid_budget.journal(core.store, approval)
-            cold = len(hashes)
-            first["model_latest"][request]["minimum_micro_usd"] = 0
-            before = sum(query.startswith("SELECT") for query in queries)
-            second = paid_budget.journal(core.store, approval)
-            after = sum(query.startswith("SELECT") for query in queries) - before
-    finally:
-        core.store.db.set_trace_callback(None)
+    original_one = core.store.one
+    original_rows = core.store.rows
+
+    def observed(method):
+        def read(query, params=()):
+            queries.append(str(query))
+            return method(query, params)
+        return read
+
+    monkeypatch.setattr(core.store, "one", observed(original_one))
+    monkeypatch.setattr(core.store, "rows", observed(original_rows))
+    with core.store.read_snapshot():
+        first = paid_budget.journal(core.store, approval)
+        cold = len(hashes)
+        first["model_latest"][request]["minimum_micro_usd"] = 0
+        before = len(queries)
+        second = paid_budget.journal(core.store, approval)
+        after = len(queries) - before
     assert reads == [path.stat().st_size] * 2
     assert cold == len(path.read_text("utf-8").splitlines()) and len(hashes) == cold
     # Unchanged bytes and DB reuse the validated view instead of folding again.
@@ -113,15 +121,15 @@ def test_warm_bytes_never_cache_current_database(core, tmp_path, damage):
     with core.store.transaction():
         paid_budget.journal(core.store, approval)
     if damage == "amount":
-        core.store.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=?",
+        core.store.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=%s",
                            (request,))
     elif damage == "state":
-        core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=?", (request,))
+        core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=%s", (request,))
     elif damage == "measurement":
-        core.store.execute("UPDATE model_admissions SET measurement_json=? WHERE request_id=?",
+        core.store.execute("UPDATE model_admissions SET measurement_json=%s WHERE request_id=%s",
                            (json.dumps({"version": 999}), request))
     else:
-        core.store.execute("UPDATE runtime_meta SET value=? WHERE key='model_budget_journal_id'",
+        core.store.execute("UPDATE runtime_meta SET value=%s WHERE key='model_budget_journal_id'",
                            ("budget_" + "f" * 32,))
     with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
         with core.store.transaction():
@@ -169,7 +177,7 @@ def test_bad_tail_preserves_earlier_fold_error_and_durable_stop(
         with core.store.transaction():
             paid_budget.journal(core.store, approval)
     assert len(calls) == 1
-    assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+    assert core.store.one("SELECT value FROM runtime_meta WHERE key=%s",
                           ("model_budget_stop:" + view["head_sha256"],))
 
 
@@ -199,7 +207,9 @@ def test_large_source_reuses_only_a_small_verified_view(core, tmp_path, monkeypa
         return original(*args, **kwargs)
 
     monkeypatch.setattr(paid_budget, "_journal", replay)
-    with core.store.transaction():
+    # Reuse is guaranteed in one immutable snapshot. READ COMMITTED may see
+    # unrelated concurrent transactions and conservatively rebuild its view.
+    with core.store.read_snapshot():
         first = paid_budget.journal(core.store, approval)
         assert len(marshal.dumps(first)) < paid_budget.CACHE_MAX_BYTES < path.stat().st_size
         first["model_latest"][request]["minimum_micro_usd"] = 0
@@ -300,15 +310,13 @@ def test_warm_read_failure_clears_cache_and_cannot_return_old_view(core, tmp_pat
 
 def test_valid_warm_chain_keeps_fold_failure_and_clears_cache(core, tmp_path, monkeypatch):
     approval, _ = settled(core, tmp_path)
-    with core.store.transaction():
-        expected = paid_budget.journal(core.store, approval)
 
     def fold(state, row):
         raise CoreError("SYNTHETIC_CURRENT_FOLD_FAILURE", 409)
 
-    monkeypatch.setattr(cumulative, "fold", fold)
-    with core.store.transaction():
-        # Nothing changed: the validated view is reused without folding again.
+    with core.store.read_snapshot():
+        expected = paid_budget.journal(core.store, approval)
+        monkeypatch.setattr(cumulative, "fold", fold)
         assert paid_budget.journal(core.store, approval) == expected
     # Any DB write invalidates it; the next read folds and keeps the failure.
     core.store.execute("INSERT INTO runtime_meta VALUES ('synthetic_db_change','1')")
@@ -318,19 +326,17 @@ def test_valid_warm_chain_keeps_fold_failure_and_clears_cache(core, tmp_path, mo
     assert paid_budget._validated_bytes.cache_info().currsize == 0
 
 
-def test_warm_chain_does_not_cache_settlement_permission_or_lower_charges(core, tmp_path):
+def test_warm_chain_preserves_unknown_liability_and_charge(core, tmp_path):
     approval, request = settled(core, tmp_path)
-    before = core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=?",
+    before = core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=%s",
                             (request,))["billed_micro_usd"]
     with core.store.transaction():
-        admission = core.store.one("SELECT * FROM model_admissions WHERE request_id=?", (request,))
+        admission = core.store.one("SELECT * FROM model_admissions WHERE request_id=%s", (request,))
         budget._persist_accounting(core.store, admission, before, "UNKNOWN", True)
         view = paid_budget.journal(core.store, approval, allow_settlement=True)
         assert view["blocked_request_ids"] == [request]
-        with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
-            paid_budget.journal(core.store, approval)
-    assert paid_budget._validated_bytes.cache_info().currsize == 0
-    assert core.store.one("SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
+        assert paid_budget.journal(core.store, approval)["blocked_request_ids"] == [request]
+    assert core.store.one("SELECT billed_micro_usd,state FROM model_usage WHERE request_id=%s",
                           (request,)) == {"billed_micro_usd": before, "state": "UNKNOWN"}
 
 
@@ -339,19 +345,21 @@ def test_preflight_failure_clears_cache_without_reclassifying_error(
     core, tmp_path, monkeypatch, failure,
 ):
     approval, _ = settled(core, tmp_path)
-    with core.store.transaction():
+    with core.store.read_snapshot():
         paid_budget.journal(core.store, approval)
-    if failure == "path":
-        approval = SimpleNamespace(journal_path=object())
-        expected = TypeError
-    else:
-        def one(*args, **kwargs):
-            raise OSError("synthetic identity read failure")
+    # A new native snapshot must read the database identity again. The previous
+    # immutable scope may reuse the identity it already read with its summary.
+    with core.store.read_snapshot():
+        if failure == "path":
+            approval = SimpleNamespace(journal_path=object())
+            expected = TypeError
+        else:
+            def one(*args, **kwargs):
+                raise OSError("synthetic identity read failure")
 
-        monkeypatch.setattr(core.store, "one", one)
-        expected = OSError
-    with pytest.raises(expected):
-        with core.store.transaction():
+            monkeypatch.setattr(core.store, "one", one)
+            expected = OSError
+        with pytest.raises(expected):
             paid_budget.journal(core.store, approval)
     assert paid_budget._validated_bytes.cache_info().currsize == 0
 
@@ -377,28 +385,30 @@ def test_payload_decode_failure_uses_original_line_decoder(core, tmp_path, monke
 
 
 @pytest.mark.parametrize("large", [False, True])
-def test_a_new_connection_reuses_the_shared_view_until_any_commit(core, tmp_path, large):
-    from companion.store import Store
-
+def test_a_new_connection_reuses_the_shared_view_until_any_commit(core, tmp_path, large,
+                                                                 monkeypatch):
     approval, request = settled(core, tmp_path)
     if large:
         path = Path(approval.journal_path)
         path.write_bytes(b" " * (paid_budget.CACHE_MAX_BYTES + 1) + path.read_bytes())
         paid_budget.forget_views(core.store)
 
-    with core.store.transaction():
-        expected = paid_budget.journal(core.store, approval)
-    other = Store(core.settings.database)
+    other = Store(core.store.database, core.settings.state_directory)
     try:
-        queries = []
-        other.db.set_trace_callback(queries.append)
-        with other.transaction():
-            assert paid_budget.journal(other, approval) == expected
-        other.db.set_trace_callback(None)
-        # Reused: no fold or projection query ran on the fresh connection.
-        assert not any("model_admissions a" in query for query in queries)
+        paid_budget.forget_views(core.store)
+        with core.store.database.session() as exporter, exporter.transaction(readonly=True):
+            snapshot = exporter.one("SELECT pg_export_snapshot() AS id")["id"]
+            import_snapshot = sql.SQL("SET TRANSACTION SNAPSHOT {}").format(sql.Literal(snapshot))
+            with core.store.read_snapshot(), other.read_snapshot():
+                core.store.execute(import_snapshot)
+                other.execute(import_snapshot)
+                expected = paid_budget.journal(core.store, approval)
+                with monkeypatch.context() as patch:
+                    patch.setattr(paid_budget, "_journal",
+                                  lambda *a, **kw: pytest.fail("identical snapshot rebuilt view"))
+                    assert paid_budget.journal(other, approval) == expected
         # A commit from another connection invalidates the shared view.
-        core.store.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=?",
+        core.store.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=%s",
                            (request,))
         with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
             with other.transaction():
@@ -410,23 +420,23 @@ def test_a_new_connection_reuses_the_shared_view_until_any_commit(core, tmp_path
 def test_commit_during_validation_does_not_cache_under_new_database(core, tmp_path, monkeypatch):
     approval, request = settled(core, tmp_path)
     paid_budget.forget_views(core.store)
-    other = Store(core.settings.database)
     original = paid_budget._journal
+    with core.store.database.session() as writer:
+        def change_after_validation(*args, **kwargs):
+            view = original(*args, **kwargs)
+            assert writer.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=%s",
+                                  (request,)) == 1
+            return view
 
-    def change_after_validation(*args, **kwargs):
-        view = original(*args, **kwargs)
-        other.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=?", (request,))
-        return view
-
-    try:
-        with monkeypatch.context() as patch:
-            patch.setattr(paid_budget, "_journal", change_after_validation)
-            paid_budget.journal(core.store, approval)
-        for reader in (core.store, other):
-            with reader.transaction(), pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
-                paid_budget.journal(reader, approval)
-    finally:
-        other.close()
+        # READ COMMITTED can see the other commit before this transaction publishes its view.
+        with core.store.transaction():
+            with monkeypatch.context() as patch:
+                patch.setattr(paid_budget, "_journal", change_after_validation)
+                paid_budget.journal(core.store, approval)
+            with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+                paid_budget.journal(core.store, approval)
+    with core.store.read_snapshot(), pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
+        paid_budget.journal(core.store, approval)
 
 
 def test_uncommitted_writes_never_fill_or_use_the_shared_view(core, tmp_path):
@@ -455,26 +465,27 @@ def test_simultaneous_snapshots_build_one_view_and_keep_results_private(
 
     monkeypatch.setattr(paid_budget, "_journal", build)
 
-    def read():
-        store = Store(core.settings.database)
+    def read(snapshot):
+        store = Store(core.store.database, core.settings.state_directory)
         try:
-            def operation():
-                starting.wait(timeout=3)
+            with store.read_snapshot():
+                store.execute(sql.SQL("SET TRANSACTION SNAPSHOT {}").format(sql.Literal(snapshot)))
+                starting.wait(timeout=10)
                 return paid_budget.journal(store, approval)
-            return store.read_or_write(operation)
         finally:
             store.close()
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        reads = [pool.submit(read) for _ in range(2)]
-        starting.wait(timeout=3)
-        values = [future.result(timeout=3) for future in reads]
+    with core.store.read_snapshot(), ThreadPoolExecutor(max_workers=2) as pool:
+        snapshot = core.store.one("SELECT pg_export_snapshot() AS id")["id"]
+        reads = [pool.submit(read, snapshot) for _ in range(2)]
+        starting.wait(timeout=10)
+        values = [future.result(timeout=10) for future in reads]
     assert values[0] == values[1] and len(calls) == 1
     values[0]["model_latest"][request]["minimum_micro_usd"] = 0
     assert values[1]["model_latest"][request]["minimum_micro_usd"] > 0
     # A different connection's later edit must never inherit that shared proof.
-    core.store.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=?", (request,))
-    other = Store(core.settings.database)
+    core.store.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=%s", (request,))
+    other = Store(core.store.database, core.settings.state_directory)
     try:
         with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
             other.read_or_write(lambda: paid_budget.journal(other, approval))
@@ -594,22 +605,24 @@ def test_frozen_journal_key_reuses_digest_only_for_exact_bytes(
         return original(value)
 
     monkeypatch.setattr(paid_budget.hashlib, "sha256", sha256)
-    with core.store.transaction():
+    with core.store.read_snapshot():
         first = paid_budget._view_key(core.store, path, raw)
         assert paid_budget._view_key(core.store, path, memoryview(raw).tobytes()) == first
         assert len(hashes) == (1 if retain_bytes else 2)
         identity = core.store._view_key_memo[0][-1]
         assert isinstance(identity, bytes) is retain_bytes
+    with core.store.transaction():
+        before_write = paid_budget._view_key(core.store, path, raw)
         core.store.execute("INSERT INTO runtime_meta VALUES ('digest_scope_write','1')")
         changed = paid_budget._view_key(core.store, path, raw)
-        assert changed != first
-        assert len(hashes) == (2 if retain_bytes else 3)
+        assert changed != before_write
+        assert len(hashes) == (3 if retain_bytes else 4)
         tampered = raw.replace(b'"previous":"0', b'"previous":"9', 1)
         assert len(tampered) == len(raw) and tampered != raw
         assert paid_budget._view_key(core.store, path, tampered)[1] != changed[1]
     with core.store.transaction():
         paid_budget._view_key(core.store, path, raw)
-    assert len(hashes) == (3 if retain_bytes else 4)
+    assert len(hashes) == (4 if retain_bytes else 5)
 
 
 def test_frozen_journal_digest_reuse_still_reads_and_rejects_current_file(

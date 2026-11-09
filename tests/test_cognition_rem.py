@@ -1,6 +1,7 @@
 """Read-side frozen REM records; this fixture does not claim REM execution acceptance."""
 
 import json
+from contextlib import closing
 from datetime import UTC, datetime
 
 import pytest
@@ -11,14 +12,15 @@ from companion import api, rem
 from companion.cognition_read import CognitionRead
 from companion.contracts import CoreError
 from companion.privacy import advance_epoch
-from companion.store import after, encode
+from companion.store import Store, after, encode
+from tests.postgres_fixture import logical_state
 from tests.support.confirmed_memory import remember
 
 
 def retained_record(core, number=1):
     """Use real Memory evidence/proof and the frozen persisted-job/usage schema."""
     mid = remember(core, number, f"合成主题{number}喜欢绿色", confirmed=True)
-    memory = core.store.one("SELECT * FROM memories WHERE memory_id=?", (mid,))
+    memory = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (mid,))
     memory["evidence_ids"] = [f"evt_test_{number}"]
     proof = core.memory_context.pin(core.clock(), rows=[memory])
     job = core.new_job(f"evt_test_{number}", "rem", f"retained-rem-{number}", core.clock())
@@ -44,24 +46,25 @@ def retained_record(core, number=1):
 def test_rem_native_metadata_pagination_and_usage(core):
     first, _ = retained_record(core, 1)
     second, _ = retained_record(core, 2)
-    before = core.store.db.total_changes
-    view = CognitionRead(core)
-    page = view.page("rem", limit=1)
-    assert page["items"][0]["id"] == second and page["truncated"]
-    older = view.page("rem", limit=1, before=page["next_cursor"])
-    assert older["items"][0]["id"] == first and not older["truncated"]
-    item = view.page("rem", record_id=first)["items"][0]
-    original = next(row for row in rem.records(core) if row["rem_id"] == first)
-    assert item["usage"] == original["usage"]
-    assert item["usage"]["state"] == "UNKNOWN" and item["usage"]["billed_micro_usd"] == 700
-    assert item["kind"] == "FICTION" and item["audience"] == "owner_only"
-    assert item["occurred_at"] == core.store.one(
-        "SELECT created_at FROM rem_records WHERE rem_id=?", (first,))["created_at"]
-    assert item["questions"] == {"state": "UNVERIFIED", "count": 1}
-    assert item["source_available"]
-    assert "合成私人" not in json.dumps(item, ensure_ascii=False)
-    assert "未验证的问题" not in json.dumps(item, ensure_ascii=False)
-    assert core.store.db.total_changes == before
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        view = CognitionRead(core)
+        page = view.page("rem", limit=1)
+        assert page["items"][0]["id"] == second and page["truncated"]
+        older = view.page("rem", limit=1, before=page["next_cursor"])
+        assert older["items"][0]["id"] == first and not older["truncated"]
+        item = view.page("rem", record_id=first)["items"][0]
+        original = next(row for row in rem.records(core) if row["rem_id"] == first)
+        assert item["usage"] == original["usage"]
+        assert item["usage"]["state"] == "UNKNOWN" and item["usage"]["billed_micro_usd"] == 700
+        assert item["kind"] == "FICTION" and item["audience"] == "owner_only"
+        assert item["occurred_at"] == core.store.one(
+            'SELECT created_at FROM rem_records WHERE rem_id=%s', (first,))["created_at"]
+        assert item["questions"] == {"state": "UNVERIFIED", "count": 1}
+        assert item["source_available"]
+        assert "合成私人" not in json.dumps(item, ensure_ascii=False)
+        assert "未验证的问题" not in json.dumps(item, ensure_ascii=False)
+    assert logical_state(core.store) == before
     assert view.page("rem", record_id="absent")["record_status"] == "NOT_RECORDED"
     assert core.model.calls == []
 
@@ -73,10 +76,10 @@ def test_rem_unavailable_sources_hide_refs_but_preserve_accounting(core, change)
         core.clock.advance(86401)
     elif change == "source_expiry":
         core.settings.raw_event_retention_days = 1
-        core.store.execute("UPDATE rem_records SET expires_at=?", (after(core.clock(), 300000),))
+        core.store.execute('UPDATE rem_records SET expires_at=%s', (after(core.clock(), 300000),))
         core.clock.advance(86401)
     elif change == "erasure":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     else:
         with core.store.transaction():
@@ -97,7 +100,9 @@ def test_rem_privacy_race_rejects_entire_page(core, monkeypatch):
 
     def changed(*args):
         original(*args)
-        advance_epoch(core.store)
+        with (closing(Store(core.database, core.settings.state_directory)) as writer,
+              writer.transaction(control_write=True)):
+            advance_epoch(writer)
 
     monkeypatch.setattr(core.memory_context, "revalidate", changed)
     with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
@@ -106,8 +111,10 @@ def test_rem_privacy_race_rejects_entire_page(core, monkeypatch):
 
 def test_rem_source_reference_cannot_disagree_with_saved_proof(core):
     rid, _ = retained_record(core)
-    core.store.execute("UPDATE rem_records SET source_event_ids_json='[\"different\"]' "
-                       "WHERE rem_id=?", (rid,))
+    core.store.execute((
+        'UPDATE rem_records SET source_event_ids_json=\'["different"]\' WHERE '
+        'rem_id=%s'
+    ), (rid,))
     item = CognitionRead(core).page("rem", record_id=rid)["items"][0]
     assert not item["source_available"] and item["source_event_ids"] == []
     assert item["usage"]["billed_micro_usd"] == 700

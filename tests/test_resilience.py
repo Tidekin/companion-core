@@ -91,26 +91,24 @@ def test_unknown_price_blocks_autonomy_only(core):
     assert core.status()["usage"][0]["unknown_price_requests"] == 1
 
 
-def test_monthly_budget_reservation_is_enforced(core):
-    core.settings.monthly_limit_micro_usd = 1
+def test_monthly_currency_amount_does_not_refuse_a_valid_reply(core):
     ingest(core)
     run(core.run_once())
-    assert core.model.calls == []
+    assert len(core.model.calls) == 1
     assert (
         core.store.one("SELECT last_error_code FROM jobs")["last_error_code"]
-        == "MONTHLY_BUDGET_EXHAUSTED"
+        is None
     )
 
 
-def test_extraction_budget_pause_does_not_consume_events(core):
+def test_zero_extraction_currency_amount_does_not_disable_processing(core):
     core.settings.memory_enabled = True
     core.settings.extraction_min_events = 1
     core.settings.extraction_idle_seconds = 0
-    core.settings.memory_daily_micro_usd = 0
     ingest(core)
     run(core.run_once())
-    assert not run(core.extract_once())
-    assert core.store.one("SELECT memory_processed FROM events")["memory_processed"] == 0
+    assert run(core.extract_once())
+    assert core.store.one("SELECT memory_processed FROM events")["memory_processed"] == 1
 
 
 def test_erasure_ledger_loss_blocks_startup(core):
@@ -131,11 +129,11 @@ def test_raw_retention_is_replayed_and_downgrades_memory(core):
 
 
 def test_single_worker_lock_releases(core):
-    with single_worker(core.settings.database):
+    with single_worker(core.settings.state_directory):
         with pytest.raises(CoreError, match="WORKER_ALREADY_RUNNING"):
-            with single_worker(core.settings.database):
+            with single_worker(core.settings.state_directory):
                 pass
-    with single_worker(core.settings.database):
+    with single_worker(core.settings.state_directory):
         pass
 
 
@@ -163,18 +161,30 @@ def test_correction_removes_superseded_fact_from_context(core):
     assert "我喜欢绿茶" not in json.dumps(core.context(job), ensure_ascii=False)
 
 
-def test_migrations_up_down_up(tmp_path):
+def test_native_migrations_require_restore_for_downgrade(empty_database):
     from pathlib import Path
 
+    import psycopg
     from alembic import command
     from alembic.config import Config
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
 
-    path = tmp_path / "migration.db"
-    migrate(str(path), "0033_model_usage_job_index")
+    migrate(empty_database, "pg0001_core")
     cfg = Config()
-    cfg.set_main_option("script_location", str(Path("migrations").resolve()))
-    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
-    command.downgrade(cfg, "0001_m0")
-    command.upgrade(cfg, "0033_model_usage_job_index")
-    command.downgrade(cfg, "base")
-    command.upgrade(cfg, "head")
+    cfg.set_main_option("script_location", str(Path("migrations/postgresql").resolve()))
+    engine = create_engine(
+        "postgresql+psycopg://", poolclass=NullPool, hide_parameters=True,
+        creator=lambda: psycopg.connect(empty_database.get_secret_value()),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="CORE_POSTGRES_DOWNGRADE_REQUIRES_BACKUP_RESTORE"):
+            with engine.begin() as connection:
+                cfg.attributes["connection"] = connection
+                command.downgrade(cfg, "base")
+        migrate(empty_database)
+        with psycopg.connect(empty_database.get_secret_value()) as db:
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
+                "pg0002_relationship_standing",)
+    finally:
+        engine.dispose()

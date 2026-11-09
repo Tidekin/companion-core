@@ -16,6 +16,7 @@ from companion.voice_protocol import (
     canonical_bytes,
 )
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.voice_jobs import TOKEN, create_tts, prepared, result
 from tests.support.voice_node_api import app_for, claim_body, node_wall_clock
 from tests.support.voice_node_worker import node as node  # noqa: F401 -- pytest fixture
@@ -175,30 +176,33 @@ def test_disabled_asr_input_state_preserves_source_authority(core, monkeypatch, 
             assert initial.json()["state"] == "FALLBACK"
             assert not initial.json()["records"][0]["upload_allowed"]
             if change == "cancelled":
-                core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE event_id=?",
+                core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE event_id=%s",
                                    (event_id,))
             elif change == "revision":
                 core.store.execute("UPDATE conversations SET reply_revision=reply_revision+1")
             elif change == "source":
-                event = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,))
+                event = core.store.one((
+                    'SELECT body_json FROM events WHERE event_id=%s'
+                ), (event_id,))
                 body = json.loads(event["body_json"])
                 body["text"] = "source changed after capture"
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                    (encode(body), event_id))
             elif change == "scope":
                 core.settings.voice = core.settings.voice.model_copy(
                     update={"job_ttl_seconds": 91})
             else:
-                event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
+                event = core.store.one('SELECT * FROM events WHERE event_id=%s', (event_id,))
                 value = core.voice._input_authority(event) | {"state": "FENCED"}
-                core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
-                                   ("voice_input:" + event_id, encode(value)))
                 core.store.execute(
-                    "INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch','1')")
-            before = core.store.db.total_changes
+                    "INSERT INTO runtime_meta (key,value) VALUES (%s,%s),('privacy_epoch','1') "
+                    "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+                    ("voice_input:" + event_id, encode(value)),
+                )
+            before = logical_state(core.store)
             denied = await client.get(path)
             assert denied.status_code in {403, 409}, denied.text
-            assert core.store.db.total_changes == before
+            assert logical_state(core.store) == before
             assert not core.store.rows("SELECT * FROM voice_jobs")
             assert not core.store.rows("SELECT * FROM model_usage")
 

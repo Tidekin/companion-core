@@ -2,9 +2,9 @@
 
 import asyncio
 import importlib
-import sqlite3
 from contextlib import closing
 
+import psycopg
 import pytest
 
 from companion import runtime_config, shutdown
@@ -37,12 +37,13 @@ def test_native_worker_survives_real_boundary_lock(
         "companion.__main__" if role == "worker" else "companion." + role.replace("-", "_"))
     entry = "worker" if role == "worker" else role.replace("-", "_")
 
-    with closing(sqlite3.connect(core.settings.database, isolation_level=None)) as writer:
+    with closing(psycopg.connect(core.settings.database.get_secret_value())) as writer:
         def contend(store, settings, clock, **kwargs):
             attempts.append(1)
             if len(attempts) == 1:
-                store.db.execute("PRAGMA busy_timeout=0")
-                writer.execute("BEGIN IMMEDIATE")
+
+                writer.execute(
+                    "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
                 try:
                     return boundary(store, settings, clock, **kwargs)
                 finally:
@@ -54,7 +55,7 @@ def test_native_worker_survives_real_boundary_lock(
         async def unit(instance, *_):
             units.append(1)
             # The complete configuration is published before any business work.
-            assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                   (runtime_config.PREFIX + role,))
             shutdown.request()
             return Selection("lane", UnitResult(True), True) if role == "life-worker" else True
@@ -64,14 +65,14 @@ def test_native_worker_survives_real_boundary_lock(
                             method, unit)
         monkeypatch.setattr(runtime_config, "boundary", contend)
         monkeypatch.setattr("httpx.AsyncClient", lambda **_: NoNetworkClient())
-        run(asyncio.wait_for(getattr(module, entry)(core.settings), 5))
+        run(asyncio.wait_for(getattr(module, entry)(core.settings), 12))
 
     assert attempts == ([1] if stop_while_busy else [1, 1])
     assert units == ([] if stop_while_busy else [1])
     assert not core.store.rows("SELECT * FROM model_usage")
 
 
-@pytest.mark.parametrize("failure", [sqlite3.OperationalError("no such table: broken"),
+@pytest.mark.parametrize("failure", [psycopg.errors.UndefinedTable("missing relation"),
                                      RuntimeError("broken configuration"),
                                      asyncio.CancelledError()])
 def test_worker_boundary_propagates_other_failures(core, monkeypatch, failure):
@@ -87,14 +88,13 @@ def test_worker_boundary_propagates_other_failures(core, monkeypatch, failure):
     assert calls == [1]
 
 
-@pytest.mark.parametrize("code", [sqlite3.SQLITE_FULL, sqlite3.SQLITE_IOERR,
-                                 sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_LOCKED])
-def test_claim_scope_never_relabels_other_sqlite_failures(core, code):
+@pytest.mark.parametrize("error", [psycopg.errors.DiskFull, psycopg.errors.IoError,
+                                   psycopg.errors.DataCorrupted, psycopg.errors.UndefinedTable])
+def test_claim_scope_never_relabels_other_database_failures(core, error):
     from companion.worker_schedule import claim_scope
 
-    failure = sqlite3.OperationalError("synthetic database failure")
-    failure.sqlite_errorcode = code
-    with pytest.raises(sqlite3.OperationalError) as caught, claim_scope(core.store):
+    failure = error("synthetic database failure")
+    with pytest.raises(error) as caught, claim_scope(core.store):
         raise failure
     assert caught.value is failure
 
@@ -105,12 +105,13 @@ def test_content_worker_yields_before_expiry_claim_and_stays_alive(core, monkeyp
     core.settings.content_enabled = True
     original, calls = agent_images.expire_downloads, []
     shutdown.reset()
-    with closing(sqlite3.connect(core.settings.database, isolation_level=None)) as writer:
+    with closing(psycopg.connect(core.settings.database.get_secret_value())) as writer:
         def expire(service):
             calls.append(1)
-            service.store.db.execute("PRAGMA busy_timeout=1")
+
             if len(calls) == 1:
-                writer.execute("BEGIN IMMEDIATE")
+                writer.execute(
+                    "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
                 asyncio.get_running_loop().call_soon(writer.rollback)
             else:
                 shutdown.request()
@@ -118,7 +119,7 @@ def test_content_worker_yields_before_expiry_claim_and_stays_alive(core, monkeyp
 
         monkeypatch.setattr(agent_images, "expire_downloads", expire)
         try:
-            run(asyncio.wait_for(content_worker.content_worker(core.settings), 5))
+            run(asyncio.wait_for(content_worker.content_worker(core.settings), 12))
         finally:
             shutdown.reset()
     assert calls == [1, 1]

@@ -72,7 +72,7 @@ def test_other_meanings_of_wrong_do_not_quarantine_image_evidence(core, tmp_path
         async with fixture as context:
             assert await context.worker.run_once()
             await context.entry.send(context.entry.client, context.entry.protocol)
-            source = core.store.one("SELECT * FROM events WHERE event_id=?",
+            source = core.store.one('SELECT * FROM events WHERE event_id=%s',
                                     (context.job["event_id"],))
             reference = next(value for value in memory_references.inputs(core, source)
                              if value["kind"] == "image")
@@ -116,7 +116,7 @@ def test_native_quote_links_target_without_granting_objection(
         async with fixture as context:
             assert await context.worker.run_once()
             await context.entry.send(context.entry.client, context.entry.protocol)
-            source = core.store.one("SELECT * FROM events WHERE event_id=?",
+            source = core.store.one('SELECT * FROM events WHERE event_id=%s',
                                     (context.job["event_id"],))
             reference = next(value for value in memory_references.inputs(core, source)
                              if value["kind"] == "image")
@@ -125,9 +125,11 @@ def test_native_quote_links_target_without_granting_objection(
                     old_reply if valid_quote else "与本地已发记录不符的引用")]),
                 text_segment(text),
             ])
-            job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j "
-                "JOIN events e USING(event_id) WHERE j.event_id=?", (posted["event_id"],))
-            body = json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+            job = core.store.one((
+                'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+                'USING(event_id) WHERE j.event_id=%s'
+            ), (posted["event_id"],))
+            body = json.loads(core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                               (posted["event_id"],))["body_json"])
             quotes = reply_quote.self_quote_indices(core.store, core.settings, job, body)
             assert bool(quotes) == valid_quote

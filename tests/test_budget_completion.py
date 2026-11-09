@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+from unittest.mock import patch
 
 import httpx
+import psycopg
 import pytest
 
 from companion import budget, paid_budget
@@ -35,7 +37,7 @@ def test_complete_returns_only_after_settling_usage(core, tmp_path, live):
                 ModelClient(core.settings, client) if live else core.model,
                 core.store, core.settings, request_id, MESSAGES, "chat", core.clock,
             )
-            usage = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+            usage = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,))
             assert usage["state"] == "SETTLED"
             assert (usage["input_tokens"], usage["output_tokens"]) == (
                 response.input_tokens, response.output_tokens,
@@ -73,8 +75,10 @@ def test_unknown_transport_outcome_records_only_its_failure_class(core, tmp_path
 
     run(exercise())
     assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
-    row = core.store.one("SELECT safe_detail_json FROM audit_log WHERE "
-                         "action='model.usage_diagnostic' AND entity_id=?", (request_id,))
+    row = core.store.one((
+        'SELECT safe_detail_json FROM audit_log WHERE '
+        "action='model.usage_diagnostic' AND entity_id=%s"
+    ), (request_id,))
     assert json.loads(row["safe_detail_json"]) == {
         "code": "TRANSPORT_USAGE_UNKNOWN", "actual_usage_known": False,
         "transport_failure": failure, "cache_usage_present": None,
@@ -122,7 +126,7 @@ def test_failed_completion_retains_reservation_without_caller_cleanup(core, tmp_
 
     run(exercise())
     if failure == "expired":
-        assert core.store.one("SELECT lease_until FROM jobs WHERE job_id=?",
+        assert core.store.one('SELECT lease_until FROM jobs WHERE job_id=%s',
                               (job_id,))["lease_until"] > core.clock()
     assert len(calls) == (0 if failure == "expired" else 1)
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
@@ -145,7 +149,7 @@ def test_business_binding_failure_settles_before_the_calling_seam(core, monkeypa
     monkeypatch.setattr(budget, "reserve", reserve_then_expire)
     generate(core) if scenario == "diary" else run(core.reflections.run_day(DAY))
     assert model.calls == []
-    usage = core.store.one("SELECT * FROM model_usage WHERE scenario=?", (scenario,))
+    usage = core.store.one('SELECT * FROM model_usage WHERE scenario=%s', (scenario,))
     assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
 
 
@@ -159,21 +163,18 @@ def test_journal_history_uses_constant_query_count_and_still_checks_missing_rows
         request_ids.append(request_id)
         budget.settle(core.store, core.settings, request_id, ModelResponse("ok", 80, 3))
         if index in {0, 7}:
-            queries = []
-            core.store.db.set_trace_callback(queries.append)
-            try:
+            # Count every native cursor execution in the measured transaction.
+            with patch.object(psycopg.Cursor, "execute", autospec=True,
+                              side_effect=psycopg.Cursor.execute) as queries:
                 with core.store.transaction():
                     paid_budget.journal(core.store, approval)
-            finally:
-                core.store.db.set_trace_callback(None)
-            counts.append(sum(query.startswith("SELECT") for query in queries))
-    assert counts[1] == counts[0]
-    # A LEFT JOIN must retain an admission even when its usage projection is lost.
-    core.store.execute("PRAGMA foreign_keys=OFF")
-    core.store.execute("DELETE FROM model_usage WHERE request_id=?", (request_ids[0],))
-    core.store.execute("PRAGMA foreign_keys=ON")
+            counts.append(queries.call_count)
+    assert 0 < counts[0] == counts[1]
+    # The deferred FK allows inspection of the missing projection before rollback.
     with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
         with core.store.transaction():
+            core.store.execute("SET CONSTRAINTS fk_model_admissions_request_id DEFERRED")
+            core.store.execute("DELETE FROM model_usage WHERE request_id=%s", (request_ids[0],))
             paid_budget.journal(core.store, approval)
 
 
@@ -181,7 +182,7 @@ def test_journal_history_uses_constant_query_count_and_still_checks_missing_rows
 @pytest.mark.parametrize("state", ["QUEUED", "RUNNING", "RETRY_WAIT"])
 def test_background_memory_yields_to_runnable_chat_before_any_reservation(core, scenario, state):
     ingest(core)
-    core.store.execute("UPDATE jobs SET state=?,next_attempt_at=?", (state, core.clock()))
+    core.store.execute('UPDATE jobs SET state=%s,next_attempt_at=%s', (state, core.clock()))
     with pytest.raises(CoreError, match="BACKGROUND_YIELD_TO_CHAT"):
         budget.reserve(core.store, core.settings, None, scenario, MESSAGES, core.clock())
     assert core.store.rows("SELECT * FROM model_usage") == []
@@ -196,14 +197,14 @@ def test_background_priority_keeps_manual_and_nonrunnable_work_available(core, r
         core.store, core.settings, job_id if reason == "manual" else None,
         "memory_review", MESSAGES, core.clock(),
     )
-    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,)) == {
+    assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s', (request_id,)) == {
         "state": "RESERVED",
     }
 
 
 def test_chat_waiting_for_tools_keeps_background_yielding(core):
     ingest(core)
-    core.store.execute("UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=?",
+    core.store.execute("UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=%s",
                        (after(core.clock(), 60),))
     with pytest.raises(CoreError, match="BACKGROUND_YIELD_TO_CHAT"):
         budget.reserve(core.store, core.settings, None, "memory_review", MESSAGES, core.clock())
@@ -221,4 +222,5 @@ def test_extraction_yield_leaves_the_batch_and_retry_count_untouched(core):
     assert core.model.calls == []
     assert core.store.rows("SELECT * FROM model_usage") == []
     assert not core.store.one("SELECT 1 FROM events WHERE memory_processed=1")
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE 'extract_attempts:%'")
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE %s",
+                              ("extract_attempts:%",))

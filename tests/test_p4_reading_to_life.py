@@ -118,7 +118,7 @@ def read_item(core, adapter, day, url):
 
 @pytest.mark.parametrize("chain", ["heybox", "bili", "cross-platform"])
 def test_seven_simulated_days_read_interest_diary_share_and_erasure(
-    core, tmp_path, monkeypatch, chain
+    empty_database, core, tmp_path, monkeypatch, chain
 ):
     cfg = core.settings
     cfg.observation_enabled = cfg.goals_enabled = cfg.exploration_enabled = True
@@ -208,7 +208,7 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
             assert active.goals.get(goal_id)["state"] == "DONE"
             assert (
                 active.store.one(
-                    "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (fetched,)
+                    'SELECT source_event_id FROM event_dependencies WHERE event_id=%s', (fetched,)
                 )["source_event_id"]
                 == discovered
             )
@@ -237,8 +237,10 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
             count, _ = proactive_counts(active.store, cfg, active.clock())
             assert count == cfg.proactive_daily_limit
             message = active.store.one(
-                "SELECT o.* FROM outbox o JOIN social_candidates c "
-                "ON c.message_id=o.message_id WHERE c.event_id=?", (fetched,),
+                (
+                    'SELECT o.* FROM outbox o JOIN social_candidates c ON '
+                    'c.message_id=o.message_id WHERE c.event_id=%s'
+                ), (fetched,),
             )
             assert message["action_type"] == "qq.private.proactive"
             assert json.loads(message["content_json"])["text"] == core.model.activity
@@ -274,43 +276,55 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
         key, archive = Fernet.generate_key(), tmp_path / "synthetic-life-before-erasure.enc"
         backup(cfg.database, archive, key)
         source, fetched, goal_id, message_id, day = records[-1]
-        with active.store.transaction():
+        with active.store.transaction(control_write=True):
             active.ledger.expire_events(active.store, [source], active.clock())
-        destination = tmp_path / "synthetic-life-restored.db"
-        restore(archive, destination, key, cfg.erasure_ledger)
-        restored = Core(cfg.model_copy(update={"database": str(destination)}), clock=active.clock)
+        restored_state = tmp_path / "restored-state"
+        restore(archive, empty_database, key, cfg.erasure_ledger,
+                state_directory=restored_state)
+        restored = Core(cfg.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=active.clock)
         try:
             for instance in (active, restored):
                 for event_id in (source, fetched):
-                    event = instance.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
+                    event = instance.store.one((
+                        'SELECT * FROM events WHERE event_id=%s'
+                    ), (event_id,))
                     assert event["redacted"] and event["body_json"] == "{}"
                 with pytest.raises(CoreError, match="GOAL_NOT_FOUND"):
                     instance.goals.get(goal_id)
                 assert instance.store.one(
-                    "SELECT topic,scope_json FROM goals WHERE goal_id=?", (goal_id,)
+                    'SELECT topic,scope_json FROM goals WHERE goal_id=%s', (goal_id,)
                 ) == {"topic": "", "scope_json": "{}"}
                 assert not instance.store.rows("SELECT * FROM traits")
                 assert (
                     instance.store.one(
-                        "SELECT state FROM social_candidates WHERE event_id=?", (fetched,)
+                        'SELECT state FROM social_candidates WHERE event_id=%s', (fetched,)
                     )["state"]
                     == "ERASED"
                 )
                 message = instance.store.one(
-                    "SELECT * FROM outbox WHERE message_id=?", (message_id,)
+                    'SELECT * FROM outbox WHERE message_id=%s', (message_id,)
                 )
                 assert message["state"] == "CANCELLED" and message["content_json"] == "{}"
                 assert instance.diary.get_day(day, cfg.owner_qq_id) is None
                 assert (
                     instance.store.one(
-                        "SELECT status FROM diary_entries WHERE local_date=?", (day.isoformat(),)
+                        'SELECT status FROM diary_entries WHERE local_date=%s', (day.isoformat(),)
                     )["status"]
                     == "REDACTED"
                 )
-                assert not instance.store.rows("PRAGMA foreign_key_check")
-                assert instance.store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
+                assert not instance.store.one(
+                    "SELECT 1 FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+                    "AND NOT convalidated"
+                )
+                assert instance.store.schema_capabilities() and not instance.store.one(
+                    "SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+                    "WHERE c.relnamespace=current_schema()::regnamespace "
+                    "AND (NOT i.indisvalid OR NOT i.indisready)"
+                )
         finally:
-            restored.store.close()
+            restored.close()
     finally:
         if active is not core:
-            active.store.close()
+            active.close()

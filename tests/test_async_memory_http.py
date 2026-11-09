@@ -50,7 +50,7 @@ def test_inference_keeps_http_responsive_and_worker_fenced(core, tmp_path, monke
         async with environment(core, tmp_path, purposes=("chat", "memory")) as (entry, _):
             client = entry.client
             source = await entry.admit(1, "青禾项目使用蓝色配色")
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 mid = core.memory.add(Candidate(subject="project", kind="fact", fact_key="color",
                     content=source["payload"]["text"], evidence_event_id=source["event_id"],
                     evidence_quote=source["payload"]["text"]), core.clock(), confirmed=True)
@@ -78,8 +78,10 @@ def test_inference_keeps_http_responsive_and_worker_fenced(core, tmp_path, monke
                         if path in {"worker_forget", "worker_tool_forget"}:
                             paid = path == "worker_tool_forget"
                             assert result and len(calls) == int(paid)
-                            job = core.store.one("SELECT state,last_error_code FROM jobs "
-                                "WHERE event_id=?", (question["event_id"],))
+                            job = core.store.one((
+                                'SELECT state,last_error_code FROM jobs WHERE'
+                                ' event_id=%s'
+                            ), (question["event_id"],))
                             assert job == {"state": "CANCELLED",
                                            "last_error_code": (
                                                "REPLY_SOURCE_RECALLED" if paid

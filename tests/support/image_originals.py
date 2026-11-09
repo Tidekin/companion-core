@@ -17,6 +17,6 @@ def staged_original(core):
         fingerprint=hashlib.sha256(b"image/png\0" + data).hexdigest(),
         deadline=after(now, 30), created_at=now, updated_at=now,
     )
-    row = core.store.one("SELECT * FROM content_items WHERE item_id=?", (item_id,))
+    row = core.store.one('SELECT * FROM content_items WHERE item_id=%s', (item_id,))
     image_spool.put(core.store, row, data, "image/png", after(now, image_spool.RETENTION_SECONDS))
     return row, data

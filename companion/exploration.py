@@ -27,16 +27,21 @@ from companion.transport import digest
 from companion.wake import IDLE_DISCOVERY
 
 METERED_READS_SQL = (
-    "SELECT x.*,x.rowid AS queue_order,a.observed_requests,a.observed_bytes,"
-    "MAX(COALESCE(x.used_requests,x.reserved_requests),COALESCE(a.observed_requests,0)) "
-    "AS accounted_requests,"
-    "MAX(COALESCE(x.used_bytes,x.reserved_bytes),COALESCE(a.observed_bytes,0)) "
-    "AS accounted_bytes FROM exploration_requests x "
-    "LEFT JOIN reading_attempts a USING(request_id)"
+
+        'SELECT x.*,x.record_sequence AS queue_order,'
+        'a.observed_requests,a.observed_bytes,'
+        'GREATEST(COALESCE(x.used_requests,x.reserved_requests),'
+        'COALESCE(a.observed_requests,0)) AS accounted_requests,'
+        'GREATEST(COALESCE(x.used_bytes,x.reserved_bytes),'
+        'COALESCE(a.observed_bytes,0)) AS accounted_bytes FROM '
+        'exploration_requests x LEFT JOIN reading_attempts a '
+        'USING(request_id)'
+
 )
 METERED_USAGE_SQL = (
     "SELECT started_at,operation,accounted_requests,accounted_bytes FROM ("
-    + METERED_READS_SQL + ") UNION ALL SELECT source_budget_at,'read',"
+    + METERED_READS_SQL
+    + ") UNION ALL SELECT source_budget_at,'read',"
     "COALESCE(source_used_requests,source_reserved_requests),"
     "COALESCE(source_used_bytes,source_reserved_bytes) FROM voice_jobs "
     "WHERE operation='sing' AND source_reserved_requests>0"
@@ -46,8 +51,9 @@ METERED_USAGE_SQL = (
 def read_periods(settings, now):
     local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
     day = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    return tuple(at.astimezone(UTC).isoformat(timespec="microseconds")
-                 for at in (day, day.replace(day=1)))
+    return tuple(
+        at.astimezone(UTC).isoformat(timespec="microseconds") for at in (day, day.replace(day=1))
+    )
 
 
 class ReadItem(StrictModel):
@@ -73,19 +79,23 @@ class ReadResult(StrictModel):
 
 
 def erase_exploration(store, event_ids):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='exploration_requests'"):
+    if not store.one(
+        "SELECT 1 FROM pg_catalog.pg_class WHERE "
+        "relnamespace=current_schema()::regnamespace AND relname='exploration_requests' AND "
+        "relkind IN ('r','p')"
+    ):
         return
     for event_id in event_ids:
         store.execute(
-            "UPDATE exploration_requests SET url='',goal_step_json='{}',lease_token=NULL,"
-            "state='CANCELLED',redacted=1,result_sha256=NULL WHERE request_id IN "
-            "(SELECT request_id FROM exploration_evidence WHERE event_id=?)",
+            "UPDATE exploration_requests SET url = '', goal_step_json = '{}', lease_token = NULL, "
+            "state = 'CANCELLED', redacted = 1, result_sha256 = NULL WHERE request_id IN (SELECT "
+            "request_id FROM exploration_evidence WHERE event_id = %s)",
             (event_id,),
         )
-        store.execute("DELETE FROM exploration_evidence WHERE event_id=?", (event_id,))
+        store.execute("DELETE FROM exploration_evidence WHERE event_id = %s", (event_id,))
         store.execute(
-            "UPDATE social_candidates SET comparison_text='',canonical_url='',content_sha256='',"
-            "state='ERASED',reason_code='PRIVACY_CHANGED' WHERE event_id=?",
+            "UPDATE social_candidates SET comparison_text = '', canonical_url = '', content_sha256 "
+            "= '', state = 'ERASED', reason_code = 'PRIVACY_CHANGED' WHERE event_id = %s",
             (event_id,),
         )
 
@@ -108,9 +118,13 @@ class ExplorationService:
             validate_target(self.store, self.settings, self.clock, row)
         if owner_authority.required(self.store, self.settings):
             ref = json.loads(row["authority_json"])
-            owner_authority.current(self.store, self.settings, self.clock,
+            owner_authority.current(
+                self.store,
+                self.settings,
+                self.clock,
                 purpose="content" if row["operation"] == "read" else "exploration",
-                authority=ref)
+                authority=ref,
+            )
             step = json.loads(row["goal_step_json"])
             if step:
                 self.goals.validate_authority(self.goals.get(step["goal_id"]))
@@ -119,41 +133,65 @@ class ExplorationService:
         if not live_text.active(self.store, self.settings):
             return
         approval, _, _ = live_text.guard(
-            self.store, self.settings, self.clock, current_request=current_request,
+            self.store,
+            self.settings,
+            self.clock,
+            current_request=current_request,
         )
         if approval.companion_scope == "owner_private_v1":
             return  # Native goal/source/adapter and resource leases below still apply.
         if (
             getattr(approval, "link_scope", "none") != "owner_links_v1"
-            or row["operation"] != "read" or row["goal_step_json"] != "{}"
+            or row["operation"] != "read"
+            or row["goal_step_json"] != "{}"
         ):
             raise CoreError("LIVE_LINK_SCOPE_REQUIRED", 403)
         items = self.store.rows(
-            "SELECT * FROM content_items WHERE kind='link' AND read_request_id=? AND redacted=0",
+            "SELECT content_items.item_id AS item_id, content_items.owner_event_id AS "
+            "owner_event_id, content_items.kind AS kind, content_items.slot AS slot, "
+            "content_items.source_event_id AS source_event_id, content_items.target_url AS "
+            "target_url, content_items.read_request_id AS read_request_id, content_items.state AS "
+            "state, content_items.media_sha256 AS media_sha256, content_items.fingerprint AS "
+            "fingerprint, content_items.captured_privacy_epoch AS captured_privacy_epoch, "
+            "content_items.reserved_bytes AS reserved_bytes, content_items.usage_request_id AS "
+            "usage_request_id, content_items.output_event_id AS output_event_id, "
+            "content_items.lease_token AS lease_token, content_items.lease_until AS lease_until, "
+            "content_items.deadline AS deadline, content_items.error_code AS error_code, "
+            "content_items.redacted AS redacted, content_items.created_at AS created_at, "
+            "content_items.started_at AS started_at, content_items.updated_at AS updated_at, "
+            "content_items.attachment_json AS attachment_json FROM content_items AS content_items "
+            "WHERE content_items.kind = 'link' AND content_items.read_request_id = %s AND "
+            "content_items.redacted = 0",
             (row["request_id"],),
         )
         if len(items) != 1:
             raise CoreError("LIVE_LINK_SOURCE_REQUIRED", 403)
         item = items[0]
         _, body, job = qq_source.source(
-            self.store, self.settings, approval, item["owner_event_id"],
+            self.store,
+            self.settings,
+            approval,
+            item["owner_event_id"],
         )
         urls = {
             field["value"]
             for segment in (body.get("rich") or {}).get("segments", [])
             if segment.get("type") == "json"
-            for field in segment.get("fields", []) if field.get("kind") == "url"
+            for field in segment.get("fields", [])
+            if field.get("kind") == "url"
         }
         sources = self.store.rows(
-            "SELECT event_id FROM exploration_evidence WHERE request_id=?",
+            "SELECT event_id FROM exploration_evidence WHERE request_id = %s",
             (row["request_id"],),
         )
         if (
-            job["state"] != "QUEUED" or item["state"] != "WAITING"
+            job["state"] != "QUEUED"
+            or item["state"] != "WAITING"
             or item["deadline"] <= self.clock()
             or item["captured_privacy_epoch"] != epoch(self.store)
             or row["captured_privacy_epoch"] != epoch(self.store)
-            or item["target_url"] != row["url"] or row["url"] not in urls
+            or item["target_url"] != row["url"]
+            or row["url"] not in urls
             or sources != [{"event_id": item["owner_event_id"]}]
         ):
             raise CoreError("LIVE_LINK_SOURCE_CHANGED", 403)
@@ -164,11 +202,12 @@ class ExplorationService:
     def adapter(self, adapter_id):
         policy = self.observations.policy(adapter_id)
         content_enabled = self.settings.content_enabled
-        if (not self.settings.exploration_enabled and not content_enabled) or (
-            not supports(policy.source, "get")
-        ) or (
-            policy.source == "web" and (
-                not self.settings.web_reading_enabled or not self.settings.web_reading_hosts
+        if (
+            (not self.settings.exploration_enabled and not content_enabled)
+            or (not supports(policy.source, "get"))
+            or (
+                policy.source == "web"
+                and (not self.settings.web_reading_enabled or not self.settings.web_reading_hosts)
             )
         ):
             raise CoreError("EXPLORATION_DISABLED", 403)
@@ -183,14 +222,15 @@ class ExplorationService:
         if request["operation"] != "read":
             return True
         return not self.store.one(
-            "SELECT 1 FROM exploration_evidence x JOIN events e USING(event_id) "
-            "WHERE x.request_id=? AND e.source='qq.onebot' AND e.actor_id='owner' "
-            "AND e.redacted=0",
+            "SELECT 1 FROM exploration_evidence AS x JOIN events AS e USING (event_id) WHERE "
+            "x.request_id = %s AND e.source = 'qq.onebot' AND e.actor_id = 'owner' AND e.redacted "
+            "= 0",
             (request["request_id"],),
         )
 
-    def create(self, adapter_id, operation, key, url="", step=None, source_event_ids=None,
-               query=None):
+    def create(
+        self, adapter_id, operation, key, url="", step=None, source_event_ids=None, query=None
+    ):
         """`query` is a Core-chosen discover search term; only discover requests carry one."""
         policy = self.adapter(adapter_id)
         if policy.source == "qzone" and (
@@ -200,7 +240,9 @@ class ExplorationService:
         if query is not None and (operation != "discover" or not 2 <= len(query) <= 100):
             raise CoreError("EXPLORATION_QUERY_INVALID", 400)
         s, now = self.store, self.clock()
-        previous = s.one("SELECT request_id FROM exploration_requests WHERE request_key=?", (key,))
+        previous = s.one(
+            "SELECT request_id FROM exploration_requests WHERE request_key = %s", (key,)
+        )
         if previous:
             return previous["request_id"]
         sources = self.goals.step_source_ids(step["step_id"]) if step else source_event_ids or []
@@ -217,16 +259,29 @@ class ExplorationService:
             else:
                 # Owner input carries the original admission; never upgrade an old turn.
                 for source_id in sources:
-                    job = s.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'",
-                                (source_id,))
+                    job = s.one(
+                        "SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, "
+                        "jobs.kind AS kind, jobs.state AS state, jobs.idempotency_key AS "
+                        "idempotency_key, jobs.attempts AS attempts, jobs.max_attempts AS "
+                        "max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS "
+                        "lease_until, jobs.next_attempt_at AS next_attempt_at, "
+                        "jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, "
+                        "jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, "
+                        "jobs.context_tracked AS context_tracked, jobs.authority_json AS "
+                        "authority_json FROM jobs AS jobs WHERE jobs.event_id = %s AND jobs.kind = "
+                        "'chat'",
+                        (source_id,),
+                    )
                     if job:
-                        view = owner_authority.check_job(s, self.settings, self.clock, job,
-                                                         purpose=purpose)
+                        view = owner_authority.check_job(
+                            s, self.settings, self.clock, job, purpose=purpose
+                        )
                         if authority and authority != view.authority.as_dict():
                             raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
                         authority = view.authority.as_dict()
-            view = owner_authority.current(s, self.settings, self.clock, purpose=purpose,
-                                            authority=authority or None)
+            view = owner_authority.current(
+                s, self.settings, self.clock, purpose=purpose, authority=authority or None
+            )
             authority = view.authority.as_dict()
         request_id = uid("read")
         s.insert(
@@ -243,8 +298,13 @@ class ExplorationService:
             updated_at=now,
             authority_json=encode(authority),
             query=query,
-            discovery_mode=("recommend" if operation == "discover" and query is None
-                            and policy.bilibili_discovery == "recommend" else "default"),
+            discovery_mode=(
+                "recommend"
+                if operation == "discover"
+                and query is None
+                and policy.bilibili_discovery == "recommend"
+                else "default"
+            ),
         )
         for source_id in set(sources):
             s.insert("exploration_evidence", request_id=request_id, event_id=source_id)
@@ -264,25 +324,26 @@ class ExplorationService:
 
         for decision in decisions:
             if decision["decision"] == "OBSERVE":
-                with nullcontext() if self.store.db.in_transaction else self.store.transaction():
+                with nullcontext() if self.store.in_transaction else self.store.transaction():
                     idle = decision.get("reason_code") == IDLE_DISCOVERY
-                    pool = [name for name in adapters if not idle or
-                            self.settings.observation_adapters[name].source == "bilibili"]
+                    pool = [
+                        name
+                        for name in adapters
+                        if not idle or self.settings.observation_adapters[name].source == "bilibili"
+                    ]
                     if not pool:
                         continue
-                    chosen = topic_selection.choose(self.store, self.settings, self.clock(),
-                                                    pool, own_only=idle)
+                    chosen = topic_selection.choose(
+                        self.store, self.settings, self.clock(), pool, own_only=idle
+                    )
                     if chosen:
-                        self.create(chosen[0], "discover", decision["decision_id"],
-                                    query=chosen[1])
+                        self.create(chosen[0], "discover", decision["decision_id"], query=chosen[1])
                         continue
                     count = self.store.one(
-                        "SELECT COUNT(*) AS n FROM exploration_requests WHERE operation='discover'"
-                        " AND query IS NULL"
+                        "SELECT COUNT(*) AS n FROM exploration_requests WHERE operation = "
+                        "'discover' AND query IS NULL"
                     )["n"]
-                    self.create(
-                        pool[count % len(pool)], "discover", decision["decision_id"]
-                    )
+                    self.create(pool[count % len(pool)], "discover", decision["decision_id"])
 
     def schedule_goal(self):
         self.recover()
@@ -298,9 +359,10 @@ class ExplorationService:
                 (
                     name
                     for name, adapter in self.settings.observation_adapters.items()
-                    if adapter.source == source and (
-                        source != "web" or web_host_allowed(
-                            urlsplit(url).hostname, self.settings.web_reading_hosts)
+                    if adapter.source == source
+                    and (
+                        source != "web"
+                        or web_host_allowed(urlsplit(url).hostname, self.settings.web_reading_hosts)
                     )
                 ),
                 None,
@@ -320,21 +382,40 @@ class ExplorationService:
         s, now = self.store, self.clock()
         with nullcontext() if s.in_write_transaction else s.transaction():
             for row in s.rows(
-                "SELECT * FROM exploration_requests WHERE state IN ('QUEUED','RUNNING')",
+                "SELECT exploration_requests.request_id AS request_id, "
+                "exploration_requests.request_key AS request_key, exploration_requests.adapter_id "
+                "AS adapter_id, exploration_requests.operation AS operation, "
+                "exploration_requests.url AS url, exploration_requests.goal_step_json AS "
+                "goal_step_json, exploration_requests.state AS state, "
+                "exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
+                "AS lease_until, exploration_requests.captured_privacy_epoch AS "
+                "captured_privacy_epoch, exploration_requests.reserved_bytes AS reserved_bytes, "
+                "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 "
+                "AS result_sha256, exploration_requests.last_error_code AS last_error_code, "
+                "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
+                "started_at, exploration_requests.updated_at AS updated_at, "
+                "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests "
+                "AS reserved_requests, exploration_requests.used_requests AS used_requests, "
+                "exploration_requests.source_grant_id AS source_grant_id, "
+                "exploration_requests.source_grant_epoch AS source_grant_epoch, "
+                "exploration_requests.authority_json AS authority_json, exploration_requests.query "
+                "AS query, exploration_requests.discovery_mode AS discovery_mode FROM "
+                "exploration_requests AS exploration_requests WHERE exploration_requests.state IN "
+                "('QUEUED', 'RUNNING')",
             ):
                 step = json.loads(row["goal_step_json"])
                 expired = row["lease_until"] and row["lease_until"] <= now
                 if row["state"] == "QUEUED" and step:
                     current = s.one(
-                        "SELECT lease_until FROM goal_steps WHERE step_id=?", (step["step_id"],)
+                        "SELECT lease_until FROM goal_steps WHERE step_id = %s", (step["step_id"],)
                     )
                     expired = not current or current["lease_until"] <= now
                 if not expired:
                     continue
                 was_started = row["state"] == "RUNNING"
                 changed = s.execute(
-                    "UPDATE exploration_requests SET state=?,last_error_code=?,updated_at=? "
-                    "WHERE request_id=? AND state=?",
+                    "UPDATE exploration_requests SET state = %s, last_error_code = %s, updated_at "
+                    "= %s WHERE request_id = %s AND state = %s",
                     (
                         "UNKNOWN" if was_started else "CANCELLED",
                         "READ_TIMEOUT" if was_started else "READER_UNAVAILABLE",
@@ -342,7 +423,7 @@ class ExplorationService:
                         row["request_id"],
                         row["state"],
                     ),
-                ).rowcount
+                )
                 if changed and step:
                     self.goals.fail(
                         step,
@@ -352,20 +433,23 @@ class ExplorationService:
                     )
             # Also repair parent-only timeouts left by older workers. Keep the original
             # lease identity and reservations so authenticated late usage can still settle.
-            s.execute("UPDATE reading_attempts SET state='UNKNOWN',updated_at=? "
-                      "WHERE state='RUNNING' AND lease_until<=?", (now, now))
+            s.execute(
+                "UPDATE reading_attempts SET state = 'UNKNOWN', updated_at = %s WHERE state "
+                "= 'RUNNING' AND lease_until <= %s",
+                (now, now),
+            )
 
     def budget_available(self, for_read=False):
         cfg, s = self.settings, self.store
         day, month = self.periods()
         row = s.one(
             "SELECT SUM(accounted_requests) AS monthly,"
-            "SUM(CASE WHEN started_at>=? THEN accounted_requests "
+            "SUM(CASE WHEN started_at>=%s THEN accounted_requests "
             "ELSE 0 END) AS daily,"
-            "SUM(CASE WHEN started_at>=? THEN accounted_bytes "
+            "SUM(CASE WHEN started_at>=%s THEN accounted_bytes "
             "ELSE 0 END) bytes,"
-            "SUM(CASE WHEN started_at>=? AND operation='read' THEN 1 ELSE 0 END) reads "
-            f"FROM ({METERED_USAGE_SQL}) WHERE started_at>=?",
+            "SUM(CASE WHEN started_at>=%s AND operation='read' THEN 1 ELSE 0 END) reads "
+            f"FROM ({METERED_USAGE_SQL}) WHERE started_at>=%s",
             (day, day, day, month),
         )
         return (
@@ -376,75 +460,106 @@ class ExplorationService:
             and (not for_read or (row["reads"] or 0) < cfg.exploration_daily_deep_reads)
         )
 
-    def lease(self, adapter_id, source_grant=None, *, reading=False, source_check=None,
-              request_limits=None):
+    def lease(
+        self,
+        adapter_id,
+        source_grant=None,
+        *,
+        reading=False,
+        source_check=None,
+        request_limits=None,
+    ):
         from companion import live_text
 
         policy = self.adapter(adapter_id)
         if policy.source in {"web", "qzone"} and not reading:
             raise CoreError("READER_PROTOCOL_REQUIRED", 409)
         cfg, s = self.settings, self.store
-        with nullcontext() if s.db.in_transaction else s.transaction():
+        with nullcontext() if s.in_transaction else s.transaction():
             now = self.clock()
             day, month = self.periods()
             if source_grant or policy.source_grant_required:
                 self.observations.grants.require(adapter_id, source_grant)
             self.recover()
             s.execute(
-                "UPDATE exploration_requests SET state='CANCELLED',url='',goal_step_json='{}' "
-                "WHERE state='QUEUED' AND captured_privacy_epoch<>?",
+                "UPDATE exploration_requests SET state = 'CANCELLED', url = '', goal_step_json = "
+                "'{}' WHERE state = 'QUEUED' AND captured_privacy_epoch <> %s",
                 (epoch(s),),
             )
             counts = s.one(
-                "SELECT SUM(CASE WHEN started_at>=? THEN accounted_requests "
+                "SELECT SUM(CASE WHEN started_at>=%s THEN accounted_requests "
                 "ELSE 0 END) AS daily,SUM(accounted_requests) AS monthly,"
-                "SUM(CASE WHEN started_at>=? THEN accounted_bytes ELSE 0 END) "
-                "AS bytes,SUM(CASE WHEN started_at>=? AND operation='read' "
+                "SUM(CASE WHEN started_at>=%s THEN accounted_bytes ELSE 0 END) "
+                "AS bytes,SUM(CASE WHEN started_at>=%s AND operation='read' "
                 "THEN 1 ELSE 0 END) AS reads "
-                f"FROM ({METERED_USAGE_SQL}) WHERE started_at>=?",
+                f"FROM ({METERED_USAGE_SQL}) WHERE started_at>=%s",
                 (day, day, day, month),
             )
             rows = s.rows(
-                "SELECT * FROM exploration_requests WHERE adapter_id=? AND state='QUEUED' "
-                "ORDER BY CASE operation WHEN 'read' THEN 0 ELSE 1 END,created_at",
+                "SELECT exploration_requests.request_id AS request_id, "
+                "exploration_requests.request_key AS request_key, exploration_requests.adapter_id "
+                "AS adapter_id, exploration_requests.operation AS operation, "
+                "exploration_requests.url AS url, exploration_requests.goal_step_json AS "
+                "goal_step_json, exploration_requests.state AS state, "
+                "exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
+                "AS lease_until, exploration_requests.captured_privacy_epoch AS "
+                "captured_privacy_epoch, exploration_requests.reserved_bytes AS reserved_bytes, "
+                "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 "
+                "AS result_sha256, exploration_requests.last_error_code AS last_error_code, "
+                "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
+                "started_at, exploration_requests.updated_at AS updated_at, "
+                "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests "
+                "AS reserved_requests, exploration_requests.used_requests AS used_requests, "
+                "exploration_requests.source_grant_id AS source_grant_id, "
+                "exploration_requests.source_grant_epoch AS source_grant_epoch, "
+                "exploration_requests.authority_json AS authority_json, exploration_requests.query "
+                "AS query, exploration_requests.discovery_mode AS discovery_mode FROM "
+                "exploration_requests AS exploration_requests WHERE "
+                "exploration_requests.adapter_id = %s AND exploration_requests.state = 'QUEUED' "
+                "ORDER BY CASE exploration_requests.operation WHEN 'read' THEN 0 ELSE 1 END NULLS "
+                "FIRST, exploration_requests.created_at NULLS FIRST",
                 (adapter_id,),
             )
-            paused = s.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
+            paused = s.one("SELECT value FROM runtime_meta WHERE key = 'life_paused'")
             for row in rows:
                 if row["discovery_mode"] == "recommend":
                     if not reading:
                         raise CoreError("READER_PROTOCOL_REQUIRED", 409)
                     if policy.bilibili_discovery != "recommend":
-                        s.execute("UPDATE exploration_requests SET state='CANCELLED',"
-                                  "last_error_code='DISCOVERY_MODE_CHANGED' WHERE request_id=?",
-                                  (row["request_id"],))
+                        s.execute(
+                            "UPDATE exploration_requests SET state = 'CANCELLED', "
+                            "last_error_code = 'DISCOVERY_MODE_CHANGED' WHERE request_id = %s",
+                            (row["request_id"],),
+                        )
                         continue
                     self.observations.grants.require(adapter_id, source_grant)
-                limits = {"max_bytes": cfg.exploration_max_response_bytes,
-                          "max_requests": policy.reader_max_requests,
-                          "max_items": min(40, cfg.exploration_daily_candidate_limit),
-                          "deadline": after(now, 30)}
+                limits = {
+                    "max_bytes": cfg.exploration_max_response_bytes,
+                    "max_requests": policy.reader_max_requests,
+                    "max_items": min(40, cfg.exploration_daily_candidate_limit),
+                    "deadline": after(now, 30),
+                }
                 if request_limits is not None:
                     try:
                         selected = request_limits(row)
                     except CoreError as error:
                         if error.status == 429:
                             continue
-                        s.execute("UPDATE exploration_requests SET state='CANCELLED',"
-                                  "last_error_code=?,updated_at=? WHERE request_id=?",
-                                  (error.code, now, row["request_id"]))
+                        s.execute(
+                            "UPDATE exploration_requests SET state = 'CANCELLED', "
+                            "last_error_code = %s, updated_at = %s WHERE request_id = %s",
+                            (error.code, now, row["request_id"]),
+                        )
                         continue
                     if selected is False:
                         continue
                     if selected is not None:
                         limits.update(selected)
                 if (
-                    (counts["daily"] or 0) + limits["max_requests"]
-                    > cfg.exploration_daily_requests
+                    (counts["daily"] or 0) + limits["max_requests"] > cfg.exploration_daily_requests
                     or (counts["monthly"] or 0) + limits["max_requests"]
                     > cfg.exploration_monthly_requests
-                    or (counts["bytes"] or 0) + limits["max_bytes"]
-                    > cfg.exploration_daily_bytes
+                    or (counts["bytes"] or 0) + limits["max_bytes"] > cfg.exploration_daily_bytes
                 ):
                     continue
                 if row["operation"] == "discover" and not cfg.exploration_enabled:
@@ -462,7 +577,8 @@ class ExplorationService:
                         self.goals.validate_lease(step)
                     except CoreError:
                         s.execute(
-                            "UPDATE exploration_requests SET state='CANCELLED' WHERE request_id=?",
+                            "UPDATE exploration_requests SET state = 'CANCELLED' WHERE request_id "
+                            "= %s",
                             (row["request_id"],),
                         )
                         continue
@@ -470,11 +586,10 @@ class ExplorationService:
                 # slot. Do not lease a card read that would lose validation
                 # when the image starts its reserved vision request.
                 if live_text.active(s, cfg) and s.one(
-                    "SELECT 1 FROM content_items link JOIN content_items image "
-                    "ON image.owner_event_id=link.owner_event_id "
-                    "WHERE link.kind='link' AND link.read_request_id=? "
-                    "AND image.kind='qq_image' AND image.redacted=0 "
-                    "AND image.state IN ('WAITING','QUEUED','FETCHING','RUNNING') LIMIT 1",
+                    "SELECT 1 FROM content_items AS link JOIN content_items AS image ON "
+                    "image.owner_event_id = link.owner_event_id WHERE link.kind = 'link' AND "
+                    "link.read_request_id = %s AND image.kind = 'qq_image' AND image.redacted = 0 "
+                    "AND image.state IN ('WAITING', 'QUEUED', 'FETCHING', 'RUNNING') LIMIT 1",
                     (row["request_id"],),
                 ):
                     continue
@@ -483,8 +598,8 @@ class ExplorationService:
                         source_check(row)
                     except CoreError as error:
                         s.execute(
-                            "UPDATE exploration_requests SET state='CANCELLED',last_error_code=?,"
-                            "updated_at=? WHERE request_id=?",
+                            "UPDATE exploration_requests SET state = 'CANCELLED', last_error_code "
+                            "= %s, updated_at = %s WHERE request_id = %s",
                             (error.code, now, row["request_id"]),
                         )
                         continue
@@ -492,14 +607,14 @@ class ExplorationService:
                 token, until = uid("reader_lease"), limits["deadline"]
                 if step:
                     goal_until = s.one(
-                        "SELECT lease_until FROM goal_steps WHERE step_id=?", (step["step_id"],)
+                        "SELECT lease_until FROM goal_steps WHERE step_id = %s", (step["step_id"],)
                     )["lease_until"]
                     until = min(until, goal_until)
                 s.execute(
-                    "UPDATE exploration_requests SET state='RUNNING',lease_token=?,lease_until=?,"
-                    "reserved_bytes=?,reserved_requests=?,started_at=?,updated_at=?,"
-                    "source_grant_id=?,source_grant_epoch=? "
-                    "WHERE request_id=?",
+                    "UPDATE exploration_requests SET state = 'RUNNING', lease_token = %s, "
+                    "lease_until = %s, reserved_bytes = %s, reserved_requests = %s, started_at = "
+                    "%s, updated_at = %s, source_grant_id = %s, source_grant_epoch = %s WHERE "
+                    "request_id = %s",
                     (
                         token,
                         until,
@@ -530,19 +645,41 @@ class ExplorationService:
                 return item
         return None
 
-    def validate_read(self, adapter_id, request_id, validation, *, reading=False,
-                      current_request=None):
+    def validate_read(
+        self, adapter_id, request_id, validation, *, reading=False, current_request=None
+    ):
         self.adapter(adapter_id)
         s = self.store
-        with nullcontext() if s.db.in_transaction else s.transaction():
+        with nullcontext() if s.in_transaction else s.transaction():
             self._protocol(request_id, reading)
             row = s.one(
-                "SELECT * FROM exploration_requests WHERE request_id=? AND adapter_id=?",
+                "SELECT exploration_requests.request_id AS request_id, "
+                "exploration_requests.request_key AS request_key, exploration_requests.adapter_id "
+                "AS adapter_id, exploration_requests.operation AS operation, "
+                "exploration_requests.url AS url, exploration_requests.goal_step_json AS "
+                "goal_step_json, exploration_requests.state AS state, "
+                "exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
+                "AS lease_until, exploration_requests.captured_privacy_epoch AS "
+                "captured_privacy_epoch, exploration_requests.reserved_bytes AS reserved_bytes, "
+                "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 "
+                "AS result_sha256, exploration_requests.last_error_code AS last_error_code, "
+                "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
+                "started_at, exploration_requests.updated_at AS updated_at, "
+                "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests "
+                "AS reserved_requests, exploration_requests.used_requests AS used_requests, "
+                "exploration_requests.source_grant_id AS source_grant_id, "
+                "exploration_requests.source_grant_epoch AS source_grant_epoch, "
+                "exploration_requests.authority_json AS authority_json, exploration_requests.query "
+                "AS query, exploration_requests.discovery_mode AS discovery_mode FROM "
+                "exploration_requests AS exploration_requests WHERE "
+                "exploration_requests.request_id = %s AND exploration_requests.adapter_id = %s",
                 (request_id, adapter_id),
             )
             if (
-                not row or row["lease_token"] != validation.lease_token
-                or row["state"] != "RUNNING" or row["lease_until"] <= self.clock()
+                not row
+                or row["lease_token"] != validation.lease_token
+                or row["state"] != "RUNNING"
+                or row["lease_until"] <= self.clock()
             ):
                 raise CoreError("STALE_READER_LEASE", 409)
             if row["captured_privacy_epoch"] != epoch(s):
@@ -564,7 +701,8 @@ class ExplorationService:
 
     def _protocol(self, request_id, reading):
         if not reading and self.store.one(
-            "SELECT 1 FROM reading_attempts WHERE request_id=?", (request_id,),
+            "SELECT 1 FROM reading_attempts WHERE request_id = %s",
+            (request_id,),
         ):
             raise CoreError("READER_PROTOCOL_MISMATCH", 409)
 
@@ -582,11 +720,30 @@ class ExplorationService:
                     item.pop(field)
         fingerprint = digest(receipt)
         result_ids, failed_step = [], None
-        with nullcontext() if s.db.in_transaction else s.transaction():
+        with nullcontext() if s.in_transaction else s.transaction():
             now = self.clock()
             self._protocol(request_id, reading)
             row = s.one(
-                "SELECT * FROM exploration_requests WHERE request_id=? AND adapter_id=?",
+                "SELECT exploration_requests.request_id AS request_id, "
+                "exploration_requests.request_key AS request_key, exploration_requests.adapter_id "
+                "AS adapter_id, exploration_requests.operation AS operation, "
+                "exploration_requests.url AS url, exploration_requests.goal_step_json AS "
+                "goal_step_json, exploration_requests.state AS state, "
+                "exploration_requests.lease_token AS lease_token, exploration_requests.lease_until "
+                "AS lease_until, exploration_requests.captured_privacy_epoch AS "
+                "captured_privacy_epoch, exploration_requests.reserved_bytes AS reserved_bytes, "
+                "exploration_requests.used_bytes AS used_bytes, exploration_requests.result_sha256 "
+                "AS result_sha256, exploration_requests.last_error_code AS last_error_code, "
+                "exploration_requests.created_at AS created_at, exploration_requests.started_at AS "
+                "started_at, exploration_requests.updated_at AS updated_at, "
+                "exploration_requests.redacted AS redacted, exploration_requests.reserved_requests "
+                "AS reserved_requests, exploration_requests.used_requests AS used_requests, "
+                "exploration_requests.source_grant_id AS source_grant_id, "
+                "exploration_requests.source_grant_epoch AS source_grant_epoch, "
+                "exploration_requests.authority_json AS authority_json, exploration_requests.query "
+                "AS query, exploration_requests.discovery_mode AS discovery_mode FROM "
+                "exploration_requests AS exploration_requests WHERE "
+                "exploration_requests.request_id = %s AND exploration_requests.adapter_id = %s",
                 (request_id, adapter_id),
             )
             if not row or row["lease_token"] != result.lease_token:
@@ -606,7 +763,7 @@ class ExplorationService:
             if captured_grant or policy.source_grant_required:
                 self.observations.grants.require(adapter_id, captured_grant)
             step = json.loads(row["goal_step_json"])
-            paused = s.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
+            paused = s.one("SELECT value FROM runtime_meta WHERE key = 'life_paused'")
             if paused and paused["value"] == "1" and self.autonomous(row, step):
                 raise CoreError("AUTONOMY_PAUSED", 409)
             if step:
@@ -624,7 +781,7 @@ class ExplorationService:
                 sources = [
                     source["event_id"]
                     for source in s.rows(
-                        "SELECT event_id FROM exploration_evidence WHERE request_id=?",
+                        "SELECT event_id FROM exploration_evidence WHERE request_id = %s",
                         (request_id,),
                     )
                 ]
@@ -634,21 +791,25 @@ class ExplorationService:
                     raise CoreError("READ_REQUIRES_ONE_RESULT", 400)
                 day, _ = self.periods()
                 count = s.one(
-                    "SELECT COUNT(*) AS n FROM observations o JOIN events e USING(event_id) "
-                    "WHERE e.source IN (SELECT value FROM json_each(?)) "
-                    "AND result_status='DISCOVERED' AND o.created_at>=?",
+                    "SELECT COUNT(*) AS n FROM observations AS o JOIN events AS e USING (event_id) "
+                    'WHERE e.source IN (SELECT value COLLATE "C" FROM '
+                    "JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) AND "
+                    "result_status = 'DISCOVERED' AND o.created_at >= %s",
                     (encode(observation_sources("discover")), day),
                 )["n"]
                 propose_goals = self.settings.goals_enabled
                 idle_discovery = row["operation"] == "discover" and s.one(
-                    "SELECT 1 FROM wake_decisions WHERE decision_id=? AND reason_code=?",
-                    (row["request_key"], IDLE_DISCOVERY))
+                    "SELECT 1 FROM wake_decisions WHERE decision_id = %s AND reason_code = %s",
+                    (row["request_key"], IDLE_DISCOVERY),
+                )
                 for index, item in enumerate(result.items):
                     source, canonical = content_target(
-                        item.url, web_hosts=self.settings.web_reading_hosts if reading else (),
+                        item.url,
+                        web_hosts=self.settings.web_reading_hosts if reading else (),
                     )
-                    if source != policy.source or (row["url"] and canonical != row["url"]
-                                                  and not (reading and source == "web")):
+                    if source != policy.source or (
+                        row["url"] and canonical != row["url"] and not (reading and source == "web")
+                    ):
                         raise CoreError("READER_TARGET_MISMATCH", 400)
                     discovered = row["operation"] == "discover"
                     if discovered and count >= self.settings.exploration_daily_candidate_limit:
@@ -680,26 +841,27 @@ class ExplorationService:
                             title=item.title,
                             text=text,
                             url=canonical,
-                            requested_url=json.loads(step["scope_json"])["url"] if step
-                            else row["url"] if reading else "",
+                            requested_url=json.loads(step["scope_json"])["url"]
+                            if step
+                            else row["url"]
+                            if reading
+                            else "",
                             reading=item.reading,
                             article=item.article,
                         ),
                     )
                     event_id = self.observations.append(
-                        adapter_id, observation, reading=reading,
+                        adapter_id,
+                        observation,
+                        reading=reading,
                     )["event_id"]
                     s.insert("exploration_evidence", request_id=request_id, event_id=event_id)
                     result_ids.append(event_id)
-                    if (
-                        not discovered
-                        and item.image_urls
-                        and self.settings.content_enabled
-                    ):
+                    if not discovered and item.image_urls and self.settings.content_enabled:
                         for source_id in sources:
                             if s.one(
-                                "SELECT 1 FROM events WHERE event_id=? AND actor_id='owner' "
-                                "AND source='qq.onebot'",
+                                "SELECT 1 FROM events WHERE event_id = %s AND actor_id = 'owner' "
+                                "AND source = 'qq.onebot'",
                                 (source_id,),
                             ):
                                 from companion.content import register_link_images
@@ -712,12 +874,18 @@ class ExplorationService:
                     if discovered:
                         count += 1
                         existing = s.one(
-                            "SELECT 1 FROM goals WHERE redacted=0 "
-                            "AND json_extract(scope_json,'$.url')=?",
+                            (
+                                (
+                                    'SELECT 1 FROM goals WHERE redacted=0 AND (CASE WHEN '
+                                    'scope_json IS JSON THEN '
+                                    "(scope_json::json#>>'{url}') END)=%s"
+                                )
+                            ),
                             (canonical,),
                         ) or s.one(
                             # Already watched: the ledger keeps one entry per item.
-                            "SELECT 1 FROM watch_ledger WHERE item_ref=?", (canonical,),
+                            "SELECT 1 FROM watch_ledger WHERE item_ref = %s",
+                            (canonical,),
                         )
                         if not existing and propose_goals:
                             try:
@@ -742,10 +910,8 @@ class ExplorationService:
                 state = result.status
                 failed_step = step or None
             s.execute(
-                "UPDATE exploration_requests SET state=?,used_bytes=?,used_requests=?,"
-                "result_sha256=?,"
-                "last_error_code=?,"
-                "updated_at=? WHERE request_id=?",
+                "UPDATE exploration_requests SET state = %s, used_bytes = %s, used_requests = %s, "
+                "result_sha256 = %s, last_error_code = %s, updated_at = %s WHERE request_id = %s",
                 (
                     state,
                     None if state == "UNKNOWN" else result.used_bytes,
@@ -757,8 +923,11 @@ class ExplorationService:
                 ),
             )
         if failed_step and not reading:
-            self.goals.fail(failed_step, result.error_code or "READ_FAILED",
-                            execution_uncertain=state == "UNKNOWN")
+            self.goals.fail(
+                failed_step,
+                result.error_code or "READ_FAILED",
+                execution_uncertain=state == "UNKNOWN",
+            )
         if step and step["kind"] == "self" and not reading:
             for event_id in result_ids:
                 self.social.consider(event_id)

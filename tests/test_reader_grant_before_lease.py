@@ -37,7 +37,7 @@ def test_a_new_request_with_a_valid_grant_waits_for_its_lease(core, queued):
 
 
 def test_no_valid_grant_still_refuses_before_the_lease(core, queued):
-    core.store.execute("UPDATE source_grants SET revoked_at=? ", (core.clock(),))
+    core.store.execute('UPDATE source_grants SET revoked_at=%s ', (core.clock(),))
     with pytest.raises(CoreError, match="SOURCE_GRANT_REVOKED"):
         result(core, queued)
     core.store.execute("DELETE FROM source_grant_revisions")
@@ -47,11 +47,13 @@ def test_no_valid_grant_still_refuses_before_the_lease(core, queued):
 
 
 def test_after_the_lease_only_the_bound_grant_counts(core, queued):
-    core.store.execute("UPDATE exploration_requests SET state='RUNNING' WHERE request_id=?",
+    core.store.execute("UPDATE exploration_requests SET state='RUNNING' WHERE request_id=%s",
                        (queued,))
     with pytest.raises(CoreError, match="SOURCE_GRANT_REQUIRED"):
         result(core, queued)  # Leased without a binding is never accepted.
     grant = core.store.one("SELECT grant_id,epoch FROM source_grant_revisions")
-    core.store.execute("UPDATE exploration_requests SET source_grant_id=?,source_grant_epoch=? "
-                       "WHERE request_id=?", (grant["grant_id"], grant["epoch"], queued))
+    core.store.execute((
+        'UPDATE exploration_requests SET '
+        'source_grant_id=%s,source_grant_epoch=%s WHERE request_id=%s'
+    ), (grant["grant_id"], grant["epoch"], queued))
     assert result(core, queued)["state"] == "RUNNING"

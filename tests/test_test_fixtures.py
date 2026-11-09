@@ -1,13 +1,12 @@
 """Shared setup must preserve the isolation and schema exercised by runtime tests."""
 
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 
 import pytest
+from psycopg import sql
 
+from companion.postgres import Database
 from tests.conftest import ingest
-from tests.support.historical_schema import assert_schema_metadata
 
 
 @pytest.mark.parametrize("attempt", [1, 2])
@@ -15,21 +14,25 @@ def test_core_fixture_keeps_runtime_data_out_of_the_template(core, migrated_data
     # Both invocations start empty even though the prior invocation wrote an event.
     assert core.store.rows("SELECT event_id FROM events") == []
     assert core.store.schema_capabilities()
-    assert core.store.one("PRAGMA foreign_keys")["foreign_keys"] == 1
-    assert core.store.one("PRAGMA synchronous")["synchronous"] == 2
-    assert core.store.one("PRAGMA secure_delete")["secure_delete"] == 1
+    assert core.store.rows(
+        "SELECT conname FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+        "AND contype='f' AND NOT convalidated"
+    ) == []
+    assert core.store.one("SHOW synchronous_commit")["synchronous_commit"] == "on"
+    assert core.store.one("SHOW full_page_writes")["full_page_writes"] == "on"
     ingest(core, attempt, text="合成夹具隔离检查")
     assert len(core.store.rows("SELECT event_id FROM events")) == 1
 
-    with closing(sqlite3.connect(migrated_database)) as template:
-        # Only migration-owned identity/OFF markers and FTS internal rows may exist;
-        # identities, privacy epochs, leases, erasure and budget state stay empty.
-        assert_schema_metadata(template)
-        tables = template.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        for (name,) in tables:
-            if (name not in {"alembic_version", "runtime_meta"}
-                and not name.startswith("memories_fts_")):
-                assert template.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0] == 0
+    with Database(migrated_database) as database, database.session() as template:
+        # Bootstrap identities, epochs, authority and journals belong to each clone.
+        tables = template.rows(
+            "SELECT tablename FROM pg_tables WHERE schemaname=current_schema() "
+            "AND tablename<>'alembic_version' ORDER BY tablename"
+        )
+        for row in tables:
+            assert template.one(sql.SQL("SELECT COUNT(*) AS n FROM {}").format(
+                sql.Identifier(row["tablename"]),
+            ))["n"] == 0
 
 
 def test_reusable_setup_never_imports_a_business_test_suite():

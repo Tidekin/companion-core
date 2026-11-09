@@ -1,4 +1,4 @@
-"""Exercise Core memory with real DeepSeek, synthetic data, and a bounded budget.
+"""Exercise Core memory with real DeepSeek, synthetic data, and bounded calls.
 
 No QQ messages are sent. All test databases are temporary workspace files; only
 the public embedding weights and the JSON verification report are retained.
@@ -51,8 +51,6 @@ async def verify(directory, report):
         max_recent_messages=0,
         extraction_min_events=1,
         extraction_idle_seconds=0,
-        monthly_limit_micro_usd=50000,
-        memory_daily_micro_usd=50000,
     )
     cfg = Settings(**values)
     migrate(cfg.database)
@@ -245,7 +243,6 @@ def main():
         "mode": "real_model_synthetic_conversations",
         "transport": "local Core outbox; no QQ sends",
         "embedding_index": INDEX_VERSION,
-        "budget_limit_micro_usd": 50000,
         "checks": [],
     }
     try:

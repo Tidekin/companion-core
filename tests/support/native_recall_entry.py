@@ -43,12 +43,12 @@ async def native_recall(core, tmp_path, *, respond=None, paid=None, core_options
         for number, text in ((900, fact_text), (901, "另一个公开项目代号是紫云三号。")):
             source = await entry.admit(number, text)
             sources.append(source)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 ids.append(core.memory.add(Candidate(subject="project", kind="fact",
                     fact_key=str(number), content=text, evidence_event_id=source["event_id"],
                     evidence_quote=text), core.clock(), confirmed=True))
         # The native owner_private scope excludes public facts from retrieval.
-        core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=?",
+        core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=%s",
                            (ids[1],))
         if history_bytes:
             # The actual grant starts dialogue history after the separate memory evidence seeds.

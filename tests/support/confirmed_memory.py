@@ -6,7 +6,7 @@ def remember(core, number, content, subject="user", fact_key=None, confirmed=Fal
     core.settings.memory_enabled = True
     ev = event(core, number, content)
     core.ingest(ev, f"key-{number}")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         return core.memory.add(
             Candidate(
                 subject=subject,

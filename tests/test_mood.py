@@ -11,9 +11,11 @@ from companion.contracts import CoreError
 from companion.life_context import decision_context
 from companion.memory import Memory
 from companion.mood import RESET_KEY, MoodService, reset_record, validate_reset_record
+from companion.postgres import Database
 from companion.store import Store, encode
 from companion.transport import enqueue
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.cognition_goal_steps import finish_record, retained_plan
 from tests.support.consolidation import enable_nightly
 from tests.support.diary import generate
@@ -90,10 +92,10 @@ def test_no_inferred_owner_emotion_silence_fiction_or_preferences(core, text):
 def test_feedback_requires_actual_private_interaction_and_live_ancestry(core, damage):
     key = feedback(core)
     if damage == "actor":
-        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=?", (key,))
+        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=%s", (key,))
     elif damage == "quote":
         core.store.execute(
-            "UPDATE events SET body_json=? WHERE event_id=?",
+            'UPDATE events SET body_json=%s WHERE event_id=%s',
             (encode({"text": "这个回答很有帮助", "quote": {"text": "引用"}}), key),
         )
     elif damage == "private":
@@ -108,13 +110,13 @@ def test_feedback_requires_actual_private_interaction_and_live_ancestry(core, da
 def test_snapshot_is_readonly_rebuilds_across_day_and_checks_pinned_sources(core):
     key = feedback(core)
     view = core.mood.snapshot()
-    changes = core.store.db.total_changes
+    changes = logical_state(core.store)
     core.clock.advance(29 * 3600)
     core.mood.revalidate(view)  # a frozen prompt remains valid as time advances
     current = core.mood.snapshot()
     assert current["expression"] != view["expression"]
-    assert core.store.db.total_changes == changes and core.model.calls == []
-    with closing(Store(core.settings.database)) as reopened:
+    assert logical_state(core.store) == changes and core.model.calls == []
+    with closing(Store(core.store.database, core.store.state_directory)) as reopened:
         assert (
             MoodService(Memory(reopened, core.settings, core.ledger), core.clock).snapshot()
             == current
@@ -131,7 +133,7 @@ def test_source_forgotten_during_chat_cannot_deliver_old_mood(core):
     job = core.store.one("SELECT job_id FROM jobs WHERE event_id='evt_test_100'")
     core.model.callback = lambda: erase(core, [key])
     assert run(core.run_once(job_id=job["job_id"]))
-    state = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+    state = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                            (job["job_id"],))
     assert state == {"state": "CANCELLED", "last_error_code": "REPLY_SOURCE_RECALLED"}
     assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id='evt_test_100'")
@@ -155,12 +157,12 @@ def test_delayed_ingestion_uses_actual_event_time_and_cannot_cross_reset(core):
     key = feedback(core)
     original = core.clock()
     core.clock.advance(6 * 3600)
-    core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?", (core.clock(), key))
+    core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s', (core.clock(), key))
     assert pleasure(core) == pytest.approx(.02, abs=1e-6)
     assert core.mood.snapshot()["signals"][0]["at"] == original
     core.mood.control("clear", core.settings.owner_qq_id, request_id="late-feedback")
     core.clock.advance(1)
-    core.store.execute("UPDATE events SET ingested_at=? WHERE event_id=?", (core.clock(), key))
+    core.store.execute('UPDATE events SET ingested_at=%s WHERE event_id=%s', (core.clock(), key))
     assert core.mood.snapshot()["signals"] == []
 
 
@@ -171,18 +173,20 @@ def test_uncertain_new_reply_cannot_retarget_feedback_to_an_older_sent_reply(cor
     event = core.store.one("SELECT * FROM events WHERE event_id='evt_test_10'")
     mid = enqueue(core.store, event["event_id"], event["conversation_id"],
                   "这一次的回答", core.clock())
-    core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=?", (mid,))
+    core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=%s", (mid,))
     core.clock.advance(1)
     ingest(core, 11, "这个回答很有帮助")
     assert [item["event_id"] for item in core.mood.snapshot()["signals"]] == [first]
 
 
 @pytest.mark.parametrize("action", ["forget", "clear"])
-def test_latest_ledger_blocks_old_backup_and_recompute_cannot_undo_clear(core, tmp_path, action):
+def test_latest_ledger_blocks_old_backup_and_recompute_cannot_undo_clear(
+    core, tmp_path, action, empty_database
+):
     key = feedback(core)
     archive, restored, secret = (
         tmp_path / "before.enc",
-        tmp_path / "restored.db",
+        empty_database,
         Fernet.generate_key(),
     )
     backup(core.settings.database, archive, secret)
@@ -190,13 +194,17 @@ def test_latest_ledger_blocks_old_backup_and_recompute_cannot_undo_clear(core, t
         erase(core, [key])
     else:
         core.mood.control("clear", core.settings.owner_qq_id, request_id="clear-once")
-    restore(archive, restored, secret, core.settings.erasure_ledger)
-    with closing(Store(str(restored))) as store:
+    restore(archive, restored, secret, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with (
+        Database(restored) as database,
+        closing(Store(database, tmp_path / "restored-state")) as store,
+    ):
         service = MoodService(Memory(store, core.settings, core.ledger), core.clock)
         assert service.snapshot()["signals"] == []
         assert service.control("recompute", core.settings.owner_qq_id)["mood"]["signals"] == []
         if action == "clear":
-            assert store.one("SELECT value FROM runtime_meta WHERE key=?", (RESET_KEY,))
+            assert store.one("SELECT value FROM runtime_meta WHERE key=%s", (RESET_KEY,))
 
 
 def test_pause_clear_new_sources_and_affect_are_independent(core):
@@ -244,17 +252,17 @@ def test_goal_success_needs_real_step_receipts_and_simulation_never_counts(core)
     goal, steps = retained_plan(core)
     results = [finish_record(core, step, i) for i, step in enumerate(steps, 1)]
     core.store.execute(
-        "UPDATE goals SET state='DONE',result_event_id=? WHERE goal_id=?", (results[-1], goal)
+        "UPDATE goals SET state='DONE',result_event_id=%s WHERE goal_id=%s", (results[-1], goal)
     )
     assert core.mood.snapshot()["signals"][0]["reason"] == "VERIFIED_GOAL_COMPLETION"
     assert core.mood.snapshot()["expression"]["dominance"] > 0
     core.store.execute(
-        "UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=?", (steps[0],)
+        "UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=%s", (steps[0],)
     )
     assert core.mood.snapshot()["signals"] == []
-    core.store.execute("UPDATE goal_steps SET state='DONE' WHERE step_id=?", (steps[0],))
+    core.store.execute("UPDATE goal_steps SET state='DONE' WHERE step_id=%s", (steps[0],))
     core.store.execute(
-        "UPDATE events SET source='observation.simulation' WHERE event_id=?", (results[0],)
+        "UPDATE events SET source='observation.simulation' WHERE event_id=%s", (results[0],)
     )
     assert core.mood.snapshot()["signals"] == []
 
@@ -336,9 +344,9 @@ def test_life_job_revalidates_frozen_mood_during_model_and_readback(core):
     core.model.callback = elapsed
     job = due(core)
     assert job and run(core.run_once(job_id=job))
-    row = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?", (job,))
+    row = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s', (job,))
     assert row == {"state": "SUCCEEDED", "last_error_code": None}
-    result = core.store.one("SELECT state FROM life_activity_results WHERE job_id=?", (job,))
+    result = core.store.one('SELECT state FROM life_activity_results WHERE job_id=%s', (job,))
     assert result["state"] == "SHADOW"
     assert core.life_topics.preview(core.settings.owner_qq_id)["items"]
 

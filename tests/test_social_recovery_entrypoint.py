@@ -58,7 +58,7 @@ def test_http_authority_independent_worker_resumes_same_unadmitted_social_job(co
                 for key in ("plan_id", "model_request_id", "expires_at", "candidate_sha256"):
                     assert after[key] == before[key]
                 assert after["state"] == "READY"
-                assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                       (job["job_id"],))["state"] == "SUCCEEDED"
                 assert core.store.one("SELECT job_id,state FROM model_usage") == {
                     "job_id": job["job_id"], "state": "SETTLED"}

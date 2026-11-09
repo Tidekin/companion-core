@@ -34,7 +34,7 @@ def discover(core, key="wake-1", url=URL, title="独立游戏新消息"):
 
 
 def read_goal(core):
-    goal = core.store.one("SELECT * FROM goals ORDER BY rowid DESC LIMIT 1")
+    goal = core.store.one('SELECT * FROM goals ORDER BY record_sequence DESC LIMIT 1')
     core.goals.accept(goal["goal_id"])
     assert core.exploration.schedule_goal()
     item = core.exploration.lease("bili")

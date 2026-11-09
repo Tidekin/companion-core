@@ -24,6 +24,8 @@ from tests.support.turn_taking import enable, history_messages
 
 @pytest.mark.parametrize("change", ["none", "erase_during", "erase_before_delivery",
                                   "without_history"])
+
+
 def test_followup_uses_ten_turns_and_eligible_episodes_under_native_custody(core, tmp_path, change):
     enable(core)
     core.settings.max_recent_messages = 20
@@ -32,8 +34,7 @@ def test_followup_uses_ten_turns_and_eligible_episodes_under_native_custody(core
     first_at = core.clock()
     marker = "那次望远镜项目里讨论过的光学问题"
     approved_live(core, tmp_path,
-                  max_output_tokens=4096, per_attempt_micro_usd=100000,
-                  per_request_micro_usd=200000)
+                  max_output_tokens=4096, )
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
     key = Ed25519PrivateKey.generate()
     config = BridgeConfig(owner_qq_id=core.settings.owner_qq_id,
@@ -71,21 +72,24 @@ def test_followup_uses_ten_turns_and_eligible_episodes_under_native_custody(core
                 # Signed HTTP inputs plus synthetic already-delivered history are
                 # prior state; the independent worker executes the actual follow-up.
                 with core.store.transaction():
-                    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+                    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                        (accepted["job_id"],))
-                    conversation = core.store.one("SELECT conversation_id FROM events "
-                        "WHERE event_id=?", (incoming["event_id"],))["conversation_id"]
+                    conversation = core.store.one((
+                        'SELECT conversation_id FROM events WHERE event_id=%s'
+                    ), (incoming["event_id"],))["conversation_id"]
                     message_id = enqueue(core.store, incoming["event_id"], conversation,
                                          "这点我明白了。", core.clock())
-                    core.store.execute("UPDATE outbox SET state='SENT',sent_at=? "
-                                       "WHERE message_id=?", (core.clock(), message_id))
+                    core.store.execute((
+                        "UPDATE outbox SET state='SENT',sent_at=%s WHERE "
+                        'message_id=%s'
+                    ), (core.clock(), message_id))
             core.settings.memory_enabled = True
-            source = core.store.one("SELECT * FROM events WHERE event_id=?", (sources[0],))
+            source = core.store.one('SELECT * FROM events WHERE event_id=%s', (sources[0],))
             core.memory.episodes([source], core.clock())
             core.clock.advance(900)
 
             async def erase():
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [sources[0]], core.clock())
 
             observed = await process_worker(core, tmp_path, "followup", sources[-1],

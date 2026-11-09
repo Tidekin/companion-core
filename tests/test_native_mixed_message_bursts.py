@@ -82,7 +82,7 @@ def test_card_image_and_question_keep_all_sources_through_independent_workers(
             core.clock.now = max(core.clock.now, datetime.now(UTC))
             assert handshakes == ["Bearer " + active.config.onebot_token]
             latest = core.store.one(
-                "SELECT * FROM jobs WHERE kind='chat' ORDER BY rowid DESC LIMIT 1")
+                "SELECT * FROM jobs WHERE kind='chat' ORDER BY record_sequence DESC LIMIT 1")
             assert core.claim_job("wait-for-mixed-original", job_id=latest["job_id"]) is None
             pump = pending_media.MediaPump(active.runtime, active.client, protocol=active.onebot,
                 image_transport=httpx.MockTransport(download), image_resolver=resolve)

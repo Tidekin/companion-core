@@ -10,12 +10,10 @@ import asyncio
 import hashlib
 import json
 import math
-import sqlite3
 import statistics
 import sys
 import time
 import tracemalloc
-from contextlib import closing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +29,7 @@ from companion.model import EXTRACT_RULES, MEMORY_HEADING, PRINCIPLES, ModelResp
 from companion.reflection import REFLECTION_RULES  # noqa: E402
 from companion.store import encode, migrate  # noqa: E402
 from companion.transport import enqueue  # noqa: E402
+from tests.postgres_fixture import isolated_database  # noqa: E402
 
 BASE_SHA = "a33d3cb77f348828b17e4bb48c621c53cfcdc017"
 NOW = "2026-10-20T04:00:00.000000+00:00"
@@ -164,8 +163,8 @@ def seed_history(core, case):
     for i in range(6):
         text = ("合成压力上下文；" * 45) if case.get("pressure") else f"合成历史消息 {i}"
         result = ingest_fixture(core, "history_" + str(i), text)
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (result["job_id"],))
-        event = core.store.one("SELECT * FROM events WHERE event_id=?", (result["event_id"],))
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (result["job_id"],))
+        event = core.store.one("SELECT * FROM events WHERE event_id=%s", (result["event_id"],))
         message = enqueue(
             core.store,
             event["event_id"],
@@ -174,7 +173,7 @@ def seed_history(core, case):
             NOW,
         )
         core.store.execute(
-            "UPDATE outbox SET state=? WHERE message_id=?",
+            "UPDATE outbox SET state=%s WHERE message_id=%s",
             ("DELIVERY_UNCERTAIN" if i == 5 else "SENT", message),
         )
 
@@ -261,13 +260,19 @@ def visible_ids(messages, rows):
 
 
 async def one_case(work, variant, case, catalog, template):
+    with isolated_database(template=template) as database:
+        return await _one_case(work, variant, case, catalog, database)
+
+
+async def _one_case(work, variant, case, catalog, database):
     directory = work / variant / case["id"]
     directory.mkdir(parents=True, exist_ok=False)
     cfg = Settings(
         owner_qq_id="10001",
         bot_qq_id="10002",
         bridge_token="synthetic-b4-" * 3,
-        database=str(directory / "core.sqlite3"),
+        database=database,
+        state_directory=str(directory / "state"),
         erasure_ledger=str(directory / "erasures.jsonl"),
         input_rate=1_000_000,
         cached_input_rate=250_000,
@@ -278,9 +283,6 @@ async def one_case(work, variant, case, catalog, template):
         operator_hot_reload=False,  # Fixed configuration; cases bypass native task claiming.
         conversation_policy=ConversationPolicyConfig(mode="OFF", strategy="participation_v1"),
     )
-    with closing(sqlite3.connect(template)) as source:
-        with closing(sqlite3.connect(cfg.database)) as destination:
-            source.backup(destination)
     model = SyntheticModel()
     model.case = {
         **case,
@@ -302,13 +304,13 @@ async def one_case(work, variant, case, catalog, template):
         )
         job = core.store.one(
             "SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
-            "WHERE job_id=?",
+            "WHERE job_id=%s",
             (result["job_id"],),
         )
         hits = rows_for(case, catalog)
         # Only candidate retrieval is synthetic. MemoryContext still validates
         # native positive evidence and pins complete current fact rows before I/O.
-        retrieved = [{**core.store.one("SELECT * FROM memories WHERE memory_id=?",
+        retrieved = [{**core.store.one("SELECT * FROM memories WHERE memory_id=%s",
                                        (row["memory_id"],)),
                       "evidence_ids": list(row["evidence_ids"])} for row in hits]
         core.memory.search = lambda *args, **kwargs: retrieved
@@ -365,7 +367,7 @@ async def one_case(work, variant, case, catalog, template):
             "qq_send_attempts": 0,
         }
     finally:
-        core.store.close()
+        core.close()
 
 
 async def background_records():
@@ -416,8 +418,12 @@ def aggregate(records):
 async def benchmark(work, dataset):
     # Schema preparation is outside the measured context/recall boundary. Each
     # case still owns its database, ledger, identities, reservations and events.
-    template = work / "schema.sqlite3"
-    migrate(str(template))
+    with isolated_database() as template:
+        migrate(template)
+        return await _benchmark(work, dataset, template)
+
+
+async def _benchmark(work, dataset, template):
     catalog = {
         row["memory_id"]: {"subject": "user", "needs_review": False, **row}
         for row in dataset["memories"]
@@ -456,8 +462,8 @@ async def benchmark(work, dataset):
         "background_coverage": "payload simulation; no background worker executed",
         "retrieval_coverage": "fixture candidate IDs; no FTS/BGE quality claim",
         "semantic_answer_quality": "NOT_EVALUATED; review stub uses fixture oracle",
-        "local_timing_boundary": "context/recall including SQLite review reservation; "
-        "excludes migration/seed/chat request and all provider/network I/O",
+        "local_timing_boundary": "context/recall including PostgreSQL review reservation; "
+        "excludes migration/seed/chat request and all external provider I/O",
         "variants": {},
     }
     for variant in ("baseline", "experiment"):

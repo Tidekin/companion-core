@@ -315,7 +315,7 @@ def test_sql_surface_is_only_existing_usage_projection_and_original_pending_is_p
 
 
 @asynccontextmanager
-async def native_case(core, tmp_path, monkeypatch, *, cap=50000):
+async def native_case(core, tmp_path, monkeypatch, *, max_input_tokens=20000):
     import base64
 
     from companion.meme_core import SPEC
@@ -331,7 +331,8 @@ async def native_case(core, tmp_path, monkeypatch, *, cap=50000):
     from tests.support.meme_responsibility import liability_case
     from tests.support.onebot_events import raw_event
 
-    async with liability_case(core, tmp_path, monkeypatch, cap=cap) as c:
+    async with liability_case(core, tmp_path, monkeypatch,
+                              max_input_tokens=max_input_tokens) as c:
         config = replace(
             c.config,
             data_dir=str(tmp_path / "caption-native"),
@@ -401,7 +402,7 @@ def test_real_no_admission_ignores_preallocated_uid_without_persisting_absence(
     core, tmp_path, monkeypatch
 ):
     async def scenario():
-        async with native_case(core, tmp_path, monkeypatch, cap=1) as c:
+        async with native_case(core, tmp_path, monkeypatch, max_input_tokens=1) as c:
             calls = []
             assert await worker(core, calls) and not calls
             assert not core.store.rows("SELECT request_id FROM model_usage")
@@ -465,7 +466,7 @@ def test_legitimate_local_success_survives_raw_core_erasure_cancellation(
                     commit_check=lambda: c.owner.verify(),
                 )
             )["state"] == "READY"
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [c.context["event_id"]], core.clock())
             c.owner.stop()
             database, config = c.owner.spool.directory / "spool.sqlite3", c.owner.config

@@ -16,6 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from companion.contracts import CoreError
+from companion.postgres import BUDGET_LEDGER, TRANSACTION_WRITE_COUNT
 from companion.store import encode, uid
 
 # The chain codec retains at most this many source bytes. Whole custody views
@@ -104,24 +105,13 @@ def sha(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
-def daily_limits(settings):
-    """Configured local spend caps, including groups that share the same allowance."""
+def scenarios():
+    """Local execution scenarios admitted by the existing authority contract."""
     from companion.video_input import SCENARIOS
 
-    return {
-        "memory_extract": settings.memory_daily_micro_usd,
-        "memory_review": settings.memory_daily_micro_usd,
-        "diary": settings.diary_daily_micro_usd,
-        "reflection": settings.reflection_daily_micro_usd,
-        "activity": settings.autonomous_daily_micro_usd,
-        "rem": settings.rem.daily_micro_usd,
-        "style_distill": settings.style_distill.daily_micro_usd,
-        "jargon": settings.jargon.daily_micro_usd,
-        "watch_review": settings.watch_ledger.daily_micro_usd,
-        "social_autonomy": settings.social_autonomy.model_daily_micro_usd,
-        "meme_caption": settings.meme_caption_daily_micro_usd,
-        **dict.fromkeys(("content_vision", *SCENARIOS), settings.content.image_daily_micro_usd),
-    }
+    return {"memory_extract", "memory_review", "diary", "reflection", "activity", "rem",
+            "style_distill", "jargon", "watch_review", "social_autonomy", "meme_caption",
+            "content_vision", *SCENARIOS}
 
 
 def snapshot(settings):
@@ -135,21 +125,10 @@ def snapshot(settings):
     value["estimator"] = "utf8-third-v1"
     if counting := count_contract(settings):
         value["token_measurement"] = counting
-    value["local_monthly_micro_usd"] = settings.monthly_limit_micro_usd
-    caps = daily_limits(settings)
-    frozen = ["memory_extract", "memory_review", "diary", "reflection", "activity"]
     if approval.image_input is not None:
         value["image_estimator"] = "approved-fixed-image-plus-utf8-third-v1"
-        frozen.append("content_vision")
     if approval.meme_input is not None:
         value["image_estimator"] = "approved-fixed-image-plus-utf8-third-v1"
-        frozen.append("meme_caption")
-    if settings.social_autonomy.enabled:
-        frozen.append("social_autonomy")
-    value["scenario_daily_micro_usd"] = {name: caps[name] for name in frozen}
-    # watch_review, style_distill and jargon stay out, like rem: their own daily caps apply at
-    # reservation inside the approved window, and enabling them keeps the policy valid.
-    value["reflection_monthly_micro_usd"] = settings.reflection_monthly_micro_usd
     # Private per-window credential binding, never the raw key or a public account identifier.
     value["credential_tag"] = hmac.new(
         settings.model_key.get_secret_value().encode(),
@@ -292,7 +271,7 @@ LIVE_LIFECYCLE = "model_budget_live_lifecycle"
 
 
 def live_lifecycle(store):
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (LIVE_LIFECYCLE,))
+    row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (LIVE_LIFECYCLE,))
     return json.loads(row["value"]) if row else None
 
 
@@ -341,48 +320,51 @@ def _live_record(row, digest, current, seen):
             "head_sha256": digest}
 
 
-IDENTITY = "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
-SUMMARY = ("SELECT (SELECT count(*) FROM runtime_meta) AS metadata_count,"
-           "(SELECT COALESCE(sum(CAST(length(key)+length(value) AS double precision)),0) "
-           "FROM runtime_meta) AS metadata_size,"
-           "(SELECT count(*) FROM model_admissions) AS admissions_count,"
-           "(SELECT count(*) FROM model_usage) AS usage_count,"
-           "(SELECT COALESCE(sum(CAST(length(state)+billed_micro_usd AS double precision)),0) "
-           "FROM model_usage) AS usage_size")
+SUMMARY = (
+    "SELECT meta.metadata_count, meta.metadata_size, "
+    "meta.journal_id, "
+    "(SELECT count(*) FROM model_admissions) AS admission_count, "
+    "usage.usage_count, usage.usage_size, pg_current_snapshot()::text AS snapshot, "
+    "current_schema() AS schema, pg_postmaster_start_time()::text AS instance, "
+    "CASE WHEN current_setting('transaction_read_only')='on' THEN '0' ELSE "
+    + TRANSACTION_WRITE_COUNT + " END AS writes FROM "
+    "(SELECT count(*) AS metadata_count, "
+    "max(value) FILTER (WHERE key='model_budget_journal_id') AS journal_id, "
+    "COALESCE(sum(length(key)+length(value)),0)::double precision AS metadata_size "
+    "FROM runtime_meta) AS meta CROSS JOIN "
+    "(SELECT count(*) AS usage_count, "
+    "COALESCE(sum(length(state)+billed_micro_usd),0)::double precision AS usage_size "
+    "FROM model_usage) AS usage"
+)
 # Views shared by every connection of this process, for callers such as the API that open
 # one connection per request. Keyed by the journal path.
 _SHARED, _SHARED_LOCK = {}, threading.RLock()
 
 
 def _view_key(store, path, raw):
-    """What a read-only view depends on, as seen by this connection.
-
-    `data_version` changes when another connection commits; `total_changes` when this one
-    writes. The table summary also catches content neither counter sees, such as a page
-    level restore into this connection.
-    """
-    # Inside one write transaction or read snapshot only this connection's own writes,
-    # counted by total_changes, can change the DB; the summary is then fixed. Complete
-    # bytes are still read on every call. Exact equality can reuse their digest too.
-    scope = store.frozen_revision
+    """Bind exact journal bytes to the native snapshot, actual writes and full summary."""
+    scope = getattr(store, "frozen_scope", None)
     memo = getattr(store, "_view_key_memo", None)
     identity = raw if len(raw) <= KEY_MAX_BYTES else hashlib.sha256(raw).hexdigest()
     if scope is not None and memo is not None and memo[0] == (
-        scope, str(path), identity,
+        scope, store.database.cache_identity, str(path), identity,
     ):
         return memo[1]
     digest = hashlib.sha256(raw).hexdigest() if isinstance(identity, bytes) else identity
-    summary = tuple(store.one(SUMMARY).values())
-    key = (str(path), digest, store.change_token(), summary)
+    state = store.one(SUMMARY)
+    summary = tuple(state[name] for name in (
+        "metadata_count", "metadata_size", "admission_count", "usage_count", "usage_size",
+    ))
+    token = tuple(state[name] for name in ("snapshot", "schema", "instance", "writes"))
+    key = (str(path), digest, store.database.cache_identity, token, summary, state['journal_id'])
     if scope is not None:
-        store._view_key_memo = ((scope, str(path), identity), key)
+        store._view_key_memo = ((scope, store.database.cache_identity, str(path), identity), key)
     return key
 
 
 def _shared_key(store, key):
-    identity = store.shared_snapshot_identity()
-    path, digest, _, summary = key
-    return (path, digest, summary, identity) if identity is not None else None
+    """Only immutable read snapshots may share a fully validated custody view."""
+    return key if store.in_read_snapshot else None
 
 
 def forget_views(store=None):
@@ -397,8 +379,7 @@ def _permit(view, approval, allow_settlement):
     """The read-only refusals of `_journal`, applied again to a reused view."""
     authority, lifecycle = view["owner_authority"], view["lifecycle"]
     if not allow_settlement and (
-        view["blocked_request_ids"]
-        or authority and authority["state"] != "ACTIVE"
+        authority and authority["state"] != "ACTIVE"
         or lifecycle and not authority and (
             lifecycle["state"] == "STOPPED"
             or getattr(approval, "window_id", lifecycle["window_id"]) != lifecycle["window_id"])
@@ -417,8 +398,18 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
     refusals are applied again on every reuse. Callers get a private copy, so folding into
     a view never changes the saved one.
     """
-    if (record is not None or resolution_replay is not None
-            or model_control_replay is not None or accounting_replay is not None):
+    mutates = any(value is not None for value in (
+        record, resolution_replay, model_control_replay, accounting_replay,
+    ))
+    if not store.in_transaction:
+        if mutates:
+            raise RuntimeError("MODEL_JOURNAL_REQUIRES_TRANSACTION")
+        return store.read_or_write(lambda: journal(
+            store, approval, allow_settlement=allow_settlement, initialize=initialize))
+    if mutates and not store.in_write_transaction:
+        raise RuntimeError("MODEL_JOURNAL_REQUIRES_WRITE_TRANSACTION")
+    store.ledger_lock(BUDGET_LEDGER, shared=store.in_read_snapshot)
+    if mutates:
         forget_views(store)
         return _journal(store, approval, record, allow_settlement=allow_settlement,
                         initialize=initialize, resolution_replay=resolution_replay,
@@ -426,9 +417,8 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                         accounting_replay=accounting_replay)
     if getattr(store, "in_read_snapshot", False):
         # Concurrent API readers otherwise each rebuild the same cold view.
-        # These scopes are query-only WAL snapshots: they cannot wait for a DB
-        # write while holding this lock. read_or_write releases it before any
-        # authoritative write retry. Keys are still checked after acquiring it.
+        # Acquire the database ledger lock before this process-local codec lock.
+        # read_or_write releases both before an authoritative write retry.
         with _SHARED_LOCK:
             return _read_journal(store, approval, allow_settlement=allow_settlement,
                                  initialize=initialize)
@@ -452,7 +442,7 @@ def _read_journal(store, approval, *, allow_settlement, initialize):
                     entry = _SHARED.get(key[0])
                 saved = (key, *entry[1:]) if (
                     shared is not None and entry is not None and entry[0] == shared) else None
-            identity = store.one(IDENTITY) if saved is not None else None
+            identity = key[-1]
     except BaseException:
         _clear_codec()
         raise
@@ -485,12 +475,11 @@ def _read_journal(store, approval, *, allow_settlement, initialize):
         if len(blob) > CACHE_MAX_BYTES:
             forget_views(store)
             return view
-        # A concurrent commit can land between the fold and publication. Bind the
-        # result only to the database and snapshot identity it actually checked.
-        after = _view_key(store, path, raw)
-        if after != key or _shared_key(store, after) != shared:
+        # READ COMMITTED may observe a concurrent commit while validating the journal.
+        # Publish only under the key that was checked before the fold.
+        if _view_key(store, path, raw) != key:
             return view
-        entry = (key, blob, store.one(IDENTITY), marshal.loads(blob))
+        entry = (key, blob, key[-1], marshal.loads(blob))
         store._journal_view = entry
         if shared is not None:
             with _SHARED_LOCK:
@@ -498,10 +487,49 @@ def _read_journal(store, approval, *, allow_settlement, initialize):
     return view
 
 
+def _journal_projection(store):
+    """Read the original projections together for this locked journal validation."""
+    from companion import (
+        cumulative,
+        delivery_reconciliation,
+        gateway_admission,
+        model_accounting,
+        owner_authority,
+    )
+
+    prefixes = ("model_control:", model_accounting.PROJECTION, model_accounting.PENDING,
+                delivery_reconciliation.PROJECTION, "model_budget_stop:")
+    bounds = tuple(value for prefix in prefixes for value in (prefix, prefix[:-1] + ";"))
+    return store.one(
+        "SELECT (SELECT jsonb_agg(metadata) FROM ("
+        "SELECT key,value FROM runtime_meta WHERE key=ANY(%s) OR "
+        + " OR ".join("(key >= %s AND key < %s)" for _ in prefixes)
+        + ") AS metadata) AS metadata, "
+        "EXISTS(SELECT 1 FROM model_usage WHERE scenario='gateway') AS gateway, "
+        "(SELECT jsonb_agg(client) FROM (" + gateway_admission.CLIENTS_SQL
+        + ") AS client) AS clients, "
+        "(SELECT jsonb_agg(authority ORDER BY authority.revision NULLS FIRST) FROM ("
+        + owner_authority.PROJECTION_SQL + ") AS authority) AS authority, "
+        "(SELECT jsonb_agg(admission) FROM ("
+        'SELECT a.request_id AS request_id, a.logical_request_id AS logical_request_id, '
+        'a.attempt_id AS attempt_id, a.attempt_number AS attempt_number, a.window_id AS '
+        'window_id, a.contract_sha256 AS contract_sha256, a.payload_sha256 AS payload_sha256, '
+        'a.snapshot_json AS snapshot_json, a.reserved_micro_usd AS reserved_micro_usd, '
+        'a.input_bound AS input_bound, a.output_bound AS output_bound, a.lease_token AS '
+        'lease_token, a.lease_until AS lease_until, a.io_started_at AS io_started_at, '
+        'a.journal_path AS journal_path, a.journal_id AS journal_id, a.measurement_json AS '
+        'measurement_json, a.authority_json AS authority_json, m.billed_micro_usd AS '
+        'billed_micro_usd, m.state AS state FROM model_admissions AS a LEFT JOIN model_usage '
+        'AS m ON a.request_id = m.request_id) AS admission) AS admissions',
+        ([cumulative.PROJECTION, LIVE_LIFECYCLE, "model_budget_blocked"], *bounds,
+         owner_authority.CURRENT),
+    )
+
+
 def _journal(store, approval, record=None, *, allow_settlement=False, initialize=True,
              resolution_replay=None, model_control_replay=None, accounting_replay=None,
              raw=None):
-    """Caller holds BEGIN IMMEDIATE; fsync before DB commit makes failure conservative.
+    """Caller holds the native ledger lock; fsync precedes the database commit.
 
     This is not a second queue or message store: only reservation hashes and monetary
     lower bounds survive outside the DB. A mismatch blocks, never silently repairs.
@@ -516,7 +544,7 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
         )
 
         path = Path(approval.journal_path)
-        identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+        identity = store.one("SELECT value FROM runtime_meta WHERE key = 'model_budget_journal_id'")
     except BaseException:
         _clear_codec()
         raise
@@ -524,8 +552,9 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
         if not path.exists():
             # A query-only snapshot cannot record the identity, so it never creates the file.
             if (not initialize or getattr(store, "in_read_snapshot", False) or identity
-                or store.one("SELECT 1 FROM model_admissions LIMIT 1")
-                or store.one("SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,))):
+                or store.one('SELECT 1 FROM model_admissions LIMIT 1')
+                or store.one('SELECT 1 FROM runtime_meta WHERE key = '
+                    '%s', (cumulative.PROJECTION,))):
                 raise ValueError("missing independent journal")
             path.parent.mkdir(parents=True, exist_ok=True)
             journal_id = uid("budget")
@@ -620,44 +649,42 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
                         raise ValueError("duplicate gateway attribution")
                     gateway_bindings[row["request_id"]] = row["gateway"]
                 latest[row["request_id"]] = row
-        if gateway_bindings or record and "gateway" in record or store.one(
-            "SELECT 1 FROM model_usage WHERE scenario='gateway' LIMIT 1"
-        ):
+        projections = _journal_projection(store)
+        if gateway_bindings or record and "gateway" in record or projections["gateway"]:
             from companion.gateway_admission import validate_projection
 
             gateway_bindings = validate_projection(store, gateway_bindings, record)
-        from companion.gateway_admission import validate_clients
+        from companion.gateway_admission import _validate_clients
 
-        gateway_clients = validate_clients(store, gateway_clients, record)
-        model_carry.validate_projection(store, model_controls, replay=model_control_replay)
-        accounting_pending = model_accounting.validate_projection(store, accounting,
+        gateway_clients = _validate_clients(gateway_clients, projections["clients"] or [], record)
+        metadata = {row["key"]: row["value"] for row in projections["metadata"] or []}
+        model_carry.validate_projection(model_controls, metadata, replay=model_control_replay)
+        accounting_pending = model_accounting.validate_projection(store, accounting, metadata,
                                                                    accounting_replay)
-        projection = store.one("SELECT value FROM runtime_meta WHERE key=?",
-                               (cumulative.PROJECTION,))
+        projection = metadata.get(cumulative.PROJECTION)
         expected = cumulative.binding(account, path)
-        saved = json.loads(projection["value"]) if projection else None
+        saved = json.loads(projection) if projection is not None else None
         witness = saved.pop("control_head_sha256", None) if saved else None
         if saved != expected or (expected and witness not in heads):
             raise ValueError("cumulative policy projection behind journal or DB")
-        for stop in store.rows("SELECT key,value FROM runtime_meta "
-                               "WHERE key LIKE 'model_budget_stop:%'"):
-            if (not identity or stop["value"] != identity["value"]
-                or stop["key"].removeprefix("model_budget_stop:") not in heads):
+        for key, value in metadata.items():
+            if not key.startswith("model_budget_stop:"):
+                continue
+            if (not identity or value != identity["value"]
+                or key.removeprefix("model_budget_stop:") not in heads):
                 raise ValueError("durable cumulative stop missing from journal")
-        stored_lifecycle = live_lifecycle(store)
+        stored_lifecycle = (json.loads(metadata[LIVE_LIFECYCLE])
+                            if LIVE_LIFECYCLE in metadata else None)
         if (managed or stored_lifecycle) and stored_lifecycle != lifecycle:
             raise ValueError("live lifecycle behind journal or DB")
-        delivery_reconciliation.validate_projection(store, resolutions, resolution_replay)
-        owner_authority.validate_projection(store, authorities, identity["value"], path)
+        delivery_reconciliation.validate_projection(store, resolutions, metadata, resolution_replay)
+        owner_authority._validate_projection(authorities, identity["value"], path,
+                                             projections["authority"])
         authority_record = record and record.get("kind") == owner_authority.RECORD_KIND
         lifecycle_record = record and record.get("kind") in {
             "window_stop", "window_open", "window_handoff"
         }
-        if not heads or (blocked and (
-            not allow_settlement or (
-                record and record.get("kind") in {"window_open", "window_handoff"}
-            )
-        )):
+        if not heads:
             raise ValueError("journal reconciliation")
         if authorities and authorities[-1]["state"] != "ACTIVE" and not (
             allow_settlement or authority_record
@@ -668,10 +695,7 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
             or getattr(approval, "window_id", lifecycle["window_id"]) != lifecycle["window_id"]
         ):
             raise ValueError("live window stopped or replaced")
-        admissions = {row["request_id"]: row for row in store.rows(
-            "SELECT a.*,m.billed_micro_usd,m.state "
-            "FROM model_admissions a LEFT JOIN model_usage m USING(request_id)"
-        )}
+        admissions = {row["request_id"]: row for row in projections["admissions"] or []}
         for request_id, admission in admissions.items():
             receipt = json.loads(admission.get("measurement_json", "{}"))
             if not isinstance(receipt, dict):
@@ -755,7 +779,7 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
                 blocked.pop(record["request_id"])
             previous = row["sha256"]
             if record["kind"] in model_carry.KINDS:
-                store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+                store.execute('INSERT INTO runtime_meta VALUES (%s, %s)',
                               ("model_control:" + previous, previous))
             if record["kind"] in {"quota_pause", delivery_reconciliation.KIND}:
                 store.retain_budget_stop(identity["value"], previous)
@@ -764,11 +788,13 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
             if record["kind"] == delivery_reconciliation.KIND:
                 resolutions[row["delivery"]["message_id"]] = row
             if lifecycle_record:
-                store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON '
+                    'CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = DEFAULT',
                               (LIVE_LIFECYCLE, encode(next_lifecycle)))
                 lifecycle = next_lifecycle
             if record["kind"] in cumulative.CONTROL_RECORDS and account["policy"]:
-                store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON '
+                    'CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = DEFAULT',
                               (cumulative.PROJECTION,
                                encode(cumulative.binding(account, path, previous))))
         return {"head_sha256": previous, "lifecycle": lifecycle, "cumulative": account,

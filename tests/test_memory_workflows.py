@@ -3,7 +3,6 @@
 Only DeepSeek responses are substituted here. scripts/verify_memory_live.py repeats
 the workflows using the real provider and records replies, states, and usage.
 """
-
 import json
 
 import pytest
@@ -15,6 +14,7 @@ from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import MEMORY_HEADING
 from tests.conftest import run
+from tests.postgres_fixture import isolated_database
 from tests.support.memory_workflows import message, reply
 
 
@@ -42,6 +42,8 @@ def relation(payload, *, same=False, conflict=False):
         ("我的猫叫什么？", "布丁"),
     ],
 )
+
+
 def test_paraphrased_question_in_new_session_with_old_fact_and_distractors(core, question, answer):
     facts = [
         "用户最喜欢的饮料是茉莉绿茶。",
@@ -244,14 +246,14 @@ def test_semantic_index_is_erased_and_old_backup_cannot_restore_it(core, tmp_pat
     backup(core.settings.database, tmp_path / "before.enc", key)
     core.memory.decide(found[0]["memory_id"], "forget", core.clock())
     assert core.store.one("SELECT COUNT(*) AS n FROM memory_vectors")["n"] == 0
-    destination = tmp_path / "restored.db"
-    restore(tmp_path / "before.enc", destination, key, core.settings.erasure_ledger)
-    reopened = Core(core.settings.model_copy(update={"database": str(destination)}), core.model)
-    try:
-        assert reopened.memory.search("我平时最爱喝什么？") == []
-        assert reopened.store.one("SELECT COUNT(*) AS n FROM memory_vectors")["n"] == 0
-    finally:
-        reopened.store.close()
+    with isolated_database() as destination:
+        state = tmp_path / "restored-state"
+        restore(tmp_path / "before.enc", destination, key, core.settings.erasure_ledger,
+                state_directory=state)
+        with Core(core.settings.model_copy(update={"database": destination,
+                  "state_directory": state}), core.model, core.clock) as reopened:
+            assert reopened.memory.search("我平时最爱喝什么？") == []
+            assert reopened.store.one("SELECT COUNT(*) AS n FROM memory_vectors")["n"] == 0
 
 
 def test_similar_wording_does_not_replace_the_requested_attribute(core):
@@ -297,15 +299,14 @@ def test_recall_selection_accepts_the_prompt_limit_and_rejects_overflow(core, mo
         assert core.store.one("SELECT 1 FROM outbox WHERE origin_event_id='evt_test_100'") is None
 
 
-def test_memory_review_daily_limit_does_not_block_normal_chat(core):
+def test_zero_memory_currency_keeps_recall_available(core):
     message(core, 1, "/记住这个：用户最喜欢的饮料是茉莉绿茶。")
-    core.settings.memory_daily_micro_usd = 0
     core.settings.max_recent_messages = 0
     job = message(core, 2, "我平时最爱喝什么？", "new:FriendMessage:10001")
     assert job["state"] == "SUCCEEDED"
     messages, scenario = core.model.calls[-1]
-    assert scenario == "chat" and "核对暂不可用" in json.dumps(messages, ensure_ascii=False)
-    assert "茉莉绿茶" not in json.dumps(messages, ensure_ascii=False)
+    assert scenario == "chat" and "核对暂不可用" not in json.dumps(messages, ensure_ascii=False)
+    assert "茉莉绿茶" in json.dumps(messages, ensure_ascii=False)
 
 
 def test_unknown_recall_reference_is_rejected_before_chat(core):
@@ -326,67 +327,21 @@ def test_memory_enabled_lease_covers_review_and_chat(core):
         Settings.model_validate(values)
 
 
-def test_existing_m1_database_keeps_facts_across_index_upgrade_and_downgrade(core, tmp_path):
-    from contextlib import closing
-    from pathlib import Path
+def test_native_index_rebuild_keeps_facts_evidence_and_reopen_identity(core):
+    from companion.store import migrate
 
-    from alembic import command
-    from alembic.config import Config
-
-    from companion.contracts import Candidate
-    from companion.memory import Memory
-    from companion.privacy import ErasureLedger
-    from companion.store import Store, encode, migrate
-
-    path = tmp_path / "previous.db"
-    migrate(str(path), "0002_m1")
-    settings = core.settings.model_copy(
-        update={
-            "database": str(path),
-            "erasure_ledger": str(tmp_path / "previous.jsonl"),
-            "memory_enabled": False,
-        }
-    )
-    # Construct historical source/fact rows without invoking current Core job writes.
-    with closing(Store(str(path))) as legacy:
-        ledger = ErasureLedger(settings.erasure_ledger)
-        ledger.initialize(legacy)
-        now, content = core.clock(), "用户最喜欢的饮料是茉莉绿茶。"
-        with legacy.transaction():
-            legacy.insert("principals", actor_id="owner", kind="owner", created_at=now)
-            legacy.insert("conversations", conversation_id="conv_legacy", platform="qq.onebot",
-                          platform_session_key="qq:FriendMessage:10001", scope="private",
-                          owner_actor_id="owner", created_at=now, last_event_at=now)
-            legacy.insert("events", event_id="evt_legacy", schema_version=1, source="qq.onebot",
-                          source_event_id="10002:qq:FriendMessage:10001:1",
-                          conversation_id="conv_legacy", actor_id="owner",
-                          event_type="message.received", occurred_at=now, ingested_at=now,
-                          privacy_scope="private", body_json=encode({"text": content}),
-                          trace_id="trace_legacy")
-            mid = Memory(legacy, settings, ledger).add(Candidate(
-                subject="user", kind="preference", fact_key="drink", content=content,
-                evidence_event_id="evt_legacy", evidence_quote=content,
-            ), now, confirmed=True)
-    migrate(str(path), "0003_memory_index")
-    settings.memory_enabled = True
-    with closing(Store(str(path))) as indexed:
-        memory = Memory(indexed, settings, ErasureLedger(settings.erasure_ledger))
-        memory.index.warmup()
-        assert memory.search("我平时最爱喝什么？")[0]["memory_id"] == mid
-        assert indexed.one("SELECT COUNT(*) AS n FROM memory_vectors")["n"] == 1
-    migration = Config()
-    migration.set_main_option("script_location", str(Path("migrations").resolve()))
-    migration.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
-    command.downgrade(migration, "0002_m1")
-    store = Store(str(path))
-    try:
-        assert store.one("SELECT memory_id FROM memories")["memory_id"] == mid
-        assert store.one("SELECT 1 FROM sqlite_master WHERE name='memory_vectors'") is None
-    finally:
-        store.close()
-    migrate(str(path))
-    reopened = Core(settings, core.model, core.clock)
-    try:
-        assert reopened.memory.search("我平时最爱喝什么？")[0]["memory_id"] == mid
-    finally:
-        reopened.store.close()
+    message(core, 1, "/记住这个：用户最喜欢的饮料是茉莉绿茶。")
+    query = "我平时最爱喝什么？"
+    mid = core.memory.search(query)[0]["memory_id"]
+    facts = core.store.rows("SELECT * FROM memories")
+    evidence = core.store.rows("SELECT * FROM memory_evidence")
+    assert core.store.one("SELECT COUNT(*) n FROM memory_vectors")["n"] == 1
+    core.store.execute("DELETE FROM memory_vectors")
+    core.memory.index.warmup()
+    assert core.memory.search(query)[0]["memory_id"] == mid
+    assert core.store.one("SELECT COUNT(*) n FROM memory_vectors")["n"] == 1
+    migrate(core.settings.database)
+    with Core(core.settings, core.model, core.clock) as reopened:
+        assert reopened.memory.search(query)[0]["memory_id"] == mid
+        assert reopened.store.rows("SELECT * FROM memories") == facts
+        assert reopened.store.rows("SELECT * FROM memory_evidence") == evidence

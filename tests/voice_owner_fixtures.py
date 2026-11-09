@@ -74,7 +74,10 @@ def native_reply(core, text):
     from companion.model import ModelClient
     from tests.conftest import run
 
-    event = core.store.one("SELECT * FROM events WHERE source='qq.onebot' ORDER BY rowid DESC")
+    event = core.store.one(
+        "SELECT * FROM events WHERE source='qq.onebot' ORDER BY "
+        'record_sequence DESC'
+    )
     status = core.voice.input_status(event["event_id"])
     if status.state == "WAITING":
         core.clock.advance(core.settings.voice.asr.wait_seconds + 1)
@@ -91,6 +94,6 @@ def native_reply(core, text):
         run(scenario())
     finally:
         core.model = previous_model
-    outbox = core.store.one("SELECT * FROM outbox ORDER BY rowid DESC LIMIT 1")
+    outbox = core.store.one("SELECT * FROM outbox ORDER BY record_sequence DESC LIMIT 1")
     assert outbox is not None and json.loads(outbox["content_json"])["text"] == text
     return outbox["message_id"]

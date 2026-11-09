@@ -41,11 +41,11 @@ def test_consolidation_revision_does_not_rebind_queued_day(core, tmp_path):
     enable_nightly(core)
     policy, first = grant(core, tmp_path, ["consolidation"])
     key = core.consolidation.schedule_day(DAY)
-    row = core.store.one("SELECT * FROM consolidation_runs WHERE run_id=?", (key,))
+    row = core.store.one('SELECT * FROM consolidation_runs WHERE run_id=%s', (key,))
     assert json.loads(row["steps_json"])["authority"] == first["authority"]
     activate(core, policy, revision=1, operation="operation-activate-2")
     assert core.consolidation.claim() is None
-    row = core.store.one("SELECT * FROM consolidation_runs WHERE run_id=?", (key,))
+    row = core.store.one('SELECT * FROM consolidation_runs WHERE run_id=%s', (key,))
     assert row["state"] == "CANCELLED"
     assert row["last_error_code"] == "OWNER_AUTHORITY_REVISION_CHANGED"
 
@@ -58,7 +58,7 @@ def test_memory_checkpoint_revision_is_terminal_without_new_call(core, tmp_path)
               "local_day": DAY.isoformat(), "source_event_ids": [], "next_attempt_at": None,
               "batch": {"authority": first["authority"], "phase": "EXTRACT",
                         "candidates": [{"content": "pending private material"}]}}
-    core.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+    core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                        (memory_work.CHECKPOINT_KEY, encode(record)))
     activate(core, policy, revision=1, operation="operation-activate-2")
     assert run(memory_work.extract_step(core)).progressed
@@ -85,7 +85,7 @@ def test_prior_v2_raw_revision_requires_explicit_history_for_domain(core, tmp_pa
                         max_turns=8, max_utf8_bytes=8192)})
     activate(core, policy, revision=2, operation="domain-history-revision")
     assert source_allowed(core.store, core.settings, core.clock, capture.event_id, "diary")
-    core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (capture.event_id,))
+    core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (capture.event_id,))
     assert not source_allowed(core.store, core.settings, core.clock, capture.event_id, "diary")
 
 
@@ -96,10 +96,10 @@ def test_legacy_memory_read_uses_original_archive_without_rebinding(core, tmp_pa
     policy = OwnerGrantPolicy.model_validate({**view.policy.model_dump(),
         "purposes": ["memory"], "history": {}})
     activate(core, policy, revision=1, operation="memory-only-legacy-read")
-    before = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+    before = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],))
     assert source_allowed(core.store, core.settings, core.clock, job["event_id"], "memory")
-    assert core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],)) == before
-    core.store.execute("DELETE FROM runtime_meta WHERE key=?",
+    assert core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],)) == before
+    core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
                        ("live_text_input:" + job["event_id"],))
     assert not source_allowed(core.store, core.settings, core.clock, job["event_id"], "memory")
 
@@ -133,7 +133,7 @@ def test_old_ungranted_revision_cannot_starve_current_memory_batch(core, tmp_pat
         capture = OwnerCapture.model_validate(value)
         owner_input.approve(core.store, core.settings, core.clock, capture)
         core.ingest(inbound(core, capture), "memory-source-" + str(number))
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=?",
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id=%s",
                            (capture.event_id,))
         return capture.event_id
 

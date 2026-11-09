@@ -116,7 +116,7 @@ def test_native_outbox_body_cannot_be_replaced_with_a_new_content_hash(core, tmp
             await native_admit(ctx)
             assert await ctx.worker.run_once()
             body = {"text": "替换后的正文"}
-            core.store.execute("UPDATE outbox SET content_json=?,content_sha256=?",
+            core.store.execute('UPDATE outbox SET content_json=%s,content_sha256=%s',
                                (encode(body), digest(body)))
             assert not await native_send(ctx)
             assert len(ctx.calls) == 1 and ctx.sends == []
@@ -222,6 +222,8 @@ def test_model_http_request_drift_is_rejected_after_async_hooks(core, tmp_path, 
     {"message": [{"type": "image", "data": {"file": "synthetic"}}]},
     {"message": [{"type": "record", "data": {"file": "synthetic"}}]},
 ])
+
+
 def test_wrong_identity_nontext_and_slash_never_create_model_or_delivery(
     core, tmp_path, raw_change,
 ):
@@ -286,7 +288,9 @@ def test_live_input_cannot_bypass_individual_approval_through_generic_inbox(core
     ("deadline", "SETTLED"), ("privacy", "SETTLED"), ("revocation", "SETTLED"),
     ("oversize", "SETTLED"),
 ])
-def test_model_late_or_unknown_results_retain_costs_and_never_enqueue(
+
+
+def test_model_results_preserve_costs_and_require_current_delivery_authority(
     core, tmp_path, result, expected,
 ):
     from companion import owner_authority
@@ -319,6 +323,8 @@ def test_model_late_or_unknown_results_retain_costs_and_never_enqueue(
             assert usage["state"] == expected and usage["billed_micro_usd"] > 0
             if result == "oversize":
                 assert_failure_notice(core)
+            elif result in {"missing_usage", "rate_change"}:
+                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 1
             else:
                 assert not core.store.rows("SELECT * FROM outbox")
             assert len(ctx.calls) == 1 and ctx.sends == []
@@ -403,18 +409,20 @@ def test_onebot_ack_loss_is_one_external_attempt_across_restart(core, tmp_path):
     run(scenario())
 
 
-def test_sqlite_lock_wait_cannot_authorize_send_after_deadline(core, tmp_path):
-    import sqlite3
+def test_native_lock_wait_cannot_authorize_send_after_deadline(core, tmp_path):
     import threading
     import time
+
+    import psycopg
 
     async def scenario():
         async with native_clients(core, tmp_path) as ctx:
             locked = threading.Event()
             def hold():
-                connection = sqlite3.connect(core.settings.database)
+                connection = psycopg.connect(core.settings.database.get_secret_value())
                 try:
-                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
                     locked.set()
                     time.sleep(0.1)
                     core.clock.now = ctx.policy.expires_at
@@ -443,17 +451,25 @@ def test_sqlite_lock_wait_cannot_authorize_send_after_deadline(core, tmp_path):
 
 
 @pytest.mark.parametrize("limits", [
-    {"per_attempt_micro_usd": 1}, {"daily_micro_usd": 1}, {"monthly_micro_usd": 1},
-    {"window_micro_usd": 1}, {"max_input_tokens": 1},
+    {}, {}, {},
+    {}, {"max_input_tokens": 1},
 ])
-def test_existing_paid_approval_and_amount_limits_are_not_relaxed(core, tmp_path, limits):
+
+
+def test_money_caps_are_advisory_while_input_quota_stays_hard(core, tmp_path, limits):
     async def scenario():
         async with native_clients(core, tmp_path, paid_options=limits) as ctx:
             await native_admit(ctx)
             assert await ctx.worker.run_once()
-            assert ctx.calls == ctx.sends == []
-            assert not core.store.rows("SELECT * FROM model_usage")
-            assert_failure_notice(core)
+            assert ctx.sends == []
+            if "max_input_tokens" in limits:
+                assert not ctx.calls
+                assert not core.store.rows("SELECT * FROM model_usage")
+                assert_failure_notice(core)
+            else:
+                assert len(ctx.calls) == 1
+                assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
+                assert core.store.rows("SELECT * FROM outbox")
             assert ctx.spool.db.execute("SELECT count(*) FROM window_attempts").fetchone()[0] == 0
     run(scenario())
 
@@ -463,7 +479,7 @@ def test_existing_global_reservation_blocks_native_model_without_new_io(core, tm
     async def scenario():
         async with native_clients(core, tmp_path, paid_options={"concurrency": 1}) as ctx:
             first = await native_admit(ctx)
-            first_job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
+            first_job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s',
                                        (first["event_id"],))
             job = core.claim_job("held-original-reservation", job_id=first_job["job_id"])
             request_id = budget.reserve(core.store, core.settings, job["job_id"], "chat",
@@ -471,7 +487,7 @@ def test_existing_global_reservation_blocks_native_model_without_new_io(core, tm
             await native_admit(ctx, 2)
             await ctx.worker.run_once()
             assert ctx.calls == ctx.sends == []
-            assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+            assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                                   (request_id,))["state"] == "RESERVED"
             assert len(core.store.rows("SELECT * FROM model_usage")) == 1
             assert not core.store.rows("SELECT * FROM outbox")
@@ -530,23 +546,47 @@ def test_owner_stop_entrypoint_fences_core_before_new_model_io(core, tmp_path, s
 
 
 def test_core_stop_survives_old_db_without_its_native_projection(core, tmp_path):
-    import sqlite3
-    from contextlib import closing
+    from tempfile import TemporaryDirectory
+
+    from companion.backup import _client, _run
+    from companion.core import Core
+    from tests.postgres_fixture import isolated_database
+    from tests.support.core_http import real_core_http
+
+    def native_database_tool(dsn, tool, *args):
+        with TemporaryDirectory(dir=tmp_path) as directory, _client(dsn, directory) as (_, env):
+            _run(tool, args, env)
 
     async def scenario():
         async with native_clients(core, tmp_path) as ctx:
             await native_admit(ctx)
-            with closing(sqlite3.connect(tmp_path / "before-stop.db")) as old_db:
-                core.store.db.backup(old_db)
-                await native_stop(ctx)
-                old_db.backup(core.store.db)
-            await ctx.worker.run_once()
-            assert ctx.calls == ctx.sends == []
-            assert not core.store.rows("SELECT * FROM outbox")
-            assert not core.store.rows("SELECT * FROM model_usage")
-            response = await ctx.client.post("/internal/v1/owner-authority/check",
-                json={"authority": ctx.authority, "purpose": "chat"})
-            assert response.status_code != 200
+            dump = str(tmp_path / "before-stop.dump")
+            await asyncio.to_thread(native_database_tool, core.settings.database, "pg_dump",
+                                    "--format=custom", "--no-owner", "--no-privileges",
+                                    "--file", dump)
+            await native_stop(ctx)
+            with isolated_database() as target:
+                # Simulate a DB-only rewind. The original independent authority journal stays ahead.
+                await asyncio.to_thread(native_database_tool, target, "pg_restore",
+                                        "--clean", "--if-exists", "--no-owner", "--no-privileges",
+                                        "--single-transaction", dump)
+                cfg = core.settings.model_copy(update={"database": target})
+                with Core(cfg, ctx.worker.model, core.clock) as rewound:
+                    assert not rewound.store.one(
+                        "SELECT 1 FROM owner_authority_revisions WHERE state='STOPPED'"
+                    )
+                    await rewound.run_once()
+                    assert ctx.calls == ctx.sends == []
+                    assert not rewound.store.rows("SELECT * FROM outbox")
+                    assert not rewound.store.rows("SELECT * FROM model_usage")
+                    async with real_core_http(rewound) as port, httpx.AsyncClient(
+                        base_url=f"http://127.0.0.1:{port}", trust_env=False,
+                        headers={"Authorization": "Bearer " + cfg.bridge_token.get_secret_value()},
+                    ) as client:
+                        response = await client.post("/internal/v1/owner-authority/check",
+                            json={"authority": ctx.authority, "purpose": "chat"})
+                        assert response.status_code == 503, response.text
+                        assert response.json()["error"] == "OWNER_AUTHORITY_CUSTODY_REQUIRED"
     run(scenario())
 
 
@@ -641,7 +681,7 @@ def test_unfinished_native_send_keeps_custody_when_new_input_arrives(core, tmp_p
             await native_admit(ctx, 2)
             # Native ingress may accept the newer owner turn; it cannot erase or
             # replay a prior send whose external outcome is still unresolved.
-            assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+            assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                                   (item["message_id"],))["state"] == "SENDING"
             assert not await native_send(ctx)
             assert len(ctx.calls) == 1 and ctx.sends == []

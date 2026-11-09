@@ -45,7 +45,7 @@ def test_lost_preflight_response_closes_without_provider_io_and_next_input_works
             await active.capture()
             await active.flush()
             await work()
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             lost, proofs = [], []
 
             async def lose_response(response):
@@ -68,7 +68,7 @@ def test_lost_preflight_response_closes_without_provider_io_and_next_input_works
             assert not sends and active.attempts() == {"NOT_SENT": 1}
             assert core.store.rows("SELECT state,attempt_count FROM outbox") == [
                 {"state": "CANCELLED", "attempt_count": 1}]
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usage
             assert active.runtime.row()["state"] == "ACTIVE"
             active.restart()
             assert active.runtime.row()["state"] == "ACTIVE"

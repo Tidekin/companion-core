@@ -102,9 +102,9 @@ def test_segmented_reply_environment_off(monkeypatch, tmp_path, raw):
     monkeypatch.setenv("COMPANION_CONFIG", str(tmp_path / "absent.toml"))
     for name, value in {"OWNER_QQ_ID": "10001", "BOT_QQ_ID": "10002",
                         "BRIDGE_TOKEN": "x" * 32, "SEGMENTED_REPLY": raw,
-                        "DATABASE": str(tmp_path / "absent.db")}.items():
+                        "DATABASE": "dbname=synthetic"}.items():
         monkeypatch.setenv("COMPANION_" + name, value)
-    assert Settings.load().segmented_reply is None
+    assert Settings.load(apply_operator_config=False).segmented_reply is None
 
 
 def test_thinking_payload_only_for_chat():

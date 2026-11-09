@@ -28,7 +28,7 @@ def test_same_chat_call_receives_the_actual_turns_and_times(core, case):
     history = case["inputs"]["history"]
     for number, turn in enumerate(history, 1):
         message = sent_history(core, number, turn["user"], turn["assistant"])
-        core.store.execute("UPDATE outbox SET sent_at=? WHERE message_id=?",
+        core.store.execute('UPDATE outbox SET sent_at=%s WHERE message_id=%s',
                            (core.clock(), message))
         if number < len(history):
             core.clock.advance(30)
@@ -51,7 +51,7 @@ def test_same_chat_call_receives_the_actual_turns_and_times(core, case):
     assert messages[-1] == {"role": "user", "content": case["inputs"]["text"]}
     # All cases, including short requests, use one ordinary reply job. No new
     # activity job, timer, additional model call or proactive delivery is created.
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],)) == {
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job["job_id"],)) == {
         "state": "SUCCEEDED"}
     assert core.store.one("SELECT COUNT(*) n FROM jobs")["n"] == len(history) + 1
     assert core.store.rows("SELECT DISTINCT action_type FROM outbox") == [
@@ -84,8 +84,10 @@ def test_native_entry_and_independent_worker_keep_turn_sources_and_delivery(core
             events = []
             for number, text in enumerate(("猫把纸箱挤塌了", "你来说点什么", "怎么弄"), 1):
                 source = await entry.admit(number, text)
-                job = core.store.one("SELECT j.*,e.body_json,e.conversation_id FROM jobs j "
-                                     "JOIN events e USING(event_id) WHERE e.event_id=?",
+                job = core.store.one((
+                    'SELECT j.*,e.body_json,e.conversation_id FROM jobs j '
+                    'JOIN events e USING(event_id) WHERE e.event_id=%s'
+                ),
                                      (source["event_id"],))
                 eligible = owner_input.history_sources(core.store, core.settings, core.clock, job)
                 assert len(eligible) == number - 1
@@ -101,8 +103,10 @@ def test_native_entry_and_independent_worker_keep_turn_sources_and_delivery(core
                 for previous in events:
                     assert previous["payload"]["text"] in json.dumps(
                         wire["messages"], ensure_ascii=False)
-                row = core.store.one("SELECT snapshots_json FROM agent_conversations "
-                                     "WHERE job_id=?", (job_id,))
+                row = core.store.one((
+                    'SELECT snapshots_json FROM agent_conversations WHERE '
+                    'job_id=%s'
+                ), (job_id,))
                 snapshots = json.loads(row["snapshots_json"])
                 history = next(item["proof"] for item in snapshots if item["kind"] == "history")
                 assert [item["event_id"] for item in history] == [
@@ -111,7 +115,7 @@ def test_native_entry_and_independent_worker_keep_turn_sources_and_delivery(core
                               if item["kind"] == "conversation_policy")
                 assert policy["strategy"] == "participation_v2"
                 assert (await entry.send(entry.client, entry.protocol))["worked"]
-                delivered = core.store.one("SELECT sent_at FROM outbox WHERE origin_event_id=?",
+                delivered = core.store.one('SELECT sent_at FROM outbox WHERE origin_event_id=%s',
                                             (source["event_id"],))
                 # Bridge send receipts use wall time. Subprocess startup can outlast
                 # the synthetic tick; the next input must follow actual delivery.

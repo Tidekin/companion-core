@@ -3,7 +3,7 @@
 import asyncio
 import ipaddress
 import time
-from contextlib import closing
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, Request
@@ -11,10 +11,12 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from companion import gateway
+from companion.api_store import ApiStore
 from companion.config import Settings
 from companion.contracts import CoreError
 from companion.gateway_contract import ChatRequest, RequestContext
-from companion.store import Store, utcnow
+from companion.postgres import Database
+from companion.store import utcnow
 
 
 def _error(code, status, request_id=None):
@@ -25,7 +27,15 @@ def _error(code, status, request_id=None):
 
 def create_app(settings=None, *, clock=utcnow):
     settings = settings or Settings.load()
-    app = FastAPI(title="Companion Gateway", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        with Database(settings.database, max_connections=4) as database:
+            app.state.operations = ApiStore(database, settings.state_directory)
+            yield
+
+    app = FastAPI(title="Companion Gateway", docs_url=None, redoc_url=None, openapi_url=None,
+                  lifespan=lifespan)
 
     @app.middleware("http")
     async def boundary(request, call_next):
@@ -64,7 +74,7 @@ def create_app(settings=None, *, clock=utcnow):
 
     @app.get("/v1/models")
     async def models(request: Request):
-        with closing(Store(settings.database)) as store:
+        def operation(store):
             grant = auth(store, request)
             if request.headers.get("X-Companion-Mode", "passthrough") != "passthrough":
                 raise CoreError("GATEWAY_MODE_NOT_IMPLEMENTED", 403)
@@ -73,46 +83,51 @@ def create_app(settings=None, *, clock=utcnow):
             return {"object": "list", "data": [{"id": item.model_alias, "object": "model",
                     "created": 0, "owned_by": "companion-core"}
                     for item in aliases if item.model_alias in grant.model_aliases]}
+        return await app.state.operations.run(operation)
 
     @app.get("/v1/gateway/requests/{request_id}")
     async def receipt(request_id: str, request: Request):
-        with closing(Store(settings.database)) as store:
-            result = read_receipt(store, request, request_id)
-            return JSONResponse(result, headers={"X-Request-Id": request_id})
+        result = await app.state.operations.run(
+            lambda store: read_receipt(store, request, request_id),
+        )
+        return JSONResponse(result, headers={"X-Request-Id": request_id})
 
     @app.post("/v1/chat/completions")
     async def complete(request: Request):
-        with closing(Store(settings.database)) as store:
-            grant = auth(store, request)
-            data = bytearray()
-            async for chunk in request.stream():
-                data.extend(chunk)
-                if len(data) > 524288:
-                    raise CoreError("GATEWAY_INPUT_TOO_LARGE", 400)
-            try:
-                body = ChatRequest.model_validate_json(data)
-                context = RequestContext(mode=request.headers.get("X-Companion-Mode"),
-                    conversation_id=request.headers.get("X-Companion-Conversation-Id"),
-                    world_id=request.headers.get("X-Companion-World-Id"))
-            except (ValidationError, ValueError):
-                raise CoreError("GATEWAY_INVALID_REQUEST", 400) from None
+        operations = app.state.operations
+        await operations.run(lambda store: auth(store, request))
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > 524288:
+                raise CoreError("GATEWAY_INPUT_TOO_LARGE", 400)
+        try:
+            body = ChatRequest.model_validate_json(data)
+            context = RequestContext(mode=request.headers.get("X-Companion-Mode"),
+                conversation_id=request.headers.get("X-Companion-Conversation-Id"),
+                world_id=request.headers.get("X-Companion-World-Id"))
+        except (ValidationError, ValueError):
+            raise CoreError("GATEWAY_INVALID_REQUEST", 400) from None
+
+        def submit(store):
             # Authentication may expire or be revoked during an untrusted slow upload.
             grant = auth(store, request)
-            request_id = gateway.submit(store, settings, grant, body, context,
-                                        request.headers.get("Idempotency-Key"), clock())
-            request.state.gateway_request_id = request_id
-            deadline = time.monotonic() + gateway.config().wait_seconds
-            while True:
-                result = read_receipt(store, request, request_id)
-                if result["status"] == "SUCCEEDED":
-                    return JSONResponse(result["completion"], headers={"X-Request-Id": request_id})
-                if result["status"] not in {"QUEUED", "RUNNING"}:
-                    return _error(result["error_code"] or "GATEWAY_RECEIPT_EXPIRED",
-                                  result["error_status"] or 503,
-                                  request_id)
-                if time.monotonic() >= deadline:
-                    return _error("GATEWAY_REQUEST_PENDING", 503, request_id)
-                # The worker owns execution; disconnecting this waiter never resubmits it.
-                await asyncio.sleep(0.05)
+            return gateway.submit(store, settings, grant, body, context,
+                                  request.headers.get("Idempotency-Key"), clock())
+
+        request_id = await operations.run(submit)
+        request.state.gateway_request_id = request_id
+        deadline = time.monotonic() + gateway.config().wait_seconds
+        while True:
+            result = await operations.run(lambda store: read_receipt(store, request, request_id))
+            if result["status"] == "SUCCEEDED":
+                return JSONResponse(result["completion"], headers={"X-Request-Id": request_id})
+            if result["status"] not in {"QUEUED", "RUNNING"}:
+                return _error(result["error_code"] or "GATEWAY_RECEIPT_EXPIRED",
+                              result["error_status"] or 503, request_id)
+            if time.monotonic() >= deadline:
+                return _error("GATEWAY_REQUEST_PENDING", 503, request_id)
+            # The worker owns execution; a waiter owns no lease while sleeping.
+            await asyncio.sleep(0.05)
 
     return app

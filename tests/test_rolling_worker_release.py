@@ -2,8 +2,8 @@
 
 import json
 import os
+import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -96,14 +96,91 @@ def test_override_changes_only_rolled_images(tmp_path):
         "-f", "/srv/a.json", "-f", "/srv/b.json", "-f", str(path)]
 
 
-def test_life_worker_waits_for_both_of_its_locks():
-    from companion import worker_lock
+def test_life_worker_waits_for_both_of_its_locks(tmp_path):
+    from companion.worker_lock import single_worker
 
-    paths = rolling.lock_paths("/data/companion.sqlite3", "companion-life-worker")
+    paths = rolling.lock_paths(tmp_path, "companion-life-worker")
     assert [p.name for p in paths] == [
-        "companion.life-worker.lock", "companion.diary-worker.lock"]
-    # Production 2026-10-30: the first rolling run looked for `companion.sqlite3.*.lock`.
-    assert "with_suffix(f\".{kind}.lock\")" in Path(worker_lock.__file__).read_text()
+        "life-worker.lock", "diary-worker.lock"]
+    with single_worker(tmp_path, "life-worker"), single_worker(tmp_path, "diary-worker"):
+        assert all(path.is_file() for path in paths)
+
+
+def test_ledger_reads_native_rows_through_the_api_configuration(core, tmp_path, monkeypatch):
+    from tests.conftest import ingest
+    from tests.postgres_fixture import logical_state
+
+    ingest(core)
+    core.store.insert("model_usage", usage_id="usage_rolling", request_id="request_rolling",
+                      scenario="chat", provider="synthetic", model="synthetic", state="UNKNOWN",
+                      occurred_at=core.clock())
+    before = logical_state(core.store)
+    env = {name: value for name, value in os.environ.items() if not name.startswith("COMPANION_")}
+    env.update(COMPANION_CONFIG=str(tmp_path / "absent.toml"),
+               COMPANION_DATABASE=core.settings.database.get_secret_value(),
+               COMPANION_OWNER_QQ_ID=core.settings.owner_qq_id,
+               COMPANION_BOT_QQ_ID=core.settings.bot_qq_id,
+               COMPANION_BRIDGE_TOKEN="synthetic-rolling-ledger-token")
+
+    def execute(*args, **kwargs):
+        assert args[:3] == ("exec", "companion-api-id", "/app/.venv/bin/python")
+        assert core.settings.database.get_secret_value() not in str(args)
+        return subprocess.run([sys.executable, *args[3:]], env=env, capture_output=True,
+                              text=True, check=True, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(rolling, "docker", execute)
+    assert rolling.ledger(row("companion-api")) == {
+        "authority": None, "unknown": 1, "jobs": {"QUEUED": 1}, "deliveries": {}}
+    assert logical_state(core.store) == before
+
+
+@pytest.mark.parametrize("exit_code,held", [(0, False), (1, False), (0, True)])
+def test_cost_unknown_warning_preserves_clean_stop_and_lock_requirements(
+    tmp_path, monkeypatch, exit_code, held,
+):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    current = rows()
+    before = {"authority": [1, "ACTIVE"], "unknown": 0, "jobs": {}, "deliveries": {}}
+    after = {**before, "unknown": 1}
+    snapshots = iter((before, after))
+    monkeypatch.setattr(rolling, "inspect", lambda project: current)
+    monkeypatch.setattr(rolling, "ledger", lambda api: next(snapshots))
+    monkeypatch.setattr(rolling, "lock_holders", lambda path, locks: [42] if held else [])
+    original_read = Path.read_text
+
+    def read(path, *args, **kwargs):
+        return "" if path == Path('/proc/locks') else original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    commands = []
+
+    def docker(*args, **kwargs):
+        commands.append(args)
+        stopped = {"Running": False, "ExitCode": exit_code, "FinishedAt": "synthetic-stop"}
+        return SimpleNamespace(stdout=json.dumps([{"State": stopped}]) if args[0] == "inspect"
+                               else "")
+
+    monkeypatch.setattr(rolling, "docker", docker)
+    replacement = row("companion-worker", NEW, StartedAt="synthetic-start")
+    replacement["Id"] = "synthetic-new-worker"
+    monkeypatch.setattr(rolling, "wait_started", lambda *args: replacement)
+    receipt, images = {"steps": []}, {}
+
+    def run():
+        rolling.roll("synthetic-project", "companion-worker", NEW, tmp_path,
+                     tmp_path / "override.json", images, receipt)
+
+    if exit_code or held:
+        with pytest.raises(RuntimeError, match="stop cleanly|worker lock"):
+            run()
+        assert images == {} and not any("up" in command for command in commands)
+    else:
+        run()
+        assert receipt["steps"][0]["warnings"] == ["MODEL_COST_UNKNOWN_CHANGED"]
+        assert receipt["steps"][0]["result"] == "ROLLED"
+        assert images == {"companion-worker": NEW}
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="/proc/locks device numbers are Linux")

@@ -34,7 +34,7 @@ def registered_grant(core, tmp_path, source="heybox"):
     adapter = "bili" if source == "bilibili" else "heybox"
     grant_id = "grant_" + ("1" if adapter == "heybox" else "2") * 32
     previous = core.store.one(
-        "SELECT MAX(epoch) n FROM source_grant_revisions WHERE grant_id=?", (grant_id,)
+        'SELECT MAX(epoch) n FROM source_grant_revisions WHERE grant_id=%s', (grant_id,)
     )
     revision = (previous["n"] or 0) + 1
     authority = {

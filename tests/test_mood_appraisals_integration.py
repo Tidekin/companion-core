@@ -70,7 +70,7 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path):
                 assert await worker.run_once("before-appraisal")
             assert (await entry.send(entry.client, entry.protocol))["worked"]
             settings = core.settings.model_dump(mode="json")
-            for name in ("model_key", "bridge_token", "control_token"):
+            for name in ("database", "model_key", "bridge_token", "control_token"):
                 settings[name] = getattr(core.settings, name).get_secret_value()
             settings_path = tmp_path / "worker-settings.json"
             settings_path.write_text(encode(settings), encoding="utf-8")
@@ -87,7 +87,10 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path):
                 assert result["calls"] == (["memory_extract"] if attempt == 0 else [])
             rows = core.store.rows("SELECT event_id,request_id FROM mood_appraisals")
             assert len(rows) == 1
-            assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+            assert core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            ) == [
                 {"scenario": "chat", "state": "SETTLED"},
                 {"scenario": "memory_extract", "state": "SETTLED"},
             ]
@@ -205,5 +208,5 @@ def test_valid_appraisal_survives_exhausted_unrelated_fact_reviews(core):
     assert run(core.run_once(job_id=chat["job_id"]))
     messages, kind = core.model.calls[-1]
     assert kind == "chat" and any("小肥鱼的心情参考" in m["content"] for m in messages)
-    assert core.store.one("SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
+    assert core.store.one('SELECT 1 FROM job_sources WHERE job_id=%s AND event_id=%s',
                           (chat["job_id"], key))

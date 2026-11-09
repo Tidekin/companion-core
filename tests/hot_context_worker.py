@@ -30,21 +30,23 @@ async def provider(request):
 async def run():
     async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
         with Core(settings, ModelClient(settings, client), lambda: now) as core:
-            queued = core.store.one("SELECT j.*,e.conversation_id FROM jobs j "
-                                    "JOIN events e USING(event_id) WHERE job_id=?", (job_id,))
+            queued = core.store.one((
+                'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+                'USING(event_id) WHERE job_id=%s'
+            ), (job_id,))
             available = owner_input.history_sources(core.store, settings, core.clock, queued)
             assert len(available) == int(expected_history_count)
             assert await core.run_once("hot-context-worker", job_id=job_id)
-            job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+            job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job_id,))
             assert job["state"] == "SUCCEEDED", dict(job)
             assert len(payloads) == 1
             payload = payloads[0]
             sources = [row["event_id"] for row in core.store.rows(
-                "SELECT event_id FROM job_sources WHERE job_id=? AND event_id<>?",
+                'SELECT event_id FROM job_sources WHERE job_id=%s AND event_id<>%s',
                 (job_id, job["event_id"]))]
             measurement = measure_request(settings, payload["messages"],
                                           tools=payload.get("tools"))
-            saved = core.store.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+            saved = core.store.one('SELECT snapshots_json FROM agent_conversations WHERE job_id=%s',
                                    (job_id,))
             history = next(item["proof"] for item in json.loads(saved["snapshots_json"])
                            if item["kind"] == "history")

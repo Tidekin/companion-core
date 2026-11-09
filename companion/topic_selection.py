@@ -51,10 +51,10 @@ def interest_topics(store, now):
     reference = datetime.fromisoformat(now)
     scores = {}
     for row in store.rows(
-        "SELECT w.rating,w.topic_tags_json,w.updated_at FROM watch_ledger w "
-        "JOIN events e ON e.event_id=w.source_event_id "
-        "JOIN observations o ON o.event_id=w.source_event_id "
-        "WHERE w.state='JUDGED' AND e.redacted=0 AND o.redacted=0 AND w.updated_at>=?",
+        'SELECT w.rating, w.topic_tags_json, w.updated_at FROM watch_ledger AS w JOIN events AS e '
+        'ON e.event_id = w.source_event_id JOIN observations AS o ON o.event_id = '
+        "w.source_event_id WHERE w.state = 'JUDGED' AND e.redacted = 0 AND o.redacted = 0 AND "
+        'w.updated_at >= %s',
         (since,),
     ):
         age = (reference - datetime.fromisoformat(row["updated_at"])).total_seconds() / 86400
@@ -88,8 +88,8 @@ def owner_terms(store, settings, now):
 def recent_queries(store, now):
     since = after(now, -ROTATION_HOURS * 3600)
     return {row["query"] for row in store.rows(
-        "SELECT query FROM exploration_requests WHERE operation='discover' "
-        "AND query IS NOT NULL AND created_at>=?", (since,))}
+        "SELECT query FROM exploration_requests WHERE operation = 'discover' AND NOT query IS NULL "
+        'AND created_at >= %s', (since,))}
 
 
 def choose(store, settings, now, adapters, rng=None, *, own_only=False):

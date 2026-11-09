@@ -31,7 +31,7 @@ def withdrawn(store, event_id, body):
                 if s.get("type") == "reply" and isinstance(s.get("reference"), str)]
     if not segments:
         return frozenset()
-    current = store.one("SELECT conversation_id,source_event_id FROM events WHERE event_id=?",
+    current = store.one('SELECT conversation_id, source_event_id FROM events WHERE event_id = %s',
                         (event_id,))
     prefix = namespace(current and current["source_event_id"])
     if not prefix:
@@ -41,12 +41,11 @@ def withdrawn(store, event_id, body):
         reference = segment["reference"]
         source_id = f"{prefix}:{reference}"
         owner = store.one(
-            "SELECT redacted FROM events WHERE source_event_id=? AND conversation_id=?",
+            'SELECT redacted FROM events WHERE source_event_id = %s AND conversation_id = %s',
             (source_id, current["conversation_id"]))
         sent = store.rows(
-            "SELECT e.redacted FROM outbox o "
-            "JOIN events e ON e.event_id=o.origin_event_id "
-            "WHERE o.conversation_id=? AND o.provider_message_id=? LIMIT 2",
+            'SELECT e.redacted FROM outbox AS o JOIN events AS e ON e.event_id = o.origin_event_id '
+            'WHERE o.conversation_id = %s AND o.provider_message_id = %s LIMIT 2',
             (current["conversation_id"], reference))
         if (is_recalled(store, source_id) or (owner and owner["redacted"])
                 or any(row["redacted"] for row in sent)):

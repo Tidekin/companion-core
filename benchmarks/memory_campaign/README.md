@@ -1,7 +1,7 @@
 # Memory campaign toolkit
 
-Reusable three-arm memory comparison: old Core, new Core and a Qwen embedding/rerank RAG
-reference, all answered by the same DeepSeek model. Every script takes a round directory;
+Reusable memory evaluation for selected frozen Core runs, with optional Qwen RAG references
+and controls. Every script takes a round directory;
 counts, personas, categories and delays come from that round's bank, budgets and settings
 from its `round.json`. Nothing about a particular bank is written in code.
 
@@ -12,8 +12,8 @@ from its `round.json`. Nothing about a particular bank is written in code.
   round.json            settings (below)
   build_bank.py         this round's stories (uses authoring.py)  — optional, any generator
   bank/                 the bank (layout below), frozen by bank.py
-  arms/old|new/         frozen source snapshots, run configs, per-persona results
-  rag/                  RAG reference requests/responses/answers
+  arms/<name>/          frozen source snapshots, run configs, per-persona results
+  rag/                  optional RAG reference requests/responses/answers
   grading/              blind mapping, raw grades, review.jsonl, overrides.jsonl
   deepseek-usage.jsonl  qwen-usage.jsonl   conservative spend ledgers
   results.json summary.json memory-report.html evidence-diagnosis.md
@@ -24,7 +24,9 @@ Minimal `round.json` (all other keys have defaults in `roundcfg.py`):
 ```json
 {
   "name": "memory-round-4",
-  "arms": {"old": "<commit>", "new": "<commit>"},
+  "arms": {"core": "<native PostgreSQL commit>"},
+  "references": [],
+  "postgres": {"connections_file": "E:/Companion Core/.local/private/persona-databases.json"},
   "budget": {"deepseek_total_cny": 49, "deepseek_inference_cny": 47, "qwen_total_cny": 50},
   "smoke": {"bank": "E:/Companion Core/.local/<an already exposed round>/bank"},
   "sensitivity_exclude_categories": [],
@@ -36,6 +38,19 @@ Useful optional keys: `bank` (path, default `bank`), `source_checkout`, `history
 (signed history scope given to both arms), `native` (Core overrides), `rag` (models,
 `top_k`, `top_n`, `observed_arm`, `qwen_key_file`), `grading.rubric` (`v1`|`v2`|`v3`),
 `review` (`persona`, `delay_days`, `changed_per_family`), `parser`, `telemetry`.
+
+Core runs require one operator-prepared, distinct PostgreSQL database per persona.
+`postgres.connections_file` names a private JSON map from persona IDs to libpq connection
+strings. Keep this file outside the round and exported artifacts. Allocation and empty-target
+checks finish before inference; the run retains its databases and independent journals for
+accounting review. `state_directory` lives separately under each persona's result directory.
+The isolated PostgreSQL test configuration also supplies the eighteen lifecycle checks.
+
+`arms: {"core": "<commit>"}`, `references: []`, and `controls: []` run and grade one candidate.
+Coverage comes from the complete bank, including failed questions. Historical comparisons
+can select multiple native revisions and `references: ["rag"]`; reports derive their columns
+from that selection. Three independent judge votes and fixed reviewed anchors remain
+available for a single candidate.
 
 Judging and controls:
 - `controls: ["closed"]` adds a closed-book control: the RAG generator and prompt with no

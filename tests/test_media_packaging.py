@@ -22,7 +22,11 @@ def test_images_import_media_routes_from_packaged_sources_without_external_io(tm
     for instruction in dockerfile.splitlines():
         if not instruction.startswith("COPY "):
             continue
-        *sources, destination = shlex.split(instruction)[1:]
+        fields = shlex.split(instruction)[1:]
+        if fields[0] == "--from=postgres-client":
+            # This stage supplies native clients and libraries, not Python sources.
+            continue
+        *sources, destination = fields
         assert not any(source.startswith("--") for source in sources)
         target = image / destination
         assert target.resolve().is_relative_to(image)
@@ -87,12 +91,13 @@ if image_kind == 'core':
     from companion.voice_jobs import VoiceJobs
     settings = Settings(owner_qq_id='10001', bot_qq_id='10002',
                         bridge_token='synthetic-image-import-token-0001',
-                        database=str(root / 'never-created.sqlite3'),
+                        database='dbname=synthetic',
+                        state_directory=str(root / 'never-created-state'),
                         erasure_ledger=str(root / 'never-created.jsonl'))
     app = create_app(settings)
     assert Core and VoiceJobs and app.routes
     assert not settings.voice.enabled
-    assert not Path(settings.database).exists()
+    assert not Path(settings.state_directory).exists()
     assert not Path(settings.erasure_ledger).exists()
 else:
     from companion_onebot_bridge import meme_runtime, network, owner_resolution, voice_runtime

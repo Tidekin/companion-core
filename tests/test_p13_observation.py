@@ -10,6 +10,7 @@ from companion.store import encode
 from scripts.summarize_beta_feedback import snapshot, summarize
 from scripts.validate_beta_feedback import validate_record
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.beta_observation import feedback_template, paid_fixture
 from tests.support.p12_beta_operations import bundle, feedback, inspector
 
@@ -45,7 +46,7 @@ def inspect(core):
 
 def test_inspector_explains_recorded_selection_without_reconstructing_private_reason(core):
     selection_fixture(core)
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = inspect(core)
     selected = result["trace"]["jobs"][0]["memory_selection"]
     assert selected["state"] == "SELECTION_RECORDED"
@@ -57,8 +58,9 @@ def test_inspector_explains_recorded_selection_without_reconstructing_private_re
     assert selected["selection_reason"] == selected["discarded_history"] == "NOT_RECORDED"
     assert selected["source_validity"] == "NOT_REVALIDATED"
     assert "PRIVATE_" not in encode(result)
-    assert list(core.store.db.iterdump()) == before
-    advance_epoch(core.store)
+    assert logical_state(core.store) == before
+    with core.store.transaction(control_write=True):
+        advance_epoch(core.store)
     result = inspect(core)["trace"]["jobs"][0]
     assert result["memory_selection"]["state"] == "STALE_EPOCH"
     assert "candidates" not in result["memory_selection"]
@@ -86,7 +88,7 @@ def test_inspector_suppresses_invalid_or_unbound_selection(core, damage):
     elif damage == "payload":
         record["review_payload_sha256"] = "d" * 64
     raw = "[" if damage == "invalid" else "x" * 131073 if damage == "oversized" else encode(record)
-    core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+    core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                        (raw, "live_text_memory:" + job["job_id"]))
     result = inspect(core)
     assert not result["blockers"]
@@ -96,18 +98,18 @@ def test_inspector_suppresses_invalid_or_unbound_selection(core, damage):
 
 def test_inspector_distinguishes_pending_empty_and_absent_selection(core):
     job, record = selection_fixture(core)
-    core.store.execute("DELETE FROM runtime_meta WHERE key=?",
+    core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
                        ("live_text_context:" + job["job_id"],))
     record.update(selected=None, selected_sha256=None, review_request_id=None)
     for state in ("REVIEW_PENDING", "NO_CANDIDATES"):
-        core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+        core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                            (encode(record), "live_text_memory:" + job["job_id"]))
         result = inspect(core)["trace"]["jobs"][0]["memory_selection"]
         assert result["state"] == state
         assert result["frozen_context_count"] is None
         record.update(candidates=[], candidates_sha256=paid_budget.sha([]), selected=[],
                       selected_sha256=paid_budget.sha([]), review_payload_sha256=None)
-    core.store.execute("DELETE FROM runtime_meta WHERE key=?",
+    core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
                        ("live_text_memory:" + job["job_id"],))
     assert inspect(core)["trace"]["jobs"][0]["memory_selection"]["state"] == "NOT_RECORDED"
 
@@ -200,7 +202,8 @@ def test_inspector_reads_original_input_window_and_hides_erased_bindings(core):
     assert report["configured_approval_sha256"] is None
     assert binding["source_validity"] == "NOT_REVALIDATED"
     assert "PRIVATE_" not in encode(report)
-    advance_epoch(core.store)
+    with core.store.transaction(control_write=True):
+        advance_epoch(core.store)
     binding = inspect(core)["trace"]["recorded_window"]
     assert binding == {"state": "STALE_EPOCH", "source_validity": "NOT_REVALIDATED"}
     core.store.execute("UPDATE events SET redacted=1")

@@ -47,7 +47,9 @@ def attempt(core, *, cache=ABSENT, usage=ABSENT, status=200, number=1, marker=AB
 
     response = run(exercise())
     assert len(calls) == 1
-    row = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
-    record = core.store.one("SELECT * FROM audit_log WHERE action='model.usage_diagnostic' "
-                            "AND entity_id=?", (request_id,))
+    row = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,))
+    record = core.store.one((
+        "SELECT * FROM audit_log WHERE action='model.usage_diagnostic' AND "
+        'entity_id=%s'
+    ), (request_id,))
     return response, row, record

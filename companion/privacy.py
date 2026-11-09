@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from contextlib import nullcontext
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -8,6 +9,7 @@ from zoneinfo import ZoneInfo
 from companion import job_queue, transport
 from companion.commands import command_parts
 from companion.contracts import CoreError
+from companion.postgres import ERASURE_LEDGER
 from companion.store import encode, uid
 
 SECRET_PATTERNS = [
@@ -22,23 +24,29 @@ def reply_content_erased_by_memory(store, row):
     """A completed memory erasure clears every reply already present, not its receipt."""
     if row["content_json"] != "{}" or row["content_sha256"] != "":
         return False
-    return bool(store.one(
-        "SELECT 1 FROM privacy_erasure_ledger WHERE target_type='memory' "
-        "AND state='COMPLETE' AND julianday(erased_at)>=julianday(?) LIMIT 1",
-        (row["created_at"],),
-    ))
+    return bool(
+        store.one(
+            "SELECT 1 FROM privacy_erasure_ledger WHERE target_type='memory' "
+            "AND state='COMPLETE' AND CASE WHEN pg_input_is_valid(erased_at,'timestamptz') "
+            "THEN isfinite(erased_at::timestamptz) AND erased_at::timestamptz>=%s::timestamptz "
+            "ELSE false END LIMIT 1",
+            (row["created_at"],),
+        )
+    )
 
 
 def legacy_correction_matches(memory, body_json):
     """The exact legacy QQ command relation shared by retention and source proofs."""
     command, arguments = command_parts(json.loads(body_json).get("text", ""))
     return command == "纠正这一条" and arguments.split(maxsplit=1) == [
-        memory["supersedes_memory_id"], memory["content"],
+        memory["supersedes_memory_id"],
+        memory["content"],
     ]
 
 
 def redact(text, settings):
     for secret in (
+        settings.database.get_secret_value(),
         settings.bridge_token.get_secret_value(),
         settings.model_key.get_secret_value(),
         settings.video_model_key.get_secret_value(),
@@ -88,14 +96,15 @@ def sensitive(text):
 
 
 def epoch(store):
-    row = store.one("SELECT value FROM runtime_meta WHERE key='privacy_epoch'")
+    row = store.one("SELECT value FROM runtime_meta WHERE key = 'privacy_epoch'")
     return int(row["value"]) if row else 0
 
 
 def advance_epoch(store):
+    if not store.control_write:
+        raise RuntimeError("ERASURE_CONTROL_WRITE_REQUIRED")
     store.execute(
-        "INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch',?)",
-        (str(epoch(store) + 1),),
+        "UPDATE runtime_meta SET value=(value::bigint+1)::text WHERE key='privacy_epoch'",
     )
 
 
@@ -104,8 +113,8 @@ def diary_copies(store, dates, before=None):
     result = set()
     for row in store.rows(
         "SELECT event_id,body_json FROM events WHERE redacted=0 "
-        "AND json_extract(body_json,'$.diary_command')=1 "
-        "AND (? IS NULL OR ingested_at<=?)",
+        "AND (body_json::json->'diary_command')::text IN ('true','1') "
+        "AND (%s::text IS NULL OR ingested_at<=%s)",
         (before, before),
     ):
         body = json.loads(row["body_json"])
@@ -135,10 +144,10 @@ def source_grant_closure(store, event_ids, memory_ids=()):
     from companion.observation import dependent_events
 
     event_ids, memory_ids = set(event_ids), set(memory_ids)
-    relatives = store.rows("SELECT memory_id,supersedes_memory_id FROM memories")
+    relatives = store.rows("SELECT memory_id, supersedes_memory_id FROM memories")
     evidence = store.rows(
-        "SELECT m.memory_id,m.event_id,e.source,e.event_type FROM memory_evidence m "
-        "JOIN events e USING(event_id)"
+        "SELECT m.memory_id, m.event_id, e.source, e.event_type FROM memory_evidence AS m JOIN "
+        "events AS e USING (event_id)"
     )
     while True:
         before = len(event_ids), len(memory_ids)
@@ -152,7 +161,8 @@ def source_grant_closure(store, event_ids, memory_ids=()):
         for row in evidence:
             if (
                 row["memory_id"] in memory_ids
-                and row["source"] == "owner.decision" and row["event_type"] == "memory.corrected"
+                and row["source"] == "owner.decision"
+                and row["event_type"] == "memory.corrected"
             ):
                 event_ids.add(row["event_id"])
         if before == (len(event_ids), len(memory_ids)):
@@ -163,8 +173,23 @@ class ErasureLedger:
     def __init__(self, path):
         self.path = Path(path)
 
+    @staticmethod
+    def _write_lock(store):
+        if not store.in_write_transaction or not store.control_write:
+            raise RuntimeError("ERASURE_CONTROL_WRITE_REQUIRED")
+        store.ledger_lock(ERASURE_LEDGER)
+
     def initialize(self, store):
-        existing = store.one("SELECT value FROM runtime_meta WHERE key='ledger_id'")
+        if not store.in_transaction:
+            from companion.erasure import contract_signature
+
+            # Cold handler discovery imports the domain modules. Do that before
+            # holding the erasure control row, as replay's own entry point does.
+            contract_signature()
+            with store.transaction(control_write=True):
+                return self.initialize(store)
+        self._write_lock(store)
+        existing = store.one("SELECT value FROM runtime_meta WHERE key = 'ledger_id'")
         if not self.path.exists():
             if existing:
                 raise CoreError("ERASURE_LEDGER_MISSING", 503)
@@ -177,7 +202,9 @@ class ErasureLedger:
         ledger_id = lines[0]["ledger_id"]
         if existing and existing["value"] != ledger_id:
             raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
-        store.execute("INSERT OR IGNORE INTO runtime_meta VALUES ('ledger_id',?)", (ledger_id,))
+        store.execute(
+            "INSERT INTO runtime_meta VALUES ('ledger_id', %s) ON CONFLICT DO NOTHING", (ledger_id,)
+        )
         self.replay(store)
 
     def read(self):
@@ -197,8 +224,14 @@ class ErasureLedger:
                 ):
                     raise ValueError("invalid sequence")
                 if record.get("target_type", "memory") not in {
-                    "memory", "event_batch", "raw_retention", "diary", "source_grant",
-                    "input_recall", "affect_reset", "mood_reset",
+                    "memory",
+                    "event_batch",
+                    "raw_retention",
+                    "diary",
+                    "source_grant",
+                    "input_recall",
+                    "affect_reset",
+                    "mood_reset",
                 }:
                     raise ValueError("unknown erasure target")
                 if record.get("target_type") == "affect_reset":
@@ -216,17 +249,28 @@ class ErasureLedger:
                     target = marker_key(source["source_event_id"])
                     state = record["state"]
                     stamp = datetime.fromisoformat(record["occurred_at"])
-                    if (state not in {"PENDING_TARGET", "RECALLED"}
+                    if (
+                        state not in {"PENDING_TARGET", "RECALLED"}
                         or record["memory_id"] != target + ":" + state
                         or stamp.utcoffset() is None
                         or stamp > datetime.fromisoformat(record["at"])
-                        or (state == "PENDING_TARGET" and (
-                            record["event_ids"] or record["memory_ids"] or record.get("event_id")
-                        ))
-                        or (state == "RECALLED" and (
-                            record.get("event_id") != "evt_" + target.removeprefix("input_recall:")
-                            or record["event_id"] not in record["event_ids"]
-                        ))):
+                        or (
+                            state == "PENDING_TARGET"
+                            and (
+                                record["event_ids"]
+                                or record["memory_ids"]
+                                or record.get("event_id")
+                            )
+                        )
+                        or (
+                            state == "RECALLED"
+                            and (
+                                record.get("event_id")
+                                != "evt_" + target.removeprefix("input_recall:")
+                                or record["event_id"] not in record["event_ids"]
+                            )
+                        )
+                    ):
                         raise ValueError("invalid input recall target")
                 if record.get("target_type") == "raw_retention" or (
                     record.get("target_type") == "input_recall" and "retention_cutoff" in record
@@ -248,10 +292,10 @@ class ErasureLedger:
             raise CoreError("ERASURE_LEDGER_INVALID", 503) from error
 
     def append(self, store, memory_id, now):
-        # Caller holds a DB write transaction, serializing ledger appends across API workers.
-        rows = store.rows("SELECT memory_id,event_id FROM memory_evidence")
+        self._write_lock(store)
+        rows = store.rows("SELECT memory_id, event_id FROM memory_evidence")
         memory_ids, event_ids = {memory_id}, set()
-        relatives = store.rows("SELECT memory_id,supersedes_memory_id FROM memories")
+        relatives = store.rows("SELECT memory_id, supersedes_memory_id FROM memories")
         while True:
             previous = (len(memory_ids), len(event_ids))
             for row in relatives:
@@ -283,12 +327,17 @@ class ErasureLedger:
     def reset_affect(self, store, request_id, now):
         from companion.affect import apply_feedback_reset, reset_record, reset_target
 
-        if not store.db.in_transaction:
-            raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
+        self._write_lock(store)
         target = reset_target(request_id)
         lines = self.read()
-        record = next((item for item in lines[1:] if
-            item.get("target_type") == "affect_reset" and item["memory_id"] == target), None)
+        record = next(
+            (
+                item
+                for item in lines[1:]
+                if item.get("target_type") == "affect_reset" and item["memory_id"] == target
+            ),
+            None,
+        )
         if record is None:
             record = reset_record(len(lines), request_id, now)
             with self.path.open("a", encoding="utf-8") as stream:
@@ -303,12 +352,17 @@ class ErasureLedger:
     def reset_mood(self, store, request_id, now):
         from companion.mood import apply_reset, reset_record, reset_target
 
-        if not store.db.in_transaction:
-            raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
+        self._write_lock(store)
         target = reset_target(request_id)
         lines = self.read()
-        record = next((item for item in lines[1:] if
-            item.get("target_type") == "mood_reset" and item["memory_id"] == target), None)
+        record = next(
+            (
+                item
+                for item in lines[1:]
+                if item.get("target_type") == "mood_reset" and item["memory_id"] == target
+            ),
+            None,
+        )
         if record is None:
             record = reset_record(len(lines), request_id, now)
             with self.path.open("a", encoding="utf-8") as stream:
@@ -321,6 +375,7 @@ class ErasureLedger:
         return result
 
     def expire_events(self, store, event_ids, now, *, retention_cutoff=None):
+        self._write_lock(store)
         record = {
             "seq": len(self.read()),
             "erasure_id": uid("erase"),
@@ -339,10 +394,11 @@ class ErasureLedger:
         self.apply(store, record)
 
     def forget_diary(self, store, day, timezone, now):
+        self._write_lock(store)
         target = "companion:" + timezone + ":" + day
         existing = store.one(
-            "SELECT erasure_id FROM privacy_erasure_ledger "
-            "WHERE target_type='diary' AND target_id=?",
+            "SELECT erasure_id FROM privacy_erasure_ledger WHERE target_type = 'diary' AND "
+            "target_id = %s",
             (target,),
         )
         if existing:
@@ -371,12 +427,25 @@ class ErasureLedger:
         self.apply(store, record)
 
     def forget_source_grant(self, store, grant_id, now):
-        events, memories = source_grant_closure(store, [row["event_id"] for row in store.rows(
-            "SELECT event_id FROM source_grant_events WHERE grant_id=?", (grant_id,))])
+        self._write_lock(store)
+        events, memories = source_grant_closure(
+            store,
+            [
+                row["event_id"]
+                for row in store.rows(
+                    "SELECT event_id FROM source_grant_events WHERE grant_id = %s", (grant_id,)
+                )
+            ],
+        )
         record = {
-            "seq": len(self.read()), "erasure_id": uid("erase"),
-            "memory_id": grant_id, "memory_ids": sorted(memories), "event_ids": sorted(events),
-            "at": now, "target_type": "source_grant", "source_grant_id": grant_id,
+            "seq": len(self.read()),
+            "erasure_id": uid("erase"),
+            "memory_id": grant_id,
+            "memory_ids": sorted(memories),
+            "event_ids": sorted(events),
+            "at": now,
+            "target_type": "source_grant",
+            "source_grant_id": grant_id,
         }
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(encode(record) + "\n")
@@ -385,13 +454,19 @@ class ErasureLedger:
         self.apply(store, record)
 
     def recall_input(
-        self, store, source, now, *, retention_cutoff=None, verified=False, occurred_at=None,
+        self,
+        store,
+        source,
+        now,
+        *,
+        retention_cutoff=None,
+        verified=False,
+        occurred_at=None,
         event_id=None,
     ):
         from companion.input_recall import marker_key, matching_events, validate_source
 
-        if not store.db.in_transaction:
-            raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
+        self._write_lock(store)
         validate_source(source)
         if retention_cutoff is not None:
             cutoff, stamp = datetime.fromisoformat(retention_cutoff), datetime.fromisoformat(now)
@@ -403,8 +478,11 @@ class ErasureLedger:
         if verified and event_id != "evt_" + target.removeprefix("input_recall:"):
             raise CoreError("INPUT_RECALL_TARGET_MISMATCH", 409)
         state = "RECALLED" if verified else "PENDING_TARGET"
-        prior = [item for item in records[1:] if item.get("target_type") == "input_recall"
-                 and item["recall_source"] == source]
+        prior = [
+            item
+            for item in records[1:]
+            if item.get("target_type") == "input_recall" and item["recall_source"] == source
+        ]
         pending = next((item for item in prior if item["state"] == "PENDING_TARGET"), None)
         occurred_at = occurred_at or (pending["occurred_at"] if pending else now)
         stamp, received = datetime.fromisoformat(occurred_at), datetime.fromisoformat(now)
@@ -421,21 +499,41 @@ class ErasureLedger:
         if record is None:
             roots = matching_events(store, source)
             if verified:
-                existing = store.one("SELECT occurred_at FROM events WHERE event_id=?", (event_id,))
-                if (roots and roots != {event_id}) or (existing and (
-                    event_id not in roots or datetime.fromisoformat(existing["occurred_at"]) > stamp
-                )):
+                existing = store.one(
+                    "SELECT occurred_at FROM events WHERE event_id = %s", (event_id,)
+                )
+                if (roots and roots != {event_id}) or (
+                    existing
+                    and (
+                        event_id not in roots
+                        or datetime.fromisoformat(existing["occurred_at"]) > stamp
+                    )
+                ):
                     raise CoreError("INPUT_RECALL_TARGET_MISMATCH", 409)
             events = self.retention_events(store, [event_id]) if verified else set()
-            memories = {row["memory_id"] for row in store.rows(
-                "SELECT memory_id FROM memory_evidence WHERE event_id IN "
-                "(SELECT value FROM json_each(?))", (encode(sorted(events)),),
-            )}
+            memories = {
+                row["memory_id"]
+                for row in store.rows(
+                    (
+                        'SELECT memory_id FROM memory_evidence WHERE event_id '
+                        'IN (SELECT value COLLATE "C" FROM '
+                        'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+                        'parsed(value))'
+                    ),
+                    (encode(sorted(events)),),
+                )
+            }
             record = {
-                "seq": len(records), "erasure_id": uid("erase"), "memory_id": target + ":" + state,
-                "memory_ids": sorted(memories), "event_ids": sorted(events), "at": now,
-                "target_type": "input_recall", "recall_source": source,
-                "state": state, "occurred_at": occurred_at,
+                "seq": len(records),
+                "erasure_id": uid("erase"),
+                "memory_id": target + ":" + state,
+                "memory_ids": sorted(memories),
+                "event_ids": sorted(events),
+                "at": now,
+                "target_type": "input_recall",
+                "recall_source": source,
+                "state": state,
+                "occurred_at": occurred_at,
                 "event_id": event_id if verified else None,
             }
             if retention_cutoff is not None:
@@ -444,17 +542,32 @@ class ErasureLedger:
                 stream.write(encode(record) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-        applied = store.one("SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id=?",
-                            (record["erasure_id"],))
+        applied = store.one(
+            "SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id = %s", (record["erasure_id"],)
+        )
         if not applied or self.remaining_input_recall(store, record):
             self.apply_input_recall(store, record, repair=bool(applied))
         prefix = "erased_event:"
-        events = sorted({row["key"][len(prefix):] for row in store.rows(
-            "SELECT key FROM runtime_meta WHERE value=? AND substr(key,1,?)=?",
-            (record["erasure_id"], len(prefix), prefix),
-        )} | set(record["event_ids"]))
-        return {"state": record["state"], "source_event_id": source["source_event_id"],
-                "event_ids": events, "erasure_id": record["erasure_id"], "duplicate": duplicate}
+        events = sorted(
+            {
+                row["key"][len(prefix) :]
+                for row in store.rows(
+                    (
+                        'SELECT key FROM runtime_meta WHERE value = %s AND '
+                        'SUBSTRING(key FROM 1 FOR %s) = %s'
+                    ),
+                    (record["erasure_id"], len(prefix), prefix),
+                )
+            }
+            | set(record["event_ids"])
+        )
+        return {
+            "state": record["state"],
+            "source_event_id": source["source_event_id"],
+            "event_ids": events,
+            "erasure_id": record["erasure_id"],
+            "duplicate": duplicate,
+        }
 
     @staticmethod
     def erase_diary_projections(store, record):
@@ -466,17 +579,17 @@ class ErasureLedger:
     def replay(self, store):
         from companion.erasure import CONTRACT_KEY, contract_signature
 
-        lines = self.read()
-        applied = store.one(
-            "SELECT MAX(restore_min_replay_version) AS n FROM privacy_erasure_ledger"
-        )
-        if (applied["n"] or 0) > len(lines) - 1:
-            raise CoreError("ERASURE_LEDGER_TRUNCATED", 503)
-        # Loading cleanup owners may import the SDK on a cold worker. Discover
-        # the code-only contract before taking SQLite's single writer lock.
+        # Discover the code-only contract before taking the control/ledger locks.
         signature = contract_signature()
-        with store.transaction():
-            previous = store.one("SELECT value FROM runtime_meta WHERE key=?", (CONTRACT_KEY,))
+        with nullcontext() if store.in_transaction else store.transaction(control_write=True):
+            self._write_lock(store)
+            lines = self.read()
+            applied = store.one(
+                "SELECT MAX(restore_min_replay_version) AS n FROM privacy_erasure_ledger"
+            )
+            if (applied["n"] or 0) > len(lines) - 1:
+                raise CoreError("ERASURE_LEDGER_TRUNCATED", 503)
+            previous = store.one("SELECT value FROM runtime_meta WHERE key = %s", (CONTRACT_KEY,))
             repair_contracts = not previous or previous["value"] != signature
             for record in lines[1:]:
                 if record.get("target_type") in {"affect_reset", "mood_reset"}:
@@ -486,10 +599,12 @@ class ErasureLedger:
                 # Rebuild this projection even for pre-upgrade COMPLETE records.
                 # A backup may predate the event itself, so UPDATE events is insufficient.
                 for event_id in record["event_ids"]:
-                    store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
-                                  ("erased_event:" + event_id, record["erasure_id"]))
+                    store.execute(
+                        "INSERT INTO runtime_meta VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        ("erased_event:" + event_id, record["erasure_id"]),
+                    )
                 applied = store.one(
-                    "SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id=?",
+                    "SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id = %s",
                     (record["erasure_id"],),
                 )
                 # Older releases marked deletion complete before resolving date aliases.
@@ -501,26 +616,49 @@ class ErasureLedger:
                 if record.get("target_type") == "source_grant":
                     from companion.source_grants import grant_tombstone
 
-                    if applied and record["event_ids"] and not record["memory_ids"] and store.one(
-                        "SELECT 1 FROM memories p JOIN memories c "
-                        "ON c.supersedes_memory_id=p.memory_id WHERE p.status='FORGOTTEN' "
-                        "AND (c.status<>'FORGOTTEN' OR c.content<>'') LIMIT 1"
+                    if (
+                        applied
+                        and record["event_ids"]
+                        and not record["memory_ids"]
+                        and store.one(
+
+                                'SELECT 1 FROM memories AS p JOIN memories AS c ON '
+                                'c.supersedes_memory_id = p.memory_id WHERE p.status = '
+                                "'FORGOTTEN' AND (c.status <> 'FORGOTTEN' OR c.content "
+                                "<> '') LIMIT 1"
+
+                        )
                     ):
                         # Old COMPLETE records deleted the root-to-memory evidence without
                         # recording memory IDs. Preserve data for isolated owner review;
                         # neither restored publication nor inferred grant attribution is safe.
                         raise CoreError("SOURCE_GRANT_LEGACY_ERASURE_REVIEW_REQUIRED", 503)
-                    remaining_grant = not store.one("SELECT 1 FROM runtime_meta WHERE key=?",
-                        (grant_tombstone(record["source_grant_id"]),)) or store.one(
-                        "SELECT 1 FROM source_grant_events g JOIN events e USING(event_id) "
-                        "WHERE g.grant_id=? AND e.redacted=0", (record["source_grant_id"],))
-                    remaining_grant = remaining_grant or store.one(
-                        "SELECT 1 FROM events WHERE redacted=0 AND event_id IN "
-                        "(SELECT value FROM json_each(?))", (encode(record["event_ids"]),),
+                    remaining_grant = not store.one(
+                        "SELECT 1 FROM runtime_meta WHERE key = %s",
+                        (grant_tombstone(record["source_grant_id"]),),
                     ) or store.one(
-                        "SELECT 1 FROM memories WHERE memory_id IN "
-                        "(SELECT value FROM json_each(?)) AND (content<>'' OR status<>'FORGOTTEN')",
-                        (encode(record["memory_ids"]),),
+                        "SELECT 1 FROM source_grant_events AS g JOIN events AS e USING (event_id) "
+                        "WHERE g.grant_id = %s AND e.redacted = 0",
+                        (record["source_grant_id"],),
+                    )
+                    remaining_grant = (
+                        remaining_grant
+                        or store.one(
+                            "SELECT 1 FROM events WHERE redacted = 0 AND event_id IN (SELECT value "
+                            'COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+                            "parsed(value))",
+                            (encode(record["event_ids"]),),
+                        )
+                        or store.one(
+                            (
+                                'SELECT 1 FROM memories WHERE memory_id IN (SELECT '
+                                'value COLLATE "C" FROM '
+                                'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+                                "parsed(value)) AND (content <> '' OR status <> "
+                                "'FORGOTTEN')"
+                            ),
+                            (encode(record["memory_ids"]),),
+                        )
                     )
                 remaining_recall = record.get("target_type") == "input_recall" and (
                     self.remaining_input_recall(store, record)
@@ -535,16 +673,18 @@ class ErasureLedger:
             # Publish only after every owner handler succeeded. A failure leaves
             # the durable Ledger unchanged and the entire replay transaction undone.
             if repair_contracts:
-                store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
-                              (CONTRACT_KEY, signature))
+                store.execute(
+                    "INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON "
+                    "CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = DEFAULT",
+                    (CONTRACT_KEY, signature),
+                )
 
     def repair_derivatives(self, store, record):
         """Upgrade COMPLETE projections once, using recorded source identities only."""
         from companion.diary import erase_diary_projections
         from companion.erasure import ErasureScope, erase_derivatives
 
-        if not store.db.in_transaction:
-            raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
+        self._write_lock(store)
 
         if record.get("target_type") == "input_recall":
             self.apply_input_recall(store, record, repair=True)
@@ -558,17 +698,22 @@ class ErasureLedger:
         # links. Its per-event tombstone still names this exact erasure, so use
         # that explicit attribution rather than guessing from content or dates.
         prefix = "erased_event:"
-        recorded = {row["key"][len(prefix):] for row in store.rows(
-            "SELECT key FROM runtime_meta WHERE value=? AND substr(key,1,?)=? "
-            "AND length(key)>?", (record["erasure_id"], len(prefix), prefix, len(prefix)),
-        )}
+        recorded = {
+            row["key"][len(prefix) :]
+            for row in store.rows(
+                (
+                    'SELECT key FROM runtime_meta WHERE value = %s AND '
+                    'SUBSTRING(key FROM 1 FOR %s) = %s AND LENGTH(key) > %s'
+                ),
+                (record["erasure_id"], len(prefix), prefix, len(prefix)),
+            )
+        }
         roots = set(record["event_ids"]) | recorded
         if record.get("target_type") == "raw_retention":
             event_ids, memory_ids = self.retention_events(store, roots), set(record["memory_ids"])
         else:
             event_ids, memory_ids = source_grant_closure(store, roots, record["memory_ids"])
-        scoped_record = {**record, "event_ids": sorted(event_ids),
-                         "memory_ids": sorted(memory_ids)}
+        scoped_record = {**record, "event_ids": sorted(event_ids), "memory_ids": sorted(memory_ids)}
         copies = erase_diary_projections(store, scoped_record, conservative=False)
         if record.get("target_type") == "raw_retention":
             self.expire_memory_evidence(store, scoped_record)
@@ -586,8 +731,7 @@ class ErasureLedger:
         from companion.erasure import ErasureScope, erase_derivatives
         from companion.observation import dependent_events
 
-        if not store.db.in_transaction:
-            raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
+        self._write_lock(store)
 
         if record.get("target_type") == "input_recall":
             self.apply_input_recall(store, record)
@@ -612,15 +756,25 @@ class ErasureLedger:
             from companion.source_grants import cancel_grant_reads, grant_tombstone
 
             grant_id = record["source_grant_id"]
-            store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
-                          (grant_tombstone(grant_id), record["erasure_id"]))
-            store.execute("UPDATE source_grants SET revoked_at=COALESCE(revoked_at,?),"
-                          "forgotten_at=? WHERE grant_id=?", (record["at"], record["at"], grant_id))
+            store.execute(
+                "INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) "
+                "DO UPDATE SET value = excluded.value, record_sequence = DEFAULT",
+                (grant_tombstone(grant_id), record["erasure_id"]),
+            )
+            store.execute(
+                "UPDATE source_grants SET revoked_at = COALESCE(revoked_at, %s), "
+                "forgotten_at = %s WHERE grant_id = %s",
+                (record["at"], record["at"], grant_id),
+            )
             cancel_grant_reads(store, grant_id, record["at"])
             erase_reading(store, ())
             # Re-resolve the explicit relationship in the snapshot; never infer it from URLs.
-            roots = set(record["event_ids"]) | {row["event_id"] for row in store.rows(
-                "SELECT event_id FROM source_grant_events WHERE grant_id=?", (grant_id,))}
+            roots = set(record["event_ids"]) | {
+                row["event_id"]
+                for row in store.rows(
+                    "SELECT event_id FROM source_grant_events WHERE grant_id = %s", (grant_id,)
+                )
+            }
             events, memories = source_grant_closure(store, roots, record["memory_ids"])
             record = {**record, "event_ids": sorted(events), "memory_ids": sorted(memories)}
             if not events and not memories:
@@ -628,15 +782,17 @@ class ErasureLedger:
                 self.record_complete(store, record)
                 return
 
-        event_ids = (self.retention_events(store, record["event_ids"])
-                     if record.get("target_type") == "raw_retention"
-                     else dependent_events(store, record["event_ids"]))
+        event_ids = (
+            self.retention_events(store, record["event_ids"])
+            if record.get("target_type") == "raw_retention"
+            else dependent_events(store, record["event_ids"])
+        )
         memory_ids = set(record["memory_ids"])
         for event_id in event_ids:
             memory_ids.update(
                 row["memory_id"]
                 for row in store.rows(
-                    "SELECT memory_id FROM memory_evidence WHERE event_id=?", (event_id,)
+                    "SELECT memory_id FROM memory_evidence WHERE event_id = %s", (event_id,)
                 )
             )
         record = {**record, "event_ids": sorted(event_ids), "memory_ids": sorted(memory_ids)}
@@ -646,8 +802,9 @@ class ErasureLedger:
         else:
             self.erase_memories(store, record["memory_ids"], record["at"])
         event_ids = set(record["event_ids"]) | copies
-        erase_derivatives(store, ErasureScope(frozenset(event_ids),
-                                             record.get("target_type") != "diary"))
+        erase_derivatives(
+            store, ErasureScope(frozenset(event_ids), record.get("target_type") != "diary")
+        )
         self.erase_events(store, record, event_ids)
         if record.get("target_type") == "diary":
             # Diary commands never enter chat context, memory extraction, or diary sources.
@@ -656,10 +813,10 @@ class ErasureLedger:
             # No complete source lineage exists for these paraphrases. Keep the
             # existing conservative cleanup on every new raw-fact erasure.
             store.execute("DELETE FROM conversation_summaries")
-            store.execute("UPDATE episodes SET title='',summary='',status='REDACTED'")
+            store.execute("UPDATE episodes SET title = '', summary = '', status = 'REDACTED'")
             store.execute("DELETE FROM trait_evidence")
             store.execute("DELETE FROM traits")
-            transport.revoke_deliveries(store, "1", erase_content=True)
+            transport.revoke_deliveries(store, "TRUE", erase_content=True)
         advance_epoch(store)
         self.record_complete(store, record)
 
@@ -668,23 +825,28 @@ class ErasureLedger:
         """A remaining positive source must have no erased, missing or expired ancestor."""
         events = encode(record["event_ids"])
         sources = store.rows(
-            "SELECT e.event_id FROM memory_evidence v JOIN events e USING(event_id) "
-            "JOIN conversations c USING(conversation_id) WHERE v.memory_id=? AND v.polarity=1 "
-            "AND e.actor_id='owner' AND e.privacy_scope='private' AND c.scope='private' "
-            "AND c.owner_actor_id='owner'", (memory_id,),
+            "SELECT e.event_id FROM memory_evidence AS v JOIN events AS e USING (event_id) JOIN "
+            "conversations AS c USING (conversation_id) WHERE v.memory_id = %s AND v.polarity = 1 "
+            "AND e.actor_id = 'owner' AND e.privacy_scope = 'private' AND c.scope = 'private' AND "
+            "c.owner_actor_id = 'owner'",
+            (memory_id,),
         )
         for source in sources:
             invalid = store.one(
-                "WITH RECURSIVE sources(event_id) AS (SELECT ? UNION "
-                "SELECT d.source_event_id FROM event_dependencies d "
-                "JOIN sources s ON d.event_id=s.event_id) "
-                "SELECT 1 FROM sources s LEFT JOIN events e USING(event_id) "
-                "WHERE e.event_id IS NULL OR e.redacted=1 "
-                "OR e.event_id IN (SELECT value FROM json_each(?)) "
-                "OR (? IS NOT NULL AND e.ingested_at<?) "
-                "OR EXISTS (SELECT 1 FROM runtime_meta r WHERE r.key='erased_event:'||s.event_id) "
-                "LIMIT 1", (source["event_id"], events, record.get("retention_cutoff"),
-                             record.get("retention_cutoff")),
+                'WITH RECURSIVE sources(event_id) AS (SELECT %s::text COLLATE "C" UNION SELECT '
+                "d.source_event_id FROM event_dependencies AS d JOIN sources AS s ON d.event_id = "
+                "s.event_id) SELECT 1 FROM sources AS s LEFT JOIN events AS e USING (event_id) "
+                "WHERE e.event_id IS NULL OR e.redacted = 1 OR e.event_id IN (SELECT value COLLATE "
+                '"C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) OR (NOT '
+                "CAST(%s AS TEXT) IS NULL AND e.ingested_at < %s) OR EXISTS(SELECT 1 FROM "
+                "runtime_meta AS r WHERE r.key = 'erased_event:' || s.event_id) LIMIT "
+                "1",
+                (
+                    source["event_id"],
+                    events,
+                    record.get("retention_cutoff"),
+                    record.get("retention_cutoff"),
+                ),
             )
             if not invalid:
                 return True
@@ -694,58 +856,90 @@ class ErasureLedger:
         from companion.input_recall import is_recalled, marker_key
 
         if record["state"] == "PENDING_TARGET":
-            return not store.one("SELECT 1 FROM runtime_meta WHERE key=?",
-                                 (marker_key(record["recall_source"]["source_event_id"]),))
+            return not store.one(
+                "SELECT 1 FROM runtime_meta WHERE key = %s",
+                (marker_key(record["recall_source"]["source_event_id"]),),
+            )
         if not is_recalled(store, record["recall_source"]["source_event_id"]):
             return True
         events = set(record["event_ids"])
-        if store.one("SELECT 1 FROM events WHERE redacted=0 AND event_id IN "
-                     "(SELECT value FROM json_each(?)) LIMIT 1", (encode(sorted(events)),)):
+        if store.one(
+            "SELECT 1 FROM events WHERE redacted = 0 AND event_id IN (SELECT value "
+            'COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) LIMIT '
+            "1",
+            (encode(sorted(events)),),
+        ):
             return True
-        if store.one("SELECT 1 FROM memory_evidence WHERE event_id IN "
-                     "(SELECT value FROM json_each(?)) LIMIT 1", (encode(sorted(events)),)):
+        if store.one(
+            'SELECT 1 FROM memory_evidence WHERE event_id IN (SELECT value COLLATE "C" '
+            "FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) LIMIT "
+            "1",
+            (encode(sorted(events)),),
+        ):
             return True
-        return any(not self.recall_support(store, row["memory_id"], record)
-                   for row in store.rows(
-                       "SELECT memory_id FROM memories WHERE content<>'' AND memory_id IN "
-                       "(SELECT value FROM json_each(?))", (encode(record["memory_ids"]),),
-                   ))
+        return any(
+            not self.recall_support(store, row["memory_id"], record)
+            for row in store.rows(
+                "SELECT memory_id FROM memories WHERE content <> '' AND memory_id IN "
+                '(SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) '
+                "AS parsed(value))",
+                (encode(record["memory_ids"]),),
+            )
+        )
 
     def apply_input_recall(self, store, record, *, repair=False):
         from companion.diary import erase_diary_projections
         from companion.erasure import ErasureScope, erase_derivatives
         from companion.input_recall import project_marker
 
-        if not store.db.in_transaction:
-            raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
+        self._write_lock(store)
         project_marker(store, record)
         if record["state"] == "PENDING_TARGET":
             self.record_complete(store, record)
             return
         prefix = "erased_event:"
-        recorded = {row["key"][len(prefix):] for row in store.rows(
-            "SELECT key FROM runtime_meta WHERE value=? AND substr(key,1,?)=?",
-            (record["erasure_id"], len(prefix), prefix),
-        )}
+        recorded = {
+            row["key"][len(prefix) :]
+            for row in store.rows(
+                (
+                    'SELECT key FROM runtime_meta WHERE value = %s AND '
+                    'SUBSTRING(key FROM 1 FOR %s) = %s'
+                ),
+                (record["erasure_id"], len(prefix), prefix),
+            )
+        }
         events = self.retention_events(store, set(record["event_ids"]) | recorded)
-        memories = set(record["memory_ids"]) | {row["memory_id"] for row in store.rows(
-            "SELECT memory_id FROM memory_evidence WHERE event_id IN "
-            "(SELECT value FROM json_each(?))", (encode(sorted(events)),),
-        )}
+        memories = set(record["memory_ids"]) | {
+            row["memory_id"]
+            for row in store.rows(
+                'SELECT memory_id FROM memory_evidence WHERE event_id IN (SELECT value COLLATE "C" '
+                "FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS "
+                "parsed(value))",
+                (encode(sorted(events)),),
+            )
+        }
         scoped = {**record, "event_ids": sorted(events), "memory_ids": sorted(memories)}
         # A verified before-input notice has no content or work to revoke. Keep
         # the event/source tombstones without invalidating unrelated work.
-        present = store.one("SELECT 1 FROM events WHERE event_id IN "
-                            "(SELECT value FROM json_each(?)) LIMIT 1", (encode(sorted(events)),))
+        present = store.one(
+            'SELECT 1 FROM events WHERE event_id IN (SELECT value COLLATE "C" FROM '
+            "JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value)) LIMIT "
+            "1",
+            (encode(sorted(events)),),
+        )
         if not present and not memories:
             self.erase_events(store, record, events)
             self.record_complete(store, record)
             return
         copies = erase_diary_projections(store, scoped, conservative=not repair)
-        store.execute("DELETE FROM memory_evidence WHERE event_id IN "
-                      "(SELECT value FROM json_each(?))", (encode(sorted(events)),))
+        store.execute(
+            'DELETE FROM memory_evidence WHERE event_id IN (SELECT value COLLATE "C" '
+            "FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS "
+            "parsed(value))",
+            (encode(sorted(events)),),
+        )
         for memory_id in memories:
-            store.execute("DELETE FROM memory_revisions WHERE memory_id=?", (memory_id,))
+            store.execute("DELETE FROM memory_revisions WHERE memory_id = %s", (memory_id,))
             if not self.recall_support(store, memory_id, scoped):
                 # Source withdrawal is not an explicit request to forget a fact's
                 # family. Preserve every separately supported successor/fact.
@@ -758,7 +952,7 @@ class ErasureLedger:
             # Historical replies/summaries lack complete source lineage. Keep
             # the existing conservative fallback until their owners supply it.
             store.execute("DELETE FROM conversation_summaries")
-            store.execute("UPDATE episodes SET title='',summary='',status='REDACTED'")
+            store.execute("UPDATE episodes SET title = '', summary = '', status = 'REDACTED'")
             store.execute("DELETE FROM trait_evidence")
             store.execute("DELETE FROM traits")
         advance_epoch(store)
@@ -766,33 +960,44 @@ class ErasureLedger:
 
     def clear_recalled_replies(self, store, event_ids, at, *, repair=False):
         """Invalidate replies from consumed sources without erasing their owner inputs."""
-        if not store.one("SELECT 1 FROM sqlite_master WHERE name='job_sources' AND type='table'"):
+        if not store.one(
+            "SELECT 1 FROM pg_catalog.pg_class WHERE "
+            "relnamespace=current_schema()::regnamespace AND relname='job_sources' AND relkind IN "
+            "('r','p')"
+        ):
             if repair:
                 self.clear_event_replies(store, event_ids)
             else:
-                transport.revoke_deliveries(store, "1", erase_content=True)
+                transport.revoke_deliveries(store, "TRUE", erase_content=True)
             return
         events = encode(sorted(event_ids))
         jobs = store.rows(
-            "WITH RECURSIVE origins(event_id) AS (SELECT value FROM json_each(?) "
-            "UNION SELECT event_id FROM jobs WHERE ? AND context_tracked=0 "
-            "AND event_id IS NOT NULL UNION SELECT origin_event_id FROM outbox o "
-            "WHERE ? AND origin_event_id IS NOT NULL AND NOT EXISTS "
-            "(SELECT 1 FROM jobs j WHERE j.event_id=o.origin_event_id) "
-            "UNION SELECT j.event_id FROM jobs j JOIN job_sources s USING(job_id) "
-            "JOIN origins r ON r.event_id=s.event_id WHERE j.event_id IS NOT NULL) "
-            "SELECT j.job_id,j.event_id FROM jobs j JOIN origins r USING(event_id)",
-            (events, int(not repair), int(not repair)),
+            'WITH RECURSIVE origins(event_id) AS (SELECT value COLLATE "C" FROM '
+            "JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value) UNION SELECT event_id "
+            "FROM jobs WHERE %s AND context_tracked = 0 AND NOT event_id IS NULL UNION SELECT "
+            "origin_event_id FROM outbox AS o WHERE %s AND NOT origin_event_id IS NULL AND NOT "
+            "EXISTS(SELECT 1 FROM jobs AS j WHERE j.event_id = o.origin_event_id) UNION SELECT "
+            "j.event_id FROM jobs AS j JOIN job_sources AS s USING (job_id) JOIN origins AS r ON "
+            "r.event_id = s.event_id WHERE NOT j.event_id IS NULL) SELECT j.job_id, j.event_id "
+            "FROM jobs AS j JOIN origins AS r USING (event_id)",
+            (events, not repair, not repair),
         )
         job_ids = encode([row["job_id"] for row in jobs])
         origins = encode(sorted(set(event_ids) | {row["event_id"] for row in jobs
                                                   if row["event_id"]}))
-        job_queue.cancel_active(store, "job_id IN (SELECT value FROM json_each(?))", (job_ids,),
+        job_queue.cancel_active(store, (
+            'job_id IN (SELECT value FROM json_array_elements_text(%s::json) AS '
+            'ids(value))'
+        ), (job_ids,),
                                 "REPLY_SOURCE_RECALLED", at)
         transport.revoke_deliveries(
-            store, "origin_event_id IN (SELECT value FROM json_each(?)) OR (? AND NOT EXISTS "
-            "(SELECT 1 FROM jobs j WHERE j.event_id=outbox.origin_event_id))",
-            (origins, int(not repair)), erase_content=True,
+            store, (
+                'origin_event_id IN (SELECT value FROM '
+                'json_array_elements_text(%s::json) AS ids(value)) OR (%s AND NOT '
+                'EXISTS (SELECT 1 FROM jobs j WHERE '
+                'j.event_id=outbox.origin_event_id))'
+            ),
+            (origins, not repair), erase_content=True,
         )
 
     @staticmethod
@@ -807,18 +1012,23 @@ class ErasureLedger:
             # Older corrections predate event_dependencies but retained this
             # explicit source-to-successor relation. It is not a second source.
             for row in store.rows(
-                "SELECT m.memory_id,m.supersedes_memory_id,m.content,e.body_json "
-                "FROM memories m JOIN memory_evidence v USING(memory_id) "
-                "JOIN events e USING(event_id) WHERE m.supersedes_memory_id IS NOT NULL "
-                "AND e.source='qq.onebot' AND e.event_id IN (SELECT value FROM json_each(?))",
+                "SELECT m.memory_id, m.supersedes_memory_id, m.content, e.body_json FROM memories "
+                "AS m JOIN memory_evidence AS v USING (memory_id) JOIN events AS e USING "
+                "(event_id) WHERE NOT m.supersedes_memory_id IS NULL AND e.source = 'qq.onebot' "
+                'AND e.event_id IN (SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s '
+                "AS JSON)) AS parsed(value))",
                 (encode(sorted(event_ids)),),
             ):
                 if legacy_correction_matches(row, row["body_json"]):
-                    event_ids.update(item["event_id"] for item in store.rows(
-                        "SELECT e.event_id FROM memory_evidence v JOIN events e USING(event_id) "
-                        "WHERE v.memory_id=? AND e.source='owner.decision' "
-                        "AND e.event_type='memory.corrected'", (row["memory_id"],),
-                    ))
+                    event_ids.update(
+                        item["event_id"]
+                        for item in store.rows(
+                            "SELECT e.event_id FROM memory_evidence AS v JOIN events AS e USING "
+                            "(event_id) WHERE v.memory_id = %s AND e.source = 'owner.decision' AND "
+                            "e.event_type = 'memory.corrected'",
+                            (row["memory_id"],),
+                        )
+                    )
             if event_ids == previous:
                 return event_ids
 
@@ -828,30 +1038,46 @@ class ErasureLedger:
         from companion.observation import expired_sources
 
         events = encode(record["event_ids"])
-        affected = {row["memory_id"] for row in store.rows(
-            "SELECT memory_id FROM memory_evidence WHERE event_id IN "
-            "(SELECT value FROM json_each(?))", (events,),
-        )} | set(record["memory_ids"])
-        store.execute("DELETE FROM memory_evidence WHERE event_id IN "
-                      "(SELECT value FROM json_each(?))", (events,))
+        affected = {
+            row["memory_id"]
+            for row in store.rows(
+                'SELECT memory_id FROM memory_evidence WHERE event_id IN (SELECT value COLLATE "C" '
+                "FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value))",
+                (events,),
+            )
+        } | set(record["memory_ids"])
+        store.execute(
+            'DELETE FROM memory_evidence WHERE event_id IN (SELECT value COLLATE "C" '
+            "FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value))",
+            (events,),
+        )
         for memory_id in affected:
-            sources = [row["event_id"] for row in store.rows(
-                "SELECT e.event_id FROM memory_evidence v JOIN events e USING(event_id) "
-                "JOIN conversations c USING(conversation_id) WHERE v.memory_id=? "
-                "AND v.polarity=1 AND e.redacted=0 AND e.actor_id='owner' "
-                "AND e.privacy_scope='private' AND c.scope='private' AND c.owner_actor_id='owner' "
-                "AND NOT EXISTS (SELECT 1 FROM runtime_meta r "
-                "WHERE r.key='erased_event:'||e.event_id)",
-                (memory_id,),
-            )]
-            valid = any(not expired_sources(store, [source], record["retention_cutoff"])
-                        for source in sources)
-            store.execute("DELETE FROM memory_revisions WHERE memory_id=?", (memory_id,))
+            sources = [
+                row["event_id"]
+                for row in store.rows(
+                    (
+                        'SELECT e.event_id FROM memory_evidence AS v JOIN '
+                        'events AS e USING (event_id) JOIN conversations AS c '
+                        'USING (conversation_id) WHERE v.memory_id = %s AND '
+                        'v.polarity = 1 AND e.redacted = 0 AND e.actor_id = '
+                        "'owner' AND e.privacy_scope = 'private' AND c.scope = "
+                        "'private' AND c.owner_actor_id = 'owner' AND NOT "
+                        'EXISTS(SELECT 1 FROM runtime_meta AS r WHERE r.key = '
+                        "'erased_event:' || e.event_id)"
+                    ),
+                    (memory_id,),
+                )
+            ]
+            valid = any(
+                not expired_sources(store, [source], record["retention_cutoff"])
+                for source in sources
+            )
+            store.execute("DELETE FROM memory_revisions WHERE memory_id = %s", (memory_id,))
             if not valid:
                 store.execute(
-                    "UPDATE memories SET confidence=0,needs_review=1,updated_at=?,"
-                    "status=CASE WHEN status IN ('CONFIRMED','HYPOTHESIS') "
-                    "THEN 'HYPOTHESIS' ELSE status END WHERE memory_id=? AND status<>'FORGOTTEN'",
+                    "UPDATE memories SET confidence = 0, needs_review = 1, updated_at = %s, status "
+                    "= CASE WHEN status IN ('CONFIRMED', 'HYPOTHESIS') THEN 'HYPOTHESIS' ELSE "
+                    "status END WHERE memory_id = %s AND status <> 'FORGOTTEN'",
                     (record["at"], memory_id),
                 )
 
@@ -859,31 +1085,37 @@ class ErasureLedger:
     def erase_memories(store, memory_ids, at):
         for memory_id in memory_ids:
             store.execute(
-                "UPDATE memories SET content='',status='FORGOTTEN',fact_key='',"
-                "confidence=0,updated_at=? WHERE memory_id=?",
+                "UPDATE memories SET content = '', status = 'FORGOTTEN', fact_key = '', confidence "
+                "= 0, updated_at = %s WHERE memory_id = %s",
                 (at, memory_id),
             )
-            store.execute("DELETE FROM memory_revisions WHERE memory_id=?", (memory_id,))
-            store.execute("DELETE FROM memory_evidence WHERE memory_id=?", (memory_id,))
+            store.execute("DELETE FROM memory_revisions WHERE memory_id = %s", (memory_id,))
+            store.execute("DELETE FROM memory_evidence WHERE memory_id = %s", (memory_id,))
 
     @staticmethod
     def erase_events(store, record, event_ids):
         for event_id in event_ids:
-            store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
-                          ("erased_event:" + event_id, record["erasure_id"]))
             store.execute(
-                "UPDATE events SET body_json='{}',redacted=1,memory_processed=1 WHERE event_id=?",
+                "INSERT INTO runtime_meta VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                ("erased_event:" + event_id, record["erasure_id"]),
+            )
+            store.execute(
+                "UPDATE events SET body_json = '{}', redacted = 1, memory_processed = 1 WHERE "
+                "event_id = %s",
                 (event_id,),
             )
-            job_queue.cancel_active(store, "event_id=?", (event_id,), "PRIVACY_CHANGED")
+            job_queue.cancel_active(store, 'event_id=%s', (event_id,), "PRIVACY_CHANGED")
     def clear_event_replies(self, store, event_ids):
         for event_id in event_ids:
-            transport.revoke_deliveries(store, "origin_event_id=?", (event_id,), erase_content=True)
+            transport.revoke_deliveries(
+                store, 'origin_event_id=%s', (event_id,), erase_content=True,
+            )
 
     @staticmethod
     def record_complete(store, record):
         store.execute(
-            "INSERT OR IGNORE INTO privacy_erasure_ledger VALUES (?,?,?,?,?,?)",
+            "INSERT INTO privacy_erasure_ledger VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO "
+            "NOTHING",
             (
                 record["erasure_id"],
                 record.get("target_type", "memory"),

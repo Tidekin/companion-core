@@ -205,7 +205,7 @@ def test_private_file_real_entrypoint_independent_workers(
                             assert await owner_notices.flush_one(runtime, client)
                             assert (
                                 core.store.one(
-                                    "SELECT redacted FROM events WHERE event_id=?", (event_id,)
+                                    'SELECT redacted FROM events WHERE event_id=%s', (event_id,)
                                 )["redacted"]
                                 == 1
                             )

@@ -2,10 +2,10 @@
 
 import asyncio
 import json
-import sqlite3
 import sys
 from datetime import datetime
 
+import psycopg
 import pytest
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
@@ -17,6 +17,7 @@ from companion.goals import GoalContinuationDecision, GoalProposal, GoalScope
 from companion.memory_projections import MemoryProjections
 from companion.store import after
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.goal_read_plan import URLS, create, prepared, read
 
 
@@ -76,7 +77,7 @@ def test_plan_serial_receipts_reorder_cas_and_original_evidence(core, tmp_path):
             assert all(step["state"] == "DONE" for step in final["steps"])
             assert len(core.store.rows("SELECT * FROM reading_attempts")) == 3
             assert len({step["outcome_event_id"] for step in final["steps"]}) == 3
-            eid = core.memory.episodes(core.store.rows("SELECT * FROM events WHERE event_id=?",
+            eid = core.memory.episodes(core.store.rows('SELECT * FROM events WHERE event_id=%s',
                                                        (source,)), core.clock())
             projected = MemoryProjections(core.memory).snapshot(core.clock(), episode_ids=[eid])
             assert projected["episodes"][0]["goals"][0]["state"] == "done"
@@ -132,7 +133,9 @@ def test_unknown_dispatch_never_replays_or_continues_after_restart(core, tmp_pat
     run(scenario())
 
 
-def test_prior_result_erasure_cancels_tail_and_replays_into_old_backup(core, tmp_path):
+def test_prior_result_erasure_cancels_tail_and_replays_into_old_backup(
+    empty_database, core, tmp_path,
+):
     async def scenario():
         async with prepared(core, tmp_path) as (client, source, _):
             goal_id = await create(client, source, count=2)
@@ -141,16 +144,20 @@ def test_prior_result_erasure_cancels_tail_and_replays_into_old_backup(core, tmp
             core.goals.continue_plan(goal_id, decision(core, goal_id))
             result = core.store.one("SELECT outcome_event_id FROM goal_steps WHERE state='DONE'")[
                 "outcome_event_id"]
-            archive, target = tmp_path / "plan.enc", tmp_path / "restore.db"
+            archive = tmp_path / "plan.enc"
+            restored_state = tmp_path / "restored-state"
             key = Fernet.generate_key()
             backup(core.settings.database, archive, key)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [result], core.clock())
-            restore(archive, target, key, core.settings.erasure_ledger)
-            with Core(core.settings.model_copy(update={"database": str(target)}),
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
+            with Core(core.settings.model_copy(update={
+                "database": empty_database, "state_directory": str(restored_state),
+            }),
                       core.model, core.clock) as restored:
                 for instance in (core, restored):
-                    assert instance.store.one("SELECT redacted FROM goals WHERE goal_id=?",
+                    assert instance.store.one('SELECT redacted FROM goals WHERE goal_id=%s',
                         (goal_id,))["redacted"]
                     assert not instance.store.rows("SELECT * FROM goal_step_evidence")
                     assert not instance.store.rows(
@@ -281,15 +288,22 @@ def test_reorder_sql_failure_rolls_back_parking_positions_and_step_identities(co
             parent = core.goals.get(goal_id)
             order = list(reversed([step["step_id"] for step in core.goals.plan(goal_id)["steps"]
                                    if step["state"] == "WAITING_DECISION"]))
-            core.store.execute("CREATE TEMP TRIGGER fail_position_refill BEFORE UPDATE OF position "
-                "ON goal_steps WHEN OLD.position>3 AND NEW.position<=3 BEGIN "
-                "SELECT RAISE(ABORT,'synthetic_position_refill_failure'); END")
+            core.store.execute("""
+                CREATE FUNCTION fail_position_refill() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    RAISE EXCEPTION 'synthetic_position_refill_failure';
+                END $$""")
+            core.store.execute("""
+                CREATE TRIGGER fail_position_refill BEFORE UPDATE OF position ON goal_steps
+                FOR EACH ROW WHEN (OLD.position>3 AND NEW.position<=3)
+                EXECUTE FUNCTION fail_position_refill()""")
             try:
-                with pytest.raises(sqlite3.IntegrityError,
+                with pytest.raises(psycopg.errors.RaiseException,
                                    match="synthetic_position_refill_failure"):
                     core.goals.continue_plan(goal_id, decision(core, goal_id, order=order))
             finally:
-                core.store.execute("DROP TRIGGER fail_position_refill")
+                core.store.execute("DROP TRIGGER fail_position_refill ON goal_steps")
+                core.store.execute("DROP FUNCTION fail_position_refill()")
             assert core.store.rows("SELECT * FROM goal_steps ORDER BY step_id") == before
             assert core.goals.get(goal_id) == parent
             assert not core.store.one("SELECT 1 FROM goal_steps WHERE position>3")
@@ -305,10 +319,10 @@ def test_completed_plan_projection_requires_final_result_and_committed_positions
                 assert await read(client, core.clock(), url) == (True, 3)
                 if index < 2:
                     core.goals.continue_plan(goal_id, decision(core, goal_id))
-            steps = core.store.rows("SELECT * FROM goal_steps WHERE goal_id=? ORDER BY position",
+            steps = core.store.rows('SELECT * FROM goal_steps WHERE goal_id=%s ORDER BY position',
                                    (goal_id,))
             assert len(steps) == 3 and all(step["state"] == "DONE" for step in steps)
-            eid = core.memory.episodes(core.store.rows("SELECT * FROM events WHERE event_id=?",
+            eid = core.memory.episodes(core.store.rows('SELECT * FROM events WHERE event_id=%s',
                                                        (source,)), core.clock())
             view = MemoryProjections(core.memory)
             assert view.snapshot(core.clock(), episode_ids=[eid])["episodes"][0]["goals"][0][
@@ -317,17 +331,17 @@ def test_completed_plan_projection_requires_final_result_and_committed_positions
                 "memories", "model_usage", "model_admissions", "exploration_requests",
                 "reading_attempts", "observations")}
             for damage in ("first_result", "parking_position"):
-                core.store.execute("UPDATE goals SET result_event_id=? WHERE goal_id=?",
+                core.store.execute('UPDATE goals SET result_event_id=%s WHERE goal_id=%s',
                     (steps[0 if damage == "first_result" else -1]["outcome_event_id"], goal_id))
                 if damage == "parking_position":
-                    core.store.execute("UPDATE goal_steps SET position=4 WHERE step_id=?",
+                    core.store.execute('UPDATE goal_steps SET position=4 WHERE step_id=%s',
                                        (steps[-1]["step_id"],))
-                before = core.store.db.total_changes
+                before = logical_state(core.store)
                 snapshot = view.snapshot(core.clock(), episode_ids=[eid])
                 projected = snapshot["episodes"][0]["goals"][0]
                 assert projected["native_state"] == "DONE" and projected["state"] == "UNKNOWN"
                 assert not projected["closed"]
-                assert core.store.db.total_changes == before
+                assert logical_state(core.store) == before
                 assert retained == {table: core.store.rows(f"SELECT * FROM {table}")
                                     for table in retained}
     run(scenario())

@@ -160,8 +160,6 @@ async def verify(directory, report):
         memory_enabled=True,
         diary_enabled=True,
         proactive_enabled=False,
-        monthly_limit_micro_usd=50000,
-        diary_daily_micro_usd=50000,
         database=str(directory / "core.db"),
         erasure_ledger=str(directory / "erasures.jsonl"),
     )

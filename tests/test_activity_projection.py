@@ -1,7 +1,5 @@
 """Inspection is bounded, source checked and has no execution or maintenance effects."""
-
 import json
-import sqlite3
 from contextlib import closing
 
 import pytest
@@ -15,10 +13,12 @@ from companion.cognition_read import CognitionRead
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
 from companion.memory import Memory
 from companion.observation import ObservationEvent
+from companion.postgres import Database
 from companion.runtime import Runtime
 from companion.store import Store
 from companion.transport import begin_send, delivery_result, lease_deliveries, reconcile_delivery
 from tests.conftest import ingest, run
+from tests.postgres_fixture import isolated_database, logical_state
 from tests.support.confirmed_memory import remember
 from tests.support.goals import setup_goal
 from tests.support.memory_projections import fetched
@@ -40,7 +40,7 @@ def goal_item(core, key):
     return next(item for item in inspect(core)["items"] if item["id"] == key)
 
 
-def test_read_is_metadata_only_and_sqlite_rejects_any_write(core, monkeypatch):
+def test_read_is_metadata_only_in_native_readonly_scope(core, monkeypatch):
     goal = setup_goal(core)
     mid = remember(core, 2, "合成私有原话不能成为快照正文", confirmed=True)
     eid = episode(core, 2)
@@ -51,19 +51,18 @@ def test_read_is_metadata_only_and_sqlite_rejects_any_write(core, monkeypatch):
     monkeypatch.setattr(core.goals, "recent", forbidden)
     monkeypatch.setattr(core.reading, "lease", forbidden)
     monkeypatch.setattr(core.memory, "search", forbidden)
-    before = "\n".join(core.store.db.iterdump())
-    changes = core.store.db.total_changes
-    writes = {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
-              sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_DROP_TABLE}
-    core.store.db.set_authorizer(lambda action, *args:
-                                 sqlite3.SQLITE_DENY if action in writes else sqlite3.SQLITE_OK)
-    try:
-        result = inspect(core, memory_ids=[mid], episode_ids=[eid])
-        assert result == inspect(core, memory_ids=[mid], episode_ids=[eid])
-    finally:
-        core.store.db.set_authorizer(None)
-    assert core.store.db.total_changes == changes
-    assert "\n".join(core.store.db.iterdump()) == before
+    before = logical_state(core.store)
+    original = activity_projection._work
+
+    def readonly(reader, sources, candidate):
+        assert core.store.in_read_snapshot
+        assert core.store.one("SHOW transaction_read_only")["transaction_read_only"] == "on"
+        return original(reader, sources, candidate)
+
+    monkeypatch.setattr(activity_projection, "_work", readonly)
+    result = inspect(core, memory_ids=[mid], episode_ids=[eid])
+    assert result == inspect(core, memory_ids=[mid], episode_ids=[eid])
+    assert logical_state(core.store) == before
     assert core.model.calls == []
     assert result["presence"]["state"] == "UNKNOWN"
     assert result["attention"]["used_in_request"] == "NOT_RECORDED"
@@ -105,13 +104,14 @@ def test_native_labels_never_supply_completion_proof(core, damage):
     core.goals.accept(key)
     step = core.goals.claim()
     if damage == "uncertain":
-        core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=?",
+        core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=%s",
                            (step["step_id"],))
     else:
-        core.store.execute("UPDATE goals SET state='DONE' WHERE goal_id=?", (key,))
+        core.store.execute("UPDATE goals SET state='DONE' WHERE goal_id=%s", (key,))
         if damage == "missing_step":
-            core.store.execute("DELETE FROM goal_step_evidence WHERE step_id=?", (step["step_id"],))
-            core.store.execute("DELETE FROM goal_steps WHERE goal_id=?", (key,))
+            core.store.execute('DELETE FROM goal_step_evidence WHERE step_id=%s',
+                               (step["step_id"],))
+            core.store.execute('DELETE FROM goal_steps WHERE goal_id=%s', (key,))
     item = goal_item(core, key)
     assert item["execution"]["state"] == "UNKNOWN" and item["result"] is None
 
@@ -143,7 +143,7 @@ def test_combined_limit_keeps_unknown_ahead_of_newer_jobs(core):
     key = setup_goal(core)
     core.goals.accept(key)
     step = core.goals.claim()
-    core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=?",
+    core.store.execute("UPDATE goal_steps SET state='EXECUTION_UNCERTAIN' WHERE step_id=%s",
                        (step["step_id"],))
     for number in range(2, 27):
         ingest(core, number, "合成新消息")
@@ -165,12 +165,12 @@ def test_latest_epoch_is_checked_after_read_transaction_closes(core, monkeypatch
     setup_goal(core)
     original = activity_projection._work
     changed = []
-    with closing(Store(core.settings.database)) as writer:
+    with closing(Store(core.database, core.settings.state_directory)) as writer:
         def concurrent(reader, sources, candidate):
             item = original(reader, sources, candidate)
             if not changed:
-                assert core.store.db.in_transaction
-                with writer.transaction():
+                assert core.store.in_read_snapshot
+                with writer.transaction(control_write=True):
                     writer.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
                     privacy.advance_epoch(writer)
                 changed.append(True)
@@ -178,7 +178,7 @@ def test_latest_epoch_is_checked_after_read_transaction_closes(core, monkeypatch
         monkeypatch.setattr(activity_projection, "_work", concurrent)
         with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
             inspect(core)
-    assert changed and not core.store.db.in_transaction
+    assert changed and not core.store.in_transaction
     assert inspect(core)["items"] == []
 
 
@@ -191,8 +191,8 @@ def test_independent_ledger_erasure_during_read_cannot_publish_old_snapshot(core
         item = original(reader, sources, candidate)
         if not changed:
             with Runtime(core.settings, core.clock) as writer:
-                assert writer.store is not core.store and core.store.db.in_transaction
-                with writer.store.transaction():
+                assert writer.store is not core.store and core.store.in_read_snapshot
+                with writer.store.transaction(control_write=True):
                     writer.ledger.expire_events(writer.store, ["evt_test_1"], core.clock())
             changed.append(True)
         return item
@@ -213,25 +213,25 @@ def test_newer_unreplayed_ledger_fails_after_ending_the_read_snapshot(core, monk
         if not changed:
             with Runtime(core.settings, core.clock) as writer:
                 with pytest.raises(RuntimeError, match="synthetic commit loss"):
-                    with writer.store.transaction():
+                    with writer.store.transaction(control_write=True):
                         writer.ledger.expire_events(writer.store, ["evt_test_1"], core.clock())
                         raise RuntimeError("synthetic commit loss")
             changed.append(True)
         return item
 
     monkeypatch.setattr(activity_projection, "_work", interrupted_erasure)
-    before = core.store.db.total_changes
+    before = logical_state(core.store)
     with pytest.raises(CoreError, match="ERASURE_REPLAY_REQUIRED"):
         inspect(core)
-    assert changed and not core.store.db.in_transaction
-    assert core.store.db.total_changes == before  # Inspection never replays or repairs.
+    assert changed and not core.store.in_transaction
+    assert logical_state(core.store) == before  # Inspection never replays or repairs.
 
 
-def test_native_work_rows_share_one_consistent_sqlite_read_snapshot(core, monkeypatch):
+def test_native_work_rows_share_one_consistent_read_snapshot(core, monkeypatch):
     first, second = setup_goal(core), setup_goal(core, number=2)
     original = activity_projection._work
     changed = []
-    with closing(Store(core.settings.database)) as writer:
+    with closing(Store(core.database, core.settings.state_directory)) as writer:
         def update_work(reader, sources, candidate):
             item = original(reader, sources, candidate)
             if not changed:
@@ -284,12 +284,12 @@ def test_expired_reader_lease_is_only_a_record_never_presence_or_a_retry(core):
 
     _, leased, _ = queued(core)
     core.clock.advance(core.settings.lease_seconds + 1)
-    before = "\n".join(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = inspect(core)
     item = next(row for row in result["items"] if row["id"] == leased["request_id"])
     assert item["attempt_state"] == "RUNNING" and not item["lease"]["valid_at_as_of"]
     assert item["lease"]["worker_presence"] == "UNKNOWN"
-    assert "\n".join(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
 
 
 def test_watched_is_an_analysis_receipt_and_never_current_playback(core):
@@ -353,9 +353,9 @@ def test_future_read_permission_and_historical_processing_stay_separate(core, bo
     else:
         forgotten = core.observations.grants.forget(grant.grant_id, core.ledger)
         assert forgotten["history_erased"] is True
-    before = "\n".join(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = inspect(core)
-    assert "\n".join(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     if boundary == "processing_withdrawal":
         assert evidence.event_id not in json.dumps(result)
     else:
@@ -367,7 +367,7 @@ def test_malformed_or_unavailable_reader_result_cannot_leak_an_id(core, body):
     from tests.support.reading_service import queued
 
     _, leased, _ = queued(core)
-    core.store.execute("UPDATE reading_attempts SET result_event_ids_json=?", (body,))
+    core.store.execute('UPDATE reading_attempts SET result_event_ids_json=%s', (body,))
     result = inspect(core)
     assert result["truncated"]
     assert leased["request_id"] not in {item["id"] for item in result["items"]}
@@ -379,23 +379,25 @@ def test_read_does_not_end_the_callers_transaction(core):
     with core.store.transaction():
         with pytest.raises(CoreError, match="ACTIVITY_SNAPSHOT_BUSY"):
             inspect(core)
-        assert core.store.db.in_transaction
+        assert core.store.in_transaction
 
 
 def test_restore_replays_ledger_before_source_and_attention_rebuild(core, tmp_path):
     mid = remember(core, 1, "后来明确遗忘的内容", confirmed=True)
     cid, eid = conversation(core), episode(core, 1)
-    archive, restored = tmp_path / "before.enc", tmp_path / "restored.db"
+    archive = tmp_path / "before.enc"
     secret = Fernet.generate_key()
     backup(core.settings.database, archive, secret)
     core.memory.decide(mid, "forget", core.clock())
-    restore(archive, restored, secret, core.settings.erasure_ledger)
-    with closing(Store(str(restored))) as store:
-        from types import SimpleNamespace
+    with isolated_database() as restored:
+        state = tmp_path / "restored-state"
+        restore(archive, restored, secret, core.settings.erasure_ledger, state_directory=state)
+        with Database(restored) as database, closing(Store(database, state)) as store:
+            from types import SimpleNamespace
 
-        memory = Memory(store, core.settings, core.ledger)
-        reader = CognitionRead(SimpleNamespace(store=store, memory=memory,
-                                              settings=core.settings, clock=core.clock))
-        result = reader.activity_snapshot(
-            {"conversation_id": cid, "memory_ids": [mid], "episode_ids": [eid]})
-        assert result["items"] == result["attention"]["items"] == []
+            memory = Memory(store, core.settings, core.ledger)
+            reader = CognitionRead(SimpleNamespace(store=store, memory=memory,
+                                                  settings=core.settings, clock=core.clock))
+            result = reader.activity_snapshot(
+                {"conversation_id": cid, "memory_ids": [mid], "episode_ids": [eid]})
+            assert result["items"] == result["attention"]["items"] == []

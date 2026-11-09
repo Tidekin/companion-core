@@ -73,6 +73,8 @@ def main():
                    check=True, timeout=40)
     with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf8") as environment:
         environment.write(f"COMPANION_POSTGRES_TEST_CONFIG={PRIVATE}\n")
+    with Path(os.environ["GITHUB_PATH"]).open("a", encoding="utf8") as path:
+        path.write(str(directory) + "\n")
     print("Fresh PostgreSQL test cluster ready on runner loopback")
 
 

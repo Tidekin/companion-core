@@ -27,7 +27,7 @@ def test_discovery_only_requires_its_original_native_grant(core, tmp_path, monke
             client, config, grant, now = values
             assert core.settings.paid_model.meme_input is None
             event, item = await discovery(core, *values)
-            original = core.store.one("SELECT authority_json FROM jobs WHERE job_id=?",
+            original = core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s',
                                        (item["job_id"],))["authority_json"]
             assert json.loads(original) == grant.authority
             owner_authority.stop(core.store, core.settings, core.clock,
@@ -37,7 +37,7 @@ def test_discovery_only_requires_its_original_native_grant(core, tmp_path, monke
                     meme_service.DiscoveryCheck(lease_token=item["lease_token"],
                                                 attempt_key=item["attempt_key"]))
             assert result(core, item, "UNKNOWN")["state"] == "UNKNOWN"
-            assert core.store.one("SELECT authority_json FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s',
                                   (item["job_id"],))["authority_json"] == original
             assert core.store.rows("SELECT * FROM model_usage") == []
             with pytest.raises(CoreError, match="OWNER_AUTHORITY_DISABLED"):
@@ -58,7 +58,7 @@ def test_caption_real_http_and_process_reuse_original_usage(core, tmp_path, monk
             response = await client.post("/internal/v1/memes/captions", json=request)
             assert response.status_code == 200, response.text
             job_id = response.json()["job_id"]
-            source = core.store.one("SELECT authority_json FROM jobs WHERE job_id=?", (job_id,))
+            source = core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s', (job_id,))
             assert json.loads(source["authority_json"]) == grant.authority
             config_path, output = tmp_path / "worker.json", tmp_path / "worker-report.json"
             process_config(core, config_path)
@@ -107,7 +107,7 @@ def test_native_caption_final_boundary_preserves_dispatch_knowledge(
                     owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                         operation_id="stop-caption-boundary", authority=grant.authority))
                 elif fence == "source":
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
 
             def provider(request):
@@ -122,7 +122,7 @@ def test_native_caption_final_boundary_preserves_dispatch_knowledge(
                                          event_hooks={"request": [hook]}) as transport:
                 core.model = ModelClient(core.settings, transport)
                 assert await core.run_once("caption-boundary")
-            usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE job_id=?",
+            usage = core.store.one('SELECT state,billed_micro_usd FROM model_usage WHERE job_id=%s',
                                    (job_id,))
             assert len(calls) == (1 if fence == "unknown" else 0)
             if fence == "unknown":

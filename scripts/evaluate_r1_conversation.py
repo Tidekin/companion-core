@@ -9,11 +9,9 @@ import hashlib
 import itertools
 import json
 import random
-import sqlite3
 import sys
 import tempfile
 import uuid
-from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,6 +36,7 @@ from companion.reply_segments import SegmentedReplyConfig  # noqa: E402
 from companion.store import after, encode, migrate  # noqa: E402
 from companion.style_observation import StyleObservationConfig, shadow_payload  # noqa: E402
 from companion.transport import enqueue  # noqa: E402
+from tests.postgres_fixture import isolated_database  # noqa: E402
 
 DATASET = ROOT / "tests/fixtures/r1_conversation_cases.json"
 NOW = "2026-10-24T06:30:00.000000+00:00"
@@ -105,7 +104,7 @@ def _ingest(core, name, text, *, old_session=False):
         "payload": {"text": text, "media": []}, "trace_id": "r1_" + name,
     })
     accepted = core.ingest(event, "r1_" + name)
-    source = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+    source = core.store.one("SELECT conversation_id FROM events WHERE event_id=%s",
                             (accepted["event_id"],))
     return {**accepted, "conversation_id": source["conversation_id"]}
 
@@ -116,12 +115,14 @@ def build_context(case, empty_database, directory):
     This isolates conversation strategy from retrieval/model randomness. It does
     not measure embedding quality or recreate missing historical request fields.
     """
-    database = directory / "case.sqlite3"
-    with closing(sqlite3.connect(empty_database)) as source:
-        with closing(sqlite3.connect(database)) as target:
-            source.backup(target)
+    with isolated_database(template=empty_database) as database:
+        return _build_context(case, database, directory)
+
+
+def _build_context(case, database, directory):
     settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="r1-offline-" * 4,
-                        database=str(database), erasure_ledger=str(directory / "erasures.jsonl"),
+                        database=database, state_directory=str(directory / "state"),
+                        erasure_ledger=str(directory / "erasures.jsonl"),
                         max_output_tokens=2048, context_soft_tokens=16000,
                         max_recent_messages=30, proactive_enabled=False,
                         expression_enabled=True, expression_selection_probability=0,
@@ -140,9 +141,9 @@ def build_context(case, empty_database, directory):
         for index, memory in enumerate(case["inputs"]["memories"]):
             accepted = _ingest(core, f"memory_{index}", memory["content"],
                                old_session=memory.get("cross_session", False))
-            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                (accepted["job_id"],))
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 mid = core.memory.add(Candidate(
                     subject="user", kind="preference", fact_key=memory.get("fact_key", str(index)),
                     content=memory["content"], evidence_event_id=accepted["event_id"],
@@ -153,12 +154,12 @@ def build_context(case, empty_database, directory):
             clock_value[0] = after(clock(), 60)
         for index, turn in enumerate(case["inputs"]["history"]):
             accepted = _ingest(core, f"history_{index}", turn["user"])
-            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                (accepted["job_id"],))
             if turn["assistant"]:
                 message = enqueue(core.store, accepted["event_id"], accepted["conversation_id"],
                                   turn["assistant"], clock())
-                core.store.execute("UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+                core.store.execute("UPDATE outbox SET state='SENT',sent_at=%s WHERE message_id=%s",
                                    (clock(), message))
             clock_value[0] = after(clock(), 60)
         accepted = _ingest(core, "current", case["inputs"]["text"])
@@ -225,6 +226,7 @@ def arm(base, strategy, case, style):
 
 def measurement_defaults():
     return Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="r1-offline-" * 4,
+                    database="dbname=synthetic",
                     max_output_tokens=2048, context_soft_tokens=16000,
                     input_rate=300000, cached_input_rate=6000, output_rate=1200000,
                     segmented_reply=None, **FROZEN_BASELINE)
@@ -251,10 +253,10 @@ def prepare(cases, output, *, repetitions=1, measurement_settings=None,
     temporary = ROOT / ".local/test-temp"
     temporary.mkdir(parents=True, exist_ok=True)
     records = []
-    with tempfile.TemporaryDirectory(prefix="r1-prepare-", dir=temporary) as temp:
+    with (tempfile.TemporaryDirectory(prefix="r1-prepare-", dir=temporary) as temp,
+          isolated_database() as empty):
         temp = Path(temp)
-        empty = temp / "empty.sqlite3"
-        migrate(str(empty))
+        migrate(empty)
         for index, case in enumerate(cases):
             directory = temp / str(index)
             directory.mkdir()

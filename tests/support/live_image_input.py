@@ -26,7 +26,7 @@ def options():
         "core_options": {
             "content_enabled": True,
             "observation_enabled": True,
-            "content": ContentConfig(use_chat_model_for_vision=True, image_daily_micro_usd=10000),
+            "content": ContentConfig(use_chat_model_for_vision=True),
             "observation_adapters": {
                 "content_image": ObservationAdapterConfig(
                     token="synthetic-image-adapter-token-12345",

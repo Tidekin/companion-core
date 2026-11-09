@@ -1,6 +1,7 @@
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from companion.config import Settings
 from companion.contracts import CoreError, DeliveryResult
 from companion.core import Core
 from companion.model import ModelClient
+from companion.postgres import Database
 from companion.store import Store, migrate
 from companion.transport import begin_send, delivery_result, enqueue
 from tests.conftest import event, ingest, run
@@ -170,7 +172,7 @@ def test_m0_06_fifo_even_with_two_workers(core):
     other.store.close()
     for _ in range(5):
         run(core.run_once())
-    rows = core.store.rows("SELECT content_json FROM outbox ORDER BY rowid")
+    rows = core.store.rows('SELECT content_json FROM outbox ORDER BY record_sequence')
     assert [json.loads(r["content_json"])["text"] for r in rows] == [
         f"回复：message-{i}" for i in range(5)
     ]
@@ -235,19 +237,19 @@ def test_m0_10_authentication_and_no_published_ports(core):
     assert all("ports" not in service for service in compose["services"].values())
 
 
-def test_m0_11_encrypted_backup_restore(core, tmp_path):
+def test_m0_11_encrypted_backup_restore(core, tmp_path, empty_database):
     ingest(core)
     run(core.run_once())
     key = Fernet.generate_key()
-    archive, restored = tmp_path / "backup.enc", tmp_path / "restored.db"
+    archive, restored = tmp_path / "backup.enc", empty_database
     backup(core.settings.database, archive, key)
     assert not archive.read_bytes().startswith(b"SQLite")
-    restore(archive, restored, key, core.settings.erasure_ledger)
-    s = Store(str(restored))
-    assert s.one("SELECT COUNT(*) AS n FROM events")["n"] == 1
-    assert s.one("SELECT state FROM jobs")["state"] == "SUCCEEDED"
-    assert s.one("SELECT billed_micro_usd FROM model_usage")["billed_micro_usd"] == 43
-    s.close()
+    restore(archive, restored, key, core.settings.erasure_ledger,
+            state_directory=tmp_path / "restored-state")
+    with Database(restored) as database, closing(Store(database, tmp_path / "restored-state")) as s:
+        assert s.one("SELECT COUNT(*) AS n FROM events")["n"] == 1
+        assert s.one("SELECT state FROM jobs")["state"] == "SUCCEEDED"
+        assert s.one("SELECT billed_micro_usd FROM model_usage")["billed_micro_usd"] == 43
 
 
 def test_m0_12_proactive_quota_does_not_block_chat(core):
@@ -278,13 +280,13 @@ def test_m0_12_proactive_quota_does_not_block_chat(core):
     })
     core.observations.append("reader", observed)
     candidate = core.social.consider(observed.event_id)
-    assert core.store.one("SELECT state FROM social_candidates WHERE candidate_id=?",
+    assert core.store.one('SELECT state FROM social_candidates WHERE candidate_id=%s',
                           (candidate,))["state"] == "CANDIDATE"
     assert proactive_counts(core.store, core.settings, core.clock()) == (1, False)
     assert not core.social.flush()
     accepted = ingest(core, 2, "普通回复继续")
     assert run(core.run_once())
-    assert core.store.one("SELECT COUNT(*) AS n FROM outbox WHERE origin_event_id=?",
+    assert core.store.one('SELECT COUNT(*) AS n FROM outbox WHERE origin_event_id=%s',
                           (accepted["event_id"],))["n"] == 1
     assert proactive_counts(core.store, core.settings, core.clock())[0] == 1
 
@@ -303,7 +305,9 @@ def test_m0_14_repeat_migration_preserves_data(core):
     migrate(core.settings.database)
     migrate(core.settings.database)
     assert core.store.one("SELECT COUNT(*) AS n FROM events")["n"] == 1
-    assert core.store.rows("PRAGMA foreign_key_check") == []
+    assert core.store.rows(
+        "SELECT conname FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+        "AND contype='f' AND NOT convalidated") == []
 
 
 def test_m0_15_untrusted_text_cannot_change_permissions(core):

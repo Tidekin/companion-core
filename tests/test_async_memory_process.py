@@ -23,14 +23,14 @@ def test_tcp_input_independent_worker_process_and_source_fence(core, tmp_path, w
         async with environment(core, tmp_path, purposes=("chat", "memory")) as (entry, _):
             client = entry.client
             source = await entry.admit(1, "青禾项目使用蓝色配色")
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 mid = core.memory.add(Candidate(subject="project", kind="fact", fact_key="color",
                     content=source["payload"]["text"], evidence_event_id=source["event_id"],
                     evidence_quote=source["payload"]["text"]), core.clock(), confirmed=True)
             question = await entry.admit(2, "青禾项目使用什么配色")
             config = core.settings.model_dump(mode="json")
             # Public synthetic fixture credentials, never production settings.
-            for name in ("model_key", "bridge_token", "control_token"):
+            for name in ("database", "model_key", "bridge_token", "control_token"):
                 config[name] = getattr(core.settings, name).get_secret_value()
             await asyncio.to_thread(settings_path.write_text, encode(config), encoding="utf-8")
             script = (
@@ -85,7 +85,7 @@ def test_tcp_input_independent_worker_process_and_source_fence(core, tmp_path, w
                     child.kill()
                     await child.communicate()
             job = core.store.one(
-                "SELECT state,last_error_code FROM jobs WHERE event_id=?", (question["event_id"],),
+                'SELECT state,last_error_code FROM jobs WHERE event_id=%s', (question["event_id"],),
             )
             if withdraw:
                 assert result["calls"] == []

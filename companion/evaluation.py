@@ -30,13 +30,11 @@ from companion.store import after, encode
 CAPABILITY = "model.evaluate"
 DEVICE = "core.evaluation"
 CALLS = 6
-COST = 50000
-ATTEMPT_MICRO_USD = 5000
 SHA = r"^[a-f0-9]{64}$"
 # A pilot replays owner turns; a synthetic plan carries only prepared SYNTHETIC cases.
 LIMITS = {
-    "owner_pilot": {"calls": CALLS, "cost": COST, "cases": 1, "bytes": 120000, "input": 2400},
-    "synthetic": {"calls": 216, "cost": 1000000, "cases": 36, "bytes": 1500000, "input": 8000},
+    "owner_pilot": {"calls": CALLS, "cases": 1, "bytes": 120000, "input": 2400},
+    "synthetic": {"calls": 216, "cases": 36, "bytes": 1500000, "input": 8000},
 }
 MAX_HTTP_BODY_BYTES = max(value["bytes"] for value in LIMITS.values()) + 1024
 # Requests per worker claim; later batches queue behind ordinary chat.
@@ -161,14 +159,12 @@ def _plan(settings, manifest):
                 measured = _request_measurement(settings, payload)
                 if measured["budget_input_tokens"] is None or any(
                     row.get(key) != value for key, value in measured.items()
-                ) or measured["budget_input_tokens"] > limits["input"] or measured[
-                    "estimated_reservation_micro_usd"] > ATTEMPT_MICRO_USD:
+                ) or measured["budget_input_tokens"] > limits["input"]:
                     raise ValueError("unsupported, changed or over-limit measurement")
                 measured_costs.append(measured["estimated_reservation_micro_usd"])
             shared.setdefault(row["case"], set()).add(digest)
         if version == 2 and (plan.get("repetitions") != repetitions
-                             or plan.get("estimated_reservation_micro_usd") != sum(measured_costs)
-                             or sum(measured_costs) > limits["cost"]):
+                             or plan.get("estimated_reservation_micro_usd") != sum(measured_costs)):
             raise ValueError("measurement total or repetition count")
         if any(len(digests) != 1 for digests in shared.values()) or len(
             set(manifest["source_event_ids"])) != len(manifest["source_event_ids"]):
@@ -181,16 +177,23 @@ def _plan(settings, manifest):
 def _sources(store, settings, ids, now):
     result, conversations = {}, set()
     for source_id in ids:
-        source = store.one("SELECT e.*,c.scope,c.owner_actor_id FROM events e JOIN conversations c "
-                           "USING(conversation_id) WHERE event_id=?", (source_id,))
+        source = store.one('SELECT e.event_id AS event_id, e.schema_version AS schema_version, '
+            'e.source AS source, e.source_event_id AS source_event_id, e.conversation_id AS '
+            'conversation_id, e.actor_id AS actor_id, e.event_type AS event_type, e.occurred_at AS '
+            'occurred_at, e.ingested_at AS ingested_at, e.privacy_scope AS privacy_scope, '
+            'e.body_json AS body_json, e.trace_id AS trace_id, e.idempotency_key AS '
+            'idempotency_key, e.fingerprint AS fingerprint, e.redacted AS redacted, '
+            'e.memory_processed AS memory_processed, e.reply_revision AS reply_revision, c.scope '
+            'AS scope, c.owner_actor_id AS owner_actor_id FROM events AS e JOIN conversations AS c '
+            'ON e.conversation_id = c.conversation_id WHERE e.event_id = %s', (source_id,))
         if (not source or not reply_revision.owner_input(store, source_id)
             or not reply_revision.source_active(store, source_id)
             or source["scope"] != "private" or source["owner_actor_id"] != "owner"):
             raise CoreError("EVALUATION_OWNER_SOURCE_REQUIRED", 403)
         input_recall.require_not_recalled(store, source["source_event_id"])
         conversations.add(source["conversation_id"])
-        sent = store.rows("SELECT message_id,content_sha256,sent_at FROM outbox "
-                          "WHERE origin_event_id=? AND state='SENT' ORDER BY message_id",
+        sent = store.rows('SELECT message_id, content_sha256, sent_at FROM outbox WHERE '
+            "origin_event_id = %s AND state = 'SENT' ORDER BY message_id NULLS FIRST",
                           (source_id,))
         result[source_id] = {"event_sha256": event_digest(source), "sent": sent}
     if len(conversations) != 1 or expired_sources(
@@ -210,19 +213,19 @@ def _authority(store, settings, clock, current_request=None):
 
 
 def _conversation_binding(store, conversation):
-    latest = store.one("SELECT event_id FROM events WHERE conversation_id=? AND "
-                       + reply_revision.OWNER_INPUT + " ORDER BY rowid DESC LIMIT 1",
+    latest = store.one('SELECT event_id FROM events WHERE conversation_id=%s AND '
+                       + reply_revision.OWNER_INPUT + ' ORDER BY record_sequence DESC LIMIT 1',
                        (conversation,))
     return {"conversation_revision": store.one(
-        "SELECT reply_revision FROM conversations WHERE conversation_id=?",
+        'SELECT reply_revision FROM conversations WHERE conversation_id = %s',
         (conversation,))["reply_revision"], "latest_owner_event": latest["event_id"]}
 
 
 def _inputs(store, settings, manifest, now):
     """Owner sources and conversation fences; a synthetic plan has neither."""
     if manifest.get("kind", "owner_pilot") == "synthetic":
-        row = store.one("SELECT conversation_id FROM conversations WHERE scope='private' "
-                        "AND owner_actor_id='owner' ORDER BY rowid LIMIT 1")
+        row = store.one("SELECT conversation_id FROM conversations WHERE scope = 'private' AND "
+            "owner_actor_id = 'owner' ORDER BY record_sequence NULLS FIRST LIMIT 1")
         if not row:
             raise CoreError("EVALUATION_OWNER_SOURCE_REQUIRED", 403)
         return {}, row["conversation_id"], {}
@@ -238,7 +241,7 @@ def preview(store, settings, clock, manifest):
     _authority(store, settings, clock)
     digest = paid_budget.sha(data)
     return {"manifest_sha256": digest, "request_count": len(rows),
-            "max_cost_micro_usd": _limits(data)["cost"], "consent_scope": {
+            "consent_scope": {
                 "capabilities": [CAPABILITY], "device_id": DEVICE, "session_id": digest}}
 
 
@@ -249,7 +252,13 @@ def submit(core, request):
         digest, now = prepared["manifest_sha256"], clock()
         consent = ConsentService(store, settings, clock).require(
             request.consent_id, CAPABILITY, DEVICE, digest)
-        previous = store.one("SELECT * FROM evaluation_runs WHERE manifest_sha256=?", (digest,))
+        previous = store.one('SELECT evaluation_runs.evaluation_id AS evaluation_id, '
+            'evaluation_runs.manifest_sha256 AS manifest_sha256, evaluation_runs.consent_id AS '
+            'consent_id, evaluation_runs.job_id AS job_id, evaluation_runs.manifest_json AS '
+            'manifest_json, evaluation_runs.sources_json AS sources_json, '
+            'evaluation_runs.binding_json AS binding_json, evaluation_runs.redacted AS redacted, '
+            'evaluation_runs.created_at AS created_at FROM evaluation_runs AS evaluation_runs '
+            'WHERE evaluation_runs.manifest_sha256 = %s', (digest,))
         if previous:
             return {"evaluation_id": previous["evaluation_id"], "job_id": previous["job_id"],
                     "manifest_sha256": digest, "reused": True}
@@ -279,9 +288,14 @@ def submit(core, request):
 
 
 def check_job(store, settings, clock, job_id, *, lease_token=None, current_request=None):
-    run = store.one("SELECT r.*,j.state,j.lease_token,j.lease_until,j.event_id,e.conversation_id "
-                    "FROM evaluation_runs r JOIN jobs j USING(job_id) JOIN events e "
-                    "ON e.event_id=j.event_id WHERE r.job_id=? AND j.kind='evaluation'", (job_id,))
+    run = store.one('SELECT r.evaluation_id AS evaluation_id, r.manifest_sha256 AS '
+        'manifest_sha256, r.consent_id AS consent_id, r.job_id AS job_id, r.manifest_json AS '
+        'manifest_json, r.sources_json AS sources_json, r.binding_json AS binding_json, r.redacted '
+        'AS redacted, r.created_at AS created_at, j.state AS state, j.lease_token AS lease_token, '
+        'j.lease_until AS lease_until, j.event_id AS event_id, e.conversation_id AS '
+        'conversation_id FROM evaluation_runs AS r JOIN jobs AS j ON r.job_id = j.job_id JOIN '
+        'events AS e ON e.event_id = j.event_id WHERE r.job_id = %s AND j.kind = '
+        "'evaluation'", (job_id,))
     if not run or run["redacted"] or run["state"] != "RUNNING" or (
         not run["lease_until"] or run["lease_until"] <= clock()
     ) or lease_token is not None and lease_token != run["lease_token"]:
@@ -303,22 +317,21 @@ def check_job(store, settings, clock, job_id, *, lease_token=None, current_reque
 
 
 def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_input):
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("EVALUATION_ADMISSION_TRANSACTION_REQUIRED")
     run, manifest = check_job(store, settings, clock, job_id)
-    prior = store.rows("SELECT request_id,state,billed_micro_usd FROM model_usage "
-                       "WHERE job_id=? ORDER BY rowid", (job_id,))
+    prior = store.rows('SELECT request_id, state, billed_micro_usd FROM model_usage WHERE job_id = '
+        '%s ORDER BY record_sequence NULLS FIRST', (job_id,))
     limits = _limits(manifest)
     if (len(prior) >= min(limits["calls"], len(manifest["plan"]["requests"]))
-        or any(row["state"] != "SETTLED" for row in prior)
-        or sum(row["billed_micro_usd"] for row in prior) + estimate > limits["cost"]
-        or estimate > ATTEMPT_MICRO_USD or estimated_input > limits["input"]):
+        or any(row["state"] not in {"SETTLED", "UNKNOWN"} for row in prior)
+        or estimated_input > limits["input"]):
         raise CoreError("EVALUATION_SUBLIMIT_EXHAUSTED", 429)
     ordinal = len(prior)
     if (rid != request_id(run["manifest_sha256"], ordinal)
         or any(row["request_id"] != request_id(run["manifest_sha256"], i)
                for i, row in enumerate(prior))
-        or len(store.rows("SELECT 1 FROM evaluation_results WHERE evaluation_id=?",
+        or len(store.rows('SELECT 1 FROM evaluation_results WHERE evaluation_id = %s',
                           (run["evaluation_id"],))) != ordinal
         or paid_budget.sha(model_payload(settings, messages, "evaluation")) != (
             manifest["plan"]["requests"][ordinal]["payload_sha256"])):
@@ -326,23 +339,27 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
 
 
 def actual_limits(store, usage, actual):
-    total = store.one("SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-                      "WHERE job_id=?", (usage["job_id"],))["n"]
-    if actual > ATTEMPT_MICRO_USD or total + actual - usage["billed_micro_usd"] > COST:
-        return ["EVALUATION_AMOUNT"]
     return []
 
 
 def check_request(store, settings, clock, rid):
-    usage = store.one("SELECT * FROM model_usage WHERE request_id=? AND scenario='evaluation'",
+    usage = store.one('SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS '
+        'request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
+        'model_usage.provider AS provider, model_usage.model AS model, model_usage.input_tokens AS '
+        'input_tokens, model_usage.cached_input_tokens AS cached_input_tokens, '
+        'model_usage.output_tokens AS output_tokens, model_usage.billed_micro_usd AS '
+        'billed_micro_usd, model_usage.is_estimate AS is_estimate, model_usage.occurred_at AS '
+        'occurred_at, model_usage.state AS state, model_usage.pricing_known AS pricing_known FROM '
+        'model_usage AS model_usage WHERE model_usage.request_id = %s AND model_usage.scenario = '
+        "'evaluation'",
                       (rid,))
     if not usage or usage["state"] != "RESERVED":
         raise CoreError("EVALUATION_REQUEST_FENCED", 409)
     run, manifest = check_job(store, settings, clock, usage["job_id"], current_request=rid)
     matching = [i for i in range(len(manifest["plan"]["requests"]))
                 if rid == request_id(run["manifest_sha256"], i)]
-    admission = store.one("SELECT payload_sha256,authority_json FROM model_admissions "
-                          "WHERE request_id=?", (rid,))
+    admission = store.one('SELECT payload_sha256, authority_json FROM model_admissions WHERE '
+        'request_id = %s', (rid,))
     if (len(matching) != 1 or not admission or admission["payload_sha256"] != (
         manifest["plan"]["requests"][matching[0]]["payload_sha256"]
     )):
@@ -354,7 +371,7 @@ def check_request(store, settings, clock, rid):
     view = owner_authority.current(store, settings, clock, purpose="evaluation",
                                    authority=json.loads(run["binding_json"])["authority"])
     retention = min(settings.raw_event_retention_days, view.policy.source_retention_days)
-    source_deadlines = [after(store.one("SELECT ingested_at FROM events WHERE event_id=?",
+    source_deadlines = [after(store.one('SELECT ingested_at FROM events WHERE event_id = %s',
                                        (event_id,))["ingested_at"],
                               86400 * retention)
                         for event_id in manifest["source_event_ids"]]
@@ -367,7 +384,7 @@ def check_request(store, settings, clock, rid):
 def recover(store, now):
     # Core's original cancellation drain settles expired reservations through the
     # original budget journal. Never set usage states directly or repeat a call.
-    job_queue.cancel_active(store, "kind='evaluation' AND state='RUNNING' AND lease_until<=?",
+    job_queue.cancel_active(store, "kind='evaluation' AND state='RUNNING' AND lease_until<=%s",
                             (now,), "EVALUATION_INTERRUPTED", now)
 
 
@@ -382,11 +399,12 @@ async def run(core, job):
         with store.transaction():
             row, manifest = check_job(store, settings, clock, job["job_id"],
                                       lease_token=job["lease_token"])
-            prior = store.rows("SELECT state FROM model_usage WHERE job_id=?", (job["job_id"],))
-            stored = store.one("SELECT COUNT(*) AS n FROM evaluation_results "
-                               "WHERE evaluation_id=?", (row["evaluation_id"],))["n"]
-            # Only a cleanly settled prefix with all results continues; never repeat a call.
-            if any(usage["state"] != "SETTLED" for usage in prior) or stored != len(prior):
+            prior = store.rows('SELECT state FROM model_usage WHERE job_id = %s', (job["job_id"],))
+            stored = store.one('SELECT COUNT(*) AS n FROM evaluation_results WHERE evaluation_id = '
+                '%s', (row["evaluation_id"],))["n"]
+            # Every prior call needs its original response checkpoint; cost can remain unknown.
+            if (any(usage["state"] not in {"SETTLED", "UNKNOWN"} for usage in prior)
+                or stored != len(prior)):
                 raise CoreError("EVALUATION_PREVIOUS_ATTEMPT_REVIEW_REQUIRED", 409)
         requests = manifest["plan"]["requests"]
         stop = min(len(prior) + BATCH, len(requests))
@@ -406,8 +424,8 @@ async def run(core, job):
                                              "evaluation", clock, source_check=source_check)
             with store.transaction():
                 source_check()
-                usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (rid,))
-                if usage["state"] != "SETTLED":
+                usage = store.one('SELECT state FROM model_usage WHERE request_id = %s', (rid,))
+                if usage["state"] not in {"SETTLED", "UNKNOWN"}:
                     raise CoreError("EVALUATION_USAGE_UNCERTAIN", 409)
                 safe_text = redact(response.text, settings)
                 store.insert("evaluation_results", request_id=rid,
@@ -442,8 +460,12 @@ async def run(core, job):
 def results(store, settings, clock, evaluation_id):
     _enabled(settings)
     captured_epoch = epoch(store)
-    row = store.one("SELECT r.*,j.state,j.last_error_code FROM evaluation_runs r JOIN jobs j "
-                    "USING(job_id) WHERE evaluation_id=?", (evaluation_id,))
+    row = store.one('SELECT r.evaluation_id AS evaluation_id, r.manifest_sha256 AS '
+        'manifest_sha256, r.consent_id AS consent_id, r.job_id AS job_id, r.manifest_json AS '
+        'manifest_json, r.sources_json AS sources_json, r.binding_json AS binding_json, r.redacted '
+        'AS redacted, r.created_at AS created_at, j.state AS state, j.last_error_code AS '
+        'last_error_code FROM evaluation_runs AS r JOIN jobs AS j ON r.job_id = j.job_id WHERE '
+        'r.evaluation_id = %s', (evaluation_id,))
     if not row:
         raise CoreError("EVALUATION_NOT_FOUND", 404)
     if row["redacted"]:
@@ -455,11 +477,10 @@ def results(store, settings, clock, evaluation_id):
     outcomes = []
     for ordinal, item in enumerate(manifest["plan"]["requests"]):
         rid = request_id(row["manifest_sha256"], ordinal)
-        usage = store.one("SELECT state,input_tokens,output_tokens,cached_input_tokens,"
-                          "billed_micro_usd FROM model_usage WHERE request_id=?", (rid,))
-        observed = store.one("SELECT text,text_redacted,finish_reason,evidence_type "
-                             "FROM evaluation_results "
-                             "WHERE request_id=?",
+        usage = store.one('SELECT state, input_tokens, output_tokens, cached_input_tokens, '
+            'billed_micro_usd FROM model_usage WHERE request_id = %s', (rid,))
+        observed = store.one('SELECT text, text_redacted, finish_reason, evidence_type FROM '
+            'evaluation_results WHERE request_id = %s',
                              (rid,))
         outcomes.append({"ordinal": ordinal, "request_id": rid,
                          **{k: item[k] for k in (
@@ -472,12 +493,12 @@ def results(store, settings, clock, evaluation_id):
                          "finish_reason": observed["finish_reason"] if observed else None,
                          "complete_response": bool(observed and observed["text"]
                                                    and not observed["text_redacted"] and usage
-                                                   and usage["state"] == "SETTLED"
+                                                   and usage["state"] in {"SETTLED", "UNKNOWN"}
                                                    and observed["finish_reason"] == "stop")})
     # As in other private views, fence the completed projection rather than
     # keeping an initial SQLite snapshot alive across an independent erasure.
-    current = store.one("SELECT redacted,manifest_sha256,sources_json FROM evaluation_runs "
-                        "WHERE evaluation_id=?", (evaluation_id,))
+    current = store.one('SELECT redacted, manifest_sha256, sources_json FROM evaluation_runs WHERE '
+        'evaluation_id = %s', (evaluation_id,))
     if not current or current["redacted"]:
         raise CoreError("EVALUATION_ERASED", 410)
     current_sources, _, _ = _inputs(store, settings, manifest, clock())
@@ -492,32 +513,44 @@ def results(store, settings, clock, evaluation_id):
 
 
 def erase(store, event_ids):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='evaluation_runs'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='evaluation_runs' AND relkind IN "
+        "('r','p')"):
         return
-    with nullcontext() if store.db.in_transaction else store.transaction():
-        affected = store.rows("SELECT DISTINCT r.evaluation_id,r.job_id FROM evaluation_runs r "
-                              "JOIN job_sources s USING(job_id) WHERE s.event_id IN "
-                              "(SELECT value FROM json_each(?))", (encode(sorted(event_ids)),))
+    with nullcontext() if store.in_transaction else store.transaction():
+        affected = store.rows('SELECT DISTINCT r.evaluation_id, r.job_id FROM evaluation_runs AS r '
+            'JOIN job_sources AS s USING (job_id) WHERE s.event_id IN (SELECT value COLLATE "C" '
+            'FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS '
+            'parsed(value))', (encode(sorted(event_ids)),))
         for row in affected:
-            store.execute("UPDATE evaluation_runs SET manifest_json='{}',sources_json='{}',"
-                          "binding_json='{}',redacted=1 WHERE evaluation_id=?",
+            store.execute("UPDATE evaluation_runs SET manifest_json = '{}', sources_json = '{}', "
+                "binding_json = '{}', redacted = 1 WHERE evaluation_id = %s",
                           (row["evaluation_id"],))
-            store.execute("DELETE FROM evaluation_results WHERE evaluation_id=?",
+            store.execute('DELETE FROM evaluation_results WHERE evaluation_id = %s',
                           (row["evaluation_id"],))
             job_queue.release(store, row["job_id"], "CANCELLED", reason="EVALUATION_SOURCE_ERASED")
 
 
 def revoke_jobs(store, consent_id, now):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='evaluation_runs'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='evaluation_runs' AND relkind IN "
+        "('r','p')"):
         return  # Revocation remains available before this projection's migration.
-    job_queue.cancel_active(store, "kind='evaluation' AND job_id IN "
-                            "(SELECT job_id FROM evaluation_runs WHERE consent_id=?)",
+    job_queue.cancel_active(store, (
+        "kind='evaluation' AND job_id IN (SELECT job_id FROM evaluation_runs WHERE "
+        'consent_id=%s)'
+    ),
                             (consent_id,), "EVALUATION_CONSENT_REVOKED", now)
 
 
 def stop_window(store, window_sha256, now):
-    if not store.one("SELECT 1 FROM sqlite_master WHERE name='evaluation_runs'"):
+    if not store.one('SELECT 1 FROM pg_catalog.pg_class WHERE '
+        "relnamespace=current_schema()::regnamespace AND relname='evaluation_runs' AND relkind IN "
+        "('r','p')"):
         return
-    job_queue.cancel_active(store, "kind='evaluation' AND job_id IN (SELECT job_id FROM "
-                            "evaluation_runs WHERE json_extract(binding_json,'$.window_sha256')=?)",
+    job_queue.cancel_active(store, (
+        "kind='evaluation' AND job_id IN (SELECT job_id FROM evaluation_runs WHERE "
+        '(CASE WHEN binding_json IS JSON THEN binding_json::json #>> '
+        "'{window_sha256}' END)=%s)"
+    ),
                             (window_sha256,), "LIVE_WINDOW_STOPPED", now)

@@ -68,7 +68,7 @@ def test_carry_cannot_omit_even_one_unknown(core, tmp_path):
 def test_pending_delivery_cannot_be_carried(core, tmp_path):
     case = stranded(core, tmp_path)
     source = core.store.one(
-        "SELECT conversation_id FROM events WHERE event_id=?", (case.capture.event_id,)
+        'SELECT conversation_id FROM events WHERE event_id=%s', (case.capture.event_id,)
     )
     pending = enqueue(
         core.store,
@@ -127,7 +127,7 @@ def test_fsync_before_projection_failure_requires_exact_controlled_recovery(
     execute = core.store.execute
 
     def crash(query, values=()):
-        if query == "INSERT INTO runtime_meta VALUES (?,?)" and values[0].startswith(
+        if query == "INSERT INTO runtime_meta VALUES (%s, %s)" and values[0].startswith(
             "model_control:"
         ):
             raise RuntimeError("synthetic crash after fsync before projection")
@@ -226,12 +226,12 @@ def test_local_close_projection_failure_keeps_future_admission_blocked(core, tmp
     job = authorized_job(core, number=2)
     request_id = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
     original = core.store.one(
-        "SELECT billed_micro_usd FROM model_usage WHERE request_id=?", (request_id,)
+        'SELECT billed_micro_usd FROM model_usage WHERE request_id=%s', (request_id,)
     )["billed_micro_usd"]
     execute = core.store.execute
 
     def fail(query, values=()):
-        if query == "INSERT INTO runtime_meta VALUES (?,?)" and values[0].startswith(
+        if query == "INSERT INTO runtime_meta VALUES (%s, %s)" and values[0].startswith(
             "model_control:"
         ):
             raise RuntimeError("synthetic local closure projection failure")
@@ -257,7 +257,7 @@ def test_local_close_projection_failure_keeps_future_admission_blocked(core, tmp
     asyncio.run(exercise())
     monkeypatch.setattr(core.store, "execute", execute)
     assert core.store.one(
-        "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?", (request_id,)
+        'SELECT billed_micro_usd,state FROM model_usage WHERE request_id=%s', (request_id,)
     ) == {"billed_micro_usd": original, "state": "UNKNOWN"}
     with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
         owner_authority.custody(core.store, core.settings, settlement=True)
@@ -311,7 +311,9 @@ def test_cancelled_transport_cleanup_precedes_local_closure(core, tmp_path):
     asyncio.run(exercise())
 
 
-def test_native_erasure_and_restore_preserve_carry_finance_without_reactivating(core, tmp_path):
+def test_native_erasure_and_restore_preserve_carry_finance_without_reactivating(
+    empty_database, core, tmp_path,
+):
     from cryptography.fernet import Fernet
 
     from companion.backup import backup, restore
@@ -322,18 +324,21 @@ def test_native_erasure_and_restore_preserve_carry_finance_without_reactivating(
         core.store, core.settings, case.request, case.verified, core.clock()
     )
     before = core.store.rows("SELECT request_id,billed_micro_usd,state FROM model_usage")
-    snapshot, restored, key = (
+    snapshot, restored_state, key = (
         tmp_path / "carry.enc",
-        tmp_path / "carry-restored.db",
+        tmp_path / "restored-state",
         Fernet.generate_key(),
     )
     backup(core.settings.database, snapshot, key)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [case.capture.event_id], core.clock())
         view = paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
     assert receipt["carry_sha256"] in view["model_carries"]
-    restore(snapshot, restored, key, core.settings.erasure_ledger)
-    settings = core.settings.model_copy(update={"database": str(restored)})
+    restore(snapshot, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    settings = core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    })
     with Runtime(settings, core.clock) as runtime:
         assert owner_authority.status(runtime.store, settings, core.clock)["state"] == "OFF"
         assert (
@@ -341,7 +346,7 @@ def test_native_erasure_and_restore_preserve_carry_finance_without_reactivating(
             == before
         )
         assert runtime.store.one(
-            "SELECT redacted FROM events WHERE event_id=?", (case.capture.event_id,)
+            'SELECT redacted FROM events WHERE event_id=%s', (case.capture.event_id,)
         )["redacted"]
         with pytest.raises(CoreError):
             model_carry.read(

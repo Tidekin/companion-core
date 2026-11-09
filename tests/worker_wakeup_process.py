@@ -9,11 +9,12 @@ from pathlib import Path
 from time import monotonic, process_time
 
 import httpx
+import psycopg
 
 from companion import __main__, worker_wakeup
 from companion.config import Settings
 from companion.retrieval import SemanticIndex
-from companion.store import Store
+from companion.worker_loop import KEY
 from companion.worker_schedule import ScanContext, UnitResult
 
 
@@ -56,19 +57,18 @@ def main():
         "scan_contexts": 0,
         "native_units": 0,
     }
-    start, watchers, wakeups = {}, [], []
-    original_store = Store.__init__
+    start, wakeups = {}, []
+    execute = psycopg.Cursor.execute
 
-    def trace(sql):
+    def observe(cursor, statement, params=None, **options):
+        result = execute(cursor, statement, params, **options)
         stats["sql"] += 1
-        if sql.startswith("INSERT OR REPLACE INTO runtime_meta") and "worker_loop" in sql:
+        if (isinstance(statement, str) and statement.startswith("INSERT INTO runtime_meta")
+            and isinstance(params, (tuple, list)) and params and params[0] == KEY):
             stats["recorder_writes"] += 1
+        return result
 
-    def store_init(self, *a, **kw):
-        original_store(self, *a, **kw)
-        self.db.set_trace_callback(trace)
-
-    Store.__init__ = store_init
+    psycopg.Cursor.execute = observe
     service_module, service_class = service_name.rsplit(".", 1)
     service = getattr(importlib.import_module(service_module), service_class)
     native_scan = getattr(service, method)
@@ -119,7 +119,6 @@ def main():
 
     def enter(self):
         result = native_enter(self)
-        watchers.append(self.watcher)
         wakeups.append(self)
         return result
 
@@ -194,12 +193,6 @@ def main():
         __main__.main()
     except SystemExit as error:
         code = error.code
-    closed = 0
-    for watcher in watchers:
-        try:
-            watcher.watch(50, 10, 1, None)
-        except RuntimeError:
-            closed += 1
     stats["hints"] = sum(w.notifications for w in wakeups)
     result = {
         "pid": os.getpid(),
@@ -210,8 +203,8 @@ def main():
         "steady": {key: stats[key] - start.get(key, 0) for key in stats},
         "steady_seconds": monotonic() - start.get("at", monotonic()),
         "steady_cpu_seconds": process_time() - start.get("cpu", process_time()),
-        "watchers": len(watchers),
-        "closed_watchers": closed,
+        "watchers": len(wakeups),
+        "closed_watchers": sum(w.listener.closed for w in wakeups),
     }
     Path(args["report"]).write_text(json.dumps(result), encoding="utf-8")
     raise SystemExit(code)

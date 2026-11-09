@@ -122,7 +122,7 @@ def contract_signature():
 
 
 def erase_derivatives(store, scope):
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
     for contract in cleanup_contracts():
         contract.erase(store, scope)

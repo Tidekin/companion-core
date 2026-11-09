@@ -123,7 +123,7 @@ def test_current_unknown_still_requires_same_policy_handoff(core, tmp_path, monk
     active, _ = activate(core, policy, revision=6, operation="voice-after-original-handoff")
     assert active["authority"]["revision"] == 7
     assert core.store.rows("SELECT * FROM model_usage") == before
-    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                           (request_id,))["state"] == "UNKNOWN"
 
 
@@ -196,7 +196,7 @@ def test_http_voice_revision_runs_independent_voice_node(core, tmp_path, monkeyp
     # authenticated HTTP revision; its provider transport is synthetic.
     run(scenario())
     if old_voice:
-        assert core.store.one("SELECT * FROM voice_jobs WHERE job_id=?",
+        assert core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s',
                               (old_voice["job_id"],)) == old_voice
     authority = owner_authority.current(core.store, core.settings, core.clock).authority.as_dict()
     capture_text(core, case.key, authority, policy)
@@ -210,13 +210,15 @@ def test_http_voice_revision_runs_independent_voice_node(core, tmp_path, monkeyp
                 counter, tmp_path, core.clock.now.timestamp())
 
     run(worker())
-    row = core.store.one("SELECT * FROM voice_jobs WHERE message_id=?", (message,))
+    row = core.store.one('SELECT * FROM voice_jobs WHERE message_id=%s', (message,))
     assert row["state"] == "READY" and json.loads(row["authority_json"]) == authority
     assert core.store.rows("SELECT * FROM model_usage WHERE state='UNKNOWN'") == [original[0]]
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (message,))["state"] == (
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (message,))["state"] == (
         "PENDING")
     if old_voice:
-        retained = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (old_voice["job_id"],))
+        retained = core.store.one((
+            'SELECT * FROM voice_jobs WHERE job_id=%s'
+        ), (old_voice["job_id"],))
         # Fresh input still performs the established content-free supersession audit.
         for field in ("updated_at", "last_error_code"):
             retained.pop(field)

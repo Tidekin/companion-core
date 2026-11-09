@@ -6,8 +6,7 @@ The full runtime view retains the existing live custody checks on its caller's S
 
 import json
 import shutil
-import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -15,19 +14,32 @@ from types import SimpleNamespace
 
 from alembic.script import ScriptDirectory
 from alembic.util import CommandError
+from psycopg import Error as PostgresError
+from psycopg_pool import PoolTimeout
 
 from companion import __version__, budget, paid_budget
 from companion.contracts import CoreError
+from companion.postgres import ERASURE_LEDGER, Database
 from companion.privacy import ErasureLedger
-from companion.store import ReadView, Store
+from companion.store import Store
 
 
-def _migration_scripts():
+@contextmanager
+def read_view(settings):
+    """Finite native snapshot without migration, bootstrap, replay or write retry."""
+    with Database(settings.database, max_connections=1) as database:
+        with closing(Store(database, settings.state_directory)) as store, store.read_snapshot():
+            store.execute("SET LOCAL statement_timeout='2s'")
+            store.execute("SET LOCAL lock_timeout='1s'")
+            yield store
+
+
+def _migration_scripts(*, legacy=False):
     root = Path(__file__).resolve().parent
     migrations = root.parent / "migrations"
     if not migrations.is_dir():
         migrations = root / "migrations"
-    return ScriptDirectory(str(migrations))
+    return ScriptDirectory(str(migrations if legacy else migrations / "postgresql"))
 
 
 @lru_cache(maxsize=1)
@@ -43,7 +55,13 @@ def schema_head():
 
 @lru_cache(maxsize=1)
 def _packaged_revisions(head):
-    return frozenset(rev.revision for rev in _migration_scripts().walk_revisions(head=head))
+    # Packaged SQLite revisions remain known predecessors after the one-way import.
+    # They must never be treated as an unknown, future PostgreSQL schema.
+    return frozenset(
+        rev.revision for scripts, start in (
+            (_migration_scripts(), head), (_migration_scripts(legacy=True), "heads"),
+        ) for rev in scripts.walk_revisions(head=start)
+    )
 
 
 def schema_readiness(view):
@@ -77,23 +95,25 @@ def _queue(view, table, active, now):
     states = {r["state"]: r["n"] for r in view.rows(
         f"SELECT state,COUNT(*) n FROM {table} GROUP BY state"
     )}
-    marks = ",".join("?" for _ in active)
-    oldest = view.one(f"SELECT MIN(created_at) at FROM {table} WHERE state IN ({marks})", active)
+    oldest = view.one(
+        f"SELECT MIN(created_at) at FROM {table} WHERE state=ANY(%s::text[])", (list(active),))
     age = None
     if oldest["at"]:
         age = max(0, (now - datetime.fromisoformat(oldest["at"])).total_seconds())
     expired = view.one(
-        f"SELECT COUNT(*) n FROM {table} WHERE state IN ({marks}) AND lease_until IS NOT NULL "
-        "AND julianday(lease_until)<=julianday(?)", (*active, now.isoformat()),
+        f"SELECT COUNT(*) n FROM {table} WHERE state=ANY(%s::text[]) "
+        "AND lease_until IS NOT NULL AND lease_until::timestamptz<=%s::timestamptz",
+        (list(active), now.isoformat()),
     )["n"]
     return {"states": states, "active": sum(states.get(s, 0) for s in active),
             "oldest_age_seconds": age, "expired_leases": expired}
 
 
 def _ledger(view, settings, result, integrity):
+    view.ledger_lock(ERASURE_LEDGER, shared=True)
     resource = _resource(settings.erasure_ledger)
     result["resources"]["erasure_ledger"] = resource
-    identity = view.one("SELECT value FROM runtime_meta WHERE key='ledger_id'")
+    identity = view.one("SELECT value FROM runtime_meta WHERE key = 'ledger_id'")
     if not identity:
         result["blockers"].append("ERASURE_IDENTITY_UNINITIALIZED")
         return
@@ -106,7 +126,7 @@ def _ledger(view, settings, result, integrity):
     except (OSError, ValueError, TypeError):
         result["blockers"].append("ERASURE_LEDGER_RECONCILIATION_REQUIRED")
         return
-    if view.one("SELECT COUNT(*) n FROM privacy_erasure_ledger WHERE state!='COMPLETE'")["n"]:
+    if view.one("SELECT COUNT(*) AS n FROM privacy_erasure_ledger WHERE state <> 'COMPLETE'")["n"]:
         result["blockers"].append("ERASURE_REPLAY_REQUIRED")
     if not integrity:
         return
@@ -118,7 +138,7 @@ def _ledger(view, settings, result, integrity):
         if records[0]["ledger_id"] != identity["value"]:
             raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
         applied = {r["erasure_id"]: r for r in view.rows(
-            "SELECT erasure_id,restore_min_replay_version,state FROM privacy_erasure_ledger"
+            'SELECT erasure_id, restore_min_replay_version, state FROM privacy_erasure_ledger'
         )}
         if len(applied) != len(records) - 1 or any(
             not (row := applied.get(record["erasure_id"])) or row["state"] != "COMPLETE"
@@ -133,9 +153,9 @@ def _ledger(view, settings, result, integrity):
 
 
 def _budget_journal(view, settings, result, integrity):
-    identity = view.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+    identity = view.one("SELECT value FROM runtime_meta WHERE key = 'model_budget_journal_id'")
     paths = {r["journal_path"] for r in view.rows(
-        "SELECT DISTINCT journal_path FROM model_admissions"
+        'SELECT DISTINCT journal_path FROM model_admissions'
     )}
     if settings.paid_model:
         paths.add(settings.paid_model.journal_path)
@@ -171,52 +191,35 @@ def _budget_journal(view, settings, result, integrity):
         # only checks; it cannot take its absent-identity initialization branch.
         from companion.paid_budget import journal
 
-        journal(view, SimpleNamespace(journal_path=path))
+        journal(view, SimpleNamespace(journal_path=path), initialize=False)
         resource["checked"] = "FULL_JOURNAL"
     except CoreError:
         result["blockers"].append("BUDGET_JOURNAL_RECONCILIATION_REQUIRED")
 
 
 def snapshot(settings, *, integrity=False):
-    """One bounded SQLite read transaction, including committed WAL; no Core/Store init.
-
-    mode=ro/query_only prohibit logical writes. SQLite may need existing writable
-    WAL shared-memory coordination; if unavailable, report failure, never immutable.
-    """
+    """Native read-only diagnostics; integrity reports catalog checks explicitly."""
     now = datetime.now(UTC)
-    path = Path(settings.database).resolve()
     result = {"schema_version": 1, "version": __version__, "mode": settings.mode,
               "observed_at": now.isoformat(), "read_only": True, "blockers": [],
               "worker_progress": {"state": "UNOBSERVED",
                                   "reason": "BUSINESS_PROGRESS_NOT_INFERRED"},
               "worker_loop": {"state": "UNOBSERVED"},
-              "database": _resource(path), "resources": {}}
-    result["database"]["wal_bytes"] = _resource(str(path) + "-wal")["bytes"]
+              "database": {"storage": "postgresql", "exists": False, "bytes": None,
+                           "wal_bytes": None, "schema": None,
+                           "expected_schema": None}, "resources": {}}
     try:
-        result["resources"]["disk_free_bytes"] = shutil.disk_usage(path.parent).free
+        result["resources"]["disk_free_bytes"] = shutil.disk_usage(
+            Path(settings.state_directory).resolve()).free
     except OSError:
         result["resources"]["disk_free_bytes"] = None
         result["blockers"].append("DISK_RESOURCE_UNAVAILABLE")
-    if not path.is_file():
-        result["blockers"].append("DATABASE_MISSING")
-        return result
     try:
-        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA query_only=ON")
-            # Do not turn an unexpectedly huge/corrupt DB into unbounded health work.
-            remaining = 2_000
-
-            def progress():
-                nonlocal remaining
-                remaining -= 1
-                return remaining <= 0
-
-            db.set_progress_handler(progress, 10_000)
-            db.execute("BEGIN")
-            view = ReadView(db)
-            schema, blocker = schema_readiness(view)
-            result["database"].update(schema)
+        with read_view(settings) as view:
+            result["database"].update(exists=True, bytes=view.one(
+                "SELECT pg_database_size(current_database()) AS n")["n"])
+            readiness, blocker = schema_readiness(view)
+            result["database"].update(readiness)
             if blocker:
                 result["blockers"].append(blocker)
                 return result
@@ -225,11 +228,18 @@ def snapshot(settings, *, integrity=False):
             result["worker_loop"] = loop_snapshot(view, now)
             result["database"]["integrity"] = "NOT_CHECKED"
             if integrity:
-                ok = db.execute("PRAGMA quick_check(1)").fetchone()[0] == "ok"
-                result["database"]["integrity"] = "OK" if ok else "FAILED"
-                if not ok:
+                invalid = view.one(
+                    "SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace "
+                    "WHERE n.nspname=current_schema() AND NOT c.convalidated LIMIT 1") or view.one(
+                    "SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid "
+                    "JOIN pg_namespace n ON n.oid=c.relnamespace "
+                    "WHERE n.nspname=current_schema() AND (NOT i.indisvalid OR NOT i.indisready) "
+                    "LIMIT 1")
+                result["database"]["integrity"] = "FAILED" if invalid else "CATALOG_VALID"
+                result["database"]["integrity_basis"] = "catalog_constraints_and_indexes"
+                if invalid:
                     result["blockers"].append("DATABASE_INTEGRITY_FAILED")
-            owner = view.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+            owner = view.one("SELECT value FROM runtime_meta WHERE key = 'owner_qq_id'")
             if not owner or owner["value"] != settings.owner_qq_id:
                 result["blockers"].append("OWNER_IDENTITY_UNINITIALIZED_OR_MISMATCH")
             _ledger(view, settings, result, integrity)
@@ -239,23 +249,20 @@ def snapshot(settings, *, integrity=False):
                 "PENDING", "LEASED", "SENDING", "RETRY_WAIT", "DELIVERY_UNCERTAIN",
             ), now)
             result["budget"] = view.one(
-                "SELECT COUNT(*) unsettled_calls,COALESCE(SUM(billed_micro_usd),0) "
-                "unsettled_micro_usd,COALESCE(SUM(state='UNKNOWN'),0) unknown_calls "
+                "SELECT COUNT(*) unsettled_calls,COALESCE(SUM(billed_micro_usd),0)::bigint "
+                "unsettled_micro_usd,COUNT(*) FILTER (WHERE state='UNKNOWN') unknown_calls "
                 "FROM model_usage WHERE state IN ('UNKNOWN','RESERVED')"
             )
             result["budget"]["pricing_configured"] = settings.pricing_known
             result["budget"]["paid_approval_configured"] = settings.paid_model is not None
-            result["budget"]["unlimited_period_spend"] = bool(
-                settings.paid_model and settings.paid_model.unlimited_period_spend,
-            )
-            result["budget"]["calibration"] = budget.usage_diagnostics(db)
+            result["budget"]["calibration"] = budget.usage_diagnostics(view)
             if settings.mode == "live" and settings.paid_model is None:
                 result["blockers"].append("PAID_APPROVAL_REQUIRED")
             for key in (
                 "model_budget_blocked", "model_budget_restore_required",
             ):
-                if view.one("SELECT 1 FROM runtime_meta WHERE key=?", (key,)):
-                    result["blockers"].append(key.upper())
+                if view.one('SELECT 1 FROM runtime_meta WHERE key = %s', (key,)):
+                    result.setdefault("warnings", []).append(key.upper())
             from companion.live_text import stopped
 
             lifecycle = paid_budget.live_lifecycle(view)
@@ -264,7 +271,9 @@ def snapshot(settings, *, integrity=False):
             ) else None
             if stopped(view, plan):
                 result["blockers"].append("LIVE_TEXT_STOPPED")
-            if result["budget"]["unsettled_calls"]:
+            if result["budget"]["unknown_calls"]:
+                result.setdefault("warnings", []).append("MODEL_COST_UNKNOWN")
+            if result["budget"]["unsettled_calls"] > result["budget"]["unknown_calls"]:
                 result["blockers"].append("MODEL_USAGE_UNSETTLED")
             if result["deliveries"]["states"].get("DELIVERY_UNCERTAIN"):
                 result["blockers"].append("DELIVERY_UNCERTAIN")
@@ -277,8 +286,7 @@ def snapshot(settings, *, integrity=False):
             }
             if settings.memory_enabled and not Path(settings.embedding_cache_dir).is_dir():
                 result["blockers"].append("EMBEDDING_CACHE_MISSING")
-            db.rollback()
-    except (sqlite3.Error, OSError, ValueError, TypeError):
+    except (PostgresError, PoolTimeout, OSError, ValueError, TypeError):
         result["blockers"].append("DATABASE_SNAPSHOT_UNAVAILABLE")
     return result
 
@@ -318,19 +326,20 @@ def runtime_snapshot(store, settings, clock):
             "android": settings.media.enabled and settings.android_enabled,
             "public_publish": False,
         },
-        "jobs": s.rows("SELECT state,COUNT(*) AS count FROM jobs GROUP BY state"),
-        "deliveries": s.rows("SELECT state,COUNT(*) AS count FROM outbox GROUP BY state"),
+        "jobs": s.rows('SELECT state, COUNT(*) AS count FROM jobs GROUP BY state'),
+        "deliveries": s.rows('SELECT state, COUNT(*) AS count FROM outbox GROUP BY state'),
         "tool_usage": s.rows(
             "SELECT capability,state,COUNT(*) AS calls,"
-            "SUM(billed_micro_usd) AS estimated_micro_usd FROM tool_tasks "
+            "SUM(billed_micro_usd)::bigint AS estimated_micro_usd FROM tool_tasks "
             "GROUP BY capability,state"
         ),
         "usage": s.rows(
-            "SELECT scenario,SUM(input_tokens) AS input_tokens,"
-            "SUM(output_tokens) AS output_tokens,SUM(cached_input_tokens) AS cached_tokens,"
-            "SUM(billed_micro_usd) AS estimated_micro_usd,"
-            "SUM(pricing_known=0) AS unknown_price_requests,"
-            "SUM(state='UNKNOWN') AS unknown_usage_requests "
+            "SELECT scenario,SUM(input_tokens)::bigint AS input_tokens,"
+            "SUM(output_tokens)::bigint AS output_tokens,"
+            "SUM(cached_input_tokens)::bigint AS cached_tokens,"
+            "SUM(billed_micro_usd)::bigint AS estimated_micro_usd,"
+            "COUNT(*) FILTER (WHERE pricing_known=0) AS unknown_price_requests,"
+            "COUNT(*) FILTER (WHERE state='UNKNOWN') AS unknown_usage_requests "
             "FROM model_usage GROUP BY scenario"
         ),
     }

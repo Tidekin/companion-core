@@ -37,7 +37,7 @@ async def scenario():
         assert await worker.content.run_once()
         assert worker.store.one("SELECT state FROM content_items")["state"] == "SUCCEEDED"
         assert await worker.run_once("independent-file-sdk", job_id=job_id)
-        assert worker.store.one("SELECT state FROM jobs WHERE job_id=?",
+        assert worker.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                 (job_id,))["state"] == "SUCCEEDED"
         assert len(launches) == 1
         assert not provider.responses

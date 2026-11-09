@@ -5,11 +5,12 @@ entry-point tests cover capture/dispatch and the Bridge process-lock proof produ
 """
 
 import json
-import sqlite3
+from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
+import psycopg
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -17,9 +18,11 @@ import companion_delivery_protocol as wire
 from companion import cumulative, live_text, paid_budget
 from companion import delivery_reconciliation as reconciliation
 from companion.contracts import CoreError, DeliveryResult
+from companion.postgres import Database
 from companion.privacy import ErasureLedger
 from companion.store import Store, after, encode, uid
 from companion.transport import delivery_result
+from tests.postgres_fixture import copy_database, logical_state
 from tests.support.cumulative_budget import policy, view
 from tests.support.delivery_reconciliation import decide, native, prepare, put, signed
 
@@ -68,12 +71,12 @@ def test_account_original_binding_drift_rejects_without_append(core, tmp_path, c
     if change == "authorization":
         env.proof = signed(env, authorization_sha256="f" * 64)
     elif change == "receipt":
-        core.store.execute("UPDATE social_autonomy_reservations SET receipt_sha256=?", ("f" * 64,))
+        core.store.execute('UPDATE social_autonomy_reservations SET receipt_sha256=%s', ("f" * 64,))
     elif change == "reservation":
-        core.store.execute("UPDATE social_autonomy_reservations SET action_type=?",
+        core.store.execute('UPDATE social_autonomy_reservations SET action_type=%s',
                            ("qq.profile.avatar",))
     elif change == "plan":
-        core.store.execute("UPDATE social_autonomy_plans SET payload_sha256=?", ("f" * 64,))
+        core.store.execute('UPDATE social_autonomy_plans SET payload_sha256=%s', ("f" * 64,))
     else:
         core.store.execute("UPDATE outbox SET delivery_lane='owner_private'")
     before = rows(env)
@@ -85,8 +88,8 @@ def test_account_original_binding_drift_rejects_without_append(core, tmp_path, c
 def test_account_resolution_after_source_erasure_keeps_original_hashes(core, tmp_path):
     env = native(core, tmp_path, action="qzone.publish")
     event_id = core.store.one("SELECT event_id FROM events")["event_id"]
-    with core.store.transaction():
-        core.store.execute("UPDATE outbox SET origin_event_id=?", (event_id,))
+    with core.store.transaction(control_write=True):
+        core.store.execute('UPDATE outbox SET origin_event_id=%s', (event_id,))
         core.store.insert("social_autonomy_sources", plan_id=env.proof["account_plan_id"],
                           event_id=event_id, role="content", source_sha256="d" * 64)
         ErasureLedger(core.settings.erasure_ledger).expire_events(
@@ -118,7 +121,7 @@ def test_owner_closed_account_capacity_keeps_original_daily_limit_and_cooldown(
     module = SocialAutonomy(core.store, core.settings, clock=core.clock)
     reservation = core.store.one("SELECT * FROM social_autonomy_reservations")
     original_quota = deepcopy(view(core))
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     assert json.loads(reservation["receipt_json"])["result"] == "UNKNOWN"
     assert reservation["released_at"] is None
     with pytest.raises(CoreError, match="SOCIAL_DAILY_ACTION_LIMIT"):
@@ -129,7 +132,7 @@ def test_owner_closed_account_capacity_keeps_original_daily_limit_and_cooldown(
     core.clock.advance(max(86400, getattr(cfg, pool + "_cooldown_seconds")) + 1)
     core.settings.social_autonomy = cfg
     assert module._capacity(action, "UTC", core.clock()) is None
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert core.store.one("SELECT * FROM social_autonomy_reservations") == reservation
     assert view(core) == original_quota
     # Capacity eligibility cannot restart the original stopped execution window.
@@ -146,11 +149,11 @@ def test_account_capacity_rejects_forged_owner_projection_without_original_journ
         authorization_sha256="a" * 64, nickname_enabled=True)
     core.store.execute("UPDATE outbox SET state='CANCELLED',lease_token=NULL")
     put(core.store, reconciliation.PROJECTION + env.message_id, "f" * 64)
-    before, journal = list(core.store.db.iterdump()), rows(env)
+    before, journal = logical_state(core.store), rows(env)
     with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
         SocialAutonomy(core.store, core.settings, clock=core.clock)._capacity(
             "qq.profile.nickname", "UTC", core.clock())
-    assert rows(env) == journal and list(core.store.db.iterdump()) == before
+    assert rows(env) == journal and logical_state(core.store) == before
 
 
 @pytest.mark.parametrize("outcome", ["SENT", "CANCELLED"])
@@ -158,7 +161,7 @@ def test_account_capacity_rejects_forged_owner_projection_without_original_journ
 def test_voice_resolution_keeps_frozen_result_and_original_costs(core, tmp_path, outcome, erased):
     env = native(core, tmp_path, action="qq.private.reply", voice=True)
     if erased:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             ErasureLedger(core.settings.erasure_ledger).expire_events(
                 core.store, [env.proof["event_id"]], core.clock())
     before = deepcopy(view(core))
@@ -182,7 +185,7 @@ def test_voice_resolution_rejects_changed_original_result(core, tmp_path, change
         value["binding"]["reply_sha256"] = "f" * 64
         put(core.store, "voice_reply:" + env.message_id, value)
     elif change == "result":
-        core.store.execute("UPDATE voice_jobs SET result_sha256=?", ("f" * 64,))
+        core.store.execute('UPDATE voice_jobs SET result_sha256=%s', ("f" * 64,))
     elif change == "generation":
         core.store.execute("UPDATE voice_jobs SET generation=2")
     else:
@@ -247,7 +250,8 @@ def rows(env):
 
 def sibling(env, *, state="SENDING", attempted=True):
     core = env.core
-    row = core.store.one("SELECT * FROM outbox WHERE message_id=?", (env.message_id,))
+    row = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (env.message_id,))
+    row.pop("record_sequence")
     message_id, token = uid("msg"), uid("lease")
     row.update(message_id=message_id, lease_token=token if attempted else None,
                delivery_key="synthetic-sibling:" + message_id, state=state,
@@ -281,7 +285,7 @@ def test_native_resolution_preserves_all_reservations_money_and_stop(
     before = deepcopy(view(core))
     usage = core.store.rows("SELECT * FROM model_usage")
     admissions = core.store.rows("SELECT * FROM model_admissions")
-    original = core.store.one("SELECT * FROM outbox WHERE message_id=?", (env.message_id,))
+    original = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (env.message_id,))
     prefix = rows(env)
     assert prepare(env)["state"] == "READY"
     assert reconciliation.readiness(core.store, core.settings, env.message_id)["prepared"]
@@ -303,7 +307,7 @@ def test_native_resolution_preserves_all_reservations_money_and_stop(
     assert after_state["paused"] and after_state["reason"] == before["reason"]
     assert core.store.rows("SELECT * FROM model_usage") == usage
     assert core.store.rows("SELECT * FROM model_admissions") == admissions
-    changed = core.store.one("SELECT * FROM outbox WHERE message_id=?", (env.message_id,))
+    changed = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (env.message_id,))
     assert changed["state"] == outcome and changed["lease_token"] is None
     for field in ("attempt_count", "native_ack_json", "provider_message_id", "created_at",
                   "lease_until", "content_sha256"):
@@ -336,7 +340,7 @@ def test_changed_signed_or_unsigned_original_binding_is_rejected(core, tmp_path,
     with pytest.raises(CoreError):
         reconciliation.prepare(core.store, core.settings, proof, core.clock())
     assert rows(env) == original
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                           (env.message_id,))["state"] == "DELIVERY_UNCERTAIN"
 
 
@@ -368,7 +372,7 @@ def test_no_prepared_proof_or_conflicting_owner_decision_can_resolve(core, tmp_p
 @pytest.mark.parametrize("action", ["qq.private.reply", "qq.private.proactive", "qq.private.poke"])
 def test_erased_payload_uses_retained_authority_and_historical_public_key(core, tmp_path, action):
     env = native(core, tmp_path, action=action)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         ErasureLedger(core.settings.erasure_ledger).expire_events(
             core.store, [env.proof["event_id"]], core.clock())
     core.settings.live_text_window = core.settings.live_text_window.model_copy(update={
@@ -379,11 +383,11 @@ def test_erased_payload_uses_retained_authority_and_historical_public_key(core, 
     assert result["receipt"]["delivery"]["content_sha256"]
     assert result["receipt"]["quiescence"] == env.proof
     assert "synthetic private reply" not in encode(result)
-    assert core.store.one("SELECT content_json,content_sha256 FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT content_json,content_sha256 FROM outbox WHERE message_id=%s',
                           (env.message_id,)) == {"content_json": "{}", "content_sha256": ""}
 
 
-def test_unrelated_model_unknown_stays_unknown_and_blocks_renewal(core, tmp_path):
+def test_cost_unknown_is_retained_across_policy_renewal(core, tmp_path):
     env = native(core, tmp_path, model_unknown=True)
     original = deepcopy(view(core)["models"])
     prepare(env)
@@ -391,16 +395,16 @@ def test_unrelated_model_unknown_stays_unknown_and_blocks_renewal(core, tmp_path
     assert view(core)["models"] == original
     assert {value["state"] for value in original.values()} == {"UNKNOWN"}
     policy(core)
-    with pytest.raises(CoreError):
-        with core.store.transaction():
-            cumulative.activate(core.store, core.settings, core.clock())
+    with core.store.transaction():
+        cumulative.activate(core.store, core.settings, core.clock())
+    assert view(core)["models"] == original
 
 
 def test_legacy_erased_text_receipt_keeps_payload_hash_without_inventing_content_hash(
     core, tmp_path,
 ):
     env = native(core, tmp_path, action="qq.private.reply", legacy=True)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         ErasureLedger(core.settings.erasure_ledger).expire_events(
             core.store, [env.proof["event_id"]], core.clock())
     prepare(env)
@@ -437,10 +441,10 @@ def test_fsynced_decision_recovers_exact_owner_receipt_after_database_failure(
 
     def execute(sql, params=()):
         nonlocal failed
-        if (stage == "projection" and not failed and sql.startswith("INSERT OR REPLACE")
+        if (stage == "projection" and not failed and sql.startswith("INSERT INTO runtime_meta")
             and params and str(params[0]).startswith(reconciliation.PROJECTION)):
             failed = True
-            raise sqlite3.OperationalError("synthetic projection interruption")
+            raise psycopg.OperationalError("synthetic projection interruption")
         return real_execute(sql, params)
 
     def fsync(descriptor):
@@ -452,13 +456,13 @@ def test_fsynced_decision_recovers_exact_owner_receipt_after_database_failure(
 
     monkeypatch.setattr(core.store, "execute", execute)
     monkeypatch.setattr(paid_budget.os, "fsync", fsync)
-    with pytest.raises((CoreError, sqlite3.OperationalError)):
+    with pytest.raises((CoreError, psycopg.OperationalError)):
         decide(env)
     monkeypatch.setattr(core.store, "execute", real_execute)
     monkeypatch.setattr(paid_budget.os, "fsync", real_fsync)
     assert failed
     assert rows(env)[-1]["kind"] == reconciliation.KIND
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                           (env.message_id,))["state"] == "DELIVERY_UNCERTAIN"
     with pytest.raises(CoreError):
         paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
@@ -553,16 +557,13 @@ def test_changed_historical_approval_cannot_replace_the_frozen_capture_key(core,
         reconciliation.prepare(core.store, core.settings, proof, core.clock())
 
 
-def test_old_database_recovers_only_exact_original_owner_record(core, tmp_path):
+def test_old_database_recovers_only_exact_original_owner_record(core, tmp_path, empty_database):
     env = native(core, tmp_path)
     prepare(env)
-    backup = tmp_path / "before-owner.db"
-    destination = sqlite3.connect(backup)
-    core.store.db.backup(destination)
-    destination.close()
+    copy_database(core.settings.database, empty_database, tmp_path)
     expected = decide(env)
-    restored = Store(str(backup))
-    try:
+    with (Database(empty_database) as db,
+          closing(Store(db, core.store.state_directory)) as restored):
         with pytest.raises(CoreError):
             reconciliation.lookup(restored, core.settings, env.message_id,
                 proof_sha256=wire.digest(env.proof))
@@ -578,8 +579,6 @@ def test_old_database_recovers_only_exact_original_owner_record(core, tmp_path):
         assert recovered == expected["receipt"]
         assert reconciliation.lookup(restored, core.settings, env.message_id,
             proof_sha256=wire.digest(env.proof)) == recovered
-    finally:
-        restored.db.close()
 
 
 @pytest.mark.parametrize("outcome", ["SENT", "CANCELLED"])
@@ -593,7 +592,7 @@ def test_live_without_cumulative_still_requires_proof_and_original_budget_record
     result = decide(env, outcome)
     assert result["receipt"]["account_ref"] is result["receipt"]["policy_sha256"] is None
     assert result["receipt"]["prior_liability_sha256"] is None
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,))
+    assert not core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s', (cumulative.PROJECTION,))
     assert decide(env, outcome) == result
 
 
@@ -657,7 +656,7 @@ def test_last_unknown_delivery_closes_input_without_changing_previous_receipt(
 def test_input_closure_never_hides_unsettled_native_work(core, tmp_path, blocker):
     env = native(core, tmp_path, model_unknown=blocker == "models")
     if blocker == "jobs":
-        core.store.execute("UPDATE jobs SET state='RUNNING' WHERE event_id=?",
+        core.store.execute("UPDATE jobs SET state='RUNNING' WHERE event_id=%s",
                            (env.proof["event_id"],))
     elif blocker == "reads":
         core.store.insert("content_items", item_id=uid("content"),
@@ -716,34 +715,31 @@ def test_original_provider_ack_is_hashed_separately_from_owner_resolution(core, 
     })
 
 
-def test_terminal_input_recovery_does_not_close_an_old_database_with_active_work(core, tmp_path):
+def test_terminal_input_recovery_does_not_close_an_old_database_with_active_work(
+    core, tmp_path, empty_database
+):
     env = native(core, tmp_path)
     prepare(env)
-    backup = tmp_path / "old-active-input.db"
-    destination = sqlite3.connect(backup)
-    core.store.db.backup(destination)
-    destination.close()
+    copy_database(core.settings.database, empty_database, tmp_path)
     expected = decide(env)
-    restored = Store(str(backup))
-    try:
-        restored.execute("UPDATE jobs SET state='RUNNING' WHERE event_id=?",
+    with (Database(empty_database) as db,
+          closing(Store(db, core.store.state_directory)) as restored):
+        restored.execute("UPDATE jobs SET state='RUNNING' WHERE event_id=%s",
                          (env.proof["event_id"],))
         with pytest.raises(CoreError, match="INPUT_CLOSURE_RECONCILIATION_REQUIRED"):
             reconciliation.lookup(restored, core.settings, env.message_id,
                 operation_id="owner-fixture-op",
                 operation_sha256=wire.digest([env.message_id, "CANCELLED"]),
                 outcome="CANCELLED", repair=True, now=core.clock())
-        assert restored.one("SELECT state FROM outbox WHERE message_id=?",
+        assert restored.one("SELECT state FROM outbox WHERE message_id=%s",
                              (env.message_id,))["state"] == "DELIVERY_UNCERTAIN"
         assert expected["receipt"]["input_closure"]["terminal"]
-    finally:
-        restored.db.close()
 
 
 @pytest.mark.parametrize("change", ["token", "job", "message", "signature", "body", "missing"])
 def test_retired_voice_proof_is_bound_to_original_signed_message(core, tmp_path, change):
     env = native(core, tmp_path, action="qq.private.reply", voice=True)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         ErasureLedger(core.settings.erasure_ledger).expire_events(
             core.store, [env.proof["event_id"]], core.clock())
     if change == "token":

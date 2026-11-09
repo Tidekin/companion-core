@@ -7,8 +7,8 @@ fixed order, it:
 1. checks the OwnerAuthority is still ACTIVE and records the UNKNOWN model call count;
 2. stops the old container with a long grace period, so the worker finishes its current
    unit (model call, send, commit) and exits 0 after releasing its file locks;
-3. refuses to continue if the exit was not clean, a lock is still held or a new UNKNOWN
-   appeared;
+3. refuses to continue if the exit was not clean or a lock is still held, and records
+   changed cost UNKNOWN counts as warnings;
 4. starts the service again from its original Compose files plus an image-only override,
    and waits until the new container is running and holds the same locks.
 
@@ -20,7 +20,6 @@ service and stops. Standard library only, so it runs with the host's Python.
 import argparse
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import time
@@ -88,9 +87,8 @@ def plan_services(plan, rows, image):
     return services
 
 
-def lock_paths(database, service):
-    # The same naming as companion.worker_lock: the suffix replaces `.sqlite3`.
-    return [Path(database).with_suffix(f".{kind}.lock") for kind in LOCK_KINDS[service]]
+def lock_paths(state_directory, service):
+    return [Path(state_directory) / f"{kind}.lock" for kind in LOCK_KINDS[service]]
 
 
 def lock_holders(path, locks_text):
@@ -108,22 +106,30 @@ def lock_holders(path, locks_text):
     return holders
 
 
-def ledger(database):
-    """Read-only: the authority state, UNKNOWN model calls and open jobs and deliveries."""
-    db = sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
-    try:
-        authority = db.execute("SELECT revision,state FROM owner_authority_revisions "
-                               "ORDER BY revision DESC LIMIT 1").fetchone()
-        unknown = db.execute("SELECT count(*) FROM model_usage WHERE state='UNKNOWN'").fetchone()
-        jobs = dict(db.execute("SELECT state,count(*) FROM jobs WHERE state IN "
-                               "('QUEUED','RUNNING','RETRY_WAIT') GROUP BY state"))
-        outbox = dict(db.execute("SELECT state,count(*) FROM outbox WHERE state IN "
-                                 "('PENDING','LEASED','SENDING','RETRY_WAIT',"
-                                 "'DELIVERY_UNCERTAIN') GROUP BY state"))
-    finally:
-        db.close()
-    return {"authority": list(authority) if authority else None, "unknown": unknown[0],
-            "jobs": jobs, "deliveries": outbox}
+LEDGER_SCRIPT = '''
+import json
+import psycopg
+from companion.config import Settings
+settings=Settings.load(apply_operator_config=False)
+with psycopg.connect(settings.database.get_secret_value()) as db:
+    db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+    authority=db.execute("SELECT revision,state FROM owner_authority_revisions "
+                         "ORDER BY revision DESC LIMIT 1").fetchone()
+    unknown=db.execute("SELECT count(*) FROM model_usage WHERE state='UNKNOWN'").fetchone()[0]
+    jobs=dict(db.execute("SELECT state,count(*) FROM jobs WHERE state IN "
+                         "('QUEUED','RUNNING','RETRY_WAIT') GROUP BY state").fetchall())
+    outbox=dict(db.execute("SELECT state,count(*) FROM outbox WHERE state IN "
+                          "('PENDING','LEASED','SENDING','RETRY_WAIT',"
+                          "'DELIVERY_UNCERTAIN') GROUP BY state").fetchall())
+print(json.dumps({'authority':authority,'unknown':unknown,'jobs':jobs,'deliveries':outbox}))
+'''
+
+
+def ledger(api):
+    """Read the native snapshot inside the API's existing deployment configuration."""
+    python = (api["Config"].get("Entrypoint") or ["/app/.venv/bin/python"])[0]
+    return json.loads(docker("exec", api["Id"], python, "-B", "-c", LEDGER_SCRIPT,
+                             timeout=30).stdout)
 
 
 def compose(row, override):
@@ -141,14 +147,15 @@ def write_override(path, images):
                                indent=2) + "\n", encoding="utf-8")
 
 
-def wait_started(project, service, image, database, old):
+def wait_started(project, service, image, state_directory, old):
     deadline = time.monotonic() + START_SECONDS
     while time.monotonic() < deadline:
         row = inspect(project).get(service)
         locks = Path("/proc/locks").read_text()
         if (row and row["Image"] == image and row["State"]["Running"]
                 and row["Id"] != old["Id"]
-                and all(lock_holders(path, locks) for path in lock_paths(database, service))):
+                and all(lock_holders(path, locks)
+                        for path in lock_paths(state_directory, service))):
             break
         time.sleep(1)
     else:
@@ -162,10 +169,10 @@ def wait_started(project, service, image, database, old):
     return row
 
 
-def roll(project, service, image, database, override, images, receipt):
+def roll(project, service, image, state_directory, override, images, receipt):
     rows = inspect(project)
     old = rows[service]
-    before = ledger(database)
+    before = ledger(rows["companion-api"])
     if not before["authority"] or before["authority"][1] != "ACTIVE":
         raise RuntimeError("OwnerAuthority is not ACTIVE; use the STOP procedure")
     labels = old["Config"].get("Labels") or {}
@@ -180,21 +187,21 @@ def roll(project, service, image, database, override, images, receipt):
     docker("stop", "--time", str(GRACE_SECONDS), old["Id"], timeout=GRACE_SECONDS + 60)
     stopped = json.loads(docker("inspect", old["Id"]).stdout)[0]["State"]
     locks = Path("/proc/locks").read_text()
-    after = ledger(database)
+    after = ledger(rows["companion-api"])
     step.update(exit_code=stopped["ExitCode"], stopped_at=stopped["FinishedAt"],
                 unknown_after_stop=after["unknown"], jobs_after_stop=after["jobs"],
                 deliveries_after_stop=after["deliveries"])
     if stopped["Running"] or stopped["ExitCode"] != 0:
         raise RuntimeError(f"{service} did not stop cleanly (exit {stopped['ExitCode']})")
-    if any(lock_holders(path, locks) for path in lock_paths(database, service)):
+    if any(lock_holders(path, locks) for path in lock_paths(state_directory, service)):
         raise RuntimeError(f"{service} still holds a worker lock after stopping")
     if after["unknown"] != before["unknown"]:
-        raise RuntimeError(f"{service} stop left a new UNKNOWN model call")
+        step.setdefault("warnings", []).append("MODEL_COST_UNKNOWN_CHANGED")
     images[service] = image
     write_override(override, images)
     docker(*compose(old, override), "up", "-d", "--no-deps", "--no-build", "--pull", "never",
            "--force-recreate", service, timeout=300)
-    new = wait_started(project, service, image, database, old)
+    new = wait_started(project, service, image, state_directory, old)
     step.update(new_container=new["Id"], started=new["State"]["StartedAt"],
                 ready_at=datetime.now(UTC).isoformat(), result="ROLLED")
 
@@ -213,8 +220,8 @@ def main():
     parser.add_argument("--project", default="companion-main")
     parser.add_argument("--plan", type=Path, required=True, help="plan.json of class R")
     parser.add_argument("--core-image", required=True)
-    parser.add_argument("--database", required=True,
-                        help="Host path of the Core SQLite database (its locks sit beside it)")
+    parser.add_argument("--state-directory", required=True,
+                        help="Host path of the Core state directory containing worker locks")
     parser.add_argument("--output", type=Path, required=True,
                         help="New directory kept for the override file and the receipt")
     args = parser.parse_args()
@@ -224,8 +231,8 @@ def main():
     args.core_image = docker("image", "inspect", "--format", "{{.Id}}",
                              args.core_image).stdout.strip()
     services = plan_services(plan, rows, args.core_image)
-    if not Path(args.database).is_file():
-        raise SystemExit("Database path not found on this host")
+    if not Path(args.state_directory).is_dir():
+        raise SystemExit("Core state directory not found on this host")
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
     override = args.output / "compose.rolling.json"
     images = {}
@@ -234,7 +241,7 @@ def main():
     status = 0
     for service in services:
         try:
-            roll(args.project, service, args.core_image, args.database, override, images,
+            roll(args.project, service, args.core_image, args.state_directory, override, images,
                  receipt)
         except Exception as error:  # noqa: BLE001 - report, put the old image back, stop
             receipt["steps"][-1:] and receipt["steps"][-1].update(

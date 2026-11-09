@@ -73,8 +73,10 @@ def test_authenticated_ws_real_http_five_input_model_outbox_send_chain(core, tmp
                     captured.config.owner_qq_id, captured.config.bot_qq_id,
                     captured.config.onebot_token, "你好", captured.config.onebot_ws_url))
                 assert not list((captured.spool.directory / "captures").glob("*.json"))
-                assert len(core.store.rows("SELECT value FROM runtime_meta "
-                                          "WHERE key LIKE 'owner_input:%'")) == 5
+                assert len(core.store.rows(
+                    'SELECT value FROM runtime_meta WHERE key LIKE '
+                    "'owner_input:%%'"
+                )) == 5
     run(scenario())
 
 
@@ -599,7 +601,7 @@ def test_accepted_or_erased_capture_clears_frame_text_and_repairs_interrupted_pu
 
                 event = normalized(raw_event(1), window.plan.config)
                 core.ingest(InboundEvent.model_validate(event), event["event_id"])
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
             # Emulate a crash after the durable ACK/body purge but before file removal.
             monkeypatch.setattr(window.spool, "remove_capture_text", lambda event_id: None)

@@ -56,7 +56,7 @@ def test_native_bili_sdk_selects_original_reader_media_and_resumes(
                               model=model) as (client, config, plan):
                 event, _ = await admit_image(core, client, config, plan, tmp_path, message=[
                     {"type": "text", "data": {"text": "分析这段视频 " + URL}}])
-                job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+                job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (event["event_id"],))
                 assert not core.store.one("SELECT 1 FROM exploration_requests")
                 first = await sdk_step(core, tmp_path, job["job_id"], [answer(calls=[
                     call("read-1", "read_content", {"url": URL})])], "RETRY_WAIT", "read-select")
@@ -72,7 +72,7 @@ def test_native_bili_sdk_selects_original_reader_media_and_resumes(
                 item = core.store.one("SELECT * FROM bili_video_items")
                 assert item and item["window_sha256"] == ""
                 original_request = item["request_id"]
-                tool = core.store.one("SELECT * FROM agent_tool_calls WHERE tool_name=?",
+                tool = core.store.one('SELECT * FROM agent_tool_calls WHERE tool_name=%s',
                                        ("analyze_shared_video",))
                 assert tool["request_id"] == original_request and tool["state"] == "DEFERRED"
 
@@ -92,14 +92,16 @@ def test_native_bili_sdk_selects_original_reader_media_and_resumes(
                 if boundary != "complete":
                     assert item["state"] in {"FAILED", "CANCELLED", "UNKNOWN"}, item
                     assert len(dispatched) == (1 if boundary == "unknown" else 0)
-                    usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+                    usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
                     assert len(usage) == 3
                     if boundary == "unknown":
                         assert usage[-1]["state"] == "UNKNOWN"
                     assert not core.store.one("SELECT 1 FROM outbox")
                     assert (await reader_once(isolated, config.core_url, core.clock, media,
                                                media=True))["requests"] == []
-                    assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+                    assert core.store.rows(
+                        'SELECT * FROM model_usage ORDER BY record_sequence'
+                    ) == usage
                     assert len(dispatched) == (1 if boundary == "unknown" else 0)
                     return
                 assert item["state"] == "COMPLETE", {
@@ -119,7 +121,10 @@ def test_native_bili_sdk_selects_original_reader_media_and_resumes(
                 assert len(core.store.rows("SELECT * FROM exploration_requests")) == 2
                 assert core.store.one("SELECT request_id FROM bili_video_items")["request_id"] == (
                     original_request)
-                assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+                assert core.store.rows(
+                    'SELECT scenario,state FROM model_usage ORDER BY '
+                    'record_sequence'
+                ) == [
                     {"scenario": "chat", "state": "SETTLED"},
                     {"scenario": "chat", "state": "SETTLED"},
                     {"scenario": "content_video_preview", "state": "SETTLED"},

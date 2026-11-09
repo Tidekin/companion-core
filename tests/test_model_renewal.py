@@ -7,7 +7,9 @@ import copy
 import json
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
+import psycopg
 import pytest
 
 from companion import (
@@ -45,7 +47,7 @@ def test_reviewed_renewal_can_raise_capacity_to_ten_without_changing_old_liabili
     with pytest.raises(CoreError, match="MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"):
         budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock(),
                        clock=core.clock, logical_request_id="capacity-renewal-overflow")
-    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                           (case.request_id,)) == before[0]
     with core.store.transaction():
         saved = paid_budget.journal(core.store, core.settings.paid_model)["model_carries"]
@@ -113,20 +115,19 @@ def test_renewal_replay_batches_windows_at_each_original_cutoff(core, tmp_path):
         core.authorized_model_test_jobs = {}
     before = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
     assert len(before) == 3
-    queries = []
     paid_budget.forget_views(core.store)
-    core.store.db.set_trace_callback(queries.append)
-    try:
+    with patch.object(psycopg.Cursor, "execute", autospec=True,
+                      side_effect=psycopg.Cursor.execute) as executions:
         with core.store.transaction():
             view = paid_budget.journal(core.store, core.settings.paid_model)
-    finally:
-        core.store.db.set_trace_callback(None)
+    queries = [call.args[1] for call in executions.call_args_list
+               if isinstance(call.args[1], str)]
     # Each historical cutoff retains its original baseline despite newer admissions.
     assert len(view["model_carries"]) == 3
     assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == before
     baseline_reads = [query for query in queries if query.startswith((
         "SELECT window_id FROM model_admissions",
-        "SELECT request_id,window_id FROM model_admissions",
+        "SELECT request_id, window_id FROM model_admissions",
     ))]
     assert len(baseline_reads) == 2  # One current table read per historical renewal.
 
@@ -139,11 +140,11 @@ def test_renewal_replay_rejects_changed_baseline_admission(core, tmp_path, chang
     activate(core, policy, revision=4, operation="activate-baseline-custody")
     before = core.store.rows("SELECT * FROM model_usage")
     if change == "missing":
-        core.store.execute("DELETE FROM model_admissions WHERE request_id=?", (case.request_id,))
+        core.store.execute('DELETE FROM model_admissions WHERE request_id=%s', (case.request_id,))
     else:
         core.store.insert("model_budget_windows", window_id="unrelated-window",
                           contract_sha256="0" * 64)
-        core.store.execute("UPDATE model_admissions SET window_id=? WHERE request_id=?",
+        core.store.execute('UPDATE model_admissions SET window_id=%s WHERE request_id=%s',
                            ("unrelated-window", case.request_id))
     with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
         with core.store.transaction():
@@ -264,7 +265,7 @@ def test_renewal_fsync_replay_requires_the_exact_reviewed_request(
     execute = core.store.execute
 
     def crash(query, values=()):
-        if query == "INSERT INTO runtime_meta VALUES (?,?)" and values[0].startswith(
+        if query == "INSERT INTO runtime_meta VALUES (%s, %s)" and values[0].startswith(
             "model_control:"
         ):
             raise RuntimeError("crash after renewal fsync")
@@ -293,7 +294,7 @@ def test_new_journal_closed_unknown_no_longer_pauses_life(core, tmp_path):
     migrated(core, tmp_path)
     assert not _uncertain(core.store, core.settings)
     request_id = current_unknown(core)
-    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                           (request_id,))["state"] == "UNKNOWN"
     # Owner decision 2026-11-01: closed liability counts as settled for Life too.
     assert not _uncertain(core.store, core.settings)
@@ -328,7 +329,7 @@ def test_renewal_retains_new_closed_unknown_and_uses_existing_input_handoff(
         row["billed_micro_usd"] for row in before if row["request_id"] == current
     )
     capture = OwnerCapture.model_validate(json.loads(core.store.one(
-        "SELECT value FROM runtime_meta WHERE key=?",
+        'SELECT value FROM runtime_meta WHERE key=%s',
         ("owner_input:" + proof["inputs"][0]["event_id"],),
     )["value"])["capture"])
     state = owner_input_state.read(core.store, core.settings, capture)
@@ -357,7 +358,7 @@ def test_renewal_retains_new_closed_unknown_and_uses_existing_input_handoff(
     activate(core, policy, revision=active["authority"]["revision"] + 1,
              operation="same-approval-after-renewal")
     for row in before:
-        assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+        assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                (row["request_id"],)) == row
 
 
@@ -393,8 +394,10 @@ def test_renewal_keeps_closed_unknown_from_an_earlier_same_approval_revision(
         core.authorized_model_test_capture = active, case.key
         core.authorized_model_test_jobs = {}
     historical = current_unknown(core)
-    source = core.store.one("SELECT j.event_id FROM jobs j JOIN model_usage m USING(job_id) "
-                            "WHERE m.request_id=?", (historical,))["event_id"]
+    source = core.store.one((
+        'SELECT j.event_id FROM jobs j JOIN model_usage m USING(job_id) WHERE'
+        ' m.request_id=%s'
+    ), (historical,))["event_id"]
     for number in range(handoffs):
         authority = case.successor["authority"]
         owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
@@ -403,7 +406,7 @@ def test_renewal_keeps_closed_unknown_from_an_earlier_same_approval_revision(
                              operation=f"history-resume-{number}")
         case.successor = active
     if erased:
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
     current = None
     if with_current:
@@ -414,7 +417,7 @@ def test_renewal_keeps_closed_unknown_from_an_earlier_same_approval_revision(
     request, policy, witness = renewal(core, case, number=2 if prior_renewal else 1,
                                        concurrency=10)
     assert request["authority"]["revision"] > json.loads(core.store.one(
-        "SELECT authority_json FROM model_admissions WHERE request_id=?",
+        'SELECT authority_json FROM model_admissions WHERE request_id=%s',
         (historical,),
     )["authority_json"])["revision"]
     receipt = model_carry.prepare(core.store, core.settings, request, witness, core.clock())
@@ -439,17 +442,17 @@ def test_renewal_keeps_closed_unknown_from_an_earlier_same_approval_revision(
     assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == before
     assert not core.store.rows("SELECT * FROM outbox")
     if erased:
-        assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+        assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                (source,))["redacted"]
 
 
 def test_life_does_not_trust_unproved_unknown_or_recovering_journal(core, tmp_path):
     case = migrated(core, tmp_path)
     assert not _uncertain(core.store, core.settings)
-    core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'model_control:%'")
+    core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'model_control:%%'")
     assert _uncertain(core.store, core.settings)
     assert (
-        core.store.one("SELECT state FROM model_usage WHERE request_id=?", (case.request_id,))[
+        core.store.one('SELECT state FROM model_usage WHERE request_id=%s', (case.request_id,))[
             "state"
         ]
         == "UNKNOWN"

@@ -64,7 +64,7 @@ def test_bootstrap_without_offer_uses_only_admitted_meme_intent(core, tmp_path, 
         )
         assert not core.store.rows("SELECT * FROM model_usage")
         assert not core.store.rows("SELECT * FROM outbox")
-        saved = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+        saved = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                ("meme_offer:" + event["event_id"],))
         if query == "accepted-null":
             assert json.loads(saved["value"])["offer"] is None

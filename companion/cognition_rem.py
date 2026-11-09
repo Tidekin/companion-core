@@ -31,7 +31,8 @@ def record(core, row, now):
     A missing/expired source hides private references, retaining accounting.
     This reader never invokes REM scheduling, execution, expiration or erasure.
     """
-    job = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=? AND kind='rem'",
+    job = core.store.one('SELECT state, last_error_code FROM jobs WHERE job_id = %s AND kind = '
+        "'rem'",
                          (row["job_id"],))
     if job is None:
         return None
@@ -61,12 +62,14 @@ def record(core, row, now):
         except (CoreError, ValueError, KeyError, TypeError):
             available = False
     usage = core.store.one(
-        "SELECT request_id,state,input_tokens,output_tokens,cached_input_tokens,billed_micro_usd "
-        "FROM model_usage WHERE job_id=? AND scenario='rem' ORDER BY rowid DESC LIMIT 1",
+        'SELECT request_id, state, input_tokens, output_tokens, cached_input_tokens, '
+        "billed_micro_usd FROM model_usage WHERE job_id = %s AND scenario = 'rem' ORDER BY "
+        'record_sequence DESC NULLS LAST LIMIT 1',
         (row["job_id"],),
     )
     admission = core.store.one(
-        "SELECT measurement_json FROM model_admissions WHERE request_id=?", (usage["request_id"],),
+        'SELECT measurement_json FROM model_admissions WHERE request_id = '
+        '%s', (usage["request_id"],),
     ) if usage else None
     questions = output.get("questions") if available else None
     count = len(questions) if isinstance(questions, list) and len(questions) <= 3 else None

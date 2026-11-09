@@ -86,18 +86,18 @@ Reader 原始结果入 SDK、生成后投递来源检查、最终原图/记忆�
 
 | 能力 | 可声明的 fields | 已消费的 wired | 尚未消费 |
 | --- | --- | --- | --- |
-| `memory.recall` | `pause`、`memory_daily_micro_usd`、`extraction_min_events`、`extraction_idle_seconds` | 无 | 全部 4 项 |
-| `diary` | `pause`、`diary_daily_micro_usd` | `pause` | 日预算 |
+| `memory.recall` | `pause`、`extraction_min_events`、`extraction_idle_seconds` | 无 | 全部 3 项 |
+| `diary` | `pause` | `pause` | 无 |
 | `consolidation` | `pause` | 无 | 暂停 |
-| `reflection` | `pause`、`reflection_daily_max_suggestions`、`reflection_max_daily_calls`、`reflection_daily_micro_usd` | 无 | 全部 4 项 |
+| `reflection` | `pause`、`reflection_daily_max_suggestions`、`reflection_max_daily_calls` | 无 | 全部 3 项 |
 | `goals` | `pause`、`goals_max_active` | 无 | 全部 2 项 |
 | `affect` | `pause` | 无 | 暂停 |
 | `proactive` | `pause`、`proactive_daily_limit`、`proactive_interval_seconds`、`proactive_idle_seconds` | 无 | 全部 4 项 |
-| `wake` | `pause`、`wake_max_daily_runs`、`wake_min_interval_minutes`、`autonomous_daily_micro_usd` | 前 3 项 | 自主活动日预算 |
+| `wake` | `pause`、`wake_max_daily_runs`、`wake_min_interval_minutes` | 全部 3 项 | 无 |
 | `exploration` | `pause`、`exploration_daily_candidate_limit`、`exploration_daily_deep_reads`、`exploration_daily_requests` | 无 | 全部 4 项 |
 | `expression` | `pause`、`expression_cooldown_minutes`、`expression_selection_probability` | 无 | 全部 3 项 |
 | `expression_learning` | `pause` | 无 | 暂停 |
-| `memes.semantic` | `pause`、`meme_caption_daily_micro_usd` | 无 | 全部 2 项 |
+| `memes.semantic` | `pause` | 无 | 暂停 |
 | `reading.web` | `pause` | 无 | 暂停 |
 | `reading.bilibili` | `pause` | 无 | 暂停 |
 | `bilibili.video` | `pause` | 无 | 暂停 |

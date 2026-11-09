@@ -1,6 +1,7 @@
 """Original image and memory evidence survive every native fragment boundary."""
 
 import json
+import sys
 from datetime import datetime, timedelta
 
 import httpx
@@ -24,6 +25,11 @@ def test_multi_image_memory_reply_sends_all_parts_from_one_final_generation(
         async with native_image_memory(core, tmp_path, no_candidates=no_candidates, reply=REPLY,
             core_options={"segmented_reply": SegmentedReplyConfig(min_chars=12, interval_ms=500)}
         ) as value:
+            def unexpected_failure(job, code):
+                raise AssertionError(
+                    "segmented image generation failed: " + code,
+                ) from sys.exception()
+            value.worker.fail_job = unexpected_failure
             assert await value.worker.run_once("native-segmented-image-memory")
             rows = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
             assert [json.loads(row["content_json"])["text"] for row in rows] == PARTS
@@ -35,11 +41,11 @@ def test_multi_image_memory_reply_sends_all_parts_from_one_final_generation(
             assert (PREFERENCE in encode(final)) == (not no_candidates)
             # Generation retains originals only for their existing short lifetime.
             assert len(list(image_spool.directory(core.store).glob("*.raw"))) == 2
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows("SELECT * FROM model_usage ORDER BY record_sequence")
             assert len(usage) == 2 and all(row["state"] == "SETTLED" for row in usage)
             usage_ids = [row["request_id"] for row in usage]
             for index, row in enumerate(rows):
-                receipt = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                receipt = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=%s",
                     ("owner_delivery:" + row["message_id"],))["value"])
                 assert receipt["request_ids"] == usage_ids
                 assert row["segment_index"] == index
@@ -57,7 +63,7 @@ def test_multi_image_memory_reply_sends_all_parts_from_one_final_generation(
             assert [item["message"][0]["data"]["text"] for item in value.sends] == PARTS
             assert value.entry.db.execute(
                 "SELECT COUNT(*) FROM window_attempts WHERE state='ACK'").fetchone()[0] == 3
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows("SELECT * FROM model_usage ORDER BY record_sequence") == usage
             assert len(core.store.rows("SELECT * FROM memories")) == 2
     run(scenario())
 
@@ -73,7 +79,7 @@ def test_frozen_fragments_survive_original_expiry_and_cleanup(core, tmp_path, bo
             expiry = datetime.fromisoformat(max(row["expires_at"] for row in captures))
             core.clock.now = expiry - timedelta(seconds=1)
             assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows("SELECT * FROM model_usage ORDER BY record_sequence")
 
             def expire():
                 core.clock.now = max(core.clock.now, expiry + timedelta(seconds=1))
@@ -97,7 +103,7 @@ def test_frozen_fragments_survive_original_expiry_and_cleanup(core, tmp_path, bo
             assert [row["state"] for row in core.store.rows(
                 "SELECT state FROM outbox ORDER BY segment_index")] == ["SENT"] * 3
             assert core.store.rows("SELECT * FROM captured_images ORDER BY item_id") == captures
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert core.store.rows("SELECT * FROM model_usage ORDER BY record_sequence") == usage
             assert len(value.calls) == len(value.downloads) == 2
     run(scenario())
 
@@ -123,13 +129,13 @@ def test_joint_evidence_loss_or_unknown_send_stops_remaining_fragments(
                 image_spool.cleanup(core.store, core.clock(), retain_completed=True)
                 assert not list(image_spool.directory(core.store).glob("*.raw"))
             if failure == "memory_drift":
-                core.store.execute("UPDATE memories SET content='已改变' WHERE memory_id=?",
+                core.store.execute("UPDATE memories SET content='已改变' WHERE memory_id=%s",
                                    (value.memory_id,))
             elif failure == "image_evidence_drift":
                 row = core.store.one("SELECT item_id,proof_json FROM captured_images")
                 proof = json.loads(row["proof_json"])
                 proof["signature"] = "0" * 128
-                core.store.execute("UPDATE captured_images SET proof_json=? WHERE item_id=?",
+                core.store.execute('UPDATE captured_images SET proof_json=%s WHERE item_id=%s',
                                    (encode(proof), row["item_id"]))
 
             def uncertain(request):

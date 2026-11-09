@@ -89,7 +89,7 @@ def test_atomic_admission_across_independent_connections_never_exceeds_ten(core,
     job = approved(core, tmp_path)
 
     def reserve(index):
-        with closing(Store(core.settings.database)) as store:
+        with closing(Store(core.database, core.settings.state_directory)) as store:
             try:
                 return budget.reserve(store, core.settings, job, "chat", MESSAGES, core.clock(),
                                       clock=core.clock, logical_request_id=f"contender-{index}")
@@ -108,10 +108,10 @@ def test_atomic_admission_across_independent_connections_never_exceeds_ten(core,
 
 def test_background_leaves_a_slot_for_chat(core, tmp_path):
     core.settings.watch_ledger = core.settings.watch_ledger.model_copy(
-        update={"enabled": True, "daily_micro_usd": 100000})
+        update={"enabled": True})
     job = approved(core, tmp_path)
     # Use the current native policy with its independently granted exploration scope.
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job,))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (job,))
     view = owner_authority.current(core.store, core.settings, core.clock)
     from tests.support.owner_authority import activate
 
@@ -161,11 +161,13 @@ def test_background_yield_proves_zero_dispatch_without_an_unknown_slot_leak(
 
     asyncio.run(scenario())
     assert not provider.calls
-    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state,billed_micro_usd FROM model_usage WHERE request_id=%s',
                            (request_id,)) == {"state": "SETTLED", "billed_micro_usd": 0}
     assert budget.execution_counts(core.store)["total"] == 0
-    assert core.store.one("SELECT 1 FROM audit_log WHERE action='model.not_dispatched' "
-                          "AND entity_id=?", (request_id,))
+    assert core.store.one((
+        "SELECT 1 FROM audit_log WHERE action='model.not_dispatched' AND "
+        'entity_id=%s'
+    ), (request_id,))
 
 
 @pytest.mark.parametrize("transport_unwound", [False, True])
@@ -175,7 +177,7 @@ def test_unknown_retains_money_and_blocks_its_input_without_stopping_unrelated_w
     job = approved(core, tmp_path)
     request_id = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock(),
                                 clock=core.clock, logical_request_id="uncertain-original")
-    before = core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=?",
+    before = core.store.one('SELECT billed_micro_usd FROM model_usage WHERE request_id=%s',
                             (request_id,))
     if transport_unwound:
         async def scenario():
@@ -190,13 +192,12 @@ def test_unknown_retains_money_and_blocks_its_input_without_stopping_unrelated_w
         asyncio.run(scenario())
     else:
         budget.settle(core.store, core.settings, request_id)
-    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state,billed_micro_usd FROM model_usage WHERE request_id=%s',
         (request_id,)) == {"state": "UNKNOWN", **before}
     with core.store.transaction():
         view = paid_budget.journal(core.store, core.settings.paid_model)
     assert (request_id in view["model_closures"]) is transport_unwound
-    assert budget.execution_counts(core.store, view["model_closures"])["total"] == (
-        0 if transport_unwound else 1)
+    assert budget.execution_counts(core.store, view["model_closures"])["total"] == 0
     assert not life_topics._uncertain(core.store, core.settings)
     assert "MODEL_USAGE_UNKNOWN" not in capabilities._live_blocks(
         core.store, core.settings, core.clock())
@@ -211,7 +212,7 @@ def test_unknown_retains_money_and_blocks_its_input_without_stopping_unrelated_w
 def test_tool_roundtrip_waits_for_capacity_then_reuses_saved_response_and_tool(core, tmp_path,
                                                                             monkeypatch):
     job_id = approved(core, tmp_path)
-    core.store.execute("UPDATE jobs SET state='QUEUED',lease_token=NULL,attempts=0 WHERE job_id=?",
+    core.store.execute("UPDATE jobs SET state='QUEUED',lease_token=NULL,attempts=0 WHERE job_id=%s",
                        (job_id,))
     original = budget.reserve
     refused = []
@@ -238,7 +239,7 @@ def test_tool_roundtrip_waits_for_capacity_then_reuses_saved_response_and_tool(c
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
             core.model = ModelClient(core.settings, client)
             assert await core.run_once("capacity-first", job_id=job_id)
-            row = core.store.one("SELECT state,attempts,last_error_code FROM jobs WHERE job_id=?",
+            row = core.store.one('SELECT state,attempts,last_error_code FROM jobs WHERE job_id=%s',
                                   (job_id,))
             assert row == {"state": "RETRY_WAIT", "attempts": 0,
                            "last_error_code": "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"}
@@ -255,8 +256,10 @@ def test_tool_roundtrip_waits_for_capacity_then_reuses_saved_response_and_tool(c
     assert any(item["role"] == "tool" and item["tool_call_id"] == "capacity-clock"
                for item in calls[-1]["messages"])
     assert len(core.store.rows("SELECT * FROM model_usage WHERE state='SETTLED'")) == 2
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                           (job_id,))["state"] == "SUCCEEDED"
-    assert len(core.store.rows("SELECT * FROM outbox WHERE origin_event_id=("
-                              "SELECT event_id FROM jobs WHERE job_id=?)", (job_id,))) == 1
+    assert len(core.store.rows((
+        'SELECT * FROM outbox WHERE origin_event_id=(SELECT event_id FROM '
+        'jobs WHERE job_id=%s)'
+    ), (job_id,))) == 1
     assert Path(core.settings.paid_model.journal_path).exists()

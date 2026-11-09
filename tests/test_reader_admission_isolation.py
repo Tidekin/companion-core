@@ -1,9 +1,7 @@
 """Reader lease and pre-I/O validation retain authority after API queue waits."""
 
 import asyncio
-import sys
 import threading
-from pathlib import Path
 from time import perf_counter
 
 import httpx
@@ -11,6 +9,7 @@ import pytest
 
 from companion import api_store
 from companion.store import Store, after
+from tests.api_store_lock_worker import start as start_lock_worker
 from tests.conftest import ingest
 from tests.support.core_http import real_core_http
 from tests.support.exploration import configure
@@ -46,12 +45,13 @@ def test_reader_admission_wait_keeps_health_and_uses_current_time(
     entered, opened, closed = threading.Event(), [], []
 
     class ObservedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             opened.append((self, threading.get_ident()))
-            self.db.set_trace_callback(
-                lambda sql: entered.set() if sql == "BEGIN IMMEDIATE" else None
-            )
+
+        def _control_lock(self, exclusive):
+            entered.set()
+            return super()._control_lock(exclusive)
 
         def close(self):
             closed.append((self, threading.get_ident()))
@@ -60,11 +60,7 @@ def test_reader_admission_wait_keeps_health_and_uses_current_time(
     monkeypatch.setattr(api_store, "Store", ObservedStore)
 
     async def scenario():
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
-            core.settings.database, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+        process = await start_lock_worker(core)
         task = None
         try:
             assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
@@ -132,8 +128,8 @@ def test_reader_queue_rechecks_source_grant(core, monkeypatch, version, operatio
     entered, release = threading.Event(), threading.Event()
 
     class GatedStore(Store):
-        def __init__(self, path):
-            super().__init__(path)
+        def __init__(self, database, state_directory):
+            super().__init__(database, state_directory)
             entered.set()
             assert release.wait(5)
 
@@ -152,7 +148,7 @@ def test_reader_queue_rechecks_source_grant(core, monkeypatch, version, operatio
                     core.observations.grants.revoke(grant.grant_id)
                 else:
                     core.clock.advance(3601)
-                before = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?",
+                before = core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s',
                                         (request_id,))
                 release.set()
                 response = await asyncio.wait_for(task, 5)
@@ -160,7 +156,7 @@ def test_reader_queue_rechecks_source_grant(core, monkeypatch, version, operatio
                 assert response.json()["error"] in {
                     "SOURCE_GRANT_REVOKED", "SOURCE_GRANT_EXPIRED", "STALE_READER_LEASE",
                 }
-                assert core.store.one("SELECT * FROM exploration_requests WHERE request_id=?",
+                assert core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s',
                                       (request_id,)) == before
                 assert not core.store.rows("SELECT * FROM observations")
             finally:
@@ -175,7 +171,7 @@ def test_http_reader_lease_preserves_explicit_video_capability_and_media_limits(
     from tests.support.bili_video import metadata
 
     module, item_id, source = metadata(core)
-    original = core.store.one("SELECT read_request_id FROM content_items WHERE item_id=?",
+    original = core.store.one('SELECT read_request_id FROM content_items WHERE item_id=%s',
                               (item_id,))
     child = module.schedule(item_id, source)
 
@@ -193,7 +189,7 @@ def test_http_reader_lease_preserves_explicit_video_capability_and_media_limits(
             item = response.json()["item"]
             assert item["request_id"] == child and item["max_items"] == 1
             assert item["max_bytes"] == 33 * 1024 * 1024 and item["max_requests"] == 8
-            native = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?",
+            native = core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s',
                                     (child,))
             assert native["reserved_bytes"] == item["max_bytes"]
             assert native["reserved_requests"] == item["max_requests"]
@@ -203,6 +199,6 @@ def test_http_reader_lease_preserves_explicit_video_capability_and_media_limits(
             assert checked.status_code == 200 and checked.json() == {"valid": True}
 
     asyncio.run(scenario())
-    assert core.store.one("SELECT read_request_id FROM content_items WHERE item_id=?",
+    assert core.store.one('SELECT read_request_id FROM content_items WHERE item_id=%s',
                           (item_id,)) == original
     assert not core.store.rows("SELECT * FROM model_usage")

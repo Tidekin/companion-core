@@ -26,7 +26,7 @@ def test_native_planner_binds_core_offer_actual_wire_and_ack(runtime_case, tmp_p
         "WHERE j.kind='chat' AND o.state='SENT'"
     )
     saved = c.core.store.one(
-        "SELECT * FROM agent_conversations WHERE job_id=?", (job["job_id"],)
+        'SELECT * FROM agent_conversations WHERE job_id=%s', (job["job_id"],)
     )
     assert saved["phase"] == "COMPLETE"
     snapshots = json.loads(saved["snapshots_json"])
@@ -48,16 +48,16 @@ def test_native_planner_binds_core_offer_actual_wire_and_ack(runtime_case, tmp_p
     assert record["source_proof_count"] == plan["initial_source_proof_count"] == len(proofs)
     assert record["source_proofs_sha256"] == plan["initial_source_proofs_sha256"] == sha(proofs)
     usage = c.core.store.one(
-        "SELECT * FROM model_usage WHERE request_id=?", (record["request_id"],)
+        'SELECT * FROM model_usage WHERE request_id=%s', (record["request_id"],)
     )
     assert usage["state"] == "SETTLED" and usage["job_id"] == job["job_id"]
     admission = c.core.store.one(
-        "SELECT * FROM model_admissions WHERE request_id=?", (record["request_id"],)
+        'SELECT * FROM model_admissions WHERE request_id=%s', (record["request_id"],)
     )
     assert json.loads(admission["measurement_json"]) == measured.receipt()
     assert admission["payload_sha256"] == sha(payload)
     offer = json.loads(c.core.store.one(
-        "SELECT value FROM runtime_meta WHERE key=?", ("meme_offer:" + job["event_id"],)
+        'SELECT value FROM runtime_meta WHERE key=%s', ("meme_offer:" + job["event_id"],)
     )["value"])
     candidate = c.item["asset_sha256"]
     assert offer["catalog_owner"] == "core" and offer["binding_version"] == 2

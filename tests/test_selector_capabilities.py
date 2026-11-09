@@ -58,7 +58,7 @@ def test_actual_caption_job_runs_in_independent_selector_without_core_fallback(
             first = await child(core, tmp_path, "meme_caption", 1)
             assert len(first["calls"]) == 1, first
             assert {"lane": "meme_caption", "progressed": True} in first["turns"]
-            job = core.store.one("SELECT state,authority_json FROM jobs WHERE job_id=?", (job_id,))
+            job = core.store.one('SELECT state,authority_json FROM jobs WHERE job_id=%s', (job_id,))
             assert job["state"] == "SUCCEEDED"
             assert json.loads(job["authority_json"]) == grant.authority
             usage = core.store.rows("SELECT * FROM model_usage")
@@ -86,7 +86,7 @@ def test_ready_native_caption_remains_fenced_before_selector_dispatch(
                                         json=body(core, event, item, now))
             assert created.status_code == 200, created.text
             job_id = created.json()["job_id"]
-            original = core.store.one("SELECT authority_json FROM jobs WHERE job_id=?", (job_id,))
+            original = core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s', (job_id,))
             if fence == "purpose":
                 policy = grant.policy.model_copy(update={
                     "purposes": [p for p in grant.policy.purposes if p != "meme"],
@@ -101,15 +101,15 @@ def test_ready_native_caption_remains_fenced_before_selector_dispatch(
                 capture = owner_turn(SimpleNamespace(core=core, store=core.store,
                     settings=core.settings, clock=core.clock, approval=view,
                     key=grant.key, config=config), 2, "先处理新输入", approve_only=True)
-                assert not core.store.one("SELECT 1 FROM events WHERE event_id=?",
+                assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s',
                                            (capture["event_id"],))
             report = await child(core, tmp_path, "meme_caption", 1)
             assert report["calls"] == []
             assert core.store.rows("SELECT * FROM model_usage") == []
-            assert core.store.one("SELECT authority_json FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s',
                                    (job_id,)) == original
             if fence == "pre_ingress":
-                assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job_id,)) == {
+                assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job_id,)) == {
                     "state": "QUEUED",
                 }
     run(scenario())
@@ -143,7 +143,7 @@ def test_native_poke_coalescing_and_execution_use_original_selector_process(
                 core.clock.advance(core.settings.poke_policy.coalesce_seconds + 1)
                 if pre_ingress:
                     event = owner_turn(env, 2, "请先看新的输入", approve_only=True)
-                    assert not core.store.one("SELECT 1 FROM events WHERE event_id=?",
+                    assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s',
                                                (event["event_id"],))
                 actual = await child(core, tmp_path, "poke", 2)
                 if pre_ingress:

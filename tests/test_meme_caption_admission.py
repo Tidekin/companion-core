@@ -48,10 +48,8 @@ def messages(count=1, format="PNG"):
 def setup_caption(core, tmp_path, monkeypatch, *, daily=30000, paid=None, second=False):
     async def prepare():
         async with discovery_environment(core, tmp_path, monkeypatch,
-            meme_semantics_enabled=True, meme_caption_daily_micro_usd=daily,
+            meme_semantics_enabled=True,
             paid={"meme_input": policy(), "max_output_tokens": 4096,
-                "unlimited_period_spend": False, "daily_micro_usd": 200000,
-                "monthly_micro_usd": 1000000, "window_micro_usd": 2000000,
                 "concurrency": 1, **(paid or {})}) as values:
             event, _, (client, _, _, now) = values
             submit(core, event)
@@ -69,8 +67,11 @@ def setup_caption(core, tmp_path, monkeypatch, *, daily=30000, paid=None, second
                 assert created.status_code == 200, created.text
                 jobs.append(created.json()["job_id"])
             for job_id in jobs:
-                core.store.execute("UPDATE jobs SET state='RUNNING',lease_token=?,"
-                    "lease_until=? WHERE job_id=?",
+                core.store.execute((
+                    'UPDATE jobs SET '
+                    "state='RUNNING',lease_token=%s,lease_until=%s WHERE "
+                    'job_id=%s'
+                ),
                     ("caption-lease", after(core.clock(), 120), job_id))
             return jobs if second else jobs[0]
 
@@ -86,19 +87,16 @@ def test_closed_defaults_preserve_prior_snapshot_and_config_fields(core, tmp_pat
     approval = approved_live(core, tmp_path)
     before = paid_budget.snapshot(core.settings)
     assert "meme_input" not in approval.model_dump(mode="json")
-    assert "meme_caption" not in before["scenario_daily_micro_usd"]
+    assert "scenario_daily_micro_usd" not in before
     assert "image_estimator" not in before
     assert core.settings.meme_semantics_enabled is False
-    assert core.settings.meme_caption_daily_micro_usd == 0
     assert core.settings.output_tokens("meme_caption") == 2000
     assert not any(name.startswith("meme_caption_") or name == "meme_semantics_enabled"
                    for name in core.settings.model_dump())
-    core.settings.meme_caption_daily_micro_usd = 20000
     assert paid_budget.snapshot(core.settings) == before
     core.settings.paid_model = approval.model_copy(update={"meme_input": policy()})
     snapshot = paid_budget.snapshot(core.settings)
-    assert snapshot["scenario_daily_micro_usd"]["meme_caption"] == 20000
-    assert "content_vision" not in snapshot["scenario_daily_micro_usd"]
+    assert "scenario_daily_micro_usd" not in snapshot
     assert snapshot["image_estimator"] == "approved-fixed-image-plus-utf8-third-v1"
 
 
@@ -142,9 +140,10 @@ def test_caption_estimate_uses_dedicated_policy_and_json_without_owner_image_per
     ("runtime_off", "MODEL_MEME_SCOPE_REQUIRED"),
     ("runtime_shadow", "MODEL_MEME_SCOPE_REQUIRED"),
     ("no_policy", "PAID_MEME_APPROVAL_REQUIRED"),
-    ("zero_cap", "SCENARIO_BUDGET_DISABLED"),
     ("logical", "MODEL_MEME_JOB_REQUIRED"),
 ])
+
+
 def test_caption_contract_fails_closed(core, tmp_path, monkeypatch, change, code):
     job_id = setup_caption(core, tmp_path, monkeypatch)
     assert core.settings.paid_model.image_input is None
@@ -158,8 +157,6 @@ def test_caption_contract_fails_closed(core, tmp_path, monkeypatch, change, code
             mode="OFF" if change == "runtime_off" else "SHADOW")
     elif change == "no_policy":
         core.settings.paid_model = core.settings.paid_model.model_copy(update={"meme_input": None})
-    elif change == "zero_cap":
-        core.settings.meme_caption_daily_micro_usd = 0
     with pytest.raises(CoreError, match=code):
         meme_input.contract(core.settings, job_id, "other" if change == "logical" else job_id)
     assert not core.store.one("SELECT 1 FROM model_usage")
@@ -198,22 +195,24 @@ def test_caption_settles_one_native_attempt_and_cannot_reuse_chat_or_background_
         owner_authority.admit_model(core.store, core.settings, core.clock, job_id, "chat")
     with pytest.raises(CoreError, match="COMPANION_BACKGROUND_SCOPE_REQUIRED"):
         owner_authority.admit_model(core.store, core.settings, core.clock, None, "meme_caption")
-    core.store.execute("UPDATE jobs SET kind='chat' WHERE job_id=?", (job_id,))
+    core.store.execute("UPDATE jobs SET kind='chat' WHERE job_id=%s", (job_id,))
     with pytest.raises(CoreError, match="MODEL_MEME_JOB_REQUIRED"):
         reserve(core, job_id)
 
 
 @pytest.mark.parametrize("limit,code", [
-    ({"daily_micro_usd": 1}, "MODEL_DAILY_BUDGET_EXHAUSTED"),
-    ({"monthly_micro_usd": 1}, "MODEL_MONTHLY_BUDGET_EXHAUSTED"),
-    ({"window_micro_usd": 1}, "MODEL_WINDOW_BUDGET_EXHAUSTED"),
-    ({"per_attempt_micro_usd": 1}, "MODEL_ATTEMPT_BUDGET_EXHAUSTED"),
+    ({}, "MODEL_DAILY_BUDGET_EXHAUSTED"),
+    ({}, "MODEL_MONTHLY_BUDGET_EXHAUSTED"),
+    ({}, "MODEL_WINDOW_BUDGET_EXHAUSTED"),
+    ({}, "MODEL_ATTEMPT_BUDGET_EXHAUSTED"),
 ])
-def test_caption_respects_shared_paid_caps(core, tmp_path, monkeypatch, limit, code):
+
+
+def test_caption_currency_caps_are_advisory(core, tmp_path, monkeypatch, limit, code):
     job_id = setup_caption(core, tmp_path, monkeypatch, paid=limit)
-    with pytest.raises(CoreError, match=code):
-        reserve(core, job_id)
-    assert not core.store.one("SELECT 1 FROM model_usage")
+    request = reserve(core, job_id)
+    assert core.store.one("SELECT state FROM model_usage WHERE request_id=%s", (request,))[
+        "state"] == "RESERVED"
 
 
 def test_caption_reservation_shares_provider_concurrency(core, tmp_path, monkeypatch):
@@ -224,36 +223,31 @@ def test_caption_reservation_shares_provider_concurrency(core, tmp_path, monkeyp
     assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
 
 
-def test_caption_independent_daily_cap_applies_even_to_unlimited_period_spend(
+def test_caption_currency_amount_does_not_disable_unlimited_period_spend(
     core, tmp_path, monkeypatch,
 ):
     job_id = setup_caption(core, tmp_path, monkeypatch, daily=1, paid={
-        "unlimited_period_spend": True, "daily_micro_usd": None,
-        "monthly_micro_usd": None, "window_micro_usd": None,
     })
-    with pytest.raises(CoreError, match="DAILY_BUDGET_EXHAUSTED"):
-        reserve(core, job_id)
-    assert not core.store.one("SELECT 1 FROM model_usage")
+    reserve(core, job_id)
+    assert core.store.one("SELECT 1 FROM model_usage")
 
 
-def test_caption_actual_usage_over_independent_cap_stops_unlimited_period_spend(
+def test_caption_actual_usage_over_currency_amount_preserves_actual_charge(
     core, tmp_path, monkeypatch,
 ):
     job_id = setup_caption(core, tmp_path, monkeypatch, daily=5000, paid={
-        "unlimited_period_spend": True, "daily_micro_usd": None,
-        "monthly_micro_usd": None, "window_micro_usd": None,
     })
     request_id = reserve(core, job_id)
     budget.settle(core.store, core.settings, request_id, ModelResponse("{}", 6000, 20))
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
-        "state": "UNKNOWN", "billed_micro_usd": 6040,
+        "state": "SETTLED", "billed_micro_usd": 6040,
     }
-    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
     diagnostic = json.loads(core.store.one("SELECT safe_detail_json FROM audit_log "
                                            "WHERE action='model.usage_diagnostic'")[
         "safe_detail_json"
     ])
-    assert diagnostic["limits"] == ["SCENARIO_DAILY_AMOUNT"]
+    assert diagnostic["limits"] == []
 
 
 @pytest.mark.parametrize("change,code", [
@@ -262,6 +256,8 @@ def test_caption_actual_usage_over_independent_cap_stops_unlimited_period_spend(
     ("lease", "JOB_LEASE_LOST"),
     ("event", "OWNER_SOURCE_CHANGED"),
 ])
+
+
 def test_caption_rechecks_source_stop_job_lease_and_frozen_event_after_http_hooks(
     core, tmp_path, monkeypatch, change, code,
 ):
@@ -275,7 +271,7 @@ def test_caption_rechecks_source_stop_job_lease_and_frozen_event_after_http_hook
             raise CoreError("MEME_SOURCE_CHANGED", 409)
         view = owner_authority.current(core.store, core.settings, core.clock, purpose="meme")
         meme_core.check_caption_job(core.store, core.settings, view,
-            core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)), clock=core.clock)
+            core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job_id,)), clock=core.clock)
 
     changed = False
 

@@ -39,48 +39,65 @@ def next_local_midnight(settings, now):
 
 
 def total_monthly(store, month, before=None):
-    """Shared cost ceiling includes unknown/reserved model and isolated tool charges."""
+    """Recorded model and isolated tool charges, including pending estimates."""
     total = store.one(
-        "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage WHERE occurred_at>=?"
-        + (" AND occurred_at<?" if before else ""),
+        "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage WHERE occurred_at>=%s"
+        + (" AND occurred_at<%s" if before else ""),
         (month, before) if before else (month,),
     )["n"]
     if store.has_table("tool_tasks"):
         total += store.one(
-            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM tool_tasks WHERE dispatched_at>=?"
-            + (" AND dispatched_at<?" if before else ""),
+            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM tool_tasks WHERE dispatched_at>=%s"
+            + (" AND dispatched_at<%s" if before else ""),
             (month, before) if before else (month,),
         )["n"]
     return total
 
 
 def chat_pending(store, now):
-    return bool(store.one(
-        "SELECT 1 FROM jobs j JOIN events e ON e.event_id=j.event_id "
-        "WHERE j.kind='chat' AND e.redacted=0 "
-        "AND j.state IN ('QUEUED','RUNNING','RETRY_WAIT') LIMIT 1",
-    ))
+    return bool(
+        store.one(
+            (
+                'SELECT 1 FROM jobs AS j JOIN events AS e ON e.event_id '
+                "= j.event_id WHERE j.kind = 'chat' AND e.redacted = 0 "
+                "AND j.state IN ('QUEUED', 'RUNNING', 'RETRY_WAIT') "
+                'LIMIT 1'
+            ),
+        )
+    )
 
 
-BACKGROUND_SCENARIOS = frozenset({
-    "activity", "social_autonomy", "memory_extract", "memory_review", "diary",
-    "reflection", "rem", "meme_caption", "qq_poke", "watch_review", "style_distill", "jargon",
-})
-CAPACITY_WAIT_CODES = frozenset({"MODEL_PROVIDER_CONCURRENCY_EXHAUSTED",
-                                 "BACKGROUND_YIELD_TO_CHAT"})
+BACKGROUND_SCENARIOS = frozenset(
+    {
+        "activity",
+        "social_autonomy",
+        "memory_extract",
+        "memory_review",
+        "diary",
+        "reflection",
+        "rem",
+        "meme_caption",
+        "qq_poke",
+        "watch_review",
+        "style_distill",
+        "jargon",
+    }
+)
+CAPACITY_WAIT_CODES = frozenset(
+    {"MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "BACKGROUND_YIELD_TO_CHAT"}
+)
 
 
 def execution_counts(store, closures=()):
     """Count native admitted attempts, excluding only verified execution closures."""
     closed = sorted(closures)
     return store.one(
-        "SELECT COUNT(*) AS total,COALESCE(SUM(m.scenario IN ("
-        + ",".join("?" for _ in BACKGROUND_SCENARIOS)
-        + ") AND (m.scenario!='memory_review' OR m.job_id IS NULL)),0) AS background "
+        "SELECT COUNT(*) AS total,COUNT(*) FILTER (WHERE m.scenario=ANY(%s::text[]) "
+        "AND (m.scenario!='memory_review' OR m.job_id IS NULL)) AS background "
         "FROM model_usage m JOIN model_admissions a USING(request_id) "
-        "WHERE m.state IN ('RESERVED','UNKNOWN')"
-        + (" AND m.request_id NOT IN (" + ",".join("?" for _ in closed) + ")" if closed else ""),
-        [*sorted(BACKGROUND_SCENARIOS), *closed],
+        "WHERE m.state='RESERVED'"
+        " AND m.request_id<>ALL(%s::text[])",
+        (sorted(BACKGROUND_SCENARIOS), closed),
     )
 
 
@@ -90,24 +107,39 @@ def is_background(scenario, job_id=None):
 
 def capacity_exhausted(store, approval, closures=(), *, scenario="chat", job_id=None):
     counts = execution_counts(store, closures)
-    return (counts["total"] >= approval.concurrency or is_background(scenario, job_id)
-            and counts["background"] >= max(1, approval.concurrency - 1))
+    return (
+        counts["total"] >= approval.concurrency
+        or is_background(scenario, job_id)
+        and counts["background"] >= max(1, approval.concurrency - 1)
+    )
 
 
 def capacity_wait(store, code, *, request_id=None):
     """Only an unadmitted or proven unsent attempt may wait, never an uncertain call."""
-    return code in CAPACITY_WAIT_CODES and (request_id is None or not store.one(
-        "SELECT 1 FROM model_usage WHERE request_id=?", (request_id,),
-    ) or not_dispatched(store, request_id))
+    return code in CAPACITY_WAIT_CODES and (
+        request_id is None
+        or not store.one(
+            "SELECT 1 FROM model_usage WHERE request_id = %s",
+            (request_id,),
+        )
+        or not_dispatched(store, request_id)
+    )
 
 
 def not_dispatched(store, request_id):
-    return bool(store.one(
-        "SELECT 1 FROM model_usage m JOIN audit_log a ON a.entity_id=m.request_id "
-        "WHERE m.request_id=? AND m.state='SETTLED' AND m.billed_micro_usd=0 "
-        "AND m.input_tokens=0 AND m.output_tokens=0 AND m.is_estimate=0 "
-        "AND a.action='model.not_dispatched' LIMIT 1", (request_id,),
-    ))
+    return bool(
+        store.one(
+            (
+                'SELECT 1 FROM model_usage AS m JOIN audit_log AS a ON '
+                'a.entity_id = m.request_id WHERE m.request_id = %s AND '
+                "m.state = 'SETTLED' AND m.billed_micro_usd = 0 AND "
+                'm.input_tokens = 0 AND m.output_tokens = 0 AND '
+                'm.is_estimate = 0 AND a.action = '
+                "'model.not_dispatched' LIMIT 1"
+            ),
+            (request_id,),
+        )
+    )
 
 
 def close_expired_model_work(store, table, now):
@@ -117,8 +149,8 @@ def close_expired_model_work(store, table, now):
     store.execute(
         f"UPDATE {table} SET state=CASE u.state WHEN 'UNKNOWN' THEN 'UNKNOWN' ELSE 'FAILED' END,"
         "error_code=CASE u.state WHEN 'UNKNOWN' THEN 'MODEL_USAGE_UNKNOWN' "
-        "ELSE 'MODEL_RESULT_NOT_CHECKPOINTED' END,lease_until=NULL,updated_at=? "
-        f"FROM model_usage u WHERE {table}.state='RUNNING' AND lease_until<=? "
+        "ELSE 'MODEL_RESULT_NOT_CHECKPOINTED' END,lease_until=NULL,updated_at=%s "
+        f"FROM model_usage u WHERE {table}.state='RUNNING' AND lease_until<=%s "
         "AND model_request_id=u.request_id AND u.state IN ('UNKNOWN','SETTLED')",
         (now, now),
     )
@@ -148,55 +180,44 @@ def _period_starts(now, timezone):
     return day.astimezone(UTC), day.replace(day=1).astimezone(UTC)
 
 
+
 def _check_period_limits(store, settings, approval, scenario, estimate, day, month, *, autonomous):
-    month = month.isoformat(timespec="microseconds")
-    unlimited = bool(approval and approval.unlimited_period_spend)
-    total = total_monthly(store, month)
-    if (settings.pricing_known and not unlimited
-        and total + estimate > settings.monthly_limit_micro_usd):
-        raise CoreError("MONTHLY_BUDGET_EXHAUSTED", 429)
+    """Financial totals are informational; feature and scheduler limits remain explicit."""
     if not autonomous:
         return
-
-    cap = paid_budget.daily_limits(settings).get(scenario)
-    if cap is None:
+    if scenario not in paid_budget.scenarios():
         raise CoreError("UNKNOWN_BUDGET_SCENARIO", 400)
     feature = {
         "style_distill": settings.style_distill, "jargon": settings.jargon,
         "watch_review": settings.watch_ledger, "social_autonomy": settings.social_autonomy,
     }.get(scenario)
-    if feature is not None and (not feature.enabled or cap == 0):
+    if feature is not None and not feature.enabled:
         raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
-
-    group = (scenario,)
-    if scenario in {"memory_extract", "memory_review"}:
-        group = ("memory_extract", "memory_review")
-    elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
-        group = ("content_vision", *sorted(VIDEO_SCENARIOS))
-    daily = store.one(
-        "SELECT COUNT(*) n,COALESCE(SUM(billed_micro_usd),0) amount FROM model_usage "
-        "WHERE occurred_at>=? AND scenario IN (" + ",".join("?" for _ in group) + ")",
-        (day.isoformat(timespec="microseconds"), *group),
-    )
-    if scenario == "reflection":
-        monthly = store.one("SELECT COALESCE(SUM(billed_micro_usd),0) n FROM model_usage "
-                            "WHERE occurred_at>=? AND scenario='reflection'", (month,))["n"]
-        if cap == 0 or settings.reflection_monthly_micro_usd == 0:
-            raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
-        if not unlimited and monthly + estimate > settings.reflection_monthly_micro_usd:
-            raise CoreError("SCENARIO_MONTHLY_BUDGET_EXHAUSTED", 429)
-        if daily["n"] >= settings.reflection_max_daily_calls:
+    if scenario in {"reflection", "social_autonomy"}:
+        calls = store.one("SELECT count(*) AS n FROM model_usage WHERE occurred_at>=%s "
+                          "AND scenario=%s",
+                          (day.isoformat(timespec="microseconds"), scenario))["n"]
+        limit = (settings.reflection_max_daily_calls if scenario == "reflection"
+                 else settings.social_autonomy.model_daily_calls)
+        if calls >= limit:
             raise CoreError("SCENARIO_CALL_LIMIT", 429)
-    if scenario == "social_autonomy" and daily["n"] >= settings.social_autonomy.model_daily_calls:
-        raise CoreError("SCENARIO_CALL_LIMIT", 429)
-    capped = not unlimited or scenario in {"meme_caption", "social_autonomy"}
-    if capped and daily["amount"] + estimate > cap:
-        raise CoreError("DAILY_BUDGET_EXHAUSTED", 429)
 
 
 def reserve(
-    store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
-    clock=None, cloud_task_kind=None, cloud_task_id=None, source_check=None, tools=(),
+    store,
+    settings,
+    job_id,
+    scenario,
+    messages,
+    now,
+    *,
+    request_id=None,
+    logical_request_id=None,
+    clock=None,
+    cloud_task_kind=None,
+    cloud_task_id=None,
+    source_check=None,
+    tools=(),
     generation=None,
 ):
     from companion import runtime_config
@@ -213,8 +234,6 @@ def reserve(
     if inputs.video_binding is not None:
         cloud_task_kind, cloud_task_id = "video", inputs.video_binding["task_id"]
     autonomous = scenario not in {"chat", "qq_poke", "evaluation", "gateway"}
-    if autonomous and not settings.pricing_known:
-        raise CoreError("UNKNOWN_PRICING", 429)
     day, month = _period_starts(now, settings.timezone)
     measurement = measure_request(wire, messages, scenario, tools=tools, generation=generation)
     estimated_input = measurement.reserved_input_tokens
@@ -234,16 +253,23 @@ def reserve(
             store, clock() if callable(clock) else now,
         ):
             raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
-        activate_cumulative = bool(approval and (approval.cumulative or store.one(
-            "SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,),
-        )))
+        activate_cumulative = bool(
+            approval
+            and (
+                approval.cumulative
+                or store.one(
+                    "SELECT 1 FROM runtime_meta WHERE key = %s",
+                    (cumulative.PROJECTION,),
+                )
+            )
+        )
         if activate_cumulative:
             now = clock() if callable(clock) else now
             day, month = _period_starts(now, settings.timezone)
         owner_view = model_scope.admit(store, settings, clock, now, job_id, scenario, request_id,
                                        inputs, messages, estimate, estimated_input)
         request_id = request_id or uid("model")
-        if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
+        if store.one("SELECT 1 FROM model_usage WHERE request_id = %s", (request_id,)):
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
         model_scope.admit_attempt(store, settings, current_time, now, job_id, scenario,
                                  request_id, inputs, messages, source_check)
@@ -255,21 +281,26 @@ def reserve(
                    scenario=scenario, job_id=job_id)
         cloud_pricing = video_route(wire, scenario) or settings
         cloud_budget.reserve(
-            store, settings, reference_type="model", reference_id=request_id,
-            estimated_micro_usd=estimate, now=now,
+            store,
+            settings,
+            reference_type="model",
+            reference_id=request_id,
+            estimated_micro_usd=estimate,
+            now=now,
             task_kind=cloud_task_kind or ("video" if scenario in VIDEO_SCENARIOS else "model"),
             task_id=cloud_task_id or logical_request_id or job_id or request_id,
-            pricing={"pricing_known": bool(settings.pricing_known), **{
-                key: getattr(cloud_pricing, key)
-                for key in ("input_rate", "cached_input_rate", "output_rate")
-            }},
+            pricing={
+                "pricing_known": bool(settings.pricing_known),
+                **{
+                    key: getattr(cloud_pricing, key)
+                    for key in ("input_rate", "cached_input_rate", "output_rate")
+                },
+            },
         )
         if approval:
-            # All monetary admission checks precede any journal initialization;
-            # rejecting the CNY limit must not leave an orphaned fsynced header.
+            # Resource admission precedes the independent reservation record.
             if activate_cumulative:
                 cumulative.activate(store, settings, now)
-            paid_budget.journal(store, approval)
             quota = cumulative.admit_model(store, settings, request_id, logical_request_id, now,
                                             estimate, estimated_input, output_tokens)
         from companion.model import model_route
@@ -319,7 +350,7 @@ def _record_paid_reservation(store, settings, approval, scenario, request_id, lo
         attempt_id=uid("attempt"),
         attempt_number=1
         + store.one(
-            "SELECT COUNT(*) AS n FROM model_admissions WHERE logical_request_id=?",
+            'SELECT COUNT(*) AS n FROM model_admissions WHERE logical_request_id=%s',
             (logical_request_id,),
         )["n"],
         window_id=approval.window_id,
@@ -354,116 +385,100 @@ def _record_paid_reservation(store, settings, approval, scenario, request_id, lo
     )
 
 
+
 def _admit(store, settings, approval, logical, estimate, now, day, month, *, scenario="chat",
            job_id=None):
+    """Keep contract identity and live execution capacity without monetary refusals."""
     from companion import model_carry
 
-    carry_view = None
+    carry = None
     if model_carry.active(settings):
         model_carry.supported(store, settings)
-        carry_view = paid_budget.journal(store, approval)
-        if store.one("SELECT 1 FROM model_admissions a JOIN model_usage m USING(request_id) "
-                     "WHERE a.logical_request_id=? AND m.state='UNKNOWN' LIMIT 1", (logical,)):
-            raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
+        carry = paid_budget.journal(store, approval)
     if store.one(
-        "SELECT 1 FROM model_usage m LEFT JOIN model_admissions a USING(request_id) "
-        "WHERE a.request_id IS NULL AND m.state IN ('RESERVED','UNKNOWN') LIMIT 1"
+        "SELECT 1 FROM model_admissions a JOIN model_usage m USING(request_id) "
+        "WHERE a.logical_request_id=%s AND m.scenario=%s AND m.state='UNKNOWN' AND NOT EXISTS("
+        "SELECT 1 FROM agent_conversations c, "
+        "jsonb_array_elements(c.conversation_json::jsonb->'messages') response(value) "
+        "WHERE c.job_id=m.job_id AND response.value->>'kind'='response' "
+        "AND response.value->'metadata'->>'core_request_id'=m.request_id) LIMIT 1",
+        (logical, scenario),
+    ):
+        raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
+    if store.one(
+        "SELECT 1 FROM model_usage AS m LEFT JOIN model_admissions AS a USING(request_id) "
+        "WHERE a.request_id IS NULL AND m.state='RESERVED' LIMIT 1"
     ):
         raise CoreError("MODEL_LEGACY_USAGE_RECONCILIATION_REQUIRED", 503)
-    if store.one(
-        "SELECT 1 FROM runtime_meta WHERE key IN "
-        "('model_budget_blocked','model_budget_restore_required')"
-    ):
-        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
-    snapshot = paid_budget.snapshot(settings)
-    frozen = paid_budget.sha(snapshot)
-    prior = store.one(
-        "SELECT contract_sha256 FROM model_budget_windows WHERE window_id=?", (approval.window_id,)
-    )
+    frozen = paid_budget.sha(paid_budget.snapshot(settings))
+    prior = store.one("SELECT contract_sha256 FROM model_budget_windows WHERE window_id=%s",
+                      (approval.window_id,))
     if prior and prior["contract_sha256"] != frozen:
         raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
-    store.execute(
-        "INSERT OR IGNORE INTO model_budget_windows VALUES (?,?)", (approval.window_id, frozen)
-    )
-    if estimate <= 0 or estimate > approval.per_attempt_micro_usd:
-        raise CoreError("MODEL_ATTEMPT_BUDGET_EXHAUSTED", 429)
-    # Financial totals retain every liability; only verified execution closures
-    # release capacity independently of the original accounting outcome.
-    daily = store.one(
-        "SELECT COUNT(*) AS calls,COALESCE(SUM(billed_micro_usd),0) AS amount "
-        "FROM model_usage WHERE occurred_at>=?",
-        (day.isoformat(timespec="microseconds"),),
-    )
-    if (
-        daily["calls"] >= approval.daily_calls
-        or (not approval.unlimited_period_spend
-            and daily["amount"] + estimate > approval.daily_micro_usd)
-    ):
+    store.execute("INSERT INTO model_budget_windows VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                  (approval.window_id, frozen))
+    daily = store.one("SELECT count(*) AS n FROM model_usage WHERE occurred_at>=%s",
+                      (day.isoformat(timespec="microseconds"),))["n"]
+    if daily >= approval.daily_calls:
         raise CoreError("MODEL_DAILY_BUDGET_EXHAUSTED", 429)
-    if (
-        not approval.unlimited_period_spend
-        and total_monthly(store, month.isoformat(timespec="microseconds")) + estimate
-        > approval.monthly_micro_usd
+    for column, value, calls, label in (
+        ("window_id", approval.window_id, approval.window_calls, "WINDOW"),
+        ("logical_request_id", logical, approval.per_request_calls, "REQUEST"),
     ):
-        raise CoreError("MODEL_MONTHLY_BUDGET_EXHAUSTED", 429)
-    for column, value, amount, calls, code in (
-        (
-            "window_id",
-            approval.window_id,
-            approval.window_micro_usd,
-            approval.window_calls,
-            "WINDOW",
-        ),
-        (
-            "logical_request_id",
-            logical,
-            approval.per_request_micro_usd,
-            approval.per_request_calls,
-            "REQUEST",
-        ),
-    ):
-        window_scope = (model_carry.scope_windows(carry_view, value)
-                        if column == "window_id" and carry_view else [value])
-        usage = store.one(
-            "SELECT COUNT(*) AS calls,COALESCE(SUM(m.billed_micro_usd),0) AS amount "
-            "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE a." + column
-            + " IN (" + ",".join("?" for _ in window_scope) + ")", window_scope,
-        )
-        limited = column != "window_id" or not approval.unlimited_period_spend
-        if usage["calls"] >= calls or (limited and usage["amount"] + estimate > amount):
-            raise CoreError("MODEL_" + code + "_BUDGET_EXHAUSTED", 429)
-    if capacity_exhausted(store, approval,
-                          carry_view["model_closures"] if carry_view else (),
-                          scenario=scenario, job_id=job_id):
+        values = (model_carry.scope_windows(carry, value)
+                  if column == "window_id" and carry else [value])
+        used = store.one("SELECT count(*) AS n FROM model_admissions a "
+                         "JOIN model_usage m USING(request_id) WHERE a." + column
+                         + "=ANY(%s::text[])", (values,))["n"]
+        if used >= calls:
+            raise CoreError("MODEL_" + label + "_BUDGET_EXHAUSTED", 429)
+    if capacity_exhausted(store, approval, scenario=scenario, job_id=job_id):
         raise CoreError("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", 429)
 
 
 def mark_reservation_unknown(store, request_id):
     store.execute(
-        "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=? AND state='RESERVED'",
+        "UPDATE model_usage SET state = 'UNKNOWN' WHERE request_id = %s AND state = 'RESERVED'",
         (request_id,),
     )
 
 
 def settle(store, settings, request_id, response=None, *, transport_failure=None):
     with nullcontext() if store.in_write_transaction else store.transaction():
-        usage = store.one("SELECT occurred_at FROM model_usage WHERE request_id=?", (request_id,))
+        usage = store.one(
+            "SELECT occurred_at FROM model_usage WHERE request_id = %s", (request_id,)
+        )
         if usage:
             cloud_budget.sync(store, settings, usage["occurred_at"])
-        admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
+        admission = store.one(
+            "SELECT model_admissions.request_id AS request_id, "
+            "model_admissions.logical_request_id AS logical_request_id, "
+            "model_admissions.attempt_id AS attempt_id, model_admissions.attempt_number AS "
+            "attempt_number, model_admissions.window_id AS window_id, "
+            "model_admissions.contract_sha256 AS contract_sha256, model_admissions.payload_sha256 "
+            "AS payload_sha256, model_admissions.snapshot_json AS snapshot_json, "
+            "model_admissions.reserved_micro_usd AS reserved_micro_usd, "
+            "model_admissions.input_bound AS input_bound, model_admissions.output_bound AS "
+            "output_bound, model_admissions.lease_token AS lease_token, "
+            "model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS "
+            "io_started_at, model_admissions.journal_path AS journal_path, "
+            "model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS "
+            "measurement_json, model_admissions.authority_json AS authority_json FROM "
+            "model_admissions AS model_admissions WHERE model_admissions.request_id = "
+            "%s",
+            (request_id,),
+        )
         if admission:
-            _settle_paid(store, settings, admission, response,
-                         transport_failure=transport_failure)
-            return
+            return _settle_paid(
+                store, settings, admission, response, transport_failure=transport_failure)
         if response is None or response.input_tokens is None or response.output_tokens is None:
             store.execute(
-                "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=?", (request_id,)
+                "UPDATE model_usage SET state = 'UNKNOWN' WHERE request_id = %s", (request_id,)
             )
         else:
             store.execute(
-                "UPDATE model_usage SET input_tokens=?,output_tokens=?,"
-                "cached_input_tokens=?,billed_micro_usd=?,state='SETTLED' "
-                "WHERE request_id=?",
+                "UPDATE model_usage SET input_tokens = %s, output_tokens = %s, cached_input_tokens "
+                "= %s, billed_micro_usd = %s, state = 'SETTLED' WHERE request_id = %s",
                 (
                     response.input_tokens,
                     response.output_tokens,
@@ -483,12 +498,20 @@ def settle(store, settings, request_id, response=None, *, transport_failure=None
 
 def expire_cancelled_reservations(store, settings, now):
     """Recover abandoned cancellation drains without losing their real liability."""
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("BUDGET_RECOVERY_TRANSACTION_REQUIRED")
     for admission in store.rows(
-        "SELECT a.* FROM model_admissions a JOIN model_usage m USING(request_id) "
-        "JOIN jobs j ON j.job_id=m.job_id WHERE j.state='CANCELLED' AND m.state='RESERVED' "
-        "AND a.lease_until<=?", (now,),
+        "SELECT a.request_id AS request_id, a.logical_request_id AS logical_request_id, "
+        "a.attempt_id AS attempt_id, a.attempt_number AS attempt_number, a.window_id AS window_id, "
+        "a.contract_sha256 AS contract_sha256, a.payload_sha256 AS payload_sha256, a.snapshot_json "
+        "AS snapshot_json, a.reserved_micro_usd AS reserved_micro_usd, a.input_bound AS "
+        "input_bound, a.output_bound AS output_bound, a.lease_token AS lease_token, a.lease_until "
+        "AS lease_until, a.io_started_at AS io_started_at, a.journal_path AS journal_path, "
+        "a.journal_id AS journal_id, a.measurement_json AS measurement_json, a.authority_json AS "
+        "authority_json FROM model_admissions AS a JOIN model_usage AS m ON a.request_id = "
+        "m.request_id JOIN jobs AS j ON j.job_id = m.job_id WHERE j.state = 'CANCELLED' AND "
+        "m.state = 'RESERVED' AND a.lease_until <= %s",
+        (now,),
     ):
         _settle_paid(store, settings, admission, None)
 
@@ -496,28 +519,88 @@ def expire_cancelled_reservations(store, settings, now):
 def _settle_unstarted_reply(store, request_id, dispatch, reason, now):
     """Record known zero provider I/O; keep the admitted call and its audit proof."""
     with store.transaction():
-        admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
-        usage = store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
-        if (not admission or not usage or usage["state"] != "RESERVED" or dispatch["dispatched"]
-            or (admission["io_started_at"] is not None and (
-                not dispatch.get("owned")
-                or admission["io_started_at"] != dispatch.get("io_started_at")))):
+        admission = store.one(
+            "SELECT model_admissions.request_id AS request_id, "
+            "model_admissions.logical_request_id AS logical_request_id, "
+            "model_admissions.attempt_id AS attempt_id, model_admissions.attempt_number AS "
+            "attempt_number, model_admissions.window_id AS window_id, "
+            "model_admissions.contract_sha256 AS contract_sha256, model_admissions.payload_sha256 "
+            "AS payload_sha256, model_admissions.snapshot_json AS snapshot_json, "
+            "model_admissions.reserved_micro_usd AS reserved_micro_usd, "
+            "model_admissions.input_bound AS input_bound, model_admissions.output_bound AS "
+            "output_bound, model_admissions.lease_token AS lease_token, "
+            "model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS "
+            "io_started_at, model_admissions.journal_path AS journal_path, "
+            "model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS "
+            "measurement_json, model_admissions.authority_json AS authority_json FROM "
+            "model_admissions AS model_admissions WHERE model_admissions.request_id = "
+            "%s",
+            (request_id,),
+        )
+        usage = store.one(
+            "SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS "
+            "request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, "
+            "model_usage.provider AS provider, model_usage.model AS model, "
+            "model_usage.input_tokens AS input_tokens, model_usage.cached_input_tokens AS "
+            "cached_input_tokens, model_usage.output_tokens AS output_tokens, "
+            "model_usage.billed_micro_usd AS billed_micro_usd, model_usage.is_estimate AS "
+            "is_estimate, model_usage.occurred_at AS occurred_at, model_usage.state AS state, "
+            "model_usage.pricing_known AS pricing_known FROM model_usage AS model_usage WHERE "
+            "model_usage.request_id = %s",
+            (request_id,),
+        )
+        if (
+            not admission
+            or not usage
+            or usage["state"] != "RESERVED"
+            or dispatch["dispatched"]
+            or (
+                admission["io_started_at"] is not None
+                and (
+                    not dispatch.get("owned")
+                    or admission["io_started_at"] != dispatch.get("io_started_at")
+                )
+            )
+        ):
             return False
-        evidence = paid_budget.sha({"kind": "reply_not_dispatched", "request_id": request_id,
-            "lease_token": admission["lease_token"], "payload_sha256": admission["payload_sha256"],
-            "reason": reason})
-        _persist_accounting(store, admission, 0, "SETTLED", False, evidence,
-                            tokens=(0, 0))
-        store.execute("UPDATE model_usage SET input_tokens=0,output_tokens=0,"
-                      "cached_input_tokens=0,is_estimate=0 WHERE request_id=? AND state='SETTLED'",
-                      (request_id,))
-        store.audit("model.not_dispatched", request_id, "budget", now,
-                    reason=reason, evidence_sha256=evidence)
+        evidence = paid_budget.sha(
+            {
+                "kind": "reply_not_dispatched",
+                "request_id": request_id,
+                "lease_token": admission["lease_token"],
+                "payload_sha256": admission["payload_sha256"],
+                "reason": reason,
+            }
+        )
+        _persist_accounting(store, admission, 0, "SETTLED", False, evidence, tokens=(0, 0))
+        store.execute(
+            "UPDATE model_usage SET input_tokens = 0, output_tokens = 0, "
+            "cached_input_tokens = 0, is_estimate = 0 WHERE request_id = %s AND state = 'SETTLED'",
+            (request_id,),
+        )
+        store.audit(
+            "model.not_dispatched",
+            request_id,
+            "budget",
+            now,
+            reason=reason,
+            evidence_sha256=evidence,
+        )
         return True
 
 
 def _settle_paid(store, settings, admission, response, *, transport_failure=None):
-    usage = store.one("SELECT * FROM model_usage WHERE request_id=?", (admission["request_id"],))
+    usage = store.one(
+        "SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS "
+        "request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, "
+        "model_usage.provider AS provider, model_usage.model AS model, model_usage.input_tokens AS "
+        "input_tokens, model_usage.cached_input_tokens AS cached_input_tokens, "
+        "model_usage.output_tokens AS output_tokens, model_usage.billed_micro_usd AS "
+        "billed_micro_usd, model_usage.is_estimate AS is_estimate, model_usage.occurred_at AS "
+        "occurred_at, model_usage.state AS state, model_usage.pricing_known AS pricing_known FROM "
+        "model_usage AS model_usage WHERE model_usage.request_id = %s",
+        (admission["request_id"],),
+    )
     if usage["state"] == "SETTLED":
         return
     try:
@@ -555,7 +638,9 @@ def _settle_paid(store, settings, admission, response, *, transport_failure=None
         and response.output_tokens > 0
     )
     amount, state, blocked = (
-        admission["reserved_micro_usd"], "UNKNOWN", response is not None and not valid,
+        admission["reserved_micro_usd"],
+        "UNKNOWN",
+        response is not None and not valid,
     )
     diagnostic = {
         "code": "TRANSPORT_USAGE_UNKNOWN" if response is None else "USAGE_MISSING_OR_INVALID",
@@ -568,20 +653,31 @@ def _settle_paid(store, settings, admission, response, *, transport_failure=None
             pricing, response.input_tokens, response.output_tokens, response.cached_tokens
         )
         # A reservation is an estimate. Small estimation errors settle normally;
-        # actual local amount limits and the requested output cap remain hard stops.
+        # Actual amounts are advisory; output and cumulative resource bounds remain hard.
         amount, state, blocked = actual, "SETTLED", False
-        limits = _actual_limit_violations(store, admission, snapshot, usage, actual)
-        if snapshot.get("cumulative") or store.one("SELECT 1 FROM runtime_meta WHERE key=?",
-                                                  (cumulative.PROJECTION,)):
+        limits = []
+        if snapshot.get("cumulative") or store.one(
+            "SELECT 1 FROM runtime_meta WHERE key = %s", (cumulative.PROJECTION,)
+        ):
             try:
-                view = paid_budget.journal(store, SimpleNamespace(
-                    journal_path=admission["journal_path"]), allow_settlement=True)["cumulative"]
+                view = paid_budget.journal(
+                    store,
+                    SimpleNamespace(journal_path=admission["journal_path"]),
+                    allow_settlement=True,
+                )["cumulative"]
                 prior = view["models"][admission["request_id"]]
-                proposed = prior | {"micro_usd": actual, "state": "SETTLED",
-                                   "input_tokens": response.input_tokens,
-                                   "output_tokens": response.output_tokens}
-                limits.extend("CUMULATIVE_" + code for code in cumulative.violations(
-                    view, proposed, replacing="model:" + admission["request_id"]))
+                proposed = prior | {
+                    "micro_usd": actual,
+                    "state": "SETTLED",
+                    "input_tokens": response.input_tokens,
+                    "output_tokens": response.output_tokens,
+                }
+                limits.extend(
+                    "CUMULATIVE_" + code
+                    for code in cumulative.violations(
+                        view, proposed, replacing="model:" + admission["request_id"]
+                    )
+                )
             except (CoreError, KeyError):
                 limits.append("CUMULATIVE_CUSTODY_UNAVAILABLE")
         if response.output_tokens > admission["output_bound"]:
@@ -615,19 +711,27 @@ def _settle_paid(store, settings, admission, response, *, transport_failure=None
         if profile is not None and settings.paid_model:
             current_pricing = settings.paid_model.video_routes.get(profile)
     if current_pricing is None or (
-        current_pricing.input_rate, current_pricing.cached_input_rate, current_pricing.output_rate,
+        current_pricing.input_rate,
+        current_pricing.cached_input_rate,
+        current_pricing.output_rate,
     ) != (pricing.input_rate, pricing.cached_input_rate, pricing.output_rate):
         amount, state, blocked = max(amount, admission["reserved_micro_usd"]), "UNKNOWN", True
         diagnostic["code"] = "PRICING_CONFIG_CHANGED"
     if usage["state"] == "UNKNOWN":
         amount, state = max(amount, usage["billed_micro_usd"]), "UNKNOWN"
     # Mutable enabling approval is deliberately irrelevant to accounting custody.
-    _persist_accounting(store, admission, amount, state, blocked,
-                        tokens=(response.input_tokens, response.output_tokens) if valid else None)
+    _persist_accounting(
+        store,
+        admission,
+        amount,
+        state,
+        blocked,
+        tokens=(response.input_tokens, response.output_tokens) if valid else None,
+    )
     if valid:
         store.execute(
-            "UPDATE model_usage SET input_tokens=?,output_tokens=?,cached_input_tokens=? "
-            "WHERE request_id=?",
+            "UPDATE model_usage SET input_tokens = %s, output_tokens = %s, cached_input_tokens = "
+            "%s WHERE request_id = %s",
             (
                 response.input_tokens,
                 response.output_tokens,
@@ -638,107 +742,41 @@ def _settle_paid(store, settings, admission, response, *, transport_failure=None
     present = getattr(response, "cache_usage_present", None)
     diagnostic["cache_usage_present"] = present if type(present) is bool else None
     store.audit(
-        "model.usage_diagnostic", admission["request_id"], "budget", usage["occurred_at"],
+        "model.usage_diagnostic",
+        admission["request_id"],
+        "budget",
+        usage["occurred_at"],
         **diagnostic,
     )
+    return diagnostic
 
 
-def _actual_limit_violations(store, admission, snapshot, usage, actual):
-    """Replace this reservation with known usage before comparing frozen local limits."""
-    delta = actual - usage["billed_micro_usd"]
-    local = datetime.fromisoformat(usage["occurred_at"]).astimezone(ZoneInfo(snapshot["timezone"]))
-    day = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    month = day.replace(day=1)
-    next_day = (day + timedelta(days=1)).astimezone(UTC).isoformat(timespec="microseconds")
-    next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
-    next_month = next_month.astimezone(UTC).isoformat(timespec="microseconds")
-    day = day.astimezone(UTC).isoformat(timespec="microseconds")
-    month = month.astimezone(UTC).isoformat(timespec="microseconds")
-    limits = []
-    if usage["scenario"] == "gateway":
-        from companion.gateway_admission import actual_limits
 
-        limits.extend(actual_limits(store, usage, actual))
-    if usage["scenario"] == "evaluation":
-        from companion.evaluation import actual_limits
-
-        limits.extend(actual_limits(store, usage, actual))
-    if actual > snapshot["per_attempt_micro_usd"]:
-        limits.append("ATTEMPT_AMOUNT")
-    for column, value, cap, code in (
-        ("window_id", admission["window_id"], snapshot["window_micro_usd"], "WINDOW_AMOUNT"),
-        ("logical_request_id", admission["logical_request_id"], snapshot["per_request_micro_usd"],
-         "REQUEST_AMOUNT"),
-    ):
-        total = store.one(
-            "SELECT SUM(m.billed_micro_usd) AS n FROM model_admissions a "
-            "JOIN model_usage m USING(request_id) WHERE a." + column + "=?", (value,),
-        )["n"]
-        limited = column != "window_id" or not snapshot.get("unlimited_period_spend", False)
-        if limited and total + delta > cap:
-            limits.append(code)
-    unlimited_period = snapshot.get("unlimited_period_spend", False)
-    if unlimited_period and usage["scenario"] != "meme_caption":
-        return limits
-    if not unlimited_period:
-        daily = store.one(
-            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-            "WHERE occurred_at>=? AND occurred_at<?", (day, next_day),
-        )["n"]
-        if daily + delta > snapshot["daily_micro_usd"]:
-            limits.append("DAILY_AMOUNT")
-        monthly = total_monthly(store, month, next_month) + delta
-        if monthly > min(snapshot["monthly_micro_usd"], snapshot.get(
-            "local_monthly_micro_usd", snapshot["monthly_micro_usd"],
-        )):
-            limits.append("MONTHLY_AMOUNT")
-    scenario = usage["scenario"]
-    cap = snapshot.get("scenario_daily_micro_usd", {}).get(scenario)
-    if cap is not None:
-        scenarios = ("memory_extract", "memory_review") if scenario.startswith("memory_") else (
-            scenario,
-        )
-        total = store.one(
-            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-            "WHERE occurred_at>=? AND occurred_at<? AND scenario IN ("
-            + ",".join("?" for _ in scenarios) + ")",
-            (day, next_day, *scenarios),
-        )["n"]
-        if total + delta > cap:
-            limits.append("SCENARIO_DAILY_AMOUNT")
-    if scenario == "reflection" and "reflection_monthly_micro_usd" in snapshot:
-        total = store.one(
-            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-            "WHERE occurred_at>=? AND occurred_at<? AND scenario='reflection'",
-            (month, next_month),
-        )["n"]
-        if total + delta > snapshot["reflection_monthly_micro_usd"]:
-            limits.append("SCENARIO_MONTHLY_AMOUNT")
-    return limits
-
-
-def usage_diagnostics(db):
+def usage_diagnostics(store):
     """Read-only calibration from settled paid usage; no prompts or account identifiers."""
-    cursor = db.execute(
-        "SELECT COUNT(*) AS calibrated_calls,COALESCE(SUM(a.input_bound),0) AS "
-        "input_estimated_tokens,COALESCE(SUM(m.input_tokens),0) AS input_actual_tokens,"
-        "COALESCE(SUM(m.output_tokens),0) AS output_actual_tokens,"
-        "COALESCE(SUM(m.cached_input_tokens),0) AS cached_input_tokens,"
-        "COALESCE(SUM(a.reserved_micro_usd),0) AS reserved_micro_usd,"
-        "COALESCE(SUM(m.billed_micro_usd),0) AS usage_priced_micro_usd "
-        "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE m.state='SETTLED' "
+    row = store.one(
         # Read correction IDs once instead of scanning the audit log for every call.
-        "AND m.request_id NOT IN (SELECT entity_id FROM audit_log "
-        "WHERE action='model.video_rate_correction' AND entity_id IS NOT NULL)"
+        "SELECT COUNT(*) AS calibrated_calls, COALESCE(CAST(SUM(a.input_bound) AS BIGINT), 0) AS "
+        "input_estimated_tokens, COALESCE(CAST(SUM(m.input_tokens) AS BIGINT), 0) AS "
+        "input_actual_tokens, COALESCE(CAST(SUM(m.output_tokens) AS BIGINT), 0) AS "
+        "output_actual_tokens, COALESCE(CAST(SUM(m.cached_input_tokens) AS BIGINT), 0) AS "
+        "cached_input_tokens, COALESCE(CAST(SUM(a.reserved_micro_usd) AS BIGINT), 0) AS "
+        "reserved_micro_usd, COALESCE(CAST(SUM(m.billed_micro_usd) AS BIGINT), 0) AS "
+        "usage_priced_micro_usd FROM model_admissions AS a JOIN model_usage AS m USING "
+        "(request_id) WHERE m.state = 'SETTLED' AND NOT m.request_id IN (SELECT entity_id FROM "
+        "audit_log WHERE action = 'model.video_rate_correction' AND NOT entity_id IS NULL)"
     )
-    row = dict(zip((column[0] for column in cursor.description), cursor.fetchone(), strict=True))
     # Diagnostics never reinterpret the reserved tokens of an UNKNOWN as observed usage.
-    anomalies = db.execute(
-        "SELECT COUNT(DISTINCT entity_id) FROM audit_log "
-        "WHERE action='model.usage_diagnostic' "
-        "AND json_extract(safe_detail_json,'$.code') IN "
-        "('INPUT_USAGE_SPIKE','LOCAL_LIMIT_EXCEEDED','USAGE_MISSING_OR_INVALID')"
-    ).fetchone()[0]
+    anomalies = store.one(
+
+            'SELECT COUNT(DISTINCT entity_id) AS n FROM audit_log WHERE '
+            "action='model.usage_diagnostic' AND (CASE WHEN "
+            'safe_detail_json IS JSON THEN '
+            "(safe_detail_json::json#>>'{code}') END) IN "
+            "('INPUT_USAGE_SPIKE','LOCAL_LIMIT_EXCEEDED',"
+            "'USAGE_MISSING_OR_INVALID')"
+
+    )["n"]
     return {
         **row,
         "input_error_tokens": row["input_actual_tokens"] - row["input_estimated_tokens"],
@@ -750,7 +788,14 @@ def usage_diagnostics(db):
 
 
 def _persist_accounting(
-    store, admission, amount, state, blocked, evidence_sha256=None, *, tokens=None,
+    store,
+    admission,
+    amount,
+    state,
+    blocked,
+    evidence_sha256=None,
+    *,
+    tokens=None,
 ):
     """Record known costs even when approval is disabled or journal custody fails.
 
@@ -761,18 +806,19 @@ def _persist_accounting(
     journal_failed = False
     quota = None
     try:
-        identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+        identity = store.one("SELECT value FROM runtime_meta WHERE key = 'model_budget_journal_id'")
         if not identity or identity["value"] != admission["journal_id"]:
             raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
         paid_budget.journal(store, custody, allow_settlement=True)
-        quota = cumulative.admission_metadata(store, admission, amount=amount,
-                                              state=state, tokens=tokens)
+        quota = cumulative.admission_metadata(
+            store, admission, amount=amount, state=state, tokens=tokens
+        )
     except CoreError:
         journal_failed = True
     if journal_failed:
         amount, state, blocked = max(amount, admission["reserved_micro_usd"]), "UNKNOWN", True
     store.execute(
-        "UPDATE model_usage SET billed_micro_usd=?,state=? WHERE request_id=?",
+        "UPDATE model_usage SET billed_micro_usd = %s, state = %s WHERE request_id = %s",
         (amount, state, admission["request_id"]),
     )
     if not journal_failed:
@@ -792,25 +838,39 @@ def _persist_accounting(
         except CoreError:
             amount, state, blocked = max(amount, admission["reserved_micro_usd"]), "UNKNOWN", True
             store.execute(
-                "UPDATE model_usage SET billed_micro_usd=?,state=? WHERE request_id=?",
+                "UPDATE model_usage SET billed_micro_usd = %s, state = %s WHERE request_id = %s",
                 (amount, state, admission["request_id"]),
             )
     if blocked:
-        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('model_budget_blocked','1')")
+        store.execute(
+            "INSERT INTO runtime_meta (key, value) VALUES ('model_budget_blocked', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, record_sequence = DEFAULT"
+        )
     cloud_budget.sync_reference(store, "model", admission["request_id"])
 
 
-def _check_measurement(settings, admission, messages, scenario, *, tools=(), generation=None,
-                       video_profile=None, prepared=None):
+def _check_measurement(
+    settings,
+    admission,
+    messages,
+    scenario,
+    *,
+    tools=(),
+    generation=None,
+    video_profile=None,
+    prepared=None,
+):
     if prepared is None:
         measured = measure_request(settings, messages, scenario, tools=tools, generation=generation)
     else:
         from companion.model import model_payload
 
         measured, contract = prepared
-        if (contract != paid_budget.sha(paid_budget.snapshot(settings))
-            or measured.payload_sha256 != paid_budget.sha(model_payload(
-                settings, messages, scenario, tools=tools, generation=generation))):
+        if contract != paid_budget.sha(
+            paid_budget.snapshot(settings)
+        ) or measured.payload_sha256 != paid_budget.sha(
+            model_payload(settings, messages, scenario, tools=tools, generation=generation)
+        ):
             raise CoreError("MODEL_TOKEN_MEASUREMENT_CHANGED", 503)
     check_request_limits(settings.paid_model, measured, scenario)
     if measured.reserved_input_tokens != admission["input_bound"]:
@@ -827,8 +887,20 @@ def _check_measurement(settings, admission, messages, scenario, *, tools=(), gen
         raise CoreError("MODEL_TOKEN_MEASUREMENT_CHANGED", 503)
 
 
-async def complete(model, store, settings, request_id, messages, scenario, clock, *,
-                   source_check=None, tools=(), trace_id=None, generation=None):
+async def complete(
+    model,
+    store,
+    settings,
+    request_id,
+    messages,
+    scenario,
+    clock,
+    *,
+    source_check=None,
+    tools=(),
+    trace_id=None,
+    generation=None,
+):
     """Dispatch a reservation and settle every outcome before returning to its caller."""
     from companion.model import (
         ModelClient,
@@ -839,12 +911,25 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     from companion.reply_revision import CANCELLED, SOURCE_RECALLED, SUPERSEDED
 
     response = None
+    usable_response = False
     transport_failure = None
     dispatch = {"dispatched": False}
     try:
-        response = await _dispatch(model, store, settings, request_id, messages, scenario, clock,
-                                   dispatch=dispatch, source_check=source_check, tools=tools,
-                                   trace_id=trace_id, generation=generation)
+        response = await _dispatch(
+            model,
+            store,
+            settings,
+            request_id,
+            messages,
+            scenario,
+            clock,
+            dispatch=dispatch,
+            source_check=source_check,
+            tools=tools,
+            trace_id=trace_id,
+            generation=generation,
+        )
+        usable_response = True
         return response
     except ModelResponseError as error:
         # An unusable reply can still carry observed usage.
@@ -853,34 +938,62 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     except CoreError as error:
         if isinstance(error, ModelTransportError):
             transport_failure = error.failure
-        known_not_sent = (isinstance(error, ModelDispatchRefused)
-                          and error.admission is dispatch.get("admission"))
-        before_io_yield = (error.code == "BACKGROUND_YIELD_TO_CHAT"
-                           and not dispatch.get("owned"))
-        if (isinstance(model, ModelClient) and (known_not_sent or before_io_yield
+        known_not_sent = isinstance(
+            error, ModelDispatchRefused
+        ) and error.admission is dispatch.get("admission")
+        before_io_yield = error.code == "BACKGROUND_YIELD_TO_CHAT" and not dispatch.get("owned")
+        if isinstance(model, ModelClient) and (
+            known_not_sent
+            or before_io_yield
             or settings.mode == "live"
-            and error.code in {CANCELLED, SOURCE_RECALLED, SUPERSEDED})):
+            and error.code in {CANCELLED, SOURCE_RECALLED, SUPERSEDED}
+        ):
             _settle_unstarted_reply(store, request_id, dispatch, error.code, clock())
         raise
     finally:
         # Cancellation is an unknown outcome too; callers never refund a started attempt.
-        settle(store, settings, request_id, response, transport_failure=transport_failure)
+        accounting = None
+        if settings.mode == "live" and isinstance(model, ModelClient) and not dispatch.get("owned"):
+            from companion.postgres import BUDGET_LEDGER
+
+            # The ownership read and any unstarted settlement share the dispatch lock.
+            with store.transaction():
+                store.ledger_lock(BUDGET_LEDGER)
+                admission = store.one(
+                    "SELECT io_started_at FROM model_admissions WHERE request_id=%s", (request_id,))
+                if not admission or admission["io_started_at"] is None:
+                    accounting = settle(
+                        store, settings, request_id, response, transport_failure=transport_failure)
+        else:
+            accounting = settle(
+                store, settings, request_id, response, transport_failure=transport_failure)
         from companion import model_carry
 
         if model_carry.active(settings) and scenario != "gateway":
             model_carry.close_owned(store, settings, request_id, dispatch, clock())
+        if usable_response and accounting and accounting.get("limits"):
+            raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
 
 
 def _start_paid_attempt(store, settings, clock, approval, request_id, scenario, now, check_payload):
     """Bind one usage row and journal I/O start under the caller's writer lock."""
-    cumulative.preflight(store, settings, clock)
     paid_budget.contract(settings, clock())
     custody = paid_budget.journal(store, approval)
     cumulative.check(store, settings, clock(), custody=custody)
     row = store.one(
-        "SELECT a.*,m.state,m.scenario AS usage_scenario,m.job_id AS usage_job_id "
-        "FROM model_admissions a JOIN model_usage m USING(request_id) "
-        "WHERE request_id=?",
+        (
+            (
+                'SELECT a.request_id, a.logical_request_id, a.attempt_id, '
+                'a.attempt_number, a.window_id, a.contract_sha256, '
+                'a.payload_sha256, a.snapshot_json, a.reserved_micro_usd, '
+                'a.input_bound, a.output_bound, a.lease_token, a.lease_until,'
+                ' a.io_started_at, a.journal_path, a.journal_id, '
+                'a.measurement_json, a.authority_json,m.state,m.scenario AS '
+                'usage_scenario,m.job_id AS usage_job_id FROM '
+                'model_admissions a JOIN model_usage m USING(request_id) '
+                'WHERE request_id=%s'
+            )
+        ),
         (request_id,),
     )
     if not row or row["io_started_at"] or row["state"] != "RESERVED":
@@ -891,11 +1004,6 @@ def _start_paid_attempt(store, settings, clock, approval, request_id, scenario, 
     if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
         raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
     check_payload(row)
-    if store.one(
-        "SELECT 1 FROM runtime_meta WHERE key IN "
-        "('model_budget_blocked','model_budget_restore_required')"
-    ):
-        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
     quota = cumulative.admission_metadata(store, row)
     if quota:
         now = clock()
@@ -903,7 +1011,7 @@ def _start_paid_attempt(store, settings, clock, approval, request_id, scenario, 
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
             raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
     store.execute(
-        "UPDATE model_admissions SET io_started_at=? WHERE request_id=?", (now, request_id)
+        'UPDATE model_admissions SET io_started_at=%s WHERE request_id=%s', (now, request_id)
     )
     paid_budget.journal(
         store,
@@ -931,9 +1039,19 @@ def _transport_custody(store, settings, clock, approval, request_id, scenario, r
     current_job = model_scope.check(store, settings, clock, request_id, scenario)
     notices.check_request(store, settings, request_id, clock())
     current = store.one(
-        "SELECT a.*,m.state,m.scenario,m.job_id AS usage_job_id "
-        "FROM model_admissions a JOIN model_usage m "
-        "USING(request_id) WHERE request_id=?", (request_id,),
+        (
+            (
+                'SELECT a.request_id, a.logical_request_id, a.attempt_id, '
+                'a.attempt_number, a.window_id, a.contract_sha256, '
+                'a.payload_sha256, a.snapshot_json, a.reserved_micro_usd, '
+                'a.input_bound, a.output_bound, a.lease_token, a.lease_until,'
+                ' a.io_started_at, a.journal_path, a.journal_id, '
+                'a.measurement_json, '
+                'a.authority_json,m.state,m.scenario,m.job_id AS usage_job_id'
+                ' FROM model_admissions a JOIN model_usage m '
+                'USING(request_id) WHERE request_id=%s'
+            )
+        ), (request_id,),
     )
     if (
         not current or current["state"] != "RESERVED"
@@ -948,15 +1066,23 @@ def _transport_custody(store, settings, clock, approval, request_id, scenario, r
         or current["authority_json"] != row["authority_json"]
     ):
         raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
-    if store.one("SELECT 1 FROM runtime_meta WHERE key IN "
-                 "('model_budget_blocked','model_budget_restore_required')"):
-        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
     return current, current_job, quota_state
 
 
 async def _dispatch(
-    model, store, settings, request_id, messages, scenario, clock, *, dispatch=None,
-    source_check=None, tools=(), trace_id=None, generation=None,
+    model,
+    store,
+    settings,
+    request_id,
+    messages,
+    scenario,
+    clock,
+    *,
+    dispatch=None,
+    source_check=None,
+    tools=(),
+    trace_id=None,
+    generation=None,
 ):
     """Persisted admission is fenced before adapter I/O."""
     from companion import notices, runtime_config
@@ -971,12 +1097,12 @@ async def _dispatch(
         notices.check_request(store, settings, request_id, clock() if callable(clock) else clock)
     if settings.mode != "live":
         with store.transaction():
-            cloud_budget.mark_dispatched(store, "model", request_id,
-                                         clock() if callable(clock) else clock)
+            cloud_budget.mark_dispatched(
+                store, "model", request_id, clock() if callable(clock) else clock
+            )
         return await model.complete(messages, scenario, **({"tools": tools} if tools else {}))
     if not callable(clock):
         raise CoreError("MODEL_ADMISSION_CLOCK_REQUIRED", 503)
-    cumulative.preflight(store, settings, clock)
     now = clock()
     from companion.model import ModelAdmission, ModelClient, model_payload
 
@@ -1014,7 +1140,6 @@ async def _dispatch(
     # Re-read after lock acquisition, input estimation and journal fsync; no stale
     # pre-lock timestamp may authorize an HTTP request after the deadline.
     with phase("dispatch_recheck", trace_id):
-        cumulative.preflight(store, settings, clock)
         paid_budget.contract(settings, clock())
         # I/O custody already began and this phase cannot prove non-dispatch, so a late
         # owner message is left to the HTTP-boundary check, which can.
@@ -1024,6 +1149,7 @@ async def _dispatch(
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
             raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
     if isinstance(model, ModelClient):
+
         async def before_dispatch(request):
             # Every user hook has completed. Custody and current runtime checks
             # remain here; the adapter only binds the actual HTTP request bytes.
@@ -1048,15 +1174,20 @@ async def _dispatch(
                 # The checked model transport calls its delegate immediately after
                 # this hook; no await separates the final proof from that handoff.
                 dispatch["dispatched"] = True
+
         admission = ModelAdmission(row["payload_sha256"], before_dispatch, trace_id=trace_id)
         if dispatch is not None:
             dispatch["admission"] = admission
         try:
             if wire is not settings:
                 model = ModelClient(wire, model.client)
-            return await model.complete(messages, scenario, admission=admission,
-                                        **({"tools": tools} if tools else {}),
-                                        **({"generation": generation} if generation else {}))
+            return await model.complete(
+                messages,
+                scenario,
+                admission=admission,
+                **({"tools": tools} if tools else {}),
+                **({"generation": generation} if generation else {}),
+            )
         finally:
             if dispatch is not None:
                 dispatch["transport_returned"] = True
@@ -1081,8 +1212,16 @@ def record_provider_discrepancy(
         raise CoreError("INVALID_PROVIDER_RECONCILIATION", 400)
     with store.transaction():
         row = store.one(
-            "SELECT a.*,m.billed_micro_usd FROM model_admissions a "
-            "JOIN model_usage m USING(request_id) WHERE request_id=?",
+            "SELECT a.request_id AS request_id, a.logical_request_id AS logical_request_id, "
+            "a.attempt_id AS attempt_id, a.attempt_number AS attempt_number, a.window_id AS "
+            "window_id, a.contract_sha256 AS contract_sha256, a.payload_sha256 AS payload_sha256, "
+            "a.snapshot_json AS snapshot_json, a.reserved_micro_usd AS reserved_micro_usd, "
+            "a.input_bound AS input_bound, a.output_bound AS output_bound, a.lease_token AS "
+            "lease_token, a.lease_until AS lease_until, a.io_started_at AS io_started_at, "
+            "a.journal_path AS journal_path, a.journal_id AS journal_id, a.measurement_json AS "
+            "measurement_json, a.authority_json AS authority_json, m.billed_micro_usd AS "
+            "billed_micro_usd FROM model_admissions AS a JOIN model_usage AS m ON a.request_id = "
+            "m.request_id WHERE COALESCE(a.request_id, m.request_id) = %s",
             (request_id,),
         )
         if row is None:

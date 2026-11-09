@@ -81,7 +81,7 @@ def test_native_ingest_binds_job_and_rejects_stopped_duplicate(core, tmp_path):
     owner_input.approve(core.store, core.settings, core.clock, capture)
     message = inbound(core, capture)
     result = core.ingest(message, "owner-native-input")
-    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (result["job_id"],))
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=%s", (result["job_id"],))
     assert json.loads(job["authority_json"]) == capture.authority
     assert core.ingest(message, "owner-native-input")["duplicate"]
     assert not core.store.rows("SELECT * FROM model_usage")
@@ -95,10 +95,12 @@ def test_bridge_api_capture_signature_required_before_native_ingest(core, tmp_pa
     from fastapi.testclient import TestClient
 
     from companion.api import create_app
+    from companion.api_store import ApiStore
 
     capture, _ = captured(core, tmp_path)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     client = TestClient(app)
     headers = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
     path = "/internal/v1/owner-authority/inputs/approve"
@@ -112,7 +114,7 @@ def test_bridge_api_capture_signature_required_before_native_ingest(core, tmp_pa
     response = client.post("/internal/v1/inbox/events", json=inbound(core, capture).model_dump(
         mode="json"), headers={**headers, "X-Idempotency-Key": "owner-api-native-input"})
     assert response.status_code == 202, response.text
-    row = core.store.one("SELECT authority_json FROM jobs WHERE job_id=?",
+    row = core.store.one("SELECT authority_json FROM jobs WHERE job_id=%s",
                          (response.json()["job_id"],))
     assert json.loads(row["authority_json"]) == capture.authority
 
@@ -144,9 +146,9 @@ def test_history_verification_does_not_reauthorize_capture(core, tmp_path, bound
 def test_erasure_removes_capture_and_prevents_its_readmission(core, tmp_path):
     capture, _ = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [capture.event_id], core.clock())
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=%s",
                                (owner_input.INPUT + capture.event_id,))
     with pytest.raises(CoreError, match="EVENT_ERASED"):
         owner_input.approve(core.store, core.settings, core.clock, capture)
@@ -177,7 +179,7 @@ def test_explicit_history_scope_can_read_original_signed_source_after_revision(c
         owner_input.source(core.store, core.settings, current, capture.event_id, core.clock())
     assert owner_input.source(core.store, core.settings, current, capture.event_id,
                               core.clock(), history=True)[0]["event_id"] == capture.event_id
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [capture.event_id], core.clock())
     with pytest.raises(CoreError, match="OWNER_SOURCE_CHANGED"):
         owner_input.source(core.store, core.settings, current, capture.event_id,

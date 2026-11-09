@@ -35,7 +35,7 @@ def test_owner_text_extracts_only_plain_owner_messages(core):
 
     ingest(core, 2, "")
     core.store.execute(
-        "UPDATE events SET actor_id='companion' WHERE event_id=?", ("evt_test_2",)
+        "UPDATE events SET actor_id='companion' WHERE event_id=%s", ("evt_test_2",)
     )
     assert mood_appraisals.owner_text(core.store, "evt_test_2") is None
 
@@ -126,9 +126,12 @@ def test_record_writes_to_mood_appraisals_table(core):
 
     # Create model_usage record for FK constraint
     core.store.execute(
-        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
-        "output_tokens,occurred_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            'INSERT INTO model_usage (usage_id,request_id,scenario,provider,model,stat'
+            'e,input_tokens,output_tokens,occurred_at) VALUES '
+            "('usage_test_request', %s, %s, %s, "
+            '%s, %s, %s, %s, %s)'
+        ),
         ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
          100, 20, core.clock()),
     )
@@ -139,7 +142,7 @@ def test_record_writes_to_mood_appraisals_table(core):
         )
 
     row = core.store.one(
-        "SELECT event_id, reason FROM mood_appraisals WHERE event_id=?", ("evt_test_1",)
+        'SELECT event_id, reason FROM mood_appraisals WHERE event_id=%s', ("evt_test_1",)
     )
     assert row["event_id"] == "evt_test_1"
     assert row["reason"] == "OWNER_PLAYFUL"
@@ -171,9 +174,12 @@ def test_erase_removes_appraisals_by_event_ids(core):
 
     # Create model_usage record
     core.store.execute(
-        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
-        "output_tokens,occurred_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            'INSERT INTO model_usage (usage_id,request_id,scenario,provider,model,stat'
+            'e,input_tokens,output_tokens,occurred_at) VALUES '
+            "('usage_test_request', %s, %s, %s, "
+            '%s, %s, %s, %s, %s)'
+        ),
         ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
          100, 20, core.clock()),
     )
@@ -211,9 +217,12 @@ def test_still_valid_checks_quote_and_source_retention(core):
 
     # Create model_usage record
     core.store.execute(
-        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
-        "output_tokens,occurred_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            'INSERT INTO model_usage (usage_id,request_id,scenario,provider,model,stat'
+            'e,input_tokens,output_tokens,occurred_at) VALUES '
+            "('usage_test_request', %s, %s, %s, "
+            '%s, %s, %s, %s, %s)'
+        ),
         ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
          100, 20, core.clock()),
     )
@@ -223,7 +232,7 @@ def test_still_valid_checks_quote_and_source_retention(core):
             core.store, core.settings, validated, "test_request", core.clock()
         )
 
-    row = core.store.one("SELECT * FROM mood_appraisals WHERE event_id=?", ("evt_test_1",))
+    row = core.store.one('SELECT * FROM mood_appraisals WHERE event_id=%s', ("evt_test_1",))
     assert mood_appraisals.still_valid(core.store, row)
 
     # Erase source event
@@ -238,9 +247,12 @@ def test_capped_enforces_daily_limit_per_reason(core):
 
     # Create model_usage record
     core.store.execute(
-        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
-        "output_tokens,occurred_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            'INSERT INTO model_usage (usage_id,request_id,scenario,provider,model,stat'
+            'e,input_tokens,output_tokens,occurred_at) VALUES '
+            "('usage_test_request', %s, %s, %s, "
+            '%s, %s, %s, %s, %s)'
+        ),
         ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
          100, 20, core.clock()),
     )

@@ -1,14 +1,13 @@
 """Cumulative admission in the original Budget Journal, never a second wallet.
 
-Account ownership is an owner-approved anonymous assertion. These are local
-liability limits, not a verified provider account balance or external hard cap.
+Account ownership is an owner-approved anonymous assertion. The policy limits
+calls and token usage; original monetary records remain accounting evidence.
 """
 
 import hashlib
 import hmac
 import json
 import re
-from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,7 +34,6 @@ LEGACY_DOMAIN = b"companion-core/cumulative-window-inventory/v1\x00"
 
 class ModelCaps(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    micro_usd: int = Field(strict=True, ge=0, le=2**63 - 1)
     model_attempts: int = Field(strict=True, ge=0, le=2**31 - 1)
     input_tokens: int = Field(strict=True, ge=0, le=2**63 - 1)
     output_tokens: int = Field(strict=True, ge=0, le=2**63 - 1)
@@ -67,7 +65,7 @@ class LegacyWindowInventory(BaseModel):
 
 class CumulativeApproval(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    version: Literal[1]
+    version: Literal[2]
     account_ref: str = Field(pattern=SHA)
     policy_id: str = Field(pattern=r"^quota_[a-f0-9]{32}$")
     approval_sha256: str = Field(pattern=SHA)
@@ -157,6 +155,29 @@ def _liability(value):
     return dict(value)
 
 
+def blocking_pause(state):
+    """Cost uncertainty is advisory; owner and delivery controls remain hard fences."""
+    return state["paused"] and state["reason"] not in {
+        "UNKNOWN_MODEL_LIABILITY", "LOCAL_LIMIT_EXCEEDED",
+    }
+
+
+def _recorded_policy(value):
+    """Validate retained v1 bytes without reinstating their monetary admission caps."""
+    if value.get("version") != 1:
+        return CumulativeApproval.model_validate(value).model_dump(mode="json")
+    current = {**value, "version": 2}
+    for period in ("request", "window", "day", "month", "account"):
+        limits = dict(value[period])
+        amount = limits.pop("micro_usd")
+        if type(amount) is not int or not 0 <= amount <= 2**63 - 1:
+            raise ValueError("invalid historical monetary cap")
+        current[period] = limits
+    if CumulativeApproval.model_validate(current).model_dump(mode="json") != current:
+        raise ValueError("historical cumulative policy")
+    return value
+
+
 def fold(state, row):
     """Pure projection of versioned records in the existing hash-chained journal."""
     kind = row["kind"]
@@ -171,7 +192,7 @@ def fold(state, row):
             expected.add("legacy")
         if set(row) != expected or row["version"] != 1:
             raise ValueError("invalid cumulative policy record")
-        policy = CumulativeApproval.model_validate(row["policy"]).model_dump(mode="json")
+        policy = _recorded_policy(row["policy"])
         if policy != row["policy"] or digest(policy) != row["policy_sha256"]:
             raise ValueError("cumulative policy hash")
         at = instant(row["at"])
@@ -218,7 +239,7 @@ def fold(state, row):
                 policy["key_ownership_sha256"] == previous["key_ownership_sha256"]
             ):
                 raise ValueError("key rotation attribution required")
-            if any(v["state"] in {"RESERVED", "UNKNOWN", "DELIVERY_UNCERTAIN"}
+            if any(v["state"] in {"RESERVED", "DELIVERY_UNCERTAIN"}
                    for v in [*state["models"].values(), *state["operations"].values()]):
                 raise ValueError("unresolved responsibility cannot renew")
         state.update(policy=policy, policy_sha256=row["policy_sha256"], clock=at,
@@ -243,7 +264,7 @@ def fold(state, row):
             if set(row) != {"kind", "version", "account_ref", "at", "policy_sha256", "key",
                             "source_sha256", "liability", "previous"} or row[
                 "policy_sha256"
-            ] != state["policy_sha256"] or state["paused"]:
+            ] != state["policy_sha256"] or blocking_pause(state):
                 raise ValueError("invalid cumulative operation")
             liability = _liability(row["liability"])
             if (not re.fullmatch(r"(?:input|send):[a-f0-9]{64}", row["key"])
@@ -297,7 +318,7 @@ def fold(state, row):
             quota.update(micro_usd=row["minimum_micro_usd"], state=row["state"])
         if quota["model_attempts"] != 1 or quota["owner_inputs"] or quota["send_attempts"]:
             raise ValueError("invalid model attempt dimensions")
-        if kind == "reserve" and (prior or state["paused"]):
+        if kind == "reserve" and (prior or blocking_pause(state)):
             raise ValueError("cumulative model reservation replay or pause")
         if prior:
             if any(prior[k] != quota[k] for k in ("at", "window_id", "logical_request_id")):
@@ -312,15 +333,21 @@ def fold(state, row):
                 raise ValueError("cumulative model clock moved backwards")
             state["clock"] = checked_at
         state["models"][key] = quota
-        if row["state"] == "UNKNOWN" or kind == "blocked":
+        if (row["state"] == "UNKNOWN" or kind == "blocked") and not blocking_pause(state):
             state.update(paused=True, reason="UNKNOWN_MODEL_LIABILITY")
 
 
 def legacy_liabilities(store, provider, inventory=None):
     """Exact, bounded import inventory. Nothing is silently assigned to another account."""
     models, operations = {}, {}
-    rows = store.rows("SELECT m.*,a.window_id,a.logical_request_id FROM model_usage m "
-                     "LEFT JOIN model_admissions a USING(request_id) ORDER BY m.request_id")
+    rows = store.rows('SELECT m.usage_id AS usage_id, m.request_id AS request_id, m.job_id AS '
+        'job_id, m.scenario AS scenario, m.provider AS provider, m.model AS model, m.input_tokens '
+        'AS input_tokens, m.cached_input_tokens AS cached_input_tokens, m.output_tokens AS '
+        'output_tokens, m.billed_micro_usd AS billed_micro_usd, m.is_estimate AS is_estimate, '
+        'm.occurred_at AS occurred_at, m.state AS state, m.pricing_known AS pricing_known, '
+        'a.window_id AS window_id, a.logical_request_id AS logical_request_id FROM model_usage AS '
+        'm LEFT JOIN model_admissions AS a ON m.request_id = a.request_id ORDER BY m.request_id '
+        'NULLS FIRST')
     if len(rows) > 10000:
         raise CoreError("CUMULATIVE_LEGACY_INVENTORY_TOO_LARGE", 409)
     for row in rows:
@@ -338,9 +365,10 @@ def legacy_liabilities(store, provider, inventory=None):
         records.add(item.record_sha256)
         inventory_items.setdefault((item.kind, item.source_sha256), []).append(item)
     approved = {}
-    for row in store.rows("SELECT key,value FROM runtime_meta WHERE key LIKE 'live_text_input:%'"):
+    for row in store.rows('SELECT key, value FROM runtime_meta WHERE key LIKE '
+        "'live_text_input:%%'"):
         item = json.loads(row["value"])
-        history = store.one("SELECT value FROM runtime_meta WHERE key=?",
+        history = store.one('SELECT value FROM runtime_meta WHERE key = %s',
                             ("live_text_window:" + item["window_sha256"],))
         if not history:
             raise CoreError("CUMULATIVE_LEGACY_INPUT_ATTRIBUTION_REQUIRED", 409)
@@ -351,7 +379,21 @@ def legacy_liabilities(store, provider, inventory=None):
         approved[item["event_id"]] = window
         operations["input:" + digest(item["event_id"])] = liability(
             attempts[0].at, window, item["event_id"], "ADMITTED", owner_inputs=1)
-    for row in store.rows("SELECT * FROM outbox WHERE attempt_count>0 ORDER BY message_id"):
+    for row in store.rows('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+        'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+        'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+        'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+        'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+        'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+        'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+        'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+        'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at AS '
+        'next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+        'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+        'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+        'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+        'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.attempt_count '
+        '> 0 ORDER BY outbox.message_id NULLS FIRST'):
         if (row["state"] not in {"SENT", "FAILED", "CANCELLED"}
             or row["origin_event_id"] not in approved):
             raise CoreError("CUMULATIVE_LEGACY_SEND_ATTRIBUTION_REQUIRED", 409)
@@ -375,7 +417,7 @@ def verify_legacy_inventory(store, settings, scope):
     if inventory is None:
         return
     live = settings.live_text_window
-    journal_id = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+    journal_id = store.one("SELECT value FROM runtime_meta WHERE key = 'model_budget_journal_id'")
     if (not live or not live.capture_public_key or not journal_id
         or inventory.budget_journal_id != journal_id["value"]
         or inventory.identity_sha256 != scope.owner_identity_sha256):
@@ -444,7 +486,7 @@ def pause(store, custody, now, reason="OWNER_PAUSE", evidence_sha256=None):
     from companion import paid_budget
 
     state = paid_budget.journal(store, custody, allow_settlement=True)["cumulative"]
-    if not state["policy"] or state["paused"]:
+    if not state["policy"] or blocking_pause(state):
         return
     observed = instant(now) if now is not None else state["clock"]
     paid_budget.journal(store, custody, {"kind": "quota_pause", "version": 1,
@@ -458,14 +500,14 @@ def check(store, settings, now, *, custody=None):
 
     scope = _scope(settings)
     if scope is None and custody is None and not store.one(
-        "SELECT 1 FROM runtime_meta WHERE key=?", (PROJECTION,),
+        'SELECT 1 FROM runtime_meta WHERE key = %s', (PROJECTION,),
     ):
         return empty_state()
     view = custody
     if view is None:
         approval = settings.paid_model
         if approval is None:
-            projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
+            projection = store.one('SELECT value FROM runtime_meta WHERE key = %s', (PROJECTION,))
             approval = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
         view = paid_budget.journal(store, approval, allow_settlement=True)
     state = view["cumulative"]
@@ -485,7 +527,7 @@ def check(store, settings, now, *, custody=None):
     if not instant(scope.starts_at) <= at < instant(scope.expires_at):
         pause(store, settings.paid_model, now, "EXPIRED")
         raise CoreError("CUMULATIVE_POLICY_EXPIRED", 403)
-    if state["paused"]:
+    if blocking_pause(state):
         raise CoreError("CUMULATIVE_PAUSED", 403)
     return state
 
@@ -494,23 +536,24 @@ def preflight(store, settings, clock):
     """Record expiry/rollback before a narrower window validator can return early."""
     from companion import paid_budget
 
-    if not store.one("SELECT 1 FROM runtime_meta WHERE key=?", (PROJECTION,)):
+    if not store.in_transaction:
+        return store.read_or_write(lambda: preflight(store, settings, clock))
+    if not store.one('SELECT 1 FROM runtime_meta WHERE key = %s', (PROJECTION,)):
         return
-    with nullcontext() if store.db.in_transaction else store.transaction():
-        now = clock() if callable(clock) else clock
-        projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
-        custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
-        view = paid_budget.journal(store, custody, allow_settlement=True)
-        scope = _scope(settings)
-        if scope and digest(scope.model_dump(mode="json")) != view["cumulative"]["policy_sha256"]:
-            # Explicit new approvals still pass activate() at the reviewed cutoff.
-            return
-        check(store, settings, now, custody=view)
-        paid = settings.paid_model
-        # Cumulative scopes reject open-ended approvals at configuration time.
-        if paid and not instant(paid.starts_at) <= instant(now) < instant(paid.expires_at):
-            pause(store, custody, now, "EXPIRED")
-            raise CoreError("CUMULATIVE_WINDOW_EXPIRED", 403)
+    now = clock() if callable(clock) else clock
+    projection = store.one('SELECT value FROM runtime_meta WHERE key = %s', (PROJECTION,))
+    custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
+    view = paid_budget.journal(store, custody, allow_settlement=True)
+    scope = _scope(settings)
+    if scope and digest(scope.model_dump(mode="json")) != view["cumulative"]["policy_sha256"]:
+        # Explicit new approvals still pass activate() at the reviewed cutoff.
+        return
+    check(store, settings, now, custody=view)
+    paid = settings.paid_model
+    # Cumulative scopes reject open-ended approvals at configuration time.
+    if paid and not instant(paid.starts_at) <= instant(now) < instant(paid.expires_at):
+        pause(store, custody, now, "EXPIRED")
+        raise CoreError("CUMULATIVE_WINDOW_EXPIRED", 403)
 
 
 def violations(state, item, *, replacing=None):
@@ -530,9 +573,9 @@ def violations(state, item, *, replacing=None):
             or name == "month" and periods(v["at"], policy["timezone"])[1] == month
         )]
         for dimension, cap in policy[name].items():
-            if sum(v[dimension] for v in selected) > cap:
+            if dimension != "micro_usd" and sum(v[dimension] for v in selected) > cap:
                 result.append(name.upper() + "_" + dimension.upper())
-    concurrent = sum(v["model_attempts"] for v in values if v["state"] in {"RESERVED", "UNKNOWN"})
+    concurrent = sum(v["model_attempts"] for v in values if v["state"] == "RESERVED")
     if concurrent > policy["concurrency"]:
         result.append("CONCURRENCY")
     return result
@@ -554,7 +597,7 @@ def admit_model(store, settings, request_id, logical, at, amount, input_tokens, 
 def admission_metadata(store, admission, *, amount=None, state=None, tokens=None):
     from companion import paid_budget
 
-    if not store.one("SELECT 1 FROM runtime_meta WHERE key=?", (PROJECTION,)):
+    if not store.one('SELECT 1 FROM runtime_meta WHERE key = %s', (PROJECTION,)):
         return None
     custody = SimpleNamespace(journal_path=admission["journal_path"])
     view = paid_budget.journal(store, custody, allow_settlement=True)["cumulative"]
@@ -576,7 +619,7 @@ def final_fence(settings, state, now, request_id=None):
         return
     at = instant(now)
     if (scope is None or digest(scope.model_dump(mode="json")) != state["policy_sha256"]
-        or state["paused"] or at < state["clock"]
+        or blocking_pause(state) or at < state["clock"]
         or not instant(scope.starts_at) <= at < instant(scope.expires_at)):
         raise CoreError("CUMULATIVE_DISPATCH_FENCED", 403)
     if request_id and periods(state["models"][request_id]["at"], scope.timezone) != periods(
@@ -616,7 +659,7 @@ def admit_operation(store, settings, now, kind, source_id, source_sha256, *, at=
 def send_result(store, message_id, result, now):
     from companion import paid_budget
 
-    projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
+    projection = store.one('SELECT value FROM runtime_meta WHERE key = %s', (PROJECTION,))
     if not projection:
         return
     custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
@@ -635,7 +678,7 @@ def send_result(store, message_id, result, now):
 def status(store, settings, now):
     from companion import paid_budget
 
-    projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
+    projection = store.one('SELECT value FROM runtime_meta WHERE key = %s', (PROJECTION,))
     if not projection:
         return {"enrolled": False}
     try:
@@ -657,7 +700,9 @@ def status(store, settings, now):
             or name == "month" and periods(v["at"], policy["timezone"])[1] == month)]
         totals[name] = {dimension: sum(v[dimension] for v in selected) for dimension in DIMENSIONS}
     return {"enrolled": True, "available": True, "account_ref": policy["account_ref"],
-            "policy_sha256": state["policy_sha256"], "paused": state["paused"],
+            "policy_sha256": state["policy_sha256"], "paused": blocking_pause(state),
+            "warnings": ["MODEL_COST_UNKNOWN"] if any(
+                value["state"] == "UNKNOWN" for value in state["models"].values()) else [],
             "reason": state["reason"], "expires_at": policy["expires_at"],
             "timezone": policy["timezone"], "currency": policy["currency"], "used": totals,
             "limits": {name: policy[name] for name in totals}}
@@ -667,7 +712,7 @@ def owner_pause(store, settings, clock, request):
     from companion import paid_budget
 
     with store.transaction():
-        projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
+        projection = store.one('SELECT value FROM runtime_meta WHERE key = %s', (PROJECTION,))
         if not projection:
             raise CoreError("CUMULATIVE_ACCOUNT_NOT_ENROLLED", 409)
         custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])

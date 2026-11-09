@@ -53,7 +53,7 @@ def test_native_pump_offers_current_revision_and_yields_to_pending_input(
                         ).fetchone()
                         assert saved == (1, "ACCEPTED")
                         value = json.loads(core.store.one(
-                            "SELECT value FROM runtime_meta WHERE key=?",
+                            'SELECT value FROM runtime_meta WHERE key=%s',
                             (meme_core.OFFER + event["event_id"],))["value"])
                         assert value["reply_revision"] == 1
                         assert value["offer"]["candidates"] == []

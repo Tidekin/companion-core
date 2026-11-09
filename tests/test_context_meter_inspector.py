@@ -16,6 +16,7 @@ from companion.contracts import CoreError
 from companion.dialogue_history import fit_context
 from companion.model import ModelClient
 from companion.store import encode
+from tests.postgres_fixture import logical_state
 from tests.support.context_meter_inspector import native_job, recorded_attempts
 from tests.support.token_measurement import configure
 
@@ -29,8 +30,8 @@ def test_native_inspector_projects_each_complete_request_without_recounting(
     tool_results = [m for m in requests[1]["messages"] if m["role"] == "tool"]
     assert {m["tool_call_id"] for m in tool_results} == {"first-call", "second-call"}
     assert len(requests[0]["tools"]) == len(requests[1]["tools"]) == 2
-    admissions = core.store.rows("SELECT * FROM model_admissions ORDER BY rowid")
-    before = list(core.store.db.iterdump())
+    admissions = core.store.rows('SELECT * FROM model_admissions ORDER BY record_sequence')
+    before = logical_state(core.store)
     ledger = Path(core.settings.paid_model.journal_path).read_bytes()
 
     def forbidden(*args, **kwargs):
@@ -58,7 +59,7 @@ def test_native_inspector_projects_each_complete_request_without_recounting(
         assert calls[-1]["accounted_or_reserved_micro_usd"] > 0
     assert "SYNTHETIC_PRIVATE_TOOL_RESULT" not in encode(result)
     assert core.settings.model_url not in encode(result)
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert Path(core.settings.paid_model.journal_path).read_bytes() == ledger
 
 
@@ -127,8 +128,10 @@ def test_media_reservation_is_an_estimate_and_not_observed_usage(core, tmp_path)
     image_approval(core, tmp_path, provider="deepseek", model="deepseek-flash",
                    endpoint="https://api.deepseek.com")
     job_id, request_id = reserve_image(core, image_messages())
-    trace = core.store.one("SELECT e.trace_id FROM events e JOIN jobs j USING(event_id) "
-                           "WHERE j.job_id=?", (job_id,))["trace_id"]
+    trace = core.store.one((
+        'SELECT e.trace_id FROM events e JOIN jobs j USING(event_id) WHERE '
+        'j.job_id=%s'
+    ), (job_id,))["trace_id"]
     call = beta_observation.inspect_context(core.settings, trace)["trace"]["jobs"][0][
         "model_calls"][0]
     assert call["state"] == "RESERVED" and call["prompt_tokens"] is None
@@ -213,6 +216,7 @@ def test_real_http_and_independent_worker_expose_both_sdk_attempts(core, tmp_pat
         }) as (entry, _):
             source = await entry.admit(1, "synthetic meter inspection")
             settings = core.settings.model_dump(mode="json")
+            settings["database"] = core.settings.database.get_secret_value()
             for name in ("model_key", "bridge_token", "control_token"):
                 settings[name] = getattr(core.settings, name).get_secret_value()
             job_id = entry.accepted[source["event_id"]]["job_id"]
@@ -232,7 +236,7 @@ def test_real_http_and_independent_worker_expose_both_sdk_attempts(core, tmp_pat
                 raise
             assert child.returncode == 0, stderr.decode("utf-8", errors="replace")
             assert json.loads(stdout) == {"mock_provider_requests": 2}
-            trace_id = core.store.one("SELECT trace_id FROM events WHERE event_id=?",
+            trace_id = core.store.one('SELECT trace_id FROM events WHERE event_id=%s',
                                       (source["event_id"],))["trace_id"]
             trace = beta_observation.inspect_context(core.settings, trace_id)["trace"]
             calls = trace["jobs"][0]["model_calls"]
@@ -242,15 +246,20 @@ def test_real_http_and_independent_worker_expose_both_sdk_attempts(core, tmp_pat
             assert context["state"] == "RECORDED"
             assert context["source_validity"] == "NOT_REVALIDATED"
             assert context["pending"] is None and len(context["requests"]) == 2
-            saved = core.store.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+            saved = core.store.one('SELECT snapshots_json FROM agent_conversations WHERE job_id=%s',
                                   (job_id,))
             plan = next(item["metadata"]["core_context"]
                         for item in json.loads(saved["snapshots_json"])
                         if item["kind"] == "context_plan")
             assert context["plan_sha256"] == paid_budget.sha(plan)
             admissions = core.store.rows(
-                "SELECT a.* FROM model_admissions a JOIN model_usage m USING(request_id) "
-                "WHERE m.job_id=? ORDER BY m.rowid", (job_id,))
+                (
+                    (
+                        'SELECT a.* FROM model_admissions a JOIN model_usage '
+                        'm USING(request_id) WHERE m.job_id=%s ORDER BY '
+                        'm.record_sequence'
+                    )
+                ), (job_id,))
             assert len(admissions) == 2
             for record, call, admission in zip(context["requests"], calls, admissions, strict=True):
                 assert record["state"] == "ADMITTED"

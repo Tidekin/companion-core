@@ -39,10 +39,12 @@ def test_original_voice_job_retirement_preserves_unknown_and_cleanup(core, monke
         assert changed["authority"] != original.authority.as_dict()
     else:
         # Historical migration leaves this field empty: current grants cannot backfill it.
-        core.store.execute("UPDATE voice_jobs SET authority_json='{}',window_sha256=? "
-                           "WHERE job_id=?", ("a" * 64, job["job_id"]))
+        core.store.execute((
+            "UPDATE voice_jobs SET authority_json='{}',window_sha256=%s WHERE"
+            ' job_id=%s'
+        ), ("a" * 64, job["job_id"]))
     assert jobs.status(job["job_id"])["state"] == ("UNKNOWN" if started else "CANCELLED")
-    row = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job["job_id"],))
+    row = core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s', (job["job_id"],))
     assert row["input_blob"] is row["result_blob"] is row["lease_json"] is None
     assert json.loads(row["authority_json"]) == {} and row["content_retired"] == 1
     with pytest.raises(CoreError, match="VOICE_LEASE_RETIRED"):

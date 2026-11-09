@@ -285,7 +285,7 @@ def test_poke_model_result_dispatch_uses_real_receipt(core, tmp_path, decision):
                 assert json.loads(result["native_ack_json"])["response_sha256"] == content_hash(
                     {"status": "ok", "retcode": 0, "data": None})
             assert active.db.execute("SELECT state FROM inbox").fetchone()[0] == "accepted"
-            assert core.store.one("SELECT reply_revision FROM events WHERE event_id=?",
+            assert core.store.one('SELECT reply_revision FROM events WHERE event_id=%s',
                                   (receipt["event_id"],))["reply_revision"] == 0
             assert core.store.rows("SELECT * FROM model_usage") == usage
             active.runtime.verify()

@@ -8,7 +8,7 @@ from tests.sdk_reader_fixture import answer
 
 
 async def sdk_step(core, tmp_path, event_id, index):
-    job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?", (event_id,))
+    job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s', (event_id,))
     config, output = tmp_path / f"history-{index}.pickle", tmp_path / f"history-{index}.json"
     config.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
         [answer("原始历史答复")], "SUCCEEDED", str(output))))

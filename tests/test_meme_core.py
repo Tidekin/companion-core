@@ -75,12 +75,12 @@ def test_caption_capacity_wait_keeps_original_job_and_sends_once(core, tmp_path,
                 patch.setattr(budget, "reserve", full)
                 assert await worker(core, calls)
             assert not calls and not core.store.rows("SELECT * FROM model_usage")
-            assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?", (job_id,)) == {
+            assert core.store.one('SELECT state,attempts FROM jobs WHERE job_id=%s', (job_id,)) == {
                 "state": "QUEUED", "attempts": 0}
             core.clock.advance(2)
             assert await worker(core, calls)
             assert len(calls) == 1
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job_id,))["state"] == (
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job_id,))["state"] == (
                 "SUCCEEDED")
 
     run(scenario())
@@ -209,7 +209,7 @@ def test_queued_offer_wait_is_bounded_and_empty_query_releases_chat(core, tmp_pa
         async with caption_environment(core, tmp_path, monkeypatch) as values:
             event, accepted, client, _, _, _, _ = values
             core.store.execute(
-                "UPDATE jobs SET state='QUEUED' WHERE job_id=?", (accepted["job_id"],)
+                "UPDATE jobs SET state='QUEUED' WHERE job_id=%s", (accepted["job_id"],)
             )
             with Core(core.settings, clock=core.clock) as independent:
                 assert independent.claim_job("chat") is None
@@ -254,7 +254,7 @@ def test_offer_wait_expires_without_bridge_response(core, tmp_path, monkeypatch)
         async with caption_environment(core, tmp_path, monkeypatch) as values:
             _, accepted, _, _, _, _, _ = values
             core.store.execute(
-                "UPDATE jobs SET state='QUEUED',created_at=? WHERE job_id=?",
+                "UPDATE jobs SET state='QUEUED',created_at=%s WHERE job_id=%s",
                 (after(core.clock(), -meme_core.OFFER_WAIT_SECONDS - 1), accepted["job_id"]),
             )
             with Core(core.settings, clock=core.clock) as independent:
@@ -293,7 +293,7 @@ def test_new_source_cache_binding_keeps_original_erasure_lineage(core, tmp_path,
             second_event, accepted = await admit(client, config, plan, now, 2)
             assert accepted.status_code == 202, accepted.text
             core.store.execute(
-                "UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (accepted.json()["job_id"],)
+                "UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (accepted.json()["job_id"],)
             )
             # Native discovery contract inherits this second input's actual revision.
             from companion import meme_service
@@ -350,7 +350,7 @@ def test_new_source_cache_binding_keeps_original_erasure_lineage(core, tmp_path,
             )
             assert offered.status_code == 200, offered.text
             sources = core.store.rows(
-                "SELECT event_id FROM job_sources WHERE job_id=?", (accepted.json()["job_id"],)
+                'SELECT event_id FROM job_sources WHERE job_id=%s', (accepted.json()["job_id"],)
             )
             assert {row["event_id"] for row in sources} == {
                 first_event["event_id"],
@@ -362,14 +362,14 @@ def test_new_source_cache_binding_keeps_original_erasure_lineage(core, tmp_path,
             )
             assert recalled.status_code == 200, recalled.text
             assert not core.store.one(
-                "SELECT 1 FROM runtime_meta WHERE key=?", (meme_core.OFFER + current["event_id"],)
+                'SELECT 1 FROM runtime_meta WHERE key=%s', (meme_core.OFFER + current["event_id"],)
             )
             assert all(
                 row["result_json"] is None for row in core.store.rows("SELECT * FROM meme_captions")
             )
             assert (
                 core.store.one(
-                    "SELECT redacted FROM events WHERE event_id=?", (second_event["event_id"],)
+                    'SELECT redacted FROM events WHERE event_id=%s', (second_event["event_id"],)
                 )["redacted"]
                 == 0
             )
@@ -434,7 +434,7 @@ def test_local_query_embedding_cannot_block_new_input_or_publish_stale_offer(
         async with caption_environment(core, tmp_path, monkeypatch) as values:
             event, accepted, client, config, plan, now, _ = values
             core.store.execute(
-                "UPDATE jobs SET state='QUEUED' WHERE job_id=?", (accepted["job_id"],)
+                "UPDATE jobs SET state='QUEUED' WHERE job_id=%s", (accepted["job_id"],)
             )
             loop = asyncio.get_running_loop()
             started, release = asyncio.Event(), threading.Event()
@@ -466,7 +466,7 @@ def test_local_query_embedding_cannot_block_new_input_or_publish_stale_offer(
             stale = await pending
             assert stale.status_code == 409, stale.text
             assert not core.store.one(
-                "SELECT 1 FROM runtime_meta WHERE key=?", (meme_core.QUERY + event["event_id"],)
+                'SELECT 1 FROM runtime_meta WHERE key=%s', (meme_core.QUERY + event["event_id"],)
             )
             assert not core.store.rows("SELECT * FROM model_usage")
 
@@ -486,7 +486,7 @@ def test_stale_unpaid_caption_does_not_block_current_source(core, tmp_path, monk
             current, accepted = await admit(client, config, plan, now, 2)
             assert accepted.status_code == 202, accepted.text
             core.store.execute(
-                "UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (accepted.json()["job_id"],)
+                "UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (accepted.json()["job_id"],)
             )
             meme_service.submit(
                 core.store,
@@ -536,7 +536,7 @@ def test_pre_admission_failure_cannot_poison_new_caption_binding(
                 created = await client.post("/internal/v1/memes/captions", json=payload)
                 assert created.status_code == 200, created.text
                 assert core.store.one(
-                    "SELECT reuse_job_id FROM meme_captions WHERE job_id=?",
+                    'SELECT reuse_job_id FROM meme_captions WHERE job_id=%s',
                     (created.json()["job_id"],),
                 )["reuse_job_id"] == original.json()["job_id"]
                 payload["source_evidence"]["usage_basis"] += "; third source proof"
@@ -553,7 +553,7 @@ def test_pre_admission_failure_cannot_poison_new_caption_binding(
                 assert await worker(core, calls)
             assert not calls and not core.store.rows("SELECT * FROM model_usage")
             assert core.store.one(
-                "SELECT usage_request_id FROM meme_captions WHERE job_id=?",
+                'SELECT usage_request_id FROM meme_captions WHERE job_id=%s',
                 (original.json()["job_id"],),
             )["usage_request_id"]
             if not bind_before_failure:
@@ -612,7 +612,7 @@ def test_text_without_a_meme_intent_is_claimed_without_waiting(core, tmp_path, m
         async with caption_environment(core, tmp_path, monkeypatch) as values:
             _, accepted, _, _, _, _, _ = values
             core.store.execute(
-                "UPDATE jobs SET state='QUEUED' WHERE job_id=?", (accepted["job_id"],)
+                "UPDATE jobs SET state='QUEUED' WHERE job_id=%s", (accepted["job_id"],)
             )
             with Core(core.settings, clock=core.clock) as independent:
                 assert independent.claim_job("chat")["job_id"] == accepted["job_id"]

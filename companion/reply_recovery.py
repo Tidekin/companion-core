@@ -32,15 +32,15 @@ class RecoveryRequest(StrictModel):
 
 
 def _meta(store, key):
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+    row = store.one("SELECT value FROM runtime_meta WHERE key = %s", (key,))
     return json.loads(row["value"]) if row else None
 
 
 def is_delivery(store, message_id):
     return bool(
         store.one(
-            "SELECT 1 FROM outbox o JOIN jobs j ON j.event_id=o.origin_event_id "
-            "WHERE o.message_id=? AND j.kind=?",
+            "SELECT 1 FROM outbox AS o JOIN jobs AS j ON j.event_id = o.origin_event_id WHERE "
+            "o.message_id = %s AND j.kind = %s",
             (message_id, KIND),
         )
     )
@@ -93,7 +93,7 @@ def _original(store, settings, clock, message_id):
     snapshots = owner_delivery._snapshots(store, job)
     if any(
         p["kind"] in {"reader", "images", "singing", "video_preview_reply"} for p in snapshots
-    ) or store.one("SELECT 1 FROM agent_image_inputs WHERE job_id=?", (job["job_id"],)):
+    ) or store.one("SELECT 1 FROM agent_image_inputs WHERE job_id = %s", (job["job_id"],)):
         _fail()
     proof = owner_delivery._history_proof(store, job, snapshots)
     if proof != owner_input.history_proof(
@@ -123,7 +123,8 @@ def _unstarted(store, settings, row):
         or row["native_ack_json"] is not None
         or row["sent_at"] is not None
         or store.one(
-            "SELECT 1 FROM audit_log WHERE entity_id=? AND action='delivery.result'", (message_id,)
+            "SELECT 1 FROM audit_log WHERE entity_id = %s AND action = 'delivery.result'",
+            (message_id,),
         )
     ):
         _fail()
@@ -198,8 +199,10 @@ def _select(store, settings, clock, message_id):
     if not 0 < prefix < len(group["rows"]):
         _fail()
     first_pending = group["rows"][prefix]["message_id"]
-    if (_meta(store, "owner_delivery_not_sent:" + first_pending) is None
-        and _meta(store, "input_cancel_before_send:" + first_pending) is None):
+    if (
+        _meta(store, "owner_delivery_not_sent:" + first_pending) is None
+        and _meta(store, "input_cancel_before_send:" + first_pending) is None
+    ):
         _fail()
     for row in group["rows"][prefix:]:
         _unstarted(store, settings, row)
@@ -210,8 +213,8 @@ def _select(store, settings, clock, message_id):
         "authority": current.authority.as_dict(),
         "privacy_epoch": epoch(store),
         "reply_revision": store.one(
-            "SELECT reply_revision FROM conversations WHERE conversation_id=?",
-            (job["conversation_id"],)
+            "SELECT reply_revision FROM conversations WHERE conversation_id = %s",
+            (job["conversation_id"],),
         )["reply_revision"],
         "prefix": prefix,
         "group_sha256": group["rows"][0]["reply_group_sha256"],
@@ -253,8 +256,8 @@ def preview(store, settings, clock, message_id):
 def create(store, settings, clock, message_id, expected, operation, fingerprint):
     from companion.transport import enqueue_reply_parts
 
-    with nullcontext() if store.db.in_transaction else store.transaction():
-        source = store.one("SELECT reply_group_id FROM outbox WHERE message_id=?", (message_id,))
+    with nullcontext() if store.in_transaction else store.transaction():
+        source = store.one("SELECT reply_group_id FROM outbox WHERE message_id = %s", (message_id,))
         key = ORIGINAL + source["reply_group_id"] if source and source["reply_group_id"] else ""
         prior = _meta(store, key)
         if prior:
@@ -265,18 +268,35 @@ def create(store, settings, clock, message_id, expected, operation, fingerprint)
         value, group, current = _selection(store, settings, clock, message_id)
         if digest(value) != expected:
             raise CoreError("REPLY_RECOVERY_CHANGED", 409)
-        related = store.rows("SELECT job_id FROM jobs j WHERE event_id=? OR EXISTS "
-            "(SELECT 1 FROM job_sources s WHERE s.job_id=j.job_id AND s.event_id=?) LIMIT ?",
-            (value["original_event_id"], value["original_event_id"], MAX_INPUT_DELIVERIES + 1))
+        related = store.rows(
+            "SELECT job_id FROM jobs AS j WHERE event_id = %s OR EXISTS(SELECT 1 "
+            "FROM job_sources AS s WHERE s.job_id = j.job_id AND s.event_id = %s) LIMIT %s",
+            (value["original_event_id"], value["original_event_id"], MAX_INPUT_DELIVERIES + 1),
+        )
         if len(related) >= MAX_INPUT_DELIVERIES:
             _fail()
         ids = [r["job_id"] for r in related]
-        deliveries = store.rows("SELECT o.message_id FROM outbox o LEFT JOIN runtime_meta m "
-            "ON m.key='owner_delivery:'||o.message_id WHERE o.origin_event_id=? OR "
-            "CASE WHEN json_valid(m.value) THEN json_extract(m.value,'$.event_id')=? OR "
-            "json_extract(m.value,'$.job_id') IN (" + ",".join("?" for _ in ids) + ") "
-            "ELSE 0 END LIMIT ?", (value["original_event_id"], value["original_event_id"],
-                                  *ids, MAX_INPUT_DELIVERIES + 1))
+        deliveries = store.rows(
+            (
+                (
+                    'SELECT o.message_id FROM outbox o LEFT JOIN '
+                    "runtime_meta m ON m.key='owner_delivery:'||o.message_id"
+                    ' WHERE o.origin_event_id=%s OR CASE WHEN (m.value IS '
+                    'JSON) THEN (CASE WHEN m.value IS JSON THEN '
+                    "(m.value::json#>>'{event_id}') END)=%s OR (CASE WHEN "
+                    "m.value IS JSON THEN (m.value::json#>>'{job_id}') END) "
+                    'IN ('
+                )
+            )
+            + ",".join('%s' for _ in ids)
+            + ") ELSE false END LIMIT %s",
+            (
+                value["original_event_id"],
+                value["original_event_id"],
+                *ids,
+                MAX_INPUT_DELIVERIES + 1,
+            ),
+        )
         if len(deliveries) + len(group["rows"]) - value["prefix"] > MAX_INPUT_DELIVERIES:
             _fail()
         now, job_id = clock(), uid("job")
@@ -314,7 +334,8 @@ def create(store, settings, clock, message_id, expected, operation, fingerprint)
             *(
                 r["event_id"]
                 for r in store.rows(
-                    "SELECT event_id FROM job_sources WHERE job_id=?", (value["original_job_id"],)
+                    "SELECT event_id FROM job_sources WHERE job_id = %s",
+                    (value["original_job_id"],),
                 )
             ),
         }
@@ -344,7 +365,24 @@ def create(store, settings, clock, message_id, expected, operation, fingerprint)
         store.insert("runtime_meta", key=RECORD + job_id, value=encode(record))
         store.insert("runtime_meta", key=key, value=encode({"job_id": job_id, "message_ids": ids}))
         for index, new_id in enumerate(ids):
-            row = store.one("SELECT * FROM outbox WHERE message_id=?", (new_id,))
+            row = store.one(
+                "SELECT outbox.message_id AS message_id, outbox.origin_event_id AS "
+                "origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS "
+                "action_type, outbox.content_json AS content_json, outbox.content_sha256 AS "
+                "content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, "
+                "outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, "
+                "outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, "
+                "outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS "
+                "last_error_code, outbox.created_at AS created_at, outbox.updated_at AS "
+                "updated_at, outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, "
+                "outbox.next_attempt_at AS next_attempt_at, outbox.reply_group_id AS "
+                "reply_group_id, outbox.segment_index AS segment_index, outbox.segment_count AS "
+                "segment_count, outbox.reply_group_sha256 AS reply_group_sha256, "
+                "outbox.segment_interval_ms AS segment_interval_ms, outbox.delivery_lane AS "
+                "delivery_lane, outbox.native_ack_json AS native_ack_json, outbox.authority_json "
+                "AS authority_json FROM outbox AS outbox WHERE outbox.message_id = %s",
+                (new_id,),
+            )
             material = _material(store, row, record, index)
             owner_delivery.bind_material(store, new_id, current.authority.as_dict(), material)
         store.audit(
@@ -363,7 +401,18 @@ def create(store, settings, clock, message_id, expected, operation, fingerprint)
 def _material(store, row, record, index):
     from companion.private_life import event_digest
 
-    event = store.one("SELECT * FROM events WHERE event_id=?", (record["event_id"],))
+    event = store.one(
+        "SELECT events.event_id AS event_id, events.schema_version AS "
+        "schema_version, events.source AS source, events.source_event_id AS source_event_id, "
+        "events.conversation_id AS conversation_id, events.actor_id AS actor_id, events.event_type "
+        "AS event_type, events.occurred_at AS occurred_at, events.ingested_at AS ingested_at, "
+        "events.privacy_scope AS privacy_scope, events.body_json AS body_json, events.trace_id AS "
+        "trace_id, events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, "
+        "events.redacted AS redacted, events.memory_processed AS memory_processed, "
+        "events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = "
+        "%s",
+        (record["event_id"],),
+    )
     return {
         "kind": KIND,
         "authority": record["selection"]["authority"],
@@ -430,13 +479,16 @@ def history_group(store, message_id, *, include_partial=False):
     """
     from companion.transport import reply_group, segment_envelopes
 
-    row = store.one("SELECT reply_group_id FROM outbox WHERE message_id=?", (message_id,))
+    row = store.one("SELECT reply_group_id FROM outbox WHERE message_id = %s", (message_id,))
     ref = _meta(store, ORIGINAL + row["reply_group_id"]) if row and row["reply_group_id"] else None
     if ref is None:
         return None
     record = _meta(store, RECORD + ref["job_id"])
-    if (not record or record["message_ids"] != ref["message_ids"]
-        or digest({k: v for k, v in record.items() if k != "sha256"}) != record["sha256"]):
+    if (
+        not record
+        or record["message_ids"] != ref["message_ids"]
+        or digest({k: v for k, v in record.items() if k != "sha256"}) != record["sha256"]
+    ):
         _fail()
     old = reply_group(store, message_id)
     new = reply_group(store, record["message_ids"][0], require_sent=not include_partial)
@@ -444,12 +496,20 @@ def history_group(store, message_id, *, include_partial=False):
         return None
     selected = record["selection"]
     prefix = selected["prefix"]
-    if (len(new["rows"]) != len(old["rows"]) - prefix
+    if (
+        len(new["rows"]) != len(old["rows"]) - prefix
         or old["rows"][0]["reply_group_sha256"] != selected["group_sha256"]
         or any(r["state"] != "SENT" or not r["sent_at"] for r in old["rows"][:prefix])
-        or any(r["content_json"] != s["content_json"] for r, s in zip(
-            new["rows"], old["rows"][prefix:], strict=True))):
+        or any(
+            r["content_json"] != s["content_json"]
+            for r, s in zip(new["rows"], old["rows"][prefix:], strict=True)
+        )
+    ):
         _fail()
     rows = old["rows"][:prefix] + new["rows"]
-    return {"rows": rows, "text": old["text"], "segmented": True,
-            "envelopes": segment_envelopes(old) | segment_envelopes(new)}
+    return {
+        "rows": rows,
+        "text": old["text"],
+        "segmented": True,
+        "envelopes": segment_envelopes(old) | segment_envelopes(new),
+    }

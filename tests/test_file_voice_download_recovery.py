@@ -91,25 +91,27 @@ def test_ambiguous_file_expiry_never_becomes_a_proven_download_failure(core, tmp
                 core.store.execute("UPDATE content_items SET usage_request_id='model_uncertain'")
             elif evidence == "signature":
                 key = "owner_input:" + event["event_id"]
-                receipt = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                receipt = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                                     (key,))["value"])
                 receipt["capture"]["signature"] = "0" * 128
-                core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                                    (encode(receipt), key))
             elif evidence == "source":
                 body = event["payload"] | {"text": "changed after capture"}
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                    (encode(body), event["event_id"]))
             elif evidence == "snapshot":
                 snapshot = json.loads(row["attachment_json"]) | {"actual_bytes": 1}
-                core.store.execute("UPDATE content_items SET attachment_json=?",
+                core.store.execute('UPDATE content_items SET attachment_json=%s',
                                    (encode(snapshot),))
             elif evidence == "authority":
-                core.store.execute("UPDATE jobs SET authority_json=? WHERE kind='chat'",
+                core.store.execute("UPDATE jobs SET authority_json=%s WHERE kind='chat'",
                                    (encode(plan.authority | {"policy_sha256": "f" * 64}),))
             else:
-                core.store.execute("UPDATE content_items SET state=?,"
-                    "error_code='PRIVATE_FILE_PROCESSOR_LOST'", (evidence.upper(),))
+                core.store.execute((
+                    'UPDATE content_items SET '
+                    "state=%s,error_code='PRIVATE_FILE_PROCESSOR_LOST'"
+                ), (evidence.upper(),))
             original = core.store.one("SELECT * FROM content_items")
             core.clock.advance(21)
             assert not content_files.expire_downloads(core.content)
@@ -122,7 +124,7 @@ def test_ambiguous_file_expiry_never_becomes_a_proven_download_failure(core, tmp
                             "media_sha256", "fingerprint", "attachment_json"):
                     assert saved[key] == original[key]
                 if evidence == "staged":
-                    assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                    assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                           (qq_files.STAGED + row["item_id"],))["value"] == "{}"
                 # Existing privacy cleanup can remove UNKNOWN bytes, but the
                 # retained uncertainty must never later turn into a failed GET.
@@ -135,7 +137,10 @@ def test_ambiguous_file_expiry_never_becomes_a_proven_download_failure(core, tmp
 
 
 async def sdk_reply(core, tmp_path, number, text):
-    job = core.store.one("SELECT * FROM jobs WHERE kind='chat' ORDER BY rowid DESC LIMIT 1")
+    job = core.store.one(
+        "SELECT * FROM jobs WHERE kind='chat' ORDER BY record_sequence DESC "
+        'LIMIT 1'
+    )
     args, output = tmp_path / f"fallback-{number}.pickle", tmp_path / f"fallback-{number}.json"
     args.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
                                   [answer(text)], "SUCCEEDED", str(output))))

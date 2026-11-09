@@ -1,7 +1,7 @@
 import re
 import sqlite3
 
-from companion.store import migrate
+from companion.legacy_import import migrate_sqlite as migrate
 
 
 def assert_schema_metadata(db):
@@ -22,12 +22,10 @@ def historical_database(source, path, revision):
         for (table,) in tables.fetchall():
             if table.startswith("memories_fts"):
                 continue  # Native memory triggers rebuild the historical FTS index.
-            if not source.one(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,),
-            ):
+            if not source.has_table(table):
                 continue
             columns = [row[1] for row in target.execute(f'PRAGMA table_info("{table}")')]
-            for row in source.rows(f'SELECT * FROM "{table}" ORDER BY rowid'):
+            for row in source.rows(f'SELECT * FROM "{table}" ORDER BY record_sequence'):
                 if table == "runtime_meta" and row["key"] == "voice_incarnation":
                     continue
                 if table == "runtime_meta" and row["key"] in {

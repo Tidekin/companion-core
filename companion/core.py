@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
@@ -177,20 +178,32 @@ class Core(Runtime):
         # The autonomous selector no longer consumes old fixed-timer greetings.
         # Only unadmitted queued work can be retired; retain all model/send custody.
         for job in s.rows(
-            "SELECT j.job_id,j.event_id,e.trace_id FROM jobs j JOIN events e USING(event_id) "
-            "WHERE j.kind='activity' AND j.state IN ('QUEUED','RETRY_WAIT') "
-            "AND e.source='system.timer' AND e.event_type='activity.tick' "
-            "AND json_type(e.body_json,'$.notice') IS NULL "
-            "AND NOT EXISTS (SELECT 1 FROM model_usage m WHERE m.job_id=j.job_id) "
-            "AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.origin_event_id=j.event_id)",
+            (
+                'SELECT j.job_id,j.event_id,e.trace_id FROM jobs j JOIN '
+                "events e USING(event_id) WHERE j.kind='activity' AND "
+                "j.state IN ('QUEUED','RETRY_WAIT') AND "
+                "e.source='system.timer' AND "
+                "e.event_type='activity.tick' AND "
+                "json_typeof(e.body_json::json#>'{notice}') IS NULL AND "
+                'NOT EXISTS (SELECT 1 FROM model_usage m WHERE '
+                'm.job_id=j.job_id) AND NOT EXISTS (SELECT 1 FROM '
+                'outbox o WHERE o.origin_event_id=j.event_id)'
+            ),
         ):
             job_queue.release(s, job["job_id"], "CANCELLED", now, reason="LEGACY_TIMER_RETIRED")
             s.audit("activity.legacy_timer_retired", job["job_id"], job["trace_id"], now)
-        expired = s.rows("SELECT * FROM jobs WHERE state='RUNNING' "
-                         "AND kind IN ('chat','activity') AND lease_until<=?", (now,))
+        expired = s.rows('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS '
+            'kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS '
+            'attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, '
+            'jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, '
+            'jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, '
+            'jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked '
+            'AS context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs WHERE '
+            "jobs.state = 'RUNNING' AND jobs.kind IN ('chat', 'activity') AND jobs.lease_until <= "
+            '%s', (now,))
         for job in expired:
             s.execute(
-                "UPDATE model_usage SET state='UNKNOWN' WHERE job_id=? AND state='RESERVED'",
+                "UPDATE model_usage SET state = 'UNKNOWN' WHERE job_id = %s AND state = 'RESERVED'",
                 (job["job_id"],),
             )
             state = "QUEUED" if job["attempts"] < job["max_attempts"] else "FAILED"
@@ -205,10 +218,10 @@ class Core(Runtime):
         recover_deliveries(s, now)
 
     def cleanup_media(self):
-        """One bounded directory batch per spool in the existing maintenance cadence."""
+        """Return actual file removals from one bounded scan per spool."""
         from companion import agent_images, image_generation
 
-        processed = 0
+        removed = 0
         for module, kwargs in (
             (image_spool, {"max_bytes": self.settings.content.max_image_bytes,
                            "retain_completed": agent_images.enabled(self.settings)}),
@@ -223,17 +236,18 @@ class Core(Runtime):
                     continue
                 scan = self._media_scans[module] = os.scandir(root)
             try:
-                count = module.cleanup(self.store, self.clock(), entries=scan,
-                                       limit=MEDIA_CLEANUP_BATCH, **kwargs)
+                scanned, unlinked = module.cleanup(
+                    self.store, self.clock(), entries=scan, limit=MEDIA_CLEANUP_BATCH, **kwargs,
+                )
             except BaseException:
                 scan.close()
                 del self._media_scans[module]
                 raise
-            processed += count
-            if count < MEDIA_CLEANUP_BATCH:
+            removed += unlinked
+            if scanned < MEDIA_CLEANUP_BATCH:
                 scan.close()
                 del self._media_scans[module]
-        return processed
+        return removed
 
     def close(self):
         for scan in getattr(self, "_media_scans", {}).values():
@@ -244,8 +258,8 @@ class Core(Runtime):
 
     def claim_job(self, worker_id, *, job_id=None):
         s, now = self.store, self.clock()
-        # Keep native recovery before the retryable snapshot. A claim rechecks
-        # every fence under its writer lock; spool scans use idle maintenance.
+        # Recovery commits independently. Empty polls use a snapshot; an eligible
+        # candidate repeats its fences only under the native writer/row lock.
         with s.transaction():
             self.recover(now)
         return s.read_or_write(lambda: self._claim_job(worker_id, job_id, now))
@@ -258,7 +272,7 @@ class Core(Runtime):
                                    and self.settings.paid_model
                                    and self.settings.paid_model.concurrency > 1)
             if private_life.busy(s, now, foreground_only=foreground_only) or s.one(
-                "SELECT 1 FROM outbox WHERE state='SENDING' LIMIT 1",
+                "SELECT 1 FROM outbox WHERE state = 'SENDING' LIMIT 1",
             ):
                 # Input admission and tail cancellation proceed independently;
                 # chat waits for its existing model/send responsibility. Separate
@@ -267,22 +281,30 @@ class Core(Runtime):
         if not proactive_allowed(s, self.settings, now):
             cancel_proactive_work(s, now)
         row = s.one(
-            "SELECT j.*,e.conversation_id,e.body_json,e.trace_id,e.redacted,e.reply_revision "
-            "FROM jobs j "
-            "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
-            "AND j.kind IN ('chat','activity','evaluation','rem') "
-            "AND ((? IS NULL AND j.kind IN ('chat','evaluation')) OR j.job_id=?) "
-            "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) AND e.redacted=0 "
-            "AND NOT EXISTS (SELECT 1 FROM jobs b JOIN events be ON be.event_id=b.event_id "
-            "WHERE be.conversation_id=e.conversation_id AND b.rowid<j.rowid "
-            "AND (b.kind='chat' OR (b.kind='activity' "
-            "AND (j.kind<>'chat' OR b.state='RUNNING'))) "
-            "AND b.state IN ('QUEUED','RUNNING','RETRY_WAIT')) "
-            "ORDER BY CASE WHEN j.kind='evaluation' THEN 1 ELSE 0 END,j.rowid LIMIT 1",
+            'SELECT j.job_id AS job_id, j.event_id AS event_id, j.kind AS kind, j.state AS state, '
+            'j.idempotency_key AS idempotency_key, j.attempts AS attempts, j.max_attempts AS '
+            'max_attempts, j.lease_owner AS lease_owner, j.lease_until AS lease_until, '
+            'j.next_attempt_at AS next_attempt_at, j.last_error_code AS last_error_code, '
+            'j.created_at AS created_at, j.updated_at AS updated_at, j.lease_token AS lease_token, '
+            'j.context_tracked AS context_tracked, j.authority_json AS authority_json, '
+            'e.conversation_id AS conversation_id, e.body_json AS body_json, e.trace_id AS '
+            'trace_id, e.redacted AS redacted, e.reply_revision AS reply_revision FROM jobs AS j '
+            "JOIN events AS e ON e.event_id = j.event_id WHERE j.state IN ('QUEUED', 'RETRY_WAIT') "
+            "AND j.kind IN ('chat', 'activity', 'evaluation', 'rem') AND ((CAST(%s AS TEXT) IS "
+            "NULL AND j.kind IN ('chat', 'evaluation')) OR j.job_id = %s) AND (j.next_attempt_at "
+            'IS NULL OR j.next_attempt_at <= %s) AND e.redacted = 0 AND NOT EXISTS(SELECT 1 AS "1" '
+            'FROM jobs AS b JOIN events AS be ON be.event_id = b.event_id WHERE be.conversation_id '
+            "= e.conversation_id AND b.record_sequence < j.record_sequence AND (b.kind = 'chat' OR "
+            "(b.kind = 'activity' AND (j.kind <> 'chat' OR b.state = 'RUNNING'))) AND b.state IN "
+            "('QUEUED', 'RUNNING', 'RETRY_WAIT')) ORDER BY CASE WHEN j.kind = 'evaluation' THEN 1 "
+            'ELSE 0 END NULLS FIRST, j.record_sequence NULLS FIRST LIMIT 1'
+            + (' FOR UPDATE OF j SKIP LOCKED' if s.in_write_transaction else ''),
             (job_id, job_id, now),
         )
         if not row:
             return None
+        if not s.in_write_transaction:
+            raise RuntimeError("POSTGRES_CLAIM_REQUIRES_WRITE_TRANSACTION")
         if row["kind"] in {"activity", "rem"} and (
             budget.chat_pending(s, now) or private_life.enabled(self.settings)
             and private_life.owner_waiting(s, self.settings, now)
@@ -313,9 +335,9 @@ class Core(Runtime):
                 return None
             if qq_images.enabled(self.settings):
                 inflight = s.one(
-                    "SELECT m.request_id FROM model_usage m JOIN model_admissions a "
-                    "USING(request_id) WHERE m.job_id=? AND m.scenario='content_vision' "
-                    "AND m.state='RESERVED' AND a.window_id=? AND a.lease_until>?",
+                    'SELECT m.request_id FROM model_usage AS m JOIN model_admissions AS a USING '
+                    "(request_id) WHERE m.job_id = %s AND m.scenario = 'content_vision' AND "
+                    "m.state = 'RESERVED' AND a.window_id = %s AND a.lease_until > %s",
                     (row["job_id"], self.settings.live_text_window.window_id, self.clock()),
                 )
                 if inflight:
@@ -335,10 +357,17 @@ class Core(Runtime):
                         now)
         return {**row, "lease_token": token, "attempts": row["attempts"] + 1}
 
-    def _check_context_snapshots(self, job, snapshots, *, current_request=None):
-        reply_revision.check_job(self.store, job)
-        authority = self._owner_job_view(job)
-        configuration = runtime_config.check(self.store, self.settings, "job:" + job["job_id"])
+    def _check_context_snapshots(self, job, snapshots, *, current_request=None, owner_view=None,
+                                 reads=None):
+        if reads is None:
+            reply_revision.check_job(self.store, job)
+        else:
+            reply_revision._checked_job(job, reads.reply)
+        authority = owner_view if owner_view is not None else self._owner_job_view(job)
+        task_key = "job:" + job["job_id"]
+        configuration = (runtime_config.check(self.store, self.settings, task_key)
+                         if reads is None else runtime_config._checked_task(
+                             self.store, self.settings, task_key, reads.configuration))
         task_settings = runtime_config.effective(self.settings, configuration)
         markers = [item for item in snapshots if item["kind"] == "runtime_configuration"]
         if markers and (configuration is None or markers != [{"kind": "runtime_configuration",
@@ -399,13 +428,17 @@ class Core(Runtime):
                     owner_input.check_history(self.store, self.settings, self.clock,
                                               job, snapshot["proof"])
                 elif snapshot["kind"] == "context_plan":
-                    from companion.context_planner import check
+                    from companion.context_planner import check, check_bound
 
-                    check(self, job, snapshots)
+                    if reads is None:
+                        check(self, job, snapshots)
+                    else:
+                        check_bound(self.store, job, snapshots, reads.privacy_epoch)
                 elif snapshot["kind"] == "images":
                     from companion import agent_images
 
-                    ids = agent_images.context_item_ids(self.store, self.settings, self.clock, job)
+                    ids = agent_images.context_item_ids(self.store, self.settings, self.clock, job,
+                        _item_ids=reads.image_item_ids if reads is not None else None)
                     if ids != snapshot["item_ids"]:
                         raise CoreError("PRIVACY_CHANGED", 409)
             except CoreError as error:
@@ -533,11 +566,15 @@ class Core(Runtime):
         dynamic_rules = [expression_data, policy_data]
         if job["kind"] == "chat" and not cfg.chat_time_labels:
             # Stored event times keep a rebuilt context identical to the measured one.
-            current_event = s.one("SELECT rowid,occurred_at FROM events WHERE event_id=?",
+            current_event = s.one((
+                'SELECT record_sequence AS rowid, occurred_at FROM '
+                'events WHERE event_id = %s'
+            ),
                                   (job["event_id"],))
             previous = s.one(
-                "SELECT occurred_at FROM events WHERE conversation_id=? AND actor_id='owner' "
-                "AND rowid<? AND redacted=0 ORDER BY rowid DESC LIMIT 1",
+                "SELECT occurred_at FROM events WHERE conversation_id = %s AND actor_id = 'owner' "
+                'AND record_sequence < %s AND redacted = 0 ORDER BY record_sequence DESC NULLS '
+                'LAST LIMIT 1',
                 (job["conversation_id"], current_event["rowid"]),
             ) if current_event and turn.permits("history") else None
             dynamic_rules.append(conversation_policy.time_hint(
@@ -547,10 +584,16 @@ class Core(Runtime):
             from companion.capabilities import prompt_parts as capability_prompt
             from companion.capabilities import snapshot as capability_snapshot
 
-            capability_rules, capability_data = capability_prompt(
-                capability_snapshot(s, cfg, self.clock, model_tools=model_tools),
-                compact=cfg.context_soft_tokens < 8000,
-            )
+            with nullcontext() if s.in_transaction else s.read_snapshot():
+                # Feature rows share only this freshly validated read snapshot.
+                # Every later model/tool boundary still obtains its own view.
+                view = owner_authority.current(s, cfg, self.clock,
+                    authority=authority.authority) if authority and s.in_read_snapshot else None
+                capability_rules, capability_data = capability_prompt(
+                    capability_snapshot(s, cfg, self.clock, model_tools=model_tools,
+                                        owner_view=view),
+                    compact=cfg.context_soft_tokens < 8000,
+                )
             rules += capability_rules
             dynamic_rules.append(capability_data)
         style = style_observation.reply_reference(
@@ -693,7 +736,8 @@ class Core(Runtime):
                 # It explains the current message: older history is pruned before it.
                 selection.messages.append(glossary)
                 selection.priorities[id(glossary)] = context_selection.TOPIC
-        if authority and job["kind"] == "chat":
+        if (authority and job["kind"] == "chat"
+                and {"history", "social", "account_actions"} <= set(authority.policy.purposes)):
             from companion import account_action_context
 
             if actions := account_action_context.reference(self, job):
@@ -768,7 +812,7 @@ class Core(Runtime):
                 current_input.extend(notice_messages[1:-1])
             else:
                 # The owner's stored time keeps a rebuilt chat context identical.
-                received = s.one("SELECT occurred_at FROM events WHERE event_id=?",
+                received = s.one('SELECT occurred_at FROM events WHERE event_id = %s',
                                  (job["event_id"],))
                 current_input.append(time_context.now_message(
                     received["occurred_at"] if received else self.clock(), cfg.timezone))
@@ -1051,12 +1095,12 @@ class Core(Runtime):
         except ValueError as error:
             self.store.audit("memory.recall_invalid", job["job_id"], job["trace_id"], self.clock(),
                              reason=validation_reason, request_id=request_id)
-            usage = self.store.one("SELECT state FROM model_usage WHERE request_id=?",
+            usage = self.store.one('SELECT state FROM model_usage WHERE request_id = %s',
                                    (request_id,))
             if (not bounded_text and private_life.enabled(self.settings) and job["kind"] == "chat"
                 and reply_revision.owner_input(self.store, job["event_id"])
                 and not reply_revision.control_job(self.store, job)
-                and usage and usage["state"] == "SETTLED"):
+                and usage and usage["state"] in {"SETTLED", "UNKNOWN"}):
                 # Recall selection is optional context, not a memory write. Drop
                 # every candidate and expose unavailability; never retry this paid
                 # review or report an invalid selection as a valid empty result.
@@ -1136,8 +1180,8 @@ class Core(Runtime):
         text = command + (" " + arguments if arguments else "")
         if text == "发送状态":
             uncertain = s.rows(
-                "SELECT message_id,created_at FROM outbox "
-                "WHERE state='DELIVERY_UNCERTAIN' ORDER BY rowid LIMIT 10"
+                "SELECT message_id, created_at FROM outbox WHERE state = 'DELIVERY_UNCERTAIN' "
+                'ORDER BY record_sequence NULLS FIRST LIMIT 10'
             )
             return encode(uncertain) if uncertain else "没有待核对的发送。"
         reconciliation = re.fullmatch(r"核对发送\s+(msg_[a-f0-9]+)\s+(已发送|取消)", text)
@@ -1185,10 +1229,14 @@ class Core(Runtime):
             evidence_id = job["event_id"]
             if not content:
                 prior = s.one(
-                    "SELECT event_id,body_json FROM events WHERE actor_id='owner' "
-                    "AND event_type IN ('message.received','message.media_received') "
-                    "AND redacted=0 AND conversation_id=? AND rowid<(SELECT rowid "
-                    "FROM events WHERE event_id=?) ORDER BY rowid DESC LIMIT 1",
+                    (
+                        'SELECT event_id, body_json FROM events WHERE actor_id '
+                        "= 'owner' AND event_type IN ('message.received', "
+                        "'message.media_received') AND redacted = 0 AND "
+                        'conversation_id = %s AND record_sequence < (SELECT '
+                        'record_sequence AS rowid FROM events WHERE event_id = '
+                        '%s) ORDER BY record_sequence DESC NULLS LAST LIMIT 1'
+                    ),
                     (job["conversation_id"], evidence_id),
                 )
                 if prior:
@@ -1210,19 +1258,20 @@ class Core(Runtime):
             )
             if not candidates:
                 return "这条内容包含凭据，未保存为记忆。"
-            with s.transaction():
+            with s.transaction(control_write=True):
                 if captured_epoch != epoch(s):
                     raise CoreError("PRIVACY_CHANGED", 503)
                 if not s.one(
-                    "SELECT 1 FROM jobs WHERE job_id=? AND state='RUNNING' "
-                    "AND lease_token=? AND lease_until>?",
+                    "SELECT 1 FROM jobs WHERE job_id = %s AND state = 'RUNNING' AND lease_token = "
+                    '%s AND lease_until > %s',
                     (job["job_id"], job["lease_token"], self.clock()),
                 ):
                     raise CoreError("JOB_LEASE_EXPIRED", 409)
                 reply_revision.check_job(s, job)
                 memory_id = self.add_memories(candidates, resolutions, self.clock(),
                                               confirmed=True)[0]
-                review = s.one("SELECT needs_review FROM memories WHERE memory_id=?", (memory_id,))
+                review = s.one('SELECT needs_review FROM memories WHERE memory_id = '
+                    '%s', (memory_id,))
             if review["needs_review"]:
                 return f"已记录：{memory_id}。这与已有记忆存在冲突，请澄清或用“/纠正这一条”修订。"
             return f"已记住：{memory_id}"
@@ -1233,12 +1282,12 @@ class Core(Runtime):
             decision = {"确认这一条": "confirm", "忘记这一条": "forget", "纠正这一条": "correct"}[
                 match[1]
             ]
-            with s.transaction():
+            with s.transaction(control_write=True):
                 if live_text.active(s, self.settings):
                     live_text.check_job(s, self.settings, self.clock, job)
                 if not s.one(
-                    "SELECT 1 FROM jobs WHERE job_id=? AND state='RUNNING' "
-                    "AND lease_token=? AND lease_until>?",
+                    "SELECT 1 FROM jobs WHERE job_id = %s AND state = 'RUNNING' AND lease_token = "
+                    '%s AND lease_until > %s',
                     (job["job_id"], job["lease_token"], self.clock()),
                 ):
                     raise CoreError("JOB_LEASE_EXPIRED", 409)
@@ -1252,13 +1301,12 @@ class Core(Runtime):
         if epoch(self.store) == captured_epoch:
             return
         tracked = self.store.one(
-            "SELECT context_tracked FROM jobs WHERE job_id=?", (job["job_id"],),
+            'SELECT context_tracked FROM jobs WHERE job_id = %s', (job["job_id"],),
         )
         if private_life.enabled(self.settings) and tracked and tracked["context_tracked"]:
             # Revalidate the actual prompt sources. An unrelated recall must not
             # turn a current independent reply into a global window failure.
             reply_revision.check_job(self.store, job)
-            reply_revision.check_sources(self.store, job["job_id"])
             return
         raise CoreError("PRIVACY_CHANGED", 503)
 
@@ -1426,7 +1474,7 @@ class Core(Runtime):
                 )
                 model_done_ns = time.perf_counter_ns()
                 usage = self.store.one(
-                    "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
+                    'SELECT billed_micro_usd, state FROM model_usage WHERE request_id = %s',
                     (request_id,),
                 )
                 emit(
@@ -1458,7 +1506,15 @@ class Core(Runtime):
                 task_settings = self._check_context_snapshots(job, context_snapshots)
                 if bounded_text:
                     live_text.check_job(self.store, self.settings, self.clock, job)
-                current = self.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+                current = self.store.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, '
+                    'jobs.kind AS kind, jobs.state AS state, jobs.idempotency_key AS '
+                    'idempotency_key, jobs.attempts AS attempts, jobs.max_attempts AS '
+                    'max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS '
+                    'lease_until, jobs.next_attempt_at AS next_attempt_at, jobs.last_error_code AS '
+                    'last_error_code, jobs.created_at AS created_at, jobs.updated_at AS '
+                    'updated_at, jobs.lease_token AS lease_token, jobs.context_tracked AS '
+                    'context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs '
+                    'WHERE jobs.job_id = %s', (job["job_id"],))
                 if current["state"] != "RUNNING" or current["lease_token"] != job["lease_token"]:
                     return True
                 if current["lease_until"] <= self.clock():
@@ -1498,10 +1554,14 @@ class Core(Runtime):
                     elif mixed_reply:
                         from companion import reply_composition
 
-                        newer = self.store.one("SELECT 1 FROM events WHERE conversation_id=? "
-                            "AND actor_id='owner' AND source='qq.onebot' "
-                            "AND event_type IN ('message.received','message.media_received') "
-                            "AND rowid>(SELECT rowid FROM events WHERE event_id=?) LIMIT 1",
+                        newer = self.store.one((
+                            'SELECT 1 FROM events WHERE conversation_id = %s AND '
+                            "actor_id = 'owner' AND source = 'qq.onebot' AND "
+                            "event_type IN ('message.received', "
+                            "'message.media_received') AND record_sequence > "
+                            '(SELECT record_sequence AS rowid FROM events WHERE '
+                            'event_id = %s) LIMIT 1'
+                        ),
                             (job["conversation_id"], job["event_id"]))
                         message_ids = [] if newer else reply_composition.enqueue(self, job, now)
                     elif singing_reply:
@@ -1528,8 +1588,8 @@ class Core(Runtime):
                     elif policy and generated_reply and job["kind"] == "chat" and (
                         intent is None or intent.image is None or authority is not None
                         and not self.store.one(
-                            "SELECT 1 FROM generated_images WHERE job_id=? AND state='SUCCEEDED' "
-                            "AND message_id IS NULL", (job["job_id"],),
+                            'SELECT 1 FROM generated_images WHERE job_id = %s AND state = '
+                            "'SUCCEEDED' AND message_id IS NULL", (job["job_id"],),
                         )
                     ):
                         parts = split_text(intent.text if intent else reply, policy)
@@ -1552,10 +1612,14 @@ class Core(Runtime):
                             if len(parts) > available:
                                 parts = [reply]
                         if (len(parts) > 1 or image is not None) and self.store.one(
-                            "SELECT 1 FROM events WHERE conversation_id=? AND actor_id='owner' "
-                            "AND event_type IN ('message.received','message.media_received') "
-                            "AND source='qq.onebot' AND rowid>(SELECT rowid FROM events "
-                            "WHERE event_id=?) LIMIT 1", (job["conversation_id"], job["event_id"]),
+                            (
+                                'SELECT 1 FROM events WHERE conversation_id = %s AND '
+                                "actor_id = 'owner' AND event_type IN "
+                                "('message.received', 'message.media_received') AND "
+                                "source = 'qq.onebot' AND record_sequence > (SELECT "
+                                'record_sequence AS rowid FROM events WHERE event_id = '
+                                '%s) LIMIT 1'
+                            ), (job["conversation_id"], job["event_id"]),
                         ):
                             parts = []  # The owner already moved on while the model was answering.
                         quote_to = reply_quote.target(
@@ -1602,7 +1666,7 @@ class Core(Runtime):
             emit("job_failed", job["trace_id"])
             if request_id:
                 usage = self.store.one(
-                    "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
+                    'SELECT billed_micro_usd, state FROM model_usage WHERE request_id = %s',
                     (request_id,),
                 )
                 emit(
@@ -1620,7 +1684,7 @@ class Core(Runtime):
     def fail_job(self, job, code):
         now = self.clock()
         with self.store.transaction():
-            current = self.store.one("SELECT state,lease_token FROM jobs WHERE job_id=?",
+            current = self.store.one('SELECT state, lease_token FROM jobs WHERE job_id = %s',
                                      (job["job_id"],))
             if (not current or current["state"] != "RUNNING"
                 or current["lease_token"] != job["lease_token"]):
@@ -1635,7 +1699,7 @@ class Core(Runtime):
             if notices.reference(job) is not None and code in {
                 "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "BACKGROUND_YIELD_TO_CHAT",
                 "DAILY_BUDGET_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",
-            } and not self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
+            } and not self.store.one('SELECT 1 FROM model_usage WHERE job_id = %s',
                                      (job["job_id"],)):
                 job_queue.retry_outcome(
                     self.store,
@@ -1649,16 +1713,22 @@ class Core(Runtime):
                 )
                 return
             checkpoint = self.store.one(
-                "SELECT phase FROM agent_conversations WHERE job_id=?", (job["job_id"],))
-            admitted = self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
+                'SELECT phase FROM agent_conversations WHERE job_id = %s', (job["job_id"],))
+            admitted = self.store.one('SELECT 1 FROM model_usage WHERE job_id = %s',
                                       (job["job_id"],))
             resumable = (checkpoint and checkpoint["phase"] in {"READY", "WAITING"}
                          and not self.store.one(
-                             "SELECT 1 FROM model_usage WHERE job_id=? AND state!='SETTLED'",
+                             "SELECT 1 FROM model_usage m WHERE m.job_id=%s "
+                             "AND (m.state='RESERVED' "
+                             "OR (m.state='UNKNOWN' AND NOT EXISTS(SELECT 1 FROM "
+                             "agent_conversations c, jsonb_array_elements("
+                             "c.conversation_json::jsonb->'messages') r(value) "
+                             "WHERE c.job_id=m.job_id AND r.value->>'kind'='response' "
+                             "AND r.value->'metadata'->>'core_request_id'=m.request_id)))",
                              (job["job_id"],))
                          and not self.store.one(
-                             "SELECT 1 FROM agent_tool_calls WHERE job_id=? "
-                             "AND state IN ('STARTED','UNKNOWN')", (job["job_id"],)))
+                             'SELECT 1 FROM agent_tool_calls WHERE job_id = %s AND state IN '
+                             "('STARTED', 'UNKNOWN')", (job["job_id"],)))
             if code in budget.CAPACITY_WAIT_CODES and (not admitted or resumable):
                 # Admission contention is a wait, including between SDK model turns.
                 # A READY checkpoint retains paid responses and observed tool results;
@@ -1701,10 +1771,10 @@ class Core(Runtime):
         """Tell the owner a reply finally failed; best effort, never blocks the failure."""
         if (reply_revision.control_job(self.store, job)
                 or not reply_revision.owner_input(self.store, job["event_id"])
-                or self.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+                or self.store.one('SELECT 1 FROM outbox WHERE origin_event_id = %s',
                                   (job["event_id"],))):
             return
-        code = self.store.one("SELECT last_error_code FROM jobs WHERE job_id=?",
+        code = self.store.one('SELECT last_error_code FROM jobs WHERE job_id = %s',
                               (job["job_id"],))["last_error_code"]
         self.store.execute("SAVEPOINT failure_notice")
         try:
@@ -1730,7 +1800,7 @@ class Core(Runtime):
 
     def _owns_memory_lease(self, lease):
         current = self.store.one(
-            "SELECT value FROM runtime_meta WHERE key='memory_extraction_lease'"
+            "SELECT value FROM runtime_meta WHERE key = 'memory_extraction_lease'"
         )
         return bool(
             current and current["value"] == lease and json.loads(lease)["until"] > self.clock()

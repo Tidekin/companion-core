@@ -108,6 +108,12 @@ class DiscoverySettlement(StrictModel):
 
 def policy_hash(settings):
     """Bind the existing discovery and caption policies as one native capability."""
+    value = policy_value(settings)
+    return digest(value) if value is not None else None
+
+
+def policy_value(settings):
+    """The concrete hash input, also used to verify a legacy monetary retirement."""
     if not (settings.expression_enabled or settings.meme_discovery_enabled
             or settings.meme_semantics_enabled):
         return None
@@ -119,7 +125,7 @@ def policy_hash(settings):
         "caption_input": paid.meme_input.model_dump(mode="json")
         if paid and paid.meme_input else None,
         **{key: getattr(settings, key) for key in (
-            "meme_caption_daily_micro_usd", "meme_discovery_daily_queries",
+            "meme_discovery_daily_queries",
             "meme_discovery_daily_download_bytes", "meme_discovery_daily_storage_bytes",
             "expression_selection_probability", "expression_cooldown_minutes",
             "expression_meme_categories",
@@ -145,7 +151,7 @@ def policy_hash(settings):
         value["catalog"]["retrieval"] = {"binding_version": 2, "profile": PROFILE}
         if settings.meme_discovery_enabled:
             value["catalog"]["acquisition"] = acquisition_profile(settings)
-    return digest(value)
+    return value
 
 
 
@@ -162,7 +168,7 @@ def acquisition_profile(settings=None):
 
 
 def _transaction(store):
-    if not store.db.in_transaction:
+    if not store.in_transaction:
         raise RuntimeError("MEME_DISCOVERY_REQUIRES_TRANSACTION")
 
 
@@ -185,7 +191,14 @@ def submit_native(store, settings, clock, body, *, origin_job):
     """Enqueue from an already executing original chat, in its offer transaction."""
     _transaction(store)
     approval = _native_scope(store, settings, clock)
-    original = store.one("SELECT * FROM jobs WHERE job_id=?", (origin_job["job_id"],))
+    original = store.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS '
+        'kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS '
+        'attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, '
+        'jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, '
+        'jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, jobs.updated_at '
+        'AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked AS context_tracked, '
+        'jobs.authority_json AS authority_json FROM jobs AS jobs WHERE jobs.job_id = '
+        '%s', (origin_job["job_id"],))
     if (not original or original["kind"] != "chat" or original["state"] != "RUNNING"
         or original["event_id"] != body.event_id
         or body.provider != acquisition_profile(settings)["provider"]):
@@ -202,7 +215,7 @@ def lease_native(store, settings, clock, body):
     with store.transaction():
         approval = _native_scope(store, settings, clock)
         if store.one(
-            "SELECT 1 FROM outbox WHERE state IN ('PENDING','LEASED','SENDING') LIMIT 1"
+            "SELECT 1 FROM outbox WHERE state IN ('PENDING', 'LEASED', 'SENDING') LIMIT 1"
         ):
             return {"item": None}
         return _lease(store, settings, clock, body, approval,
@@ -237,19 +250,27 @@ def _source(store, settings, approval, event_id, revision, clock):
 
 
 def _metadata(store, job_id):
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (META + job_id,))
+    row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (META + job_id,))
     if not row:
         raise CoreError("MEME_DISCOVERY_JOB_MISSING", 404)
     return json.loads(row["value"])
 
 
 def _save(store, job_id, value):
-    store.execute("INSERT OR REPLACE INTO runtime_meta(key,value) VALUES (?,?)",
+    store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO '
+        'UPDATE SET value = excluded.value, record_sequence = DEFAULT',
                   (META + job_id, encode(value)))
 
 
 def _owned(store, job_id, body):
-    job = store.one("SELECT * FROM jobs WHERE job_id=? AND kind='meme_discovery'", (job_id,))
+    job = store.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, '
+        'jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS attempts, '
+        'jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS '
+        'lease_until, jobs.next_attempt_at AS next_attempt_at, jobs.last_error_code AS '
+        'last_error_code, jobs.created_at AS created_at, jobs.updated_at AS updated_at, '
+        'jobs.lease_token AS lease_token, jobs.context_tracked AS context_tracked, '
+        'jobs.authority_json AS authority_json FROM jobs AS jobs WHERE jobs.job_id = %s AND '
+        "jobs.kind = 'meme_discovery'", (job_id,))
     value = _metadata(store, job_id)
     if (not job or value.get("attempt_key") != body.attempt_key
         or value.get("lease_token") != body.lease_token or value["event_id"] != job["event_id"]):
@@ -269,7 +290,7 @@ def _check_current(store, settings, clock, job_id, body, approval):
         raise CoreError("MEME_DISCOVERY_STALE_LEASE", 409)
     owner_authority.check_job(store, settings, clock, job, purpose="meme", executing=True)
     _source(store, settings, approval, value["event_id"], value["reply_revision"], clock)
-    reservation = store.one("SELECT state FROM meme_discovery_reservations WHERE job_id=?",
+    reservation = store.one('SELECT state FROM meme_discovery_reservations WHERE job_id = %s',
                             (job_id,))
     if reservation and reservation["state"] != "RESERVED":
         raise CoreError("MEME_DISCOVERY_ATTEMPT_FINISHED", 409)
@@ -288,7 +309,14 @@ def _submit(store, settings, clock, body, approval):
     _source(store, settings, approval, body.event_id, body.reply_revision, clock)
     request = body.model_dump()
     key = "meme_discovery:" + digest(request)
-    prior = store.one("SELECT * FROM jobs WHERE idempotency_key=?", (key,))
+    prior = store.one('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, '
+        'jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS attempts, '
+        'jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS '
+        'lease_until, jobs.next_attempt_at AS next_attempt_at, jobs.last_error_code AS '
+        'last_error_code, jobs.created_at AS created_at, jobs.updated_at AS updated_at, '
+        'jobs.lease_token AS lease_token, jobs.context_tracked AS context_tracked, '
+        'jobs.authority_json AS authority_json FROM jobs AS jobs WHERE jobs.idempotency_key = '
+        '%s', (key,))
     if prior:
         return DiscoverySubmission(
             job_id=prior["job_id"], event_id=body.event_id, reply_revision=body.reply_revision,
@@ -305,18 +333,40 @@ def _submit(store, settings, clock, body, approval):
 
 def recover(store, settings, now):
     """An expired reserved attempt remains charged and cannot be dispatched again."""
-    with nullcontext() if store.db.in_transaction else store.transaction():
+    with nullcontext() if store.in_transaction else store.transaction():
         for job in store.rows(
-            "SELECT * FROM jobs WHERE kind='meme_discovery' "
-            "AND state IN ('RUNNING','CANCELLED','FAILED') "
-            "AND lease_until<=?", (now,),
+            'SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, '
+            'jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS '
+            'attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, '
+            'jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, '
+            'jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, '
+            'jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked '
+            'AS context_tracked, jobs.authority_json AS authority_json FROM jobs AS jobs WHERE '
+            "jobs.kind = 'meme_discovery' AND jobs.state IN ('RUNNING', 'CANCELLED', 'FAILED') AND "
+            'jobs.lease_until <= %s', (now,),
         ):
-            reserved = store.one("SELECT * FROM meme_discovery_reservations WHERE job_id=?",
+            reserved = store.one('SELECT meme_discovery_reservations.job_id AS job_id, '
+                'meme_discovery_reservations.attempt_key AS attempt_key, '
+                'meme_discovery_reservations.day AS day, meme_discovery_reservations.state AS '
+                'state, meme_discovery_reservations.reserved_queries AS reserved_queries, '
+                'meme_discovery_reservations.queries AS queries, '
+                'meme_discovery_reservations.reserved_requests AS reserved_requests, '
+                'meme_discovery_reservations.requests AS requests, '
+                'meme_discovery_reservations.reserved_download_bytes AS reserved_download_bytes, '
+                'meme_discovery_reservations.download_bytes AS download_bytes, '
+                'meme_discovery_reservations.reserved_storage_bytes AS reserved_storage_bytes, '
+                'meme_discovery_reservations.storage_bytes AS storage_bytes, '
+                'meme_discovery_reservations.reserved_model_cost AS reserved_model_cost, '
+                'meme_discovery_reservations.model_cost AS model_cost, '
+                'meme_discovery_reservations.created_at AS created_at, '
+                'meme_discovery_reservations.updated_at AS updated_at FROM '
+                'meme_discovery_reservations AS meme_discovery_reservations WHERE '
+                'meme_discovery_reservations.job_id = %s',
                                  (job["job_id"],))
             if reserved:
                 if reserved["state"] == "RESERVED":
-                    store.execute("UPDATE meme_discovery_reservations SET state='UNKNOWN',"
-                                  "updated_at=? WHERE job_id=?", (now, job["job_id"]))
+                    store.execute("UPDATE meme_discovery_reservations SET state = 'UNKNOWN', "
+                        'updated_at = %s WHERE job_id = %s', (now, job["job_id"]))
                 if job["state"] == "RUNNING":
                     job_queue.release(
                         store, job["job_id"], "FAILED", now, reason="MEME_DISCOVERY_UNKNOWN"
@@ -328,10 +378,10 @@ def recover(store, settings, now):
 def _empty_lease_poll(store, settings, clock, scope):
     # A cancelled/failed reservation can still require UNKNOWN accounting. Such
     # work goes through the original recovery and write transaction below.
-    if store.one("SELECT 1 FROM jobs j WHERE kind='meme_discovery' AND "
-                 "(state IN ('QUEUED','RUNNING') OR (state IN ('CANCELLED','FAILED') "
-                 "AND lease_until<=? AND EXISTS (SELECT 1 FROM meme_discovery_reservations r "
-                 "WHERE r.job_id=j.job_id AND r.state='RESERVED'))) LIMIT 1", (clock(),)):
+    if store.one("SELECT 1 FROM jobs AS j WHERE kind = 'meme_discovery' AND (state IN ('QUEUED', "
+        "'RUNNING') OR (state IN ('CANCELLED', 'FAILED') AND lease_until <= %s AND EXISTS(SELECT 1 "
+        'FROM meme_discovery_reservations AS r WHERE r.job_id = j.job_id AND r.state = '
+        "'RESERVED'))) LIMIT 1", (clock(),)):
         return False
     scope(store, settings, clock)
     return True
@@ -352,10 +402,16 @@ def _lease(store, settings, clock, body, approval, *, providers):
         or private_life.busy(store, clock())):
         return {"item": None}
     # One active discovery lease also bounds non-model network concurrency.
-    if store.one("SELECT 1 FROM jobs WHERE kind='meme_discovery' AND state='RUNNING' LIMIT 1"):
+    if store.one("SELECT 1 FROM jobs WHERE kind = 'meme_discovery' AND state = 'RUNNING' LIMIT 1"):
         return {"item": None}
-    for job in store.rows("SELECT * FROM jobs WHERE kind='meme_discovery' AND state='QUEUED' "
-                           "ORDER BY rowid LIMIT 32"):
+    for job in store.rows('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS '
+        'kind, jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS '
+        'attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, '
+        'jobs.lease_until AS lease_until, jobs.next_attempt_at AS next_attempt_at, '
+        'jobs.last_error_code AS last_error_code, jobs.created_at AS created_at, jobs.updated_at '
+        'AS updated_at, jobs.lease_token AS lease_token, jobs.context_tracked AS context_tracked, '
+        'jobs.authority_json AS authority_json FROM jobs AS jobs WHERE jobs.kind = '
+        "'meme_discovery' AND jobs.state = 'QUEUED' ORDER BY record_sequence NULLS FIRST LIMIT 32"):
         value = _metadata(store, job["job_id"])
         try:
             if value["provider"] not in providers:
@@ -398,7 +454,7 @@ def reserve(store, settings, clock, job_id, body):
 
 def _reserve(store, settings, clock, job_id, body, job, value):
     _transaction(store)
-    if store.one("SELECT 1 FROM meme_discovery_reservations WHERE job_id=? OR attempt_key=?",
+    if store.one('SELECT 1 FROM meme_discovery_reservations WHERE job_id = %s OR attempt_key = %s',
                   (job_id, body.attempt_key)):
         raise CoreError("MEME_DISCOVERY_ATTEMPT_ALREADY_RESERVED", 409)
     now = clock()
@@ -407,8 +463,8 @@ def _reserve(store, settings, clock, job_id, body, job, value):
     for field in ("queries", "download_bytes", "storage_bytes"):
         total = store.one(
             f"SELECT COALESCE(SUM(CASE WHEN state='SETTLED' THEN {field} "
-            f"ELSE MAX(reserved_{field},{field}) END),0) AS n "
-            "FROM meme_discovery_reservations WHERE day=?", (day,),
+            f"ELSE GREATEST(reserved_{field},{field}) END),0) AS n "
+            "FROM meme_discovery_reservations WHERE day=%s", (day,),
         )["n"]
         if total + limits[field] > getattr(settings, "meme_discovery_daily_" + field, 0):
             raise CoreError("MEME_DISCOVERY_DAILY_" + field.upper() + "_EXHAUSTED", 429)
@@ -431,8 +487,23 @@ def result(store, settings, clock, job_id, body):
 def _settle(store, settings, clock, job_id, body):
     _transaction(store)
     job, value = _owned(store, job_id, body)
-    row = store.one("SELECT * FROM meme_discovery_reservations "
-                    "WHERE job_id=? AND attempt_key=?",
+    row = store.one('SELECT meme_discovery_reservations.job_id AS job_id, '
+        'meme_discovery_reservations.attempt_key AS attempt_key, meme_discovery_reservations.day '
+        'AS day, meme_discovery_reservations.state AS state, '
+        'meme_discovery_reservations.reserved_queries AS reserved_queries, '
+        'meme_discovery_reservations.queries AS queries, '
+        'meme_discovery_reservations.reserved_requests AS reserved_requests, '
+        'meme_discovery_reservations.requests AS requests, '
+        'meme_discovery_reservations.reserved_download_bytes AS reserved_download_bytes, '
+        'meme_discovery_reservations.download_bytes AS download_bytes, '
+        'meme_discovery_reservations.reserved_storage_bytes AS reserved_storage_bytes, '
+        'meme_discovery_reservations.storage_bytes AS storage_bytes, '
+        'meme_discovery_reservations.reserved_model_cost AS reserved_model_cost, '
+        'meme_discovery_reservations.model_cost AS model_cost, '
+        'meme_discovery_reservations.created_at AS created_at, '
+        'meme_discovery_reservations.updated_at AS updated_at FROM meme_discovery_reservations AS '
+        'meme_discovery_reservations WHERE meme_discovery_reservations.job_id = %s AND '
+        'meme_discovery_reservations.attempt_key = %s',
                     (job_id, body.attempt_key))
     if not row:
         raise CoreError("MEME_DISCOVERY_RESERVATION_REQUIRED", 409)
@@ -447,8 +518,9 @@ def _settle(store, settings, clock, job_id, body):
     ) else "SETTLED"
     observed = {field: max(row[field], usage[field]) for field in FIELDS}
     now = clock()
-    store.execute("UPDATE meme_discovery_reservations SET state=?,queries=?,requests=?,"
-                  "download_bytes=?,storage_bytes=?,model_cost=?,updated_at=? WHERE job_id=?",
+    store.execute('UPDATE meme_discovery_reservations SET state = %s, queries = %s, requests = %s, '
+        'download_bytes = %s, storage_bytes = %s, model_cost = %s, updated_at = %s WHERE job_id = '
+        '%s',
                   (state, *(observed[field] for field in FIELDS), now, job_id))
     if job["state"] == "RUNNING":
         active = reply_revision.current(store, value["event_id"], value["reply_revision"])

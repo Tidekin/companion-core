@@ -7,6 +7,7 @@ import sys
 import httpx
 from pydantic import SecretStr
 
+from tests.postgres_fixture import logical_state
 from tests.support.core_http import real_core_http
 from tests.support.evaluation_process import process_config
 from tests.support.owner_input import captured, inbound
@@ -37,7 +38,7 @@ def test_signed_tcp_entry_independent_core_and_stop_leave_inspection_read_only(c
                 json=event.model_dump(mode="json"),
                 headers={**bridge, "X-Idempotency-Key": "activity-native-input"})
             assert accepted.status_code == 202, accepted.text
-            cid = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+            cid = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                  (event.event_id,))["conversation_id"]
             child = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
                 "tests.owner_runtime_process", "--config", str(config), "--now", core.clock(),
@@ -53,7 +54,7 @@ def test_signed_tcp_entry_independent_core_and_stop_leave_inspection_read_only(c
             stopped = await client.post("/internal/v1/owner-authority/stop", headers=owner,
                 json={"authority": capture.authority, "operation_id": "activity-stop"})
             assert stopped.status_code == 200, stopped.text
-            before = "\n".join(core.store.db.iterdump())
+            before = logical_state(core.store)
             observed = await client.post(PATH, json={"conversation_id": cid}, headers=owner)
             assert observed.status_code == 200, observed.text
             assert observed.headers["Cache-Control"] == "no-store"
@@ -62,7 +63,7 @@ def test_signed_tcp_entry_independent_core_and_stop_leave_inspection_read_only(c
             assert value["items"][0]["native_state"] == "SUCCEEDED"
             assert not value["items"][0]["lease"]["valid_at_as_of"]
             assert "synthetic owner input" not in observed.text
-            assert "\n".join(core.store.db.iterdump()) == before
+            assert logical_state(core.store) == before
             for extra in ({"limit": True}, {"limit": 21}, {"actor": "owner"},
                           {"current_event_ids": [event.event_id]}):
                 rejected = await client.post(PATH, json={"conversation_id": cid, **extra},
@@ -93,7 +94,7 @@ def test_signed_read_and_isolated_reader_receipts_are_observed_without_more_io(
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
             event, _ = await admit(client, core, config, plan, 1, card=URL)
             selected = await select_read(core, URL)
-            cid = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+            cid = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                  (event["event_id"],))["conversation_id"]
             owner = {"Authorization": "Bearer " + core.settings.control_token.get_secret_value()}
             pending = await client.post(PATH, json={"conversation_id": cid}, headers=owner)
@@ -102,7 +103,7 @@ def test_signed_read_and_isolated_reader_receipts_are_observed_without_more_io(
             completed = await reader_fixture.reader_once(isolated, str(client.base_url).rstrip("/"),
                                                         core.clock, metadata)
             assert completed["remaining"] == 0
-            before = "\n".join(core.store.db.iterdump())
+            before = logical_state(core.store)
             observed = await client.post(PATH, json={"conversation_id": cid}, headers=owner)
             assert observed.status_code == 200, observed.text
             reads = [item for item in observed.json()["items"] if item["kind"] == "read"]
@@ -111,7 +112,7 @@ def test_signed_read_and_isolated_reader_receipts_are_observed_without_more_io(
                 item["meaning"] == "OBSERVATION_RECEIPT" for item in reads[0]["results"])
             assert observed.json()["presence"]["state"] == "UNKNOWN"
             assert "字幕说" not in observed.text and "token=" not in observed.text
-            assert "\n".join(core.store.db.iterdump()) == before
+            assert logical_state(core.store) == before
             assert len(selected.requests) == 1
 
     asyncio.run(scenario())

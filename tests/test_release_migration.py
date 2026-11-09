@@ -1,7 +1,7 @@
 """Upgrade populated historical schemas, without downgrading a current database."""
 
 import re
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -15,16 +15,26 @@ from companion import cloud_budget
 from companion.backup import backup, restore
 from companion.config import Settings
 from companion.core import Core
+from companion.erasure import CONTRACT_KEY, contract_signature
+from companion.legacy_import import TARGET_REVISION, import_sqlite_backup, migrate_sqlite
+from companion.postgres import Database
 from companion.privacy import ErasureLedger
-from companion.store import Store, encode, migrate
+from companion.store import Store, encode
 from tests.conftest import Clock
+from tests.postgres_fixture import isolated_database
 from tests.support.historical_schema import historical_database
 from tests.support.release_migration import (
     DIARY_TABLES,
     TIMES,
     TOKENS,
     assert_indexes_and_integrity,
+    assert_native_indexes_and_integrity,
+    assert_native_old_columns_unchanged,
     assert_old_columns_unchanged,
+    insert,
+    one,
+    open_historical,
+    rows,
     seed_legacy,
     table_snapshot,
 )
@@ -98,13 +108,18 @@ REVISION_CHAIN = (
     "0067_relationship_standing",
     "0068_image_review_target",
 )
-SEGMENT_DEFAULTS = {"reply_group_id": None, "segment_index": 0, "segment_count": 1,
-                    "reply_group_sha256": None, "segment_interval_ms": 0}
+SEGMENT_DEFAULTS = {
+    "reply_group_id": None,
+    "segment_index": 0,
+    "segment_count": 1,
+    "reply_group_sha256": None,
+    "segment_interval_ms": 0,
+}
 
 
 def settings_for(database, ledger):
     return Settings(
-        database=str(database),
+        database=database,
         erasure_ledger=str(ledger),
         owner_qq_id="10001",
         bot_qq_id="10002",
@@ -130,17 +145,20 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
     assert tuple(reversed(revisions)) == REVISION_CHAIN
 
 
-@pytest.mark.parametrize("revision,code", [
-    ("0040_owner_authority", "OWNER_AUTHORITY_DOWNGRADE"),
-    ("0043_reader_authority", "OWNER_AUTHORITY_DOWNGRADE"),
-    ("0044_voice_owner_authority", "VOICE_AUTHORITY_DOWNGRADE"),
-    ("0045_goal_read_plan", "GOAL_PLAN_DOWNGRADE"),
-    ("0061_singing_voice", "SINGING_DOWNGRADE"),
-])
+@pytest.mark.parametrize(
+    "revision,code",
+    [
+        ("0040_owner_authority", "OWNER_AUTHORITY_DOWNGRADE"),
+        ("0043_reader_authority", "OWNER_AUTHORITY_DOWNGRADE"),
+        ("0044_voice_owner_authority", "VOICE_AUTHORITY_DOWNGRADE"),
+        ("0045_goal_read_plan", "GOAL_PLAN_DOWNGRADE"),
+        ("0061_singing_voice", "SINGING_DOWNGRADE"),
+    ],
+)
 def test_authority_downgrade_keeps_custody_and_accounting_unchanged(core, tmp_path, revision, code):
     tables = ("runtime_meta", "voice_jobs", "voice_node_state", "model_usage", "outbox")
     path = historical_database(core.store, tmp_path / "authority-custody.db", revision)
-    with closing(Store(path)) as original:
+    with closing(open_historical(path)) as original:
         before = table_snapshot(original, tables)
     config = Config()
     config.set_main_option(
@@ -149,88 +167,142 @@ def test_authority_downgrade_keeps_custody_and_accounting_unchanged(core, tmp_pa
     config.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
     with pytest.raises(RuntimeError, match=code + "_REQUIRES_EXPLICIT_CUSTODY_RECONCILIATION"):
         command.downgrade(config, "0033_model_usage_job_index")
-    with closing(Store(path)) as original:
+    with closing(open_historical(path)) as original:
         assert table_snapshot(original, tables) == before
-        assert original.one("SELECT version_num FROM alembic_version")["version_num"] == revision
+        assert one(original, "SELECT version_num FROM alembic_version")["version_num"] == revision
 
 
 @pytest.mark.parametrize("revision", ["0003_memory_index", "0004_diary"])
 def test_populated_historical_upgrade_preserves_every_old_column_and_repeats(tmp_path, revision):
     database, _, before = seed_legacy(tmp_path, revision)
-    migrate(str(database), "0014_reader_budget")
-    with closing(Store(str(database))) as store:
-        assert store.rows("SELECT version_num FROM alembic_version") == [
+    migrate_sqlite(str(database), "0014_reader_budget")
+    with closing(open_historical(str(database))) as store:
+        assert rows(store, "SELECT version_num FROM alembic_version") == [
             {"version_num": "0014_reader_budget"}
         ]
         assert_old_columns_unchanged(store, before)
         assert_indexes_and_integrity(store)
-        assert not store.schema_capabilities()
+        assert one(store, "SELECT version_num FROM alembic_version")["version_num"] == (
+            "0014_reader_budget"
+        )
         first_upgrade = table_snapshot(store, before)
-    migrate(str(database), "head")
-    with closing(Store(str(database))) as store:
-        incarnation = store.one("SELECT * FROM runtime_meta WHERE key='voice_incarnation'")
+    migrate_sqlite(str(database), "head")
+    with closing(open_historical(str(database))) as store:
+        incarnation = one(store, "SELECT * FROM runtime_meta WHERE key='voice_incarnation'")
         assert incarnation and re.fullmatch(r"[a-f0-9]{32}", incarnation["value"])
         first_upgrade["runtime_meta"]["rows"].append(incarnation)
-        first_upgrade["runtime_meta"]["rows"].extend([
-            {"key": "owner_authority_restore_generation", "value": "initial"},
-            {"key": "owner_authority_mode", "value": "OFF"},
-        ])
+        first_upgrade["runtime_meta"]["rows"].extend(
+            [
+                {"key": "owner_authority_restore_generation", "value": "initial"},
+                {"key": "owner_authority_mode", "value": "OFF"},
+            ]
+        )
         assert_old_columns_unchanged(store, first_upgrade)
-        for row in store.rows("SELECT * FROM outbox"):
+        for row in rows(store, "SELECT * FROM outbox"):
             assert {key: row[key] for key in SEGMENT_DEFAULTS} == SEGMENT_DEFAULTS
         final_upgrade = table_snapshot(store, before)
         assert_indexes_and_integrity(store)
-        assert store.schema_capabilities()
-    migrate(str(database), "head")
-    with closing(Store(str(database))) as store:
+        assert (
+            one(store, "SELECT version_num FROM alembic_version")["version_num"]
+            == (REVISION_CHAIN[-1])
+        )
+    migrate_sqlite(str(database), "head")
+    with closing(open_historical(str(database))) as store:
         assert table_snapshot(store, before) == final_upgrade
+
+
+@contextmanager
+def restore_imported_history(tmp_path, archive, key, ledger, migrated_database, erase):
+    """Explicitly import a historical SQLite archive before testing native restoration."""
+    source = tmp_path / "stopped-source.sqlite3"
+    source.write_bytes(Fernet(key).decrypt(archive.read_bytes()))
+    assert source.read_bytes().startswith(b"SQLite format 3")
+    migrate_sqlite(source)
+    native_archive = tmp_path / "native.enc"
+    with isolated_database(template=migrated_database) as imported:
+        import_sqlite_backup(source, imported)
+        backup(imported, native_archive, key)
+        with (
+            Database(imported) as database,
+            closing(Store(database, tmp_path / "imported-state")) as current,
+        ):
+            erase(current, imported)
+        with isolated_database() as destination:
+            state = tmp_path / "restored-state"
+            restore(native_archive, destination, key, ledger, state_directory=state)
+            with Database(destination) as database, closing(Store(database, state)) as restored:
+                yield restored
+
+
+def native_rows(store, statement, parameters=()):
+    # record_sequence is physical native ordering, not a historical business column.
+    return [
+        {key: value for key, value in row.items() if key != "record_sequence"}
+        for row in store.rows(statement, parameters)
+    ]
+
+
+def native_one(store, statement, parameters=()):
+    found = native_rows(store, statement, parameters)
+    return found[0] if found else None
 
 
 @pytest.mark.parametrize("forget_one", [False, True])
 def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_independent_fact(
-    tmp_path, forget_one
+    tmp_path,
+    forget_one,
+    migrated_database,
 ):
     database, ledger, before = seed_legacy(tmp_path, "0003_memory_index")
-    archive, destination, key = (
-        tmp_path / "old-0003.enc",
-        tmp_path / "restored.db",
-        Fernet.generate_key(),
-    )
-    backup(database, archive, key)
+    archive, key = tmp_path / "old-0003.enc", Fernet.generate_key()
+    archive.write_bytes(Fernet(key).encrypt(database.read_bytes()))
     ciphertext = archive.read_bytes()
     assert not ciphertext.startswith(b"SQLite") and TOKENS["keep"].encode() not in ciphertext
     assert Fernet(key).decrypt(ciphertext).startswith(b"SQLite format 3")
-    migrate(str(database))
-    if forget_one:
-        with closing(Store(str(database))) as current, current.transaction():
-            ErasureLedger(ledger).append(current, "mem_erase", Clock()())
-    restore(archive, destination, key, ledger)
-    with closing(Store(str(destination))) as restored:
-        generation = restored.one(
-            "SELECT * FROM runtime_meta WHERE key='memory_control_restore_generation'"
+
+    def erase(current, _):
+        if forget_one:
+            with current.transaction(control_write=True):
+                ErasureLedger(ledger).append(current, "mem_erase", Clock()())
+
+    with restore_imported_history(
+        tmp_path,
+        archive,
+        key,
+        ledger,
+        migrated_database,
+        erase,
+    ) as restored:
+        generation = native_one(
+            restored, "SELECT * FROM runtime_meta WHERE key='memory_control_restore_generation'"
         )
         assert generation and re.fullmatch(r"restore_[a-f0-9]{32}", generation["value"])
-        restore_block = restored.one(
-            "SELECT * FROM runtime_meta WHERE key='cloud_budget_restore_required'"
+        restore_block = native_one(
+            restored, "SELECT * FROM runtime_meta WHERE key='cloud_budget_restore_required'"
         )
         assert restore_block == {"key": "cloud_budget_restore_required", "value": "1"}
-        assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": REVISION_CHAIN[-1]}
+        assert native_rows(restored, "SELECT version_num FROM alembic_version") == [
+            {"version_num": TARGET_REVISION}
         ]
-        voice_incarnation = restored.one(
-            "SELECT * FROM runtime_meta WHERE key='voice_incarnation'"
+        voice_incarnation = native_one(
+            restored, "SELECT * FROM runtime_meta WHERE key='voice_incarnation'"
         )
         assert voice_incarnation and re.fullmatch(r"[a-f0-9]{32}", voice_incarnation["value"])
-        voice_restore = restored.one(
-            "SELECT * FROM runtime_meta WHERE key='voice_restore_required'"
+        voice_restore = native_one(
+            restored, "SELECT * FROM runtime_meta WHERE key='voice_restore_required'"
         )
         assert voice_restore == {"key": "voice_restore_required", "value": "1"}
         assert restored.schema_capabilities()
-        assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))
+        assert_native_indexes_and_integrity(
+            restored, ("keep",) if forget_one else ("erase", "keep")
+        )
         for table in ("memories", "memory_evidence", "memory_revisions", "memory_vectors"):
             expected = [row for row in before[table]["rows"] if row["memory_id"] == "mem_keep"]
-            assert restored.rows(f"SELECT * FROM {table} WHERE memory_id='mem_keep'") == expected
-        assert restored.one("SELECT * FROM events WHERE event_id='evt_keep'") == {
+            assert (
+                native_rows(restored, f"SELECT * FROM {table} WHERE memory_id='mem_keep'")
+                == expected
+            )
+        assert native_one(restored, "SELECT * FROM events WHERE event_id='evt_keep'") == {
             **next(row for row in before["events"]["rows"] if row["event_id"] == "evt_keep"),
             "reply_revision": 0,
         }
@@ -240,11 +312,17 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
                 "state": "UNKNOWN" if usage["state"] == "RESERVED" else usage["state"],
             }
             assert (
-                restored.one("SELECT * FROM model_usage WHERE request_id=?", (usage["request_id"],))
+                native_one(
+                    restored,
+                    "SELECT * FROM model_usage WHERE request_id=%s",
+                    (usage["request_id"],),
+                )
                 == expected
             )
         for old in before["outbox"]["rows"]:
-            actual = restored.one("SELECT * FROM outbox WHERE message_id=?", (old["message_id"],))
+            actual = native_one(
+                restored, "SELECT * FROM outbox WHERE message_id=%s", (old["message_id"],)
+            )
             active = old["state"] in {"PENDING", "LEASED", "SENDING", "RETRY_WAIT"}
             if forget_one:
                 expected_state = (
@@ -258,8 +336,10 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
                 assert actual["content_json"] == "{}" and actual["content_sha256"] == ""
             else:
                 expected = {
-                    **old, **SEGMENT_DEFAULTS,
-                    "delivery_lane": "owner_private", "native_ack_json": None,
+                    **old,
+                    **SEGMENT_DEFAULTS,
+                    "delivery_lane": "owner_private",
+                    "native_ack_json": None,
                     "authority_json": "{}",
                 }
                 if active:
@@ -270,18 +350,25 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
                     )
                 assert actual == expected
         if forget_one:
-            assert restored.one(
-                "SELECT content,status FROM memories WHERE memory_id='mem_erase'"
+            assert native_one(
+                restored, "SELECT content,status FROM memories WHERE memory_id='mem_erase'"
             ) == {"content": "", "status": "FORGOTTEN"}
-            assert restored.one(
-                "SELECT body_json,redacted FROM events WHERE event_id='evt_erase'"
+            assert native_one(
+                restored, "SELECT body_json,redacted FROM events WHERE event_id='evt_erase'"
             ) == {"body_json": "{}", "redacted": 1}
             for table in ("memory_evidence", "memory_revisions", "memory_vectors"):
-                assert restored.rows(f"SELECT * FROM {table} WHERE memory_id='mem_erase'") == []
-            assert restored.one(
-                "SELECT restore_min_replay_version,state FROM privacy_erasure_ledger"
+                assert (
+                    native_rows(restored, f"SELECT * FROM {table} WHERE memory_id='mem_erase'")
+                    == []
+                )
+            assert native_one(
+                restored, "SELECT restore_min_replay_version,state FROM privacy_erasure_ledger"
             ) == {"restore_min_replay_version": 1, "state": "COMPLETE"}
         else:
+            replay_contract = native_one(
+                restored, "SELECT * FROM runtime_meta WHERE key=%s", (CONTRACT_KEY,)
+            )
+            assert replay_contract == {"key": CONTRACT_KEY, "value": contract_signature()}
             unchanged = {
                 table: rows
                 for table, rows in before.items()
@@ -289,91 +376,138 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
             }
             unchanged["runtime_meta"] = {
                 **before["runtime_meta"],
-                "rows": before["runtime_meta"]["rows"] + [voice_incarnation] + [
-                    restored.one("SELECT * FROM runtime_meta WHERE key=?", (name,))
+                "rows": before["runtime_meta"]["rows"]
+                + [voice_incarnation]
+                + [
+                    native_one(restored, "SELECT * FROM runtime_meta WHERE key=%s", (name,))
                     for name in ("owner_authority_restore_generation", "owner_authority_mode")
-                ] + [generation, restore_block] + [
-                    restored.one("SELECT * FROM runtime_meta WHERE key=?", (name,))
-                    for name in ("social_autonomy_restore_required", "voice_restore_required",
-                                 "bili_video_restore_required")
+                ]
+                + [generation, restore_block, replay_contract]
+                + [
+                    native_one(restored, "SELECT * FROM runtime_meta WHERE key=%s", (name,))
+                    for name in (
+                        "social_autonomy_restore_required",
+                        "voice_restore_required",
+                        "bili_video_restore_required",
+                    )
                 ],
             }
-            assert_old_columns_unchanged(restored, unchanged)
+            assert_native_old_columns_unchanged(restored, unchanged)
 
 
-def test_encrypted_0004_diary_restore_deletes_only_requested_date(tmp_path):
+def test_encrypted_0004_diary_restore_deletes_only_requested_date(tmp_path, migrated_database):
     database, ledger, before = seed_legacy(tmp_path, "0004_diary")
-    archive, destination, key = (
-        tmp_path / "old-0004.enc",
-        tmp_path / "restored-diary.db",
-        Fernet.generate_key(),
-    )
-    backup(database, archive, key)
-    migrate(str(database))
-    instance = Core(settings_for(database, ledger), clock=Clock())
-    try:
-        instance.diary.forget(date.fromisoformat(TIMES["erase"][:10]), "10001")
-    finally:
-        instance.store.close()
-    restore(archive, destination, key, ledger)
-    with closing(Store(str(destination))) as restored:
-        assert restored.one(
-            "SELECT status,body_md FROM diary_entries WHERE entry_id='diary_erase'"
+    archive, key = tmp_path / "old-0004.enc", Fernet.generate_key()
+    archive.write_bytes(Fernet(key).encrypt(database.read_bytes()))
+
+    def erase(_, imported):
+        settings = settings_for(imported, ledger).model_copy(
+            update={
+                "state_directory": str(tmp_path / "diary-source-state"),
+            }
+        )
+        with closing(Core(settings, clock=Clock())) as instance:
+            instance.diary.forget(date.fromisoformat(TIMES["erase"][:10]), "10001")
+
+    with restore_imported_history(
+        tmp_path,
+        archive,
+        key,
+        ledger,
+        migrated_database,
+        erase,
+    ) as restored:
+        assert native_one(
+            restored, "SELECT status,body_md FROM diary_entries WHERE entry_id='diary_erase'"
         ) == {"status": "DELETED", "body_md": ""}
         for table in ("diary_evidence", "diary_revisions"):
-            assert restored.rows(f"SELECT * FROM {table} WHERE entry_id='diary_erase'") == []
+            assert (
+                native_rows(restored, f"SELECT * FROM {table} WHERE entry_id='diary_erase'") == []
+            )
         for table in DIARY_TABLES:
             key_column = "run_id" if table == "diary_runs" else "entry_id"
             value = "diary_run_keep" if table == "diary_runs" else "diary_keep"
-            assert restored.rows(f"SELECT * FROM {table} WHERE {key_column}=?", (value,)) == [
-                row for row in before[table]["rows"] if row[key_column] == value
-            ]
-        assert_old_columns_unchanged(
+            assert native_rows(
+                restored, f"SELECT * FROM {table} WHERE {key_column}=%s", (value,)
+            ) == [row for row in before[table]["rows"] if row[key_column] == value]
+        assert_native_old_columns_unchanged(
             restored,
             {
                 table: before[table]
                 for table in ("memories", "memory_evidence", "memory_revisions", "memory_vectors")
             },
         )
-        assert_indexes_and_integrity(restored)
+        assert_native_indexes_and_integrity(restored)
 
 
 def test_0018_preserves_populated_goals_without_guessing_reflection_origins(tmp_path):
     database, _, _ = seed_legacy(tmp_path, "0004_diary")
-    migrate(str(database), "0017_paid_model_gate")
-    with closing(Store(str(database))) as store:
-        store.insert(
-            "reflection_runs", run_id="reflection_legacy", identity_id="companion",
-            local_date="2026-10-18", timezone="Asia/Shanghai", state="COMMITTED",
-            source_set_sha256="a" * 64, captured_privacy_epoch=3,
-            created_at=TIMES["keep"], updated_at=TIMES["keep"],
+    migrate_sqlite(str(database), "0017_paid_model_gate")
+    with closing(open_historical(str(database))) as store:
+        insert(
+            store,
+            "reflection_runs",
+            run_id="reflection_legacy",
+            identity_id="companion",
+            local_date="2026-10-18",
+            timezone="Asia/Shanghai",
+            state="COMMITTED",
+            source_set_sha256="a" * 64,
+            captured_privacy_epoch=3,
+            created_at=TIMES["keep"],
+            updated_at=TIMES["keep"],
         )
-        store.insert(
-            "reflection_suggestions", suggestion_id="suggestion_legacy", run_id="reflection_legacy",
-            kind="next_question", content="同样的历史主题", evidence_json="[]", state="PENDING",
-            created_at=TIMES["keep"], updated_at=TIMES["keep"],
+        insert(
+            store,
+            "reflection_suggestions",
+            suggestion_id="suggestion_legacy",
+            run_id="reflection_legacy",
+            kind="next_question",
+            content="同样的历史主题",
+            evidence_json="[]",
+            state="PENDING",
+            created_at=TIMES["keep"],
+            updated_at=TIMES["keep"],
         )
-        store.insert(
-            "goals", goal_id="goal_legacy", kind="self", topic="同样的历史主题",
-            scope_json=encode({"operation": "investigate", "url": ""}), proposal_key="legacy-key",
-            state="CANDIDATE", priority=1, next_due_at=TIMES["keep"],
-            created_at=TIMES["keep"], updated_at=TIMES["keep"],
+        insert(
+            store,
+            "goals",
+            goal_id="goal_legacy",
+            kind="self",
+            topic="同样的历史主题",
+            scope_json=encode({"operation": "investigate", "url": ""}),
+            proposal_key="legacy-key",
+            state="CANDIDATE",
+            priority=1,
+            next_due_at=TIMES["keep"],
+            created_at=TIMES["keep"],
+            updated_at=TIMES["keep"],
         )
-        store.insert("goal_evidence", goal_id="goal_legacy", event_id="evt_keep")
-        before = table_snapshot(store, (
-            "goals", "goal_evidence", "reflection_runs", "reflection_suggestions",
-            "events", "memories", "model_usage", "outbox", "runtime_meta",
-        ))
+        insert(store, "goal_evidence", goal_id="goal_legacy", event_id="evt_keep")
+        before = table_snapshot(
+            store,
+            (
+                "goals",
+                "goal_evidence",
+                "reflection_runs",
+                "reflection_suggestions",
+                "events",
+                "memories",
+                "model_usage",
+                "outbox",
+                "runtime_meta",
+            ),
+        )
     # Exercise this historical migration's own downgrade guard, before later
     # irreversible custody migrations introduce their independent stop boundary.
-    migrate(str(database), "0018_reflection_goal_lineage")
-    migrate(str(database), "0018_reflection_goal_lineage")
-    with closing(Store(str(database))) as store:
+    migrate_sqlite(str(database), "0018_reflection_goal_lineage")
+    migrate_sqlite(str(database), "0018_reflection_goal_lineage")
+    with closing(open_historical(str(database))) as store:
         assert_old_columns_unchanged(store, before)
-        assert store.one("SELECT reflection_suggestion_id FROM goals") == {
+        assert one(store, "SELECT reflection_suggestion_id FROM goals") == {
             "reflection_suggestion_id": None
         }
-        assert store.rows("PRAGMA foreign_key_check") == []
+        assert rows(store, "PRAGMA foreign_key_check") == []
         # An explicit attribution is retained; downgrading may not silently discard it.
         store.execute(
             "UPDATE goals SET reflection_suggestion_id='suggestion_legacy' "
@@ -386,45 +520,68 @@ def test_0018_preserves_populated_goals_without_guessing_reflection_origins(tmp_
     config.set_main_option("sqlalchemy.url", "sqlite:///" + database.resolve().as_posix())
     with pytest.raises(RuntimeError, match="REFLECTION_GOALS_DOWNGRADE_REQUIRES_EXPLICIT_REVIEW"):
         command.downgrade(config, "0017_paid_model_gate")
-    with closing(Store(str(database))) as store:
-        assert store.one("SELECT reflection_suggestion_id FROM goals") == {
+    with closing(open_historical(str(database))) as store:
+        assert one(store, "SELECT reflection_suggestion_id FROM goals") == {
             "reflection_suggestion_id": "suggestion_legacy"
         }
         assert_old_columns_unchanged(store, before)
-        assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
+        assert one(store, "PRAGMA integrity_check")["integrity_check"] == "ok"
 
 
 def test_0021_retains_reflection_provenance_and_guards_pending_wait_downgrade(tmp_path):
     database, _, _ = seed_legacy(tmp_path, "0004_diary")
-    migrate(str(database), "0020_reply_segment_capacity")
+    migrate_sqlite(str(database), "0020_reply_segment_capacity")
     tables = ("reflection_runs", "reflection_evidence", "reflection_suggestions", "model_usage")
-    with closing(Store(str(database))) as store:
+    with closing(open_historical(str(database))) as store:
         for index, state in enumerate(("FAILED", "COMMITTED", "SKIPPED", "CANCELLED")):
             run_id = "old_reflection_" + str(index)
-            store.insert(
-                "reflection_runs", run_id=run_id, identity_id="companion",
-                local_date=f"2026-10-{10 + index}", timezone="Asia/Shanghai", state=state,
-                source_set_sha256="a" * 64, captured_privacy_epoch=2,
+            insert(
+                store,
+                "reflection_runs",
+                run_id=run_id,
+                identity_id="companion",
+                local_date=f"2026-10-{10 + index}",
+                timezone="Asia/Shanghai",
+                state=state,
+                source_set_sha256="a" * 64,
+                captured_privacy_epoch=2,
                 last_error_code="SCENARIO_CALL_LIMIT" if state == "FAILED" else None,
-                created_at=TIMES["keep"], updated_at=TIMES["keep"],
+                created_at=TIMES["keep"],
+                updated_at=TIMES["keep"],
             )
-            store.insert("reflection_evidence", run_id=run_id, event_id="evt_keep",
-                         source_id="owner:evt_keep")
-        store.insert(
-            "reflection_suggestions", suggestion_id="old_suggestion", run_id="old_reflection_1",
-            kind="next_question", content="继续了解银杉航线", evidence_json="[]", state="PENDING",
-            created_at=TIMES["keep"], updated_at=TIMES["keep"],
+            insert(
+                store,
+                "reflection_evidence",
+                run_id=run_id,
+                event_id="evt_keep",
+                source_id="owner:evt_keep",
+            )
+        insert(
+            store,
+            "reflection_suggestions",
+            suggestion_id="old_suggestion",
+            run_id="old_reflection_1",
+            kind="next_question",
+            content="继续了解银杉航线",
+            evidence_json="[]",
+            state="PENDING",
+            created_at=TIMES["keep"],
+            updated_at=TIMES["keep"],
         )
         before = table_snapshot(store, tables)
-    migrate(str(database), "0021_reflection_admission_retry")
-    migrate(str(database), "0021_reflection_admission_retry")
-    with closing(Store(str(database))) as store:
+    migrate_sqlite(str(database), "0021_reflection_admission_retry")
+    migrate_sqlite(str(database), "0021_reflection_admission_retry")
+    with closing(open_historical(str(database))) as store:
         assert_old_columns_unchanged(store, before)
-        assert all(row["next_attempt_at"] is None
-                   for row in store.rows("SELECT * FROM reflection_runs"))
-        assert store.rows("PRAGMA foreign_key_check") == []
-        store.execute("UPDATE reflection_runs SET state='RETRY_WAIT',next_attempt_at=? "
-                      "WHERE run_id='old_reflection_0'", (TIMES["keep"],))
+        assert all(
+            row["next_attempt_at"] is None for row in rows(store, "SELECT * FROM reflection_runs")
+        )
+        assert rows(store, "PRAGMA foreign_key_check") == []
+        store.execute(
+            "UPDATE reflection_runs SET state='RETRY_WAIT',next_attempt_at=? "
+            "WHERE run_id='old_reflection_0'",
+            (TIMES["keep"],),
+        )
         pending = table_snapshot(store, tables)
     config = Config()
     config.set_main_option(
@@ -435,59 +592,117 @@ def test_0021_retains_reflection_provenance_and_guards_pending_wait_downgrade(tm
         RuntimeError, match="REFLECTION_RETRY_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"
     ):
         command.downgrade(config, "0020_reply_segment_capacity")
-    with closing(Store(str(database))) as store:
+    with closing(open_historical(str(database))) as store:
         assert table_snapshot(store, tables) == pending
-        store.execute("UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL "
-                      "WHERE run_id='old_reflection_0'")
+        store.execute(
+            "UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL "
+            "WHERE run_id='old_reflection_0'"
+        )
     command.downgrade(config, "0020_reply_segment_capacity")
-    with closing(Store(str(database))) as store:
+    with closing(open_historical(str(database))) as store:
         assert table_snapshot(store, tables) == before
-        assert store.rows("PRAGMA foreign_key_check") == []
+        assert rows(store, "PRAGMA foreign_key_check") == []
 
 
 def test_0033_job_index_preserves_rows_rowids_budget_snapshots_and_erasure_ledger(tmp_path):
     database, ledger, _ = seed_legacy(tmp_path, "0004_diary")
-    migrate(str(database), "0032_bili_video")
-    with closing(Store(str(database))) as store:
-        original = store.one("SELECT * FROM model_usage WHERE state='UNKNOWN'")
+    migrate_sqlite(str(database), "0032_bili_video")
+    with closing(open_historical(str(database))) as store:
+        original = one(store, "SELECT * FROM model_usage WHERE state='UNKNOWN'")
         # A gap makes accidental table rebuilds visible, including the NULL-job case.
-        store.insert("model_usage", rowid=41, **{**original, "usage_id": "usage_null_job",
-                     "request_id": "request_null_job", "job_id": None})
-        store.insert("model_budget_windows", window_id="migration-window",
-                     contract_sha256="a" * 64)
-        for index, row in enumerate(store.rows("SELECT * FROM model_usage ORDER BY rowid")):
-            store.insert("model_admissions", request_id=row["request_id"],
-                         logical_request_id="job_keep", attempt_id=f"attempt_{index}",
-                         attempt_number=index + 1, window_id="migration-window",
-                         contract_sha256="a" * 64, payload_sha256="b" * 64,
-                         snapshot_json=encode({"historical_pricing": True}),
-                         reserved_micro_usd=row["billed_micro_usd"], input_bound=1000,
-                         output_bound=100, lease_token=f"lease_{index}",
-                         lease_until=TIMES["keep"], io_started_at=TIMES["keep"],
-                         journal_path=str(tmp_path / "retained-budget.jsonl"),
-                         journal_id="retained-budget")
-        cloud_budget.policy(store, settings_for(database, ledger), Clock()())
-        assert store.one("SELECT COUNT(*) n FROM cloud_cost_snapshots")["n"] == 4
-        tables = store.rows(
+        insert(
+            store,
+            "model_usage",
+            rowid=41,
+            **{
+                **original,
+                "usage_id": "usage_null_job",
+                "request_id": "request_null_job",
+                "job_id": None,
+            },
+        )
+        insert(
+            store, "model_budget_windows", window_id="migration-window", contract_sha256="a" * 64
+        )
+        for index, row in enumerate(rows(store, "SELECT * FROM model_usage ORDER BY rowid")):
+            insert(
+                store,
+                "model_admissions",
+                request_id=row["request_id"],
+                logical_request_id="job_keep",
+                attempt_id=f"attempt_{index}",
+                attempt_number=index + 1,
+                window_id="migration-window",
+                contract_sha256="a" * 64,
+                payload_sha256="b" * 64,
+                snapshot_json=encode({"historical_pricing": True}),
+                reserved_micro_usd=row["billed_micro_usd"],
+                input_bound=1000,
+                output_bound=100,
+                lease_token=f"lease_{index}",
+                lease_until=TIMES["keep"],
+                io_started_at=TIMES["keep"],
+                journal_path=str(tmp_path / "retained-budget.jsonl"),
+                journal_id="retained-budget",
+            )
+        config = cloud_budget.CloudBudgetConfig().model_dump()
+        insert(
+            store,
+            "cloud_budget_policies",
+            version=1,
+            config_json=encode(config),
+            config_sha256="c" * 64,
+            timezone="Asia/Shanghai",
+            effective_at=TIMES["keep"],
+            fx_valid_from=TIMES["erase"],
+            fx_valid_until=TIMES["keep"],
+        )
+        for usage in rows(store, "SELECT * FROM model_usage ORDER BY rowid"):
+            insert(
+                store,
+                "cloud_cost_snapshots",
+                reference_type="model",
+                reference_id=usage["request_id"],
+                policy_version=1,
+                task_kind="model",
+                task_id=usage["job_id"] or usage["request_id"],
+                local_day=TIMES["keep"][:10],
+                occurred_at=usage["occurred_at"],
+                snapshot_json=encode({"config": config}),
+                reserved_micro_usd=usage["billed_micro_usd"],
+                accounted_micro_usd=usage["billed_micro_usd"],
+                amount_micro_cny=usage["billed_micro_usd"] * 7,
+                state=usage["state"],
+                legacy=1,
+                updated_at=TIMES["keep"],
+            )
+        assert one(store, "SELECT COUNT(*) n FROM cloud_cost_snapshots")["n"] == 4
+        tables = rows(
+            store,
             "SELECT name,sql FROM sqlite_master WHERE type='table' AND name<>'alembic_version' "
             "ORDER BY name",
         )
-        schema = store.rows("SELECT type,name,tbl_name,sql FROM sqlite_master "
-                            "WHERE name<>'alembic_version' ORDER BY name")
+        schema = rows(
+            store,
+            "SELECT type,name,tbl_name,sql FROM sqlite_master "
+            "WHERE name<>'alembic_version' ORDER BY name",
+        )
 
         def rows_with_rowids(current):
             snapshot = {}
             for table in tables:
                 name = table["name"]
                 if "WITHOUT ROWID" in " ".join(table["sql"].upper().split()):
-                    primary = sorted((row for row in current.rows(f'PRAGMA table_info("{name}")')
-                                      if row["pk"]), key=lambda row: row["pk"])
+                    primary = sorted(
+                        (row for row in rows(current, f'PRAGMA table_info("{name}")') if row["pk"]),
+                        key=lambda row: row["pk"],
+                    )
                     assert primary
                     order = ",".join('"' + row["name"] + '"' for row in primary)
                     query = f'SELECT * FROM "{name}" ORDER BY {order}'
                 else:
                     query = f'SELECT rowid AS snapshot_rowid,* FROM "{name}" ORDER BY rowid'
-                snapshot[name] = current.rows(query)
+                snapshot[name] = rows(current, query)
             return snapshot
 
         before = rows_with_rowids(store)
@@ -499,28 +714,38 @@ def test_0033_job_index_preserves_rows_rowids_budget_snapshots_and_erasure_ledge
     config.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
     for operation in ("upgrade", "upgrade", "downgrade", "upgrade"):
         if operation == "upgrade":
-            migrate(str(database), "0033_model_usage_job_index")
+            migrate_sqlite(str(database), "0033_model_usage_job_index")
         else:
             command.downgrade(config, "0032_bili_video")
-        with closing(Store(str(database))) as store:
+        with closing(open_historical(str(database))) as store:
             assert rows_with_rowids(store) == before
             assert ledger.read_bytes() == ledger_bytes
-            assert store.rows("SELECT type,name,tbl_name,sql FROM sqlite_master "
-                              "WHERE name NOT IN ('alembic_version','idx_model_usage_job') "
-                              "ORDER BY name") == schema
-            assert store.rows("PRAGMA foreign_key_check") == []
-            assert store.one("PRAGMA integrity_check") == {"integrity_check": "ok"}
-            assert store.one("SELECT version_num FROM alembic_version")["version_num"] == (
+            assert (
+                rows(
+                    store,
+                    "SELECT type,name,tbl_name,sql FROM sqlite_master "
+                    "WHERE name NOT IN ('alembic_version','idx_model_usage_job') "
+                    "ORDER BY name",
+                )
+                == schema
+            )
+            assert rows(store, "PRAGMA foreign_key_check") == []
+            assert one(store, "PRAGMA integrity_check") == {"integrity_check": "ok"}
+            assert one(store, "SELECT version_num FROM alembic_version")["version_num"] == (
                 "0033_model_usage_job_index" if operation == "upgrade" else "0032_bili_video"
             )
-            indexes = store.rows("PRAGMA index_list(model_usage)")
+            indexes = rows(store, "PRAGMA index_list(model_usage)")
             actual = [row for row in indexes if row["name"] == "idx_model_usage_job"]
             if operation == "upgrade":
                 assert len(actual) == 1 and actual[0]["unique"] == 0
-                assert [row["name"] for row in store.rows(
-                    "PRAGMA index_info(idx_model_usage_job)")] == ["job_id"]
-                plan = store.rows("EXPLAIN QUERY PLAN SELECT request_id FROM model_usage "
-                                  "WHERE job_id=?", ("job_keep",))
+                assert [
+                    row["name"] for row in rows(store, "PRAGMA index_info(idx_model_usage_job)")
+                ] == ["job_id"]
+                plan = rows(
+                    store,
+                    "EXPLAIN QUERY PLAN SELECT request_id FROM model_usage WHERE job_id=?",
+                    ("job_keep",),
+                )
                 assert any("idx_model_usage_job" in row["detail"] for row in plan)
             else:
                 assert actual == []

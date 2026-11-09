@@ -1,6 +1,5 @@
 import asyncio
 import json
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,7 +54,12 @@ def run_isolated_worker(settings_path, now):
     async def stop(*_args):
         raise asyncio.CancelledError
 
-    life_worker.Core = partial(Core, clock=lambda: now)
+    def ready_core(*args, **kwargs):
+        core = Core(*args, **kwargs, clock=lambda: now)
+        print("MEMORY_WORKER_READY", flush=True)
+        return core
+
+    life_worker.Core = ready_core
     life_worker.httpx = SimpleNamespace(AsyncClient=offline_client)
     life_worker.Wakeup.wait = stop
     try:

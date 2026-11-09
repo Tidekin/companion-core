@@ -26,10 +26,29 @@ FIELDS = {
 
 def evidence(store, request_id, prior):
     """Reconstruct the frozen evidence without interpreting estimates as observations."""
-    admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
-    usage = store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
-    diagnostics = store.rows("SELECT safe_detail_json FROM audit_log "
-        "WHERE action='model.usage_diagnostic' AND entity_id=? ORDER BY rowid", (request_id,))
+    admission = store.one('SELECT model_admissions.request_id AS request_id, '
+        'model_admissions.logical_request_id AS logical_request_id, model_admissions.attempt_id AS '
+        'attempt_id, model_admissions.attempt_number AS attempt_number, model_admissions.window_id '
+        'AS window_id, model_admissions.contract_sha256 AS contract_sha256, '
+        'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json AS '
+        'snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
+        'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
+        'output_bound, model_admissions.lease_token AS lease_token, model_admissions.lease_until '
+        'AS lease_until, model_admissions.io_started_at AS io_started_at, '
+        'model_admissions.journal_path AS journal_path, model_admissions.journal_id AS journal_id, '
+        'model_admissions.measurement_json AS measurement_json, model_admissions.authority_json AS '
+        'authority_json FROM model_admissions AS model_admissions WHERE '
+        'model_admissions.request_id = %s', (request_id,))
+    usage = store.one('SELECT model_usage.usage_id AS usage_id, model_usage.request_id AS '
+        'request_id, model_usage.job_id AS job_id, model_usage.scenario AS scenario, '
+        'model_usage.provider AS provider, model_usage.model AS model, model_usage.input_tokens AS '
+        'input_tokens, model_usage.cached_input_tokens AS cached_input_tokens, '
+        'model_usage.output_tokens AS output_tokens, model_usage.billed_micro_usd AS '
+        'billed_micro_usd, model_usage.is_estimate AS is_estimate, model_usage.occurred_at AS '
+        'occurred_at, model_usage.state AS state, model_usage.pricing_known AS pricing_known FROM '
+        'model_usage AS model_usage WHERE model_usage.request_id = %s', (request_id,))
+    diagnostics = store.rows('SELECT safe_detail_json FROM audit_log WHERE action = '
+        "'model.usage_diagnostic' AND entity_id = %s ORDER BY audit_id NULLS FIRST", (request_id,))
     if not admission or not usage or len(diagnostics) != 1:
         raise ValueError("missing original video evidence")
     snapshot = json.loads(admission["snapshot_json"])
@@ -106,8 +125,8 @@ def reconcile(store, settings, request, clock=utcnow):
         with store.transaction():
             approval = settings.paid_model
             if (not approval or not live_text.stopped(store) or store.one(
-                "SELECT 1 FROM runtime_meta WHERE key='model_budget_restore_required'"
-            ) or store.one("SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,))):
+                "SELECT 1 FROM runtime_meta WHERE key = 'model_budget_restore_required'"
+            ) or store.one('SELECT 1 FROM runtime_meta WHERE key = %s', (cumulative.PROJECTION,))):
                 raise ValueError("stopped original deployment required")
             rows = [json.loads(line) for line in Path(
                 approval.journal_path).read_text("utf-8").splitlines()]
@@ -127,13 +146,13 @@ def reconcile(store, settings, request, clock=utcnow):
                 if (view["head_sha256"] != request["expected_head_sha256"]
                     or rows[0]["journal_id"] != request["journal_id"]
                     or not view["lifecycle"] or view["lifecycle"]["state"] != "STOPPED"
-                    or store.one("SELECT 1 FROM model_usage WHERE state!='SETTLED' "
-                                 "AND request_id!=?", (request["request_id"],))
+                    or store.one("SELECT 1 FROM model_usage WHERE state <> 'SETTLED' AND "
+                        'request_id <> %s', (request["request_id"],))
                     or any(store.one(f"SELECT 1 FROM {table} WHERE state NOT IN ({states})")
                         for table, states in (("jobs", "'SUCCEEDED','FAILED','CANCELLED'"),
                                               ("outbox", "'SENT','FAILED','CANCELLED'"),
                                               ("tool_tasks", "'SUCCEEDED','FAILED','CANCELLED'")))
-                    or store.one("SELECT 1 FROM content_items WHERE state='RUNNING'")):
+                    or store.one("SELECT 1 FROM content_items WHERE state = 'RUNNING'")):
                     raise ValueError("unresolved or active responsibility")
                 blocked = [r for r in rows if r.get("kind") == "blocked"]
                 corrections = {r["blocked_sha256"] for r in rows if r.get("kind") == KIND}
@@ -144,14 +163,18 @@ def reconcile(store, settings, request, clock=utcnow):
                 admission, usage, frozen, hashes, amount = evidence(
                     store, request["request_id"], prior,
                 )
-                job = store.one("SELECT state FROM jobs WHERE job_id=?", (usage["job_id"],))
+                job = store.one('SELECT state FROM jobs WHERE job_id = %s', (usage["job_id"],))
                 if (usage["state"] != "UNKNOWN" or not job or job["state"] != "CANCELLED"
                     or usage["billed_micro_usd"] != prior["minimum_micro_usd"]
-                    or frozen != paid_budget.snapshot(settings)
+                    or {key: value for key, value in frozen.items() if key not in {
+                        "per_attempt_micro_usd", "per_request_micro_usd", "daily_micro_usd",
+                        "monthly_micro_usd", "window_micro_usd", "unlimited_period_spend",
+                        "local_monthly_micro_usd", "scenario_daily_micro_usd",
+                        "reflection_monthly_micro_usd",
+                    }} != paid_budget.snapshot(settings)
                     or admission["journal_id"] != request["journal_id"]
-                    or budget._actual_limit_violations(store, admission, frozen, usage, amount)
-                    or store.one("SELECT 1 FROM outbox WHERE origin_event_id IN "
-                        "(SELECT event_id FROM jobs WHERE job_id=?)", (usage["job_id"],))):
+                    or store.one('SELECT 1 FROM outbox WHERE origin_event_id IN (SELECT event_id '
+                        'FROM jobs WHERE job_id = %s)', (usage["job_id"],))):
                     raise ValueError("original frozen deployment or fee evidence changed")
                 record = {"kind": KIND, "version": 1, **request, **hashes,
                     "state": "SETTLED", "minimum_micro_usd": amount,
@@ -159,21 +182,21 @@ def reconcile(store, settings, request, clock=utcnow):
                     "io_started_at": admission["io_started_at"], "blocked_sha256": prior["sha256"],
                     "at": clock()}
                 view = paid_budget.journal(store, custody, record, allow_settlement=True)
-            charged = store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=?",
+            charged = store.one('SELECT billed_micro_usd FROM model_usage WHERE request_id = %s',
                                 (request["request_id"],))
             if (not charged or charged["billed_micro_usd"] != record["minimum_micro_usd"]
                 or view["blocked_request_ids"] or store.one(
-                "SELECT 1 FROM model_usage WHERE state!='SETTLED' AND request_id!=?",
+                "SELECT 1 FROM model_usage WHERE state <> 'SETTLED' AND request_id <> %s",
                 (request["request_id"],),
             )):
                 raise ValueError("other unresolved responsibility")
-            store.execute("UPDATE model_usage SET state='SETTLED',billed_micro_usd=? "
-                          "WHERE request_id=?",
+            store.execute("UPDATE model_usage SET state = 'SETTLED', billed_micro_usd = %s WHERE "
+                'request_id = %s',
                           (record["minimum_micro_usd"], request["request_id"]))
-            store.execute("DELETE FROM runtime_meta WHERE key='model_budget_blocked'")
+            store.execute("DELETE FROM runtime_meta WHERE key = 'model_budget_blocked'")
             paid_budget.journal(store, custody, allow_settlement=True)
-            if not store.one("SELECT 1 FROM audit_log WHERE action='model.video_rate_correction' "
-                             "AND entity_id=?", (request["request_id"],)):
+            if not store.one("SELECT 1 FROM audit_log WHERE action = 'model.video_rate_correction' "
+                'AND entity_id = %s', (request["request_id"],)):
                 store.audit("model.video_rate_correction", request["request_id"], "operator",
                             clock(), receipt_sha256=paid_budget.sha(record),
                             retained_micro_usd=record["minimum_micro_usd"])

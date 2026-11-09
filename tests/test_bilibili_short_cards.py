@@ -201,7 +201,7 @@ def test_signed_short_card_reader_context_and_mid_read_revocation(core, tmp_path
                         owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                             operation_id="stop-short-card", authority=window.runtime.authority))
                     else:
-                        with core.store.transaction():
+                        with core.store.transaction(control_write=True):
                             core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
                 return await original_connect(*args, **kwargs)
 

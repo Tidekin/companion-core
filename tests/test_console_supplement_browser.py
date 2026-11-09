@@ -31,7 +31,7 @@ pytestmark = pytest.mark.skipif(
 def test_memory_candidates_show_in_pending_and_badges_refresh_after_confirmation(core, tmp_path):
     core.clock.now = datetime.now(UTC)
     memory_id = remember(core, 1, "主人喜欢天文主题", confirmed=False)
-    before = core.store.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+    before = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (memory_id,))
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
@@ -45,14 +45,14 @@ def test_memory_candidates_show_in_pending_and_badges_refresh_after_confirmation
             assert "候选记忆已自动保存，可在对话中参考" in await page.locator("#page").inner_text()
             pending = page.locator(".toolbar button[aria-pressed=true]").filter(has_text="待确认")
             assert await pending.locator(".count").inner_text() == "1"
-            unchanged = core.store.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+            unchanged = core.store.one('SELECT * FROM memories WHERE memory_id=%s', (memory_id,))
             assert unchanged == before
             await card.get_by_role("button", name="确认", exact=True).click()
             await submit_dialog(page, "确认", f"/memories/{memory_id}/decision")
             await page.get_by_role("heading", name="没有待确认的记忆", exact=True).wait_for()
             await badge.wait_for(state="detached")
             assert await pending.locator(".count").count() == 0
-            assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (memory_id,))[
+            assert core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_id,))[
                 "status"] == "CONFIRMED"
             operations = core.store.one(
                 "SELECT COUNT(*) n FROM console_operations WHERE state='COMPLETE'")
@@ -157,7 +157,7 @@ def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(
 
     core.clock.now = datetime.now(UTC)
     run(recorded_attempts(core, tmp_path, unknown=True))
-    attempts = core.store.rows("SELECT request_id,state FROM model_usage ORDER BY rowid")
+    attempts = core.store.rows('SELECT request_id,state FROM model_usage ORDER BY record_sequence')
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
@@ -216,7 +216,10 @@ def test_console_shows_cache_three_states_from_the_backend_projection(core, tmp_
 
 
 def assert_receipts(core, states):
-    receipts = core.store.rows("SELECT state,result_json FROM console_operations ORDER BY rowid")
+    receipts = core.store.rows(
+        'SELECT state,result_json FROM console_operations ORDER BY '
+        'record_sequence'
+    )
     assert all(item["state"] == "COMPLETE" for item in receipts)
     # These native actions intentionally return no business identifier to the UI.
     assert [json.loads(item["result_json"]) for item in receipts] == [
@@ -238,10 +241,10 @@ def test_console_source_grant_revoke_retains_history_then_forget_erases_it(core,
             path = f"/source-grants/{grant.grant_id}"
             await row.get_by_role("button", name="撤回", exact=True).click()
             await submit_dialog(page, "撤回授权", path)
-            saved = core.store.one("SELECT * FROM source_grants WHERE grant_id=?",
+            saved = core.store.one('SELECT * FROM source_grants WHERE grant_id=%s',
                                    (grant.grant_id,))
             assert saved["revoked_at"] and saved["forgotten_at"] is None
-            assert not core.store.one("SELECT redacted FROM events WHERE event_id=?",
+            assert not core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                       (event_id,))["redacted"]
             assert core.store.one("SELECT content FROM memories")["content"] == (
                 "Private derived memory")
@@ -251,13 +254,13 @@ def test_console_source_grant_revoke_retains_history_then_forget_erases_it(core,
 
             await row.get_by_role("button", name="遗忘", exact=True).click()
             await submit_dialog(page, "遗忘这个授权", path)
-            assert core.store.one("SELECT forgotten_at FROM source_grants WHERE grant_id=?",
+            assert core.store.one('SELECT forgotten_at FROM source_grants WHERE grant_id=%s',
                                   (grant.grant_id,))["forgotten_at"]
-            assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+            assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                   (event_id,))["redacted"]
             assert core.store.one("SELECT status,content FROM memories") == {
                 "status": "FORGOTTEN", "content": ""}
-            assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                   (grant_tombstone(grant.grant_id),))
             assert await row.get_by_text("已遗忘", exact=True).count() == 1
             assert await row.get_by_role("button").count() == 0
@@ -312,7 +315,10 @@ def test_console_affect_reset_clears_feedback_but_retains_preferences_and_intere
     learned = snapshot(core)["items"][0]
     assert learned["independent_days"] == 3 and learned["status"] == "EMERGING"
     interests = view(core)
-    events = core.store.rows("SELECT event_id,body_json,redacted FROM events ORDER BY rowid")
+    events = core.store.rows(
+        'SELECT event_id,body_json,redacted FROM events ORDER BY '
+        'record_sequence'
+    )
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
@@ -341,8 +347,8 @@ def test_console_affect_reset_clears_feedback_but_retains_preferences_and_intere
             assert await affect.locator("b").inner_text() == "默认"
             assert "还没有可以学习的反馈" in await expression.inner_text()
             assert core.store.rows(
-                "SELECT event_id,body_json,redacted FROM events ORDER BY rowid") == events
-            assert core.store.one("SELECT status FROM memories WHERE memory_id=?",
+                'SELECT event_id,body_json,redacted FROM events ORDER BY record_sequence') == events
+            assert core.store.one('SELECT status FROM memories WHERE memory_id=%s',
                                   (memory_id,))["status"] == "CONFIRMED"
             after = view(core)
             assert after["privacy_epoch"] == interests["privacy_epoch"] + 1
@@ -372,7 +378,7 @@ def test_console_tools_approve_exact_scope_then_revoke_and_reject_without_dispat
             await page.get_by_role("checkbox", name="我已经看过写入文件的具体内容").check()
             await submit_dialog(page, "批准执行", f"/tools/{approved['task_id']}/decision")
             assert executive.get(approved["task_id"])["state"] == "QUEUED"
-            approval = core.store.one("SELECT * FROM tool_approvals WHERE task_id=?",
+            approval = core.store.one('SELECT * FROM tool_approvals WHERE task_id=%s',
                                       (approved["task_id"],))
             assert approval["decision"] == "APPROVE"
             assert approval["scope_sha256"] == approved["scope_sha256"]
@@ -382,14 +388,14 @@ def test_console_tools_approve_exact_scope_then_revoke_and_reject_without_dispat
             await submit_dialog(page, "撤回任务", f"/tools/{approved['task_id']}/revoke")
             assert executive.get(approved["task_id"])["state"] == "CANCELLED"
             assert executive.get(approved["task_id"])["last_error_code"] == "OWNER_REVOKED"
-            assert core.store.one("SELECT revoked_at FROM tool_approvals WHERE task_id=?",
+            assert core.store.one('SELECT revoked_at FROM tool_approvals WHERE task_id=%s',
                                   (approved["task_id"],))["revoked_at"]
 
             reject_card = page.locator(".tool-card").filter(has_text="待拒绝的另一份合成正文")
             await reject_card.get_by_role("button", name="拒绝", exact=True).click()
             await submit_dialog(page, "拒绝", f"/tools/{rejected['task_id']}/decision")
             assert executive.get(rejected["task_id"])["state"] == "CANCELLED"
-            assert core.store.one("SELECT decision FROM tool_approvals WHERE task_id=?",
+            assert core.store.one('SELECT decision FROM tool_approvals WHERE task_id=%s',
                                   (rejected["task_id"],))["decision"] == "REJECT"
             assert_receipts(core, ["QUEUED", "CANCELLED", "CANCELLED"])
             assert executor.calls == core.model.calls == []
@@ -410,7 +416,7 @@ def test_console_redacted_tool_scope_disables_approval_but_allows_rejection(core
     else:
         executive.config.endpoints["dsh"] = ExecutorEndpoint(
             url="http://127.0.0.1:8992", token="synthetic-dsh-browser-token-123456",
-            workspace="work", capabilities=["dsh.run"], max_cost_micro_usd=1000)
+            workspace="work", capabilities=["dsh.run"])
         request = ToolRequest(idempotency_key="browser-redacted-dsh", capability="dsh.run",
             workspace="work", arguments=ToolArguments(prompt=private_text),
             source_event_ids=["evt_test_1"])
@@ -471,6 +477,8 @@ async def serve_model_pages(page, respond):
     pytest.param(("Asia/Shanghai", "2026-10-27T23:59:30+08:00"), id="shanghai-before-midnight"),
     pytest.param(("UTC", "2026-10-27T00:00:30+00:00"), id="utc-after-midnight"),
 ])
+
+
 def model_chart_clock(core, request):
     core.settings.timezone, instant = request.param
     core.clock.now = datetime.fromisoformat(instant)

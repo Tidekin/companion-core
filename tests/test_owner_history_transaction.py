@@ -1,14 +1,14 @@
 """Native history validation retains its fences while batching one write transaction."""
 
 import json
-import sqlite3
 from contextlib import nullcontext
 from pathlib import Path
 
 import httpx
+import psycopg
 import pytest
 
-from companion import owner_authority, owner_input, paid_budget
+from companion import authority_custody, owner_authority, owner_input, paid_budget
 from companion.contracts import CoreError
 from companion.store import after, encode
 from tests.conftest import run
@@ -35,16 +35,20 @@ async def native_history(core, tmp_path, check, *, turns=3, independent=False):
                 core.clock.advance(1)
             assert len(sends) == turns
             source = await entry.admit(turns + 1, "合成当前输入。")
-            job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e "
-                                 "USING(event_id) WHERE event_id=?", (source["event_id"],))
+            job = core.store.one((
+                'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+                'USING(event_id) WHERE event_id=%s'
+            ), (source["event_id"],))
             expected = owner_input.history_sources(core.store, core.settings, core.clock, job)
             assert len(expected) == turns
             check(job, expected)
             if independent:
                 job_id, wire = await sdk_step(core, tmp_path, source["event_id"], turns + 1)
                 assert sum(message["role"] == "assistant" for message in wire["messages"]) == turns
-                row = core.store.one("SELECT snapshots_json FROM agent_conversations "
-                                     "WHERE job_id=?", (job_id,))
+                row = core.store.one((
+                    'SELECT snapshots_json FROM agent_conversations WHERE '
+                    'job_id=%s'
+                ), (job_id,))
                 history = next(item["proof"] for item in json.loads(row["snapshots_json"])
                                if item["kind"] == "history")
                 assert history == owner_input.history_proof(expected)
@@ -60,7 +64,7 @@ def test_history_reuses_custody_inside_one_owned_write_transaction(
 ):
     def check(job, expected):
         calls, recalls = [], []
-        native = paid_budget.journal
+        native = authority_custody.check
         native_recall = owner_input.input_recall.require_not_recalled
 
         def journal(*args, **kwargs):
@@ -71,24 +75,27 @@ def test_history_reuses_custody_inside_one_owned_write_transaction(
             recalls.append(1)
             return native_recall(*args, **kwargs)
 
-        monkeypatch.setattr(paid_budget, "journal", journal)
+        monkeypatch.setattr(authority_custody, "check", journal)
         monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
         if transactional == "read_transaction":
-            core.store.db.execute("BEGIN")
+            core.store.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
             try:
                 actual = owner_input.history_sources(core.store, core.settings, core.clock, job)
             finally:
-                core.store.db.rollback()
-            assert len(calls) == 10
+                core.store.execute("ROLLBACK")
+            # An unowned native transaction retains each source's live check,
+            # plus the complete batch's initial and final custody checks.
+            assert len(calls) == len(expected) + 2
         elif transactional:
             with core.store.transaction():
                 actual = owner_input.history_sources(core.store, core.settings, core.clock, job)
-            assert len(calls) == 2
+            # READ COMMITTED also rechecks each source, unlike the owned snapshot.
+            assert len(calls) == len(expected) + 2
         else:
             actual = owner_input.history_sources(core.store, core.settings, core.clock, job)
             assert len(calls) == 2
         assert actual == expected and len(recalls) == 3
-        assert not core.store.db.in_transaction
+        assert not core.store.in_transaction
 
     run(native_history(core, tmp_path, check))
 
@@ -103,7 +110,8 @@ def test_transaction_batch_rejects_live_boundary_changes_before_returning(
         changed, saved = [], {}
         # An unowned batch reads one snapshot, so the marker comes from another commit.
         external = not transactional and boundary == "marker"
-        other = sqlite3.connect(core.settings.database, isolation_level=None) if external else None
+        other = (psycopg.connect(core.settings.database.get_secret_value(), autocommit=True)
+                 if external else None)
 
         def recall(*args, **kwargs):
             original(*args, **kwargs)
@@ -113,7 +121,7 @@ def test_transaction_batch_rejects_live_boundary_changes_before_returning(
             if boundary == "stop":
                 core.settings.owner_runtime.mode = "OFF"
             elif boundary == "marker":
-                (other or core.store).execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                (other or core.store).execute("UPDATE runtime_meta SET value=%s WHERE key=%s",
                                               (encode("OFF"), owner_authority.MODE))
             elif boundary == "expiry":
                 core.clock.advance(31)
@@ -156,8 +164,8 @@ def test_transaction_history_still_checks_every_selected_source(
 
         # A caller's write transaction sees its own change; an unowned batch reads one
         # snapshot, so the change comes from another connection's commit.
-        other = None if transactional else sqlite3.connect(core.settings.database,
-                                                           isolation_level=None)
+        other = None if transactional else psycopg.connect(
+            core.settings.database.get_secret_value(), autocommit=True)
         execute = core.store.execute if transactional else other.execute
 
         def recall(*args, **kwargs):
@@ -166,16 +174,16 @@ def test_transaction_history_still_checks_every_selected_source(
                 return
             changed.append(1)
             if mutation in {"redaction", "redaction_first"}:
-                execute("UPDATE events SET redacted=1 WHERE event_id=?", (target,))
+                execute("UPDATE events SET redacted=1 WHERE event_id=%s", (target,))
             elif mutation == "future_send":
-                execute("UPDATE outbox SET sent_at=? WHERE origin_event_id=?",
+                execute("UPDATE outbox SET sent_at=%s WHERE origin_event_id=%s",
                         (after(core.clock(), 100), target))
             else:
                 key = owner_input.INPUT + target
-                row = core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+                row = core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))
                 value = json.loads(row["value"])
                 value["capture"]["signature"] = "0" * 128
-                execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), key))
+                execute("UPDATE runtime_meta SET value=%s WHERE key=%s", (encode(value), key))
 
         monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
         try:
@@ -199,16 +207,16 @@ def test_full_history_batches_without_the_journal_byte_cache(core, tmp_path, mon
     def check(job, expected):
         monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", 1)
         calls = []
-        native = paid_budget.journal
+        native = authority_custody.check
 
         def journal(*args, **kwargs):
             calls.append(1)
             return native(*args, **kwargs)
 
-        monkeypatch.setattr(paid_budget, "journal", journal)
+        monkeypatch.setattr(authority_custody, "check", journal)
         assert owner_input.history_sources(core.store, core.settings, core.clock, job) == expected
         assert len(calls) == 2
-        assert not core.store.db.in_transaction
+        assert not core.store.in_transaction
 
     run(native_history(core, tmp_path, check, turns=15))
 
@@ -235,10 +243,10 @@ def test_native_history_is_rechecked_after_the_model_await(core, tmp_path):
 
             async def provider(request):
                 requests.append(json.loads(request.content))
-                assert not worker.store.db.in_transaction
+                assert not worker.store.in_transaction
                 if len(requests) == 2:
                     # A separate live connection can change custody during model I/O.
-                    core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
+                    core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s',
                                        (first["event_id"],))
                 return httpx.Response(200, json=answer("合成答复。"))
 
@@ -252,9 +260,9 @@ def test_native_history_is_rechecked_after_the_model_await(core, tmp_path):
                 assert not await worker.run_once("history-no-replay")
             assert len(requests) == 2 and len(sends) == 1
             assert any(message["role"] == "assistant" for message in requests[1]["messages"])
-            assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE event_id=%s',
                                   (current["event_id"],))["state"] == "CANCELLED"
-            assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+            assert not core.store.one('SELECT 1 FROM outbox WHERE origin_event_id=%s',
                                       (current["event_id"],))
             assert len(core.store.rows("SELECT 1 FROM model_usage WHERE state='SETTLED'")) == 2
 

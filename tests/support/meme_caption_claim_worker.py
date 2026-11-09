@@ -29,7 +29,6 @@ def main():
     calls, busy = [], []
 
     async def caption(service, worker_id):
-        service.store.db.execute("PRAGMA busy_timeout=1")
         if not getattr(caption, "ready", False):
             caption.ready = True
             print(json.dumps({"phase": "ready", "pid": os.getpid()}), flush=True)
@@ -39,7 +38,7 @@ def main():
         except ClaimBusy:
             busy.append(1)
             print(json.dumps({"phase": "busy", "provider_calls": len(calls),
-                              "in_transaction": service.store.db.in_transaction}), flush=True)
+                              "in_transaction": service.store.in_transaction}), flush=True)
             if outcome == "stop":
                 shutdown.request()
             raise  # Only the actual worker loop decides whether to scan again.

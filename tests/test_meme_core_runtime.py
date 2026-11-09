@@ -37,7 +37,7 @@ def test_native_evidence_freezes_exact_source_and_registers_prompt_roots(runtime
     binding = frozen["catalog_bindings"][candidate["candidate_id"]]
     assert binding["asset_id"] == c.asset_id and binding["caption_job_id"] == c.caption_id
     assert c.core.store.one(
-        "SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
+        'SELECT 1 FROM job_sources WHERE job_id=%s AND event_id=%s',
         (c.job["job_id"], c.source["event_id"]),
     )
     run(c.service.prepare_offer(c.job))
@@ -53,18 +53,19 @@ def test_frozen_source_cannot_be_replaced_or_silently_dropped(runtime_case, chan
     if change == "remove":
         s.execute("UPDATE meme_assets SET state='REMOVED',data=NULL,mime=NULL,metadata_json=NULL")
     elif change == "caption":
-        s.execute("UPDATE meme_captions SET result_json=NULL WHERE job_id=?", (c.caption_id,))
+        s.execute("UPDATE meme_captions SET result_json=NULL WHERE job_id=%s", (c.caption_id,))
     elif change == "usage":
         s.execute("UPDATE model_usage SET state='UNKNOWN'")
     elif change == "epoch":
         from companion.privacy import advance_epoch
 
-        advance_epoch(s)
+        with s.transaction(control_write=True):
+            advance_epoch(s)
     elif change == "binding":
         saved = c.retrieval.check(c.job)
         next(iter(saved["catalog_bindings"].values()))["source_sha256"] = "f" * 64
         s.execute(
-            "UPDATE runtime_meta SET value=? WHERE key=?",
+            "UPDATE runtime_meta SET value=%s WHERE key=%s",
             (encode(saved), "meme_offer:" + c.job["event_id"]),
         )
     else:
@@ -91,16 +92,16 @@ def test_catalog_mode_refuses_new_bridge_work_and_does_not_wait(runtime_case):
 
 def test_server_classified_controls_never_require_a_model_offer(runtime_case):
     c = runtime_case
-    row = c.core.store.one("SELECT body_json FROM events WHERE event_id=?", (c.job["event_id"],))
+    row = c.core.store.one('SELECT body_json FROM events WHERE event_id=%s', (c.job["event_id"],))
     value = json.loads(row["body_json"])
     c.core.store.execute(
-        "UPDATE events SET body_json=? WHERE event_id=?",
+        'UPDATE events SET body_json=%s WHERE event_id=%s',
         (encode({**value, "control_command": True}), c.job["event_id"]),
     )
     run(c.service.prepare_offer(c.job))
     c.service.check_offer(c.job)
     assert not c.core.store.one(
-        "SELECT 1 FROM runtime_meta WHERE key=?", ("meme_offer:" + c.job["event_id"],)
+        'SELECT 1 FROM runtime_meta WHERE key=%s', ("meme_offer:" + c.job["event_id"],)
     )
     assert ExpressionEngine(c.core.store, c.core.settings, c.core.clock)._offer(
         c.job["event_id"]
@@ -115,14 +116,14 @@ def test_physical_sha_cooldown_uses_original_sent_time_and_active_holds(runtime_
 
     message = enqueue(s, c.current["event_id"], c.job["conversation_id"], "sent", now)
     s.execute(
-        "UPDATE outbox SET content_json=?,state='SENT',sent_at=? WHERE message_id=?",
+        "UPDATE outbox SET content_json=%s,state='SENT',sent_at=%s WHERE message_id=%s",
         (encode({"text": "sent", "image": {"candidate_id": sha}}), after(now, -1801), message),
     )
     assert not blocked(s, c.core.settings, sha, now)
-    s.execute("UPDATE outbox SET sent_at=? WHERE message_id=?", (now, message))
+    s.execute("UPDATE outbox SET sent_at=%s WHERE message_id=%s", (now, message))
     assert blocked(s, c.core.settings, sha, now)
     s.execute(
-        "UPDATE outbox SET state='DELIVERY_UNCERTAIN',sent_at=NULL WHERE message_id=?", (message,)
+        "UPDATE outbox SET state='DELIVERY_UNCERTAIN',sent_at=NULL WHERE message_id=%s", (message,)
     )
     assert blocked(s, c.core.settings, sha, after(now, 86401))
 
@@ -138,8 +139,11 @@ def test_same_bytes_choose_one_exact_origin_and_never_substitute(runtime_case):
     selected = next(iter(saved["catalog_bindings"].values()))
     assert selected["asset_id"] == assets[0]["asset_id"]
     c.core.store.execute(
-        "UPDATE meme_assets SET state='REMOVED',data=NULL,mime=NULL,"
-        "metadata_json=NULL WHERE asset_id=?",
+        (
+            'UPDATE meme_assets SET '
+            "state='REMOVED',data=NULL,mime=NULL,metadata_json=NULL WHERE "
+            'asset_id=%s'
+        ),
         (selected["asset_id"],),
     )
     assert c.core.store.one("SELECT COUNT(*) AS n FROM meme_assets WHERE state='STAGED'")["n"] == 1
@@ -153,10 +157,10 @@ def test_erasure_of_original_root_invalidates_derived_offer_without_refunding(ru
     c = runtime_case
     run(c.retrieval.prepare(c.job))
     before = c.core.store.rows("SELECT * FROM model_usage")
-    with c.core.store.transaction():
+    with c.core.store.transaction(control_write=True):
         c.core.ledger.expire_events(c.core.store, [c.source["event_id"]], c.core.clock())
     assert not c.core.store.one(
-        "SELECT 1 FROM runtime_meta WHERE key=?", ("meme_offer:" + c.job["event_id"],)
+        'SELECT 1 FROM runtime_meta WHERE key=%s', ("meme_offer:" + c.job["event_id"],)
     )
     asset = c.core.store.one("SELECT * FROM meme_assets")
     assert asset["state"] == "ERASED" and asset["data"] is asset["metadata_json"] is None
@@ -178,7 +182,7 @@ def test_independent_connections_to_same_authoritative_store_reserve_one_image(r
     barrier = Barrier(2)
 
     def compete(index):
-        with closing(Store(c.core.settings.database)) as store:
+        with closing(Store(c.core.store.database, c.core.store.state_directory)) as store:
             engine = ExpressionEngine(store, c.core.settings, c.core.clock)
             barrier.wait(timeout=10)
             message = engine.enqueue(
@@ -189,7 +193,7 @@ def test_independent_connections_to_same_authoritative_store_reserve_one_image(r
                 key="race:" + str(index),
             )
             return json.loads(
-                store.one("SELECT content_json FROM outbox WHERE message_id=?", (message,))[
+                store.one("SELECT content_json FROM outbox WHERE message_id=%s", (message,))[
                     "content_json"
                 ]
             )
@@ -255,10 +259,11 @@ def test_snapshot_binds_scheduled_import_and_preserves_history_fallback():
 
 def test_core_policy_binds_nondefault_rules_even_if_bridge_selected():
     settings = Settings(
-        owner_qq_id="10001", bot_qq_id="20002", bridge_token="b" * 32, expression_enabled=True
+        owner_qq_id="10001", bot_qq_id="20002", bridge_token="b" * 32,
+        database="dbname=synthetic", expression_enabled=True,
     )
     original = meme_service.policy_hash(settings)
-    assert original == "bc622473bb58029fc341e02be873ee24740eaf38f9721c8c5c461b693d04c43a"
+    assert original == "80469f135cbef6538f1d687b63aa1498953c1e7e33ad9e9d453cd6a5e550299c"
     explicit_defaults = settings.model_copy(
         update={
             "meme_catalog_owner": "bridge",
@@ -315,7 +320,7 @@ def test_frozen_prompt_and_binding_reject_tampering_before_new_model_work(runtim
         )
     before = c.core.store.rows("SELECT * FROM model_usage")
     c.core.store.execute(
-        "UPDATE runtime_meta SET value=? WHERE key=?",
+        'UPDATE runtime_meta SET value=%s WHERE key=%s',
         (encode(saved), "meme_offer:" + c.job["event_id"]),
     )
     with pytest.raises(CoreError):

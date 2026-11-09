@@ -83,7 +83,7 @@ def scope(store, settings, clock, authority, authorization_sha256, *, message_id
         or cfg.authorization_sha256 != authorization_sha256):
         raise CoreError("SOCIAL_LIVE_SCOPE_REQUIRED", 403)
     if message_id is not None:
-        row = store.one("SELECT authority_json,delivery_lane FROM outbox WHERE message_id=?",
+        row = store.one('SELECT authority_json, delivery_lane FROM outbox WHERE message_id = %s',
                         (message_id,))
         if (not row or row["delivery_lane"] != "qq_account"
             or json.loads(row["authority_json"]) != view.authority.as_dict()):
@@ -92,7 +92,7 @@ def scope(store, settings, clock, authority, authorization_sha256, *, message_id
 
 
 def _meta(store, key):
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+    row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
     return json.loads(row["value"]) if row else None
 
 
@@ -108,7 +108,8 @@ def lease_receipt(store, settings, clock, message_id, lease_token, view):
     if previous is not None and any(previous.get(k) != v for k, v in expected.items()
                                     if k != "lease_token"):
         raise CoreError("SOCIAL_DELIVERY_AUTHORITY_CHANGED", 409)
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(expected)))
+    store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO '
+        'UPDATE SET value = excluded.value, record_sequence = DEFAULT', (key, encode(expected)))
     return frozen
 
 
@@ -119,7 +120,21 @@ def send_check(store, settings, clock, body):
                          message_id=body.message_id)
         module = SocialAutonomy(store, settings, clock=clock)
         frozen = lease_receipt(store, settings, clock, body.message_id, body.lease_token, view)
-        row = store.one("SELECT * FROM outbox WHERE message_id=?", (body.message_id,))
+        row = store.one('SELECT outbox.message_id AS message_id, outbox.origin_event_id AS '
+            'origin_event_id, outbox.conversation_id AS conversation_id, outbox.action_type AS '
+            'action_type, outbox.content_json AS content_json, outbox.content_sha256 AS '
+            'content_sha256, outbox.approval_id AS approval_id, outbox.state AS state, '
+            'outbox.delivery_key AS delivery_key, outbox.lease_owner AS lease_owner, '
+            'outbox.lease_until AS lease_until, outbox.attempt_count AS attempt_count, '
+            'outbox.provider_message_id AS provider_message_id, outbox.last_error_code AS '
+            'last_error_code, outbox.created_at AS created_at, outbox.updated_at AS updated_at, '
+            'outbox.sent_at AS sent_at, outbox.lease_token AS lease_token, outbox.next_attempt_at '
+            'AS next_attempt_at, outbox.reply_group_id AS reply_group_id, outbox.segment_index AS '
+            'segment_index, outbox.segment_count AS segment_count, outbox.reply_group_sha256 AS '
+            'reply_group_sha256, outbox.segment_interval_ms AS segment_interval_ms, '
+            'outbox.delivery_lane AS delivery_lane, outbox.native_ack_json AS native_ack_json, '
+            'outbox.authority_json AS authority_json FROM outbox AS outbox WHERE outbox.message_id '
+            '= %s', (body.message_id,))
         if (row["state"] != "SENDING" or row["content_sha256"] != body.content_sha256
             or frozen.payload_sha256 != body.payload_sha256):
             raise CoreError("SOCIAL_DELIVERY_CHANGED", 403)
@@ -142,9 +157,20 @@ def cancel_before_send(store, settings, clock, body):
                 raise CoreError("IDEMPOTENCY_CONFLICT", 409)
             return previous["response"]
         proof = _meta(store, DELIVERY + body.message_id)
-        row = store.one("SELECT o.*,r.dispatched_at FROM outbox o JOIN "
-                        "social_autonomy_reservations r USING(message_id) "
-                        "WHERE o.message_id=?", (body.message_id,))
+        row = store.one('SELECT o.message_id AS message_id, o.origin_event_id AS origin_event_id, '
+            'o.conversation_id AS conversation_id, o.action_type AS action_type, o.content_json AS '
+            'content_json, o.content_sha256 AS content_sha256, o.approval_id AS approval_id, '
+            'o.state AS state, o.delivery_key AS delivery_key, o.lease_owner AS lease_owner, '
+            'o.lease_until AS lease_until, o.attempt_count AS attempt_count, o.provider_message_id '
+            'AS provider_message_id, o.last_error_code AS last_error_code, o.created_at AS '
+            'created_at, o.updated_at AS updated_at, o.sent_at AS sent_at, o.lease_token AS '
+            'lease_token, o.next_attempt_at AS next_attempt_at, o.reply_group_id AS '
+            'reply_group_id, o.segment_index AS segment_index, o.segment_count AS segment_count, '
+            'o.reply_group_sha256 AS reply_group_sha256, o.segment_interval_ms AS '
+            'segment_interval_ms, o.delivery_lane AS delivery_lane, o.native_ack_json AS '
+            'native_ack_json, o.authority_json AS authority_json, r.dispatched_at AS dispatched_at '
+            'FROM outbox AS o JOIN social_autonomy_reservations AS r ON o.message_id = '
+            'r.message_id WHERE o.message_id = %s', (body.message_id,))
         if (not row or not proof or proof.get("lease_token") != body.lease_token
             or (row["lease_token"] != body.lease_token
                 and not (row["state"] == "CANCELLED" and row["lease_token"] is None))
@@ -155,13 +181,14 @@ def cancel_before_send(store, settings, clock, body):
                 "message_id", "content_sha256", "payload_sha256"))
             or proof.get("authority") != body.authority
             or json.loads(row["authority_json"]) != body.authority
-            or store.one("SELECT 1 FROM audit_log WHERE entity_id=? AND action='delivery.result'",
+            or store.one('SELECT 1 FROM audit_log WHERE entity_id = %s AND action = '
+                "'delivery.result'",
                          (body.message_id,))):
             raise CoreError("SOCIAL_NOT_SENT_PROOF_REQUIRED", 409)
         cumulative.send_result(store, body.message_id, "FAILED", clock())
         transport.mark_not_dispatched(store, body.message_id, clock(),
                                       attempt_count=row["attempt_count"], reason=body.reason)
-        store.execute("UPDATE social_autonomy_reservations SET released_at=? WHERE message_id=?",
+        store.execute('UPDATE social_autonomy_reservations SET released_at=%s WHERE message_id=%s',
                       (clock(), body.message_id))
         result = {"state": "NOT_SENT", "message_id": body.message_id,
                   "lease_token": body.lease_token, "content_sha256": body.content_sha256,

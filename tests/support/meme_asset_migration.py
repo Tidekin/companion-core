@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from contextlib import closing
@@ -9,15 +10,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from pydantic import SecretStr
 
-from companion import meme_asset_migration as migration
-from companion.store import encode
+from companion.postgres import Database
+from companion.store import Store, encode
 from companion_meme_sources import Metadata
 from companion_onebot_bridge.meme_catalog import MemeCatalog
 from companion_onebot_bridge.meme_library import MemeLibrary
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.meme_core import body, caption_environment
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,7 +34,8 @@ def config_file(path, values):
             literal = "{ " + ", ".join(k + " = " + json.dumps(v)
                                       for k, v in value.items()) + " }"
         else:
-            literal = json.dumps(value)
+            scalar = value.get_secret_value() if isinstance(value, SecretStr) else value
+            literal = json.dumps(scalar)
         lines.append(key + " = " + literal)
     path.write_text("\n".join(lines) + "\n", "utf-8")
     path.chmod(0o600)
@@ -50,12 +54,18 @@ def cli(module, *args, ok=True):
 
 
 def logical_database(path):
-    with closing(migration.readonly(path)) as db:
+    if isinstance(path, SecretStr):
+        with Database(path) as database, closing(
+            Store(database, ROOT / '.local/test-temp'),
+        ) as store:
+            return logical_state(store)
+    with closing(sqlite3.connect(Path(path).as_uri() + '?mode=ro', uri=True)) as db:
+        db.execute('PRAGMA query_only=ON')
         return tuple(db.iterdump())
 
 
 def original_work(store):
-    return {name: store.rows("SELECT * FROM " + name + " ORDER BY rowid") for name in (
+    return {name: store.rows("SELECT * FROM " + name + " ORDER BY record_sequence") for name in (
         "jobs", "job_sources", "meme_captions", "meme_discovery_reservations",
         "model_usage", "model_admissions", "outbox",
     )}
@@ -97,7 +107,8 @@ def bundle(core, tmp_path, monkeypatch):
     core_config = config_file(tmp_path / "core.toml", {
         "owner_qq_id": core.settings.owner_qq_id, "bot_qq_id": core.settings.bot_qq_id,
         "bridge_token": core.settings.bridge_token.get_secret_value(),
-        "database": core.settings.database, "erasure_ledger": core.settings.erasure_ledger})
+        "database": core.settings.database, "state_directory": core.settings.state_directory,
+        "erasure_ledger": core.settings.erasure_ledger})
     manifest = tmp_path / "catalog.json"
     return SimpleNamespace(core=core, bridge=bridge, bridge_config=bridge_config,
                            core_config=core_config, manifest=manifest, event=event,

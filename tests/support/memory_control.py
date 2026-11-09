@@ -17,7 +17,7 @@ from tests.support.native_http import owned_http_protocol
 
 
 def grant(core, cfg, text, *, operation="remember", target=None, **changes):
-    restored = core.store.one("SELECT value FROM runtime_meta WHERE key=?", (RESTORED,))
+    restored = core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (RESTORED,))
     values = dict(
         execution="local_synthetic", grant_id=uid("mc"), operation=operation,
         permission={"remember": "memory.write", "confirm": "memory.write",

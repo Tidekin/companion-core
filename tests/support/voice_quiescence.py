@@ -14,7 +14,7 @@ def stopped_unknown(core):
     message = native_reply(core, TEXT)
     jobs = VoiceJobs(core.store, core.settings, core.clock)
     job, _, claimed, ref = start(core, jobs, message)
-    row = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job["job_id"],))
+    row = core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s', (job["job_id"],))
     stopped = jobs.stop("local", VoiceStopRequest(
         ref=VoiceStopRef.from_lease(claimed.lease), resource_state="READY", outcome="UNKNOWN",
         cleanup_epoch=row["cleanup_epoch"], cleanup=VoiceCleanup(
@@ -28,4 +28,4 @@ def stopped_unknown(core):
         core.clock())
     with pytest.raises(CoreError, match="VOICE_LEASE_RETIRED"):
         jobs.input("local", ref)
-    return core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job["job_id"],))
+    return core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s', (job["job_id"],))

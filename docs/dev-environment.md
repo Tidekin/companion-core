@@ -1,12 +1,11 @@
 # 独立 Core 开发环境
 
 使用 `compose.yaml` 和显式选择的 `deploy/compose.dev.yaml`，在独立 Compose project 中运行
-Demo API 和聊天 worker。需要 Docker Compose 2.30 及以上、可用的本地 Linux Docker engine，
-此流程依赖备份的私有临时目录与显式 immutable 来源选项，完成下面的容器验证后启用。
+Demo API、聊天 worker 和 PostgreSQL 16。需要 Docker Compose 2.30 及以上和可用的本地 Linux Docker engine。
 
 覆盖层固定合成 owner/bot、Demo 模型、空模型 key 和零预算，使用 internal 网络，不发布宿主端口。
 基础六个 Core 服务和维护备份服务均使用开发配置、独立镜像 tag 与 project 命名的数据卷。
-默认启动 API 和聊天 worker；其他 worker 仍按原 profile 显式选择。
+数据库使用项目专属卷，不发布端口。其他 worker 按原 profile 显式选择。
 
 ## 准备与首次初始化
 
@@ -28,10 +27,13 @@ $devEnv = Join-Path $devDirectory 'compose.env'
 ```dotenv
 COMPANION_DEV_BRIDGE_TOKEN=<至少32字符的独立随机token>
 COMPANION_DEV_BACKUP_KEY=<Fernet.generate_key()生成的独立开发备份key>
+COMPANION_DEV_ADMIN_PASSWORD=<独立随机数据库管理密码，至少24字符>
+COMPANION_DEV_CORE_PASSWORD=<独立随机Core数据库密码，至少24字符>
+COMPANION_DEV_ARCHIVE_PASSWORD=<独立随机归档数据库密码，至少24字符>
 ```
 
-环境文件用于 Compose 插值。容器中的普通服务只接收 dev Bridge token；备份 key 仅进入维护备份
-容器。命令显式选择这个文件；覆盖层清除基础 `.env`、根 `config.toml` 及其继承环境。
+环境文件用于 Compose 插值。Core 使用 dev_core 角色。dev_archive 在源库中只读业务数据，并拥有两个演练目标库。
+备份 key 仅进入 dev-backup。命令显式选择这个文件，覆盖层清除基础 `.env`、根 `config.toml` 及其继承环境。
 源码中的 Demo 示例配置挂入 `/app/config.toml`。
 
 ```powershell
@@ -39,7 +41,9 @@ $devCompose = @('--context', $devContext, 'compose', '--env-file', $devEnv,
     '-p', $devProject, '-f', 'compose.yaml', '-f', 'deploy/compose.dev.yaml')
 # config 输出包含开发 token/key，只在本机检查，不收集到公共日志。
 docker @devCompose config --services
+docker @devCompose pull dev-postgres
 docker @devCompose build companion-api
+docker @devCompose up -d --wait --no-build --pull never dev-postgres
 docker @devCompose run --rm --no-deps --pull never migrate init
 docker @devCompose up -d --no-deps --no-build --pull never companion-api
 docker @devCompose exec -T companion-api /app/.venv/bin/python -c "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8765/internal/v1/health/ready',headers={'Authorization':'Bearer '+os.environ['COMPANION_BRIDGE_TOKEN']}); print(urllib.request.urlopen(r,timeout=3).status)"
@@ -86,36 +90,38 @@ docker @devCompose stop companion-api
 docker @devCompose --profile '*' ps --status running
 # 使用本轮全新文件名；原 backup CLI 拒绝覆盖。
 $devSnapshot = '/data/pre-schema-20261026-01.enc'
-docker @devCompose run --rm --no-deps --pull never dev-backup backup $devSnapshot --immutable-source
+docker @devCompose run --rm --no-deps --pull never dev-backup backup $devSnapshot
 # 核对上一条退出码为0，再记录密文SHA-256。
 docker @devCompose run --rm --no-deps --pull never --entrypoint /app/.venv/bin/python dev-backup -c "import hashlib,sys; from pathlib import Path; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())" $devSnapshot
 docker @devCompose run --rm --no-deps --pull never migrate init
 ```
 
-备份服务将源 Core 卷挂到 `/source:ro`、当前 Ledger 挂到 `/privacy:ro`，仅独立 snapshot 卷的
-`/data` 可写。明文 SQLite 快照位于系统私有临时目录，结束后清除；归档沿用现有 Fernet 格式。
-这里的 `--immutable-source` 明确承诺：从调用前到备份完成，全部写入者和并行维护命令始终停止。
-命令保守拒绝任何已有 `-wal`、`-shm` 或 `-journal`，包括空文件；若命中应检查停写/关闭状态，
-不能删除 sidecar、自动修复或 checkpoint 强行继续。
-缺少 sidecar 并不能证明停写，调用者仍须保证上述前提。SQLite 的
-[只读 WAL 条件](https://www.sqlite.org/wal.html#read_only_databases)、
-[热 journal 恢复](https://www.sqlite.org/lockingv3.html#hot_journals)与
-[immutable 合同](https://www.sqlite.org/uri.html#uriimmutable)解释了无 sidecar 的只读目录为何需要此显式模式。
-默认备份仍通过标准库 backup API 读取已提交 WAL，适用于在线来源；显式模式只用于已确认不再变化的来源。
+PostgreSQL 容器保持运行，Core 写入者在这段时间内保持停止。归档角色通过只读 SQL 权限运行
+`pg_dump`，加密文件写入 snapshot 卷。独立删除日志以只读方式挂载。
+官方镜像在空卷首次启动时执行 `deploy/dev-postgres-init.sql`。更换已有项目的密码时，需要同步更新数据库角色和专用环境文件。[镜像初始化说明](https://hub.docker.com/_/postgres)
 迁移成功后依次启动 API、检查认证 ready、启动聊天 worker。迁移失败时保留快照和全部卷，保持
 服务停止，不能跳过失败继续启动。
 
-恢复演练只写 snapshot 卷中的全新目标路径：
+恢复 CLI 读取目标 TOML，并拒绝已含业务表的目标库。下面使用预建的空库 `dev_restore_after`。
+归档角色从容器环境读取密码，并以 `CREATEDB` 权限创建仅供本次恢复的暂存库。已有 dev 卷由数据库管理员一次执行 `ALTER ROLE dev_archive CREATEDB`。日常 API 和 worker 继续使用 `dev_core`。
+执行前将两个身份占位符替换为当前 Demo 配置中的合成身份值。
 
 ```powershell
-docker @devCompose run --rm --no-deps --pull never dev-backup restore $devSnapshot /data/recovery-new-01.sqlite3
+@'
+database = "host=dev-postgres dbname=dev_restore_after user=dev_archive"
+state_directory = "/data/dev_restore_after"
+erasure_ledger = "/privacy/erasures.jsonl"
+owner_qq_id = "<Demo配置中的合成owner>"
+bot_qq_id = "<Demo配置中的合成bot>"
+bridge_token = "offline-dev-restore-config-only"
+'@ | docker @devCompose run --rm --no-deps --pull never -T --entrypoint /bin/sh dev-backup -c 'umask 077; cat > /data/restore.toml'
+docker @devCompose run --rm --no-deps --pull never dev-backup restore $devSnapshot /data/restore.toml
 ```
 
 恢复读取当前独立 Ledger，回放快照之后的遗忘。遗忘优先取消不再安全的未发送回复；其余在途
 投递置为 `DELIVERY_UNCERTAIN`。原恢复逻辑保留已发生费用和 SENT 记录，将预留调用置为
 `UNKNOWN`，撤销未来权限并设置费用核对屏障。
-此命令生成演练数据库；不会替换 Core 卷中的数据库，也不能直接继续原执行窗口。
-应用回退必须与当前 schema 兼容；否则保持 dev 停止，在新路径按
+在演练库中检查恢复结果。应用回退必须与当前 schema 兼容，否则保持 Core 写入者停止，在空目标库按
 [既有部署恢复合同](deployment.md)完成恢复和核对。
 
 ## 验证与证据

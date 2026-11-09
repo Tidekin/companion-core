@@ -66,21 +66,33 @@ class ControlledModel(Model):
 
 def check_conversation(core, job, snapshots=(), *, current_request=None, purpose="chat"):
     """Recheck the original job lease and Core's existing source/snapshot contracts."""
+    if not core.store.in_transaction:
+        # One synchronous validation reads one native snapshot. This scope ends
+        # before any await; the next boundary takes a fresh custody check.
+        return core.store.read_or_write(lambda: check_conversation(
+            core, job, snapshots, current_request=current_request, purpose=purpose,
+        ))
     if job["kind"] != "chat":
         raise CoreError("CONVERSATION_CHAT_JOB_REQUIRED", 403)
-    view = owner_authority.check_job(
-        core.store, core.settings, core.clock, job, purpose="chat", executing=True,
+    from companion.conversation_guard import read
+
+    reads = read(core.store, job)
+    ref = owner_authority._job_reference(reads.job)
+    view = owner_authority._checked_current(
+        core.store, core.settings, core.clock, reads.authority, purpose="chat", authority=ref,
     )
-    if purpose != "chat":
-        owner_authority.check_job(
-            core.store, core.settings, core.clock, job, purpose=purpose, executing=True,
-        )
-    owner_input.source(core.store, core.settings, view, job["event_id"], core.clock())
-    core._check_context_snapshots(job, snapshots, current_request=current_request)
+    owner_authority._checked_job(reads.job, job, view, core.clock, executing=True)
+    if purpose not in view.policy.purposes:
+        raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
+    owner_input._checked_source(core.store, core.settings, view, job["event_id"], core.clock(),
+                                _loaded=reads.source)
+    core._check_context_snapshots(job, snapshots, current_request=current_request,
+                                  owner_view=view, reads=reads)
     from companion import agent_images, agent_reading
 
     agent_reading.check_results(core, job, snapshots)
-    agent_images.input_sources(core.store, core.settings, core.clock, job)
+    agent_images.input_sources(core.store, core.settings, core.clock, job,
+                               _item_ids=reads.image_item_ids)
     return view
 
 
@@ -122,16 +134,16 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
         def check_request():
             nonlocal registered
             with phase("request_sources", job["trace_id"]):
-                check(current_request=request_id)
-                from companion.agent_images import check_payload
+                if not registered and persistence is not None:
+                    persistence.admitted(request_id, wire)
+                else:
+                    check(current_request=request_id)
+                    from companion.agent_images import check_payload
 
-                check_payload(core.store, core.settings, core.clock, job, wire)
-                if not registered:
-                    if persistence is not None:
-                        persistence.admitted(request_id)
-                    else:
+                    check_payload(core.store, core.settings, core.clock, job, wire)
+                    if not registered:
                         context_planner.admitted(core, job, snapshots, request_id)
-                    registered = True
+                registered = True
 
         model_started = perf_counter_ns()
         emit("t_model_request", job["trace_id"], at_ns=model_started)
@@ -145,15 +157,16 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
                 persistence.failed_response(error.response)
             raise
         model_finished = perf_counter_ns()
-        usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=?",
+        usage = core.store.one('SELECT state, billed_micro_usd FROM model_usage WHERE request_id = '
+            '%s',
                                (request_id,))
         emit("t_model_done", job["trace_id"],
              elapsed_ms=(model_finished - model_started) / 1e6, at_ns=model_finished,
              budget_micro_usd=usage["billed_micro_usd"] if usage else None,
              model_usage_state=usage["state"] if usage else None)
-        if usage is None or usage["state"] != "SETTLED":
-            # An SDK usage counter cannot turn an unmeasured provider outcome into
-            # a settled one, nor authorize the next model or tool side effect.
+        if usage is None or usage["state"] not in {"SETTLED", "UNKNOWN"}:
+            # A received response still requires an original accounting row.
+            # UNKNOWN retains its original fee uncertainty and may continue.
             raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
         check()
         return response

@@ -24,9 +24,14 @@ async def life_worker(settings):
             # the single Life worker lock, including orphaned reservations.
             core.store.execute(
                 "UPDATE model_usage SET state='UNKNOWN' WHERE scenario='diary' AND state='RESERVED'"
-                + (" AND request_id IN (SELECT request_id FROM model_admissions "
-                   "WHERE lease_until<=?)"
-                   if owner_authority.required(core.store, settings) else ""),
+                + (
+                    (
+                        " AND request_id IN (SELECT request_id FROM "
+                        "model_admissions WHERE lease_until<=%s)"
+                    )
+                    if owner_authority.required(core.store, settings)
+                    else ""
+                ),
                 (core.clock(),) if owner_authority.required(core.store, settings) else (),
             )
             with Wakeup(core.store, settings, "life-worker", core.clock) as wake:
@@ -42,8 +47,10 @@ async def life_worker(settings):
                         scan, deadline = wake.before_scan(), None
                     elif not selected.more:
                         await wake.wait(
-                            scan, UnitResult(False, deadline),
-                            selector.next_blocked_maintenance if selected.blocked
+                            scan,
+                            UnitResult(False, deadline),
+                            selector.next_blocked_maintenance
+                            if selected.blocked
                             else selector.next_maintenance,
                         )
                         selector.resume()

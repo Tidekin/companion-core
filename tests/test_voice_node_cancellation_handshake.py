@@ -240,7 +240,7 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
                 assert await worker.run_once("first-native-voice-chat")
                 with worker.store.transaction():
                     reply = worker.store.one(
-                        "SELECT message_id FROM outbox ORDER BY rowid DESC LIMIT 1")
+                        'SELECT message_id FROM outbox ORDER BY record_sequence DESC LIMIT 1')
                     worker.voice.prepare_reply(reply["message_id"])
                 first = core.store.one("SELECT * FROM voice_jobs")
                 assert first["state"] == "QUEUED"
@@ -264,9 +264,12 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
                         assert await worker.run_once("second-native-voice-chat")
                         with worker.store.transaction():
                             reply = worker.store.one(
-                                "SELECT message_id FROM outbox ORDER BY rowid DESC LIMIT 1")
+
+                                    'SELECT message_id FROM outbox ORDER BY '
+                                    'record_sequence DESC LIMIT 1'
+                                )
                             worker.voice.prepare_reply(reply["message_id"])
-                        following = core.store.one("SELECT * FROM voice_jobs WHERE job_id<>?",
+                        following = core.store.one('SELECT * FROM voice_jobs WHERE job_id<>%s',
                                                    (first["job_id"],))
                         assert following["state"] == "QUEUED"
                         assert core.store.one("SELECT active_job_id FROM voice_node_state")[
@@ -290,8 +293,10 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
                             assert await node_finished(resumed) == "DISCARDED"
                         assert core.store.one("SELECT active_job_id FROM voice_node_state")[
                             "active_job_id"] is None
-                        retained = core.store.one("SELECT state,started_at FROM voice_jobs "
-                                                  "WHERE job_id=?", (first["job_id"],))
+                        retained = core.store.one((
+                            'SELECT state,started_at FROM voice_jobs WHERE '
+                            'job_id=%s'
+                        ), (first["job_id"],))
                         assert retained["state"] == "UNKNOWN" and retained["started_at"]
                         await independent_node(node_config, certificate, counter, tmp_path,
                                                timestamp, monotonic_start=monotonic_start)
@@ -300,11 +305,13 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
                             if current.returncode is None:
                                 current.kill()
                                 await current.wait()
-                assert core.store.one("SELECT state FROM voice_jobs WHERE job_id=?",
+                assert core.store.one('SELECT state FROM voice_jobs WHERE job_id=%s',
                                       (following["job_id"],))["state"] == "READY"
                 assert len(child_receipts(counter)) == 1 and len(calls) == 2
-                assert core.store.one("SELECT COUNT(*) n FROM runtime_meta "
-                    "WHERE key LIKE 'owner_input:%'")["n"] == 2
+                assert core.store.one(
+                    'SELECT COUNT(*) n FROM runtime_meta WHERE key LIKE '
+                    "'owner_input:%%'"
+                )["n"] == 2
                 assert core.store.one("SELECT active_job_id FROM voice_node_state")[
                     "active_job_id"] is None
 

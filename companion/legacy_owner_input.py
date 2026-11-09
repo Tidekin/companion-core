@@ -22,11 +22,17 @@ from companion.store import encode
 def capture_source(store, settings, approval, event_id, *, allow_commands=False,
                    historical=False):
     event = store.one(
-        "SELECT e.*,c.scope,c.owner_actor_id FROM events e "
-        "JOIN conversations c USING(conversation_id) WHERE e.event_id=?", (event_id,),
+        'SELECT e.event_id AS event_id, e.schema_version AS schema_version, e.source AS source, '
+        'e.source_event_id AS source_event_id, e.conversation_id AS conversation_id, e.actor_id AS '
+        'actor_id, e.event_type AS event_type, e.occurred_at AS occurred_at, e.ingested_at AS '
+        'ingested_at, e.privacy_scope AS privacy_scope, e.body_json AS body_json, e.trace_id AS '
+        'trace_id, e.idempotency_key AS idempotency_key, e.fingerprint AS fingerprint, e.redacted '
+        'AS redacted, e.memory_processed AS memory_processed, e.reply_revision AS reply_revision, '
+        'c.scope AS scope, c.owner_actor_id AS owner_actor_id FROM events AS e JOIN conversations '
+        'AS c ON e.conversation_id = c.conversation_id WHERE e.event_id = %s', (event_id,),
     )
     receipt = store.one(
-        "SELECT value FROM runtime_meta WHERE key=?", ("live_text_input:" + event_id,),
+        'SELECT value FROM runtime_meta WHERE key = %s', ("live_text_input:" + event_id,),
     )
     try:
         value = json.loads(receipt["value"]) if receipt else {}
@@ -89,14 +95,21 @@ def capture_source(store, settings, approval, event_id, *, allow_commands=False,
             raise ValueError()
     except (ValueError, KeyError, TypeError, InvalidSignature):
         raise CoreError("LIVE_SOURCE_CAPTURE_CHANGED", 403) from None
-    jobs = store.rows("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
+    jobs = store.rows('SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, '
+        'jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts AS attempts, '
+        'jobs.max_attempts AS max_attempts, jobs.lease_owner AS lease_owner, jobs.lease_until AS '
+        'lease_until, jobs.next_attempt_at AS next_attempt_at, jobs.last_error_code AS '
+        'last_error_code, jobs.created_at AS created_at, jobs.updated_at AS updated_at, '
+        'jobs.lease_token AS lease_token, jobs.context_tracked AS context_tracked, '
+        'jobs.authority_json AS authority_json FROM jobs AS jobs WHERE jobs.event_id = %s AND '
+        "jobs.kind = 'chat'", (event_id,))
     if len(jobs) != 1:
         raise CoreError("LIVE_SOURCE_CHAT_JOB_REQUIRED", 403)
     return event, body, jobs[0]
 
 
 def _meta(store, key):
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+    row = store.one('SELECT value FROM runtime_meta WHERE key = %s', (key,))
     return json.loads(row["value"]) if row else None
 
 
@@ -111,7 +124,7 @@ def approval(store, event_id):
             raise CoreError("LEGACY_OWNER_ARCHIVE_REQUIRED", 403)
         policy = LiveTextWindowApproval.model_validate(archive["approval"])
         binding = archive["binding"]
-        identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+        identity = store.one("SELECT value FROM runtime_meta WHERE key = 'model_budget_journal_id'")
         if (not policy.live_approved or policy.execution != "approved_live"
             or policy.plan_sha256 != receipt["window_sha256"]
             or binding["approval_sha256"] != paid_budget.sha(policy.model_dump(mode="json"))
@@ -140,7 +153,7 @@ def source(store, settings, view, event_id, now, *, purpose="history", allow_com
     """Validate original raw evidence under an explicit current history/memory scope."""
     if purpose not in {"history", "memory"}:
         raise CoreError("LEGACY_OWNER_READ_SCOPE_REQUIRED", 403)
-    with nullcontext() if store.db.in_transaction else store.transaction():
+    with nullcontext() if store.in_transaction else store.transaction():
         view = owner_authority.current(store, settings, lambda: now,
                                         purpose=purpose, authority=view.authority)
         policy = approval(store, event_id)
@@ -150,7 +163,7 @@ def source(store, settings, view, event_id, now, *, purpose="history", allow_com
         received = datetime.fromisoformat(receipt["capture"]["received_at"])
         if (event["privacy_scope"] != "private" or json.loads(job["authority_json"]) != {}
             or received > datetime.fromisoformat(now)
-            or store.one("SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event_id,))
+            or store.one('SELECT 1 FROM runtime_meta WHERE key = %s', ("erased_event:" + event_id,))
             or (datetime.fromisoformat(now) - received).total_seconds() >= 86400 * min(
                 view.policy.source_retention_days, settings.raw_event_retention_days)
             or (purpose == "history" and (view.policy.history.scope != "owner_private"
@@ -173,14 +186,21 @@ def _validate_turn(store, settings, view, item, now):
     from companion.private_life import event_digest, settled_usage_unchanged
     from companion.transport import reply_group, segment_envelopes
 
-    with nullcontext() if store.db.in_transaction else store.transaction():
+    with nullcontext() if store.in_transaction else store.transaction():
         event, _, job = source(store, settings, view, item["event_id"], now)
         if not item.get("reply_text"):
             return
         policy = approval(store, item["event_id"])
-        usage = store.rows("SELECT m.*,a.window_id,a.journal_id,a.contract_sha256,a.payload_sha256,"
-            "a.authority_json FROM model_usage m LEFT JOIN model_admissions a USING(request_id) "
-            "WHERE m.job_id=? ORDER BY m.rowid", (job["job_id"],))
+        usage = store.rows('SELECT m.usage_id AS usage_id, m.request_id AS request_id, m.job_id AS '
+            'job_id, m.scenario AS scenario, m.provider AS provider, m.model AS model, '
+            'm.input_tokens AS input_tokens, m.cached_input_tokens AS cached_input_tokens, '
+            'm.output_tokens AS output_tokens, m.billed_micro_usd AS billed_micro_usd, '
+            'm.is_estimate AS is_estimate, m.occurred_at AS occurred_at, m.state AS state, '
+            'm.pricing_known AS pricing_known, a.window_id AS window_id, a.journal_id AS '
+            'journal_id, a.contract_sha256 AS contract_sha256, a.payload_sha256 AS payload_sha256, '
+            'a.authority_json AS authority_json FROM model_usage AS m LEFT JOIN model_admissions '
+            'AS a ON m.request_id = a.request_id WHERE m.job_id = %s ORDER BY m.record_sequence '
+            'NULLS FIRST', (job["job_id"],))
         if (job["state"] != "SUCCEEDED" or not any(row["scenario"] == "chat" for row in usage)
             or any(row["state"] != "SETTLED" or row["window_id"] != policy.window_id
                 or row["journal_id"] != policy.budget_journal_id

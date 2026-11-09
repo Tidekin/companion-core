@@ -40,7 +40,10 @@ def test_v2_receipts_equal_native_reservations_and_restart_does_not_repay(core, 
     view = result(core, submitted)
     assert view["state"] == "SUCCEEDED", view["error_code"]
     assert wire == [r["payload_sha256"] for r in manifest.plan["requests"]]
-    admissions = core.store.rows("SELECT measurement_json FROM model_admissions ORDER BY rowid")
+    admissions = core.store.rows(
+        'SELECT measurement_json FROM model_admissions ORDER BY '
+        'record_sequence'
+    )
     assert [json.loads(r["measurement_json"]) for r in admissions] == [
         r["measurement"] for r in manifest.plan["requests"]]
     assert len(view["requests"]) == 6
@@ -147,7 +150,9 @@ def test_legacy_v1_plan_is_read_without_measurement_backfill(core, tmp_path):
 
 
 @pytest.mark.parametrize("boundary", ["normal", "stop", "restore"])
-def test_v2_real_tcp_and_independent_worker_preserve_owner_fences(core, tmp_path, boundary):
+def test_v2_real_tcp_and_independent_worker_preserve_owner_fences(
+    empty_database, core, tmp_path, boundary,
+):
     from companion import owner_authority
     from companion.backup import backup, restore
 
@@ -177,10 +182,14 @@ def test_v2_real_tcp_and_independent_worker_preserve_owner_fences(core, tmp_path
                 assert stopped.status_code == 200, stopped.text
             if boundary == "restore":
                 key = Fernet.generate_key()
-                archive, target = tmp_path / "prior.enc", tmp_path / "restored.db"
+                archive = tmp_path / "prior.enc"
+                restored_state = tmp_path / "restored-state"
                 backup(core.settings.database, archive, key)
-                restore(archive, target, key, core.settings.erasure_ledger)
-                settings = core.settings.model_copy(update={"database": str(target)})
+                restore(archive, empty_database, key, core.settings.erasure_ledger,
+                        state_directory=restored_state)
+                settings = core.settings.model_copy(update={
+                    "database": empty_database, "state_directory": str(restored_state),
+                })
                 with Core(settings, clock=core.clock) as restored:
                     assert await processes(restored, tmp_path / "v2-restored", count=1) == []
                     assert restored.store.rows("SELECT * FROM model_usage") == []
@@ -194,8 +203,10 @@ def test_v2_real_tcp_and_independent_worker_preserve_owner_fences(core, tmp_path
                                                 + submitted.json()["evaluation_id"])
                     assert observed.status_code == 200, observed.text
                     assert observed.json()["state"] == "SUCCEEDED"
-                    measured = core.store.rows("SELECT measurement_json FROM model_admissions "
-                                                "ORDER BY rowid")
+                    measured = core.store.rows(
+                        'SELECT measurement_json FROM model_admissions ORDER '
+                        'BY record_sequence'
+                    )
                     assert [json.loads(row["measurement_json"]) for row in measured] == [
                         row["measurement"] for row in manifest.plan["requests"]]
             assert core.store.rows("SELECT * FROM outbox") == []

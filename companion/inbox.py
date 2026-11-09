@@ -1,7 +1,8 @@
 """Private event admission and creation of its original reply job."""
 
-import sqlite3
 from datetime import UTC
+
+import psycopg
 
 from companion import (
     input_debounce,
@@ -54,8 +55,16 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
         raise CoreError("INVALID_IDEMPOTENCY_KEY", 400)
     raw = event.model_dump(mode="json", exclude={"event_id", "trace_id"})
     fingerprint = digest(raw)
+    text = redact(event.payload.text, cfg)
+    command, arguments = command_parts(text)
+    reset_affect = command == "重置互动" and not arguments
     try:
-        with input_protocol.admit_unrecalled(s, cfg, ledger, clock, event):
+        with input_protocol.admit_unrecalled(
+            s, cfg, ledger, clock, event, control_write=reset_affect,
+        ):
+            # The owner row exists before the first conversation. Lock it before
+            # checking duplicate keys so concurrent first admissions also replay.
+            s.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id' FOR UPDATE")
             now = clock()
             authority = owner_input.check_input(s, cfg, clock, event) if (
                 owner_authority.required(s, cfg)) else None
@@ -66,19 +75,35 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 and cfg.rich_input_scope != "references_v1"):
                 raise CoreError("RICH_INPUT_SCOPE_REQUIRED", 403)
             if s.one(
-                "SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event.event_id,)
+                'SELECT 1 FROM runtime_meta WHERE key = %s', ("erased_event:" + event.event_id,)
             ):
                 raise CoreError("EVENT_ERASED", 410)
             existing = s.one(
-                "SELECT * FROM events WHERE (source=? AND source_event_id=?) "
-                "OR idempotency_key=? OR event_id=?",
+                'SELECT events.event_id AS event_id, events.schema_version AS schema_version, '
+                'events.source AS source, events.source_event_id AS source_event_id, '
+                'events.conversation_id AS conversation_id, events.actor_id AS actor_id, '
+                'events.event_type AS event_type, events.occurred_at AS occurred_at, '
+                'events.ingested_at AS ingested_at, events.privacy_scope AS privacy_scope, '
+                'events.body_json AS body_json, events.trace_id AS trace_id, '
+                'events.idempotency_key AS idempotency_key, events.fingerprint AS fingerprint, '
+                'events.redacted AS redacted, events.memory_processed AS memory_processed, '
+                'events.reply_revision AS reply_revision FROM events AS events WHERE '
+                '(events.source = %s AND events.source_event_id = %s) OR events.idempotency_key = '
+                '%s OR events.event_id = %s',
                 (event.source, event.source_event_id, key, event.event_id),
             )
             if existing:
                 if existing["fingerprint"] != fingerprint or existing["idempotency_key"] != key:
                     raise CoreError("IDEMPOTENCY_CONFLICT")
                 job = s.one(
-                    "SELECT * FROM jobs WHERE idempotency_key=?",
+                    'SELECT jobs.job_id AS job_id, jobs.event_id AS event_id, jobs.kind AS kind, '
+                    'jobs.state AS state, jobs.idempotency_key AS idempotency_key, jobs.attempts '
+                    'AS attempts, jobs.max_attempts AS max_attempts, jobs.lease_owner AS '
+                    'lease_owner, jobs.lease_until AS lease_until, jobs.next_attempt_at AS '
+                    'next_attempt_at, jobs.last_error_code AS last_error_code, jobs.created_at AS '
+                    'created_at, jobs.updated_at AS updated_at, jobs.lease_token AS lease_token, '
+                    'jobs.context_tracked AS context_tracked, jobs.authority_json AS '
+                    'authority_json FROM jobs AS jobs WHERE jobs.idempotency_key = %s',
                     ("reply:" + existing["event_id"],),
                 )
                 return {
@@ -89,7 +114,13 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                     "reply_revision": existing["reply_revision"],
                 }
             conversation = s.one(
-                "SELECT * FROM conversations WHERE platform=? AND platform_session_key=?",
+                'SELECT conversations.conversation_id AS conversation_id, conversations.platform '
+                'AS platform, conversations.platform_session_key AS platform_session_key, '
+                'conversations.scope AS scope, conversations.owner_actor_id AS owner_actor_id, '
+                'conversations.last_event_at AS last_event_at, conversations.created_at AS '
+                'created_at, conversations.reply_revision AS reply_revision FROM conversations AS '
+                'conversations WHERE conversations.platform = %s AND '
+                'conversations.platform_session_key = %s',
                 (event.source, origin),
             )
             conversation_id = conversation["conversation_id"] if conversation else uid("conv")
@@ -104,11 +135,11 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                     created_at=now,
                 )
             s.execute(
-                "UPDATE conversations SET last_event_at=? WHERE conversation_id=?",
+                'UPDATE conversations SET last_event_at = %s WHERE conversation_id = %s',
                 (now, conversation_id),
             )
             body = event.payload.model_dump()
-            body["text"] = redact(body["text"], cfg)
+            body["text"] = text
             if body.get("rich"):
                 for segment in body["rich"]["segments"]:
                     for field in segment.get("fields", []):
@@ -121,12 +152,11 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                     qq_rich.validate(body["rich"])
                 except ValueError:
                     raise CoreError("INVALID_RICH_INPUT", 400) from None
-            command, arguments = command_parts(body["text"])
             diary_command = native_controls and is_diary_command(body["text"])
             control_command = native_controls and (
                 is_life_command(body["text"]) or is_memory_command(body["text"])
                 or command in {"发送状态", "核对发送", "暂停主动分享", "恢复主动分享"}
-                or (command == "重置互动" and not arguments)
+                or reset_affect
             )
             if control_command:
                 body["control_command"] = True
@@ -187,7 +217,7 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 and not body["text"].lstrip().startswith("/")):
                 if not authority or "content" in authority.policy.purposes:
                     content.schedule(event.event_id)
-            if native_controls and command == "重置互动" and not arguments:
+            if native_controls and reset_affect:
                 affect.reset(cfg.owner_qq_id, event.event_id, ledger)
             if not authority or "affect" in authority.policy.purposes:
                 affect.observe(event.event_id)
@@ -199,5 +229,5 @@ def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
                 "state": "QUEUED",
                 "reply_revision": revision,
             }
-    except sqlite3.IntegrityError as error:
+    except psycopg.IntegrityError as error:
         raise CoreError("IDEMPOTENCY_CONFLICT") from error

@@ -62,9 +62,8 @@ def enable(core, **options):
             url="https://vision.example/v1/chat/completions",
             key=SecretStr("test-vision-secret"),
             model="fixture",
-            max_request_micro_usd=10,
+            estimated_request_micro_usd=10,
         ),
-        image_daily_micro_usd=100,
     ).model_copy(update=options)
     core.exploration = ExplorationService(
         core.store, core.settings, core.observations, core.goals, core.social, core.clock,
@@ -82,13 +81,13 @@ def owner_share(core, number=1, text="看看这个", manifest=None):
     event_id = f"evt_test_{number}"
     if manifest:
         body = json.loads(
-            core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,))[
+            core.store.one('SELECT body_json FROM events WHERE event_id=%s', (event_id,))[
                 "body_json"
             ]
         )
         body["shared_content"] = manifest
         core.store.execute(
-            "UPDATE events SET body_json=? WHERE event_id=?", (encode(body), event_id)
+            'UPDATE events SET body_json=%s WHERE event_id=%s', (encode(body), event_id)
         )
     return event_id
 

@@ -18,7 +18,8 @@ from tests.support.private_companion import companion_options
 
 
 def put(store, key, value):
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(value)))
+    store.execute("INSERT INTO runtime_meta (key,value) VALUES (%s,%s) "
+                  "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value", (key, encode(value)))
 
 
 def signed(env, **changes):
@@ -31,7 +32,7 @@ def native(core, tmp_path, *, quota=True, uncertain=True, expired=False,
            action="qq.private.poke", stopped=True, model_unknown=False, legacy=False, voice=False,
            voice_v1=False):
     accepted = ingest(core, 1, "synthetic private source")
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (accepted["event_id"],))
+    event = core.store.one('SELECT * FROM events WHERE event_id=%s', (accepted["event_id"],))
     key = Ed25519PrivateKey.generate()
     options = {} if legacy else companion_options(core)
     account = action in wire.ACCOUNT_ACTIONS
@@ -86,7 +87,7 @@ def native(core, tmp_path, *, quota=True, uncertain=True, expired=False,
                       "content_sha256": wire.digest(content), "payload_sha256": payload,
                       "lease_token": token}
     with core.store.transaction():
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                            (accepted["job_id"],))
         core.store.insert("outbox", message_id=message_id,
             origin_event_id=None if account else event["event_id"],
@@ -112,7 +113,7 @@ def native(core, tmp_path, *, quota=True, uncertain=True, expired=False,
             )
             send_check["reply_revision"] = event["reply_revision"]
         if legacy:
-            core.store.execute("DELETE FROM runtime_meta WHERE key=?",
+            core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
                                ("private_life_delivery:" + message_id,))
             put(core.store, "live_text_reply:" + message_id, {
                 "message_id": message_id, "event_id": event["event_id"],

@@ -7,10 +7,8 @@ Life 也可把已结算的私人创作原文保存到同一 REM 记录中。
 
 ## 配置和授权
 
-`Settings.rem` 使用 `RemConfig`。默认 `enabled=true`，每日预算为 `10000` micro USD
-（0.01 美元），每月为 `100000` micro USD（0.10 美元），同时受原有全局费用上限约束。
+`Settings.rem` 使用 `RemConfig`，默认 `enabled=true`。真实用量和费用沿用原账本记录。
 可显式设置 `enabled=false` 关闭；已有配置中的显式关闭不会被新默认覆盖。
-开启配置必须同时具备正的 `daily_micro_usd` 与 `monthly_micro_usd`。
 执行还要求 live 模式、Memory 开启、当前主人授权包含 `rem` 与 `memory`，
 以及与完整 REM 配置相符的 `capability_policies.rem` 指纹。
 配置变更后必须重新完成原有授权流程，不能沿用旧指纹。
@@ -56,7 +54,7 @@ REM 不提供模型工具，每次生成最多一次模型调用。
 `SKIP` 也保留已发生调用的原生账目。
 
 无效结果失败后不重复支付；超时与调用后进程退出保留 UNKNOWN 责任，
-重启不会重试该任务。UNKNOWN 仍受共享预算的对账限制。
+重启不会重试缺少原回复的任务。单纯费用 UNKNOWN 只提示待核对，其他独立任务可以继续。
 已结算的无效 REM 结果不会阻止独立 Diary 任务执行。
 发送前确认没有 provider I/O 的主人输入抢占，使用原有 `model.not_dispatched`
 证据结算为零费用；预派发时间戳本身不证明 provider 已收到请求。

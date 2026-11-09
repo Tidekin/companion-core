@@ -64,7 +64,7 @@ def test_sdk_freezes_per_bubble_choices_in_one_final_generation(core, tmp_path, 
         content = json.loads(first["content_json"])
         content["reply_part"]["kind"] = "text" if kinds[0] == "voice" else "voice"
         core.store.execute(
-            "UPDATE outbox SET content_json=? WHERE message_id=?",
+            'UPDATE outbox SET content_json=%s WHERE message_id=%s',
             (json.dumps(content), first["message_id"]),
         )
         with pytest.raises(CoreError):
@@ -131,7 +131,7 @@ def test_native_voice_picture_and_text_keep_order_and_original_receipts(
             assert [json.loads(row["content_json"])["reply_part"]["kind"] for row in rows] == list(
                 order
             )
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             spool, runtime = native_spool(core, tmp_path, bridge_config, plan)
             sends = []
 
@@ -191,7 +191,9 @@ def test_native_voice_picture_and_text_keep_order_and_original_receipts(
                     else:
                         assert current == [{"state": "SENT", "attempt_count": 1}] * 3
                         assert not await tick(runtime, bridge, protocol)
-                    assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+                    assert core.store.rows(
+                        'SELECT * FROM model_usage ORDER BY record_sequence'
+                    ) == usage
                     if outcome != "unknown":
                         runtime.verify()
             finally:

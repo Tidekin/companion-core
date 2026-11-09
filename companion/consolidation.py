@@ -18,20 +18,21 @@ CONFIG_VERSION = "v05-1"
 
 def erase_consolidation(store, event_ids):
     if not store.one(
-        "SELECT 1 FROM sqlite_master WHERE name='consolidation_runs' AND type='table'"
+        'SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespace AND '
+        "relname='consolidation_runs' AND relkind IN ('r','p')"
     ):
         return
     for event_id in event_ids:
         store.execute(
-            "UPDATE consolidation_runs SET state='CANCELLED',lease_token=NULL,steps_json='{}',"
-            "source_set_sha256='',last_error_code='PRIVACY_CHANGED' WHERE run_id IN (SELECT "
-            "run_id FROM consolidation_evidence WHERE event_id=?)",
+            "UPDATE consolidation_runs SET state = 'CANCELLED', lease_token = NULL, steps_json = "
+            "'{}', source_set_sha256 = '', last_error_code = 'PRIVACY_CHANGED' WHERE run_id IN "
+            '(SELECT run_id FROM consolidation_evidence WHERE event_id = %s)',
             (event_id,),
         )
-        store.execute("DELETE FROM consolidation_evidence WHERE event_id=?", (event_id,))
+        store.execute('DELETE FROM consolidation_evidence WHERE event_id = %s', (event_id,))
     store.execute(
-        "UPDATE consolidation_runs SET state='CANCELLED',lease_token=NULL,"
-        "last_error_code='PRIVACY_CHANGED' WHERE state IN ('LEASED','PARTIAL')"
+        "UPDATE consolidation_runs SET state = 'CANCELLED', lease_token = NULL, last_error_code = "
+        "'PRIVACY_CHANGED' WHERE state IN ('LEASED', 'PARTIAL')"
     )
 
 
@@ -44,7 +45,7 @@ def enabled(store, settings, clock):
             private_life.ensure_active(store, settings, clock)
     except CoreError:
         return False
-    paused = store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
+    paused = store.one("SELECT value FROM runtime_meta WHERE key = 'life_paused'")
     return settings.consolidation_enabled and not (paused and paused["value"] == "1")
 
 
@@ -57,59 +58,77 @@ class NightlyConsolidator:
     def enabled(self):
         return enabled(self.store, self.settings, self.clock)
 
-    def schedule_day(self, day):
+    def schedule_day(self, day, *, changed_only=False):
         if not self.enabled():
             return None
         self.reflections.validate_day(day)
         with self.store.transaction():
             existing = self.status(day)
             if existing:
+                unchanged = None if changed_only else existing["run_id"]
                 steps = json.loads(existing["steps_json"])
-                reflection = self.store.one(
-                    "SELECT * FROM reflection_runs WHERE local_date=? AND timezone=?",
-                    (day.isoformat(), self.settings.timezone),
-                )
-                if (
+                if not (
                     (existing["state"] == "PARTIAL" or
                      (existing["state"] == "CANCELLED"
                       and existing["last_error_code"] == "LIVE_WINDOW_STOPPED"))
                     and steps.get("reflection") in {"FAILED", "RETRY_WAIT", "CANCELLED"}
-                    and retryable_admission(reflection, self.clock())
+                ):
+                    return unchanged
+                reflection = self.store.one(
+                    'SELECT reflection_runs.run_id AS run_id, reflection_runs.identity_id AS '
+                    'identity_id, reflection_runs.local_date AS local_date, '
+                    'reflection_runs.timezone AS timezone, reflection_runs.state AS state, '
+                    'reflection_runs.source_set_sha256 AS source_set_sha256, '
+                    'reflection_runs.captured_privacy_epoch AS captured_privacy_epoch, '
+                    'reflection_runs.lease_token AS lease_token, reflection_runs.lease_until AS '
+                    'lease_until, reflection_runs.model_request_id AS model_request_id, '
+                    'reflection_runs.last_error_code AS last_error_code, '
+                    'reflection_runs.created_at AS created_at, reflection_runs.updated_at AS '
+                    'updated_at, reflection_runs.next_attempt_at AS next_attempt_at FROM '
+                    'reflection_runs AS reflection_runs WHERE reflection_runs.local_date = %s AND '
+                    'reflection_runs.timezone = %s',
+                    (day.isoformat(), self.settings.timezone),
+                )
+                if (
+                    retryable_admission(reflection, self.clock())
                     and existing["source_set_sha256"] == reflection["source_set_sha256"]
                     == source_hash(self.diary.repo.sources(day, purpose="consolidation"))
                 ):
                     steps["reflection"] = "WAITING"
                     steps.pop("goals", None)
-                    self.store.execute(
-                        "UPDATE consolidation_runs SET state='SCHEDULED',steps_json=?,"
-                        "next_attempt_at=NULL,last_error_code=NULL,updated_at=? WHERE run_id=?",
-                        (encode(steps), self.clock(), existing["run_id"]),
+                    resumed = self.store.execute(
+                        "UPDATE consolidation_runs SET state = 'SCHEDULED', steps_json = %s, "
+                        "next_attempt_at = NULL, last_error_code = NULL, updated_at = %s "
+                        "WHERE run_id = %s AND state = %s AND steps_json = %s "
+                        "AND last_error_code IS NOT DISTINCT FROM %s AND source_set_sha256 = %s",
+                        (encode(steps), self.clock(), existing["run_id"], existing["state"],
+                         existing["steps_json"], existing["last_error_code"],
+                         existing["source_set_sha256"]),
                     )
-                    self.store.audit(
-                        "consolidation.resumed", existing["run_id"], existing["run_id"],
-                        self.clock(), reason="UNADMITTED_REFLECTION",
-                    )
-                return existing["run_id"]
+                    if resumed:
+                        self.store.audit(
+                            "consolidation.resumed", existing["run_id"], existing["run_id"],
+                            self.clock(), reason="UNADMITTED_REFLECTION",
+                        )
+                        return existing["run_id"]
+                return unchanged
             run_id, now = uid("nightly"), self.clock()
             steps = {}
             if owner_authority.required(self.store, self.settings):
                 steps["authority"] = owner_authority.current(
                     self.store, self.settings, self.clock, purpose="consolidation",
                 ).authority.as_dict()
-            self.store.insert(
-                "consolidation_runs",
-                run_id=run_id,
-                identity_id="companion",
-                local_date=day.isoformat(),
-                timezone=self.settings.timezone,
-                config_version=CONFIG_VERSION,
-                state="SCHEDULED",
-                steps_json=encode(steps),
-                captured_privacy_epoch=epoch(self.store),
-                created_at=now,
-                updated_at=now,
+            inserted = self.store.execute(
+                "INSERT INTO consolidation_runs (run_id, identity_id, local_date, timezone, "
+                "config_version, state, steps_json, captured_privacy_epoch, created_at, "
+                "updated_at) VALUES (%s, 'companion', %s, %s, %s, 'SCHEDULED', %s, %s, %s, %s) "
+                "ON CONFLICT (identity_id, local_date, timezone, config_version) DO NOTHING",
+                (run_id, day.isoformat(), self.settings.timezone, CONFIG_VERSION,
+                 encode(steps), epoch(self.store), now, now),
             )
-            return run_id
+            if inserted:
+                return run_id
+            return None if changed_only else self.status(day)["run_id"]
 
     def schedule_due(self):
         if not self.enabled():
@@ -118,23 +137,36 @@ class NightlyConsolidator:
         latest = local.date() - timedelta(
             days=1 if local.hour >= self.settings.consolidation_local_hour else 2
         )
-        return [
-            self.schedule_day(local.date() - timedelta(days=offset))
-            for offset in reversed(range(1, self.settings.consolidation_catchup_days + 1))
-            if local.date() - timedelta(days=offset) <= latest
-        ]
+        scheduled = []
+        for offset in reversed(range(1, self.settings.consolidation_catchup_days + 1)):
+            day = local.date() - timedelta(days=offset)
+            if day <= latest:
+                run_id = self.schedule_day(day, changed_only=True)
+                if run_id:
+                    scheduled.append(run_id)
+        return scheduled
 
     def status(self, day):
         return self.store.one(
-            "SELECT * FROM consolidation_runs WHERE local_date=? AND timezone=? AND "
-            "config_version=?",
+            'SELECT consolidation_runs.run_id AS run_id, consolidation_runs.identity_id AS '
+            'identity_id, consolidation_runs.local_date AS local_date, consolidation_runs.timezone '
+            'AS timezone, consolidation_runs.config_version AS config_version, '
+            'consolidation_runs.state AS state, consolidation_runs.steps_json AS steps_json, '
+            'consolidation_runs.source_set_sha256 AS source_set_sha256, '
+            'consolidation_runs.captured_privacy_epoch AS captured_privacy_epoch, '
+            'consolidation_runs.lease_token AS lease_token, consolidation_runs.lease_until AS '
+            'lease_until, consolidation_runs.next_attempt_at AS next_attempt_at, '
+            'consolidation_runs.last_error_code AS last_error_code, consolidation_runs.created_at '
+            'AS created_at, consolidation_runs.updated_at AS updated_at FROM consolidation_runs AS '
+            'consolidation_runs WHERE consolidation_runs.local_date = %s AND '
+            'consolidation_runs.timezone = %s AND consolidation_runs.config_version = %s',
             (day.isoformat(), self.settings.timezone, CONFIG_VERSION),
         )
 
     def recent(self):
         return self.store.rows(
-            "SELECT local_date,state,steps_json,last_error_code FROM consolidation_runs ORDER "
-            "BY local_date DESC LIMIT 7"
+            'SELECT local_date, state, steps_json, last_error_code FROM consolidation_runs ORDER '
+            'BY local_date DESC NULLS LAST LIMIT 7'
         )
 
     def claim(self):
@@ -142,15 +174,28 @@ class NightlyConsolidator:
         with s.transaction():
             if not self.enabled():
                 s.execute(
-                    "UPDATE consolidation_runs SET state='CANCELLED',lease_token=NULL,"
-                    "last_error_code='CONSOLIDATION_PAUSED' WHERE state IN ('SCHEDULED',"
-                    "'LEASED','PARTIAL')"
+                    "UPDATE consolidation_runs SET state = 'CANCELLED', lease_token = NULL, "
+                    "last_error_code = 'CONSOLIDATION_PAUSED' WHERE state IN ('SCHEDULED', "
+                    "'LEASED', 'PARTIAL')"
                 )
                 return None
             row = s.one(
-                "SELECT * FROM consolidation_runs WHERE timezone=? AND (state='SCHEDULED' OR "
-                "(state='PARTIAL' AND next_attempt_at<=?) OR (state='LEASED' AND "
-                "lease_until<=?)) ORDER BY local_date LIMIT 1",
+                'SELECT consolidation_runs.run_id AS run_id, consolidation_runs.identity_id AS '
+                'identity_id, consolidation_runs.local_date AS local_date, '
+                'consolidation_runs.timezone AS timezone, consolidation_runs.config_version AS '
+                'config_version, consolidation_runs.state AS state, consolidation_runs.steps_json '
+                'AS steps_json, consolidation_runs.source_set_sha256 AS source_set_sha256, '
+                'consolidation_runs.captured_privacy_epoch AS captured_privacy_epoch, '
+                'consolidation_runs.lease_token AS lease_token, consolidation_runs.lease_until AS '
+                'lease_until, consolidation_runs.next_attempt_at AS next_attempt_at, '
+                'consolidation_runs.last_error_code AS last_error_code, '
+                'consolidation_runs.created_at AS created_at, consolidation_runs.updated_at AS '
+                'updated_at FROM consolidation_runs AS consolidation_runs WHERE '
+                "consolidation_runs.timezone = %s AND (consolidation_runs.state = 'SCHEDULED' OR "
+                "(consolidation_runs.state = 'PARTIAL' AND consolidation_runs.next_attempt_at <= "
+                "%s) OR (consolidation_runs.state = 'LEASED' AND consolidation_runs.lease_until <= "
+                '%s)) ORDER BY consolidation_runs.local_date NULLS FIRST LIMIT 1 '
+                'FOR UPDATE SKIP LOCKED',
                 (self.settings.timezone, now, now),
             )
             if not row:
@@ -160,9 +205,9 @@ class NightlyConsolidator:
                 view = owner_authority.current(s, self.settings, self.clock,
                                                 purpose="consolidation")
                 if steps.get("authority") != view.authority.as_dict():
-                    s.execute("UPDATE consolidation_runs SET state='CANCELLED',lease_token=NULL,"
-                              "steps_json='{}',last_error_code='OWNER_AUTHORITY_REVISION_CHANGED' "
-                              "WHERE run_id=?", (row["run_id"],))
+                    s.execute("UPDATE consolidation_runs SET state = 'CANCELLED', lease_token = "
+                        "NULL, steps_json = '{}', last_error_code = "
+                        "'OWNER_AUTHORITY_REVISION_CHANGED' WHERE run_id = %s", (row["run_id"],))
                     return None
             sources = self.diary.repo.sources(date.fromisoformat(row["local_date"]),
                                               purpose="consolidation")
@@ -172,16 +217,17 @@ class NightlyConsolidator:
             # each generative subtask separately rejects its own old model result.
             if row["state"] != "SCHEDULED" and row["source_set_sha256"] != source_hash(sources):
                 s.execute(
-                    "UPDATE consolidation_runs SET state='CANCELLED',lease_token=NULL,"
-                    "steps_json='{}',last_error_code='CONSOLIDATION_SOURCES_CHANGED' "
-                    "WHERE run_id=?",
+                    "UPDATE consolidation_runs SET state = 'CANCELLED', lease_token = NULL, "
+                    "steps_json = '{}', last_error_code = 'CONSOLIDATION_SOURCES_CHANGED' WHERE "
+                    'run_id = %s',
                     (row["run_id"],),
                 )
                 return None
             token = uid("nightly_lease")
             s.execute(
-                "UPDATE consolidation_runs SET state='LEASED',lease_token=?,lease_until=?,"
-                "source_set_sha256=?,captured_privacy_epoch=?,updated_at=? WHERE run_id=?",
+                "UPDATE consolidation_runs SET state = 'LEASED', lease_token = %s, lease_until = "
+                '%s, source_set_sha256 = %s, captured_privacy_epoch = %s, updated_at = %s WHERE '
+                'run_id = %s',
                 (
                     token,
                     after(now, self.settings.lease_seconds),
@@ -193,7 +239,7 @@ class NightlyConsolidator:
             )
             for source_id in {source["event_id"] for source in sources}:
                 s.execute(
-                    "INSERT OR IGNORE INTO consolidation_evidence VALUES (?,?)",
+                    'INSERT INTO consolidation_evidence VALUES (%s, %s) ON CONFLICT DO NOTHING',
                     (row["run_id"], source_id),
                 )
             return {
@@ -203,21 +249,32 @@ class NightlyConsolidator:
                 "sources": sources,
                 "steps": steps,
                 "erasure_version": s.one(
-                    "SELECT COALESCE(MAX(restore_min_replay_version),0) AS n "
-                    "FROM privacy_erasure_ledger"
+                    'SELECT COALESCE(MAX(restore_min_replay_version), 0) AS n FROM '
+                    'privacy_erasure_ledger'
                 )["n"],
             }
 
     def after_memory_commit(self, run):
         # Memory.add advances the context epoch. Accept our own successful write only
         # if no erasure intervened and the exact collected source set is still intact.
-        with nullcontext() if self.store.db.in_transaction else self.store.transaction():
+        with nullcontext() if self.store.in_transaction else self.store.transaction():
             current = self.store.one(
-                "SELECT * FROM consolidation_runs WHERE run_id=?", (run["run_id"],)
+                'SELECT consolidation_runs.run_id AS run_id, consolidation_runs.identity_id AS '
+                'identity_id, consolidation_runs.local_date AS local_date, '
+                'consolidation_runs.timezone AS timezone, consolidation_runs.config_version AS '
+                'config_version, consolidation_runs.state AS state, consolidation_runs.steps_json '
+                'AS steps_json, consolidation_runs.source_set_sha256 AS source_set_sha256, '
+                'consolidation_runs.captured_privacy_epoch AS captured_privacy_epoch, '
+                'consolidation_runs.lease_token AS lease_token, consolidation_runs.lease_until AS '
+                'lease_until, consolidation_runs.next_attempt_at AS next_attempt_at, '
+                'consolidation_runs.last_error_code AS last_error_code, '
+                'consolidation_runs.created_at AS created_at, consolidation_runs.updated_at AS '
+                'updated_at FROM consolidation_runs AS consolidation_runs WHERE '
+                'consolidation_runs.run_id = %s FOR UPDATE', (run["run_id"],)
             )
             erasure_version = self.store.one(
-                "SELECT COALESCE(MAX(restore_min_replay_version),0) AS n "
-                "FROM privacy_erasure_ledger"
+                'SELECT COALESCE(MAX(restore_min_replay_version), 0) AS n FROM '
+                'privacy_erasure_ledger'
             )["n"]
             if (
                 not current
@@ -233,7 +290,7 @@ class NightlyConsolidator:
                 raise CoreError("PRIVACY_CHANGED", 409)
             run["captured_privacy_epoch"] = epoch(self.store)
             self.store.execute(
-                "UPDATE consolidation_runs SET captured_privacy_epoch=? WHERE run_id=?",
+                'UPDATE consolidation_runs SET captured_privacy_epoch = %s WHERE run_id = %s',
                 (run["captured_privacy_epoch"], run["run_id"]),
             )
 
@@ -242,8 +299,20 @@ class NightlyConsolidator:
         if owner_authority.required(s, self.settings):
             owner_authority.current(s, self.settings, self.clock, purpose="consolidation",
                                     authority=run["steps"].get("authority"))
-        with nullcontext() if s.db.in_transaction else s.transaction():
-            current = s.one("SELECT * FROM consolidation_runs WHERE run_id=?", (run["run_id"],))
+        with nullcontext() if s.in_transaction else s.transaction():
+            current = s.one('SELECT consolidation_runs.run_id AS run_id, '
+                'consolidation_runs.identity_id AS identity_id, consolidation_runs.local_date AS '
+                'local_date, consolidation_runs.timezone AS timezone, '
+                'consolidation_runs.config_version AS config_version, consolidation_runs.state AS '
+                'state, consolidation_runs.steps_json AS steps_json, '
+                'consolidation_runs.source_set_sha256 AS source_set_sha256, '
+                'consolidation_runs.captured_privacy_epoch AS captured_privacy_epoch, '
+                'consolidation_runs.lease_token AS lease_token, consolidation_runs.lease_until AS '
+                'lease_until, consolidation_runs.next_attempt_at AS next_attempt_at, '
+                'consolidation_runs.last_error_code AS last_error_code, '
+                'consolidation_runs.created_at AS created_at, consolidation_runs.updated_at AS '
+                'updated_at FROM consolidation_runs AS consolidation_runs WHERE '
+                'consolidation_runs.run_id = %s FOR UPDATE', (run["run_id"],))
             if (
                 not current
                 or current["state"] != "LEASED"
@@ -254,8 +323,9 @@ class NightlyConsolidator:
             if not self.enabled() or epoch(s) != run["captured_privacy_epoch"]:
                 raise CoreError("PRIVACY_CHANGED", 409)
             s.execute(
-                "UPDATE consolidation_runs SET state=?,steps_json=?,lease_token=?,"
-                "lease_until=?,next_attempt_at=?,last_error_code=?,updated_at=? WHERE run_id=?",
+                'UPDATE consolidation_runs SET state = %s, steps_json = %s, lease_token = %s, '
+                'lease_until = %s, next_attempt_at = %s, last_error_code = %s, updated_at = %s '
+                'WHERE run_id = %s',
                 (
                     state,
                     encode(run["steps"]),

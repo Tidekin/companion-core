@@ -68,7 +68,7 @@ def test_required_wording_retries_in_new_process_without_replaying_paid_request(
             grant.authority = activate(core, policy, revision=grant.authority["revision"],
                 operation="required-notice-purpose")[0]["authority"]
             settings = core.settings.model_dump(mode="json")
-            for name in ("model_key", "bridge_token", "control_token"):
+            for name in ("database", "model_key", "bridge_token", "control_token"):
                 settings[name] = getattr(core.settings, name).get_secret_value()
             settings_path.write_text(encode(settings), encoding="utf-8")
             source, accepted = await native.admit(client, config, grant, now)
@@ -103,10 +103,10 @@ def test_required_wording_retries_in_new_process_without_replaying_paid_request(
             assert await worker("还未到下一次尝试时间") == []
             core.clock.advance(6)
             assert await worker("这次没有在约定时间内完成阅读。") == ["EXPLAINED_FAILURE"]
-            usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usages = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert len(usages) == 2 and usages[0] == first
             assert all(row["state"] == "SETTLED" and row["billed_micro_usd"] > 0 for row in usages)
-            admissions = core.store.rows("SELECT * FROM model_admissions ORDER BY rowid")
+            admissions = core.store.rows('SELECT * FROM model_admissions ORDER BY record_sequence')
             assert len({row["request_id"] for row in admissions}) == 2
             assert {row["logical_request_id"] for row in admissions} == {job["job_id"]}
             assert [row["attempt_number"] for row in admissions] == [1, 2]
@@ -133,7 +133,7 @@ def test_required_wording_retries_in_new_process_without_replaying_paid_request(
             state = core.store.one("SELECT state FROM commitments")["state"]
             assert state == ("EXPLAINED_FAILURE" if delivery == "SENT" else "IN_PROGRESS")
             assert await worker("不得再次产生通知") == []
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usages
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usages
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
 
     run(scenario())

@@ -1,7 +1,6 @@
 """Bili media keeps original Reader authority, immutable phases and native costs."""
 
 import json
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
@@ -10,14 +9,15 @@ from threading import Barrier
 from types import SimpleNamespace
 
 import httpx
+import psycopg
 import pytest
 from alembic import command
 from alembic.config import Config
 
 from companion import budget
 from companion.bili_video import (
-    BiliVideoService,
     _model_room,
+    _policy,
     erase_bili_video,
     model_binding,
     restore_bili_video,
@@ -31,6 +31,7 @@ from companion.contracts import CoreError
 from companion.source_grants import SourceGrantSnapshot
 from companion.store import Store, encode
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.bili_video import (
     final_result,
     metadata,
@@ -44,6 +45,7 @@ from tests.support.bili_video import (
 )
 from tests.support.historical_schema import historical_database
 from tests.support.native_consumer import admit, select_tools
+from tests.support.release_migration import one, open_historical, rows
 
 
 def leased(core, **changes):
@@ -70,6 +72,8 @@ def test_unbound_model_request_does_not_claim_legacy_media(core):
     ("unrelated", "original", 9), ("job-only", "original", 8),
     ("current", "all_unknown", 9), ("current", "settled_foreground", 8),
 ])
+
+
 def test_model_room_counts_calls_once_and_preserves_foreground_slots(
     core, current, state_mode, required_calls,
 ):
@@ -106,15 +110,16 @@ def test_model_room_counts_calls_once_and_preserves_foreground_slots(
                          lease_token="lease-" + request, lease_until=now,
                          journal_path="synthetic-not-opened", journal_id="synthetic")
         admission = s.one("SELECT * FROM model_admissions WHERE request_id='overlap'")
-        # SQLite permits a NULL TEXT primary key; neither it nor a missing usage
-        # parent can add a call through the logical-request branch.
+    admission.pop("record_sequence")
+    with pytest.raises(psycopg.errors.NotNullViolation):
         s.insert("model_admissions", **{**admission, "request_id": None, "attempt_id": "null"})
-        with pytest.raises(sqlite3.IntegrityError):
-            s.insert("model_admissions", **{**admission, "request_id": "absent",
-                                             "attempt_id": "absent"})
-    before = {table: s.rows(f"SELECT rowid,* FROM {table} ORDER BY rowid")
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        s.insert(
+            "model_admissions", **{**admission, "request_id": "absent", "attempt_id": "absent"}
+        )
+    before = {table: s.rows(f"SELECT * FROM {table} ORDER BY record_sequence")
               for table in ("model_usage", "model_admissions", "model_budget_windows")}
-    changes = s.db.total_changes
+    changes = logical_state(s)
     for limit in range(1, 11):
         settings = SimpleNamespace(paid_model=SimpleNamespace(per_request_calls=limit))
         if limit < required_calls:
@@ -122,24 +127,25 @@ def test_model_room_counts_calls_once_and_preserves_foreground_slots(
                 _model_room(s, settings, "target", current)
         else:
             _model_room(s, settings, "target", current)
-    assert s.db.total_changes == changes
-    assert {table: s.rows(f"SELECT rowid,* FROM {table} ORDER BY rowid")
+    assert logical_state(s) == changes
+    assert {table: s.rows(f"SELECT * FROM {table} ORDER BY record_sequence")
             for table in before} == before
-    assert s.rows("PRAGMA foreign_key_check") == []
+    assert s.rows(
+        "SELECT conname FROM pg_constraint WHERE connamespace=current_schema()::regnamespace "
+        "AND contype='f' AND NOT convalidated") == []
 
 
-def test_model_room_keeps_concurrent_reserved_call_visible_to_the_next_writer(core):
+def test_model_room_keeps_concurrent_reserved_call_visible_to_the_next_writer(core, tmp_path):
     now, ready = core.clock(), Barrier(2)
-    core.store.insert("jobs", job_id="target", kind="chat", state="RUNNING",
-                      idempotency_key="headroom-target", created_at=now, updated_at=now)
-    settings = SimpleNamespace(paid_model=SimpleNamespace(per_request_calls=3))
 
     def reserve(request):
-        with closing(Store(core.settings.database)) as store:
+        with closing(Store(core.store.database, core.store.state_directory)) as store:
             ready.wait(timeout=10)
             try:
                 with store.transaction():
-                    _model_room(store, settings, "target", request)
+                    # model_binding rechecks this paid window under its native ledger lock.
+                    _policy(store, core.settings, core.clock)
+                    _model_room(store, core.settings, "target", request)
                     store.insert("model_usage", usage_id=request, request_id=request,
                                  job_id="target", scenario="content_video_preview",
                                  provider="synthetic", model="synthetic", state="RESERVED",
@@ -149,14 +155,27 @@ def test_model_room_keeps_concurrent_reserved_call_visible_to_the_next_writer(co
                 return "denied"
             return "reserved"
 
-    with ThreadPoolExecutor(max_workers=2) as workers:
-        assert sorted(workers.map(reserve, ("first", "second"))) == ["denied", "reserved"]
-    assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage") == [
-        {"state": "RESERVED", "billed_micro_usd": 123},
-    ]
+    async def scenario():
+        async with paid_media(core, tmp_path, lambda _: pytest.fail("unexpected provider call"),
+                              call_limit=4):
+            core.store.insert("jobs", job_id="target", kind="chat", state="RUNNING",
+                              idempotency_key="headroom-target", created_at=now, updated_at=now)
+            core.store.insert("model_usage", usage_id="prior", request_id="prior", job_id="target",
+                              scenario="content_video_preview", provider="synthetic",
+                              model="synthetic", state="UNKNOWN", billed_micro_usd=123,
+                              occurred_at=now)
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                assert sorted(workers.map(reserve, ("first", "second"))) == ["denied", "reserved"]
+            assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage "
+                                   "WHERE job_id='target' ORDER BY record_sequence") == [
+                {"state": "UNKNOWN", "billed_micro_usd": 123},
+                {"state": "RESERVED", "billed_micro_usd": 123},
+            ]
+
+    run(scenario())
 
 
-def test_model_room_vm_work_does_not_grow_with_unrelated_history(core):
+def test_model_room_work_does_not_grow_with_unrelated_history(core, monkeypatch):
     s, now = core.store, core.clock()
     settings = SimpleNamespace(paid_model=SimpleNamespace(per_request_calls=4))
     with s.transaction():
@@ -167,43 +186,44 @@ def test_model_room_vm_work_does_not_grow_with_unrelated_history(core):
                  scenario="content_video_preview", provider="synthetic", model="synthetic",
                  state="RESERVED", billed_micro_usd=123, occurred_at=now)
 
-    def steps():
-        _model_room(s, settings, "target")
-        count = 0
+    def scanned_rows():
+        visited = []
+        query_rows = s.rows
 
-        def progress():
-            nonlocal count
-            count += 1
-            return 0
+        def inspect(query, parameters):
+            plan = s.one("EXPLAIN (ANALYZE, FORMAT JSON) " + query, parameters)["QUERY PLAN"]
+            nodes = [plan[0]["Plan"]]
+            while nodes:
+                node = nodes.pop()
+                visited.append((node["Actual Rows"] + node.get("Rows Removed by Filter", 0))
+                               * node["Actual Loops"])
+                nodes.extend(node.get("Plans", []))
+            return query_rows(query, parameters)
 
-        changes = s.db.total_changes
-        s.db.set_progress_handler(progress, 1)
-        try:
+        with monkeypatch.context() as patch, s.read_snapshot():
+            patch.setattr(s, "rows", inspect)
             _model_room(s, settings, "target")
-        finally:
-            s.db.set_progress_handler(None, 0)
-        assert s.db.total_changes == changes
-        return count
+        return sum(visited)
 
-    initial = steps()
-    with s.transaction():
-        s.db.executemany(
-            "INSERT INTO model_usage(usage_id,request_id,job_id,scenario,provider,model,"
-            "state,billed_micro_usd,occurred_at) VALUES (?,?,'other','chat','synthetic',"
-            "'synthetic',?,123,?)",
-            ((f"history-{index}", f"history-{index}",
-              ("SETTLED", "RESERVED", "UNKNOWN")[index % 3], now) for index in range(1000)),
-        )
-    # A wide deterministic bound catches a history scan without timing assertions
-    # or depending on a particular SQLite query-plan rendering.
-    assert steps() <= initial + 100
+    initial = scanned_rows()
+    s.execute(
+        "INSERT INTO model_usage(usage_id, request_id, job_id, scenario, provider, model, "
+        "state, billed_micro_usd, occurred_at) SELECT 'history-'||i, 'history-'||i, "
+        "'other','chat','synthetic','synthetic', "
+        "(ARRAY['SETTLED','RESERVED','UNKNOWN'])[1+mod(i,3)],123,%s FROM generate_series(1,1000) i",
+        (now,),
+    )
+    s.execute("ANALYZE model_usage")
+    assert scanned_rows() <= initial + 100
 
 
 def test_disabled_video_requires_explicit_configuration_without_changing_metadata(core):
     module, item_id, source = metadata(core, enabled=False)
     with pytest.raises(CoreError, match="BILI_VIDEO_DISABLED"):
         module.schedule(item_id, source)
-    assert core.store.one("SELECT result_status FROM observations WHERE event_id=?", (source,)) == {
+    assert core.store.one((
+        'SELECT result_status FROM observations WHERE event_id=%s'
+    ), (source,)) == {
         "result_status": "FETCHED"
     }
     assert not core.store.rows("SELECT * FROM bili_video_items")
@@ -212,7 +232,7 @@ def test_disabled_video_requires_explicit_configuration_without_changing_metadat
 def test_native_child_requires_capability_and_preserves_original_reading_item(core):
     module, item_id, source = metadata(core)
     original = core.store.one(
-        "SELECT read_request_id FROM content_items WHERE item_id=?", (item_id,)
+        'SELECT read_request_id FROM content_items WHERE item_id=%s', (item_id,)
     )
     child = module.schedule(item_id, source)
     assert module.schedule(item_id, source) == child
@@ -222,12 +242,12 @@ def test_native_child_requires_capability_and_preserves_original_reading_item(co
     assert item["request_id"] == child
     assert item["max_bytes"] == 32 * 1024 * 1024 + 1024 * 1024
     assert item["max_requests"] == 8 and item["max_items"] == 1
-    native = core.store.one("SELECT * FROM exploration_requests WHERE request_id=?", (child,))
+    native = core.store.one('SELECT * FROM exploration_requests WHERE request_id=%s', (child,))
     assert native["reserved_bytes"] == item["max_bytes"]
     assert native["reserved_requests"] == item["max_requests"]
     assert native["lease_until"] == item["media"]["deadline"]
     assert (
-        core.store.one("SELECT read_request_id FROM content_items WHERE item_id=?", (item_id,))
+        core.store.one('SELECT read_request_id FROM content_items WHERE item_id=%s', (item_id,))
         == original
     )
     assert not core.store.rows("SELECT * FROM model_usage")
@@ -295,6 +315,8 @@ def test_offset_content_deadline_is_normalized_before_comparing_to_utc_policy(co
         ("proof.declared_bytes", 40_000_000),
     ],
 )
+
+
 def test_prepare_rejects_unbound_or_unbounded_source_without_phase_or_cost(core, path, value):
     module, item = leased(core)
     body = preparation(item)
@@ -323,6 +345,8 @@ def test_lost_prepare_ack_uses_readonly_receipt_after_expiry_without_second_prep
 @pytest.mark.parametrize(
     "mutation", ["wrong_selection", "wrong_prepare", "bytes", "input", "range", "url"]
 )
+
+
 def test_upload_rejects_modified_materialization_before_any_paid_reservation(core, mutation):
     module, item, _, result = prepared(core)
     body = upload_body(item, result)
@@ -358,7 +382,7 @@ def test_late_erased_reader_receipt_settles_only_original_metering(core):
     body = final_result(item, result)
     assert module.result("bili", item["request_id"], body) == {"accepted": True}
     attempt = core.store.one(
-        "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
     )
     assert attempt["state"] == "CANCELLED" and attempt["observed_bytes"] == 1500
     assert attempt["context_json"] == "{}" and attempt["result_event_ids_json"] == "[]"
@@ -375,10 +399,10 @@ def test_overrun_receipt_retains_observed_usage_and_unknown_reservation(core):
     over = item["max_bytes"] + 1
     module.result("bili", item["request_id"], final_result(item, result, used_bytes=over))
     native = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (item["request_id"],)
     )
     attempt = core.store.one(
-        "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
     )
     assert native["state"] == "UNKNOWN" and native["used_bytes"] is None
     assert native["reserved_bytes"] == item["max_bytes"]
@@ -388,12 +412,12 @@ def test_overrun_receipt_retains_observed_usage_and_unknown_reservation(core):
 def test_restore_fences_pending_native_work_without_clearing_its_reservations(core):
     module, item, _, _ = prepared(core)
     native = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (item["request_id"],)
     )
     with core.store.transaction():
         restore_bili_video(core.store, core.clock())
     row = core.store.one(
-        "SELECT * FROM exploration_requests WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM exploration_requests WHERE request_id=%s', (item["request_id"],)
     )
     assert row["state"] == "UNKNOWN" and row["reserved_bytes"] == native["reserved_bytes"]
     with pytest.raises(CoreError, match="BILI_VIDEO_RECONCILIATION_REQUIRED"):
@@ -401,9 +425,10 @@ def test_restore_fences_pending_native_work_without_clearing_its_reservations(co
 
 
 def test_migration_preserves_existing_data_and_refuses_downgrade_with_media_history(core, tmp_path):
-    module, item, _, _ = prepared(core)
-    before = core.store.rows("SELECT * FROM reading_attempts")
+    _, item, _, _ = prepared(core)
     database = historical_database(core.store, tmp_path / "bili.db", "0032_bili_video")
+    with closing(open_historical(database)) as prior:
+        before = rows(prior, "SELECT * FROM reading_attempts")
     config = Config()
     config.set_main_option(
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
@@ -413,10 +438,10 @@ def test_migration_preserves_existing_data_and_refuses_downgrade_with_media_hist
     )
     with pytest.raises(RuntimeError, match="BILI_VIDEO_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"):
         command.downgrade(config, "0031_voice_nodes")
-    with closing(Store(database)) as store:
-        assert store.rows("SELECT * FROM reading_attempts") == before
-        historical = BiliVideoService(store, core.settings, module.exploration, clock=core.clock)
-        assert historical.context(item["media"]["content_item_id"])["state"] == "PREPARED"
+    with closing(open_historical(database)) as store:
+        assert rows(store, "SELECT * FROM reading_attempts") == before
+        assert one(store, "SELECT state FROM bili_video_items WHERE item_id=?",
+                   (item["media"]["content_item_id"],))["state"] == "PREPARED"
 
 
 @pytest.mark.parametrize("need_clips", [False, True])
@@ -439,7 +464,7 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
     async def scenario():
         async with paid_media(core, tmp_path, provider) as (module, item, prepared):
             root = core.store.one(
-                "SELECT * FROM events WHERE event_id=?", (item["media"]["source_event_id"],)
+                'SELECT * FROM events WHERE event_id=%s', (item["media"]["source_event_id"],)
             )
             preview_body = upload_body(item, prepared)
             preview = await module.upload("bili", item["request_id"], preview_body)
@@ -463,10 +488,12 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
             assert result["evidence"]["visual_observed"] is True
             assert len(result["evidence"]["phases"]) == len(phases)
             assert (
-                core.store.one("SELECT * FROM events WHERE event_id=?", (root["event_id"],)) == root
+                core.store.one((
+                    'SELECT * FROM events WHERE event_id=%s'
+                ), (root["event_id"],)) == root
             )
             output = core.store.one(
-                "SELECT * FROM observations WHERE event_id=?", (result["event_id"],)
+                'SELECT * FROM observations WHERE event_id=%s', (result["event_id"],)
             )
             assert output["source_kind"] == "text" and output["result_status"] == "FETCHED"
             usage = phase_usage(core)
@@ -501,12 +528,9 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
     assert calls[0][1]["response_format"] == {"type": "json_object"}
 
 
-@pytest.mark.parametrize("kind", ["daily", "task"])
-def test_cloud_zero_limit_rejects_before_provider_and_native_charge(core, tmp_path, kind):
+def test_cloud_analysis_keeps_native_charge_without_currency_allocation(core, tmp_path):
     calls = []
-    cloud = CloudBudgetConfig(
-        **{"daily_micro_cny" if kind == "daily" else "video_per_item_micro_cny": 0}
-    )
+    cloud = CloudBudgetConfig()
 
     def provider(request):
         calls.append(request)
@@ -514,11 +538,10 @@ def test_cloud_zero_limit_rejects_before_provider_and_native_charge(core, tmp_pa
 
     async def scenario():
         async with paid_media(core, tmp_path, provider, cloud=cloud) as (module, item, prepared):
-            with pytest.raises(CoreError, match="CLOUD_.*BUDGET_EXHAUSTED"):
-                await module.upload("bili", item["request_id"], upload_body(item, prepared))
-            assert not calls
-            assert not phase_usage(core)
-            assert not phase_costs(core)
+            await module.upload("bili", item["request_id"], upload_body(item, prepared))
+            assert len(calls) == 1
+            assert len(phase_usage(core)) == 1
+            assert phase_costs(core)[0]["amount_micro_cny"] > 0
 
     run(scenario())
 
@@ -579,7 +602,7 @@ def test_lost_model_response_retains_unknown_cost_and_forbids_upload_repayment(c
                 final_result(item, prepared, status="UNKNOWN", used_requests=0, used_bytes=0),
             )
             meter = core.store.one(
-                "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+                'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
             )
             assert meter["state"] == "UNKNOWN"
             assert meter["observed_requests"] == 4 and meter["observed_bytes"] == 1000
@@ -590,7 +613,7 @@ def test_lost_model_response_retains_unknown_cost_and_forbids_upload_repayment(c
 def test_source_erased_during_paid_await_keeps_fee_and_cannot_resurrect_analysis(core, tmp_path):
     def provider(_):
         source = core.store.one("SELECT source_event_id FROM bili_video_items")["source_event_id"]
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [source], core.clock())
         return model_response({"analysis": "这段结果必须因擦除丢弃", "need_clips": False})
 
@@ -632,36 +655,39 @@ def test_offset_live_window_is_the_shortest_child_deadline(core, tmp_path):
     run(scenario())
 
 
-def test_clip_reservation_counts_the_preview_fee_against_the_same_item_limit(core, tmp_path):
+def test_clip_keeps_preview_and_clip_charges_above_item_currency_amount(core, tmp_path):
     calls = []
 
     def provider(request):
         calls.append(request)
         return model_response(
-            {"analysis": "需要检查预先定义的片段", "need_clips": True}, tokens=18000
+            {"analysis": "需要检查预先定义的片段", "need_clips": True}
+            if len(calls) == 1 else {"analysis": "选定片段的局部画面"}, tokens=18000
         )
 
     async def scenario():
-        cloud = CloudBudgetConfig(video_per_item_micro_cny=150000)
+        cloud = CloudBudgetConfig()
         async with paid_media(core, tmp_path, provider, cloud=cloud) as (module, item, prepared):
             preview = await module.upload("bili", item["request_id"], upload_body(item, prepared))
             assert preview["next_selection"] is not None
             cost = core.store.one("SELECT * FROM cloud_cost_snapshots WHERE task_kind='video'")
             assert cost["accounted_micro_usd"] == 18040
             assert cost["task_id"] == "content:" + item["media"]["content_item_id"]
-            assert 18040 * 8 < cloud.video_per_item_micro_cny
-            with pytest.raises(CoreError, match="CLOUD_TASK_BUDGET_EXHAUSTED"):
-                await module.upload(
-                    "bili",
-                    item["request_id"],
-                    upload_body(item, prepared, preview["next_selection"]),
-                )
-            assert len(calls) == 1
-            assert len(phase_usage(core)) == 1
-            assert phase_costs(core) == [cost]
+            assert cost["amount_micro_cny"] == 18040 * 8
+            await module.upload(
+                "bili", item["request_id"], upload_body(item, prepared, preview["next_selection"]))
+            assert len(calls) == 2
+            assert len(phase_usage(core)) == 2
+            # Physical update ordering is not part of the original fee evidence.
+            original = next(row for row in phase_costs(core)
+                            if row["reference_id"] == cost["reference_id"])
+            assert {k: v for k, v in original.items() if k != "record_sequence"} == {
+                k: v for k, v in cost.items() if k != "record_sequence"}
+            assert sum(row["amount_micro_cny"] for row in phase_costs(core)) == 2 * 18040 * 8
             partial = module.context(item["media"]["content_item_id"])
             assert partial["result_status"] == "FETCHED"
-            assert [phase["phase"] for phase in partial["evidence"]["phases"]] == ["preview"]
+            assert [phase["phase"] for phase in partial["evidence"]["phases"]] == [
+                "preview", "clips"]
 
     run(scenario())
 
@@ -702,7 +728,7 @@ def test_prepare_receipt_cannot_be_followed_by_a_smaller_settled_request_count(c
     with pytest.raises(CoreError, match="BILI_VIDEO_RESULT_INVALID"):
         module.result("bili", item["request_id"], body)
     meter = core.store.one(
-        "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+        'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
     )
     assert meter["state"] == "RUNNING" and meter["observed_requests"] == 3
     assert meter["result_sha256"] is None
@@ -717,7 +743,7 @@ def test_known_receipt_cannot_reduce_the_already_received_download_meter(core, t
         ) as (module, item, prepared):
             preview = await module.upload("bili", item["request_id"], upload_body(item, prepared))
             meter = core.store.one(
-                "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+                'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
             )
             assert meter["observed_requests"] == 4 and meter["observed_bytes"] == 1000
             for counts in ({"used_requests": 3}, {"used_bytes": 999}):
@@ -726,7 +752,7 @@ def test_known_receipt_cannot_reduce_the_already_received_download_meter(core, t
                     module.result("bili", item["request_id"], body)
                 assert (
                     core.store.one(
-                        "SELECT * FROM reading_attempts WHERE request_id=?", (item["request_id"],)
+                        'SELECT * FROM reading_attempts WHERE request_id=%s', (item["request_id"],)
                     )
                     == meter
                 )
@@ -758,7 +784,7 @@ def test_exact_followup_binds_only_new_phases_to_current_consumer(core, tmp_path
         ) as (module, item, prepared):
             root = core.store.one("SELECT * FROM bili_video_items")
             original_job = core.store.one(
-                "SELECT job_id FROM jobs WHERE event_id=?", (root["owner_event_id"],)
+                'SELECT job_id FROM jobs WHERE event_id=%s', (root["owner_event_id"],)
             )["job_id"]
 
             async def followup(text="继续读一下"):
@@ -812,7 +838,7 @@ def test_exact_followup_binds_only_new_phases_to_current_consumer(core, tmp_path
             sources = {
                 row["source_event_id"]
                 for row in core.store.rows(
-                    "SELECT source_event_id FROM event_dependencies WHERE event_id=?",
+                    'SELECT source_event_id FROM event_dependencies WHERE event_id=%s',
                     (result["event_id"],),
                 )
             }
@@ -824,11 +850,11 @@ def test_exact_followup_binds_only_new_phases_to_current_consumer(core, tmp_path
             with pytest.raises(CoreError):
                 await module.upload("bili", item["request_id"], preview_body)
             assert len(calls) == len(usage)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [consumer["event_id"]], core.clock())
             assert module.context(root["item_id"]) is None
             assert core.store.one(
-                "SELECT redacted FROM events WHERE event_id=?", (result["event_id"],)
+                'SELECT redacted FROM events WHERE event_id=%s', (result["event_id"],)
             ) == {"redacted": 1}
             assert phase_usage(core) == usage
 
@@ -847,7 +873,7 @@ def test_followup_arriving_during_model_cannot_move_or_repay_started_phase(core,
         with Core(core.settings, clock=core.clock) as independent:
             assert independent.store is not core.store
             assert independent.claim_job("wait-for-original-preview") is None
-            assert independent.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert independent.store.one('SELECT state FROM jobs WHERE job_id=%s',
                 (admitted["job_id"],)) == {"state": "QUEUED"}
         return model_response({"analysis": "旧阶段返回的局部结果", "need_clips": False})
 
@@ -885,6 +911,8 @@ def test_followup_arriving_during_model_cannot_move_or_repay_started_phase(core,
 @pytest.mark.parametrize(
     "text,reference", [("先聊别的", None), ("不用继续看了", None), ("解释这里", 999)]
 )
+
+
 def test_unrelated_or_negative_followup_cannot_authorize_new_phase(core, tmp_path, text, reference):
     async def scenario():
         controls = {}
@@ -916,7 +944,7 @@ def test_erasing_new_consumer_during_await_scrubs_its_phase_without_erasing_orig
     controls = {}
 
     def provider(_):
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [controls["consumer_id"]], core.clock())
         return model_response({"analysis": "消费者已经擦除的结果", "need_clips": False})
 
@@ -927,7 +955,7 @@ def test_erasing_new_consumer_during_await_scrubs_its_phase_without_erasing_orig
             prepared,
         ):
             source = core.store.one(
-                "SELECT * FROM events WHERE event_id=?", (item["media"]["source_event_id"],)
+                'SELECT * FROM events WHERE event_id=%s', (item["media"]["source_event_id"],)
             )
             window = controls["window"]
             consumer, _ = await admit(
@@ -948,7 +976,7 @@ def test_erasing_new_consumer_during_await_scrubs_its_phase_without_erasing_orig
                 "output_event_id": None,
             }
             retained = core.store.one(
-                "SELECT * FROM events WHERE event_id=?", (source["event_id"],)
+                'SELECT * FROM events WHERE event_id=%s', (source["event_id"],)
             )
             assert retained["redacted"] == 0 and retained["body_json"] == source["body_json"]
 
@@ -1034,7 +1062,7 @@ def test_two_video_inputs_keep_foreground_call_room_and_still_produce_a_reply(
             assert len({row["task_id"] for row in costs}) == (1 if call_limit <= 5 else 2)
             assert await core.run_once()
             assert (
-                core.store.one("SELECT state FROM jobs WHERE job_id=?", (original_job,))["state"]
+                core.store.one('SELECT state FROM jobs WHERE job_id=%s', (original_job,))["state"]
                 == "SUCCEEDED"
             )
             assert (
@@ -1046,7 +1074,7 @@ def test_two_video_inputs_keep_foreground_call_room_and_still_produce_a_reply(
             assert reply["state"] == "PENDING" and "两份原始字幕" in reply["content_json"]
             assert (
                 core.store.one(
-                    "SELECT COUNT(*) n FROM model_admissions WHERE logical_request_id=?",
+                    'SELECT COUNT(*) n FROM model_admissions WHERE logical_request_id=%s',
                     (original_job,),
                 )["n"]
                 <= call_limit

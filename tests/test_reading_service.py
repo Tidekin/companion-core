@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
 from companion.exploration import ReadResult
@@ -43,10 +44,10 @@ def test_superseded_queued_read_does_not_block_the_next_owner_request(core):
     item = core.reading.lease("web")
     assert item["request_id"] == second
     assert core.store.one(
-        "SELECT state,started_at,reserved_requests FROM exploration_requests WHERE request_id=?",
+        'SELECT state,started_at,reserved_requests FROM exploration_requests WHERE request_id=%s',
         (first,),
     ) == {"state": "CANCELLED", "started_at": None, "reserved_requests": 1}
-    assert not core.store.one("SELECT 1 FROM reading_attempts WHERE request_id=?", (first,))
+    assert not core.store.one('SELECT 1 FROM reading_attempts WHERE request_id=%s', (first,))
 
 
 @pytest.mark.parametrize("source", ["web", "bilibili", "heybox"])
@@ -58,12 +59,12 @@ def test_commit_binds_real_observation_ids_and_exact_evidence(core, source):
     result = core.reading.complete(adapter, item["request_id"], receipt)
     assert result["state"] == "DONE" and len(result["event_ids"]) == 1
     event_id = result["event_ids"][0]
-    stored = core.store.one("SELECT * FROM observations WHERE event_id=?", (event_id,))
+    stored = core.store.one('SELECT * FROM observations WHERE event_id=%s', (event_id,))
     evidence = json.loads(stored["evidence_json"])["read_observation"]
     assert evidence["content_sha256"] == body["observations"][0]["content_sha256"]
     assert evidence["coverage"] == body["observations"][0]["coverage"]
     assert evidence["quotes"] == body["observations"][0]["quotes"]
-    assert core.store.one("SELECT * FROM event_dependencies WHERE event_id=?", (event_id,))[
+    assert core.store.one('SELECT * FROM event_dependencies WHERE event_id=%s', (event_id,))[
         "source_event_id"
     ] == "evt_test_1"
     assert core.reading.complete(adapter, item["request_id"], receipt)["duplicate"]
@@ -107,7 +108,7 @@ def test_late_success_settles_usage_without_committing_revoked_content(core, cha
     if change == "new_input":
         accept(core, 2, text="先聊别的")
     elif change == "epoch":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             advance_epoch(core.store)
     elif change == "expired":
         core.clock.advance(31)
@@ -171,6 +172,7 @@ def test_actual_worker_through_authenticated_core_http_commits_parser_evidence(c
     monkeypatch.setattr(worker_v1, "WebHTTP", lambda hosts: WebHTTP(hosts, pool))
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
 
     async def scenario():
         async with httpx.AsyncClient(
@@ -214,7 +216,7 @@ def test_accepted_goal_read_survives_new_turn_but_source_erasure_revokes_it(core
     assert item["context"]["root_task_id"] == goal_id
     accept(core, 2, "我们先聊别的，继续原任务")
     assert core.reading.validate_read("web", item["request_id"], validation(item))["valid"]
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     with pytest.raises(CoreError):
         core.reading.validate_read("web", item["request_id"], validation(item))

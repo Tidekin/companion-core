@@ -72,7 +72,7 @@ def test_authenticated_card_reader_success_reaches_separate_chat_context(core, t
             assert {event["event_id"], observation} <= set(reading["source_event_ids"])
             assert any(item["event_id"] == observation for item in reading["items"])
             assert core.store.rows(
-                "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (observation,),
+                'SELECT source_event_id FROM event_dependencies WHERE event_id=%s', (observation,),
             ) == [{"source_event_id": event["event_id"]}]
             assert not sends
 
@@ -181,27 +181,30 @@ def test_card_source_drift_or_erasure_prevents_actual_read_and_result(core, tmp_
             if drift == "body":
                 body = json.loads(event["body_json"])
                 body["rich"]["segments"][0]["fields"][0]["value"] = "changed"
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                                    (encode(body), event["event_id"]))
             elif drift in {"receipt", "signature"}:
                 key = owner_input.INPUT + event["event_id"]
                 value = json.loads(core.store.one(
-                    "SELECT value FROM runtime_meta WHERE key=?", (key,),
+                    'SELECT value FROM runtime_meta WHERE key=%s', (key,),
                 )["value"])
                 if drift == "receipt":
                     value["capture"]["input_sha256"] = "0" * 64
                 else:
                     value["capture"]["signature"] = "0" * 128
                 core.store.execute(
-                    "UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), key),
+                    'UPDATE runtime_meta SET value=%s WHERE key=%s', (encode(value), key),
                 )
             elif drift == "target":
-                core.store.execute("UPDATE exploration_requests SET url=?", (URL + "7",))
+                core.store.execute('UPDATE exploration_requests SET url=%s', (URL + "7",))
             elif drift == "source":
-                core.store.execute("UPDATE events SET source='observation.heybox' WHERE event_id=?",
+                core.store.execute((
+                    "UPDATE events SET source='observation.heybox' WHERE "
+                    'event_id=%s'
+                ),
                                    (event["event_id"],))
             else:
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
             with pytest.raises(CoreError):
                 core.reading.validate_read("reader", work["request_id"],

@@ -28,8 +28,7 @@ async def group(core, tmp_path, period, allowance):
     def protocol(request):
         protocol_calls.append(request.url.path)
 
-    approved_live(core, tmp_path, max_output_tokens=4096, per_attempt_micro_usd=100000,
-                  per_request_micro_usd=200000)
+    approved_live(core, tmp_path, max_output_tokens=4096, )
     scope = policy(core, **{period: {"send_attempts": allowance}})
     async with host(core, tmp_path, source,
         policy=SegmentedReplyConfig(min_chars=4, max_segments=2, interval_ms=0),

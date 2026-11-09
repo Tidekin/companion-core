@@ -54,9 +54,11 @@ def archived(core, tmp_path, *, private=False, segmented=False):
     message = message.model_copy(update={"source_event_id": source_id,
         "event_id": "evt_" + hashlib.sha256(source_id.encode()).hexdigest()})
     accepted = core.ingest(message, "archived-input")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (accepted["job_id"],))
-    job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
-                         "WHERE job_id=?", (accepted["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (accepted["job_id"],))
+    job = core.store.one((
+        'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+        'USING(event_id) WHERE job_id=%s'
+    ), (accepted["job_id"],))
     core.settings.mode = "live"
     captured = dict(kind="authenticated_onebot_ws", window_sha256=policy.plan_sha256,
         event_id=message.event_id, source_event_id=source_id,
@@ -112,11 +114,13 @@ def archived(core, tmp_path, *, private=False, segmented=False):
         mids = enqueue_reply_parts(core.store, job, parts, 0, core.clock())
         group = reply_group(core.store, mids[0])
         envelopes = segment_envelopes(group)
-        original = core.store.one("SELECT * FROM events WHERE event_id=?", (message.event_id,))
+        original = core.store.one('SELECT * FROM events WHERE event_id=%s', (message.event_id,))
         for i, mid in enumerate(mids):
-            row = core.store.one("SELECT * FROM outbox WHERE message_id=?", (mid,))
-            core.store.execute("UPDATE outbox SET state=?,sent_at=?,provider_message_id=? "
-                "WHERE message_id=?", ("SENT" if i == 0 else "CANCELLED",
+            row = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (mid,))
+            core.store.execute((
+                'UPDATE outbox SET state=%s,sent_at=%s,'
+                'provider_message_id=%s WHERE message_id=%s'
+            ), ("SENT" if i == 0 else "CANCELLED",
                 core.clock() if i == 0 else None, "1234" if i == 0 else None, mid))
             proof = dict(message_id=mid, event_id=message.event_id,
                          plan_sha256=policy.plan_sha256, privacy_epoch=0)

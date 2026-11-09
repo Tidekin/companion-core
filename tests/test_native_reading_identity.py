@@ -30,10 +30,10 @@ def test_native_reader_rejects_changed_identity_but_retains_original_usage(
             item = await lease(client)
             reservation = core.store.one("SELECT * FROM exploration_requests")
             if drift == "target":
-                core.store.execute("UPDATE exploration_requests SET url=? WHERE request_id=?",
+                core.store.execute('UPDATE exploration_requests SET url=%s WHERE request_id=%s',
                                    (URL + "7", item["request_id"]))
             else:
-                core.store.execute("UPDATE events SET source=? WHERE event_id=?",
+                core.store.execute('UPDATE events SET source=%s WHERE event_id=%s',
                                    ("observation.bilibili", event["event_id"]))
             checked = await validate(client, item)
             assert checked.status_code in {403, 409}

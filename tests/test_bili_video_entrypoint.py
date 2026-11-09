@@ -49,7 +49,7 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
         if body["model"] == "synthetic-bili-video":
             if erase_during_model:
                 owner = core.store.one("SELECT owner_event_id FROM bili_video_items")
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [owner["owner_event_id"]], core.clock())
             count = sum(row["model"] == "synthetic-bili-video" for row in calls)
             return model_response({"analysis": "采样帧有蓝色区域", "need_clips": True}
@@ -108,20 +108,25 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
                         "content": core.store.rows(
                             "SELECT state,error_code FROM content_items"),
                         "audit": core.store.rows(
-                            "SELECT action,safe_detail_json FROM audit_log "
-                            "ORDER BY rowid DESC LIMIT 4")}
+
+                                'SELECT action,safe_detail_json FROM '
+                                'audit_log ORDER BY record_sequence DESC '
+                                'LIMIT 4'
+                            )}
                     second = await reader_once(
                         isolated, cfg.core_url, core.clock, media, media=True,
                     )
                     assert len(second["requests"]) == 4 and second["remaining"] == 0
                     if not erase_during_model:
                         await asyncio.wait_for(finished.wait(), 8)
-                    snapshot = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+                    snapshot = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
                     restart = await reader_once(
                         isolated, cfg.core_url, core.clock, media, media=True,
                     )
                     assert restart == {"requests": [], "remaining": 4}
-                    assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == (
+                    assert core.store.rows(
+                        'SELECT * FROM model_usage ORDER BY record_sequence'
+                    ) == (
                         snapshot
                     )
                 finally:
@@ -133,16 +138,17 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
     assert len(instances) == 1 and instances[0].store is not core.store
     assert sends == []
     row = core.store.one("SELECT * FROM bili_video_items")
-    usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+    usage = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
     video = [entry for entry in usage if entry["scenario"].startswith("content_video")]
     assert len(video) == (1 if erase_during_model else 2)
     assert all(entry["state"] == "SETTLED" for entry in video)
     costs = phase_costs(core)
     assert {entry["task_id"] for entry in costs} == {"content:" + row["item_id"]}
-    assert sum(entry["amount_micro_cny"] for entry in costs) <= 1_000_000
+    assert sum(entry["amount_micro_cny"] for entry in costs) == sum(
+        entry["billed_micro_usd"] for entry in video) * 8
     policies = [json.loads(entry["snapshot_json"])["config"] for entry in costs]
-    assert all(policy["video_per_item_micro_cny"] == 1_000_000 for policy in policies)
-    assert all(policy["daily_micro_cny"] == 20_000_000 for policy in policies)
+    assert all(policy["usd_to_cny_micro"] == 8_000_000 for policy in policies)
+    assert all("video_per_item_micro_cny" not in policy for policy in policies)
     if erase_during_model:
         assert row["redacted"] == 1 and row["output_event_id"] is None
         assert row["lease_json"] == row["target_json"] == row["plan_json"] == "{}"
@@ -152,7 +158,7 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
         return
     assert row["state"] == "COMPLETE"
     attempts = core.store.rows(
-        "SELECT state,observed_requests FROM reading_attempts ORDER BY rowid"
+        'SELECT state,observed_requests FROM reading_attempts ORDER BY record_sequence'
     )
     assert attempts == [{"state": "DONE", "observed_requests": 5},
                         {"state": "DONE", "observed_requests": 4}]
@@ -163,10 +169,10 @@ def test_capture_real_http_independent_reader_and_worker_preserve_bounded_eviden
     assert "采样片段里颜色逐渐变红" in final, {
         "output_event_id": row["output_event_id"],
         "output_has_clip_analysis": "采样片段里颜色逐渐变红" in core.store.one(
-            "SELECT body_json FROM events WHERE event_id=?",
+            'SELECT body_json FROM events WHERE event_id=%s',
             (row["output_event_id"],))["body_json"],
         "output_linked_to_request": bool(core.store.one(
-            "SELECT 1 FROM exploration_evidence WHERE request_id=? AND event_id=?",
+            'SELECT 1 FROM exploration_evidence WHERE request_id=%s AND event_id=%s',
             (row["request_id"], row["output_event_id"]))),
         "tool_items": [json.loads(message["content"])["items"] for message in calls[-1]["messages"]
                        if message.get("tool_call_id") == "analyze_shared_video"],
@@ -233,14 +239,15 @@ def test_real_http_unknown_phase_receipt_cannot_repay_after_restart(core, tmp_pa
 
 
 @pytest.mark.parametrize("ceiling", ["item", "day"])
-def test_real_http_clip_phase_obeys_original_one_cny_and_twenty_cny_ceiling(
+def test_real_http_clip_phase_preserves_charges_above_currency_amounts(
     core, tmp_path, ceiling,
 ):
     calls = []
 
     def provider(request):
         calls.append(request)
-        return model_response({"analysis": "局部帧仍需要看原定片段", "need_clips": True})
+        return model_response({"analysis": "局部帧仍需要看原定片段", "need_clips": True}
+                              if len(calls) == 1 else {"analysis": "原定片段的局部蓝色画面"})
 
     async def scenario():
         async with paid_media(core, tmp_path, provider) as (_, item, prepared):
@@ -275,25 +282,19 @@ def test_real_http_clip_phase_obeys_original_one_cny_and_twenty_cny_ceiling(
                     result = await client.post(path, json=upload_body(
                         item, prepared, first.json()["next_selection"],
                     ))
-                    assert result.status_code == 429, result.text
-                    assert result.json() == {"error": (
-                        "CLOUD_TASK_BUDGET_EXHAUSTED" if ceiling == "item"
-                        else "CLOUD_DAILY_BUDGET_EXHAUSTED"
-                    )}
-                    assert len(calls) == 1
-                    assert phase_usage(core) == before
-                    # The rejected clip never creates a new charge or new visual
-                    # claim. Already settled preview evidence remains available.
+                    assert result.status_code == 200, result.text
+                    assert len(calls) == 2
+                    assert len(phase_usage(core)) == len(before) + 1
                     retained = core.store.one("SELECT * FROM bili_video_items")
                     assert retained["state"] == "ANALYZED" and retained["output_event_id"]
-                    observation = core.store.one("SELECT * FROM observations WHERE event_id=?",
+                    observation = core.store.one('SELECT * FROM observations WHERE event_id=%s',
                                                  (retained["output_event_id"],))
                     proof = json.loads(observation["evidence_json"])["bili_video"]
                     assert proof["partial"] and proof["complete_video"] is False
                     assert proof["audio_analyzed"] is False
-                    assert [phase["phase"] for phase in proof["phases"]] == ["preview"]
+                    assert [phase["phase"] for phase in proof["phases"]] == ["preview", "clips"]
                     assert core.store.one("SELECT state FROM bili_video_phases "
-                                          "WHERE phase='clips'") == {"state": "REJECTED"}
+                                          "WHERE phase='clips'") == {"state": "SETTLED"}
                     assert not core.store.one("SELECT 1 FROM outbox")
 
     run(scenario())

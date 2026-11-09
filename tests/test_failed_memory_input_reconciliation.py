@@ -25,8 +25,8 @@ def test_historical_failed_recall_retirement_preserves_original_accounting(
     if mutation == "contract_replay":
         seed = ingest(core, 900, "expired unrelated source",
                       origin=f"seed:FriendMessage:{core.settings.owner_qq_id}")
-        with core.store.transaction():
-            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+        with core.store.transaction(control_write=True):
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                                (seed["job_id"],))
             core.ledger.expire_events(core.store, [seed["event_id"]], core.clock())
         assert core.store.one("SELECT state FROM privacy_erasure_ledger")["state"] == "COMPLETE"
@@ -34,29 +34,30 @@ def test_historical_failed_recall_retirement_preserves_original_accounting(
     async def scenario():
         async with historical_input(core, tmp_path, failure="memory") as (window, client, job):
             core.clock.advance(core.settings.lease_seconds + 1)
-            original_job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+            original_job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],))
             assert original_job["state"] == "FAILED"
             assert original_job["last_error_code"] == "MEMORY_REVIEW_INVALID"
             usage = core.store.one("SELECT * FROM model_usage")
             assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
             if mutation == "new_privacy_epoch":
-                advance_epoch(core.store)
+                with core.store.transaction(control_write=True):
+                    advance_epoch(core.store)
             elif mutation == "contract_replay":
                 from companion.erasure import CONTRACT_KEY, contract_signature
 
                 old_epoch = epoch(core.store)
                 ledger = Path(core.settings.erasure_ledger)
                 ledger_before = await asyncio.to_thread(ledger.read_bytes)
-                core.store.execute("UPDATE runtime_meta SET value='1,legacy' WHERE key=?",
+                core.store.execute("UPDATE runtime_meta SET value='1,legacy' WHERE key=%s",
                                    (CONTRACT_KEY,))
                 with Runtime(core.settings, clock=core.clock) as upgraded:
                     assert upgraded.store is not core.store
                     assert epoch(upgraded.store) == old_epoch + 1
-                    assert upgraded.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                    assert upgraded.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                               (CONTRACT_KEY,))["value"] == contract_signature()
                 assert await asyncio.to_thread(ledger.read_bytes) == ledger_before
             elif mutation in {"unknown", "reserved"}:
-                core.store.execute("UPDATE model_usage SET state=?", (mutation.upper(),))
+                core.store.execute('UPDATE model_usage SET state=%s', (mutation.upper(),))
             elif mutation == "missing_admission":
                 core.store.execute("DELETE FROM model_admissions")
             elif mutation == "outbox":
@@ -66,13 +67,13 @@ def test_historical_failed_recall_retirement_preserves_original_accounting(
                     delivery_key="late-failed-recall", state="FAILED", attempt_count=0,
                     created_at=core.clock(), updated_at=core.clock())
             elif mutation == "active_job":
-                core.store.execute("UPDATE jobs SET state='RUNNING' WHERE job_id=?",
+                core.store.execute("UPDATE jobs SET state='RUNNING' WHERE job_id=%s",
                                    (job["job_id"],))
             elif mutation == "lease":
-                core.store.execute("UPDATE jobs SET lease_until=? WHERE job_id=?",
+                core.store.execute('UPDATE jobs SET lease_until=%s WHERE job_id=%s',
                                    (after(core.clock(), 10), job["job_id"]))
             elif mutation == "foreign_event":
-                core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=?",
+                core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=%s",
                                    (job["event_id"],))
             elif mutation == "superseded":
                 core.store.execute("UPDATE conversations SET reply_revision=reply_revision+1")
@@ -83,10 +84,10 @@ def test_historical_failed_recall_retirement_preserves_original_accounting(
             elif mutation == "wrong_scenario":
                 core.store.execute("UPDATE model_usage SET scenario='chat'")
             elif mutation == "erased_source":
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
             elif mutation == "not_stopped":
-                core.store.execute("DELETE FROM runtime_meta WHERE key=?",
+                core.store.execute('DELETE FROM runtime_meta WHERE key=%s',
                                    (live_text.STOP + window.plan.sha256,))
                 core.store.execute("DELETE FROM runtime_meta WHERE key='live_text_stopped'")
             elif mutation in {"forged_revision", "forged_resolution"}:

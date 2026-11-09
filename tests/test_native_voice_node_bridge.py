@@ -70,14 +70,14 @@ def test_real_voice_nodes_feed_and_receive_native_bridge_custody(core, tmp_path,
                             transport=httpx.MockTransport(protocol)) as native:
                     client.event_hooks["request"].append(inspect)
                     event = await capture(runtime, client, native)
-                    original = core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                    original = core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                                (event["event_id"],))["body_json"]
                     await pump(runtime, client, native).execute(media_row(runtime))
                     worker_config = node_config.model_copy(update={"core_origin": origin})
                     await independent_node(worker_config, certificate, counter, tmp_path,
                                            core.clock.now.timestamp())
                     if reply_mode in {"model", "mixed"}:
-                        job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
+                        job = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s',
                                              (event["event_id"],))
                         args, output = tmp_path / "sdk.pickle", tmp_path / "sdk-requests.json"
                         parts = [{"kind": "voice", "text": TEXT}]
@@ -126,11 +126,11 @@ def test_real_voice_nodes_feed_and_receive_native_bridge_custody(core, tmp_path,
                         {"state": "SENT", "attempt_count": 1}] * (
                             2 if reply_mode == "mixed" else 1)
                     assert core.store.rows(
-                        "SELECT operation,state FROM voice_jobs ORDER BY rowid") == [
+                        'SELECT operation,state FROM voice_jobs ORDER BY record_sequence') == [
                         {"operation": "asr", "state": "TRANSCRIBED"},
                         {"operation": "tts", "state": "READY"}]
                     assert len(child_receipts(counter)) == 2
-                    assert core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                    assert core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                         (event["event_id"],))["body_json"] == original
                     assert not core.store.rows("SELECT * FROM memories")
                     runtime.verify()

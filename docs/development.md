@@ -68,8 +68,9 @@ FileLock 互斥，忙时退出非零；同一次运行的 workers 使用 testmon
 或未登记的动态输入变更仍应显式传相关端到端测试，或使用 `-Full`；本地影响结果不替代冻结
 候选的 CI 证据。不要将缩减结果记录为完整运行。
 
-数据库准备复用已有 session fixture，并按 xdist 官方 FileLock 模式扩展为跨 worker
-一次真实迁移。成功后才发布空数据库；每个测试仍通过 SQLite backup 获得独立数据库。
+数据库准备复用已有 session fixture，每个 pytest worker 迁移一次原生 PostgreSQL 模板，
+关闭模板连接后，通过 `CREATE DATABASE ... TEMPLATE` 为每个测试复制独立数据库。
+专用临时集群的配置与清理边界见[迁移说明](postgresql-migration.md#隔离验证与离线评估)。
 每个 worker 使用自己的进程临时目录，子进程继承它，所有目录仍属于本轮 `.local/test-temp`。
 真实端口测试继续绑定系统分配端口，锁和子进程测试照常执行；不通过删测或替换服务规避冲突。
 
@@ -95,7 +96,7 @@ FileLock 互斥，忙时退出非零；同一次运行的 workers 使用 testmon
 
 `tests/test_outbox_stateful.py` 使用 [Hypothesis 原生状态机](https://hypothesis.readthedocs.io/en/latest/stateful.html)
 的 RuleBasedStateMachine、Bundle、rule 和 invariant，生成 owner/private 的重复输入、租约、
-过期、旧令牌、发送结果和数据库重开序列。复用 Core、传输函数、FakeModel 与 SQLite backup；
+过期、旧令牌、发送结果和数据库重开序列。复用 Core、传输函数、FakeModel 与原生模板复制；
 每个示例由 `core_factory` 获得独立数据库及隐私账本路径，已有 `core` 的 tmp_path 接口保留。
 测试检查无重复计费、旧令牌不能改变投递、发送开始后不自动重发，以及原令牌迟到确认可以
 结算 DELIVERY_UNCERTAIN。范围仅限本地普通私聊 Outbox，不执行外部提供方或 QQ 操作。

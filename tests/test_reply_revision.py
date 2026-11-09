@@ -23,30 +23,63 @@ def frozen(core, parts=PARTS):
     first = accept(core)
     job = core.claim_job("first-worker")
     ids = enqueue_reply_parts(core.store, job, parts, 1500, core.clock())
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (first["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (first["job_id"],))
     return first, job, ids
+
+
+@pytest.mark.parametrize("guard", ["current", "require_current", "require_reply_source", "job"])
+def test_revision_guard_reads_one_source_state_and_rejects_later_revocation(
+    core, monkeypatch, guard,
+):
+    first = accept(core)
+    job = core.claim_job("revision-query-count")
+    original, calls = core.store.one, []
+
+    def observed(statement, parameters=()):
+        calls.append(statement)
+        return original(statement, parameters)
+
+    monkeypatch.setattr(core.store, "one", observed)
+
+    def check():
+        if guard == "job":
+            return reply_revision.check_job(core.store, job)
+        return getattr(reply_revision, guard)(core.store, first["event_id"], 1)
+
+    assert check() is (True if guard == "current" else None)
+    # Job state, both revisions and consumed-source revocation share one snapshot.
+    assert len(calls) == 1
+    core.store.execute("INSERT INTO runtime_meta (key,value) VALUES (%s,'1')",
+                       ("erased_event:" + first["event_id"],))
+    if guard == "current":
+        assert not check()
+    else:
+        with pytest.raises(CoreError, match=reply_revision.SOURCE_RECALLED):
+            check()
 
 
 @pytest.mark.parametrize("state", ["QUEUED", "RUNNING", "RETRY_WAIT"])
 def test_new_input_cancels_only_same_conversation_pending_job(core, state):
     first = accept(core)
-    core.store.execute("UPDATE jobs SET state=? WHERE job_id=?", (state, first["job_id"]))
+    core.store.execute('UPDATE jobs SET state=%s WHERE job_id=%s', (state, first["job_id"]))
     unrelated = accept(core, 7, origin=f"other:FriendMessage:{core.settings.owner_qq_id}")
     second = accept(core, 2, "请先听完我的补充")
     assert second["reply_revision"] == 2
-    assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+    assert core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                           (first["job_id"],)) == {
         "state": "CANCELLED", "last_error_code": reply_revision.SUPERSEDED,
     }
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (unrelated["job_id"],)) == {
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (unrelated["job_id"],)) == {
         "state": "QUEUED",
     }
-    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (first["event_id"],)) == {
+    assert core.store.one((
+        'SELECT redacted FROM events WHERE event_id=%s'
+    ), (first["event_id"],)) == {
         "redacted": 0,
     }
     duplicate = accept(core, 2, "请先听完我的补充")
     assert duplicate["duplicate"] and duplicate["reply_revision"] == 2
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (second["job_id"],)) == {
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (second["job_id"],)) == {
         "state": "QUEUED",
     }
 
@@ -62,13 +95,13 @@ def test_late_model_completion_settles_but_cannot_publish_old_reply(core, kind):
     core.model.callback = lambda: accept(core, 2, "等一下，还有补充")
     assert run(core.run_once())
     assert core.store.rows("SELECT * FROM outbox") == []
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (first["job_id"],)) == {
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (first["job_id"],)) == {
         "state": "CANCELLED",
     }
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
         "state": "SETTLED", "billed_micro_usd": budget.cost(core.settings, 100, 20, 40),
     }
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE 'live_text_stop%'")
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE 'live_text_stop%%'")
 
 
 @pytest.mark.parametrize("parts", [["一条完整回复"], PARTS])
@@ -79,9 +112,11 @@ def test_leased_single_and_segmented_reply_cannot_begin_after_new_input(core, pa
     with pytest.raises(CoreError, match="STALE_DELIVERY_LEASE"):
         begin_send(core.store, pending["message_id"], pending["lease_token"], core.clock(),
                    core.settings)
-    assert core.store.one("SELECT lease_token FROM outbox WHERE message_id=?",
+    assert core.store.one('SELECT lease_token FROM outbox WHERE message_id=%s',
                           (pending["message_id"],)) == {"lease_token": pending["lease_token"]}
-    assert [row["state"] for row in core.store.rows("SELECT state FROM outbox ORDER BY rowid")] == [
+    assert [row["state"] for row in core.store.rows(
+        'SELECT state FROM outbox ORDER BY record_sequence'
+    )] == [
         "CANCELLED" for _ in ids
     ]
     assert lease(core) == []
@@ -93,14 +128,16 @@ def test_inflight_result_survives_new_input_without_replaying_its_tail(core, res
     item = lease(core)[0]
     begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
     accept(core, 2, "我的话还没说完")
-    assert core.store.one("SELECT state FROM outbox WHERE message_id=?", (ids[0],)) == {
+    assert core.store.one('SELECT state FROM outbox WHERE message_id=%s', (ids[0],)) == {
         "state": "SENDING",
     }
     delivery_result(core.store, core.settings, ids[0], DeliveryResult(
         lease_token=item["lease_token"], result=result,
         provider_message_id="123" if result == "SENT" else None,
     ), core.clock())
-    assert [row["state"] for row in core.store.rows("SELECT state FROM outbox ORDER BY rowid")] == [
+    assert [row["state"] for row in core.store.rows(
+        'SELECT state FROM outbox ORDER BY record_sequence'
+    )] == [
         result, "CANCELLED", "CANCELLED",
     ]
     assert lease(core) == []
@@ -113,7 +150,7 @@ def test_companion_worker_waits_for_send_ack_after_accepting_a_new_input(core, m
     second = accept(core, 2, "先听我补充")
     monkeypatch.setattr(private_life, "enabled", lambda settings: True)
     assert core.claim_job("next-worker") is None
-    assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?",
+    assert core.store.one('SELECT state,attempts FROM jobs WHERE job_id=%s',
                           (second["job_id"],)) == {
         "state": "QUEUED", "attempts": 0,
     }
@@ -149,7 +186,7 @@ def test_partial_history_still_checks_the_entire_frozen_manifest(core):
     _, job, ids = frozen(core)
     acknowledge(core, lease(core)[0])
     accept(core, 2)
-    core.store.execute("UPDATE outbox SET content_json=? WHERE message_id=?",
+    core.store.execute('UPDATE outbox SET content_json=%s WHERE message_id=%s',
                        (json.dumps({"text": "altered unsent text"}), ids[2]))
     assert dialogue_history.recent_context_sources(
         core.store, job["conversation_id"], "evt_test_2", 10,
@@ -161,16 +198,18 @@ def test_restart_cannot_requeue_superseded_work_or_refund_usage(core):
     job = core.claim_job("first-worker")
     request = budget.reserve(core.store, core.settings, job["job_id"], "chat",
                              [{"role": "user", "content": "first"}], core.clock())
-    before = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request,))
+    before = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request,))
     accept(core, 2)
     core.clock.advance(core.settings.lease_seconds + 1)
     with Core(core.settings, core.model, core.clock) as restarted:
         claimed = restarted.claim_job("restarted-worker")
         assert claimed["event_id"] == "evt_test_2"
-        assert restarted.store.one("SELECT state FROM jobs WHERE job_id=?", (first["job_id"],)) == {
+        assert restarted.store.one((
+            'SELECT state FROM jobs WHERE job_id=%s'
+        ), (first["job_id"],)) == {
             "state": "CANCELLED",
         }
-        assert restarted.store.one("SELECT * FROM model_usage WHERE request_id=?",
+        assert restarted.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                    (request,)) == before
         with pytest.raises(CoreError, match="REPLY_SUPERSEDED"):
             enqueue(restarted.store, first["event_id"], claimed["conversation_id"],
@@ -182,7 +221,7 @@ def test_source_tracking_fences_a_reply_without_linking_independent_owner_inputs
     second = accept(core, 2)
     job = core.claim_job("latest-worker")
     reply_revision.remember_sources(core.store, job, ["evt_test_1"])
-    assert core.store.rows("SELECT event_id FROM job_sources WHERE job_id=? ORDER BY event_id",
+    assert core.store.rows('SELECT event_id FROM job_sources WHERE job_id=%s ORDER BY event_id',
                            (second["job_id"],)) == [
         {"event_id": "evt_test_1"}, {"event_id": "evt_test_2"},
     ]
@@ -194,7 +233,7 @@ def test_source_tracking_fences_a_reply_without_linking_independent_owner_inputs
         "redacted": 0,
     }
     core.fail_job(job, reply_revision.SOURCE_RECALLED)
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (second["job_id"],)) == {
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (second["job_id"],)) == {
         "state": "CANCELLED",
     }
     assert core.store.rows("SELECT * FROM outbox") == []
@@ -205,12 +244,14 @@ def test_unadmitted_provider_slot_race_waits_without_spending_retry_or_stopping(
     job = core.claim_job("racing-worker")
     monkeypatch.setattr(private_life, "enabled", lambda settings: True)
     core.fail_job(job, "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED")
-    assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?", (first["job_id"],)) == {
+    assert core.store.one((
+        'SELECT state,attempts FROM jobs WHERE job_id=%s'
+    ), (first["job_id"],)) == {
         "state": "RETRY_WAIT", "attempts": 0,
     }
     assert core.store.rows("SELECT * FROM model_usage") == []
     assert core.store.rows("SELECT * FROM outbox") == []
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE 'live_text_stop%'")
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE 'live_text_stop%%'")
 
 
 @pytest.mark.parametrize("keep_history", [False, True])
@@ -225,14 +266,14 @@ def test_prompt_lineage_tracks_only_history_retained_after_context_bounds(core, 
     prompt = core.context(job)
     assert ("已送达的旧问题" in json.dumps(prompt, ensure_ascii=False)) is keep_history
     assert {row["event_id"] for row in core.store.rows(
-        "SELECT event_id FROM job_sources WHERE job_id=?", (second["job_id"],),
+        'SELECT event_id FROM job_sources WHERE job_id=%s', (second["job_id"],),
     )} == ({"evt_test_1", "evt_test_2"} if keep_history else {"evt_test_2"})
 
 
 def test_source_opaque_read_command_is_explicitly_conservative(core):
     first = ingest(core, text="/日记列表")
     assert run(core.run_once())
-    assert core.store.one("SELECT context_tracked FROM jobs WHERE job_id=?",
+    assert core.store.one('SELECT context_tracked FROM jobs WHERE job_id=%s',
                           (first["job_id"],)) == {
         "context_tracked": 0,
     }
@@ -245,9 +286,9 @@ def test_owner_interrupts_dispatched_activity_without_poisoning_observed_usage(
 
     produce(core, tmp_path, monkeypatch, "preempt")
     result = core.store.one("SELECT * FROM life_activity_results")
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (result["job_id"],)) == {
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (result["job_id"],)) == {
         "state": "CANCELLED"}
-    usage = core.store.one("SELECT * FROM model_usage WHERE job_id=?", (result["job_id"],))
+    usage = core.store.one('SELECT * FROM model_usage WHERE job_id=%s', (result["job_id"],))
     assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
     assert not core.store.one("SELECT 1 FROM outbox WHERE action_type='qq.private.proactive'")
 
@@ -256,10 +297,12 @@ def test_a_failed_reply_keeps_its_owner_input_in_history_without_inventing_a_rep
     # Production 2026-10-30: a provider error failed one chat job; the next reply never
     # saw that question because only superseded inputs were kept as unanswered.
     first = accept(core, 1, "我什么时候说过凌晨三点")
-    core.store.execute("UPDATE jobs SET state='FAILED',last_error_code='MODEL_RETRYABLE' "
-                       "WHERE job_id=?", (first["job_id"],))
+    core.store.execute((
+        "UPDATE jobs SET state='FAILED',last_error_code='MODEL_RETRYABLE' "
+        'WHERE job_id=%s'
+    ), (first["job_id"],))
     accept(core, 2, "？在吗")
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+    conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                   (first["event_id"],))["conversation_id"]
     history = dialogue_history.recent_context_sources(core.store, conversation, "evt_test_2", 10)
     assert [row["event_id"] for row in history] == ["evt_test_1"]

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from companion import input_protocol, owner_delivery, poke
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.contracts import CoreError, LeaseRequest
 from companion.model import ModelClient
 from companion.owner_authority_protocol import OwnerSendCheck
@@ -23,6 +24,7 @@ def test_real_native_poke_admission_runner_and_delivery(core, tmp_path, kind):
     capture = signed(env)
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     headers = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
     client = TestClient(app)
     received = client.post("/internal/v1/pokes", headers=headers,
@@ -76,7 +78,7 @@ def test_native_cancel_preserves_original_pre_dispatch_proof(core, tmp_path, evi
         core.clock())["items"][0]
     begin_send(core.store, message_id, item["lease_token"], core.clock(),
                core.settings, clock=core.clock)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
         if evidence == "observed":
             core.store.audit("delivery.result", message_id, "delivery", core.clock(),
@@ -92,7 +94,7 @@ def test_native_cancel_preserves_original_pre_dispatch_proof(core, tmp_path, evi
     else:
         with pytest.raises(CoreError, match="INPUT_CANCEL_BEFORE_SEND_UNPROVEN"):
             input_protocol.cancel_before_send(core.store, core.settings, core.clock, body)
-    stored = core.store.one("SELECT state,attempt_count FROM outbox WHERE message_id=?",
+    stored = core.store.one('SELECT state,attempt_count FROM outbox WHERE message_id=%s',
                             (message_id,))
     assert stored == {"state": "CANCELLED" if evidence == "valid" else "DELIVERY_UNCERTAIN",
                       "attempt_count": 1}

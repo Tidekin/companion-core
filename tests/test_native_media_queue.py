@@ -72,7 +72,7 @@ def test_native_image_queue_preserves_lease_under_core_roundtrip_latency(core, t
                 runtime.verify()
             finally:
                 spool.close()
-            job = core.store.one("SELECT * FROM jobs WHERE event_id=?",
+            job = core.store.one('SELECT * FROM jobs WHERE event_id=%s',
                                  (prepared["event"]["event_id"],))
             config_path, output = tmp_path / "latency-worker.pickle", tmp_path / "latency-wire.json"
             config_path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
@@ -405,7 +405,7 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
             if reference:
                 action = "/get_msg" if reference == "reply" else "/get_forward_msg"
                 assert lookups.count(action) == 1
-                body = json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                body = json.loads(core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                                  (job["event_id"],))["body_json"])
                 nested = body["rich"]["segments"][0]["body"]["media"][0]
                 assert nested["origin"]["kind"] == reference

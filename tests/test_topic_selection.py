@@ -43,7 +43,7 @@ def test_interest_topics_decay_and_dislikes_drop_out(core):
 def test_erased_sources_leave_the_interest_projection(core):
     configure(core)
     event_id = judged(core, 5, ["独立游戏"], 2)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
     assert ts.interest_topics(core.store, core.clock()) == []
 
@@ -162,5 +162,8 @@ def test_watched_items_are_not_proposed_as_new_reads(core):
     core.exploration.complete("bili", request, ReadResult(
         lease_token=token, status="SUCCESS", used_bytes=100,
         items=[ReadItem(title="已经看过的视频", url=url)]))
-    assert core.store.one("SELECT 1 FROM goals WHERE json_extract(scope_json,'$.url')=?",
+    assert core.store.one((
+        'SELECT 1 FROM goals WHERE (CASE WHEN scope_json IS JSON THEN '
+        "scope_json::json #>> '{url}' END)=%s"
+    ),
                           (url,)) is None

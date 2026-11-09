@@ -70,15 +70,15 @@ async def native_image_memory(core, tmp_path, *, no_candidates=False, limit=None
         ids = []
         for number, content in ((900, PREFERENCE), (901, "过期秘密偏好：紫色键盘。")):
             source = await entry.admit(number, content)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 ids.append(core.memory.add(Candidate(subject="user", kind="preference",
                     fact_key=str(number), content=content, evidence_event_id=source["event_id"],
                     evidence_quote=content), core.clock(), confirmed=True))
         # Native owner_private scope uses real current fact validity, not a legacy approved-ID list.
-        core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+        core.store.execute("UPDATE memories SET valid_to=%s WHERE memory_id=%s",
                            (after(core.clock(), -1), ids[1]))
         if no_candidates:
-            core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+            core.store.execute("UPDATE memories SET valid_to=%s WHERE memory_id=%s",
                                (after(core.clock(), -1), ids[0]))
 
         async def admit_image(number):
@@ -93,7 +93,7 @@ async def native_image_memory(core, tmp_path, *, no_candidates=False, limit=None
                 image_transport=httpx.MockTransport(cdn), image_resolver=resolver)
             await pump.execute(row)
             assert not pump.pending(event["event_id"])
-            return core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
+            return core.store.one("SELECT * FROM jobs WHERE event_id=%s", (event["event_id"],))
 
         job = await admit_image(1)
         async with worker_for(core, model) as worker:
@@ -108,12 +108,12 @@ async def native_image_memory(core, tmp_path, *, no_candidates=False, limit=None
                 ):
                     # Expire already-bound originals while the worker lease remains valid.
                     core.clock.advance(image_spool.RETENTION_SECONDS + 1)
-                    assert core.store.one("SELECT lease_until FROM jobs WHERE job_id=?",
+                    assert core.store.one("SELECT lease_until FROM jobs WHERE job_id=%s",
                         (job["job_id"],))["lease_until"] > core.clock()
                 elif mutation == "erased_current" and any(
                     message["role"] == "tool" for message in payload["messages"]
                 ):
-                    with core.store.transaction():
+                    with core.store.transaction(control_write=True):
                         core.ledger.expire_events(core.store, [job["event_id"]], core.clock())
 
             worker.model.client.event_hooks["request"].append(mutate)

@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from companion import api, notices, owner_authority
+from companion.api_store import ApiStore
 from companion.core import Core
 from companion.goals import CommitmentRequest, GoalProposal, GoalScope
 from companion.model import ModelClient
@@ -37,6 +38,7 @@ async def owner_environment(core, tmp_path):
     app = api.create_app(core.settings)
     with Core(core.settings, core.model, core.clock) as api_core:
         app.state.core = api_core
+        app.state.api_store = ApiStore(api_core.database, api_core.settings.state_directory)
         assert api_core.store is not core.store
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
             base_url="http://127.0.0.1", headers={"Authorization": "Bearer " +
@@ -59,7 +61,7 @@ async def admit_owner(client, core, template, key, authority, number, text):
     result = await client.post("/internal/v1/inbox/events", json=event.model_dump(mode="json"),
                                headers={"X-Idempotency-Key": event.event_id})
     assert result.status_code == 202, result.text
-    job = core.store.one("SELECT authority_json FROM jobs WHERE job_id=?",
+    job = core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s',
                          (result.json()["job_id"],))
     assert json.loads(job["authority_json"]) == authority
     return event.model_dump(mode="json"), capture
@@ -116,11 +118,11 @@ def test_additional_goal_evidence_recall_cancels_notice_and_keeps_authority_acti
                 assert json.loads(job["authority_json"]) == authority
                 expected_sources = {event["event_id"] for event in inputs}
                 assert {row["source_event_id"] for row in core.store.rows(
-                    "SELECT source_event_id FROM event_dependencies WHERE event_id=?",
+                    'SELECT source_event_id FROM event_dependencies WHERE event_id=%s',
                     (job["event_id"],),
                 )} == expected_sources
                 assert {row["event_id"] for row in core.store.rows(
-                    "SELECT event_id FROM job_sources WHERE job_id=?", (job["job_id"],),
+                    'SELECT event_id FROM job_sources WHERE job_id=%s', (job["job_id"],),
                 )} == expected_sources | {job["event_id"]}
                 if recall_at == "queued":
                     await recall()
@@ -130,23 +132,25 @@ def test_additional_goal_evidence_recall_cancels_notice_and_keeps_authority_acti
                         "notice-source-closure", job_id=job["job_id"],
                     ) is (recall_at != "queued")
                 if recall_at == "ready":
-                    assert core.store.one("SELECT state FROM outbox WHERE origin_event_id=?",
+                    assert core.store.one('SELECT state FROM outbox WHERE origin_event_id=%s',
                                           (job["event_id"],)) == {"state": "PENDING"}
                     await recall()
 
-                assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                assert core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                       (job["job_id"],)) == (
                     {"state": "SUCCEEDED", "last_error_code": None} if recall_at == "ready" else
                     {"state": "CANCELLED", "last_error_code": "PRIVACY_CHANGED"}
                 )
-                assert core.store.one("SELECT redacted,body_json FROM events WHERE event_id=?",
+                assert core.store.one('SELECT redacted,body_json FROM events WHERE event_id=%s',
                                       (job["event_id"],)) == {"redacted": 1, "body_json": "{}"}
                 assert core.store.one("SELECT state,redacted FROM goals") == {
                     "state": "CANCELLED", "redacted": 1,
                 }
                 assert core.store.one("SELECT state FROM commitments") == {"state": "ERASED"}
-                assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=? "
-                                           "AND state<>'CANCELLED'", (job["event_id"],))
+                assert not core.store.rows((
+                    'SELECT * FROM outbox WHERE origin_event_id=%s AND '
+                    "state<>'CANCELLED'"
+                ), (job["event_id"],))
                 usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage "
                                         "WHERE scenario='activity'")
                 assert usage == ([] if recall_at == "queued" else [
@@ -161,13 +165,14 @@ def test_additional_goal_evidence_recall_cancels_notice_and_keeps_authority_acti
                                              json=recall_body)
                 assert repeated.status_code == 200 and repeated.json()["duplicate"]
                 assert core.ledger.path.read_bytes() == erased_ledger
-                assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                assert core.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                       (inputs[0]["event_id"],)) == {"redacted": 1}
-                saved = core.store.one("SELECT authority_json FROM jobs WHERE job_id=?",
+                saved = core.store.one('SELECT authority_json FROM jobs WHERE job_id=%s',
                                        (job["job_id"],))
                 assert json.loads(saved["authority_json"]) == authority
-                conversation_id = core.store.one("SELECT conversation_id FROM events "
-                    "WHERE event_id=?", (job["event_id"],))["conversation_id"]
+                conversation_id = core.store.one((
+                    'SELECT conversation_id FROM events WHERE event_id=%s'
+                ), (job["event_id"],))["conversation_id"]
                 assert notices.schedule(core.store, core.settings, "commitment",
                     commitment["commitment_id"], conversation_id, core.clock()) == (
                         job["job_id"])

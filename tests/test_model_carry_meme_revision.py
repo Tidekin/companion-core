@@ -142,7 +142,7 @@ def test_current_unknown_still_requires_original_same_policy_handoff(core, tmp_p
     active, _ = activate(core, policy, revision=6, operation="meme-after-original-handoff")
     assert active["authority"]["revision"] == 7
     assert core.store.rows("SELECT * FROM model_usage") == original
-    assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                           (request_id,))["state"] == "UNKNOWN"
 
 
@@ -211,9 +211,9 @@ def test_http_meme_revision_admits_fresh_source_to_independent_worker(core, tmp_
     run(worker())
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["worked"] and report["calls"] == ["chat"] and report["requests"] == 0
-    discovery = core.store.one("SELECT * FROM jobs WHERE kind='meme_discovery' AND event_id=?",
+    discovery = core.store.one("SELECT * FROM jobs WHERE kind='meme_discovery' AND event_id=%s",
                                (incoming["event_id"],))
     assert discovery is not None and discovery["state"] == "QUEUED", report
     owner_authority.check_job(core.store, core.settings, core.clock, discovery, purpose="meme")
-    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+    assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                           (original[0]["request_id"],)) == original[0]

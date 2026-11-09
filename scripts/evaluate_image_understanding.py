@@ -38,13 +38,13 @@ def planning_settings():
         endpoint="https://api.deepseek.com", currency="USD", timezone="Asia/Shanghai",
         starts_at="2026-11-01T00:00:00+08:00", input_rate=300000,
         cached_input_rate=6000, output_rate=1200000, max_input_tokens=8000,
-        max_output_tokens=2048, per_attempt_micro_usd=5000, per_request_micro_usd=30000,
-        per_request_calls=6, daily_micro_usd=1250000, daily_calls=216,
-        monthly_micro_usd=1250000, window_micro_usd=1250000, window_calls=216,
+        max_output_tokens=2048,
+        per_request_calls=6,  daily_calls=216,
+          window_calls=216,
         concurrency=1, journal_path=str(ROOT / ".local/vision-evaluation/budget.jsonl"),
         image_input=image)
     return Settings(owner_qq_id="10001", bot_qq_id="10002",
-        bridge_token="planning-only-token-12345",
+        bridge_token="planning-only-token-12345", database="dbname=synthetic",
         provider=paid.provider, model_name=paid.model, model_url=paid.endpoint,
         input_rate=paid.input_rate, cached_input_rate=paid.cached_input_rate,
         output_rate=paid.output_rate, paid_model=paid, max_output_tokens=2048,
@@ -141,9 +141,7 @@ def prepare(output, *, settings=None, subset=None):
         rows = []
         for group in groups:
             if rows and (len(rows) // 2 >= 32
-                         or len(encode([*rows, *group]).encode()) > 1200000
-                         or sum(row["estimated_reservation_micro_usd"]
-                                for row in [*rows, *group]) > evaluation.COST):
+                         or len(encode([*rows, *group]).encode()) > 1200000):
                 manifests.append(manifest(settings, rows, persona))
                 rows = []
             rows.extend(group)

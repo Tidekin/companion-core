@@ -21,7 +21,7 @@ from companion.executive_protocol import ExecutionEnvelope, ToolReceipt
 from companion.executor_files import open_scoped
 
 
-def receipt(request, status, text="", error=None, billed=0, calls=0):
+def receipt(request, status, text="", error=None, billed=0, calls=0, usage=None):
     return ToolReceipt(
         task_id=request.task_id,
         scope_sha256=request.scope_sha256,
@@ -30,6 +30,9 @@ def receipt(request, status, text="", error=None, billed=0, calls=0):
         evidence_sha256=hashlib.sha256(text.encode()).hexdigest(),
         billed_micro_usd=billed,
         model_calls=calls,
+        input_tokens=(usage or {}).get("input_tokens", 0),
+        output_tokens=(usage or {}).get("output_tokens", 0),
+        unknown_model_calls=(usage or {}).get("unknown_calls", 0),
         error_code=error,
     )
 
@@ -193,19 +196,34 @@ class DSHExecutor:
                     self.proxy_url + "/internal/v1/reservations/" + grant["token"], headers=admin
                 )
                 usage.raise_for_status()
+                usage = usage.json()
                 return receipt(
                     request,
                     "SUCCEEDED",
                     "DSH会话返回（外部效果未独立核验）：\n" + text,
-                    billed=usage.json()["reserved_micro_usd"],
-                    calls=usage.json()["calls"],
+                    billed=usage["billed_micro_usd"],
+                    calls=usage["calls"],
+                    usage=usage,
+                    error="MODEL_COST_UNKNOWN" if usage["unknown_calls"] else None,
                 )
             except (Exception, asyncio.CancelledError):
+                usage = {}
+                try:
+                    response = await client.get(
+                        self.proxy_url + "/internal/v1/reservations/" + grant["token"],
+                        headers=admin,
+                    )
+                    response.raise_for_status()
+                    usage = response.json()
+                except (Exception, asyncio.CancelledError):
+                    pass
                 return receipt(
                     request,
                     "UNKNOWN",
                     error="DSH_EXECUTION_UNCERTAIN",
-                    billed=request.max_cost_micro_usd,
+                    billed=usage.get("billed_micro_usd", 0),
+                    calls=usage.get("calls", 0),
+                    usage=usage,
                 )
             finally:
                 # Kill the whole process group, including shells forked by the SDK.
@@ -272,7 +290,7 @@ def create_executor_app(token, state_path, file_executor=None, dsh_executor=None
                     request,
                     "UNKNOWN",
                     error="EXECUTION_ALREADY_ATTEMPTED",
-                    billed=request.max_cost_micro_usd,
+                    billed=0,
                 )
             # Durable send marker precedes the effect. Never replay effects after a process crash.
             db.execute(
@@ -288,7 +306,7 @@ def create_executor_app(token, state_path, file_executor=None, dsh_executor=None
                     request,
                     "UNKNOWN",
                     error="EXECUTION_UNCERTAIN",
-                    billed=request.max_cost_micro_usd,
+                    billed=0,
                 )
             db.execute(
                 "UPDATE executions SET state=? WHERE task_id=?", (result.status, request.task_id)

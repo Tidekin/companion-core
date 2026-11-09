@@ -7,9 +7,10 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-from companion.store import Store, migrate
+from companion.legacy_import import migrate_sqlite as migrate
 from tests.conftest import ingest
 from tests.support.historical_schema import historical_database
+from tests.support.release_migration import insert, one, open_historical, rows
 from tests.support.token_measurement_migration import historical_admission, snapshot
 
 PRIOR = "0040_owner_authority"
@@ -27,27 +28,27 @@ def downgrade(database):
 def test_upgrade_preserves_original_accounting_and_unrelated_metadata(tmp_path):
     database = historical_admission(tmp_path)
     migrate(str(database), PRIOR)
-    with closing(Store(str(database))) as store:
+    with closing(open_historical(database)) as store:
         before = snapshot(store)
-        store.insert("runtime_meta", key="unrelated-text", value="non-JSON historical value")
-        store.insert("runtime_meta", key="reading_followup:retired", value='{"original":true}')
-        authority = store.rows("SELECT * FROM owner_authority_revisions")
+        insert(store, "runtime_meta", key="unrelated-text", value="non-JSON historical value")
+        insert(store, "runtime_meta", key="reading_followup:retired", value='{"original":true}')
+        authority = rows(store, "SELECT * FROM owner_authority_revisions")
     migrate(str(database), REVISION)
     migrate(str(database), REVISION)
-    with closing(Store(str(database))) as store:
+    with closing(open_historical(database)) as store:
         assert snapshot(store) == before
-        assert store.rows("SELECT * FROM owner_authority_revisions") == authority
-        assert store.one("SELECT value FROM runtime_meta WHERE key='unrelated-text'") == {
+        assert rows(store, "SELECT * FROM owner_authority_revisions") == authority
+        assert one(store, "SELECT value FROM runtime_meta WHERE key='unrelated-text'") == {
             "value": "non-JSON historical value"}
-        assert store.one("SELECT value FROM runtime_meta "
+        assert one(store, "SELECT value FROM runtime_meta "
                          "WHERE key='reading_followup:retired'") is None
-        assert store.rows("PRAGMA foreign_key_check") == []
-        assert store.rows("SELECT * FROM agent_conversations") == []
-        assert store.rows("SELECT * FROM captured_images") == []
+        assert rows(store, "PRAGMA foreign_key_check") == []
+        assert rows(store, "SELECT * FROM agent_conversations") == []
+        assert rows(store, "SELECT * FROM captured_images") == []
     downgrade(database)
-    with closing(Store(str(database))) as store:
+    with closing(open_historical(database)) as store:
         assert snapshot(store) == before
-        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == PRIOR
+        assert one(store, "SELECT version_num FROM alembic_version")["version_num"] == PRIOR
 
 
 @pytest.mark.parametrize("custody", ["conversation", "image"])
@@ -68,10 +69,11 @@ def test_native_custody_blocks_evidence_losing_downgrade(core, tmp_path, custody
                           proof_json='{"synthetic":"signed-original"}', mime="image/png",
                           expires_at=now)
         table = "captured_images"
-    before = core.store.rows(f"SELECT * FROM {table}")
     path = historical_database(core.store, tmp_path / "agent-custody.db", REVISION)
+    with closing(open_historical(path)) as historical:
+        before = rows(historical, f"SELECT * FROM {table}")
     with pytest.raises(RuntimeError, match="AGENT_CONVERSATION_DOWNGRADE_REQUIRES"):
         downgrade(path)
-    with closing(Store(path)) as original:
-        assert original.rows(f"SELECT * FROM {table}") == before
-        assert original.one("SELECT version_num FROM alembic_version")["version_num"] == REVISION
+    with closing(open_historical(path)) as original:
+        assert rows(original, f"SELECT * FROM {table}") == before
+        assert one(original, "SELECT version_num FROM alembic_version")["version_num"] == REVISION

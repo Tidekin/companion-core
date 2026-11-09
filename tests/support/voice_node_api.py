@@ -57,8 +57,7 @@ def app_for(core, *, boundary_only=False):
         app = create_app(core.settings)
         assert ROUTE_PREFIX + "/claim" in app.openapi()["paths"]
     app.state.core = core
-    if boundary_only:
-        app.state.api_store = ApiStore(core.settings.database)
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     return app
 
 

@@ -177,9 +177,9 @@ def check_chat_scope(store, settings, job_id, logical_id, scenario):
 
 
 def check_attempt(store, job_id, scenario, video_binding):
-    if not store.one("SELECT 1 FROM jobs WHERE job_id=? AND kind='chat'", (job_id,)):
+    if not store.one("SELECT 1 FROM jobs WHERE job_id=%s AND kind='chat'", (job_id,)):
         raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
     if video_binding is None and store.one(
-        "SELECT 1 FROM model_usage WHERE job_id=? AND scenario=?", (job_id, scenario),
+        'SELECT 1 FROM model_usage WHERE job_id=%s AND scenario=%s', (job_id, scenario),
     ):
         raise CoreError("MODEL_IMAGE_ALREADY_ATTEMPTED", 409)

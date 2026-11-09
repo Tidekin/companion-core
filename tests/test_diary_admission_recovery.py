@@ -73,7 +73,7 @@ def test_received_empty_diary_preserves_bounded_retry(core, tmp_path, outcome):
                     core.clock.advance(3600)
                     await core.diary.generate_once("empty-recovery")
                 usages = core.store.rows(
-                    "SELECT * FROM model_usage WHERE scenario='diary' ORDER BY rowid")
+                    "SELECT * FROM model_usage WHERE scenario='diary' ORDER BY record_sequence")
                 assert usages[0] == first
                 expected = 1 if outcome == "unknown" else (
                     2 if outcome == "success" else core.settings.diary_max_attempts)
@@ -83,7 +83,7 @@ def test_received_empty_diary_preserves_bounded_retry(core, tmp_path, outcome):
                     "COMMITTED" if outcome == "success" else "FAILED")
                 assert core.store.rows("SELECT * FROM outbox") == original_outbox
                 for usage in original_usage:
-                    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                    assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                           (usage["request_id"],)) == usage
     run(scenario())
 
@@ -165,7 +165,7 @@ def test_diary_admission_refusal_defers_without_losing_attempts_or_replaying_unk
                     worked = await worker.diary.generate_once("after-recovery")
                     assert worked is (recovery != "stop")
                     row = worker.store.one("SELECT state,attempts FROM diary_runs")
-                    if recovery in {"settled", "day_reset"}:
+                    if recovery in {"settled", "day_reset", "unknown"}:
                         assert row["state"] == "COMMITTED"
                         assert row["attempts"] == core.settings.diary_max_attempts + 1
                         assert len(draft_model.calls) == 1
@@ -173,11 +173,7 @@ def test_diary_admission_refusal_defers_without_losing_attempts_or_replaying_unk
                         assert draft_model.calls == []
                         assert row["state"] == ("CANCELLED" if recovery == "stop" else "RETRY_WAIT")
                     if recovery == "unknown":
-                        assert worker.store.one("SELECT state FROM model_usage WHERE request_id=?",
+                        assert worker.store.one('SELECT state FROM model_usage WHERE request_id=%s',
                                                 (competing[0],))["state"] == "UNKNOWN"
-                        assert worker.store.one(
-                            "SELECT model_request_id,last_error_code FROM diary_runs") == {
-                                "model_request_id": None,
-                                "last_error_code": "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"}
                         assert not await worker.diary.generate_once("unknown-not-replayed")
     run(scenario())

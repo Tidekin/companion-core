@@ -19,6 +19,7 @@ from companion.qq_rich import input_digest
 from companion.rem_protocol import RemConfig
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import run
+from tests.postgres_fixture import logical_state
 from tests.support.core_http import real_core_http
 from tests.support.life_expression_consumption import request
 from tests.support.life_expression_entrypoint import native_child
@@ -96,7 +97,7 @@ def test_diary_or_partial_scope_cannot_grant_creation(core, tmp_path, options):
         async with prepared(core, tmp_path, **options):
             job_id = core.life_topics.schedule()
             assert job_id
-            topic = core.store.one("SELECT topic_id FROM life_activity_results WHERE job_id=?",
+            topic = core.store.one('SELECT topic_id FROM life_activity_results WHERE job_id=%s',
                                    (job_id,))["topic_id"]
             material = core.life_topics.material(topic)
             assert "PRIVATE_CREATION" not in material["allowed_destinations"]
@@ -122,10 +123,13 @@ def test_queued_creation_rechecks_original_source_authority_and_settlement(core,
                 activate(core, policy, revision=stopped["authority"]["revision"],
                          operation="revise-rem-queue")
             elif fence == "changed":
-                core.store.execute("UPDATE life_activity_results SET text='changed' WHERE job_id=?",
+                core.store.execute((
+                    "UPDATE life_activity_results SET text='changed' WHERE "
+                    'job_id=%s'
+                ),
                                    (retained["job_id"],))
             else:
-                core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE job_id=?",
+                core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE job_id=%s",
                                    (retained["job_id"],))
             before = core.store.rows("SELECT * FROM model_usage")
             await core.run_once(job_id=queued["job_id"])
@@ -139,7 +143,7 @@ def test_queued_creation_rechecks_original_source_authority_and_settlement(core,
     run(scenario())
 
 
-def test_creation_erasure_replays_after_restore_without_new_payment(core, tmp_path):
+def test_creation_erasure_replays_after_restore_without_new_payment(empty_database, core, tmp_path):
     async def scenario():
         async with prepared(core, tmp_path, automatic=True) as (_, capture, recall, _):
             await draft(core, tmp_path, capture)
@@ -147,14 +151,18 @@ def test_creation_erasure_replays_after_restore_without_new_payment(core, tmp_pa
             job_id = core.store.one("SELECT job_id FROM rem_records")["job_id"]
             assert await core.run_once(job_id=job_id)
             assert rem.records(core)[0]["text"]
-            archive, target = tmp_path / "before.enc", tmp_path / "restored.db"
+            archive = tmp_path / "before.enc"
+            restored_state = tmp_path / "restored-state"
             key = Fernet.generate_key()
             backup(core.settings.database, archive, key)
             before = core.store.rows("SELECT * FROM model_usage")
             response = await recall(capture)
             assert response.status_code == 200, response.text
-            restore(archive, target, key, core.settings.erasure_ledger)
-            with Core(core.settings.model_copy(update={"database": str(target)}),
+            restore(archive, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
+            with Core(core.settings.model_copy(update={
+                "database": empty_database, "state_directory": str(restored_state),
+            }),
                       core.model, core.clock) as restored:
                 for instance in (core, restored):
                     result = rem.records(instance)[0]
@@ -202,7 +210,7 @@ def test_signed_pending_input_preempts_queued_save_without_second_payment(core, 
                 accepted = await client.post("/internal/v1/owner-authority/inputs/approve",
                                              json=capture.model_dump(mode="json"))
                 assert accepted.status_code == 200, accepted.text
-                assert not core.store.one("SELECT 1 FROM events WHERE event_id=?",
+                assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s',
                                            (capture.event_id,))
                 assert await core.run_once(job_id=queued["job_id"])
                 result = rem.records(core)[0]
@@ -265,13 +273,14 @@ def test_retained_creation_refuses_second_paid_admission_and_tampered_readback(c
             assert core.store.rows("SELECT * FROM model_usage") == before
             assert core.store.rows("SELECT * FROM model_admissions") == admissions
             assert await rem.run(core, job)
-            changes = core.store.db.total_changes
+            changes = logical_state(core.store)
             assert rem.records(core)[0]["text"] == retained["text"]
-            assert core.store.db.total_changes == changes
+            assert logical_state(core.store) == changes
             core.store.execute("UPDATE rem_records SET output_json="
-                               "json_set(output_json,'$.text','tampered')")
-            changes = core.store.db.total_changes
+                               "jsonb_set(output_json::jsonb,'{text}',%s::jsonb)::text",
+                               ('"tampered"',))
+            changes = logical_state(core.store)
             assert not rem.records(core)[0]["source_available"]
             assert not rem.records(core)[0]["text"]
-            assert core.store.db.total_changes == changes
+            assert logical_state(core.store) == changes
     run(scenario())

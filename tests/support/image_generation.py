@@ -22,8 +22,7 @@ def config(**changes):
     values = {
         "enabled": True,
         "endpoint": MediaEndpoint(url=URL, key=SecretStr("synthetic-image-provider-key"),
-                                  model="gpt-image-1", max_request_micro_usd=40000),
-        "daily_micro_usd": 200000,
+                                  model="gpt-image-1", estimated_request_micro_usd=40000),
         **changes,
     }
     return ImageGenerationConfig(**values)

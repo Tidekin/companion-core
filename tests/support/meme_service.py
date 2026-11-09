@@ -22,7 +22,7 @@ async def discovery_environment(core, tmp_path, monkeypatch, *, paid=None, purpo
         assert accepted.status_code == 202, accepted.text
         # Background availability is a unit-test precondition. Other tests run
         # the real reply model and the independent worker through this entry point.
-        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s",
                            (accepted.json()["job_id"],))
         yield event, accepted.json(), values
 

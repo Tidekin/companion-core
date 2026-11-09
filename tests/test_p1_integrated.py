@@ -17,10 +17,11 @@ def v1_policy(**values):
     return ConversationPolicyConfig(strategy="participation_v1", **values)
 
 
-def test_reset_native_ledger_old_backup_and_idempotent_retry(core, tmp_path):
+def test_reset_native_ledger_old_backup_and_idempotent_retry(empty_database, core, tmp_path):
     core.settings.affect_enabled = True
     ingest(core, 1, "简短一点")
-    key, archive, dest = Fernet.generate_key(), tmp_path / "before.enc", tmp_path / "restored.db"
+    key, archive = Fernet.generate_key(), tmp_path / "before.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     first = core.affect.reset(core.settings.owner_qq_id, "reset-1", core.ledger)
     assert core.affect.snapshot()["state"] == NEUTRAL
@@ -33,8 +34,11 @@ def test_reset_native_ledger_old_backup_and_idempotent_retry(core, tmp_path):
     assert core.affect.reset(core.settings.owner_qq_id, "reset-1", core.ledger) == first
     assert core.ledger.read() == records
     assert core.affect.snapshot()["state"]["interaction_tone"] == "detailed"
-    restore(archive, dest, key, core.settings.erasure_ledger)
-    with Core(core.settings.model_copy(update={"database": str(dest)}),
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }),
               core.model, core.clock) as restored:
         assert restored.affect.snapshot()["state"] == NEUTRAL
         assert not restored.affect.observe("evt_test_1")
@@ -51,7 +55,7 @@ def test_ledger_first_reset_survives_database_rollback(core, monkeypatch):
         with pytest.raises(RuntimeError, match="synthetic crash"):
             core.affect.reset(core.settings.owner_qq_id, "crash-reset", core.ledger)
     assert core.ledger.read()[-1]["target_type"] == "affect_reset"
-    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (affect.RESET_KEY,)) is None
+    assert core.store.one('SELECT 1 FROM runtime_meta WHERE key=%s', (affect.RESET_KEY,)) is None
     core.ledger.replay(core.store)
     assert core.affect.snapshot()["state"] == NEUTRAL
     assert not core.affect.observe("evt_test_1")
@@ -60,10 +64,10 @@ def test_ledger_first_reset_survives_database_rollback(core, monkeypatch):
 def test_native_owner_reset_command_needs_no_generation(core):
     core.settings.affect_enabled = True
     accepted = ingest(core, 1, "简短一点")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (accepted["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (accepted["job_id"],))
     command = ingest(core, 2, "/重置互动")
     assert core.affect.snapshot()["state"] == NEUTRAL
-    source = core.store.one("SELECT body_json,memory_processed FROM events WHERE event_id=?",
+    source = core.store.one('SELECT body_json,memory_processed FROM events WHERE event_id=%s',
                             (command["event_id"],))
     assert json.loads(source["body_json"])["control_command"]
     assert source["memory_processed"] == 1
@@ -80,7 +84,7 @@ def test_core_shadow_preserves_payload_and_reset_fences_source(core, mode):
     core.settings.context_soft_tokens += len(PARTICIPATION_V1.encode("utf-8"))
     core.settings.affect_enabled = True
     accepted = ingest(core, 1, "简短一点")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (accepted["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (accepted["job_id"],))
     core.clock.advance(1)
     ingest(core, 2, "怎么处理这个问题")
     job = core.claim_job("p1-context")
@@ -108,6 +112,7 @@ def test_control_reset_preserves_unknown_and_owner_authority_custody(core, tmp_p
 
     from companion import evaluation, paid_budget
     from companion.api import create_app
+    from companion.api_store import ApiStore
     from tests.support.evaluation import authorize, prepare, work
 
     manifest = prepare(core, tmp_path)
@@ -124,6 +129,7 @@ def test_control_reset_preserves_unknown_and_owner_authority_custody(core, tmp_p
     core.settings.control_token = SecretStr("synthetic-reset-budget-control")
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     response = TestClient(app).post("/internal/v2/affect/reset",
         json={"request_id": "reset-uncertain"},
         headers={"Authorization": "Bearer synthetic-reset-budget-control"})

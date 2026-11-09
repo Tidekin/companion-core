@@ -117,16 +117,18 @@ def test_two_images_wait_only_for_permitted_history_and_release_failed_original(
             first, first_image = await admit_image(core, client, config, plan, tmp_path, number=41)
             core.clock.advance(1)
             second, image = await admit_image(core, client, config, plan, tmp_path, number=42)
-            old_job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (first["event_id"],))
+            old_job = core.store.one('SELECT * FROM jobs WHERE event_id=%s', (first["event_id"],))
             assert old_job["state"] == "CANCELLED"
             receipt = await claim(client, second, image)
             response = await client.post("/internal/v2/content/" + second["event_id"] + "/image",
                 content=pixels(), headers=upload_headers(plan, second, image, receipt, pixels()))
             assert response.status_code == 200, response.text
-            job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e "
-                                 "USING(event_id) WHERE event_id=?", (second["event_id"],))
+            job = core.store.one((
+                'SELECT j.*,e.conversation_id FROM jobs j JOIN events e '
+                'USING(event_id) WHERE event_id=%s'
+            ), (second["event_id"],))
             assert agent_images.waiting(core, job) is history
-            original = core.store.one("SELECT * FROM content_items WHERE owner_event_id=?",
+            original = core.store.one('SELECT * FROM content_items WHERE owner_event_id=%s',
                                       (first["event_id"],))
             assert original["state"] == "WAITING"
             if history:
@@ -137,7 +139,7 @@ def test_two_images_wait_only_for_permitted_history_and_release_failed_original(
                                   + timedelta(milliseconds=1))
                 with Core(core.settings, clock=core.clock) as independent:
                     await independent.content.run_once()
-                failed = core.store.one("SELECT * FROM content_items WHERE owner_event_id=?",
+                failed = core.store.one('SELECT * FROM content_items WHERE owner_event_id=%s',
                                         (first["event_id"],))
                 assert failed["state"] == "FAILED"
                 assert failed["error_code"] == "CONTENT_IMAGE_DOWNLOAD_EXPIRED"

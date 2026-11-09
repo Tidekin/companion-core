@@ -11,7 +11,6 @@ from tests.support.executive import configured, proposal
 
 def tool(core, status=None):
     executive = configured(core)
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     task = executive.submit(proposal())
     leased = executive.claim()
     _, request = executive.begin(leased)
@@ -41,18 +40,20 @@ def test_converged_cancelled_tools_do_not_sync_reference_or_write(core, monkeypa
         return original(*args)
 
     monkeypatch.setattr(cloud_budget, "sync_reference", observe)
-    changes = core.store.db.total_changes
-    for _ in range(2):
-        cloud_budget.sync(core.store, core.settings, core.clock())
-    assert calls == []
-    assert core.store.db.total_changes == changes
+    with core.store.transaction():
+        changes = core.store.change_token()["writes"]
+        for _ in range(2):
+            cloud_budget.sync(core.store, core.settings, core.clock())
+        assert calls == []
+        assert core.store.change_token()["writes"] == changes
     assert snapshot(core) == before
 
 
 def test_cancelled_without_completion_proof_still_becomes_unknown(core):
     task_id = tool(core)
+    core.store.execute("UPDATE tool_tasks SET reserved_micro_usd=1000,billed_micro_usd=1000")
     # Recovery/native projection change without the ordinary erasure sync hook.
-    core.store.execute("UPDATE tool_tasks SET state='CANCELLED' WHERE task_id=?", (task_id,))
+    core.store.execute("UPDATE tool_tasks SET state='CANCELLED' WHERE task_id=%s", (task_id,))
     assert snapshot(core)["state"] == "RESERVED"
     core.store.audit("tool.finished", task_id, task_id, core.clock(), status="UNKNOWN")
     cloud_budget.sync(core.store, core.settings, core.clock())
@@ -60,11 +61,12 @@ def test_cancelled_without_completion_proof_still_becomes_unknown(core):
     assert before["state"] == "UNKNOWN" and before["accounted_micro_usd"] == 1000
     # Later generic completion text is not a native tool UNKNOWN reconciliation protocol.
     core.store.audit("tool.finished", task_id, task_id, core.clock(), status="SUCCEEDED")
-    core.store.execute("UPDATE tool_tasks SET billed_micro_usd=1 WHERE task_id=?", (task_id,))
-    changes = core.store.db.total_changes
-    cloud_budget.sync(core.store, core.settings, core.clock())
-    assert snapshot(core) == before
-    assert core.store.db.total_changes == changes
+    core.store.execute('UPDATE tool_tasks SET billed_micro_usd=1 WHERE task_id=%s', (task_id,))
+    with core.store.transaction():
+        changes = core.store.change_token()["writes"]
+        cloud_budget.sync(core.store, core.settings, core.clock())
+        assert snapshot(core) == before
+        assert core.store.change_token()["writes"] == changes
 
 
 def test_direct_sync_preserves_sticky_model_charge_without_rewriting(core):
@@ -73,11 +75,11 @@ def test_direct_sync_preserves_sticky_model_charge_without_rewriting(core):
     cloud_budget.sync(core.store, core.settings, core.clock())
     core.store.execute("UPDATE model_usage SET state='SETTLED',billed_micro_usd=1")
     before = snapshot(core)
-    changes = core.store.db.total_changes
     with core.store.transaction():
+        changes = core.store.change_token()["writes"]
         cloud_budget.sync_reference(core.store, "model", "model-unknown")
-    assert snapshot(core) == before
-    assert core.store.db.total_changes == changes
+        assert snapshot(core) == before
+        assert core.store.change_token()["writes"] == changes
     assert before["state"] == "UNKNOWN" and before["accounted_micro_usd"] == 1000
 
 
@@ -92,8 +94,9 @@ def test_native_dispatch_day_change_uses_frozen_snapshot_then_converges(core):
     core.settings.timezone = "America/Los_Angeles"
     task_id = tool(core)
     # Exercise the original tool dispatch fallback with its original frozen policy.
+    core.store.execute("UPDATE tool_tasks SET reserved_micro_usd=1000,billed_micro_usd=1000")
     core.store.execute("DELETE FROM cloud_cost_snapshots WHERE reference_id='legacy-dispatch'")
-    core.store.execute("UPDATE cloud_cost_snapshots SET legacy=1,dispatched_at=NULL,local_day=?",
+    core.store.execute('UPDATE cloud_cost_snapshots SET legacy=1,dispatched_at=NULL,local_day=%s',
                        (original["local_day"],))
     with core.store.transaction():
         cloud_budget.sync_reference(core.store, "tool", task_id)
@@ -101,10 +104,10 @@ def test_native_dispatch_day_change_uses_frozen_snapshot_then_converges(core):
     assert settled["local_day"] != original["local_day"]
     assert settled["amount_micro_cny"] == 8000
     assert settled["dispatched_at"] == core.clock()
-    changes = core.store.db.total_changes
     with core.store.transaction():
+        changes = core.store.change_token()["writes"]
         cloud_budget.sync_reference(core.store, "tool", task_id)
-    assert snapshot(core) == settled and core.store.db.total_changes == changes
+        assert snapshot(core) == settled and core.store.change_token()["writes"] == changes
 
 
 @pytest.mark.parametrize("snapshot_state", ["RESERVED", "SETTLED", "UNKNOWN"])
@@ -114,10 +117,10 @@ def test_cancelled_selection_matches_direct_native_reconciliation(
     core, snapshot_state, proof, billed,
 ):
     task_id = tool(core)
-    core.store.execute("UPDATE tool_tasks SET state='CANCELLED',billed_micro_usd=?", (billed,))
+    core.store.execute("UPDATE tool_tasks SET state='CANCELLED',billed_micro_usd=%s", (billed,))
     if proof:
         core.store.audit("tool.finished", task_id, task_id, core.clock(), status=proof)
-    core.store.execute("UPDATE cloud_cost_snapshots SET state=?", (snapshot_state,))
+    core.store.execute('UPDATE cloud_cost_snapshots SET state=%s', (snapshot_state,))
     original = snapshot(core)
     with core.store.transaction():
         cloud_budget.sync_reference(core.store, "tool", task_id)
@@ -129,7 +132,7 @@ def test_cancelled_selection_matches_direct_native_reconciliation(
     assert snapshot(core) == expected
     if snapshot_state == "UNKNOWN":
         assert expected["state"] == "UNKNOWN"
-        assert expected["accounted_micro_usd"] == original["accounted_micro_usd"]
+        assert expected["accounted_micro_usd"] == max(original["accounted_micro_usd"], billed)
 
 
 
@@ -137,7 +140,7 @@ def test_cancelled_unknown_still_imports_larger_native_hold_and_legacy_dispatch(
     task_id = tool(core)
     erase_executive(core.store, ["evt_test_1"])
     before = snapshot(core)
-    core.store.execute("UPDATE tool_tasks SET reserved_micro_usd=2000 WHERE task_id=?", (task_id,))
+    core.store.execute('UPDATE tool_tasks SET reserved_micro_usd=2000 WHERE task_id=%s', (task_id,))
     core.store.execute("UPDATE cloud_cost_snapshots SET legacy=1,dispatched_at=NULL")
     cloud_budget.sync(core.store, core.settings, core.clock())
     after = snapshot(core)
@@ -145,6 +148,7 @@ def test_cancelled_unknown_still_imports_larger_native_hold_and_legacy_dispatch(
     assert after["accounted_micro_usd"] == 2000
     assert after["amount_micro_cny"] == 16000
     assert after["dispatched_at"] == before["dispatched_at"]
-    changes = core.store.db.total_changes
-    cloud_budget.sync(core.store, core.settings, core.clock())
-    assert snapshot(core) == after and core.store.db.total_changes == changes
+    with core.store.transaction():
+        changes = core.store.change_token()["writes"]
+        cloud_budget.sync(core.store, core.settings, core.clock())
+        assert snapshot(core) == after and core.store.change_token()["writes"] == changes

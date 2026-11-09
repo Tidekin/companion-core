@@ -42,7 +42,7 @@ def test_withdrawn_source_recomputes_in_independent_worker_without_resetting_usa
             "evt_test_2", "evt_test_3", "evt_test_4",
         ]
         assert worker.store.rows("SELECT * FROM diary_revisions") == []
-        assert worker.store.one("SELECT * FROM model_usage WHERE request_id=?",
+        assert worker.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                 (original_usage["request_id"],)) == original_usage
         assert len(worker.store.rows("SELECT * FROM model_usage")) == 2
         for table in ("memories", "traits", "outbox"):
@@ -50,14 +50,20 @@ def test_withdrawn_source_recomputes_in_independent_worker_without_resetting_usa
     assert len(model.calls) == 1
 
 
-def test_recompute_after_old_backup_replay_uses_current_remaining_evidence(core, tmp_path):
+def test_recompute_after_old_backup_replay_uses_current_remaining_evidence(
+    empty_database, core, tmp_path,
+):
     seed(core)
-    archive, restored_path = tmp_path / "before.enc", tmp_path / "restore.db"
+    archive = tmp_path / "before.enc"
+    restored_state = tmp_path / "restored-state"
     key = Fernet.generate_key()
     backup(core.settings.database, archive, key)
     withdraw(core)
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
-    settings = core.settings.model_copy(update={"database": str(restored_path)})
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    settings = core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    })
     model = DiaryModel()
     with Core(settings, model, core.clock) as restored:
         assert restored.diary.get_day(DAY, settings.owner_qq_id) is None
@@ -66,32 +72,32 @@ def test_recompute_after_old_backup_replay_uses_current_remaining_evidence(core,
             (f"evt_test_{i + 1}", f"今天讨论了读书计划的第 {i} 步。") for i in range(1, 4)
         ]
         usage = restored.store.rows("SELECT * FROM model_usage")
-        entries = restored.store.rows("SELECT * FROM diary_entries")
         assert recompute(restored)
         assert run(restored.diary.generate_once("restored-worker"))
-        assert model.calls == []
-        assert restored.diary.get_day(DAY, settings.owner_qq_id) is None
-        assert restored.store.rows("SELECT * FROM model_usage") == usage
-        assert restored.store.rows("SELECT * FROM diary_entries") == entries
-        assert restored.store.one("SELECT state,last_error_code FROM diary_runs") == {
-            "state": "FAILED", "last_error_code": "CLOUD_BUDGET_RESTORE_RECONCILIATION_REQUIRED",
-        }
+        assert len(model.calls) == 1
+        entry = restored.diary.get_day(DAY, settings.owner_qq_id)
+        assert "第 0 步" not in entry["body_md"] and "第 1 步" in entry["body_md"]
+        current_usage = restored.store.rows("SELECT * FROM model_usage")
+        assert all(row in current_usage for row in usage) and len(current_usage) == len(usage) + 1
+        assert [row["event_id"] for row in restored.store.rows(
+            "SELECT event_id FROM diary_evidence ORDER BY event_id")] == [
+                source["event_id"] for source in sources]
     with Core(settings, model, core.clock) as reopened:
-        # Replaying erasure preserves independent evidence, but cannot authorize new spending.
+        # Replaying erasure keeps current sources and the completed result idempotent.
         assert reopened.diary.repo.sources(DAY) == sources
-        assert reopened.diary.get_day(DAY, settings.owner_qq_id) is None
+        assert reopened.diary.get_day(DAY, settings.owner_qq_id) == entry
         assert reopened.store.one(
             "SELECT value FROM runtime_meta WHERE key='cloud_budget_restore_required'"
         ) == {"value": "1"}
         assert not run(reopened.diary.generate_once("reopened-worker"))
-        assert reopened.store.rows("SELECT * FROM model_usage") == usage
-        assert model.calls == []
+        assert reopened.store.rows("SELECT * FROM model_usage") == current_usage
+        assert len(model.calls) == 1
 
 
 @pytest.mark.parametrize("usage_state", ["UNKNOWN", "RESERVED"])
 def test_recompute_never_replays_or_releases_unresolved_model_attempt(core, usage_state):
     model = seed(core)
-    core.store.execute("UPDATE model_usage SET state=?", (usage_state,))
+    core.store.execute('UPDATE model_usage SET state=%s', (usage_state,))
     withdraw(core)
     before = core.store.rows("SELECT * FROM model_usage")
     with pytest.raises(CoreError, match="DIARY_RECOMPUTE_USAGE_UNRESOLVED"):
@@ -154,16 +160,22 @@ def test_owner_correction_is_preserved_until_its_source_is_erased(core):
     assert "只保留主人已核对" not in current["body_md"]
 
 
-def test_day_deletion_during_recompute_fences_worker_and_survives_restore(core, tmp_path):
+def test_day_deletion_during_recompute_fences_worker_and_survives_restore(
+    empty_database, core, tmp_path,
+):
     seed(core)
     withdraw(core)
     assert recompute(core)
     key = Fernet.generate_key()
-    archive, restored_path = tmp_path / "pending.enc", tmp_path / "old.db"
+    archive = tmp_path / "pending.enc"
+    restored_state = tmp_path / "restored-state"
     backup(core.settings.database, archive, key)
     core.diary.forget(DAY, core.settings.owner_qq_id)
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
-    with Core(core.settings.model_copy(update={"database": str(restored_path)}),
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
+    with Core(core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(restored_state),
+    }),
               DiaryModel(), core.clock) as restored:
         for instance in (core, restored):
             assert recompute(instance) is None

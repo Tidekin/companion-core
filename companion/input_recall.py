@@ -14,6 +14,14 @@ from companion.contracts import CoreError
 from companion.store import encode
 
 PREFIX = "input_recall:"
+_MISSING = object()
+# The same UTF-8 SHA-256 marker as marker_key, evaluated for a native source row.
+SOURCE_JOIN_SQL = (
+    "LEFT JOIN runtime_meta AS recalled ON recalled.key=CASE "
+    "WHEN left(e.source_event_id,4)='evt_' THEN 'erased_event:'||e.source_event_id "
+    f"ELSE '{PREFIX}'||pg_catalog.encode(pg_catalog.sha256("
+    "pg_catalog.convert_to(e.source_event_id,'UTF8')),'hex') END "
+)
 
 
 def canonical_source(
@@ -67,14 +75,24 @@ def marker_key(source_event_id):
 
 def is_recalled(store, source_event_id):
     if source_event_id.startswith("evt_"):
-        return bool(store.one("SELECT 1 FROM runtime_meta WHERE key=?",
-                              ("erased_event:" + source_event_id,)))
-    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (marker_key(source_event_id),))
+        row = store.one('SELECT 1 FROM runtime_meta WHERE key = %s',
+                        ("erased_event:" + source_event_id,))
+    else:
+        row = store.one('SELECT value FROM runtime_meta WHERE key = %s',
+                        (marker_key(source_event_id),))
+    return _recalled(source_event_id, row)
+
+
+def _recalled(source_event_id, row):
+    if source_event_id.startswith("evt_"):
+        return bool(row)
     return bool(row and json.loads(row["value"])["state"] == "RECALLED")
 
 
-def require_not_recalled(store, source_event_id):
-    if is_recalled(store, source_event_id):
+def require_not_recalled(store, source_event_id, *, _loaded=_MISSING):
+    recalled = (is_recalled(store, source_event_id) if _loaded is _MISSING
+                else _recalled(source_event_id, _loaded))
+    if recalled:
         # Existing Spools only consume this exact, authenticated 410 terminal receipt.
         raise CoreError("EVENT_ERASED", 410)
 
@@ -108,12 +126,12 @@ def verified_before_ingest(store, settings, approval, receipt):
         if len(records) != 1:
             return False
         record = records[0]
-        marker = store.one("SELECT value FROM runtime_meta WHERE key=?",
+        marker = store.one('SELECT value FROM runtime_meta WHERE key = %s',
                            (marker_key(source["source_event_id"]),))
-        erased = store.one("SELECT value FROM runtime_meta WHERE key=?",
+        erased = store.one('SELECT value FROM runtime_meta WHERE key = %s',
                            ("erased_event:" + event_id,))
-        complete = store.one("SELECT state,restore_min_replay_version "
-                             "FROM privacy_erasure_ledger WHERE erasure_id=?",
+        complete = store.one('SELECT state, restore_min_replay_version FROM privacy_erasure_ledger '
+            'WHERE erasure_id = %s',
                              (record["erasure_id"],))
         if (not marker or json.loads(marker["value"]) != {
             **source, "erasure_id": record["erasure_id"], "state": "RECALLED",
@@ -124,7 +142,7 @@ def verified_before_ingest(store, settings, approval, receipt):
         for table, field in (("events", "event_id"), ("jobs", "event_id"),
                              ("outbox", "origin_event_id"), ("content_items", "owner_event_id"),
                              ("job_sources", "event_id")):
-            if store.one(f"SELECT 1 FROM {table} WHERE {field}=? LIMIT 1", (event_id,)):
+            if store.one(f"SELECT 1 FROM {table} WHERE {field}=%s LIMIT 1", (event_id,)):
                 return False
         return input_protocol._capture_matches(
             store, settings, approval, source, event_id, record["occurred_at"],
@@ -135,11 +153,11 @@ def verified_before_ingest(store, settings, approval, receipt):
 
 def matching_events(store, source):
     return {row["event_id"] for row in store.rows(
-        "SELECT e.event_id FROM events e JOIN conversations c USING(conversation_id) "
-        "WHERE e.source=? AND e.source_event_id=? AND e.actor_id='owner' "
-        "AND e.privacy_scope='private' AND e.event_type IN "
-        "('message.received','message.media_received') AND c.platform=? "
-        "AND c.platform_session_key=? AND c.scope='private' AND c.owner_actor_id='owner'",
+        'SELECT e.event_id FROM events AS e JOIN conversations AS c USING (conversation_id) WHERE '
+        "e.source = %s AND e.source_event_id = %s AND e.actor_id = 'owner' AND e.privacy_scope = "
+        "'private' AND e.event_type IN ('message.received', 'message.media_received') AND "
+        "c.platform = %s AND c.platform_session_key = %s AND c.scope = 'private' AND "
+        "c.owner_actor_id = 'owner'",
         (source["source"], source["source_event_id"], source["source"],
          source["platform_session_key"]),
     )}
@@ -149,7 +167,8 @@ def project_marker(store, record):
     source = record["recall_source"]
     if record["state"] == "PENDING_TARGET" and is_recalled(store, source["source_event_id"]):
         return
-    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (
+    store.execute('INSERT INTO runtime_meta (key, value) VALUES (%s, %s) ON CONFLICT(key) DO '
+        'UPDATE SET value = excluded.value, record_sequence = DEFAULT', (
         marker_key(source["source_event_id"]),
         encode({**source, "erasure_id": record["erasure_id"], "state": record["state"],
                 "occurred_at": record["occurred_at"], "event_id": record.get("event_id")}),
@@ -164,8 +183,8 @@ def recall_input(
         validate_source(source)
     except ValueError:
         raise CoreError("INPUT_RECALL_SOURCE_INVALID", 400) from None
-    with nullcontext() if store.db.in_transaction else store.transaction():
-        owner = store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+    with nullcontext() if store.in_transaction else store.transaction(control_write=True):
+        owner = store.one("SELECT value FROM runtime_meta WHERE key = 'owner_qq_id'")
         if owner and owner["value"] != source["owner_qq_id"]:
             raise CoreError("OWNER_REQUIRED", 403)
         return ledger.recall_input(

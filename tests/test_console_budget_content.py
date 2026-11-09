@@ -12,6 +12,7 @@ from companion.capabilities import snapshot
 from companion.contracts import CoreError
 from companion.core import Core
 from tests.conftest import FakeModel, event, run
+from tests.postgres_fixture import logical_state
 from tests.support.content import enable, owner_share, png
 
 
@@ -45,15 +46,14 @@ def test_http_image_and_independent_reply_worker_share_the_cny_ledger(core):
         assert total > 80
         policy = cloud_budget.policy(worker.store, worker.settings, worker.clock())
         cloud_budget.configure(worker.store, worker.settings, {
-            "expected_version": policy["version"], "changes": {"daily_micro_cny": total},
-        }, idempotency_key="reduce-to-consumed", now=worker.clock())
+            "expected_version": policy["version"], "changes": {"usd_to_cny_micro": 9_000_000},
+        }, idempotency_key="update-fx", now=worker.clock())
         next_id = owner_share(worker, 2, manifest=[{"kind": "image", "slot": 0}])
         worker.content.provider = vision
-        with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-            run(worker.content.analyze_image(next_id, "image:0", png(), "image/png"))
-        assert len(worker.store.rows("SELECT * FROM cloud_cost_snapshots")) == 2
-        assert len(worker.store.rows("SELECT * FROM model_usage")) == 2
-    assert len(vision.calls) == 1
+        run(worker.content.analyze_image(next_id, "image:0", png(), "image/png"))
+        assert len(worker.store.rows("SELECT * FROM cloud_cost_snapshots")) == 3
+        assert len(worker.store.rows("SELECT * FROM model_usage")) == 3
+    assert len(vision.calls) == 2
 
 
 def test_unknown_image_keeps_original_fx_and_blocks_replay_after_reconfiguration(core):
@@ -67,7 +67,7 @@ def test_unknown_image_keeps_original_fx_and_blocks_replay_after_reconfiguration
     policy = cloud_budget.policy(core.store, core.settings, core.clock())
     cloud_budget.configure(core.store, core.settings, {
         "expected_version": policy["version"],
-        "changes": {"usd_to_cny_micro": 7_000_000, "daily_micro_cny": 30_000_000},
+        "changes": {"usd_to_cny_micro": 7_000_000},
     }, idempotency_key="new-price-policy", now=core.clock())
     with pytest.raises(CoreError, match="CONTENT_IMAGE_ALREADY_UNKNOWN"):
         run(service.analyze_image(event_id, "image:0", png(), "image/png"))
@@ -77,10 +77,10 @@ def test_unknown_image_keeps_original_fx_and_blocks_replay_after_reconfiguration
     assert len(vision.calls) == 1
 
 
-def test_runtime_capability_snapshot_reports_cloud_exhaustion_without_binding(core):
-    core.settings.cloud_budget.daily_micro_cny = 0
-    before = core.store.db.total_changes
-    value = snapshot(core.store, core.settings, core.clock)
-    assert "CLOUD_DAILY_BUDGET_EXHAUSTED" in json.dumps(value)
-    assert core.store.db.total_changes == before
+def test_runtime_capability_snapshot_treats_cloud_currency_as_advisory(core):
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        value = snapshot(core.store, core.settings, core.clock)
+    assert "CLOUD_DAILY_BUDGET_EXHAUSTED" not in json.dumps(value)
+    assert logical_state(core.store) == before
     assert not core.store.rows("SELECT * FROM cloud_budget_policies")

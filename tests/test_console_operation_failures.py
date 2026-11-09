@@ -35,7 +35,7 @@ def test_native_pre_effect_rejections_replay_without_reexecuting(
     if case in {"inactive", "blank", "credential"}:
         memory, _ = test_owner_console.stored_memory(core)
     if case == "inactive":
-        core.store.execute("UPDATE memories SET status='SUPERSEDED' WHERE memory_id=?", (memory,))
+        core.store.execute("UPDATE memories SET status='SUPERSEDED' WHERE memory_id=%s", (memory,))
     route = f"/v1/console/memories/{memory}/decision"
     body = {"decision": "confirm"}
     if case in {"blank", "credential"}:
@@ -98,7 +98,7 @@ from companion.config import Settings
 from companion.core import Core
 from companion.console_api import _operation
 settings=Settings(owner_qq_id="10001",bot_qq_id="10002",bridge_token="synthetic-token-"*3,
-                  database=sys.argv[1],erasure_ledger=sys.argv[2])
+                  database=sys.argv[1],erasure_ledger=sys.argv[2],state_directory=sys.argv[5])
 with Core(settings,clock=lambda:sys.argv[3]) as core:
     def apply():
         core.goals.pause_autonomy(True)
@@ -106,9 +106,11 @@ with Core(settings,clock=lambda:sys.argv[3]) as core:
     request=SimpleNamespace(method="POST",url=SimpleNamespace(path="/v1/console/mode"))
     _operation(core,request,sys.argv[4],{"target":"life","enabled":False},apply)
 '''
-    child = subprocess.run([sys.executable, "-B", "-c", script, core.settings.database,
+    child = subprocess.run([sys.executable, "-B", "-c", script,
+                            core.settings.database.get_secret_value(),
                             core.settings.erasure_ledger, core.clock(),
-                            headers["Idempotency-Key"]], capture_output=True, timeout=20)
+                            headers["Idempotency-Key"], core.settings.state_directory],
+                           capture_output=True, timeout=20)
     assert child.returncode == 23
     assert core.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")["value"] == "1"
     assert core.store.one("SELECT state FROM console_operations")["state"] == "STARTED"

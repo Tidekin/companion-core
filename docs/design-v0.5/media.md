@@ -37,18 +37,17 @@ max_session_bytes = 2000000
 max_daily_bytes = 10000000
 max_chunk_bytes = 64000
 max_output_bytes = 256000
-daily_micro_usd = 0 # 填写明确的日预算后才会调用收费提供者
 speech_voice = "<供应商支持的音色>"
 
 [media.stt]
 url = "https://<你的供应商>/v1/audio/transcriptions"
 model = "<STT模型>"
-max_request_micro_usd = 0 # 有界请求的成本上限；0不执行
+estimated_request_micro_usd = 0 # 可选固定调用估算，仅用于费用记录
 [media.tts]
 url = "https://<你的供应商>/v1/audio/speech"
 model = "<TTS模型>"
 protocol = "openai" # MiniMax sync HTTP 改为 minimax 并填写对应完整URL
-max_request_micro_usd = 0
+estimated_request_micro_usd = 0
 [media.vision]
 url = "https://<你的供应商>/v1/chat/completions"
 model = "<视觉模型>"

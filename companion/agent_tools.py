@@ -37,8 +37,8 @@ Each tool requires its current purpose on the original owner-authorized job.
         view = check_conversation(core, job, snapshots, purpose=purpose)
         if (not reply_revision.owner_input(core.store, job["event_id"])
             or not core.store.one(
-                "SELECT 1 FROM conversations WHERE conversation_id=? "
-                "AND scope='private' AND owner_actor_id='owner'", (job["conversation_id"],),
+                "SELECT 1 FROM conversations WHERE conversation_id = %s AND scope = 'private' AND "
+                "owner_actor_id = 'owner'", (job["conversation_id"],),
             )):
             raise CoreError("CONVERSATION_OWNER_SCOPE_REQUIRED", 403)
         return view
@@ -279,8 +279,8 @@ Each tool requires its current purpose on the original owner-authorized job.
             and image_adapter and image_adapter.source == "qq_image"
             and image_adapter.media_analysis
             and core.store.one(
-            "SELECT 1 FROM captured_images p JOIN content_items c USING(item_id) "
-            "WHERE c.owner_event_id=? AND c.state='SUCCEEDED' AND c.redacted=0",
+            'SELECT 1 FROM captured_images AS p JOIN content_items AS c USING (item_id) WHERE '
+            "c.owner_event_id = %s AND c.state = 'SUCCEEDED' AND c.redacted = 0",
             (job["event_id"],),
         )):
             handlers.append(record_image_observation)

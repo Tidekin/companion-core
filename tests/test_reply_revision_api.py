@@ -100,7 +100,7 @@ def test_native_api_accepts_burst_while_independent_worker_drains_old_model(
                     first_result, second_result, third_result,
                 )] == [1, 2, 3]
                 assert [row["state"] for row in core.store.rows(
-                    "SELECT state FROM jobs ORDER BY rowid",
+                    'SELECT state FROM jobs ORDER BY record_sequence',
                 )] == ["CANCELLED", "CANCELLED", "QUEUED"]
                 assert core.store.one("SELECT state FROM model_usage") == {"state": "RESERVED"}
                 with Core(core.settings) as second_worker:
@@ -108,7 +108,7 @@ def test_native_api_accepts_burst_while_independent_worker_drains_old_model(
                     assert second_worker.claim_job("concurrent-worker") is None
                     assert second_worker.store.rows("SELECT state FROM model_usage") == [
                         {"state": "RESERVED"}]
-                    assert second_worker.store.one("SELECT state FROM jobs WHERE job_id=?",
+                    assert second_worker.store.one('SELECT state FROM jobs WHERE job_id=%s',
                         (third_result["job_id"],)) == {"state": "QUEUED"}
                 release.set()
                 await asyncio.wait_for(replied.wait(), 5)
@@ -119,11 +119,13 @@ def test_native_api_accepts_burst_while_independent_worker_drains_old_model(
                 assert core.store.rows("SELECT origin_event_id FROM outbox") == [
                     {"origin_event_id": third["event_id"]},
                 ]
-                assert core.store.rows("SELECT state FROM model_usage ORDER BY rowid") == [
+                assert core.store.rows(
+                    'SELECT state FROM model_usage ORDER BY record_sequence'
+                ) == [
                     {"state": "SETTLED"}, {"state": "SETTLED"},
                 ]
                 assert {row["event_id"] for row in core.store.rows(
-                    "SELECT event_id FROM job_sources WHERE job_id=?", (third_result["job_id"],),
+                    'SELECT event_id FROM job_sources WHERE job_id=%s', (third_result["job_id"],),
                 )} == {first["event_id"], second["event_id"], third["event_id"]}
                 assert owner_authority.current(core.store, core.settings, core.clock
                     ).authority.as_dict() == entry.runtime.authority

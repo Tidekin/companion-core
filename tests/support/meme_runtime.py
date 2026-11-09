@@ -62,8 +62,10 @@ class CoreHTTP:
             pass
         # A completed foreground turn makes background discovery eligible. Native
         # foreground-worker execution is covered separately; this is a precondition.
-        self.core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE kind='chat' "
-                                "AND event_id=?", (event["event_id"],))
+        self.core.store.execute((
+            "UPDATE jobs SET state='SUCCEEDED' WHERE kind='chat' AND "
+            'event_id=%s'
+        ), (event["event_id"],))
         response = await client.post(BASE + "/submit", json={
             "event_id": event["event_id"], "reply_revision": revision,
             "intent": "celebrate",

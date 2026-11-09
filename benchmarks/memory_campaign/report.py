@@ -19,16 +19,22 @@ from pathlib import Path
 
 sys.path[:0] = [str(Path(__file__).resolve().parent), str(Path(__file__).resolve().parent / "runner")]
 from integrity import check_grading_freeze, grading_identity  # noqa: E402
-from roundcfg import ARMS, Round, ledger_total, read_rows, save, sha  # noqa: E402
+from roundcfg import Round, ledger_total, read_rows, save, sha  # noqa: E402
 from rubrics import rubric  # noqa: E402
 
 R = Round()
+ARMS = tuple(R.cfg["arms"]) + R.references
+PAIRED = "old" in ARMS and "new" in ARMS
 ROOT = R.root
 ARGS = sys.argv[1:]
 GRADING = ROOT / (ARGS[ARGS.index("--grading") + 1] if "--grading" in ARGS else "grading")
 LABELS = {"old": "旧版 Core", "new": "新版 Core", "rag": "千问 RAG", "closed": "闭卷对照"}
 COLORS = {"old": "#7D8798", "new": "#2859E8", "rag": "#008896"}
 HATCH = {"old": "///", "new": "", "rag": ".."}
+for arm in ARMS:
+    LABELS.setdefault(arm, "Core" if arm == "core" else arm)
+    COLORS.setdefault(arm, "#2859E8")
+    HATCH.setdefault(arm, "")
 
 
 def latency(answer):
@@ -94,8 +100,11 @@ def load(*, allow_failed_gate=False):
                            answer_sha256=m["answer_sha256"],
                            exact_pass=exact(R.criteria[q["id"]], ans.get("answer", "")))
             assert has_answer(arms[a]) or not arms[a]["passed"], "Unanswered instance cannot pass"
-        op, npass = arms["old"]["passed"], arms["new"]["passed"]
-        change = ("gain" if npass else "loss") if op != npass else ("both_pass" if op else "both_fail")
+        change = "pass" if arms[ARMS[0]]["passed"] else "fail"
+        if PAIRED:
+            op, npass = arms["old"]["passed"], arms["new"]["passed"]
+            change = ("gain" if npass else "loss") if op != npass else (
+                "both_pass" if op else "both_fail")
         rows.append({**q, "criteria": R.criteria[q["id"]], "arms": arms, "change": change,
                      "sources": [inputs[s] for s in q["source_ids"]]})
     return rows, grades
@@ -170,7 +179,6 @@ def summarize(rows):
     summary = dict(
         round=R.name, at=datetime.now(UTC).isoformat(), grading=GRADING.name,
         overall={a: score(rows, a) for a in ARMS},
-        paired_changes=dict(Counter(r["change"] for r in rows)),
         all_arms_answered={a: score(answered, a) for a in ARMS},
         all_arms_answered_ids=sorted(r["id"] for r in answered),
         sample_counts=dict(question_instances=len(rows), personas=len({r["persona"] for r in rows}),
@@ -201,7 +209,7 @@ def summarize(rows):
         summary["controls"] = {c: score(rows, c) for c in R.controls}
         summary["guessable_without_memory"] = guessable
         summary["memory_dependent"] = {a: score(kept, a) for a in ARMS}
-    checked = [r for r in rows if r["arms"]["new"]["exact_pass"] is not None]
+    checked = [r for r in rows if r["arms"][ARMS[0]]["exact_pass"] is not None]
     if checked:
         summary["exact"] = {a: dict(
             checked=len(checked), exact_pass=sum(r["arms"][a]["exact_pass"] for r in checked),
@@ -227,8 +235,10 @@ def summarize(rows):
         m = json.loads(manifest.read_text("utf-8"))
         summary["judging"] = {k: m.get(k) for k in ("status", "judges", "votes", "anchor_gates",
                                                     "anchor_failed_keys", "split_decisions")}
-    summary["new_minus_old_points"] = (summary["overall"]["new"]["rate"]
-                                       - summary["overall"]["old"]["rate"]) * 100
+    if PAIRED:
+        summary["paired_changes"] = dict(Counter(r["change"] for r in rows))
+        summary["new_minus_old_points"] = (summary["overall"]["new"]["rate"]
+                                           - summary["overall"]["old"]["rate"]) * 100
     summary["latency"] = {a: dict(median_seconds=statistics.median(v),
                                   p95_seconds=statistics.quantiles(v, n=100, method="inclusive")[94]
                                   if len(v) > 1 else v[0],
@@ -242,7 +252,7 @@ def prepare_review(rows, grades):
     persona, delay = R.review_persona(), R.cfg["review"]["delay_days"]
     selected = [(r, a, f"preregistered_{persona}_d{delay}") for r in rows
                 if r["persona"] == persona and r["delay_days"] == delay for a in ARMS]
-    for family in sorted({r["family"] for r in rows}):
+    for family in sorted({r["family"] for r in rows}) if PAIRED else ():
         pool = [r for r in rows if r["family"] == family and r["arms"]["old"]["auto_grade"]["pass"]
                 != r["arms"]["new"]["auto_grade"]["pass"]]
         for r in pool[:R.cfg["review"]["changed_per_family"]]:
@@ -315,13 +325,16 @@ def charts(rows, summary):
 
     fig, ax = plt.subplots(figsize=(11.6, 6.2))
     fig.subplots_adjust(left=.22, right=.88, bottom=.14, top=.72)
-    header(fig, f"{R.name} · 三路记忆测试", f"同{R.total}题 · {len(R.personas)}个虚构人物 · 整题通过率")
+    header(fig, f"{R.name} · 记忆测试", f"{R.total}题 · {len(R.personas)}个虚构人物 · 整题通过率")
     for i, a in enumerate(ARMS):
         s = summary["overall"][a]
-        ax.barh(2 - i, s["rate"] * 100, color=COLORS[a], hatch=HATCH[a], height=.55)
-        ax.text(s["rate"] * 100 + 1, 2 - i, f'{s["passed"]}/{s["total"]}  {s["rate"]:.1%}',
+        ax.barh(len(ARMS) - i - 1, s["rate"] * 100,
+                color=COLORS[a], hatch=HATCH[a], height=.55)
+        ax.text(s["rate"] * 100 + 1, len(ARMS) - i - 1,
+                f'{s["passed"]}/{s["total"]}  {s["rate"]:.1%}',
                 va="center", weight="bold", color="#102F51")
-    ax.set(yticks=[2, 1, 0], yticklabels=[LABELS[a] for a in ARMS], xlim=(0, 100))
+    ax.set(yticks=list(reversed(range(len(ARMS)))),
+            yticklabels=[LABELS[a] for a in ARMS], xlim=(0, 100))
     for spine in ax.spines.values():
         spine.set_visible(False)
     store(fig, "memory-summary")
@@ -419,6 +432,8 @@ def render(rows, summary, figures):
                        f'<p>必须满足：{e("；".join(r["criteria"]["required"]))}</p>'
                        f'<p>禁止：{e("；".join(r["criteria"].get("forbidden", [])))}</p></details>')
     ds, qw = summary["finance"]["deepseek"], summary["finance"]["qwen"]
+    comparison = (f'新版较旧版 {summary["new_minus_old_points"]:+.2f} 个百分点；配对：'
+                  f'{e(summary["paired_changes"])}。') if PAIRED else ""
     doc = ('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>' + e(R.name)
            + '</title><style>body{font-family:"Microsoft YaHei",sans-serif;background:#f5f8fd;'
            'color:#17334f;margin:0}main{max-width:1200px;margin:auto;padding:32px}.kpis{display:grid;'
@@ -429,9 +444,9 @@ def render(rows, summary, figures):
            'table{border-collapse:collapse;margin:16px 0}th,td{padding:4px 12px;text-align:left}'
            '.fail{color:#a43d40}.q{border-bottom:1px solid #d1dce9;padding:10px 0}.note{font-size:12px;'
            'color:#586c81}</style><main><h1>' + e(R.name) + '</h1>'
-           f'<p>{R.total}题 × 旧版 / 新版 / 千问RAG · 判卷 {e(GRADING.name)}</p><div class="kpis">'
-           f'{cards}</div><p>新版较旧版 {summary["new_minus_old_points"]:+.2f} 个百分点；配对：'
-           f'{e(summary["paired_changes"])}。DeepSeek ¥{ds["charged_or_held_cny"]:.2f}/'
+           f'<p>{R.total}题 × {e(" / ".join(LABELS[a] for a in ARMS))} · '
+           f'判卷 {e(GRADING.name)}</p><div class="kpis">'
+           f'{cards}</div><p>{comparison}DeepSeek ¥{ds["charged_or_held_cny"]:.2f}/'
            f'¥{ds["cap_cny"]}，千问 ¥{qw["charged_or_held_cny"]:.2f}/¥{qw["cap_cny"]}（保守估算）。'
            f'复核 {summary["review_count"]} 份，改判 {summary["override_count"]} 份，非独立人工。</p>'
            + extras(summary, e)

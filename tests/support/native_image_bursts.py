@@ -166,11 +166,13 @@ async def wait_for_ack(core, active, sends, tasks, count, retries, responses, rp
                                          ).total_seconds(),
             "outbox": core.store.rows(
                 "SELECT state,last_error_code,attempt_count,"
-                "(julianday(lease_until)-julianday(?))*86400 lease_seconds,"
-                "(julianday(next_attempt_at)-julianday(?))*86400 due_seconds "
-                "FROM outbox ORDER BY rowid", (now, now)),
+                "EXTRACT(EPOCH FROM (lease_until::timestamptz - %s::timestamptz))"
+                "::double precision AS lease_seconds,"
+                "EXTRACT(EPOCH FROM (next_attempt_at::timestamptz - %s::timestamptz))"
+                "::double precision AS due_seconds FROM outbox ORDER BY record_sequence",
+                (now, now)),
             "jobs": core.store.rows(
-                "SELECT kind,state,last_error_code FROM jobs ORDER BY rowid"),
+                "SELECT kind,state,last_error_code FROM jobs ORDER BY record_sequence"),
             "retry_errors": dict(retries), "http_responses": dict(responses),
             "rpc_spans": rpc,
             "tasks": [{

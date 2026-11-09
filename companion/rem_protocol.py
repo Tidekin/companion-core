@@ -15,14 +15,6 @@ class RemConfig(StrictModel):
     record_retention_days: int = Field(default=30, ge=1, le=3650, strict=True)
     max_input_tokens: int = Field(default=2400, ge=128, le=8192, strict=True)
     max_output_tokens: int = Field(default=600, ge=128, le=2048, strict=True)
-    daily_micro_usd: int = Field(default=10000, ge=0, le=1000000, strict=True)
-    monthly_micro_usd: int = Field(default=100000, ge=0, le=10000000, strict=True)
-
-    @model_validator(mode="after")
-    def explicit_budget(self):
-        if self.enabled and (not self.daily_micro_usd or not self.monthly_micro_usd):
-            raise ValueError("REM requires explicit positive daily and monthly cost caps")
-        return self
 
 
 class RemDraft(StrictModel):

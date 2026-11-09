@@ -30,7 +30,7 @@ async def lineage_case(core, tmp_path, monkeypatch):
         custody = meme_assets.original_custody(core.store, core.settings, event["event_id"])
         assets = []
         with core.store.transaction():
-            core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
+            core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
                                (ids[2], ids[3]))
             for payload in payloads[1:]:
                 proof = payload["source_evidence"]
@@ -67,20 +67,20 @@ def test_takeover_extends_same_event_and_transitive_sources_without_rewriting_or
     async def scenario():
         async with lineage_case(core, tmp_path, monkeypatch) as (event, ids, assets, custody):
             original_assets = core.store.rows("SELECT * FROM meme_assets ORDER BY asset_id")
-            original_capture = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            original_capture = core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                               ("owner_input:" + event["event_id"],))
             await reject_original(core, monkeypatch)
             calls = []
             assert await worker(core, calls)
-            assert core.store.one("SELECT reuse_job_id FROM meme_captions WHERE job_id=?",
+            assert core.store.one('SELECT reuse_job_id FROM meme_captions WHERE job_id=%s',
                                   (ids[1],))["reuse_job_id"] is None
-            assert core.store.one("SELECT reuse_job_id FROM meme_captions WHERE job_id=?",
+            assert core.store.one('SELECT reuse_job_id FROM meme_captions WHERE job_id=%s',
                                   (ids[2],))["reuse_job_id"] == ids[1]
             for asset_id, item, data in assets:
                 sources, withdrawn = meme_assets.provenance(core.store, core.settings, custody,
                     item, data, caption_job_id=ids[assets.index((asset_id, item, data)) + 1])
                 recorded = {(r["event_id"], r["caption_job_id"]) for r in core.store.rows(
-                    "SELECT * FROM meme_asset_sources WHERE asset_id=?", (asset_id,))}
+                    'SELECT * FROM meme_asset_sources WHERE asset_id=%s', (asset_id,))}
                 assert sources and not withdrawn and set(sources) <= recorded
                 assert (event["event_id"], ids[0]) in recorded  # Old root remains attributable.
                 assert (event["event_id"], ids[1]) in recorded  # Same event, new caption tuple.
@@ -88,7 +88,7 @@ def test_takeover_extends_same_event_and_transitive_sources_without_rewriting_or
             assert len(calls) == len(core.store.rows("SELECT * FROM model_usage")) == 1
             assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
             assert core.store.rows("SELECT * FROM meme_assets ORDER BY asset_id") == original_assets
-            assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+            assert core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                                  ("owner_input:" + event["event_id"],)) == original_capture
 
     run(scenario())
@@ -103,10 +103,12 @@ def test_source_link_failure_rolls_back_graph_and_links_before_any_paid_work(
             before = core.store.rows("SELECT * FROM meme_asset_sources ORDER BY asset_id,"
                                      "event_id,caption_job_id")
             execute = Store.execute
+            rejected = []
 
             def fail_new_tuple(store, sql, params=()):
-                if (sql.startswith("INSERT OR IGNORE INTO meme_asset_sources")
+                if (isinstance(sql, str) and sql.startswith("INSERT INTO meme_asset_sources")
                     and params[0] == assets[1][0] and params[2] == ids[1]):
+                    rejected.append(params)
                     raise ValueError("Synthetic attribution write failure")
                 return execute(store, sql, params)
 
@@ -114,14 +116,15 @@ def test_source_link_failure_rolls_back_graph_and_links_before_any_paid_work(
             with monkeypatch.context() as patch:
                 patch.setattr(Store, "execute", fail_new_tuple)
                 assert await worker(core, calls)
+            assert len(rejected) == 1
             assert not calls and not core.store.rows("SELECT * FROM model_usage")
-            assert core.store.one("SELECT reuse_job_id FROM meme_captions WHERE job_id=?",
+            assert core.store.one('SELECT reuse_job_id FROM meme_captions WHERE job_id=%s',
                                   (ids[1],))["reuse_job_id"] == ids[0]
-            assert core.store.one("SELECT reuse_job_id FROM meme_captions WHERE job_id=?",
+            assert core.store.one('SELECT reuse_job_id FROM meme_captions WHERE job_id=%s',
                                   (ids[2],))["reuse_job_id"] == ids[0]
             assert core.store.rows("SELECT * FROM meme_asset_sources ORDER BY asset_id,"
                                    "event_id,caption_job_id") == before
-            assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                   (ids[1],)) == {"state": "CANCELLED",
                                                 "last_error_code": "MEME_ASSET_SOURCE_CHANGED"}
 
@@ -140,11 +143,11 @@ def test_actual_paid_job_prevents_takeover_when_a_cached_usage_pointer_is_missin
             assert await worker(core, calls, hook=fail_response)
             before = core.store.rows("SELECT * FROM model_usage")
             assert len(calls) == len(before) == 1 and before[0]["state"] == "UNKNOWN"
-            core.store.execute("UPDATE meme_captions SET usage_request_id=NULL WHERE job_id=?",
+            core.store.execute('UPDATE meme_captions SET usage_request_id=NULL WHERE job_id=%s',
                                (ids[0],))
             assert await worker(core, calls)
             assert len(calls) == 1 and core.store.rows("SELECT * FROM model_usage") == before
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                   (ids[1],))["state"] == "CANCELLED"
 
     run(scenario())
@@ -164,13 +167,13 @@ async def blocked_paid_ancestor(core, tmp_path, monkeypatch, *, tokens):
         original_fee = core.store.rows("SELECT * FROM model_usage")
         assert len(original_fee) == 1
         assert original_fee[0]["state"] == ("SETTLED" if tokens else "UNKNOWN")
-        assert core.store.one("SELECT result_json FROM meme_captions WHERE job_id=?",
+        assert core.store.one('SELECT result_json FROM meme_captions WHERE job_id=%s',
                               (ids[0],))["result_json"] is None
         assert await worker(core, [])  # B inherits A's failed result and original fee.
         with core.store.transaction():
-            core.store.execute("UPDATE meme_captions SET usage_request_id=NULL WHERE job_id=?",
+            core.store.execute('UPDATE meme_captions SET usage_request_id=NULL WHERE job_id=%s',
                                (ids[1],))
-            core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
+            core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
                                (ids[1], ids[2]))
             meme_assets.extend_reuse_provenance(core.store, core.settings, ids[2:])
         graph = core.store.rows("SELECT job_id,reuse_job_id,usage_request_id "
@@ -193,7 +196,7 @@ async def blocked_paid_ancestor(core, tmp_path, monkeypatch, *, tokens):
                                "FROM meme_captions ORDER BY job_id") == graph
         assert core.store.rows("SELECT * FROM meme_asset_sources ORDER BY asset_id,"
                                "event_id,caption_job_id") == links
-        assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+        assert core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                               (ids[2],)) == {"state": "CANCELLED",
                                             "last_error_code": "MEME_CAPTION_SOURCE_CHANGED"}
 
@@ -208,20 +211,27 @@ def test_settled_ancestor_without_caption_result_cannot_be_cut_through_a_missing
 def test_unknown_deeper_ancestor_cannot_be_cut_or_rebilled(core, tmp_path, monkeypatch):
     run(blocked_paid_ancestor(core, tmp_path, monkeypatch, tokens=False))
 
+def set_missing_reuse_parent(core, job_id):
+    with core.store.transaction():
+        core.store.execute("ALTER TABLE meme_captions DROP CONSTRAINT "
+                           "fk_meme_captions_reuse_job_id")
+        core.store.execute("UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s",
+                           ("job_" + "f" * 32, job_id))
+        # Retain the historical orphan while enforcing all subsequent writes.
+        core.store.execute("ALTER TABLE meme_captions ADD CONSTRAINT fk_meme_captions_reuse_job_id "
+                           "FOREIGN KEY(reuse_job_id) REFERENCES meme_captions(job_id) "
+                           "DEFERRABLE INITIALLY IMMEDIATE NOT VALID")
+
+
 def test_missing_old_parent_is_a_closed_failure_before_model_admission(core, tmp_path, monkeypatch):
     async def scenario():
         async with lineage_case(core, tmp_path, monkeypatch) as (_, ids, _, _):
             await reject_original(core, monkeypatch)
-            core.store.db.execute("PRAGMA foreign_keys=OFF")
-            try:
-                core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
-                                   ("job_" + "f" * 32, ids[1]))
-            finally:
-                core.store.db.execute("PRAGMA foreign_keys=ON")
+            set_missing_reuse_parent(core, ids[1])
             calls = []
             assert await worker(core, calls)
             assert not calls and not core.store.rows("SELECT * FROM model_usage")
-            assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                   (ids[1],)) == {"state": "CANCELLED",
                                                 "last_error_code": "MEME_CAPTION_SOURCE_CHANGED"}
 
@@ -236,31 +246,26 @@ def test_damaged_old_ancestry_never_reaches_a_model_reservation(
     async def scenario():
         async with lineage_case(core, tmp_path, monkeypatch) as (_, ids, _, _):
             await reject_original(core, monkeypatch)
-            core.store.db.execute("PRAGMA foreign_keys=OFF")
-            try:
-                if damage == "cycle":
-                    core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
-                                       (ids[0], ids[0]))
-                elif damage == "deep_cycle":
-                    core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
-                                       (ids[3], ids[0]))
-                elif damage == "missing_deep":
-                    core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
-                                       ("job_" + "f" * 32, ids[0]))
-                elif damage == "bound":
-                    core.store.execute("UPDATE meme_captions SET reuse_job_id=? WHERE job_id=?",
-                                       (ids[3], ids[0]))
-                    core.store.execute("UPDATE meme_captions SET reuse_job_id=NULL WHERE job_id=?",
-                                       (ids[2],))
-                    monkeypatch.setattr("companion.meme_core.MAX_ROWS", 2)
-                elif damage == "wrong_image":
-                    core.store.execute("UPDATE meme_captions SET asset_sha256=? WHERE job_id=?",
-                                       ("a" * 64, ids[0]))
-                else:
-                    core.store.execute("UPDATE meme_captions SET source_json='{}' WHERE job_id=?",
-                                       (ids[0],))
-            finally:
-                core.store.db.execute("PRAGMA foreign_keys=ON")
+            if damage == "cycle":
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
+                                   (ids[0], ids[0]))
+            elif damage == "deep_cycle":
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
+                                   (ids[3], ids[0]))
+            elif damage == "missing_deep":
+                set_missing_reuse_parent(core, ids[0])
+            elif damage == "bound":
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=%s WHERE job_id=%s',
+                                   (ids[3], ids[0]))
+                core.store.execute('UPDATE meme_captions SET reuse_job_id=NULL WHERE job_id=%s',
+                                   (ids[2],))
+                monkeypatch.setattr("companion.meme_core.MAX_ROWS", 2)
+            elif damage == "wrong_image":
+                core.store.execute('UPDATE meme_captions SET asset_sha256=%s WHERE job_id=%s',
+                                   ("a" * 64, ids[0]))
+            else:
+                core.store.execute("UPDATE meme_captions SET source_json='{}' WHERE job_id=%s",
+                                   (ids[0],))
             graph = core.store.rows("SELECT * FROM meme_captions ORDER BY job_id")
             links = core.store.rows("SELECT * FROM meme_asset_sources ORDER BY asset_id,"
                                    "event_id,caption_job_id")
@@ -279,7 +284,7 @@ def test_damaged_old_ancestry_never_reaches_a_model_reservation(
             assert core.store.rows("SELECT * FROM meme_asset_sources ORDER BY asset_id,"
                                    "event_id,caption_job_id") == links
             assert not core.store.rows("SELECT * FROM model_usage")
-            assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                   (ids[1],)) == {"state": "CANCELLED",
                                                 "last_error_code": "MEME_CAPTION_SOURCE_CHANGED"}
 

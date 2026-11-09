@@ -25,7 +25,7 @@ def test_share_uses_generated_wording_then_a_link_only_bubble(core, wording):
     assert not core.store.rows("SELECT * FROM outbox")
     assert not core.social.flush()
     assert run(run_notice(core))
-    rows = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
+    rows = core.store.rows('SELECT * FROM outbox ORDER BY record_sequence')
     assert [json.loads(row["content_json"])["text"] for row in rows] == [wording, BILI]
     assert rows[0]["reply_group_id"] == rows[1]["reply_group_id"]
     assert len(core.model.calls) == 1
@@ -33,7 +33,7 @@ def test_share_uses_generated_wording_then_a_link_only_bubble(core, wording):
     assert prompt["text"] == event.payload.text and prompt["title"] == event.payload.title
     assert proactive_counts(core.store, core.settings, core.clock())[0] == 1
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
-    assert json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+    assert json.loads(core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                                     (event.event_id,))["body_json"])["text"] == event.payload.text
     first = lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
                              core.clock())["items"]
@@ -58,7 +58,7 @@ def test_share_segments_prose_with_a_reserved_link_slot(core, limit, expected):
     wording = "看到了一个有趣的细节。\n\n镜头转向窗外。\n\n这个安排让我想起另一部片子。"
     ready_share(core, wording)
     assert run(run_notice(core))
-    rows = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
+    rows = core.store.rows('SELECT * FROM outbox ORDER BY record_sequence')
     texts = [json.loads(row["content_json"])["text"] for row in rows]
     assert len(texts) == expected and texts[-1] == BILI
     assert "".join(texts[:-1]) == wording
@@ -145,7 +145,9 @@ def test_first_bubble_uncertainty_prevents_the_link_from_being_sent(core):
                     core.clock())
     assert not lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
                                 core.clock())["items"]
-    assert [row["state"] for row in core.store.rows("SELECT state FROM outbox ORDER BY rowid")] == [
+    assert [row["state"] for row in core.store.rows(
+        'SELECT state FROM outbox ORDER BY record_sequence'
+    )] == [
         "DELIVERY_UNCERTAIN", "CANCELLED",
     ]
 

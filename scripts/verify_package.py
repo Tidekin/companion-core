@@ -152,13 +152,14 @@ def verify_meme_sources(destination, env=None):
                    env=env, check=True, timeout=30)
 
 
-def verify_postgres(destination):
+def verify_postgres(destination, environment):
     """Run the extracted wheel's native migration in an independent process."""
     configuration = os.environ.get("COMPANION_POSTGRES_TEST_CONFIG")
     if not configuration:
-        return
+        raise RuntimeError("POSTGRES_PACKAGE_VERIFICATION_REQUIRES_TEST_CONFIG")
     import psycopg
     from psycopg import sql
+    from psycopg.conninfo import make_conninfo
 
     value = json.loads(Path(configuration).read_text("utf8"))
     connection = {key: value[key] for key in ["host", "port", "dbname", "user", "password"]}
@@ -178,7 +179,7 @@ def verify_postgres(destination):
         native.migrate(info)
         with native.Database(info) as database, database.session() as session:
             assert session.one('SELECT version_num FROM alembic_version')=={
-                'version_num':'pg0001_core'}
+                'version_num':'pg0002_relationship_standing'}
             assert session.one("SELECT count(*) AS n FROM information_schema.tables "
                 "WHERE table_schema=current_schema() AND table_type='BASE TABLE'")=={'n':104}
         print('PASS: extracted wheel initializes native PostgreSQL migrations')
@@ -186,6 +187,13 @@ def verify_postgres(destination):
     with psycopg.connect(**connection, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(namespace)))
     try:
+        init_environment = {**environment,
+            "COMPANION_DATABASE": make_conninfo(
+                **connection, options="-c search_path=" + namespace + ",pg_catalog"),
+            "COMPANION_STATE_DIRECTORY": str(destination / "check-state"),
+        }
+        subprocess.run([sys.executable, "-B", "-m", "companion", "init"],
+                       cwd=destination, env=init_environment, check=True, timeout=60)
         subprocess.run([sys.executable, "-I", "-B", "-c", script, str(destination),
                         str(Path(configuration).resolve()), namespace],
                        cwd=destination, check=True, timeout=60)
@@ -248,6 +256,7 @@ def main():
             "companion/migrations/postgresql/schema.sql",
             "companion/migrations/postgresql/constraints.sql",
             "companion/migrations/postgresql/versions/pg0001_core.py",
+            "companion/migrations/postgresql/versions/pg0002_relationship_standing.py",
         } <= set(archive.namelist())
         with tempfile.TemporaryDirectory(prefix="package-check-", dir=temporary) as folder:
             destination = Path(folder).resolve()
@@ -258,21 +267,13 @@ def main():
                 COMPANION_OWNER_QQ_ID="10001",
                 COMPANION_BOT_QQ_ID="10002",
                 COMPANION_BRIDGE_TOKEN="package-verification-token-32-chars",
-                COMPANION_DATABASE=str(destination / "check.db"),
                 COMPANION_ERASURE_LEDGER=str(destination / "erasures.jsonl"),
                 PYTHONDONTWRITEBYTECODE="1",
                 PYTHONPATH=str(destination),
             )
             verify_meme_protocol(destination, env)
             verify_meme_sources(destination, env)
-            verify_postgres(destination)
-            subprocess.run(
-                [sys.executable, "-m", "companion", "init"],
-                cwd=destination,
-                env=env,
-                check=True,
-                timeout=30,
-            )
+            verify_postgres(destination, env)
             subprocess.run(
                 [sys.executable, "-m", "source_reader", "--help"],
                 cwd=destination,

@@ -1,20 +1,21 @@
 from contextlib import closing
 
-from companion.store import Store, migrate
+from companion.legacy_import import migrate_sqlite
+from tests.support.release_migration import insert, open_historical, rows
 
 PRIOR = "0034_voice_retention_v2"
 
 
 def historical_admission(tmp_path):
     path = tmp_path / "historical.db"
-    migrate(str(path), PRIOR)
-    with closing(Store(str(path))) as store:
-        store.insert("model_usage", rowid=17, usage_id="usage", request_id="request",
+    migrate_sqlite(path, PRIOR)
+    with closing(open_historical(path)) as db:
+        insert(db, "model_usage", rowid=17, usage_id="usage", request_id="request",
                      scenario="chat", provider="synthetic", model="synthetic",
                      billed_micro_usd=23, occurred_at="2026-10-24T00:00:00+00:00",
                      state="UNKNOWN")
-        store.insert("model_budget_windows", window_id="window", contract_sha256="a" * 64)
-        store.insert("model_admissions", rowid=41, request_id="request",
+        insert(db, "model_budget_windows", window_id="window", contract_sha256="a" * 64)
+        insert(db, "model_admissions", rowid=41, request_id="request",
                      logical_request_id="logical", attempt_id="attempt", attempt_number=1,
                      window_id="window", contract_sha256="a" * 64, payload_sha256="b" * 64,
                      snapshot_json='{"preserve": "exact historical bytes"}',
@@ -24,6 +25,6 @@ def historical_admission(tmp_path):
     return path
 
 
-def snapshot(store):
-    return {table: store.rows(f"SELECT rowid AS original_rowid,* FROM {table} ORDER BY rowid")
+def snapshot(db):
+    return {table: rows(db, f"SELECT rowid AS original_rowid,* FROM {table} ORDER BY rowid")
             for table in ("model_usage", "model_admissions", "model_budget_windows")}

@@ -64,10 +64,14 @@ def test_image_burst_keeps_recent_complete_dialogue_in_independent_worker(
             first = (await run_worker(core, tmp_path, followup, '刚才猫耳只是个玩笑。'))[0]
             prompt = encode(first['messages'])
             assert len(image_parts(first)) == expected_images
-            originals = core.store.rows('SELECT item_id FROM captured_images ORDER BY rowid')
-            selected = core.store.rows('SELECT item_id FROM agent_image_inputs WHERE job_id='
-                                      '(SELECT job_id FROM jobs ORDER BY rowid DESC LIMIT 1) '
-                                      'ORDER BY position')
+            originals = core.store.rows(
+                'SELECT item_id FROM captured_images ORDER BY record_sequence'
+            )
+            selected = core.store.rows(
+                'SELECT item_id FROM agent_image_inputs WHERE job_id=(SELECT '
+                'job_id FROM jobs ORDER BY record_sequence DESC LIMIT 1) '
+                'ORDER BY position'
+            )
             assert selected == originals[-expected_images:]
             assert all(row['item_id'] in prompt for row in selected)
             for question, reply in dialogue:
@@ -86,8 +90,10 @@ def test_image_burst_keeps_recent_complete_dialogue_in_independent_worker(
             assert len(sends) == 4 and active.attempts() == {'ACK': 4}
             assert core.store.rows('SELECT scenario,state FROM model_usage') == [
                 {'scenario': 'chat', 'state': 'SETTLED'}] * 4
-            last = core.store.one('SELECT snapshots_json FROM agent_conversations '
-                                  'ORDER BY rowid DESC LIMIT 1')
+            last = core.store.one(
+                'SELECT snapshots_json FROM agent_conversations ORDER BY '
+                'record_sequence DESC LIMIT 1'
+            )
             plan = next(item['metadata']['core_context']
                         for item in json.loads(last['snapshots_json'])
                         if item['kind'] == 'context_plan')

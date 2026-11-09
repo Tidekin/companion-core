@@ -23,6 +23,8 @@ from tests.support.owner_input import captured, inbound
 
 @pytest.mark.parametrize("change", ["safe", "expression", "mixed", "stop", "privacy",
                                     "busy", "closing"])
+
+
 def test_native_worker_and_console_share_task_configuration_identity(core, tmp_path, change):
     capture, signing_key = captured(core, tmp_path)
     core.settings.operator_hot_reload = True
@@ -99,7 +101,7 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                         changes.update(turn_taking={"silence_enabled": True},
                                        input_debounce={"active_seconds": 6})
                     if change == "mixed":
-                        changes["monthly_limit_micro_usd"] = 99_999_999
+                        changes["reflection_max_daily_calls"] = 3
                     saved = await client.put("/v1/console/configuration", json={
                         "expected_version": 0, "changes": changes}, headers=headers)
                     assert saved.status_code == 200, saved.text
@@ -113,7 +115,7 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                             headers={"Authorization": "Bearer " + PASSWORD})
                         assert stopped.status_code == 200, stopped.text
                     elif change == "privacy":
-                        with core.store.transaction():
+                        with core.store.transaction(control_write=True):
                             core.ledger.expire_events(core.store, [capture.event_id], core.clock())
                     child.stdin.write(b"continue\n")
                     await child.stdin.drain()
@@ -121,13 +123,18 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                     if tasks == 2:
                         if change == "closing":
                             # Simulated transport delivered the first reply before the owner closed.
-                            assert core.store.execute("UPDATE outbox SET state='SENT',sent_at=? "
-                                "WHERE origin_event_id=? AND state='PENDING'",
-                                (core.clock(), capture.event_id)).rowcount == 1
+                            assert core.store.execute((
+                                "UPDATE outbox SET state='SENT',sent_at=%s "
+                                "WHERE origin_event_id=%s AND state='PENDING'"
+                            ),
+                                (core.clock(), capture.event_id)) == 1
                         proof = successor()
                         second = await accept(proof, second_text)
                         if change == "closing":
-                            assert core.store.one("SELECT next_attempt_at FROM jobs WHERE job_id=?",
+                            assert core.store.one((
+                                'SELECT next_attempt_at FROM jobs WHERE '
+                                'job_id=%s'
+                            ),
                                                   (second,))["next_attempt_at"] == next_now
                             core.clock.advance(6)
                         child.stdin.write(b"next-task\n")
@@ -156,12 +163,14 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                         assert "synthetic owner guidance" in result["systems"][1]
                     if change == "closing":
                         assert SILENCE_RULES in result["systems"][1]
-                        assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                        assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                                               (second,)) == {"state": "SUCCEEDED"}
-                        assert not core.store.rows("SELECT 1 FROM outbox WHERE origin_event_id=?",
+                        assert not core.store.rows('SELECT 1 FROM outbox WHERE origin_event_id=%s',
                                                    (proof.event_id,))
-                        audit = core.store.one("SELECT safe_detail_json FROM audit_log "
-                            "WHERE action='job.succeeded' AND entity_id=?", (second,))
+                        audit = core.store.one((
+                            'SELECT safe_detail_json FROM audit_log WHERE '
+                            "action='job.succeeded' AND entity_id=%s"
+                        ), (second,))
                         assert json.loads(audit["safe_detail_json"])["reply_skipped"] is True
                     assert result["calls"] == (2 if tasks == 2 else 0)
                     assert runtime_config.get(core.store, core.settings, "job:" + first) == (

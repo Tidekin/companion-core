@@ -38,7 +38,7 @@ def test_published_ingest_reply_accepts_live_replay_states(core):
             core.fail_job(job, "MODEL_RETRYABLE")
             assert (await post()) == {**first, "duplicate": True, "state": "RETRY_WAIT"}
             for terminal in ("CANCELLED", "SUCCEEDED", "FAILED"):
-                core.store.execute("UPDATE jobs SET state=? WHERE job_id=?",
+                core.store.execute('UPDATE jobs SET state=%s WHERE job_id=%s',
                                    (terminal, job["job_id"]))
                 assert (await post()) == {**first, "duplicate": True, "state": terminal}
 

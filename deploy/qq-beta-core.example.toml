@@ -1,7 +1,7 @@
 # P5 isolated DEMO ONLY. No live model key; every autonomous capability is disabled.
 # Copy to config.toml; secrets and QQ IDs are environment variables.
 mode = "demo"
-database = "data/companion.sqlite3"
+database = "host=postgres dbname=companion user=companion"
 erasure_ledger = "privacy/erasures.jsonl"
 timezone = "Asia/Shanghai"
 provider = "deepseek"
@@ -16,9 +16,6 @@ max_recent_messages = 12
 input_rate = 0
 cached_input_rate = 0
 output_rate = 0
-monthly_limit_micro_usd = 0
-autonomous_daily_micro_usd = 0
-memory_daily_micro_usd = 0
 # Enable after completing M0 checks in your environment.
 memory_enabled = false
 embedding_cache_dir = "data/embedding-cache"
@@ -45,7 +42,6 @@ diary_max_output_tokens = 700
 diary_max_body_chars = 2400
 diary_catchup_days = 3
 diary_max_attempts = 2
-diary_daily_micro_usd = 0
 diary_auto_share = false
 # Optional HTTP diary administration: set a distinct COMPANION_DIARY_ADMIN_TOKEN.
 # The Bridge token cannot list, export, edit, or delete diaries over this API.
@@ -63,8 +59,6 @@ reflection_daily_max_suggestions = 3
 reflection_min_sources = 3
 reflection_max_daily_calls = 1
 reflection_max_output_tokens = 600
-reflection_daily_micro_usd = 0
-reflection_monthly_micro_usd = 0
 goals_enabled = false
 goals_max_active = 10
 goal_max_attempts = 3
@@ -99,13 +93,10 @@ android_enabled = false
 enabled = false
 allow_changes = false
 daily_calls = 0
-daily_micro_usd = 0
-monthly_micro_usd = 0
 
 # Explicit short owner sessions; configure HTTPS providers and bounded costs before enabling.
 [media]
 enabled = false
-daily_micro_usd = 0
 max_session_seconds = 180
 max_session_bytes = 2000000
 max_chunk_bytes = 64000
@@ -114,15 +105,12 @@ max_chunk_bytes = 64000
 max_links_per_event = 2
 max_images_per_event = 2
 max_images_per_article = 32
-article_image_micro_usd = 0
 use_chat_model_for_vision = false
 max_image_bytes = 33554432
 max_daily_image_bytes = 838860800
 max_daily_images = 32
-image_daily_micro_usd = 0
 wait_seconds = 30
 
 # Explicit opt-in: use_chat_model_for_vision=true reuses the chat URL/model/key.
 # deepseek-flash supports image input; both cost limits must be positive before calls.
 [content.vision]
-max_request_micro_usd = 0

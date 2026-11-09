@@ -2,14 +2,17 @@
 
 import copy
 import json
+from unittest.mock import patch
 
 import httpx
 import pytest
 from pydantic import SecretStr
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.store import after
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.diary import DAY, generate, seed_day
 from tests.support.exploration import URL, configure
 from tests.support.reading_protocol import envelope
@@ -32,6 +35,7 @@ def credentials(core):
 def client_for(core):
     app = create_app(core.settings)
     app.state.core = core
+    app.state.api_store = ApiStore(core.database, core.settings.state_directory)
     return httpx.AsyncClient(base_url="http://core", transport=httpx.ASGITransport(app=app))
 
 
@@ -51,7 +55,6 @@ def failed_read(token="lease_synthetic"):
 ])
 def test_v3_reader_requires_its_own_adapter_token_before_writing(core, authority, suffix, body):
     tokens = credentials(core)
-    before = core.store.db.total_changes
 
     async def scenario():
         async with client_for(core) as client:
@@ -59,8 +62,12 @@ def test_v3_reader_requires_its_own_adapter_token_before_writing(core, authority
                                        headers=tokens[authority])
             assert result.status_code == 401
 
-    run(scenario())
-    assert core.store.db.total_changes == before
+    before = logical_state(core.store)
+    with core.store.read_snapshot(), patch.object(
+        ApiStore, "run", side_effect=AssertionError("invalid reader request opened an API session")
+    ):
+        run(scenario())
+    assert logical_state(core.store) == before
     assert core.store.rows("SELECT * FROM reading_attempts") == []
     assert core.store.rows("SELECT * FROM exploration_requests") == []
 
@@ -74,7 +81,6 @@ def test_v3_reader_requires_its_own_adapter_token_before_writing(core, authority
 ])
 def test_reader_versions_reject_other_contracts_without_echo_or_writes(core, version, body):
     tokens = credentials(core)
-    before = core.store.db.total_changes
 
     async def scenario():
         async with client_for(core) as client:
@@ -85,8 +91,12 @@ def test_reader_versions_reject_other_contracts_without_echo_or_writes(core, ver
             assert result.status_code == 400 and result.json()["error"] == "INVALID_CONTRACT"
             assert "private-token-must-not-echo" not in result.text
 
-    run(scenario())
-    assert core.store.db.total_changes == before
+    before = logical_state(core.store)
+    with core.store.read_snapshot(), patch.object(
+        ApiStore, "run", side_effect=AssertionError("invalid reader request opened an API session")
+    ):
+        run(scenario())
+    assert logical_state(core.store) == before
 
 
 def test_v3_reader_http_commits_evidence_once_and_rejects_changed_receipt(core):
@@ -171,7 +181,6 @@ def test_reader_lease_cannot_be_settled_through_other_version(core, version):
 @pytest.mark.parametrize("authority", ["missing", "bridge", "diary", "bili"])
 def test_expression_learning_view_requires_control_authority(core, authority):
     tokens = credentials(core)
-    before = core.store.db.total_changes
 
     async def scenario():
         async with client_for(core) as client:
@@ -179,14 +188,15 @@ def test_expression_learning_view_requires_control_authority(core, authority):
                                         headers=tokens[authority])
             assert response.status_code == 401
 
-    run(scenario())
-    assert core.store.db.total_changes == before
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        run(scenario())
+    assert logical_state(core.store) == before
 
 
 def test_expression_learning_http_is_uncached_read_only_shadow(core):
     tokens = credentials(core)
     ingest(core, text="简短一点")
-    before = core.store.db.total_changes
 
     async def scenario():
         async with client_for(core) as client:
@@ -198,8 +208,10 @@ def test_expression_learning_http_is_uncached_read_only_shadow(core):
             assert first.json()["mode"] == "SHADOW"
             assert first.json()["items"][0]["value"] == "concise"
 
-    run(scenario())
-    assert core.store.db.total_changes == before
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        run(scenario())
+    assert logical_state(core.store) == before
     for table in ("model_usage", "outbox", "memories", "traits"):
         assert core.store.rows("SELECT * FROM " + table) == []
 
@@ -207,7 +219,7 @@ def test_expression_learning_http_is_uncached_read_only_shadow(core):
 def invalidated_diary(core):
     model = seed_day(core)
     assert generate(core)["state"] == "COMMITTED"
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert core.diary.get_day(DAY, core.settings.owner_qq_id) is None
     return model
@@ -217,7 +229,6 @@ def invalidated_diary(core):
 def test_diary_recompute_requires_distinct_diary_authority(core, authority):
     tokens = credentials(core)
     invalidated_diary(core)
-    before = core.store.db.total_changes
 
     async def scenario():
         async with client_for(core) as client:
@@ -225,8 +236,10 @@ def test_diary_recompute_requires_distinct_diary_authority(core, authority):
                                          headers=tokens[authority])
             assert response.status_code == 401
 
-    run(scenario())
-    assert core.store.db.total_changes == before
+    before = logical_state(core.store)
+    with core.store.read_snapshot():
+        run(scenario())
+    assert logical_state(core.store) == before
 
 
 def test_diary_recompute_http_is_idempotent_and_returns_current_queue_state(core):

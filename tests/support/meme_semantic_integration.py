@@ -91,7 +91,6 @@ def check_signed_caption_and_delivery(
         meme_discovery_enabled=True,
         meme_discovery_daily_download_bytes=32 * 1024 * 1024,
         meme_discovery_daily_storage_bytes=8 * 1024 * 1024,
-        meme_caption_daily_micro_usd=50000,
         expression_selection_probability=0.0 if explicit else 1.0,
     )
     options["paid_options"].update(
@@ -189,7 +188,7 @@ def check_signed_caption_and_delivery(
                     assert public_calls == visual_calls == []
                     if deferred:
                         client.event_hooks["request"].remove(unavailable_query)
-                        assert api_core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                        assert api_core.store.one('SELECT value FROM runtime_meta WHERE key=%s',
                             ("meme_offer:" + first,)) is None
                         core.clock.advance(OFFER_WAIT_SECONDS)
                     assert await worker.run_once("meme-integration-chat")
@@ -221,7 +220,7 @@ def check_signed_caption_and_delivery(
                         assert len(sends) == 2 and visual_calls == []
                         assert (await caption_lane.run()).progressed
                         assert core.store.one(
-                            "SELECT state FROM jobs WHERE job_id=?", (old_caption["job_id"],),
+                            'SELECT state FROM jobs WHERE job_id=%s', (old_caption["job_id"],),
                         )["state"] == "CANCELLED"
                         next_discovery = await runtime.submit_missing(
                             client, replacement, runtime.missing_offer(replacement),
@@ -267,7 +266,7 @@ def check_signed_caption_and_delivery(
                         "SELECT COUNT(*) FROM meme_semantic_vectors",
                     ).fetchone()[0] == 1
                     caption_row = core.store.one(
-                        "SELECT * FROM meme_captions ORDER BY rowid DESC LIMIT 1",
+                        'SELECT * FROM meme_captions ORDER BY record_sequence DESC LIMIT 1',
                     )
                     assert json.loads(caption_row["source_json"])["acquisition"] == acquisition
                     assert json.loads(caption_row["result_json"])["sampled_frames"][
@@ -334,7 +333,7 @@ def check_signed_caption_and_delivery(
                         "SELECT vector_json FROM meme_semantic_vectors").fetchone()[0])
                     assert len(vector) == 512 and any(value != 0 for value in vector)
                     queries = [json.loads(row["value"]) for row in core.store.rows(
-                        "SELECT value FROM runtime_meta WHERE key LIKE 'meme_query:%'")]
+                        "SELECT value FROM runtime_meta WHERE key LIKE 'meme_query:%%'")]
                     assert len(queries) == 3 + handoff - deferred
                     embedded = [query["embedding"] for query in queries if query["embedding"]]
                     assert len(embedded) == 2 + handoff - deferred

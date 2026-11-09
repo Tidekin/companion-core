@@ -95,7 +95,16 @@ def voice(core):
     freshness = max(15, cfg.lease_ttl_seconds * 2)
     items, recent = [], 0
     for node_id, node in sorted(cfg.nodes.items()):
-        observed = store.one("SELECT * FROM voice_node_state WHERE node_id=?", (node_id,)) or {}
+        observed = store.one('SELECT voice_node_state.node_id AS node_id, '
+            'voice_node_state.active_job_id AS active_job_id, voice_node_state.resource_state AS '
+            'resource_state, voice_node_state.last_seen_at AS last_seen_at, '
+            'voice_node_state.last_error_code AS last_error_code, voice_node_state.last_claim_seq '
+            'AS last_claim_seq, voice_node_state.claim_request_sha256 AS claim_request_sha256, '
+            'voice_node_state.claim_response_json AS claim_response_json, '
+            'voice_node_state.claim_expires_at AS claim_expires_at, voice_node_state.claim_job_id '
+            'AS claim_job_id, voice_node_state.recovery_required AS recovery_required, '
+            'voice_node_state.recovered_incarnation AS recovered_incarnation FROM voice_node_state '
+            'AS voice_node_state WHERE voice_node_state.node_id = %s', (node_id,)) or {}
         seen = _instant(observed.get("last_seen_at"))
         age = (_instant(now) - seen).total_seconds() if seen else None
         fresh = age is not None and 0 <= age <= freshness
@@ -116,8 +125,8 @@ def voice(core):
         )
         verified = (
             store.one(
-                "SELECT manifest_sha256,lease_issued_at FROM voice_jobs WHERE node_id=? "
-                "AND lease_issued_at IS NOT NULL ORDER BY lease_issued_at DESC LIMIT 1",
+                'SELECT manifest_sha256, lease_issued_at FROM voice_jobs WHERE node_id = %s AND '
+                'NOT lease_issued_at IS NULL ORDER BY lease_issued_at DESC NULLS LAST LIMIT 1',
                 (node_id,),
             )
             or {}
@@ -166,11 +175,11 @@ def voice(core):
             )
         )
     rows = store.rows(
-        "SELECT v.job_id,v.operation,v.state,v.node_id,v.source_partial,v.input_bytes,"
-        "v.input_duration_seconds,v.result_bytes,v.created_at,v.updated_at,v.deadline_at,"
-        "v.result_expires_at,v.last_error_code,v.message_id,o.state AS delivery_state "
-        "FROM voice_jobs v LEFT JOIN outbox o USING(message_id) "
-        "ORDER BY v.created_at DESC,v.job_id LIMIT 60"
+        'SELECT v.job_id, v.operation, v.state, v.node_id, v.source_partial, v.input_bytes, '
+        'v.input_duration_seconds, v.result_bytes, v.created_at, v.updated_at, v.deadline_at, '
+        'v.result_expires_at, v.last_error_code, v.message_id, o.state AS delivery_state FROM '
+        'voice_jobs AS v LEFT JOIN outbox AS o USING (message_id) ORDER BY v.created_at DESC NULLS '
+        'LAST, v.job_id NULLS FIRST LIMIT 60'
     )
     for row in rows:
         state = (
@@ -209,9 +218,9 @@ def voice(core):
             )
         )
     counts = store.one(
-        "SELECT COUNT(*) total,SUM(v.state IN ('QUEUED','LEASED','RUNNING')) pending,"
-        "SUM(o.state='DELIVERY_UNCERTAIN') uncertain FROM voice_jobs v "
-        "LEFT JOIN outbox o USING(message_id)"
+        "SELECT COUNT(*) AS total, CAST(SUM(CAST(v.state IN ('QUEUED', 'LEASED', 'RUNNING') AS "
+        "INT)) AS BIGINT) AS pending, CAST(SUM(CAST(o.state = 'DELIVERY_UNCERTAIN' AS INT)) AS "
+        'BIGINT) AS uncertain FROM voice_jobs AS v LEFT JOIN outbox AS o USING (message_id)'
     )
     return _safe(
         core,
@@ -253,16 +262,14 @@ def _receipt(row):
 
 def _plans(core, now):
     rows = core.store.rows(
-        "SELECT p.plan_id,p.state,p.plan_json,p.payload_sha256,p.redacted,"
-        "p.created_at,p.expires_at,"
-        "p.last_error_code,r.message_id,r.action_type,r.dispatched_at,r.receipt_json,r.receipt_sha256,"
-        "o.state AS delivery_state,o.lease_token,j.job_id AS retry_job_id,"
-        "j.state AS retry_state,j.next_attempt_at FROM social_autonomy_plans p "
-        "LEFT JOIN social_autonomy_reservations r USING(plan_id) "
-        "LEFT JOIN outbox o USING(message_id) "
-        "LEFT JOIN social_autonomy_jobs retry ON retry.plan_id=p.plan_id "
-        "LEFT JOIN jobs j ON j.job_id=retry.job_id "
-        "ORDER BY p.created_at DESC,p.plan_id LIMIT 60"
+        'SELECT p.plan_id, p.state, p.plan_json, p.payload_sha256, p.redacted, p.created_at, '
+        'p.expires_at, p.last_error_code, r.message_id, r.action_type, r.dispatched_at, '
+        'r.receipt_json, r.receipt_sha256, o.state AS delivery_state, o.lease_token, j.job_id AS '
+        'retry_job_id, j.state AS retry_state, j.next_attempt_at FROM social_autonomy_plans AS p '
+        'LEFT JOIN social_autonomy_reservations AS r USING (plan_id) LEFT JOIN outbox AS o USING '
+        '(message_id) LEFT JOIN social_autonomy_jobs AS retry ON retry.plan_id = p.plan_id LEFT '
+        'JOIN jobs AS j ON j.job_id = retry.job_id ORDER BY p.created_at DESC NULLS LAST, '
+        'p.plan_id NULLS FIRST LIMIT 60'
     )
     items = []
     for row in rows:
@@ -300,8 +307,8 @@ def _plans(core, now):
         if row["redacted"]:
             summary, label = "来源已撤回，计划内容已清除。", "计划已撤销"
         for source in core.store.rows(
-            "SELECT event_id FROM social_autonomy_sources "
-            "WHERE plan_id=? AND role='content' ORDER BY event_id LIMIT 20",
+            "SELECT event_id FROM social_autonomy_sources WHERE plan_id = %s AND role = 'content' "
+            'ORDER BY event_id NULLS FIRST LIMIT 20',
             (row["plan_id"],),
         ):
             try:
@@ -381,7 +388,13 @@ def _plans(core, now):
 def _assets(core, now):
     items = []
     for row in core.store.rows(
-        "SELECT * FROM social_autonomy_assets ORDER BY created_at DESC LIMIT 20"
+        'SELECT social_autonomy_assets.asset_id AS asset_id, social_autonomy_assets.asset_sha256 '
+        'AS asset_sha256, social_autonomy_assets.provenance_json AS provenance_json, '
+        'social_autonomy_assets.provenance_sha256 AS provenance_sha256, '
+        'social_autonomy_assets.created_at AS created_at, social_autonomy_assets.expires_at AS '
+        'expires_at, social_autonomy_assets.revoked_at AS revoked_at FROM social_autonomy_assets '
+        'AS social_autonomy_assets ORDER BY social_autonomy_assets.created_at DESC NULLS LAST '
+        'LIMIT 20'
     ):
         try:
             asset = ReviewedAvatar.model_validate_json(row["provenance_json"])
@@ -440,12 +453,17 @@ def _profiles(core, now):
     binding = paid_budget.sha([core.settings.bot_qq_id, core.settings.owner_qq_id])
     for field, label in (("nickname", "昵称"), ("signature", "签名"), ("avatar", "头像")):
         row = core.store.one(
-            "SELECT * FROM social_autonomy_profiles WHERE binding_sha256=? AND field=?",
+            'SELECT social_autonomy_profiles.binding_sha256 AS binding_sha256, '
+            'social_autonomy_profiles.field AS field, social_autonomy_profiles.value AS value, '
+            'social_autonomy_profiles.observed_at AS observed_at, '
+            'social_autonomy_profiles.receipt_sha256 AS receipt_sha256 FROM '
+            'social_autonomy_profiles AS social_autonomy_profiles WHERE '
+            'social_autonomy_profiles.binding_sha256 = %s AND social_autonomy_profiles.field = %s',
             (binding, field),
         )
         latest = core.store.one(
-            "SELECT MAX(COALESCE(dispatched_at,reserved_at)) at "
-            "FROM social_autonomy_reservations WHERE action_type=? AND released_at IS NULL",
+            'SELECT MAX(COALESCE(dispatched_at, reserved_at)) AS at FROM '
+            'social_autonomy_reservations WHERE action_type = %s AND released_at IS NULL',
             ("qq.profile." + field,),
         )["at"]
         observed = _instant(row["observed_at"]) if row else None
@@ -500,11 +518,10 @@ def account_actions(core):
             except CoreError as error:
                 problem = error.code
         latest = core.store.one(
-            "SELECT MAX(COALESCE(r.dispatched_at,r.reserved_at)) at "
-            "FROM social_autonomy_reservations r "
-            "JOIN outbox o USING(message_id) WHERE r.action_type=? AND r.released_at IS NULL "
-            "AND NOT (o.state IN ('CANCELLED','FAILED') AND r.dispatched_at IS NULL "
-            "AND o.attempt_count=0)",
+            'SELECT MAX(COALESCE(r.dispatched_at, r.reserved_at)) AS at FROM '
+            'social_autonomy_reservations AS r JOIN outbox AS o USING (message_id) WHERE '
+            "r.action_type = %s AND r.released_at IS NULL AND NOT (o.state IN ('CANCELLED', "
+            "'FAILED') AND r.dispatched_at IS NULL AND o.attempt_count = 0)",
             (action,),
         )["at"]
         limits.append(
@@ -526,9 +543,9 @@ def account_actions(core):
             }
         )
     counts = core.store.one(
-        "SELECT COUNT(*) total,SUM(state IN ('PENDING','LEASED','RETRY_WAIT')) pending,"
-        "SUM(state IN ('SENDING','DELIVERY_UNCERTAIN')) uncertain "
-        "FROM outbox WHERE delivery_lane='qq_account'"
+        "SELECT COUNT(*) AS total, CAST(SUM(CAST(state IN ('PENDING', 'LEASED', 'RETRY_WAIT') AS "
+        "INT)) AS BIGINT) AS pending, CAST(SUM(CAST(state IN ('SENDING', 'DELIVERY_UNCERTAIN') AS "
+        "INT)) AS BIGINT) AS uncertain FROM outbox WHERE delivery_lane = 'qq_account'"
     )
     return _safe(
         core,

@@ -102,16 +102,17 @@ def test_scope_and_utf8_bound_drop_only_complete_turns(core, tmp_path, turns, by
 
 
 def mutate_source(core, kind):
-    source = core.store.one("SELECT * FROM events ORDER BY rowid LIMIT 1")
+    source = core.store.one('SELECT * FROM events ORDER BY record_sequence LIMIT 1')
     event_id = source["event_id"]
     if kind == "privacy":
-        advance_epoch(core.store)
+        with core.store.transaction(control_write=True):
+            advance_epoch(core.store)
     elif kind in {"PENDING", "FAILED", "DELIVERY_UNCERTAIN"}:
-        core.store.execute("UPDATE outbox SET state=? WHERE origin_event_id=?", (kind, event_id))
+        core.store.execute('UPDATE outbox SET state=%s WHERE origin_event_id=%s', (kind, event_id))
     elif kind == "UNKNOWN":
         core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
     elif kind == "redacted":
-        core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (event_id,))
+        core.store.execute('UPDATE events SET redacted=1 WHERE event_id=%s', (event_id,))
     elif kind in {"SUPERSEDED", "FORGOTTEN"}:
         text = json.loads(source["body_json"])["text"]
         memory_id = core.memory.add(Candidate(
@@ -119,31 +120,32 @@ def mutate_source(core, kind):
             evidence_event_id=event_id, evidence_quote=text,
         ), core.clock(), confirmed=True)
         assert memory_id is not None
-        core.store.execute("UPDATE memories SET status=? WHERE memory_id=?", (kind, memory_id))
+        core.store.execute('UPDATE memories SET status=%s WHERE memory_id=%s', (kind, memory_id))
     elif kind == "reply_text":
-        core.store.execute("UPDATE outbox SET content_json=?", (encode({"text": "被替换的回答"}),))
+        core.store.execute('UPDATE outbox SET content_json=%s', (encode({"text": "被替换的回答"}),))
     elif kind == "input_text":
         body = json.loads(source["body_json"])
         body["text"] = "被替换的输入"
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                            (encode(body), event_id))
     elif kind == "actor":
-        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=?", (event_id,))
+        core.store.execute("UPDATE events SET actor_id='companion' WHERE event_id=%s", (event_id,))
     elif kind == "source":
-        core.store.execute("UPDATE events SET source_event_id='other-identity' WHERE event_id=?",
+        core.store.execute("UPDATE events SET source_event_id='other-identity' WHERE event_id=%s",
                            (event_id,))
     elif kind == "conversation":
         conversation = core.store.one("SELECT * FROM conversations LIMIT 1")
         conversation["conversation_id"] = uid("conv")
         conversation["platform_session_key"] = "synthetic-different-conversation"
+        conversation.pop("record_sequence")
         core.store.insert("conversations", **conversation)
-        core.store.execute("UPDATE events SET conversation_id=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET conversation_id=%s WHERE event_id=%s',
                            (conversation["conversation_id"], event_id))
     elif kind == "action":
         core.store.execute("UPDATE outbox SET action_type='qq.private.proactive'")
     else:
         key = owner_input.INPUT + event_id
-        receipt = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))[
+        receipt = json.loads(core.store.one('SELECT value FROM runtime_meta WHERE key=%s', (key,))[
             "value"
         ])
         if kind == "unsigned":
@@ -156,7 +158,7 @@ def mutate_source(core, kind):
             receipt["authority"]["policy_sha256"] = "a" * 64
         elif kind == "receipt_epoch":
             receipt["privacy_epoch"] += 1
-        core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(receipt), key))
+        core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s', (encode(receipt), key))
 
 
 @pytest.mark.parametrize("kind", [
@@ -195,11 +197,17 @@ async def selected_history_changed_in_final_preflight(core, tmp_path, kind, *, c
         ]]
         assert len(calls) == len(sends) == 1
         assert changed == [kind]
-        assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
         job = core.store.one(
-            "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1",
+            'SELECT event_id,state,last_error_code FROM jobs ORDER BY record_sequence DESC LIMIT 1',
         )
         assert job["state"] in {"CANCELLED", "FAILED"}, job
+        if kind == "UNKNOWN":
+            # Tampering with a settled row still blocks new provider I/O. The
+            # normal failed-job notice carries no invented model response.
+            assert_failure_notice(core, job["event_id"])
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 2
+        else:
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
         assert len(history_snapshot(core)) == 1
 
 
@@ -224,7 +232,8 @@ def test_unrelated_privacy_epoch_keeps_original_history_source_and_scope(core, t
 
             async def advance_unrelated_epoch(_request):
                 selected.extend(history_snapshot(core))
-                advance_epoch(core.store)
+                with core.store.transaction(control_write=True):
+                    advance_epoch(core.store)
 
             core.model.client.event_hooks["request"].append(advance_unrelated_epoch)
             assert await core.run_once()
@@ -240,7 +249,7 @@ def test_unrelated_privacy_epoch_keeps_original_history_source_and_scope(core, t
             assert all(row["state"] == "SETTLED" for row in core.store.rows(
                 "SELECT state FROM model_usage"))
             job = core.store.one(
-                "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1")
+                'SELECT state,last_error_code FROM jobs ORDER BY record_sequence DESC LIMIT 1')
             assert job == {"state": "RETRY_WAIT", "last_error_code": "PRIVACY_CHANGED"}
 
     run(scenario())
@@ -264,7 +273,7 @@ def test_ineligible_previous_source_is_absent_from_actual_prompt(core, tmp_path,
             assert len(calls) == 2 and len(sends) == 1
             assert len(calls[-1]["messages"]) == 2
             assert calls[-1]["messages"][-1] == {"role": "user", "content": "现在说的这个呢？"}
-            assert core.store.one("SELECT state FROM jobs ORDER BY rowid DESC LIMIT 1")[
+            assert core.store.one('SELECT state FROM jobs ORDER BY record_sequence DESC LIMIT 1')[
                 "state"
             ] == "SUCCEEDED"
 
@@ -350,7 +359,9 @@ def test_core_restart_keeps_original_window_history_and_attempts(core, tmp_path)
     run(scenario())
 
 
-def test_erasure_and_old_database_replay_clear_history_generated_replies(core, tmp_path):
+def test_erasure_and_old_database_replay_clear_history_generated_replies(
+    empty_database, core, tmp_path,
+):
     async def scenario():
         async with native_continuity(core, tmp_path) as (
             _, _, calls, _, capture_input, finish,
@@ -360,13 +371,14 @@ def test_erasure_and_old_database_replay_clear_history_generated_replies(core, t
             await capture_input()
             await finish()
             assert len(calls[-1]["messages"]) == 4
-            source = core.store.one("SELECT event_id FROM events ORDER BY rowid LIMIT 1")[
+            source = core.store.one('SELECT event_id FROM events ORDER BY record_sequence LIMIT 1')[
                 "event_id"
             ]
             key = Fernet.generate_key()
-            snapshot, restored = tmp_path / "before-erasure.enc", tmp_path / "restored.db"
+            snapshot = tmp_path / "before-erasure.enc"
+            restored_state = tmp_path / "restored-state"
             backup(core.settings.database, snapshot, key)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [source], core.clock())
             assert all(row["content_json"] == "{}" for row in core.store.rows(
                 "SELECT content_json FROM outbox"
@@ -376,10 +388,13 @@ def test_erasure_and_old_database_replay_clear_history_generated_replies(core, t
             # New metadata stores only references/digests, never another plaintext copy.
             metadata = encode(core.store.rows("SELECT snapshots_json FROM agent_conversations"))
             assert "选了茉莉绿茶" not in metadata and "合成回答" not in metadata
-            restore(snapshot, restored, key, core.settings.erasure_ledger)
-            with Core(core.settings.model_copy(update={"database": str(restored)}),
+            restore(snapshot, empty_database, key, core.settings.erasure_ledger,
+                    state_directory=restored_state)
+            with Core(core.settings.model_copy(update={
+                "database": empty_database, "state_directory": str(restored_state),
+            }),
                       core.model, core.clock) as reopened:
-                assert reopened.store.one("SELECT redacted FROM events WHERE event_id=?",
+                assert reopened.store.one('SELECT redacted FROM events WHERE event_id=%s',
                                           (source,))["redacted"] == 1
                 assert all(row["content_json"] == "{}" for row in reopened.store.rows(
                     "SELECT content_json FROM outbox"
@@ -405,8 +420,10 @@ def test_missing_context_after_model_receive_retains_cost_without_reply(
             await finish()
             await capture_input()
             async def receive_then_remove(response):
-                core.store.execute("DELETE FROM agent_conversations WHERE job_id=(SELECT job_id "
-                                   "FROM jobs ORDER BY rowid DESC LIMIT 1)")
+                core.store.execute(
+                    'DELETE FROM agent_conversations WHERE job_id=(SELECT '
+                    'job_id FROM jobs ORDER BY record_sequence DESC LIMIT 1)'
+                )
                 if change_reply:
                     mutate_source(core, "reply_text")
 
@@ -416,10 +433,13 @@ def test_missing_context_after_model_receive_retains_cost_without_reply(
             expected = 1 if change_reply else 2
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == expected
             if not change_reply:
-                failed = core.store.one("SELECT event_id FROM jobs ORDER BY rowid DESC LIMIT 1")
+                failed = core.store.one(
+                    'SELECT event_id FROM jobs ORDER BY record_sequence DESC '
+                    'LIMIT 1'
+                )
                 assert_failure_notice(core, failed["event_id"])
             result = core.store.one(
-                "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1"
+                'SELECT state,last_error_code FROM jobs ORDER BY record_sequence DESC LIMIT 1'
             )
             assert result == ({"state": "CANCELLED", "last_error_code": "REPLY_CANCELLED"}
                               if change_reply else {"state": "FAILED",
@@ -454,13 +474,15 @@ def test_send_check_refuses_missing_snapshot_after_completed_model(core, tmp_pat
                 "reply_revision": item["reply_revision"], "lease_token": item["lease_token"]}
             path = "/internal/v1/owner-authority/send-check"
             assert (await client.post(path, json=check)).json()["approved"] is True
-            core.store.execute("DELETE FROM agent_conversations WHERE job_id=(SELECT job_id "
-                               "FROM jobs WHERE event_id=?)", (item["origin_event_id"],))
+            core.store.execute((
+                'DELETE FROM agent_conversations WHERE job_id=(SELECT job_id '
+                'FROM jobs WHERE event_id=%s)'
+            ), (item["origin_event_id"],))
             response = await client.post(path, json=check)
             assert response.status_code == 409, response.text
             assert response.json()["error"] == "REPLY_CANCELLED"
             assert len(calls) == 2 and len(sends) == 1
-            assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+            assert core.store.one('SELECT state FROM outbox WHERE message_id=%s',
                                   (item["message_id"],))["state"] == "SENDING"
 
     run(scenario())

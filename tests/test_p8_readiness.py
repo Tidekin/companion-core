@@ -99,7 +99,7 @@ def test_stub_sensitive_ingress_and_egress_are_redacted_before_storage(core):
 
 
 @pytest.mark.parametrize("failure", ["retryable", "crash"])
-def test_unknown_reservation_is_retained_and_blocks_next_model_attempt(core, failure):
+def test_unknown_cost_is_retained_and_allows_an_independent_message(core, failure):
     ingest(core)
     if failure == "crash":
         job = core.claim_job("synthetic-crash")
@@ -107,7 +107,7 @@ def test_unknown_reservation_is_retained_and_blocks_next_model_attempt(core, fai
             core.store, core.settings, job["job_id"], "chat", core.context(job), core.clock()
         )
         initial = core.store.one(
-            "SELECT billed_micro_usd FROM model_usage WHERE request_id=?", (request_id,)
+            'SELECT billed_micro_usd FROM model_usage WHERE request_id=%s', (request_id,)
         )["billed_micro_usd"]
         core.clock.advance(core.settings.lease_seconds + 1)
         expected_calls = 0
@@ -119,17 +119,16 @@ def test_unknown_reservation_is_retained_and_blocks_next_model_attempt(core, fai
         core.clock.advance(6)
         expected_calls = 1
     assert initial > 0
-    core.settings.monthly_limit_micro_usd = initial
+    with core.store.transaction():
+        core.recover(core.clock())
+    core.store.execute("UPDATE jobs SET state='FAILED',lease_until=NULL,lease_token=NULL")
+    ingest(core, 2, "独立的新消息")
     assert run(core.run_once())
-    assert len(core.model.calls) == expected_calls
-    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
-        "state": "UNKNOWN",
-        "billed_micro_usd": initial,
-    }
-    assert core.store.one("SELECT last_error_code FROM jobs")["last_error_code"] == (
-        "MONTHLY_BUDGET_EXHAUSTED"
-    )
-    assert core.store.one("SELECT COUNT(*) AS n FROM model_usage")["n"] == 1
+    assert len(core.model.calls) == expected_calls + 1
+    rows = core.store.rows(
+        "SELECT state,billed_micro_usd FROM model_usage ORDER BY record_sequence")
+    assert rows[0] == {"state": "UNKNOWN", "billed_micro_usd": initial}
+    assert rows[1]["state"] == "SETTLED"
 
 
 @pytest.mark.parametrize("missing_usage", [False, True])
@@ -202,6 +201,8 @@ def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(
         (httpx.Response(200, json={"choices": []}), "MODEL_INVALID_RESPONSE"),
     ],
 )
+
+
 def test_model_adapter_errors_do_not_retry_or_expose_provider_body(core, response, code, tmp_path):
     from tests.support.paid_model import approved_live
 

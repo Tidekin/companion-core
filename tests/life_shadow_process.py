@@ -46,7 +46,7 @@ async def run_native(settings, clock, provider, *, stop_on_idle=False):
                 "FROM life_activity_results r JOIN jobs j USING(job_id)")
             terminal = any(row["job_id"] not in existing and (
                 row["job_state"] in {"SUCCEEDED", "FAILED", "CANCELLED"}
-                or core.store.one("SELECT 1 FROM model_usage WHERE job_id=? AND state='UNKNOWN'",
+                or core.store.one("SELECT 1 FROM model_usage WHERE job_id=%s AND state='UNKNOWN'",
                                   (row["job_id"],))) for row in rows)
             if terminal or stop_on_idle and (selected.blocked or not selected.more):
                 result.update(pid=os.getpid(), units=units, results=rows)

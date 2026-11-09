@@ -81,9 +81,9 @@ def test_mixed_review_drops_rejected_claim_and_commits_corrected_fact(core, repe
     core.clock.advance(61)
     assert run(core.extract_step()).progressed and run(core.extract_step()).progressed
     assert checkpoint_state(core.store)["batch"]["phase"] == "COMPLETE"
-    assert core.store.one("SELECT valid_to FROM memories WHERE memory_id=?", (old,))["valid_to"]
-    assert core.store.one("SELECT 1 FROM memories WHERE content=?", (CORRECTION,))
-    assert not core.store.one("SELECT 1 FROM memories WHERE content=?", (rejected.content,))
+    assert core.store.one('SELECT valid_to FROM memories WHERE memory_id=%s', (old,))["valid_to"]
+    assert core.store.one('SELECT 1 FROM memories WHERE content=%s', (CORRECTION,))
+    assert not core.store.one('SELECT 1 FROM memories WHERE content=%s', (rejected.content,))
     rejections = core.store.rows("SELECT safe_detail_json FROM audit_log WHERE "
                                  "action='memory.candidate_rejected' AND entity_id='evt_test_2'")
     assert rejections == [{"safe_detail_json": encode({"reason": "UNSUPPORTED_MEMORY_CLAIM"})}] * (
@@ -95,7 +95,7 @@ def test_mixed_review_drops_rejected_claim_and_commits_corrected_fact(core, repe
 
 def test_guarded_failure_erasure_clears_feedback_but_preserves_accounting(core):
     record = failed_semantic_batch(core)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, record["source_event_ids"], core.clock())
     assert failures(core.store) == [] and checkpoint_state(core.store) is None
     assert all(r["state"] == "SETTLED" for r in core.store.rows("SELECT * FROM model_usage"))
@@ -103,7 +103,7 @@ def test_guarded_failure_erasure_clears_feedback_but_preserves_accounting(core):
 
 def test_guarded_failure_cannot_replay_unknown_extraction(core):
     record = failed_semantic_batch(core)
-    core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=?",
+    core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=%s",
                        (record["batch"]["extraction_request_id"],))
     calls = len(core.model.calls)
     with pytest.raises(CoreError, match="MEMORY_RECOVERY_UNSETTLED"):

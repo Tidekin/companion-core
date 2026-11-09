@@ -1,7 +1,6 @@
 """Offline cumulative liability regressions; never contact a provider or QQ."""
 
 import asyncio
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from companion import budget, cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelClient, ModelResponse
 from tests.owner_model_fixtures import authorized_job
+from tests.postgres_fixture import logical_state
 from tests.support.cumulative_budget import enable, policy, view
 from tests.support.paid_model import approved_live
 
@@ -27,14 +27,24 @@ def reserve(core, **kwargs):
 
 @pytest.mark.parametrize("period", ["request", "window", "day", "month", "account"])
 @pytest.mark.parametrize("dimension", [
-    "micro_usd", "model_attempts", "input_tokens", "output_tokens",
+    "model_attempts", "input_tokens", "output_tokens",
 ])
+
+
 def test_all_model_limits_apply_before_reservation(core, tmp_path, period, dimension):
     enable(core, tmp_path, **{period: {dimension: 0}})
     with pytest.raises(CoreError, match="CUMULATIVE_LIMIT_EXHAUSTED"):
         reserve(core)
     assert core.store.rows("SELECT * FROM model_usage") == []
     assert core.model.calls == []
+
+
+def test_actual_fees_remain_in_resource_policy_accounting(core, tmp_path):
+    enable(core, tmp_path)
+    request = reserve(core)
+    assert view(core)["models"][request]["micro_usd"] > 0
+    budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
+    assert view(core)["models"][request]["state"] == "SETTLED"
 
 
 @pytest.mark.parametrize("boundary", ["2026-10-19T15:59:59+00:00", "2026-10-31T15:59:59+00:00"])
@@ -59,8 +69,9 @@ def test_rotation_and_new_window_do_not_reset_prior_account_calls(core, tmp_path
     enable(core, tmp_path, account={"model_attempts": 1})
     first = reserve(core)
     budget.settle(core.store, core.settings, first, ModelResponse("ok", 30, 2))
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (authorized_job(core),))
-    cumulative.pause(core.store, core.settings.paid_model, core.clock())
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (authorized_job(core),))
+    with core.store.transaction():
+        cumulative.pause(core.store, core.settings.paid_model, core.clock())
     core.settings.model_key = SecretStr("synthetic-rotated-key")
     core.settings.paid_model = core.settings.paid_model.model_copy(update={"window_id": "second"})
     policy(core, account={"model_attempts": 1}, key_ownership_sha256="1" * 64)
@@ -128,11 +139,34 @@ def test_clock_rollback_pause_survives_transaction_rollback(core, tmp_path):
         reserve(core)
 
 
+def test_cost_unknown_does_not_prevent_a_later_owner_pause(core, tmp_path):
+    enable(core, tmp_path)
+    request = reserve(core)
+    budget.settle(core.store, core.settings, request)
+    assert view(core)["reason"] == "UNKNOWN_MODEL_LIABILITY"
+    with core.store.transaction():
+        cumulative.pause(core.store, core.settings.paid_model, core.clock())
+    assert view(core)["reason"] == "OWNER_PAUSE"
+    budget.settle(core.store, core.settings, request, ModelResponse("late", 30, 2))
+    assert view(core)["reason"] == "OWNER_PAUSE"
+    with pytest.raises(CoreError, match="CUMULATIVE_PAUSED"):
+        reserve(core)
+
+
+def test_cost_unknown_is_a_warning_in_cumulative_status(core, tmp_path):
+    enable(core, tmp_path)
+    request = reserve(core)
+    budget.settle(core.store, core.settings, request)
+    status = cumulative.status(core.store, core.settings, core.clock())
+    assert status["available"] and not status["paused"]
+    assert "MODEL_COST_UNKNOWN" in status["warnings"]
+
+
 def test_legacy_costs_require_exact_inventory_and_are_not_reset(core, tmp_path):
     approved_live(core, tmp_path)
     request = reserve(core)
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (authorized_job(core),))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (authorized_job(core),))
     core.settings.paid_model = core.settings.paid_model.model_copy(update={"window_id": "new"})
     policy(core, account={"model_attempts": 1})
     with core.store.transaction():
@@ -168,7 +202,8 @@ def test_final_http_hook_observes_pause_before_transport(core, tmp_path):
     calls = []
 
     async def paused(_):
-        cumulative.pause(core.store, core.settings.paid_model, core.clock())
+        with core.store.transaction():
+            cumulative.pause(core.store, core.settings.paid_model, core.clock())
 
     async def exercise():
         async with httpx.AsyncClient(event_hooks={"request": [paused]},
@@ -186,13 +221,16 @@ def test_two_processes_share_account_cap(core, tmp_path):
     import sys
 
     enable(core, tmp_path, account={"model_attempts": 1})
-    script = tmp_path / "quota_reserve.py"
-    script.write_text("import sys\nfrom tests.process_helpers import reservation_process\n"
-                      "reservation_process(*sys.argv[1:])\n", encoding="utf-8")
-    config = core.settings.model_dump(mode="json")
-    config["model_key"] = core.settings.model_key.get_secret_value()
-    command = [sys.executable, str(script), core.settings.database,
-               json.dumps(config), core.clock(), authorized_job(core)]
+    from tests.support.evaluation_process import process_config
+
+    private_config = tmp_path / "reservation-settings.json"
+    process_config(core, private_config)
+    command = [
+        sys.executable, "-B", "-c",
+        "import sys; from tests.process_helpers import reservation_process; "
+        "reservation_process(*sys.argv[1:])", str(private_config), core.clock(),
+        authorized_job(core),
+    ]
     processes = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   text=True) for _ in range(2)]
     results = [process.communicate(timeout=40) for process in processes]
@@ -211,7 +249,8 @@ def test_committed_pause_cannot_be_removed_by_a_valid_journal_prefix(core, tmp_p
     enable(core, tmp_path)
     path = Path(core.settings.paid_model.journal_path)
     prior = path.read_bytes()
-    cumulative.pause(core.store, core.settings.paid_model, core.clock())
+    with core.store.transaction():
+        cumulative.pause(core.store, core.settings.paid_model, core.clock())
     path.write_bytes(prior)
     with pytest.raises(CoreError, match="RECONCILIATION"):
         reserve(core)
@@ -251,27 +290,27 @@ def test_reserved_model_cannot_dispatch_in_another_natural_day(core, tmp_path):
 
 
 @pytest.mark.parametrize("missing", [False, True])
-def test_old_database_and_latest_or_missing_journal_never_replenish(core, tmp_path, missing):
-    import sqlite3
+def test_old_database_and_latest_or_missing_journal_never_replenish(
+    empty_database, core, tmp_path, missing,
+):
     from contextlib import closing
 
+    from companion.postgres import Database
     from companion.store import Store
+    from tests.postgres_fixture import copy_database
 
     enable(core, tmp_path)
-    old = tmp_path / "old.db"
-    with closing(sqlite3.connect(old)) as destination:
-        core.store.db.backup(destination)
+    old = empty_database
+    copy_database(core.settings.database, old, tmp_path)
     request = reserve(core)
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
     if missing:
         Path(core.settings.paid_model.journal_path).unlink()
-    restored = Store(str(old))
-    try:
+    with (Database(old) as database,
+          closing(Store(database, core.store.state_directory)) as restored):
         with pytest.raises(CoreError, match="RECONCILIATION"):
             budget.reserve(restored, core.settings, authorized_job(core),
                            "chat", MESSAGES, core.clock())
-    finally:
-        restored.close()
     assert core.model.calls == []
 
 
@@ -323,13 +362,13 @@ def test_automatic_pause_witness_survives_business_rollback_and_prefix_replay(
     with pytest.raises(CoreError, match="EXPIRED"):
         if outer_transaction:
             with core.store.transaction():
-                core.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+                core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)',
                                    ("uncommitted_test", "business"))
                 cumulative.preflight(core.store, core.settings, core.clock)
         else:
             reserve(core)
     assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='uncommitted_test'")
-    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE 'model_budget_stop:%'")
+    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE 'model_budget_stop:%%'")
     assert view(core)["paused"]
     path.write_bytes(prefix)
     core.clock.now = datetime.fromisoformat("2026-10-20T04:00:00+00:00")
@@ -343,11 +382,12 @@ def test_missing_journal_and_identity_status_does_not_bootstrap_or_modify_anythi
     path = Path(core.settings.paid_model.journal_path)
     path.unlink()
     core.store.execute("DELETE FROM runtime_meta WHERE key='model_budget_journal_id'")
-    before = list(core.store.db.iterdump())
-    result = cumulative.status(core.store, core.settings, core.clock())
-    assert result == {"enrolled": True, "available": False,
-                      "code": "MODEL_BUDGET_RECONCILIATION_REQUIRED"}
-    assert list(core.store.db.iterdump()) == before
+    with core.store.read_snapshot():
+        before = logical_state(core.store)
+        result = cumulative.status(core.store, core.settings, core.clock())
+        assert result == {"enrolled": True, "available": False,
+                          "code": "MODEL_BUDGET_RECONCILIATION_REQUIRED"}
+        assert logical_state(core.store) == before
     assert not path.exists()
 
 
@@ -360,7 +400,7 @@ def test_pause_fsync_then_projection_failure_retains_only_the_stop_witness(
     execute = core.store.execute
 
     def fail_projection(sql, params=()):
-        if sql.startswith("INSERT OR REPLACE INTO runtime_meta") and params[0] == (
+        if sql.startswith("INSERT INTO runtime_meta") and params[0] == (
             cumulative.PROJECTION
         ):
             raise RuntimeError("synthetic pause projection failure after fsync")
@@ -369,7 +409,7 @@ def test_pause_fsync_then_projection_failure_retains_only_the_stop_witness(
     monkeypatch.setattr(core.store, "execute", fail_projection)
     with pytest.raises(RuntimeError, match="after fsync"):
         with core.store.transaction():
-            core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", ("business", "rollback"))
+            core.store.execute('INSERT INTO runtime_meta VALUES (%s,%s)', ("business", "rollback"))
             cumulative.pause(core.store, core.settings.paid_model, core.clock())
     monkeypatch.setattr(core.store, "execute", execute)
     assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='business'")
@@ -384,13 +424,14 @@ def test_damaged_projection_status_remains_read_only_and_reports_unavailable(
     core, tmp_path, projection,
 ):
     enable(core, tmp_path)
-    core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+    core.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                        (projection, cumulative.PROJECTION))
-    before = list(core.store.db.iterdump())
     journal = Path(core.settings.paid_model.journal_path).read_bytes()
-    result = cumulative.status(core.store, core.settings, core.clock())
-    assert not result["available"] and result["code"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
-    assert list(core.store.db.iterdump()) == before
+    with core.store.read_snapshot():
+        before = logical_state(core.store)
+        result = cumulative.status(core.store, core.settings, core.clock())
+        assert not result["available"] and result["code"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
+        assert logical_state(core.store) == before
     assert Path(core.settings.paid_model.journal_path).read_bytes() == journal
 
 

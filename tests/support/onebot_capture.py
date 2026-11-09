@@ -8,6 +8,7 @@ from pydantic import SecretStr
 from websockets.asyncio.server import serve
 
 from companion.api import create_app
+from companion.api_store import ApiStore
 from companion.config import LiveTextWindowApproval
 from companion_onebot_bridge import network
 from companion_onebot_bridge.spool import Spool
@@ -134,6 +135,7 @@ async def source_window(
         api = create_app(core.settings)
         if not independent_api:
             api.state.core = core
+            api.state.api_store = ApiStore(core.database, core.settings.state_directory)
         async with (
             api.router.lifespan_context(api) if independent_api else nullcontext(),
             network.private_http_client(

@@ -37,9 +37,12 @@ def say(core, number, text):
         return
     body = {**json.loads(template["body_json"]), "text": text}
     core.store.execute(
-        "INSERT INTO events(event_id,schema_version,source,source_event_id,conversation_id,"
-        "actor_id,event_type,occurred_at,ingested_at,privacy_scope,body_json,trace_id) "
-        "VALUES(?,1,?,?,?,'owner','message.received',?,?,'private',?,?)",
+        (
+            'INSERT INTO events(event_id,schema_version,source,source_event_i'
+            'd,conversation_id,actor_id,event_type,occurred_at,ingested_at,pr'
+            "ivacy_scope,body_json,trace_id) VALUES(%s,1,%s,%s,%s,'owner','me"
+            "ssage.received',%s,%s,'private',%s,%s)"
+        ),
         (f"evt_test_{number}", template["source"], f"synthetic-{number}",
          template["conversation_id"], core.clock(), core.clock(),
          json.dumps(body, ensure_ascii=False), f"trace_{number:08d}"))

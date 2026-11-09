@@ -3,14 +3,15 @@
 import asyncio
 import json
 import os
-import sqlite3
 import sys
 from contextlib import closing
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from companion.meme_core import MemeCaptionService
+from companion.store import Store
 from companion.worker_lock import single_worker
 from companion.worker_schedule import ClaimBusy
 from tests.conftest import run
@@ -50,34 +51,30 @@ def test_busy_caption_claim_preserves_idle_or_queued_custody(core, tmp_path, mon
                 raise AssertionError("A contended claim must not access the provider")
 
             service = MemeCaptionService(core.store, core.settings, model, core.clock)
-            core.store.db.execute("PRAGMA busy_timeout=1")
             before = custody(core)
-            with closing(sqlite3.connect(core.settings.database, isolation_level=None)) as writer:
-                writer.execute("BEGIN IMMEDIATE")
-                try:
-                    with pytest.raises(ClaimBusy) as caught:
-                        await service.run_once("contended-caption")
-                    assert caught.value.__cause__.sqlite_errorcode & 0xFF == sqlite3.SQLITE_BUSY
-                    assert not core.store.db.in_transaction
-                    assert custody(core) == before
-                    assert calls == []
-                finally:
-                    writer.rollback()
+            with (closing(Store(core.database, core.settings.state_directory)) as writer,
+                  writer.transaction(control_write=True)):
+                with pytest.raises(ClaimBusy) as caught:
+                    await service.run_once("contended-caption")
+                assert isinstance(caught.value.__cause__, psycopg.errors.LockNotAvailable)
+                assert not core.store.in_transaction
+                assert custody(core) == before
+                assert calls == []
+
 
     run(scenario())
 
 
 def test_caption_claim_propagates_real_readonly_error(core):
     core.settings.meme_semantics_enabled = True
-    core.store.db.execute("PRAGMA query_only=ON")
+    core.store.execute("SET default_transaction_read_only=on")
     try:
-        with pytest.raises(sqlite3.OperationalError) as caught:
+        with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
             run(core.memes.run_once("readonly-caption"))
-        assert caught.value.sqlite_errorcode & 0xFF == sqlite3.SQLITE_READONLY
-        assert not core.store.db.in_transaction
+        assert not core.store.in_transaction
         assert not core.model.calls
     finally:
-        core.store.db.execute("PRAGMA query_only=OFF")
+        core.store.execute("RESET default_transaction_read_only")
 
 
 @pytest.mark.parametrize("stop_while_busy", [False, True])
@@ -114,17 +111,14 @@ def test_http_caption_and_independent_worker_yield_or_stop_before_io(
                 ready = await phase("ready")
                 assert ready["pid"] != os.getpid()
                 before = custody(core)
-                with closing(sqlite3.connect(core.settings.database,
-                                             isolation_level=None)) as writer:
-                    writer.execute("BEGIN IMMEDIATE")
-                    try:
-                        child.stdin.write(b"continue\n")
-                        await child.stdin.drain()
-                        busy = await phase("busy")
-                        assert busy["provider_calls"] == 0 and not busy["in_transaction"]
-                        assert custody(core) == before
-                    finally:
-                        writer.rollback()
+                with (closing(Store(core.database, core.settings.state_directory)) as writer,
+                      writer.transaction(control_write=True)):
+                    child.stdin.write(b"continue\n")
+                    await child.stdin.drain()
+                    busy = await phase("busy")
+                    assert busy["provider_calls"] == 0 and not busy["in_transaction"]
+                    assert custody(core) == before
+
                 finished = await phase("finished")
                 output, error = await asyncio.wait_for(child.communicate(), 45)
                 assert child.returncode == 0, (output + error).decode(errors="replace")
@@ -135,12 +129,12 @@ def test_http_caption_and_independent_worker_yield_or_stop_before_io(
                 if child.returncode is None:
                     child.kill()
                     await child.wait()
-            with single_worker(core.settings.database):
+            with single_worker(core.settings.state_directory):
                 pass  # The actual CLI's process lock was released normally.
             if stop_while_busy:
                 assert custody(core) == before
             else:
-                assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?",
+                assert core.store.one('SELECT state,attempts FROM jobs WHERE job_id=%s',
                                       (job_id,)) == {"state": "SUCCEEDED", "attempts": 1}
                 assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]
                 assert not core.store.rows("SELECT * FROM outbox")

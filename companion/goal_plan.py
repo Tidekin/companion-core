@@ -11,9 +11,10 @@ from companion.store import after
 
 def closure(engine, ids):
     rows = engine.store.rows(
-        "WITH RECURSIVE sources(event_id) AS (SELECT value FROM json_each(?) UNION "
-        "SELECT d.source_event_id FROM event_dependencies d JOIN sources s "
-        "ON d.event_id=s.event_id) SELECT event_id FROM sources ORDER BY event_id",
+        'WITH RECURSIVE sources(event_id) AS (SELECT value COLLATE "C" FROM '
+        'JSON_ARRAY_ELEMENTS_TEXT(CAST(%s AS JSON)) AS parsed(value) UNION SELECT '
+        'd.source_event_id FROM event_dependencies AS d JOIN sources AS s ON d.event_id = '
+        's.event_id) SELECT event_id FROM sources ORDER BY event_id NULLS FIRST',
         (json.dumps(sorted(set(ids))),),
     )
     keys = [row["event_id"] for row in rows]
@@ -27,14 +28,20 @@ def requests(engine, *, goal_id=None, step_id=None):
     return engine.store.rows(
         "SELECT r.*,a.state AS attempt_state FROM exploration_requests r "
         "LEFT JOIN reading_attempts a USING(request_id) WHERE "
-        + ("json_extract(r.goal_step_json,'$.goal_id')=?" if goal_id else
-           "json_extract(r.goal_step_json,'$.step_id')=?"), (goal_id or step_id,),
+        + ((
+            '(CASE WHEN r.goal_step_json IS JSON THEN '
+            "(r.goal_step_json::json#>>'{goal_id}') END)=%s"
+        ) if goal_id else
+           (
+               '(CASE WHEN r.goal_step_json IS JSON THEN '
+               "(r.goal_step_json::json#>>'{step_id}') END)=%s"
+           )), (goal_id or step_id,),
     )
 
 
 def unknown(engine, goal_id):
-    return bool(engine.store.one("SELECT 1 FROM goal_steps WHERE goal_id=? "
-        "AND state='EXECUTION_UNCERTAIN'", (goal_id,))) or any(
+    return bool(engine.store.one('SELECT 1 FROM goal_steps WHERE goal_id = %s AND state = '
+        "'EXECUTION_UNCERTAIN'", (goal_id,))) or any(
         row["state"] == "UNKNOWN" or row["attempt_state"] == "UNKNOWN"
         for row in requests(engine, goal_id=goal_id))
 
@@ -48,7 +55,15 @@ def plan(engine, goal_id):
     goal = engine.get(goal_id)
     engine.validate_authority(goal)
     engine.validate_sources(engine.source_ids(goal_id))
-    steps = engine.store.rows("SELECT * FROM goal_steps WHERE goal_id=? ORDER BY position",
+    steps = engine.store.rows('SELECT goal_steps.step_id AS step_id, goal_steps.goal_id AS '
+        'goal_id, goal_steps.position AS position, goal_steps.scope_json AS scope_json, '
+        'goal_steps.state AS state, goal_steps.attempts AS attempts, goal_steps.max_attempts AS '
+        'max_attempts, goal_steps.lease_token AS lease_token, goal_steps.lease_until AS '
+        'lease_until, goal_steps.captured_privacy_epoch AS captured_privacy_epoch, '
+        'goal_steps.outcome_event_id AS outcome_event_id, goal_steps.last_error_code AS '
+        'last_error_code, goal_steps.created_at AS created_at, goal_steps.updated_at AS updated_at '
+        'FROM goal_steps AS goal_steps WHERE goal_steps.goal_id = %s ORDER BY goal_steps.position '
+        'NULLS FIRST',
                               (goal_id,))
     uncertain = unknown(engine, goal_id)
     allowed = (goal["kind"] == "self" and json.loads(goal["scope_json"]).get("operation")
@@ -72,10 +87,11 @@ def continue_plan(engine, goal_id, decision, *, autonomous=False):
     if not isinstance(decision, GoalContinuationDecision):
         decision = GoalContinuationDecision.model_validate(decision)
     s, now = engine.store, engine.clock()
-    with nullcontext() if s.db.in_transaction else s.transaction():
-        goal = engine.get(goal_id)
+    with nullcontext() if s.in_transaction else s.transaction():
+        goal = engine.get(goal_id, for_update=True)
         engine.validate_authority(goal)
-        if autonomous and s.one("SELECT 1 FROM runtime_meta WHERE key='life_paused' AND value='1'"):
+        if autonomous and s.one("SELECT 1 FROM runtime_meta WHERE key = 'life_paused' AND value = "
+            "'1'"):
             raise CoreError("AUTONOMY_PAUSED", 409)
         if goal["kind"] != "self" or json.loads(goal["scope_json"]).get("operation") != "read_plan":
             raise CoreError("GOAL_PLAN_REQUIRED", 403)
@@ -90,7 +106,7 @@ def continue_plan(engine, goal_id, decision, *, autonomous=False):
         engine.validate_reflection(goal["reflection_suggestion_id"])
         sources = set(engine.source_ids(goal_id))
         sources.update(row["outcome_event_id"] for row in s.rows(
-            "SELECT outcome_event_id FROM goal_steps WHERE goal_id=? AND state='DONE'",
+            "SELECT outcome_event_id FROM goal_steps WHERE goal_id = %s AND state = 'DONE'",
             (goal_id,)))
         evidence = closure(engine, sources)
         if decision.action == "ABANDON":
@@ -99,36 +115,47 @@ def continue_plan(engine, goal_id, decision, *, autonomous=False):
             due = decision.wait_until.astimezone(UTC).isoformat(timespec="microseconds")
             if not now < due <= after(now, 7 * 86400):
                 raise CoreError("INVALID_GOAL_WAIT", 400)
-            s.execute("UPDATE goals SET next_due_at=?,version=version+1,updated_at=? "
-                      "WHERE goal_id=? AND version=?", (due, now, goal_id, goal["version"]))
+            s.execute('UPDATE goals SET next_due_at = %s, version = version + 1, updated_at = %s '
+                'WHERE goal_id = %s AND version = %s', (due, now, goal_id, goal["version"]))
         else:
             if now < goal["next_due_at"]:
                 raise CoreError("GOAL_WAIT_NOT_DUE", 409)
             original_ids = {row["step_id"] for row in s.rows(
-                "SELECT step_id FROM goal_steps WHERE goal_id=?", (goal_id,))}
-            pending = s.rows("SELECT * FROM goal_steps WHERE goal_id=? "
-                             "AND state='WAITING_DECISION' ORDER BY position", (goal_id,))
+                'SELECT step_id FROM goal_steps WHERE goal_id = %s', (goal_id,))}
+            pending = s.rows('SELECT goal_steps.step_id AS step_id, goal_steps.goal_id AS goal_id, '
+                'goal_steps.position AS position, goal_steps.scope_json AS scope_json, '
+                'goal_steps.state AS state, goal_steps.attempts AS attempts, '
+                'goal_steps.max_attempts AS max_attempts, goal_steps.lease_token AS lease_token, '
+                'goal_steps.lease_until AS lease_until, goal_steps.captured_privacy_epoch AS '
+                'captured_privacy_epoch, goal_steps.outcome_event_id AS outcome_event_id, '
+                'goal_steps.last_error_code AS last_error_code, goal_steps.created_at AS '
+                'created_at, goal_steps.updated_at AS updated_at FROM goal_steps AS goal_steps '
+                "WHERE goal_steps.goal_id = %s AND goal_steps.state = 'WAITING_DECISION' ORDER BY "
+                'goal_steps.position NULLS FIRST', (goal_id,))
             if (set(decision.step_order) != {step["step_id"] for step in pending}
                 or any(step["attempts"] or dispatched(engine, step["step_id"])
                        for step in pending)):
                 raise CoreError("GOAL_PLAN_ORDER_INVALID", 409)
             if decision.step_order != [step["step_id"] for step in pending]:
                 positions = [step["position"] for step in pending]
-                s.execute("UPDATE goal_steps SET position=position+3 WHERE goal_id=? "
-                           "AND state='WAITING_DECISION'", (goal_id,))
+                s.execute('UPDATE goal_steps SET position = position + 3 WHERE goal_id = %s AND '
+                    "state = 'WAITING_DECISION'", (goal_id,))
                 for position, step_id in zip(positions, decision.step_order, strict=True):
-                    s.execute("UPDATE goal_steps SET position=?,updated_at=? WHERE step_id=?",
+                    s.execute('UPDATE goal_steps SET position = %s, updated_at = %s WHERE step_id '
+                        '= %s',
                                (position, now, step_id))
             first = decision.step_order[0]
             for source in evidence:
-                s.execute("INSERT OR IGNORE INTO goal_step_evidence VALUES (?,?)", (first, source))
+                s.execute('INSERT INTO goal_step_evidence VALUES (%s, %s) ON CONFLICT DO '
+                    'NOTHING', (first, source))
             state = "QUEUED" if engine.settings.exploration_enabled else "WAITING_RESOURCE"
-            s.execute("UPDATE goal_steps SET state=?,updated_at=? WHERE step_id=?",
+            s.execute('UPDATE goal_steps SET state = %s, updated_at = %s WHERE step_id = %s',
                       (state, now, first))
-            s.execute("UPDATE goals SET state=?,next_due_at=?,version=version+1,updated_at=? "
-                       "WHERE goal_id=? AND version=?", (state, now, now, goal_id, goal["version"]))
-            final = s.rows("SELECT step_id,position,state FROM goal_steps WHERE goal_id=? "
-                           "ORDER BY position", (goal_id,))
+            s.execute('UPDATE goals SET state = %s, next_due_at = %s, version = version + 1, '
+                'updated_at = %s WHERE goal_id = %s AND version = '
+                '%s', (state, now, now, goal_id, goal["version"]))
+            final = s.rows('SELECT step_id, position, state FROM goal_steps WHERE goal_id = %s '
+                'ORDER BY position NULLS FIRST', (goal_id,))
             if (not 1 <= len(final) <= 3
                 or [step["position"] for step in final] != list(range(1, len(final) + 1))
                 or {step["step_id"] for step in final} != original_ids

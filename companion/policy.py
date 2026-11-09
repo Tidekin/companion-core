@@ -44,13 +44,21 @@ class ConsentService:
                 expires_at=after(now, request.duration_seconds),
             )
             self.store.audit("consent.granted", consent_id, consent_id, now)
-        return self.store.one("SELECT * FROM consents WHERE consent_id=?", (consent_id,))
+        return self.store.one('SELECT consents.consent_id AS consent_id, '
+            'consents.capabilities_json AS capabilities_json, consents.device_id AS device_id, '
+            'consents.session_id AS session_id, consents.created_at AS created_at, '
+            'consents.expires_at AS expires_at, consents.revoked_at AS revoked_at FROM consents AS '
+            'consents WHERE consents.consent_id = %s', (consent_id,))
 
     def require(self, consent_id, capability, device_id, session_id, observed_at=None):
         flag = CAPABILITY_FLAGS.get(capability)
         if not flag or not getattr(self.settings, flag):
             raise CoreError("CAPABILITY_DISABLED", 403)
-        row = self.store.one("SELECT * FROM consents WHERE consent_id=?", (consent_id,))
+        row = self.store.one('SELECT consents.consent_id AS consent_id, consents.capabilities_json '
+            'AS capabilities_json, consents.device_id AS device_id, consents.session_id AS '
+            'session_id, consents.created_at AS created_at, consents.expires_at AS expires_at, '
+            'consents.revoked_at AS revoked_at FROM consents AS consents WHERE consents.consent_id '
+            '= %s', (consent_id,))
         if (
             not row
             or row["revoked_at"]
@@ -64,11 +72,11 @@ class ConsentService:
         return row
 
     def revoke(self, consent_id):
-        with self.store.transaction():
+        with self.store.transaction(control_write=True):
             changed = self.store.execute(
-                "UPDATE consents SET revoked_at=? WHERE consent_id=? AND revoked_at IS NULL",
+                'UPDATE consents SET revoked_at = %s WHERE consent_id = %s AND revoked_at IS NULL',
                 (self.clock(), consent_id),
-            ).rowcount
+            )
             if changed:
                 from companion.evaluation import revoke_jobs
 

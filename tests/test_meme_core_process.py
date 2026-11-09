@@ -24,7 +24,7 @@ def test_original_root_withdrawal_at_actual_model_boundary_never_calls_provider(
     # The original test claimed a native lease to exercise domain preparation;
     # no model reservation or I/O has begun. Let the actual independent Worker claim it.
     c.core.store.execute(
-        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=?", (c.job["job_id"],)
+        "UPDATE jobs SET state='QUEUED',lease_token=NULL WHERE job_id=%s", (c.job["job_id"],)
     )
     config = tmp_path / "model-boundary.json"
     process_config(c.core, config)
@@ -47,7 +47,7 @@ def test_original_root_withdrawal_at_actual_model_boundary_never_calls_provider(
                 _, error = await child.communicate()
                 raise AssertionError(error.decode(errors="replace"))
             assert marker.strip() == b"BEFORE_DISPATCH", marker
-            with c.core.store.transaction():
+            with c.core.store.transaction(control_write=True):
                 c.core.ledger.expire_events(c.core.store, [c.source["event_id"]], c.core.clock())
             child.stdin.write(b"continue\n")
             await child.stdin.drain()
@@ -59,7 +59,7 @@ def test_original_root_withdrawal_at_actual_model_boundary_never_calls_provider(
             assert not c.core.store.rows("SELECT * FROM outbox")
             assert (
                 c.core.store.one(
-                    "SELECT * FROM model_usage WHERE request_id=?", (before[0]["request_id"],)
+                    'SELECT * FROM model_usage WHERE request_id=%s', (before[0]["request_id"],)
                 )
                 == before[0]
             )

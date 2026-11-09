@@ -17,7 +17,7 @@ def life_result(core, reason="今天先等新线索", action="SKIP"):
     job = due(core)
     assert job
     assert run(core.run_once("cognition-reason", job_id=job))
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job,))["state"] == "SUCCEEDED"
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (job,))["state"] == "SUCCEEDED"
     return job
 
 
@@ -34,7 +34,7 @@ def test_native_reason_and_historical_candidate_survive_unrelated_memory(core, a
     remember(core, 99, "另一项目封面使用绿色", confirmed=True)
     assert epoch(core.store) > old_epoch
     assert view.page("life", record_id=job)["items"][0] == before
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert view.page("life", record_id=job)["record_status"] == "NOT_RECORDED"
 
@@ -48,7 +48,7 @@ def test_completed_diary_survives_unrelated_memory_but_not_source_erasure(core):
     remember(core, 99, "另一项目封面使用绿色", confirmed=True)
     assert epoch(core.store) > saved["captured_privacy_epoch"]
     assert view.page("diary", record_id=saved["run_id"])["items"][0] == before
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     assert view.page("diary", record_id=saved["run_id"])["items"] == []
 

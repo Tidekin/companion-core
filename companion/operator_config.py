@@ -4,13 +4,11 @@ import base64
 import hashlib
 import hmac
 import json
-import sqlite3
-from contextlib import closing
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
-from pathlib import Path
 from urllib.parse import urlsplit
 
+import psycopg
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import (
     AnyHttpUrl,
@@ -23,6 +21,7 @@ from pydantic import (
 )
 
 from companion.contracts import CoreError, StrictModel
+from companion.postgres import Database
 from companion.store import encode
 
 
@@ -64,7 +63,8 @@ class ConfigurationChange(StrictModel):
 # Identity, ledger locations and signed approvals are deployment custody, not browser inputs.
 EXCLUDED = frozenset({
     "owner_qq_id", "bot_qq_id", "bridge_token", "diary_admin_token", "control_token",
-    "database", "erasure_ledger", "embedding_cache_dir", "paid_model", "live_text_window",
+    "database", "state_directory", "erasure_ledger", "embedding_cache_dir", "paid_model",
+    "live_text_window",
     "observation_adapters", "executive", "media", "cloud_budget", "timezone", "mode",
     "diary_auto_share", "reranker_model_dir",
     "operator_hot_reload",
@@ -105,9 +105,6 @@ LABELS = {
     "exploration_enabled": "自主阅读", "proactive_enabled": "主动分享",
     "context_soft_tokens": "对话上下文软上限（token）",
     "max_recent_messages": "最近消息数量上限", "rich_input_scope": "富媒体输入范围",
-    "monthly_limit_micro_usd": "模型与工具月额度（微美元）",
-    "autonomous_daily_micro_usd": "主动交流日额度（微美元）",
-    "memory_daily_micro_usd": "记忆处理日额度（微美元）",
     "memory_recall_limit": "记忆召回条数上限",
     "lexical_keep_rank": "关键词召回保留名次",
     "turn_recall_limit": "历史消息召回条数上限",
@@ -128,7 +125,6 @@ LABELS = {
     "diary_max_body_chars": "日记正文上限（字符）",
     "diary_catchup_days": "日记补写范围（天）",
     "diary_max_attempts": "日记最大尝试次数",
-    "diary_daily_micro_usd": "日记日额度（微美元）",
     "content_enabled": "分享内容读取", "web_reading_enabled": "指定网站读取",
     "qzone_reading_enabled": "授权读取 QQ 空间正文",
     "observation_enabled": "来源观察", "voice_enabled": "语音输入",
@@ -143,8 +139,6 @@ LABELS = {
     "reflection_min_sources": "反思最少来源数",
     "reflection_max_output_tokens": "反思输出上限（token）",
     "reflection_max_daily_calls": "每日反思调用上限",
-    "reflection_daily_micro_usd": "反思日额度（微美元）",
-    "reflection_monthly_micro_usd": "反思月额度（微美元）",
     "goals_enabled": "目标与承诺", "goals_max_active": "活动目标数量上限",
     "goal_max_attempts": "目标最大尝试次数", "wake_enabled": "自主活动调度",
     "wake_min_interval_minutes": "自主活动最小间隔（分钟）",
@@ -157,7 +151,6 @@ LABELS = {
     "exploration_daily_bytes": "每日阅读流量上限（字节）",
     "social_enabled": "阅读内容分享", "social_semantic_threshold": "内容分享相似度阈值",
     "meme_discovery_enabled": "发现表情素材", "meme_semantics_enabled": "表情素材理解",
-    "meme_caption_daily_micro_usd": "表情理解日额度（微美元）",
     "meme_caption_max_output_tokens": "表情理解输出上限（token）",
     "meme_discovery_daily_queries": "每日表情发现次数上限",
     "meme_discovery_daily_download_bytes": "每日表情下载上限（字节）",
@@ -199,7 +192,12 @@ def _decode(row, settings):
 
 
 def latest(store):
-    return store.one("SELECT * FROM operator_configuration ORDER BY version DESC LIMIT 1")
+    return store.one('SELECT operator_configuration.version AS version, '
+        'operator_configuration.request_id AS request_id, operator_configuration.request_sha256 AS '
+        'request_sha256, operator_configuration.encrypted_overrides AS encrypted_overrides, '
+        'operator_configuration.fields_json AS fields_json, operator_configuration.created_at AS '
+        'created_at FROM operator_configuration AS operator_configuration ORDER BY '
+        'operator_configuration.version DESC NULLS LAST LIMIT 1')
 
 
 def _raw(value, *, reveal=True):
@@ -290,16 +288,19 @@ def _endpoint_changes(before, after, changes):
 
 def load(settings):
     """Startup still applies complete versions, including restart-only fields."""
-    path = Path(settings.database).resolve()
-    if not path.is_file():
-        return settings
-    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
-        db.row_factory = sqlite3.Row
-        if not db.execute(
-            "SELECT 1 FROM sqlite_master WHERE name='operator_configuration'",
-        ).fetchone():
+    with Database(settings.database, max_connections=1) as database, database.session() as db:
+        if not db.one(
+            'SELECT 1 FROM pg_catalog.pg_class WHERE relnamespace=current_schema()::regnamespace '
+            "AND relname='operator_configuration' AND relkind IN ('r','p')",
+        ):
             return settings
-        rows = db.execute("SELECT * FROM operator_configuration ORDER BY version DESC")
+        rows = db.rows('SELECT operator_configuration.version AS version, '
+            'operator_configuration.request_id AS request_id, '
+            'operator_configuration.request_sha256 AS request_sha256, '
+            'operator_configuration.encrypted_overrides AS encrypted_overrides, '
+            'operator_configuration.fields_json AS fields_json, operator_configuration.created_at '
+            'AS created_at FROM operator_configuration AS operator_configuration ORDER BY '
+            'operator_configuration.version DESC NULLS LAST')
         error = None
         for record in rows:
             try:
@@ -319,21 +320,35 @@ def load(settings):
             from companion import runtime_config
 
             try:
-                observed = db.execute("SELECT value FROM runtime_meta WHERE key=?",
-                                      (runtime_config.PREFIX + "worker",)).fetchone()
+                observed = db.one('SELECT value FROM runtime_meta WHERE key = %s',
+                                      (runtime_config.PREFIX + "worker",))
                 key = json.loads(observed["value"])["snapshot_id"] if observed else None
-                saved = db.execute("SELECT * FROM operator_runtime_snapshots WHERE snapshot_id=?",
-                                   (key,)).fetchone()
+                saved = db.one('SELECT operator_runtime_snapshots.snapshot_id AS snapshot_id, '
+                    'operator_runtime_snapshots.version AS version, '
+                    'operator_runtime_snapshots.base_sha256 AS base_sha256, '
+                    'operator_runtime_snapshots.chat_time_labels AS chat_time_labels, '
+                    'operator_runtime_snapshots.created_at AS created_at, '
+                    'operator_runtime_snapshots.expression_json AS expression_json FROM '
+                    'operator_runtime_snapshots AS operator_runtime_snapshots WHERE '
+                    'operator_runtime_snapshots.snapshot_id = %s',
+                                   (key,))
                 snapshot = runtime_config.validate_record(settings, saved, lookup=lambda version:
-                    db.execute("SELECT * FROM operator_configuration WHERE version=?",
-                               (version,)).fetchone())
+                    db.one('SELECT operator_configuration.version AS version, '
+                        'operator_configuration.request_id AS request_id, '
+                        'operator_configuration.request_sha256 AS request_sha256, '
+                        'operator_configuration.encrypted_overrides AS encrypted_overrides, '
+                        'operator_configuration.fields_json AS fields_json, '
+                        'operator_configuration.created_at AS created_at FROM '
+                        'operator_configuration AS operator_configuration WHERE '
+                        'operator_configuration.version = %s',
+                               (version,)))
                 result = _candidate(settings, runtime_config.values(settings, snapshot))
                 result._operator_config_version = snapshot.version
                 result._operator_config_base = (settings._operator_config_base
                                                 or encode(_raw(settings)))
                 result._operator_config_error = error
                 return result
-            except (CoreError, sqlite3.Error, ValueError, TypeError, KeyError):
+            except (CoreError, psycopg.Error, ValueError, TypeError, KeyError):
                 pass
             raise CoreError(error, 503)
     return settings
@@ -446,8 +461,8 @@ def view(store, settings):
     version = row["version"] if row else 0
     history = [{"version": item["version"], "created_at": item["created_at"],
                 "fields": json.loads(item["fields_json"])}
-               for item in store.rows("SELECT version,created_at,fields_json FROM "
-                                      "operator_configuration ORDER BY version DESC LIMIT 20")]
+               for item in store.rows('SELECT version, created_at, fields_json FROM '
+                   'operator_configuration ORDER BY version DESC NULLS LAST LIMIT 20')]
     pending_restart = bool(classification["restart_fields"] or (
         not settings.operator_hot_reload and version != settings._operator_config_version))
     pending = (version != active_version or batch_timing != desired.input_debounce.timing()
@@ -477,7 +492,8 @@ def update(store, settings, body, key, now, *, owner_check=None, clock=None):
             owner_check()
         if clock is not None:
             now = clock()
-        previous = store.one("SELECT request_sha256 FROM operator_configuration WHERE request_id=?",
+        previous = store.one('SELECT request_sha256 FROM operator_configuration WHERE request_id = '
+            '%s',
                              (key,))
         if previous:
             if previous["request_sha256"] != fingerprint:
@@ -496,7 +512,13 @@ def update(store, settings, body, key, now, *, owner_check=None, clock=None):
                 overrides, desired = {}, settings
             changes = body.changes
             if body.restore_version is not None:
-                historical = store.one("SELECT * FROM operator_configuration WHERE version=?",
+                historical = store.one('SELECT operator_configuration.version AS version, '
+                    'operator_configuration.request_id AS request_id, '
+                    'operator_configuration.request_sha256 AS request_sha256, '
+                    'operator_configuration.encrypted_overrides AS encrypted_overrides, '
+                    'operator_configuration.fields_json AS fields_json, '
+                    'operator_configuration.created_at AS created_at FROM operator_configuration '
+                    'AS operator_configuration WHERE operator_configuration.version = %s',
                                        (body.restore_version,))
                 if body.restore_version and historical is None:
                     raise CoreError("CONFIGURATION_VERSION_NOT_FOUND", 404)

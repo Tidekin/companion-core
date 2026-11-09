@@ -53,7 +53,7 @@ def test_reader_result_resumes_one_job_without_repeating_provider_or_reader(
             from companion.context_planner import check_bound
             from companion.privacy import epoch
 
-            job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (accepted["job_id"],))
+            job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (accepted["job_id"],))
             checkpoint = core.store.one("SELECT phase,snapshots_json FROM agent_conversations")
             assert checkpoint["phase"] == "WAITING"
             original_configuration = None

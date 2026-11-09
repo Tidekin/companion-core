@@ -62,7 +62,7 @@ def test_capped_selected_topic_upgrades_to_real_history_and_independent_worker(
             for number in range(1, 9):
                 item, _ = await admit(number, f"第{number}条实际私聊：导出问题还有新线索。")
                 inputs.append(item.event_id)
-            conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+            conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                           (inputs[-1],))["conversation_id"]
             reference, _ = grant(core, reference,
                 scope(core, conversation, inputs[:8], mode="selected"), "selected-life",
@@ -80,7 +80,7 @@ def test_capped_selected_topic_upgrades_to_real_history_and_independent_worker(
             reference, policy = grant(core, reference, scope(core, conversation), "history-life")
             assert policy.history.scope == "owner_private"
             core.life_topics.synchronize()
-            old = core.store.one("SELECT * FROM life_topics WHERE topic_id=?",
+            old = core.store.one('SELECT * FROM life_topics WHERE topic_id=%s',
                                  (original["topic_id"],))
             assert (old["state"], old["reason_code"]) == ("CLOSED", "SOURCE_LIMIT_REACHED")
             active = core.store.one("SELECT * FROM life_topics WHERE state IN ('WAITING','DUE')")
@@ -112,15 +112,18 @@ def test_history_sources_retain_native_identity_scope_and_recall(core, tmp_path,
         ):
             configure(core)
             event, _ = await admit(1, "真实私人来源，稍后再聊。")
-            conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+            conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                           (event.event_id,))["conversation_id"]
             reference, policy = grant(core, reference, scope(core, conversation), "private-life")
             source = _source(core.store, core.settings, event.event_id, core.clock())
             assert authority(core.store, core.settings, conversation, [source], core.clock())[
                 "history_sources"]
             if mutation == "text":
-                core.store.execute("UPDATE events SET body_json=json_set(body_json,'$.text',"
-                                   "'changed without signed capture') WHERE event_id=?",
+                core.store.execute((
+                    'UPDATE events SET '
+                    "body_json=jsonb_set(body_json::jsonb,'{text}',"
+                    "to_jsonb('changed without signed capture'::text))::text WHERE event_id=%s"
+                ),
                                    (event.event_id,))
                 source = _source(core.store, core.settings, event.event_id, core.clock())
             elif mutation == "not_before":

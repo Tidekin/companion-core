@@ -9,6 +9,7 @@ from companion.transport import enqueue_reply_parts
 from scripts.summarize_beta_feedback import summarize
 from scripts.validate_beta_feedback import validate_record
 from tests.conftest import ingest
+from tests.postgres_fixture import logical_state
 from tests.support.p12_beta_operations import bundle, feedback
 from tests.support.segmented_delivery import PARTS, freeze
 
@@ -16,13 +17,13 @@ from tests.support.segmented_delivery import PARTS, freeze
 def sample(core, *, visible=3, states=("SENT", "SENT", "SENT")):
     job, ids = freeze(core)
     for message_id, state in zip(ids, states, strict=True):
-        core.store.execute("UPDATE outbox SET state=?,sent_at=? WHERE message_id=?",
+        core.store.execute('UPDATE outbox SET state=%s,sent_at=%s WHERE message_id=%s',
                            (state, core.clock() if state == "SENT" else None, message_id))
     report = inspect_context(core.settings, "trace_test_1")
     record = feedback()
     record["phone"].update(expected_reply_count=3,
         reply_group_sha256=core.store.one(
-            "SELECT reply_group_sha256 FROM outbox WHERE message_id=?", (ids[0],),
+            'SELECT reply_group_sha256 FROM outbox WHERE message_id=%s', (ids[0],),
         )["reply_group_sha256"], received=None if visible is None else visible > 0,
         visible_reply_count=visible, duplicate_check_evidence_sha256="d" * 64)
     record["trace_ref_sha256"] = report["trace_ref_sha256"]
@@ -39,11 +40,11 @@ def test_three_frozen_replies_are_not_misreported_as_duplicates(core, tmp_path):
         "reply_group_sha256": record["phone"]["reply_group_sha256"],
         "expected_reply_count": 3, "outbox": {"SENT": 3}, "all_parts_sent": True,
     }
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     result = summarize(bundle(tmp_path, [(record, report)]))["groups"]["local_synthetic"]
     assert result["phone"]["visible_replies"]["sum"] == 3
     assert not result["reported_incidents"]
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     serialized = json.dumps(report, ensure_ascii=False)
     for private in [*PARTS, *ids, job["job_id"], job["event_id"], "trace_test_1"]:
         assert private not in serialized
@@ -51,11 +52,11 @@ def test_three_frozen_replies_are_not_misreported_as_duplicates(core, tmp_path):
 
 def test_inspector_checks_the_frozen_group_without_writing_or_calling_models(core):
     _, _, _, _ = sample(core)
-    before = list(core.store.db.iterdump())
+    before = logical_state(core.store)
     calls = len(core.model.calls)
     report = inspect_context(core.settings, "trace_test_1")
     assert report["trace"]["reply_groups"][0]["expected_reply_count"] == 3
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     assert len(core.model.calls) == calls == 0
 
 
@@ -134,19 +135,19 @@ def test_redacted_or_damaged_frozen_groups_are_not_available_as_feedback_proof(
 ):
     record, _, _, ids = sample(core)
     if mutation == "redacted":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     elif mutation == "missing":
-        core.store.execute("DELETE FROM outbox WHERE message_id=?", (ids[2],))
+        core.store.execute('DELETE FROM outbox WHERE message_id=%s', (ids[2],))
     else:
         field, value = {"text": ("content_json", '{"text":"changed"}'),
                         "count": ("segment_count", 2),
                         "manifest": ("reply_group_sha256", "a" * 64)}[mutation]
-        core.store.execute(f"UPDATE outbox SET {field}=? WHERE message_id=?", (value, ids[1]))
-    before = list(core.store.db.iterdump())
+        core.store.execute(f"UPDATE outbox SET {field}=%s WHERE message_id=%s", (value, ids[1]))
+    before = logical_state(core.store)
     report = inspect_context(core.settings, "trace_test_1")
     assert report["trace"]["reply_groups"] == []
-    assert list(core.store.db.iterdump()) == before
+    assert logical_state(core.store) == before
     with pytest.raises(ValueError, match="REPLY_GROUP"):
         summarize(bundle(tmp_path, [(record, report)]))
 

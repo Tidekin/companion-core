@@ -13,15 +13,17 @@ from types import SimpleNamespace
 import pytest
 from cryptography.fernet import Fernet
 
+from companion.postgres import Database
 from companion_onebot_bridge import meme_accounting_drain as drain
 from tests.conftest import run
+from tests.postgres_fixture import copy_database
 from tests.support.meme_accounting_drain import stopped_case
 from tests.support.meme_responsibility import snapshot
 
 
 @pytest.mark.parametrize("kind", ["stale_snapshot", "restored_backup"])
 def test_actual_latest_ledger_and_restore_barrier_cannot_be_cleared_by_drain(
-    core, tmp_path, monkeypatch, kind
+    empty_database, core, tmp_path, monkeypatch, kind
 ):
     from companion.backup import backup, restore
     from companion.store import Store
@@ -30,23 +32,27 @@ def test_actual_latest_ledger_and_restore_barrier_cannot_be_cleared_by_drain(
     async def scenario():
         async with stopped_case(core, tmp_path, monkeypatch) as c:
             old, encrypted, key = (
-                tmp_path / "old.sqlite3",
+                empty_database,
                 tmp_path / "old.backup",
                 Fernet.generate_key(),
             )
             if kind == "stale_snapshot":
-                with closing(sqlite3.connect(old)) as destination:
-                    core.store.db.backup(destination)
+                copy_database(core.settings.database, old, tmp_path)
             else:
                 backup(core.settings.database, encrypted, key)
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [c.context["event_id"]], core.clock())
+            state = (core.store.state_directory if kind == "stale_snapshot"
+                     else tmp_path / "restored-state")
             if kind == "restored_backup":
-                restore(encrypted, old, key, core.settings.erasure_ledger)
-            with closing(Store(str(old))) as store:
+                restore(encrypted, old, key, core.settings.erasure_ledger, state_directory=state)
+            with Database(old) as database, closing(Store(database, state)) as store:
                 shadow = copy.copy(core)
+                shadow.database = database
                 shadow.store = store
-                shadow.settings = core.settings.model_copy(update={"database": str(old)})
+                shadow.settings = core.settings.model_copy(update={
+                    "database": old, "state_directory": str(state),
+                })
                 before = snapshot(shadow)
                 with closing(sqlite3.connect(c.database)) as db:
                     bridge = tuple(db.iterdump())
@@ -172,7 +178,7 @@ def test_original_reconciled_v2_then_legally_redacted_policy_is_still_refused(
                 operation_id="accounting-redaction-resolution",
                 operation_sha256="e" * 64,
             )
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [source["event_id"]], core.clock())
             assert (
                 core.store.one(

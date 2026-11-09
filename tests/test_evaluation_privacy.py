@@ -46,8 +46,8 @@ def test_results_read_racing_independent_erasure_never_returns_erased_text(
 
     def read_then_erase(sql, *args, **kwargs):
         row = original_one(sql, *args, **kwargs)
-        if (erase_stage == "result_read" and
-            "SELECT text,text_redacted,finish_reason,evidence_type " in sql and not triggered):
+        if (erase_stage == "result_read" and not triggered and row
+            and {"text", "text_redacted", "finish_reason", "evidence_type"} <= row.keys()):
             triggered.append(True)
             erase()
         return row

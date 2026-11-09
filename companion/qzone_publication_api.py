@@ -28,8 +28,8 @@ def register_routes(app, settings, prefix, auth, request_check):
     async def publications(response: Response):
         response.headers["Cache-Control"] = "no-store"
         service = module()
-        rows = service.store.rows("SELECT plan_id FROM social_autonomy_plans "
-            "WHERE idempotency_key LIKE ? ORDER BY rowid DESC LIMIT 30", (PREFIX + "%",))
+        rows = service.store.rows('SELECT plan_id FROM social_autonomy_plans WHERE idempotency_key '
+            'LIKE %s ORDER BY record_sequence DESC NULLS LAST LIMIT 30', (PREFIX + "%",))
         return {"items": [view(service, row["plan_id"]) for row in rows]}
 
     @app.get(prefix + "/{plan_id}", dependencies=auth)

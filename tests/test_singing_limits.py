@@ -53,7 +53,7 @@ def test_source_reservation_release_and_unknown_liability(core, tmp_path, monkey
             assert core.exploration.budget_available() is (not started)
             with core.store.transaction(), pytest.raises(CoreError,
                 match="SINGING_ORIGINAL_ATTEMPT_EXISTS"):
-                original = core.store.one("SELECT * FROM jobs WHERE job_id=?",
+                original = core.store.one('SELECT * FROM jobs WHERE job_id=%s',
                                            (admitted["job_id"],))
                 jobs.create_sing(original, job["event_id"], 1, "another-tool-call")
             assert len(core.store.rows("SELECT * FROM voice_jobs")) == 1

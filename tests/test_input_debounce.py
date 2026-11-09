@@ -20,7 +20,8 @@ def seconds(core, value):
 
 
 def test_defaults_are_on_and_stay_out_of_the_settings_dump():
-    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="x" * 32)
+    settings = Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="x" * 32,
+                        database="dbname=synthetic")
     assert settings.input_debounce.enabled is True
     assert "input_debounce" not in settings.model_dump()
 
@@ -37,7 +38,7 @@ def test_a_quiet_message_waits_two_seconds_before_it_can_be_claimed(core):
 def test_an_active_chat_waits_longer_to_open_a_batch(core):
     enable(core)
     earlier, _ = accept(core, 1)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (earlier["job_id"],))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=%s", (earlier["job_id"],))
     core.clock.advance(10)
     _, due = accept(core, 2)
     assert seconds(core, due) == 5
@@ -49,7 +50,7 @@ def test_a_burst_is_answered_once_with_every_input_in_context(core):
     core.clock.advance(1)
     second, due = accept(core, 2, "今天老板又改需求了")
     assert seconds(core, due) == 2  # Continuation, not a fresh active opening.
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                           (first["job_id"],))["state"] == "CANCELLED"
     core.clock.advance(2)
     job = core.claim_job("worker")
@@ -94,8 +95,10 @@ def test_hot_edit_between_messages_preserves_open_batch_wait_and_cap(hot):
 def test_legacy_timestamp_batch_finishes_with_startup_timing(hot):
     enable(hot)
     first, _ = accept(hot, 1)
-    row = hot.store.one("SELECT conversation_id FROM events WHERE event_id=?", (first["event_id"],))
-    hot.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+    row = hot.store.one((
+        'SELECT conversation_id FROM events WHERE event_id=%s'
+    ), (first["event_id"],))
+    hot.store.execute('UPDATE runtime_meta SET value=%s WHERE key=%s',
                       (hot.clock(), input_debounce.BATCH_KEY + row["conversation_id"]))
     save(hot, input_debounce={"continue_seconds": 7})
     hot.clock.advance(1)

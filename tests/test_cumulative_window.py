@@ -33,8 +33,7 @@ async def native_quota(core, tmp_path, **changes):
         await ws.send(frame(number, text="这次讨论读书安排。"))
         await ws.wait_closed()
 
-    approved_live(core, tmp_path, max_output_tokens=4096, per_attempt_micro_usd=100000,
-                  per_request_micro_usd=200000)
+    approved_live(core, tmp_path, max_output_tokens=4096, )
     scope = policy(core, **changes)
     async with host(core, tmp_path, source, paid_options={"cumulative": scope}) as values:
         yield values
@@ -53,9 +52,9 @@ def archived_account(core, tmp_path):
 
     old, _, job, mids, key = archived(core, tmp_path)
     # Frozen v1 send custody includes the single original reservation/ACK.
-    core.store.execute("UPDATE outbox SET attempt_count=1 WHERE message_id=?", (mids[0],))
-    original = core.store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
-    sent = core.store.one("SELECT * FROM outbox WHERE message_id=?", (mids[0],))
+    core.store.execute('UPDATE outbox SET attempt_count=1 WHERE message_id=%s', (mids[0],))
+    original = core.store.one('SELECT * FROM events WHERE event_id=%s', (job["event_id"],))
+    sent = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (mids[0],))
     path = tmp_path / "original-window-reservations.jsonl"
     reservations, head = [], "0" * 64
     for kind, source_id, at, record_kind, field in (
@@ -120,7 +119,7 @@ async def renew_native(core, bridge, number, **limits):
     bridge.onebot = OneBotClient(bridge.config, bridge.protocol)
     # OneBot timestamps have second precision; the next frame must postdate the grant.
     admitted_at = core.store.one(
-        "SELECT created_at FROM owner_authority_revisions WHERE grant_id=? AND revision=?",
+        'SELECT created_at FROM owner_authority_revisions WHERE grant_id=%s AND revision=%s',
         (successor["grant_id"], successor["revision"]))["created_at"]
     earliest_frame = ceil(datetime.fromisoformat(admitted_at).timestamp())
     await asyncio.sleep(max(0, earliest_frame - datetime.now(UTC).timestamp()) + 0.1)
@@ -180,8 +179,10 @@ def test_input_and_send_responsibility_are_retained_in_original_ledgers(core, tm
             operations = view(core)["operations"]
             assert len(operations) == 2
             assert sorted(v["state"] for v in operations.values()) == ["ADMITTED", "SENT"]
-            value = json.loads(core.store.one("SELECT value FROM runtime_meta "
-                "WHERE key LIKE 'owner_input:%'")["value"])
+            value = json.loads(core.store.one(
+                'SELECT value FROM runtime_meta WHERE key LIKE '
+                "'owner_input:%%'"
+            )["value"])
             assert owner_input.approve(core.store, core.settings, core.clock,
                 OwnerCapture.model_validate(value["capture"]))["duplicate"]
             assert len(view(core)["operations"]) == 2
@@ -396,7 +397,7 @@ def test_real_handoff_preserves_complete_input_send_and_model_history(core, tmp_
                        for key in ("owner_inputs", "send_attempts", "model_attempts"))
             assert len(view(core)["operations"]) == 4
             for row in original_usage:
-                assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                assert core.store.one('SELECT * FROM model_usage WHERE request_id=%s',
                                       (row["request_id"],)) == row
             await bridge.capture(3)
             with pytest.raises(httpx.HTTPStatusError):
@@ -405,7 +406,9 @@ def test_real_handoff_preserves_complete_input_send_and_model_history(core, tmp_
     run(scenario())
 
 
-def test_forgotten_content_and_old_backup_keep_latest_cumulative_responsibility(core, tmp_path):
+def test_forgotten_content_and_old_backup_keep_latest_cumulative_responsibility(
+    core, tmp_path, empty_database,
+):
     from cryptography.fernet import Fernet
 
     from companion import owner_authority
@@ -414,7 +417,8 @@ def test_forgotten_content_and_old_backup_keep_latest_cumulative_responsibility(
     from tests.conftest import FakeModel
 
     key = Fernet.generate_key()
-    archive, destination = tmp_path / "old.enc", tmp_path / "restored.db"
+    archive, destination = tmp_path / "old.enc", empty_database
+    state = tmp_path / "restored-state"
     async def scenario():
         async with native_quota(core, tmp_path) as (bridge, _, sends, models):
             await asyncio.to_thread(backup, core.settings.database, archive, key)
@@ -422,14 +426,16 @@ def test_forgotten_content_and_old_backup_keep_latest_cumulative_responsibility(
             assert await bridge.pump()
             event_id = core.store.one("SELECT event_id FROM events")["event_id"]
             before = cumulative.status(core.store, core.settings, core.clock())["used"]
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, [event_id], core.clock())
             assert cumulative.status(core.store, core.settings, core.clock())["used"] == before
             await asyncio.to_thread(restore, archive, destination, key,
-                                    core.settings.erasure_ledger)
-            settings = core.settings.model_copy(update={"database": str(destination)})
+                                    core.settings.erasure_ledger, state_directory=state)
+            settings = core.settings.model_copy(update={
+                "database": destination, "state_directory": str(state),
+            })
             with Core(settings, FakeModel(), core.clock) as restored:
-                assert restored.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                assert restored.store.one('SELECT 1 FROM runtime_meta WHERE key=%s',
                                           ("erased_event:" + event_id,))
                 assert not cumulative.status(restored.store, settings, core.clock())["available"]
                 assert owner_authority.status(

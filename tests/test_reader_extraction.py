@@ -222,7 +222,7 @@ def test_exported_reader_cli_real_http_and_restart(core, tmp_path, source, outco
     else:
         accepted = ingest(core, text=url)
     if outcome == "erased":
-        with core.store.transaction():
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [accepted["event_id"]], core.clock())
 
     async def scenario():

@@ -6,8 +6,9 @@ response.start has status=None: an outer server error response is not observed h
 """
 
 import asyncio
-import sqlite3
 from time import perf_counter_ns
+
+import psycopg
 
 from companion import telemetry
 
@@ -46,9 +47,9 @@ class ApiTelemetry:
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
                 error_class = "CancelledError"
-            elif isinstance(error, sqlite3.OperationalError):
+            elif isinstance(error, psycopg.OperationalError):
                 error_class = "OperationalError"
-            elif isinstance(error, sqlite3.DatabaseError):
+            elif isinstance(error, psycopg.DatabaseError):
                 error_class = "DatabaseError"
             else:
                 error_class = "UnhandledError"

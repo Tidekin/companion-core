@@ -65,4 +65,4 @@ def seed_day(core, texts=None, day=DAY):
 def generate(core):
     core.diary.schedule_day(DAY)
     assert run(core.diary.generate_once("diary-worker"))
-    return core.store.one("SELECT * FROM diary_runs WHERE local_date=?", (DAY.isoformat(),))
+    return core.store.one("SELECT * FROM diary_runs WHERE local_date=%s", (DAY.isoformat(),))

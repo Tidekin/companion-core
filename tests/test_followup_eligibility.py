@@ -24,8 +24,11 @@ def queued(core, seconds=900):
     core.clock.advance(seconds)
     assert turn_taking.flush(core.store, core.settings, core.clock())
     return core.store.one(
-        "SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
-        "WHERE j.kind='activity' ORDER BY j.rowid DESC LIMIT 1",
+        (
+            'SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events'
+            " e USING(event_id) WHERE j.kind='activity' ORDER BY "
+            'j.record_sequence DESC LIMIT 1'
+        ),
     )
 
 
@@ -96,12 +99,12 @@ def test_answer_to_an_earlier_question_is_not_a_closing(core, separate_bubbles):
         "还要茶吗？" if separate_bubbles else "还要茶吗？我刚烧好水。"))
     if separate_bubbles:
         conversation = core.store.one(
-            "SELECT conversation_id FROM events WHERE event_id=?", (first["event_id"],),
+            'SELECT conversation_id FROM events WHERE event_id=%s', (first["event_id"],),
         )["conversation_id"]
         tail = enqueue(core.store, first["event_id"], conversation, "我刚烧好水。",
                        core.clock(), key="question-followed-by-statement")
         core.store.execute(
-            "UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+            "UPDATE outbox SET state='SENT',sent_at=%s WHERE message_id=%s",
             (core.clock(), tail),
         )
     core.clock.advance(60)
@@ -133,14 +136,14 @@ def test_batched_owner_messages_use_the_preceding_delivered_reply(
     core.clock.advance(8)
     core.model.chat.append("好的" if batch_ack else "我也觉得，那个角色的选择比结局更耐琢磨。")
     assert run(core.run_once("answer-batch"))
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (first["job_id"],)) == {
+    assert core.store.one('SELECT state FROM jobs WHERE job_id=%s', (first["job_id"],)) == {
         "state": "CANCELLED",
     }
     assert not core.store.one(
-        "SELECT 1 FROM outbox WHERE origin_event_id=?", (first["event_id"],),
+        'SELECT 1 FROM outbox WHERE origin_event_id=%s', (first["event_id"],),
     )
     core.store.execute(
-        "UPDATE outbox SET state='SENT',sent_at=? WHERE origin_event_id=? AND state='PENDING'",
+        "UPDATE outbox SET state='SENT',sent_at=%s WHERE origin_event_id=%s AND state='PENDING'",
         (core.clock(), last["event_id"]),
     )
     core.clock.advance(900)
@@ -160,7 +163,9 @@ def test_batched_owner_messages_use_the_preceding_delivered_reply(
 def test_material_and_scheduler_share_the_same_inclusive_time_window(core, seconds, eligible):
     enable(core)
     lively(core)
-    ref = core.store.one("SELECT message_id FROM outbox ORDER BY rowid DESC LIMIT 1")["message_id"]
+    ref = core.store.one(
+        'SELECT message_id FROM outbox ORDER BY record_sequence DESC LIMIT 1'
+    )["message_id"]
     core.clock.advance(seconds)
 
     assert (turn_taking.follow_up_target(core.store, core.settings, core.clock()) is not None) \
@@ -193,7 +198,7 @@ def test_expiry_while_queued_cancels_without_a_model_request(core):
 
     assert run(run_notice(core))
     assert core.store.one(
-        "SELECT state,last_error_code FROM jobs WHERE job_id=?", (job["job_id"],),
+        'SELECT state,last_error_code FROM jobs WHERE job_id=%s', (job["job_id"],),
     ) == {"state": "CANCELLED", "last_error_code": reply_revision.SUPERSEDED}
     assert len(core.model.calls) == before
     assert not core.store.one("SELECT 1 FROM model_usage WHERE scenario='activity'")
@@ -220,7 +225,7 @@ def test_expiry_during_model_request_keeps_known_cost_and_discards_the_result(co
     assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
     assert usage[0]["billed_micro_usd"] > 0
     assert core.store.one(
-        "SELECT state,last_error_code FROM jobs WHERE job_id=?", (job["job_id"],),
+        'SELECT state,last_error_code FROM jobs WHERE job_id=%s', (job["job_id"],),
     ) == {"state": "CANCELLED", "last_error_code": reply_revision.SUPERSEDED}
     assert not core.store.one("SELECT 1 FROM outbox WHERE action_type='qq.private.proactive'")
     assert not run(run_notice(core))

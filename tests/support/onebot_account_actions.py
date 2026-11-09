@@ -19,7 +19,7 @@ from tests.support.social_autonomy import avatar, read_public
 def fixture(core, kind="qzone_publish"):
     ref = read_public(core, "bilibili")
     owner = ingest(core, 99, "合成绑定输入", origin="onebot-direct:FriendMessage:10001")
-    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+    conversation = core.store.one('SELECT conversation_id FROM events WHERE event_id=%s',
                                   (owner["event_id"],))["conversation_id"]
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     if kind in {"nickname", "signature"}:

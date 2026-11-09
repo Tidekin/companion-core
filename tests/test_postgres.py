@@ -4,7 +4,10 @@ import json
 import os
 import re
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
+from time import monotonic, sleep
 from uuid import uuid4
 
 import psycopg
@@ -13,7 +16,7 @@ from psycopg import sql
 from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 
-from companion.postgres import WAKE_CHANNEL, Database
+from companion.postgres import BUDGET_LEDGER, ERASURE_LEDGER, WAKE_CHANNEL, Database
 
 
 @pytest.fixture
@@ -82,6 +85,81 @@ def test_custody_lock_is_transaction_scoped_without_locking_other_rows(database)
                 "held": True}
 
 
+def test_repeated_ledger_locks_upgrade_and_reacquire_after_rollback(database):
+    def available(session, *, shared=False):
+        function = "pg_try_advisory_xact_lock_shared" if shared else "pg_try_advisory_xact_lock"
+        with session.transaction():
+            return session.one(sql.SQL("SELECT {}(hashtext(current_schema()),%s) AS held").format(
+                sql.Identifier(function)), (BUDGET_LEDGER,))["held"]
+
+    with database.session() as first, database.session() as second:
+        with first.transaction(rollback=True):
+            first.ledger_lock(BUDGET_LEDGER, shared=True)
+            first.ledger_lock(BUDGET_LEDGER, shared=True)
+            assert available(second, shared=True)
+            assert not available(second)
+            first.ledger_lock(BUDGET_LEDGER)
+            first.ledger_lock(BUDGET_LEDGER, shared=True)
+            assert not available(second, shared=True)
+        assert available(second)
+        with first.transaction():
+            first.ledger_lock(BUDGET_LEDGER)
+            assert not available(second)
+        assert available(second)
+
+
+@pytest.mark.parametrize("budget_shared", [True, False])
+def test_batched_ledger_locks_preserve_order_modes_and_later_statement_snapshot(
+    database, budget_shared,
+):
+    started, acquired, release = Event(), Event(), Event()
+    with database.session() as first, database.session() as second:
+        def acquire():
+            with first.transaction(rollback=True):
+                started.set()
+                first.ledger_locks(((BUDGET_LEDGER, budget_shared), (ERASURE_LEDGER, True)))
+                observed = first.one("SELECT value FROM items WHERE id=1")
+                acquired.set()
+                assert release.wait(3)
+                return observed
+
+        def available(domain, *, shared=False):
+            function = "pg_try_advisory_xact_lock_shared" if shared else "pg_try_advisory_xact_lock"
+            return second.one(sql.SQL("SELECT {}(hashtext(current_schema()),%s) AS held").format(
+                sql.Identifier(function)), (domain,))["held"]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            try:
+                with second.transaction():
+                    second.ledger_lock(BUDGET_LEDGER)
+                    future = pool.submit(acquire)
+                    assert started.wait(3)
+                    deadline = monotonic() + 3
+                    while monotonic() < deadline:
+                        blocked = second.one("SELECT %s=ANY(pg_blocking_pids(%s)) AS blocked",
+                                             (second.backend_pid, first.backend_pid))["blocked"]
+                        if blocked:
+                            break
+                        sleep(0.01)
+                    else:
+                        pytest.fail("batch never waited for the first ledger")
+                    # Erasure must remain free while the first, budget lock is blocked.
+                    assert available(ERASURE_LEDGER)
+                    second.execute("UPDATE items SET value=9 WHERE id=1")
+                assert acquired.wait(3)
+                with second.transaction():
+                    assert available(BUDGET_LEDGER, shared=True) is budget_shared
+                    assert not available(ERASURE_LEDGER)
+                release.set()
+                assert future.result(timeout=3) == {"value": 9}
+            finally:
+                release.set()
+        # Rollback releases both native locks and their managed-scope bookkeeping.
+        with second.transaction():
+            assert available(BUDGET_LEDGER)
+            assert available(ERASURE_LEDGER)
+
+
 def test_rolled_back_transaction_does_not_publish_wakeup(database):
     with database.listener() as listener, database.session() as session:
         with pytest.raises(ValueError), session.transaction():
@@ -134,3 +212,39 @@ def test_skip_locked_claims_distinct_rows_and_rollback_releases_claim(database):
 def test_database_requires_secret_connection_information():
     with pytest.raises(TypeError, match="SecretStr"):
         Database("synthetic-plain-connection-info")
+
+
+def test_only_materialized_results_outlive_their_session(database):
+    with database.session() as session:
+        one = session.one("SELECT id,value FROM items WHERE id=1")
+        rows = session.rows("SELECT id,value FROM items ORDER BY id")
+        changed = session.execute("UPDATE items SET value=4 WHERE id=1")
+    with database.session() as successor, successor.transaction():
+        successor.execute("UPDATE items SET value=5 WHERE id=1")
+        assert one == {"id": 1, "value": 0}
+        assert rows == [{"id": 1, "value": 0}, {"id": 2, "value": 0}]
+        assert type(changed) is int and changed == 1
+        with pytest.raises(RuntimeError, match="POSTGRES_SESSION_CLOSED"):
+            session.execute("UPDATE items SET value=6 WHERE id=1")
+
+
+def test_bounded_read_retains_timeout_and_snapshot_after_optional_error(database):
+    with database.session() as reader, database.session() as writer:
+        reader.execute("SET statement_timeout='3s'")
+        with reader.transaction(readonly=True):
+            assert reader.one("SELECT value FROM items WHERE id=1") == {"value": 0}
+            writer.execute("UPDATE items SET value=7 WHERE id=1")
+            for statement, problem in (
+                ("SELECT pg_sleep(1)", psycopg.errors.QueryCanceled),
+                ("SELECT * FROM absent_bounded_table", psycopg.errors.UndefinedTable),
+                ("SELECT nextval('absent_sequence')", psycopg.errors.UndefinedTable),
+            ):
+                with pytest.raises(problem):
+                    reader.bounded_read(statement, (), limit=1, timeout_ms=5)
+                assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}
+                assert reader.one("SELECT value FROM items WHERE id=1") == {"value": 0}
+            assert reader.bounded_read("SELECT id,value FROM items ORDER BY id", (),
+                                       limit=1, timeout_ms=50) == [{"id": 1, "value": 0}]
+            assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}
+        assert reader.one("SELECT value FROM items WHERE id=1") == {"value": 7}
+        assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}

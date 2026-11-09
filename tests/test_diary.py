@@ -19,15 +19,18 @@ from companion.config import Settings
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.diary import DIARY_RULES, DiaryDraft, day_bounds
+from companion.legacy_import import import_sqlite_backup, migrate_sqlite
 from companion.model import ModelClient, ModelResponse
-from companion.privacy import ErasureLedger
-from companion.store import Store, encode, migrate
+from companion.postgres import migrate
+from companion.store import encode, uid
 from companion.transport import enqueue
 from companion.worker_lock import single_worker
 from tests.conftest import FakeModel, ingest, run
+from tests.postgres_fixture import isolated_database
 from tests.support.confirmed_memory import remember
 from tests.support.diary import DAY, DiaryModel, generate, seed_day
 from tests.support.historical_schema import historical_database
+from tests.support.release_migration import insert, one, open_historical, rows
 
 
 def test_d01_disabled_means_no_jobs_or_model_calls(core):
@@ -83,7 +86,7 @@ def test_d05_only_sent_replies_in_same_day_are_sources(core):
             key=f"reply-{i}",
         )
         core.store.execute(
-            "UPDATE outbox SET state=?,sent_at=? WHERE message_id=?",
+            'UPDATE outbox SET state=%s,sent_at=%s WHERE message_id=%s',
             (state, "2026-10-18T04:01:00.000000+00:00", mid),
         )
     sources = core.diary.repo.sources(DAY)
@@ -103,6 +106,8 @@ def test_d05_only_sent_replies_in_same_day_are_sources(core):
         ("date", "DIARY_INVALID_DRAFT"),
     ],
 )
+
+
 def test_d06_d07_invalid_generated_content_is_not_saved(core, defect, code):
     model = seed_day(core)
 
@@ -192,12 +197,12 @@ def test_d10_only_unreserved_expired_lease_is_reclaimed_and_old_result_cannot_co
     old = core.diary.repo.claim("crashed")
     if reserved:
         request = budget.reserve(core.store, core.settings, None, "diary", [], core.clock())
-        core.store.execute("UPDATE diary_runs SET model_request_id=?", (request,))
+        core.store.execute("UPDATE diary_runs SET model_request_id=%s", (request,))
     core.clock.advance(core.settings.lease_seconds + 1)
     assert run(core.diary.generate_once("replacement")) is not reserved
     if reserved:
         assert core.store.one(
-            "SELECT state FROM model_usage WHERE request_id=?", (request,),
+            "SELECT state FROM model_usage WHERE request_id=%s", (request,),
         )["state"] == "UNKNOWN"
         assert core.store.one("SELECT state FROM diary_runs")["state"] == "FAILED"
     with pytest.raises(CoreError, match="DIARY_STALE_LEASE"):
@@ -250,16 +255,16 @@ def test_d12_diary_wait_does_not_lock_database_or_block_new_qq_chat(core):
             )
             assert not task.done()
         finally:
-            other.store.close()
+            other.close()
             release.set()
             await task
 
     run(exercise())
     assert core.diary.get_day(DAY, "10001")
-    with single_worker(core.settings.database):
-        with single_worker(core.settings.database, "diary-worker"):
+    with single_worker(core.settings.state_directory):
+        with single_worker(core.settings.state_directory, "diary-worker"):
             with pytest.raises(CoreError, match="WORKER_ALREADY_RUNNING"):
-                with single_worker(core.settings.database, "diary-worker"):
+                with single_worker(core.settings.state_directory, "diary-worker"):
                     pass
 
 
@@ -275,7 +280,7 @@ def test_d13_d14_generation_is_cancelled_by_pause_or_privacy_change(core, pause)
         elif pause == "config":
             core.settings.diary_enabled = False
         else:
-            with core.store.transaction():
+            with core.store.transaction(control_write=True):
                 core.ledger.expire_events(core.store, ["evt_test_2"], core.clock())
 
     model.callback = interrupt
@@ -289,7 +294,7 @@ def test_d15_d23_unquoted_input_erasure_removes_entire_diary_and_revisions(core)
     assert generate(core)["state"] == "COMMITTED"
     core.diary.correct(DAY, "主人确认的修订内容", "10001")
     assert core.store.rows("SELECT * FROM diary_revisions")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_3"], core.clock())
     assert not core.diary.get_day(DAY, "10001")
     assert not core.store.rows("SELECT * FROM diary_revisions")
@@ -301,7 +306,7 @@ def test_d15_memory_erasure_and_retention_reach_diary(core):
     seed_day(core)
     memory_id = remember(core, 50, "我的最爱饮料是茉莉绿茶", confirmed=True)
     core.store.execute(
-        "UPDATE events SET occurred_at=? WHERE event_id='evt_test_50'",
+        "UPDATE events SET occurred_at=%s WHERE event_id='evt_test_50'",
         ("2026-10-18T05:00:00.000000+00:00",),
     )
     assert generate(core)["state"] == "COMMITTED"
@@ -327,16 +332,16 @@ def test_d16_d17_d24_delete_and_restore_cannot_resurrect_diary(core, tmp_path):
     assert len(core.ledger.read()) == 2
     assert not core.diary.get_day(DAY, "10001")
     for source, name in ((archive, "with-diary"), (early, "before-diary")):
-        destination = tmp_path / f"{name}.db"
-        restore(source, destination, key, core.settings.erasure_ledger)
-        cfg = core.settings.model_copy(update={"database": str(destination)})
-        reopened = Core(cfg, core.model, core.clock)
-        try:
-            assert not reopened.diary.get_day(DAY, "10001")
-            assert reopened.diary.schedule_day(DAY) is None
-            assert not reopened.store.rows("SELECT * FROM diary_revisions")
-        finally:
-            reopened.store.close()
+        state = tmp_path / name
+        with isolated_database() as destination:
+            restore(source, destination, key, core.settings.erasure_ledger, state_directory=state)
+            cfg = core.settings.model_copy(update={
+                "database": destination, "state_directory": str(state),
+            })
+            with Core(cfg, core.model, core.clock) as reopened:
+                assert not reopened.diary.get_day(DAY, "10001")
+                assert reopened.diary.schedule_day(DAY) is None
+                assert not reopened.store.rows("SELECT * FROM diary_revisions")
 
 
 def test_d16_fsync_record_survives_db_failure_before_apply(core, monkeypatch):
@@ -353,17 +358,17 @@ def test_d16_fsync_record_survives_db_failure_before_apply(core, monkeypatch):
     try:
         assert not reopened.diary.get_day(DAY, "10001")
     finally:
-        reopened.store.close()
+        reopened.close()
 
 
-def test_g0_delete_one_day_preserves_independent_diary_and_reply(core, tmp_path):
+def test_g0_delete_one_day_preserves_independent_diary_and_reply(empty_database, core, tmp_path):
     seed_day(core)
     first = core.store.one("SELECT conversation_id FROM events WHERE event_id='evt_test_1'")
     first_reply = enqueue(
         core.store, "evt_test_1", first["conversation_id"], "第一天回复", core.clock()
     )
     core.store.execute(
-        "UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+        "UPDATE outbox SET state='SENT',sent_at=%s WHERE message_id=%s",
         (DAY.isoformat() + "T05:00:00.000000+00:00", first_reply),
     )
     generate(core)
@@ -375,7 +380,7 @@ def test_g0_delete_one_day_preserves_independent_diary_and_reply(core, tmp_path)
         core.store, "evt_test_11", first["conversation_id"], "独立的一天", core.clock()
     )
     core.store.execute(
-        "UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+        "UPDATE outbox SET state='SENT',sent_at=%s WHERE message_id=%s",
         (other_day.isoformat() + "T05:00:00.000000+00:00", other_reply),
     )
     core.diary.schedule_day(other_day)
@@ -391,10 +396,13 @@ def test_g0_delete_one_day_preserves_independent_diary_and_reply(core, tmp_path)
     archive = tmp_path / "two-days.enc"
     backup(core.settings.database, archive, key)
     core.diary.forget(DAY, "10001")
-    destination = tmp_path / "restored-days.db"
-    restore(archive, destination, key, core.settings.erasure_ledger)
+    restored_state = tmp_path / "restored-state"
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(destination)}), core.model, core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), core.model, core.clock
     )
     try:
         for instance in (core, restored):
@@ -409,7 +417,7 @@ def test_g0_delete_one_day_preserves_independent_diary_and_reply(core, tmp_path)
             assert (
                 json.loads(
                     instance.store.one(
-                        "SELECT content_json FROM outbox WHERE message_id=?", (other_reply,)
+                        'SELECT content_json FROM outbox WHERE message_id=%s', (other_reply,)
                     )["content_json"]
                 )["text"]
                 == "独立的一天"
@@ -421,7 +429,7 @@ def test_g0_delete_one_day_preserves_independent_diary_and_reply(core, tmp_path)
                 == "{}"
             )
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_d18_http_diary_requires_distinct_admin_authority(core):
@@ -452,27 +460,21 @@ def test_d18_http_diary_requires_distinct_admin_authority(core):
         Settings.model_validate({**core.settings.model_dump(), "diary_auto_share": True})
 
 
-@pytest.mark.parametrize("failure", ["unknown", "diary", "month"])
-def test_d19_unknown_prices_and_budget_rejection_do_not_call_model(core, failure):
+@pytest.mark.parametrize("failure", ["normal", "unknown"])
+def test_d19_currency_and_price_hints_do_not_refuse_a_valid_diary(core, failure):
     model = seed_day(core)
     if failure == "unknown":
         core.settings.input_rate = None
-    elif failure == "diary":
-        core.settings.diary_daily_micro_usd = 0
-    else:
-        core.settings.monthly_limit_micro_usd = 0
-    assert generate(core)["state"] == "FAILED"
-    assert model.calls == []
-    assert core.store.rows("SELECT * FROM model_usage") == []
+    assert generate(core)["state"] == "COMMITTED"
+    assert len(model.calls) == 1
+    assert len(core.store.rows("SELECT * FROM model_usage")) == 1
 
 
 def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
     seed_day(core)
-    core.settings.autonomous_daily_micro_usd = 0
-    core.settings.memory_daily_micro_usd = 0
     core.settings.diary_max_output_tokens = 350
     request_id = budget.reserve(core.store, core.settings, None, "diary", [], core.clock())
-    row = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
+    row = core.store.one('SELECT * FROM model_usage WHERE request_id=%s', (request_id,))
     assert row["output_tokens"] == 350
     # Finish the no-I/O Demo probe before entering a separately approved mock-live scope.
     budget.settle(core.store, core.settings, request_id, ModelResponse("demo", 0, 0))
@@ -507,73 +509,84 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
     )
 
 
-def test_d21_migration_preserves_m1_data_and_refuses_destructive_downgrade(core, tmp_path):
+def test_d21_migration_preserves_m1_data_and_refuses_destructive_downgrade(
+    core, tmp_path, empty_database,
+):
     path = tmp_path / "m1.db"
-    migrate(str(path), "0002_m1")
-    cfg = core.settings.model_copy(
-        update={"database": str(path), "erasure_ledger": str(tmp_path / "m1.jsonl")}
-    )
-    # Historical rows use the historical schema. Current Core opens only after
-    # upgrade; its job/source writes intentionally require current columns.
-    with closing(Store(str(path))) as legacy:
-        ErasureLedger(cfg.erasure_ledger).initialize(legacy)
+    migrate_sqlite(path, "0002_m1")
+    ledger = tmp_path / "m1.jsonl"
+    header = {"ledger_id": uid("ledger")}
+    ledger.write_text(encode(header) + "\n", encoding="utf-8")
+    cfg = core.settings.model_copy(update={
+        "database": empty_database, "state_directory": str(tmp_path / "imported-state"),
+        "erasure_ledger": str(ledger),
+    })
+    with closing(open_historical(path)) as legacy:
+        insert(legacy, "runtime_meta", key="ledger_id", value=header["ledger_id"])
         now = core.clock()
-        with legacy.transaction():
-            legacy.insert("principals", actor_id="owner", kind="owner", created_at=now)
-            legacy.insert(
-                "conversations", conversation_id="conv_legacy", platform="qq.onebot",
+        legacy.execute("BEGIN")
+        with legacy:
+            insert(legacy, "principals", actor_id="owner", kind="owner", created_at=now)
+            insert(
+                legacy, "conversations", conversation_id="conv_legacy", platform="qq.onebot",
                 platform_session_key="qq:FriendMessage:10001", scope="private",
                 owner_actor_id="owner", last_event_at=now, created_at=now,
             )
-            legacy.insert(
-                "events", event_id="evt_legacy", schema_version=1, source="qq.onebot",
+            insert(
+                legacy, "events", event_id="evt_legacy", schema_version=1, source="qq.onebot",
                 source_event_id="10002:qq:FriendMessage:10001:100",
                 conversation_id="conv_legacy", actor_id="owner", event_type="message.received",
                 occurred_at=now, ingested_at=now, privacy_scope="private",
                 body_json=encode({"text": "已有私聊数据", "media": []}), trace_id="trace_legacy",
                 idempotency_key="inbox_legacy", fingerprint="legacy-fingerprint",
             )
-            legacy.insert(
-                "jobs", job_id="job_legacy", event_id="evt_legacy", kind="chat",
+            insert(
+                legacy, "jobs", job_id="job_legacy", event_id="evt_legacy", kind="chat",
                 state="SUCCEEDED", idempotency_key="reply:evt_legacy", created_at=now,
                 updated_at=now,
             )
-        original = {table: legacy.one(f"SELECT * FROM {table}")
+        original = {table: one(legacy, f"SELECT * FROM {table}")
                     for table in ("conversations", "events", "jobs")}
-    migrate(str(path))
-    migrate(str(path))
+    migrate_sqlite(path)
+    migrate_sqlite(path)
+    migrate(empty_database)
+    import_sqlite_backup(path, empty_database)
     old = Core(cfg, FakeModel(), core.clock)
     try:
         for table, added in (
             ("conversations", {"reply_revision": 0}), ("events", {"reply_revision": 0}),
             ("jobs", {"context_tracked": 0, "authority_json": "{}"}),
         ):
-            assert old.store.one(f"SELECT * FROM {table}") == {**original[table], **added}
+            actual = old.store.one(f"SELECT * FROM {table}")
+            assert actual.pop("record_sequence") == 1
+            assert actual == {**original[table], **added}
         assert old.store.schema_capabilities()
         seed_day(old)
         assert generate(old)["state"] == "COMMITTED"
         migration = Config()
         migration.set_main_option("script_location", str(Path("migrations").resolve()))
-        migration.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
         cost_database = historical_database(
             old.store, tmp_path / "cost-guard.db", "0026_cloud_budget")
         migration.set_main_option("sqlalchemy.url", "sqlite:///" + cost_database.as_posix())
-        costs = old.store.rows("SELECT * FROM cloud_cost_snapshots")
+        with closing(open_historical(cost_database)) as historical:
+            costs = rows(historical, "SELECT * FROM cloud_cost_snapshots")
+        assert costs == [{k: v for k, v in row.items() if k != "record_sequence"}
+                         for row in old.store.rows("SELECT * FROM cloud_cost_snapshots")]
         with pytest.raises(RuntimeError, match="CLOUD_BUDGET_DOWNGRADE"):
             command.downgrade(migration, "0003_memory_index")
-        with closing(Store(cost_database)) as guarded:
-            assert guarded.rows("SELECT * FROM cloud_cost_snapshots") == costs
+        with closing(open_historical(cost_database)) as guarded:
+            assert rows(guarded, "SELECT * FROM cloud_cost_snapshots") == costs
         assert old.diary.get_day(DAY, "10001")
         # Exercise the original diary guard on its own historical schema as well.
         diary_database = historical_database(old.store, tmp_path / "diary-guard.db", "0004_diary")
         migration.set_main_option("sqlalchemy.url", "sqlite:///" + diary_database.as_posix())
         with pytest.raises(RuntimeError, match="DIARY_DOWNGRADE"):
             command.downgrade(migration, "0003_memory_index")
-        with closing(Store(diary_database)) as guarded:
-            assert guarded.rows("SELECT entry_id FROM diary_entries") == old.store.rows(
+        with closing(open_historical(diary_database)) as guarded:
+            assert rows(guarded, "SELECT entry_id FROM diary_entries") == old.store.rows(
                 "SELECT entry_id FROM diary_entries")
     finally:
-        old.store.close()
+        old.close()
 
 
 @pytest.mark.parametrize("day,hours", [(date(2026, 3, 8), 23), (date(2026, 11, 1), 25)])
@@ -639,7 +652,7 @@ def test_old_unknown_provenance_diary_is_conservatively_erased(core):
     seed_day(core)
     generate(core)
     core.store.execute("UPDATE diary_entries SET generator_version='legacy-without-closure'")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [], core.clock())
     assert not core.diary.get_day(DAY, "10001")
 
@@ -715,7 +728,7 @@ def test_diary_readback_is_excluded_from_later_model_and_diary_sources(core):
     generate(core)
     ingest(core, 100, "/读日记")
     assert run(core.run_once("chat"))
-    core.store.execute("UPDATE outbox SET state='SENT',sent_at=?", (core.clock(),))
+    core.store.execute("UPDATE outbox SET state='SENT',sent_at=%s", (core.clock(),))
     ingest(core, 101, "现在讨论新的事情")
     job = core.store.one(
         "SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
@@ -731,7 +744,7 @@ def test_cross_day_episode_sources_keep_original_dates_and_erasure_closure(core)
     core.settings.memory_enabled = True
     ingest(core, 100, "昨天讨论的是短篇科幻", at="2026-10-17T04:00:00+00:00")
     row = core.store.one("SELECT * FROM events WHERE event_id='evt_test_100'")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.memory.episodes([row], core.clock())
 
     def quote_previous(draft):
@@ -747,7 +760,7 @@ def test_cross_day_episode_sources_keep_original_dates_and_erasure_closure(core)
     assert generate(core)["state"] == "COMMITTED"
     assert "此前（2026-10-17）主人说" in core.diary.get_day(DAY, "10001")["body_md"]
     assert len(core.store.rows("SELECT * FROM diary_evidence")) == 4
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, ["evt_test_100"], core.clock())
     assert core.diary.get_day(DAY, "10001") is None
 
@@ -757,9 +770,11 @@ def test_previous_episode_does_not_fill_an_empty_current_day(core):
     core.settings.memory_enabled = True
     for i in range(100, 104):
         ingest(core, i, "之前已经讨论过的事情", at="2026-10-17T04:00:00+00:00")
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.memory.episodes(
-            core.store.rows("SELECT * FROM events WHERE event_id LIKE 'evt_test_10%'"), core.clock()
+            core.store.rows(
+                "SELECT * FROM events WHERE event_id LIKE 'evt_test_10%%'"
+            ), core.clock()
         )
     assert generate(core)["state"] == "SKIPPED"
     assert model.calls == []

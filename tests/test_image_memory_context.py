@@ -98,7 +98,7 @@ async def image_memory_window(
                 event_id = core.store.one(
                     "SELECT owner_event_id FROM content_items",
                 )["owner_event_id"]
-                with core.store.transaction():
+                with core.store.transaction(control_write=True):
                     core.ledger.expire_events(core.store, [event_id], core.clock())
         else:
             content = reply or (
@@ -154,7 +154,7 @@ def test_originals_and_image_topic_retrieval_share_paid_job_and_verified_reply(
     async def scenario():
         async with native_image_memory(core, tmp_path, no_candidates=no_candidates) as value:
             assert not value.calls and len(value.downloads) == 2
-            reopened = Store(core.store.path)
+            reopened = Store(core.store.database, core.store.state_directory)
             try:
                 rows = reopened.rows("SELECT * FROM content_items WHERE kind='qq_image' "
                                      "ORDER BY slot")
@@ -164,7 +164,7 @@ def test_originals_and_image_topic_retrieval_share_paid_job_and_verified_reply(
                 reopened.close()
             assert await value.worker.run_once("native-image-memory")
             assert len(value.calls) == 2, core.store.one(
-                "SELECT last_error_code FROM jobs WHERE job_id=?", (value.job["job_id"],))
+                'SELECT last_error_code FROM jobs WHERE job_id=%s', (value.job["job_id"],))
             final = value.calls[-1]["messages"]
             images = [part for message in final if isinstance(message["content"], list)
                       for part in message["content"] if part["type"] == "image_url"]
@@ -180,9 +180,12 @@ def test_originals_and_image_topic_retrieval_share_paid_job_and_verified_reply(
             assert json.loads(requested["function"]["arguments"])["query"] == CUES
             assert "过期秘密偏好" not in encode(value.calls)
             assert (PREFERENCE in encode(final)) == (not no_candidates)
-            assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+            assert core.store.rows(
+                'SELECT scenario,state FROM model_usage ORDER BY '
+                'record_sequence'
+            ) == [
                 {"scenario": "chat", "state": "SETTLED"}] * 2
-            admissions = core.store.rows("SELECT * FROM model_admissions ORDER BY rowid")
+            admissions = core.store.rows('SELECT * FROM model_admissions ORDER BY record_sequence')
             assert {row["logical_request_id"] for row in admissions} == {value.job["job_id"]}
             assert [row["input_bound"] for row in admissions] == [
                 paid_budget.estimate_input_tokens(core.settings.paid_model, call["messages"],
@@ -210,7 +213,7 @@ def test_five_image_memory_inputs_obey_the_explicit_model_attempt_cap(core, tmp_
                 job = value.job if number == 1 else await value.admit_image(number)
                 assert await value.worker.run_once("bounded-native-image-memory")
                 assert len(value.calls) == min(number * 2, limit)
-                current = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                current = core.store.one('SELECT state,last_error_code FROM jobs WHERE job_id=%s',
                                          (job["job_id"],))
                 if number * 2 > limit:
                     assert current["state"] == "FAILED", current
@@ -227,7 +230,7 @@ def test_five_image_memory_inputs_obey_the_explicit_model_attempt_cap(core, tmp_
             if limit == 10:
                 event = await value.entry.admit(6, "预算已满后的新输入")
                 assert await value.worker.run_once("no-eleventh-model-call")
-                refused = core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+                refused = core.store.one('SELECT state,last_error_code FROM jobs WHERE event_id=%s',
                                          (event["event_id"],))
                 assert refused["state"] == "FAILED", refused
                 assert refused["last_error_code"] == "MODEL_DAILY_BUDGET_EXHAUSTED", refused
@@ -237,7 +240,7 @@ def test_five_image_memory_inputs_obey_the_explicit_model_attempt_cap(core, tmp_
 
 
 @pytest.mark.parametrize("mutation", [
-    "raw_hash", "expired", "erased_current", "unknown_tool_request",
+    "raw_hash", "expired", "erased_current",
 ])
 def test_joint_image_memory_flow_stops_before_final_io_on_lost_evidence(core, tmp_path, mutation):
     async def scenario():
@@ -249,7 +252,7 @@ def test_joint_image_memory_flow_stops_before_final_io_on_lost_evidence(core, tm
                 assert_failure_notice(core)
             else:
                 assert not core.store.one("SELECT 1 FROM outbox")
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+            assert core.store.one('SELECT state FROM jobs WHERE job_id=%s',
                 (value.job["job_id"],))["state"] == (
                     "CANCELLED" if mutation == "erased_current" else "FAILED")
             usage = core.store.rows("SELECT * FROM model_usage")
@@ -262,4 +265,21 @@ def test_joint_image_memory_flow_stops_before_final_io_on_lost_evidence(core, tm
             image_spool.cleanup(core.store, core.clock(), retain_completed=True)
             assert not list(image_spool.directory(core.store).glob("*.raw"))
             assert core.store.rows("SELECT * FROM model_usage") == usage
+    run(scenario())
+
+
+def test_image_tool_response_with_unknown_cost_retains_evidence_and_continues(core, tmp_path):
+    async def scenario():
+        async with native_image_memory(core, tmp_path, mutation="unknown_tool_request") as value:
+            assert await value.worker.run_once("native-image-cost-warning")
+            assert len(value.calls) == 2
+            assert core.store.one("SELECT state FROM jobs WHERE job_id=%s",
+                                  (value.job["job_id"],))["state"] == "SUCCEEDED"
+            rows = core.store.rows("SELECT * FROM model_usage ORDER BY record_sequence")
+            assert [row["state"] for row in rows] == ["UNKNOWN", "SETTLED"]
+            original = rows[0]
+            assert original["billed_micro_usd"] > 0
+            assert not await value.worker.run_once("no-image-replay")
+            assert core.store.one("SELECT * FROM model_usage WHERE request_id=%s",
+                                  (original["request_id"],)) == original
     run(scenario())

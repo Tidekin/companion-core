@@ -63,7 +63,7 @@ def test_deeper_read_after_a_full_page_of_shallow_rereads(core, tmp_path):
     core.clock.advance(1)
     deeper = observe(core, 2 + watch_ledger.SCAN_LIMIT, url=entry["item_ref"])
     evidence = {"reading": {"subtitle_status": "available", "spans": [{"text": "字幕"}]}}
-    core.store.execute("UPDATE observations SET evidence_json=? WHERE event_id=?",
+    core.store.execute('UPDATE observations SET evidence_json=%s WHERE event_id=%s',
                        (json.dumps(evidence), deeper))
     step(core)
     assert entries(core)[0]["source_event_id"] == first and len(provider.calls) == 1
@@ -99,25 +99,25 @@ def test_unknown_call_is_never_replayed(core, tmp_path):
         entry = watch_ledger.claim(core.store, core.clock())
     request = budget.reserve(core.store, core.settings, None, "watch_review",
                              [{"role": "user", "content": "x"}], core.clock(), clock=core.clock)
-    core.store.execute("UPDATE watch_ledger SET model_request_id=? WHERE entry_id=?",
+    core.store.execute('UPDATE watch_ledger SET model_request_id=%s WHERE entry_id=%s',
                        (request, entry["entry_id"]))
-    core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=?", (request,))
+    core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=%s", (request,))
     core.clock.advance(watch_ledger.LEASE_SECONDS + 1)
     step(core)
     step(core)
     assert entries(core)[0]["state"] == "UNKNOWN" and model.calls == []
 
 
-def test_daily_cap_waits_for_the_next_day_without_a_request(core, tmp_path):
+def test_daily_currency_amount_does_not_refuse_a_judgement(core, tmp_path):
     core.settings.watch_ledger = core.settings.watch_ledger.model_copy(
-        update={"daily_micro_usd": 1})
-    model = ready(core, tmp_path)
+        update={})
+    model = ready(core, tmp_path, json.dumps(JUDGEMENT))
     observe(core, 8)
     step(core)
     row = entries(core)[0]
     assert (row["state"], row["error_code"], row["model_request_id"]) == (
-        "RETRY_WAIT", "DAILY_BUDGET_EXHAUSTED", None)
-    assert row["next_attempt_at"] > core.clock() and model.calls == []
+        "JUDGED", None, row["model_request_id"])
+    assert row["model_request_id"] and len(model.calls) == 1
 
 
 def test_disabled_ledger_does_nothing_and_keeps_the_paid_contract(core, tmp_path):
@@ -136,7 +136,7 @@ def test_erasing_the_source_removes_the_entry(core, tmp_path):
     ready(core, tmp_path, json.dumps(JUDGEMENT, ensure_ascii=False))
     event_id = observe(core, 10)
     step(core)
-    with core.store.transaction():
+    with core.store.transaction(control_write=True):
         core.ledger.expire_events(core.store, [event_id], core.clock())
     assert entries(core) == []
     assert watch_ledger.recent(core.store) == []
@@ -145,8 +145,10 @@ def test_erasing_the_source_removes_the_entry(core, tmp_path):
 def chat_job(core, text="最近看了什么有意思的"):
     event = InboundEvent.model_validate(normalized(raw_event(77, text=text)))
     core.ingest(event, event.event_id)
-    return core.store.one("SELECT j.*,e.body_json,e.conversation_id FROM jobs j "
-                          "JOIN events e USING(event_id) WHERE j.event_id=?", (event.event_id,))
+    return core.store.one((
+        'SELECT j.*,e.body_json,e.conversation_id FROM jobs j JOIN events e '
+        'USING(event_id) WHERE j.event_id=%s'
+    ), (event.event_id,))
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -155,9 +157,12 @@ def test_chat_cites_recent_judgements_only_when_enabled(core, enabled, text):
     configure(core)
     event_id = observe(core, 11)
     core.store.execute(
-        "INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_ref,depth,state,rating,"
-        "take,topic_tags_json,created_at,updated_at) VALUES('watch_1',?,'bilibili','u','text',"
-        "'JUDGED',1,?,'[]',?,?)", (event_id, JUDGEMENT["take"], core.clock(), core.clock()))
+        (
+            'INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_'
+            'ref,depth,state,rating,take,topic_tags_json,created_at,updated_a'
+            "t) VALUES('watch_1',%s,'bilibili','u','text','JUDGED',1,%s,'[]',"
+            '%s,%s)'
+        ), (event_id, JUDGEMENT["take"], core.clock(), core.clock()))
     if enabled:
         enable(core)
     job = chat_job(core, text)
@@ -170,7 +175,7 @@ def test_chat_cites_recent_judgements_only_when_enabled(core, enabled, text):
                          if JUDGEMENT["take"] in item["content"])
         assert json.loads(reference.split("\n", 1)[1])[0]["origin"] == (
             "来源未记录，不要说是你自己挑的")
-        assert core.store.one("SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
+        assert core.store.one('SELECT 1 FROM job_sources WHERE job_id=%s AND event_id=%s',
                               (job["job_id"], event_id))
     assert core.model.calls == []
 
@@ -183,9 +188,11 @@ def test_a_later_video_analysis_is_judged_again_but_a_shallower_read_is_not(core
     first = observe(core, 12, url=url)
     step(core)
     analysis = observe(core, 13, url=url, text="视频分析：猫自己跳进纸箱后睡着")
-    core.store.execute("UPDATE observations SET evidence_json=json_set(evidence_json,"
-                       "'$.bili_video',json('{\"request_id\":\"x\"}')) WHERE event_id=?",
-                       (analysis,))
+    core.store.execute(
+        "UPDATE observations SET evidence_json=jsonb_set(evidence_json::jsonb,"
+        "'{bili_video}',%s::jsonb)::text WHERE event_id=%s",
+        (json.dumps({"request_id": "x"}), analysis),
+    )
     observe(core, 14, url=url, text="又一次只读到正文")
     step(core)
     [row] = entries(core)
@@ -201,17 +208,23 @@ def test_recent_judgements_say_who_chose_the_item(core, kind):
     configure(core)
     event_id = observe(core, 12)
     core.store.execute(
-        "INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_ref,depth,state,rating,"
-        "take,topic_tags_json,created_at,updated_at) VALUES('watch_2',?,'bilibili','u','text',"
-        "'JUDGED',1,'t','[]',?,?)", (event_id, core.clock(), core.clock()))
+        (
+            'INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_'
+            'ref,depth,state,rating,take,topic_tags_json,created_at,updated_a'
+            "t) VALUES('watch_2',%s,'bilibili','u','text','JUDGED',1,'t','[]'"
+            ',%s,%s)'
+        ), (event_id, core.clock(), core.clock()))
     if kind:
-        columns = {row["name"]: row for row in core.store.rows("PRAGMA table_info(goals)")}
+        columns = {row["name"] for row in core.store.rows(
+            "SELECT column_name AS name FROM information_schema.columns "
+            "WHERE table_schema=current_schema() AND table_name='goals'"
+        )}
         values = {"goal_id": "goal_watch", "kind": kind, "topic": "t", "scope_json": "{}",
                   "proposal_key": "k", "state": "DONE", "priority": 1, "version": 1,
                   "result_event_id": event_id, "next_due_at": core.clock(),
                   "created_at": core.clock(), "updated_at": core.clock(), "redacted": 0}
         values = {key: value for key, value in values.items() if key in columns}
         core.store.execute(f"INSERT INTO goals({','.join(values)}) VALUES "
-                           f"({','.join('?' for _ in values)})", tuple(values.values()))
+                           f"({','.join('%s' for _ in values)})", tuple(values.values()))
     assert [item["origin"] for item in watch_ledger.recent(core.store)] == [
         watch_ledger.ORIGINS[kind]]

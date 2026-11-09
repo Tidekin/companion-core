@@ -57,7 +57,7 @@ async def source_and_renewal(core, tmp_path, case, http):
         scope="owner_private_life_shadow_v1",
         authorization_sha256=policy.authorization_sha256,
         conversation_id=core.store.one(
-            "SELECT conversation_id FROM events WHERE event_id=?", (source_id,)
+            'SELECT conversation_id FROM events WHERE event_id=%s', (source_id,)
         )["conversation_id"],
         source_event_ids=[source_id],
         purposes=["PRIVATE_MESSAGE_DRAFT"],

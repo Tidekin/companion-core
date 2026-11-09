@@ -38,7 +38,7 @@ def test_owner_voice_api_and_independent_worker(core, tmp_path, node, operation)
     )
     capture, key, _ = native_voice(core, tmp_path, record=operation == "asr", config=voice)
     assert core.settings.live_text_window is None
-    source = core.store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
+    source = core.store.one('SELECT * FROM events WHERE event_id=%s', (capture.event_id,))
     jobs = VoiceJobs(core.store, core.settings, core.clock)
     model_calls = []
 
@@ -78,7 +78,7 @@ def test_owner_voice_api_and_independent_worker(core, tmp_path, node, operation)
                     with core.store.transaction():
                         created = jobs.create_tts(outbox["message_id"],
                             json.loads(outbox["content_json"])["text"])
-                    job = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?",
+                    job = core.store.one('SELECT * FROM voice_jobs WHERE job_id=%s',
                                          (created["job_id"],))
                 assert json.loads(job["authority_json"]) == capture.authority
                 assert job["window_sha256"] is None
@@ -97,7 +97,7 @@ def test_owner_voice_api_and_independent_worker(core, tmp_path, node, operation)
                     assert jobs.untrusted_transcription(job["job_id"])["partial"] is True
                     assert usages == []
                 assert core.store.rows("SELECT request_id,state FROM model_usage") == usages
-                assert core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                assert core.store.one('SELECT body_json FROM events WHERE event_id=%s',
                     (capture.event_id,))["body_json"] == source["body_json"]
                 assert len(child_receipts(counter)) == 1
                 assert len(model_calls) == int(operation == "tts")

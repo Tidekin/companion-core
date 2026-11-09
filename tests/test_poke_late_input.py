@@ -32,7 +32,7 @@ def test_late_signed_input_preempts_poke_without_provider_io_or_retry(core, tmp_
 
     run(scenario())
     assert len(inputs) == 1 and calls == []
-    assert not core.store.one("SELECT 1 FROM events WHERE event_id=?",
+    assert not core.store.one('SELECT 1 FROM events WHERE event_id=%s',
                                (inputs[0]["event_id"],))
     assert core.store.one("SELECT state,last_error_code FROM jobs WHERE kind='poke'") == {
         "state": "FAILED", "last_error_code": "BACKGROUND_YIELD_TO_CHAT"}

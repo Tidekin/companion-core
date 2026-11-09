@@ -18,7 +18,7 @@ async def native_case(core, tmp_path, monkeypatch, *, text="太棒了，成功�
     core.settings = core.settings.model_copy(update={
         "meme_catalog_owner": "core", "meme_discovery_enabled": discovery,
         "meme_semantics_enabled": True, "meme_trusted_sources": [meme_policy.TrustedSource(**RULE)],
-        "meme_caption_daily_micro_usd": 50000, "expression_selection_probability": 1.0,
+         "expression_selection_probability": 1.0,
         **changes,
     })
     paid = {"max_output_tokens": 4096, "meme_input": ImageInputPolicy(
@@ -30,7 +30,7 @@ async def native_case(core, tmp_path, monkeypatch, *, text="太棒了，成功�
         assert response.status_code == 202, response.text
         job = core.claim_job("native-offer", job_id=response.json()["job_id"])
         assert job is not None
-        job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+        job = core.store.one('SELECT * FROM jobs WHERE job_id=%s', (job["job_id"],))
         assert job["state"] == "RUNNING"
         service = MemeCaptionService(core.store, core.settings, core.model, core.clock)
         upstream = Upstream(count=1)
@@ -43,5 +43,5 @@ async def native_case(core, tmp_path, monkeypatch, *, text="太棒了，成功�
 
 
 def release_foreground(case):
-    case.core.store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL WHERE job_id=?",
+    case.core.store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL WHERE job_id=%s",
                             (case.job["job_id"],))

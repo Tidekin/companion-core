@@ -28,6 +28,7 @@ from companion.media_config import MediaConfig, MediaEndpoint
 from companion.media_provider import HTTPMediaProvider, MediaResult
 from companion.store import Store
 from tests.conftest import ingest, run
+from tests.postgres_fixture import logical_state
 from tests.support.media import AUDIO, IMAGE, XML, FakeMedia, chunk, process, service, start
 
 
@@ -68,20 +69,22 @@ def test_session_token_scope_expiry_and_stop(core):
         ("android", "android", "text"),
     ],
 )
+
+
 def test_media_creates_actual_observation_without_raw_retention_or_delivery(
     core, operation, source, kind
 ):
     media = service(core)
     session = start(media, [source])
     result = process(media, session, chunk(operation))
-    row = core.store.one("SELECT * FROM observations WHERE event_id=?", (result["event_id"],))
+    row = core.store.one('SELECT * FROM observations WHERE event_id=%s', (result["event_id"],))
     assert row["source_kind"] == kind and row["result_status"] == "FETCHED"
     assert row["device_id"] == ("adb:device-1" if source == "android" else "browser-owner")
     evidence = json.loads(row["evidence_json"])
     raw = {"audio": AUDIO, "camera": IMAGE, "android": XML}[operation]
     assert evidence["media_sha256"] == hashlib.sha256(raw).hexdigest()
     assert evidence["processor_id"]
-    dump = "\n".join(core.store.db.iterdump())
+    dump = json.dumps(logical_state(core.store), ensure_ascii=False)
     assert base64.b64encode(raw).decode() not in dump
     assert "hidden-password" not in dump
     assert core.store.rows("SELECT * FROM jobs") == core.store.rows("SELECT * FROM outbox") == []
@@ -97,7 +100,7 @@ def test_tts_uses_budget_returns_audio_and_does_not_cache_or_resend(core):
     with pytest.raises(CoreError, match="ALREADY_SUCCEEDED"):
         process(media, session, chunk("speech"))
     assert len(media.provider.calls) == 1
-    assert "valid-audio-fixture" not in "\n".join(core.store.db.iterdump())
+    assert "valid-audio-fixture" not in json.dumps(logical_state(core.store), ensure_ascii=False)
     usage = core.store.one("SELECT * FROM model_usage")
     assert usage["billed_micro_usd"] == 100 and usage["state"] == "SETTLED"
     assert usage["is_estimate"] == 1
@@ -127,13 +130,15 @@ def test_provider_failure_keeps_reservation_and_blocks_duplicate_retry(core):
         ("expiry", "SESSION_CLOSED"),
     ],
 )
+
+
 def test_consent_privacy_and_feature_rechecked_after_provider(core, change, error):
     media = service(core)
     session = start(media, duration_seconds=5)
 
     async def callback():
         if change == "revoke":
-            core.store.execute("UPDATE consents SET revoked_at=?", (core.clock(),))
+            core.store.execute('UPDATE consents SET revoked_at=%s', (core.clock(),))
         elif change == "privacy":
             core.observations.consents.revoke(session["consent_id"])
         elif change == "disabled":
@@ -174,7 +179,7 @@ def test_owner_stop_cancels_inflight_provider_and_retains_unknown_cost(core):
     assert media.inflight == {}
 
 
-@pytest.mark.parametrize("limit", ["session", "daily", "cost", "global"])
+@pytest.mark.parametrize("limit", ["session", "daily"])
 def test_reservation_limits_checked_before_any_provider_call(core, limit):
     media = service(core)
     session = start(media, max_bytes=1024)
@@ -182,12 +187,7 @@ def test_reservation_limits_checked_before_any_provider_call(core, limit):
         item = chunk(data=AUDIO + b"x" * 1100)
     else:
         item = chunk()
-        if limit == "daily":
-            media.options.max_daily_bytes = 0
-        elif limit == "cost":
-            media.options.daily_micro_usd = 0
-        else:
-            core.settings.monthly_limit_micro_usd = 0
+        media.options.max_daily_bytes = 0
     with pytest.raises(CoreError, match="BUDGET_EXHAUSTED"):
         process(media, session, item)
     assert not media.provider.calls
@@ -219,13 +219,11 @@ def test_concurrent_requests_cannot_overspend_remaining_session_budget(core):
 
 
 @pytest.mark.parametrize("tool_state", ["RUNNING", "UNKNOWN"])
-def test_tool_reservations_and_unknown_cost_block_media_monthly_overspend(core, tool_state):
+def test_media_preserves_tool_liability_without_global_currency_refusal(core, tool_state):
     from tests.support.executive import FakeExecutor, configured, proposal
 
     executor = FakeExecutor()
     executive = configured(core, executor)
-    core.settings.monthly_limit_micro_usd = 1000
-    executive.config.endpoints["windows"].max_cost_micro_usd = 1000
     executive.submit(proposal())
     if tool_state == "RUNNING":
         executive.begin(executive.claim())
@@ -234,14 +232,15 @@ def test_tool_reservations_and_unknown_cost_block_media_monthly_overspend(core, 
         assert run(executive.run_one())
     assert core.store.one("SELECT state,billed_micro_usd FROM tool_tasks") == {
         "state": tool_state,
-        "billed_micro_usd": 1000,
+        "billed_micro_usd": 0,
     }
     media = service(core)
-    with pytest.raises(CoreError, match="MEDIA_COST_BUDGET_EXHAUSTED"):
-        process(media, start(media), chunk())
-    assert not media.provider.calls
-    assert not core.store.rows("SELECT * FROM media_requests")
-    assert not core.store.rows("SELECT * FROM model_usage WHERE scenario='media'")
+    process(media, start(media), chunk())
+    assert len(media.provider.calls) == 1
+    assert core.store.rows("SELECT * FROM media_requests")
+    assert core.store.rows("SELECT * FROM model_usage WHERE scenario='media'")
+    assert core.store.one("SELECT state,billed_micro_usd FROM tool_tasks") == {
+        "state": tool_state, "billed_micro_usd": 0}
 
 
 def test_credentials_rejected_before_speech_and_in_provider_output(core):
@@ -286,10 +285,10 @@ def test_media_commit_is_atomic_with_actual_erasure_on_another_connection(core):
     futures, committed = [], []
 
     def erase_after_lock(event_id):
-        other = Store(core.settings.database)
+        other = Store(core.store.database, core.settings.state_directory)
         try:
             attempted.set()
-            with other.transaction():
+            with other.transaction(control_write=True):
                 committed.append(other.one("SELECT state,event_id FROM media_requests"))
                 core.ledger.expire_events(other, [event_id], core.clock())
                 erase_media_links(other, [event_id])
@@ -303,7 +302,7 @@ def test_media_commit_is_atomic_with_actual_erasure_on_another_connection(core):
             result = append(adapter_id, observation)
             futures.append(pool.submit(erase_after_lock, observation.event_id))
             assert attempted.wait(2)
-            # The actual second SQLite writer waits for evidence AND its request link to commit.
+            # The independent writer waits for evidence AND its request link to commit.
             assert not erased.wait(0.05)
             return result
 
@@ -312,7 +311,7 @@ def test_media_commit_is_atomic_with_actual_erasure_on_another_connection(core):
         futures[0].result(timeout=5)
     assert committed == [{"state": "SUCCEEDED", "event_id": result["event_id"]}]
     assert core.store.one(
-        "SELECT redacted FROM events WHERE event_id=?", (result["event_id"],)
+        'SELECT redacted FROM events WHERE event_id=%s', (result["event_id"],)
     ) == {"redacted": 1}
     request = core.store.one("SELECT * FROM media_requests")
     assert request["fingerprint"] == "" and request["event_id"] is None
@@ -324,9 +323,9 @@ def test_actual_erasure_before_final_media_transaction_suppresses_result(core):
     ingest(core, 90, "待遗忘的主人消息")
 
     async def erase_while_provider_runs():
-        other = Store(core.settings.database)
+        other = Store(core.store.database, core.settings.state_directory)
         try:
-            with other.transaction():
+            with other.transaction(control_write=True):
                 core.ledger.expire_events(other, ["evt_test_90"], core.clock())
         finally:
             other.close()
@@ -344,7 +343,7 @@ def test_request_settlement_failure_rolls_back_media_observation(core, monkeypat
     execute = core.store.execute
 
     def fail_settlement(sql, params=()):
-        if "UPDATE media_requests SET state='SUCCEEDED'" in sql:
+        if "UPDATE media_requests SET state = 'SUCCEEDED'" in sql:
             raise RuntimeError("simulated commit failure")
         return execute(sql, params)
 
@@ -358,18 +357,21 @@ def test_request_settlement_failure_rolls_back_media_observation(core, monkeypat
     }
 
 
-def test_restore_cannot_reauthorize_old_media_session(core, tmp_path):
+def test_restore_cannot_reauthorize_old_media_session(empty_database, core, tmp_path):
     media = service(core)
     session = start(media)
-    key, archive, restored_path = (
+    key, archive, restored_state = (
         Fernet.generate_key(),
         tmp_path / "media.enc",
-        tmp_path / "restore.db",
+        tmp_path / "restored-state",
     )
     backup(core.settings.database, archive, key)
-    restore(archive, restored_path, key, core.settings.erasure_ledger)
+    restore(archive, empty_database, key, core.settings.erasure_ledger,
+            state_directory=restored_state)
     restored = Core(
-        core.settings.model_copy(update={"database": str(restored_path)}), clock=core.clock
+        core.settings.model_copy(update={
+            "database": empty_database, "state_directory": str(restored_state),
+        }), clock=core.clock
     )
     try:
         recovered = MediaService(
@@ -384,7 +386,7 @@ def test_restore_cannot_reauthorize_old_media_session(core, tmp_path):
             recovered.status(session["session_id"], session["session_token"])
         assert not recovered.provider.calls
     finally:
-        restored.store.close()
+        restored.close()
 
 
 def test_provider_oversize_response_and_fake_media_signature_fail_closed(core):
@@ -641,9 +643,18 @@ def test_settings_load_nested_media_configuration(core, monkeypatch, tmp_path):
     from companion.config import Settings
 
     monkeypatch.setenv("COMPANION_CONFIG", str(tmp_path / "absent.toml"))
+    monkeypatch.setenv("COMPANION_DATABASE", core.settings.database.get_secret_value())
     monkeypatch.setenv("COMPANION_OWNER_QQ_ID", core.settings.owner_qq_id)
     monkeypatch.setenv("COMPANION_BOT_QQ_ID", core.settings.bot_qq_id)
     monkeypatch.setenv("COMPANION_BRIDGE_TOKEN", core.settings.bridge_token.get_secret_value())
     monkeypatch.setenv("COMPANION_MEDIA", '{"enabled":false,"max_session_seconds":60}')
     loaded = Settings.load()
     assert not loaded.media.enabled and loaded.media.max_session_seconds == 60
+
+
+def test_zero_media_currency_amount_keeps_native_charge(core):
+    media = service(core)
+    process(media, start(media), chunk())
+    assert len(media.provider.calls) == 1
+    usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE scenario='media'")
+    assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0

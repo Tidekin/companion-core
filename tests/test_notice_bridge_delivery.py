@@ -114,7 +114,7 @@ def test_required_notice_native_reader_worker_bridge_and_complete_ack(core, tmp_
                 for index, item in enumerate(leased):
                     assert item["authority"] == window.runtime.authority
                     material = json.loads(core.store.one(
-                        "SELECT value FROM runtime_meta WHERE key=?",
+                        'SELECT value FROM runtime_meta WHERE key=%s',
                         (owner_delivery.DELIVERY + item["message_id"],))["value"])
                     assert notices.required(core.store, material["job_id"]) is (index > 0)
                 assert window.runtime.row()["state"] == "ACTIVE"

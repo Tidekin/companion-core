@@ -165,7 +165,7 @@ def test_sdk_selects_video_tool_then_independent_worker_chats(
             async with worker_for(core, respond) as worker:
                 assert await worker.run_once("native-video-models")
             assert len(calls) == (3 if selected else 1)
-            usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usages = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert [row["scenario"] for row in usages] == (
                 ["chat", "content_video", "chat"] if selected else ["chat"])
             assert all(row["state"] == "SETTLED" for row in usages)
@@ -244,17 +244,20 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp
             expected_video = boundary in {
                 "unknown", "missing_usage", "video_price", "video_disabled"}
             assert len(video_calls) == int(expected_video)
-            usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usages = core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence')
             assert usages[0]["state"] == "SETTLED"
             if not invalid:
                 assert len(usages) == 2
                 if boundary in {"stop", "key", "payload"}:
                     assert usages[1]["state"] == "SETTLED"
                     assert usages[1]["billed_micro_usd"] == 0
-                    admission = core.store.one("SELECT * FROM model_admissions "
-                        "WHERE request_id=?", (usages[1]["request_id"],))
-                    proof = core.store.one("SELECT safe_detail_json FROM audit_log "
-                        "WHERE action='model.not_dispatched' AND entity_id=?",
+                    admission = core.store.one((
+                        'SELECT * FROM model_admissions WHERE request_id=%s'
+                    ), (usages[1]["request_id"],))
+                    proof = core.store.one((
+                        'SELECT safe_detail_json FROM audit_log WHERE '
+                        "action='model.not_dispatched' AND entity_id=%s"
+                    ),
                         (usages[1]["request_id"],))
                     detail = json.loads(proof["safe_detail_json"])
                     assert detail["evidence_sha256"] == paid_budget.sha({
@@ -265,8 +268,10 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp
                     assert usages[1]["state"] == "UNKNOWN"
                     assert usages[1]["billed_micro_usd"] > 0
                 if boundary in {"video_price", "video_disabled"}:
-                    detail = core.store.one("SELECT safe_detail_json FROM audit_log WHERE "
-                        "action='model.usage_diagnostic' AND entity_id=?",
+                    detail = core.store.one((
+                        'SELECT safe_detail_json FROM audit_log WHERE '
+                        "action='model.usage_diagnostic' AND entity_id=%s"
+                    ),
                         (usages[1]["request_id"],))
                     assert json.loads(detail["safe_detail_json"])["code"] == (
                         "PRICING_CONFIG_CHANGED")
@@ -276,6 +281,8 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp
                                            "WHERE metadata_json IS NOT NULL")
             if boundary == "payload" or invalid:
                 assert_failure_notice(core)
+            elif boundary == "missing_usage":
+                assert core.store.rows("SELECT * FROM outbox")
             else:
                 assert not core.store.rows("SELECT * FROM outbox")
             before = len(calls)
@@ -283,7 +290,7 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp
             async with worker_for(core, respond) as restarted:
                 await restarted.run_once("native-video-no-replay")
             assert len(calls) == before
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usages
+            assert core.store.rows('SELECT * FROM model_usage ORDER BY record_sequence') == usages
     run(scenario())
 
 

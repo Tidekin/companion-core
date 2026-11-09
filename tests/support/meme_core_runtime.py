@@ -104,7 +104,7 @@ def runtime_case(core, tmp_path, monkeypatch, request):
                 "mime": "image/png",
             }
             data = old.store.one(
-                "SELECT asset_data FROM meme_captions WHERE job_id=?", (caption["job_id"],)
+                'SELECT asset_data FROM meme_captions WHERE job_id=%s', (caption["job_id"],)
             )["asset_data"]
             with core.store.transaction():
                 imported = meme_asset_migration._apply(

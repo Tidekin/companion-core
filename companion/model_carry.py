@@ -59,7 +59,7 @@ def active(settings):
 def supported(store, settings):
     # Cumulative v2 is a separate explicitly reviewed capability. Never bypass v1.
     if settings.paid_model.cumulative is not None or store.one(
-        "SELECT 1 FROM runtime_meta WHERE key='model_budget_cumulative'"
+        "SELECT 1 FROM runtime_meta WHERE key = 'model_budget_cumulative'"
     ):
         raise CoreError("MODEL_CARRY_CUMULATIVE_UNSUPPORTED", 503)
 
@@ -76,7 +76,19 @@ def _tuple(admission):
 
 
 def _validate_close(store, row, latest):
-    admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (row["request_id"],))
+    admission = store.one('SELECT model_admissions.request_id AS request_id, '
+        'model_admissions.logical_request_id AS logical_request_id, model_admissions.attempt_id AS '
+        'attempt_id, model_admissions.attempt_number AS attempt_number, model_admissions.window_id '
+        'AS window_id, model_admissions.contract_sha256 AS contract_sha256, '
+        'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json AS '
+        'snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
+        'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
+        'output_bound, model_admissions.lease_token AS lease_token, model_admissions.lease_until '
+        'AS lease_until, model_admissions.io_started_at AS io_started_at, '
+        'model_admissions.journal_path AS journal_path, model_admissions.journal_id AS journal_id, '
+        'model_admissions.measurement_json AS measurement_json, model_admissions.authority_json AS '
+        'authority_json FROM model_admissions AS model_admissions WHERE '
+        'model_admissions.request_id = %s', (row["request_id"],))
     financial = latest.get(row["request_id"])
     if (
         not admission
@@ -118,8 +130,22 @@ def close_unstarted(store, settings, request_id, now, *, commit):
         head = owner_authority._latest(store)
         if not head or head["state"] != "STOPPED":
             raise CoreError("OWNER_AUTHORITY_STOP_REQUIRED", 409)
-        admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
-        usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
+        admission = store.one('SELECT model_admissions.request_id AS request_id, '
+            'model_admissions.logical_request_id AS logical_request_id, '
+            'model_admissions.attempt_id AS attempt_id, model_admissions.attempt_number AS '
+            'attempt_number, model_admissions.window_id AS window_id, '
+            'model_admissions.contract_sha256 AS contract_sha256, model_admissions.payload_sha256 '
+            'AS payload_sha256, model_admissions.snapshot_json AS snapshot_json, '
+            'model_admissions.reserved_micro_usd AS reserved_micro_usd, '
+            'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
+            'output_bound, model_admissions.lease_token AS lease_token, '
+            'model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS '
+            'io_started_at, model_admissions.journal_path AS journal_path, '
+            'model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS '
+            'measurement_json, model_admissions.authority_json AS authority_json FROM '
+            'model_admissions AS model_admissions WHERE model_admissions.request_id = '
+            '%s', (request_id,))
+        usage = store.one('SELECT state FROM model_usage WHERE request_id = %s', (request_id,))
         if not admission or not usage or usage["state"] != "UNKNOWN":
             raise CoreError("MODEL_UNSTARTED_CLOSE_NOT_ELIGIBLE", 409)
         custody = SimpleNamespace(journal_path=admission["journal_path"])
@@ -138,9 +164,8 @@ def close_unstarted(store, settings, request_id, now, *, commit):
         if json.loads(admission["snapshot_json"]).get("concurrency_basis") != wire.MODE:
             raise CoreError("MODEL_LOCAL_CLOSE_REQUIRES_V2", 409)
         if store.one(
-            "SELECT 1 FROM runtime_meta WHERE key IN "
-            "('model_budget_blocked','model_budget_restore_required',"
-            "'cloud_budget_restore_required')"
+            "SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked', "
+            "'model_budget_restore_required', 'cloud_budget_restore_required')"
         ):
             raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
         record = {
@@ -198,7 +223,20 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
         raise ValueError("model carry incomplete inventory")
     for item in items:
         admission = store.one(
-            "SELECT * FROM model_admissions WHERE request_id=?", (item["request_id"],)
+            'SELECT model_admissions.request_id AS request_id, model_admissions.logical_request_id '
+            'AS logical_request_id, model_admissions.attempt_id AS attempt_id, '
+            'model_admissions.attempt_number AS attempt_number, model_admissions.window_id AS '
+            'window_id, model_admissions.contract_sha256 AS contract_sha256, '
+            'model_admissions.payload_sha256 AS payload_sha256, model_admissions.snapshot_json AS '
+            'snapshot_json, model_admissions.reserved_micro_usd AS reserved_micro_usd, '
+            'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
+            'output_bound, model_admissions.lease_token AS lease_token, '
+            'model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS '
+            'io_started_at, model_admissions.journal_path AS journal_path, '
+            'model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS '
+            'measurement_json, model_admissions.authority_json AS authority_json FROM '
+            'model_admissions AS model_admissions WHERE model_admissions.request_id = '
+            '%s', (item["request_id"],)
         )
         financial = latest[item["request_id"]]
         if (
@@ -229,9 +267,9 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
     carries[row["carry_sha256"]] = {**row, "record_sha256": record_sha}
 
 
-def validate_projection(store, controls, *, replay=None):
-    rows = store.rows("SELECT key,value FROM runtime_meta WHERE key LIKE 'model_control:%'")
-    saved = {row["key"].removeprefix("model_control:"): row["value"] for row in rows}
+def validate_projection(controls, metadata, *, replay=None):
+    saved = {key.removeprefix("model_control:"): value for key, value in metadata.items()
+             if key.startswith("model_control:")}
     if (
         any(key != value for key, value in saved.items())
         or set(saved) - set(controls)
@@ -246,8 +284,22 @@ def close_owned(store, settings, request_id, dispatch, now):
         return
     supported(store, settings)
     with store.transaction():
-        admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
-        usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
+        admission = store.one('SELECT model_admissions.request_id AS request_id, '
+            'model_admissions.logical_request_id AS logical_request_id, '
+            'model_admissions.attempt_id AS attempt_id, model_admissions.attempt_number AS '
+            'attempt_number, model_admissions.window_id AS window_id, '
+            'model_admissions.contract_sha256 AS contract_sha256, model_admissions.payload_sha256 '
+            'AS payload_sha256, model_admissions.snapshot_json AS snapshot_json, '
+            'model_admissions.reserved_micro_usd AS reserved_micro_usd, '
+            'model_admissions.input_bound AS input_bound, model_admissions.output_bound AS '
+            'output_bound, model_admissions.lease_token AS lease_token, '
+            'model_admissions.lease_until AS lease_until, model_admissions.io_started_at AS '
+            'io_started_at, model_admissions.journal_path AS journal_path, '
+            'model_admissions.journal_id AS journal_id, model_admissions.measurement_json AS '
+            'measurement_json, model_admissions.authority_json AS authority_json FROM '
+            'model_admissions AS model_admissions WHERE model_admissions.request_id = '
+            '%s', (request_id,))
+        usage = store.one('SELECT state FROM model_usage WHERE request_id = %s', (request_id,))
         if not admission or not usage or usage["state"] != "UNKNOWN":
             return
         if dispatch.get("owner_tuple") != _tuple(admission) or admission[
@@ -259,9 +311,8 @@ def close_owned(store, settings, request_id, dispatch, now):
         if view["blocked_request_ids"] or request_id in view["model_closures"]:
             return
         if store.one(
-            "SELECT 1 FROM runtime_meta WHERE key IN "
-            "('model_budget_blocked','model_budget_restore_required',"
-            "'cloud_budget_restore_required')"
+            "SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked', "
+            "'model_budget_restore_required', 'cloud_budget_restore_required')"
         ):
             raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
         record = {
@@ -279,7 +330,7 @@ def _work(store, settings, authority, model_requests=None):
     from companion.owner_authority_protocol import OwnerCapture
 
     result = {}
-    for row in store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'owner_input:%'"):
+    for row in store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'owner_input:%%'"):
         value = json.loads(row["value"])
         capture = value.get("capture")
         if not capture or capture["authority"] != authority:
@@ -298,8 +349,8 @@ def _work(store, settings, authority, model_requests=None):
 
 def _quiescent(store, view):
     if view["blocked_request_ids"] or store.one(
-        "SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked',"
-        "'model_budget_restore_required','cloud_budget_restore_required')"
+        "SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked', "
+        "'model_budget_restore_required', 'cloud_budget_restore_required')"
     ):
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
     for table, states in (
@@ -309,7 +360,7 @@ def _quiescent(store, view):
     ):
         if store.one(f"SELECT 1 FROM {table} WHERE state NOT IN ({states}) LIMIT 1"):
             raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
-    if store.one("SELECT 1 FROM model_usage WHERE state='RESERVED'"):
+    if store.one("SELECT 1 FROM model_usage WHERE state = 'RESERVED'"):
         raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
 
 
@@ -318,18 +369,25 @@ def manifest(store, settings, authority, successor_window, witness, view):
 
     supported(store, settings)
     stop = owner_stop_receipt.read(store, settings, authority)
-    if store.one("SELECT 1 FROM model_budget_windows WHERE window_id=?", (successor_window,)):
+    if store.one('SELECT 1 FROM model_budget_windows WHERE window_id = %s', (successor_window,)):
         raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
     _quiescent(store, view)
     model_requests = {}
     work = _work(store, settings, authority, model_requests)
     unknowns, inputs = [], {}
     rows = store.rows(
-        "SELECT a.*,m.job_id,m.billed_micro_usd FROM model_admissions a "
-        "JOIN model_usage m USING(request_id) WHERE m.state='UNKNOWN' "
-        "ORDER BY a.request_id LIMIT 101"
+        'SELECT a.request_id AS request_id, a.logical_request_id AS logical_request_id, '
+        'a.attempt_id AS attempt_id, a.attempt_number AS attempt_number, a.window_id AS window_id, '
+        'a.contract_sha256 AS contract_sha256, a.payload_sha256 AS payload_sha256, a.snapshot_json '
+        'AS snapshot_json, a.reserved_micro_usd AS reserved_micro_usd, a.input_bound AS '
+        'input_bound, a.output_bound AS output_bound, a.lease_token AS lease_token, a.lease_until '
+        'AS lease_until, a.io_started_at AS io_started_at, a.journal_path AS journal_path, '
+        'a.journal_id AS journal_id, a.measurement_json AS measurement_json, a.authority_json AS '
+        'authority_json, m.job_id AS job_id, m.billed_micro_usd AS billed_micro_usd FROM '
+        'model_admissions AS a JOIN model_usage AS m ON a.request_id = m.request_id WHERE m.state '
+        "= 'UNKNOWN' ORDER BY a.request_id NULLS FIRST LIMIT 101"
     )
-    total_unknown = store.one("SELECT COUNT(*) n FROM model_usage WHERE state='UNKNOWN'")["n"]
+    total_unknown = store.one("SELECT COUNT(*) AS n FROM model_usage WHERE state = 'UNKNOWN'")["n"]
     if not rows or len(rows) > 100 or len(rows) != total_unknown:
         raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
     original = owner_authority.evidence(store, settings, authority)
@@ -350,7 +408,7 @@ def manifest(store, settings, authority, successor_window, witness, view):
             or not row["io_started_at"]
         ):
             raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
-        job = store.one("SELECT event_id FROM jobs WHERE job_id=?", (row["job_id"],))
+        job = store.one('SELECT event_id FROM jobs WHERE job_id = %s', (row["job_id"],))
         if not job or job["event_id"] not in work:
             raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
         event = job["event_id"]
@@ -372,7 +430,15 @@ def manifest(store, settings, authority, successor_window, witness, view):
             )
             inputs[source]["request_ids"].append(row["request_id"])
         tools = store.rows(
-            "SELECT * FROM agent_tool_calls WHERE job_id=? AND state='STARTED'", (row["job_id"],)
+            'SELECT agent_tool_calls.job_id AS job_id, agent_tool_calls.tool_call_id AS '
+            'tool_call_id, agent_tool_calls.tool_name AS tool_name, agent_tool_calls.args_sha256 '
+            'AS args_sha256, agent_tool_calls.model_request_id AS model_request_id, '
+            'agent_tool_calls.state AS state, agent_tool_calls.result_json AS result_json, '
+            'agent_tool_calls.metadata_json AS metadata_json, agent_tool_calls.request_id AS '
+            'request_id, agent_tool_calls.created_at AS created_at, agent_tool_calls.updated_at AS '
+            'updated_at, agent_tool_calls.voice_job_id AS voice_job_id FROM agent_tool_calls AS '
+            'agent_tool_calls WHERE agent_tool_calls.job_id = %s AND agent_tool_calls.state = '
+            "'STARTED'", (row["job_id"],)
         )
         for tool in tools:
             metadata = json.loads(tool["metadata_json"] or "{}")
@@ -397,7 +463,8 @@ def manifest(store, settings, authority, successor_window, witness, view):
     windows = sorted(
         {
             store.one(
-                "SELECT window_id FROM model_admissions WHERE request_id=?", (item["request_id"],)
+                'SELECT window_id FROM model_admissions WHERE request_id = '
+                '%s', (item["request_id"],)
             )["window_id"]
             for item in unknowns
         }
@@ -419,7 +486,7 @@ def manifest(store, settings, authority, successor_window, witness, view):
             {
                 k: v
                 for k, v in view["model_latest"].items()
-                if store.one("SELECT window_id FROM model_admissions WHERE request_id=?", (k,))[
+                if store.one('SELECT window_id FROM model_admissions WHERE request_id = %s', (k,))[
                     "window_id"
                 ]
                 in windows
@@ -454,8 +521,8 @@ def _same_approval(old, new, *, renewal_at=None):
                 new_rates <= now or (old_rates is not None and new_rates < old_rates)))):
             raise CoreError("OWNER_MODEL_RENEWAL_EXPIRY_REQUIRED", 409)
         allowed.update({"expires_at", "rates_valid_until"})
-        # The per-call output ceiling may only rise. Every money amount, call count and
-        # per-attempt/request cap stays identical, so no liability bound can grow.
+        # Ordinary renewal may only raise the output ceiling; other resource limits
+        # and token prices stay identical. Monetary retirement uses exact limits.
         if new["max_output_tokens"] < old["max_output_tokens"]:
             raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
         allowed.add("max_output_tokens")
@@ -495,6 +562,9 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
     renewal = isinstance(request, dict) and request.get("version") == 2
     if renewal:
         fields.add("previous_paid_contract")
+    retirement = renewal and "monetary_retirement" in request
+    if retirement:
+        fields.add("monetary_retirement")
     kind = RENEW if renewal else CARRY
     if (
         not isinstance(request, dict)
@@ -542,7 +612,7 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
                 raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
             candidate = previous[0]
             projected = store.one(
-                "SELECT value FROM runtime_meta WHERE key=?",
+                'SELECT value FROM runtime_meta WHERE key = %s',
                 ("model_control:" + candidate["sha256"],),
             )
             if not projected:
@@ -555,7 +625,7 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
                 with Path(journal_path).open("r+b") as stream:
                     os.fsync(stream.fileno())
                 store.execute(
-                    "INSERT INTO runtime_meta VALUES (?,?)",
+                    'INSERT INTO runtime_meta VALUES (%s, %s)',
                     ("model_control:" + candidate["sha256"], candidate["sha256"]),
                 )
         view = owner_authority.custody(store, settings, settlement=True)
@@ -583,7 +653,22 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
         old_policy = original.policy.model_dump(mode="json")
         new_policy = policy.model_dump(mode="json")
         allowed = {"authorization_sha256", "paid_contract_sha256", "unknown_carry_sha256"}
-        if renewal:
+        old = request["previous_paid_contract"] if renewal else json.loads(
+            store.one(
+                'SELECT snapshot_json FROM model_admissions WHERE request_id = %s',
+                (value["unknowns"][0]["request_id"],),
+            )["snapshot_json"]
+        )
+        new = paid_budget.snapshot(settings)
+        if renewal and paid_budget.sha(old) != original.policy.paid_contract_sha256:
+            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+        if retirement:
+            from companion.monetary_retirement import previous_approval
+
+            old = previous_approval(settings, old, new, original.policy, policy,
+                                    request["monetary_retirement"])
+            allowed.add("capability_policies")
+        elif renewal:
             from companion import model_renewal
 
             model_renewal.check_policy(store, settings, original.policy, policy, now,
@@ -598,16 +683,7 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
             != {k: v for k, v in new_policy.items() if k not in allowed}
         ):
             raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
-        old = request["previous_paid_contract"] if renewal else json.loads(
-            store.one(
-                "SELECT snapshot_json FROM model_admissions WHERE request_id=?",
-                (value["unknowns"][0]["request_id"],),
-            )["snapshot_json"]
-        )
-        new = paid_budget.snapshot(settings)
-        if renewal and paid_budget.sha(old) != original.policy.paid_contract_sha256:
-            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
-        _same_approval(old, new, renewal_at=now if renewal else None)
+        _same_approval(old, new, renewal_at=now if renewal and not retirement else None)
         if new["window_id"] != request["successor_window_id"]:
             raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
         # Recompute the original per-window credential tags using the current key.
@@ -764,8 +840,8 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
         )
         requests.update(ids)
     current_unknown = store.rows(
-        "SELECT a.request_id,a.authority_json FROM model_admissions a "
-        "JOIN model_usage m USING(request_id) WHERE m.state='UNKNOWN'"
+        'SELECT a.request_id, a.authority_json FROM model_admissions AS a JOIN model_usage AS m '
+        "USING (request_id) WHERE m.state = 'UNKNOWN'"
     )
     if not requests or requests != {
         row["request_id"]
@@ -837,8 +913,20 @@ def authority_chain(store, saved, revisions):
     origin = saved["manifest"]["authority"]
     first = origin["revision"] + 2
     current_rows = {row["revision"]: row for row in store.rows(
-        "SELECT * FROM owner_authority_revisions WHERE grant_id=? "
-        "AND revision BETWEEN ? AND ?",
+        'SELECT owner_authority_revisions.grant_id AS grant_id, owner_authority_revisions.revision '
+        'AS revision, owner_authority_revisions.operation_id AS operation_id, '
+        'owner_authority_revisions.request_sha256 AS request_sha256, '
+        'owner_authority_revisions.state AS state, owner_authority_revisions.policy_json AS '
+        'policy_json, owner_authority_revisions.policy_sha256 AS policy_sha256, '
+        'owner_authority_revisions.policy_redacted AS policy_redacted, '
+        'owner_authority_revisions.restore_generation AS restore_generation, '
+        'owner_authority_revisions.predecessor_sha256 AS predecessor_sha256, '
+        'owner_authority_revisions.record_sha256 AS record_sha256, '
+        'owner_authority_revisions.journal_id AS journal_id, '
+        'owner_authority_revisions.journal_path AS journal_path, '
+        'owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS '
+        'owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND '
+        'owner_authority_revisions.revision BETWEEN %s AND %s',
         (origin["grant_id"], first, first + len(revisions) - 1),
     )} if revisions else {}
     policies = {}
@@ -885,12 +973,38 @@ def _continuation(store, settings, authority, saved, view, *, approved_contract_
     original = owner_authority.evidence(store, settings, authority)
     head = owner_authority._latest(store)
     stopped = store.one(
-        "SELECT * FROM owner_authority_revisions WHERE grant_id=? AND revision=?",
+        'SELECT owner_authority_revisions.grant_id AS grant_id, owner_authority_revisions.revision '
+        'AS revision, owner_authority_revisions.operation_id AS operation_id, '
+        'owner_authority_revisions.request_sha256 AS request_sha256, '
+        'owner_authority_revisions.state AS state, owner_authority_revisions.policy_json AS '
+        'policy_json, owner_authority_revisions.policy_sha256 AS policy_sha256, '
+        'owner_authority_revisions.policy_redacted AS policy_redacted, '
+        'owner_authority_revisions.restore_generation AS restore_generation, '
+        'owner_authority_revisions.predecessor_sha256 AS predecessor_sha256, '
+        'owner_authority_revisions.record_sha256 AS record_sha256, '
+        'owner_authority_revisions.journal_id AS journal_id, '
+        'owner_authority_revisions.journal_path AS journal_path, '
+        'owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS '
+        'owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND '
+        'owner_authority_revisions.revision = %s',
         (authority["grant_id"], authority["revision"] + 1),
     )
     revisions = store.rows(
-        "SELECT * FROM owner_authority_revisions WHERE grant_id=? "
-        "AND revision BETWEEN ? AND ? ORDER BY revision",
+        'SELECT owner_authority_revisions.grant_id AS grant_id, owner_authority_revisions.revision '
+        'AS revision, owner_authority_revisions.operation_id AS operation_id, '
+        'owner_authority_revisions.request_sha256 AS request_sha256, '
+        'owner_authority_revisions.state AS state, owner_authority_revisions.policy_json AS '
+        'policy_json, owner_authority_revisions.policy_sha256 AS policy_sha256, '
+        'owner_authority_revisions.policy_redacted AS policy_redacted, '
+        'owner_authority_revisions.restore_generation AS restore_generation, '
+        'owner_authority_revisions.predecessor_sha256 AS predecessor_sha256, '
+        'owner_authority_revisions.record_sha256 AS record_sha256, '
+        'owner_authority_revisions.journal_id AS journal_id, '
+        'owner_authority_revisions.journal_path AS journal_path, '
+        'owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS '
+        'owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND '
+        'owner_authority_revisions.revision BETWEEN %s AND %s ORDER BY '
+        'owner_authority_revisions.revision NULLS FIRST',
         (origin["grant_id"], origin["revision"] + 2, authority["revision"]),
     )
     if (
@@ -930,7 +1044,7 @@ def _continuation(store, settings, authority, saved, view, *, approved_contract_
     except (ValueError, TypeError, KeyError) as error:
         raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409) from error
     _quiescent(store, view)
-    unknown = store.rows("SELECT request_id FROM model_usage WHERE state='UNKNOWN'")
+    unknown = store.rows("SELECT request_id FROM model_usage WHERE state = 'UNKNOWN'")
     if any(row["request_id"] not in view["model_closures"] for row in unknown):
         raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
     live_text._ledger_custody(store, settings)
@@ -950,7 +1064,21 @@ def activation(store, settings, policy):
         if head["state"] != "STOPPED":
             raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
         previous = store.one(
-            "SELECT * FROM owner_authority_revisions WHERE grant_id=? AND revision=?",
+            'SELECT owner_authority_revisions.grant_id AS grant_id, '
+            'owner_authority_revisions.revision AS revision, '
+            'owner_authority_revisions.operation_id AS operation_id, '
+            'owner_authority_revisions.request_sha256 AS request_sha256, '
+            'owner_authority_revisions.state AS state, owner_authority_revisions.policy_json AS '
+            'policy_json, owner_authority_revisions.policy_sha256 AS policy_sha256, '
+            'owner_authority_revisions.policy_redacted AS policy_redacted, '
+            'owner_authority_revisions.restore_generation AS restore_generation, '
+            'owner_authority_revisions.predecessor_sha256 AS predecessor_sha256, '
+            'owner_authority_revisions.record_sha256 AS record_sha256, '
+            'owner_authority_revisions.journal_id AS journal_id, '
+            'owner_authority_revisions.journal_path AS journal_path, '
+            'owner_authority_revisions.created_at AS created_at FROM owner_authority_revisions AS '
+            'owner_authority_revisions WHERE owner_authority_revisions.grant_id = %s AND '
+            'owner_authority_revisions.revision = %s',
             (head["grant_id"], head["revision"] - 1),
         )
         if not previous:
@@ -966,8 +1094,8 @@ def activation(store, settings, policy):
         if old != policy and any(not state["terminal"] for state in work.values()):
             raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
         if old != policy and store.one(
-            "SELECT 1 FROM model_admissions a JOIN model_usage u USING(request_id) "
-            "WHERE u.state='UNKNOWN' AND a.authority_json=?", (encode(authority),)
+            'SELECT 1 FROM model_admissions AS a JOIN model_usage AS u USING (request_id) WHERE '
+            "u.state = 'UNKNOWN' AND a.authority_json = %s", (encode(authority),)
         ):
             raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
         return

@@ -63,7 +63,7 @@ def test_console_receipt_requires_real_owner_authentication(client, core, case):
     response = client.post("/v1/console/memories/" + memory_id + "/decision",
                            json={"decision": "confirm"}, headers=headers)
     assert response.status_code in {401, 403}
-    assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (memory_id,)) == {
+    assert core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_id,)) == {
         "status": "HYPOTHESIS"}
     assert not core.store.rows("SELECT * FROM events WHERE event_type='memory.console_decided'")
 
@@ -95,17 +95,17 @@ def test_console_decision_receipt_binds_exact_memory_and_native_provenance(clien
     assert response.status_code == 200, response.text
     receipt = core.store.one("SELECT * FROM events WHERE event_type='memory.console_decided'")
     if change == "memory_version":
-        core.store.execute("UPDATE memories SET updated_at=? WHERE memory_id=?",
+        core.store.execute('UPDATE memories SET updated_at=%s WHERE memory_id=%s',
                            (after(core.clock(), 1), memory_id))
     elif change == "missing_audit":
         core.store.execute("DELETE FROM audit_log WHERE action='memory.owner_decision'")
     elif change == "roots":
-        core.store.execute("DELETE FROM event_dependencies WHERE event_id=?",
+        core.store.execute('DELETE FROM event_dependencies WHERE event_id=%s',
                            (receipt["event_id"],))
     else:
         body = json.loads(receipt["body_json"])
         body[change] = "https://attacker.invalid" if change == "origin" else "forget"
-        core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+        core.store.execute('UPDATE events SET body_json=%s WHERE event_id=%s',
                            (encode(body), receipt["event_id"]))
     with pytest.raises(CoreError, match="SOCIAL_PROFILE_SOURCE_REQUIRED"):
         social_profile_sources.material(core.store, core.settings, core.clock(), [memory_id])
@@ -151,9 +151,12 @@ def test_console_confirmation_erasure_cancels_profile_plan_and_preserves_fee(cli
         assert response.status_code == 200, response.text
     else:
         event_id = "evt_test_800" if erase == "recall_original" else core.store.one(
-            "SELECT event_id FROM events WHERE event_type='memory.console_decided' "
-            "ORDER BY rowid DESC LIMIT 1")["event_id"]
-        with core.store.transaction():
+
+                'SELECT event_id FROM events WHERE '
+                "event_type='memory.console_decided' ORDER BY record_sequence"
+                ' DESC LIMIT 1'
+            )["event_id"]
+        with core.store.transaction(control_write=True):
             core.ledger.expire_events(core.store, [event_id], core.clock())
     with pytest.raises(CoreError):
         dispatch(module, frozen)
@@ -170,7 +173,7 @@ def test_console_receipt_and_native_confirmation_share_one_transaction(client, c
 
     def fail(store, action, *args, **kwargs):
         if action == "memory.owner_decision":
-            assert store is not client.app_core.store and store.db.in_transaction
+            assert store is not client.app_core.store and store.in_transaction
             raise RuntimeError("synthetic receipt failure")
         return original(store, action, *args, **kwargs)
 
@@ -178,7 +181,7 @@ def test_console_receipt_and_native_confirmation_share_one_transaction(client, c
     with pytest.raises(RuntimeError, match="synthetic receipt failure"):
         client.post("/v1/console/memories/" + memory_id + "/decision",
                     json={"decision": "confirm"}, headers=headers)
-    assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (memory_id,)) == {
+    assert core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_id,)) == {
         "status": "HYPOTHESIS"}
     assert not core.store.rows("SELECT * FROM events WHERE event_type='memory.console_decided'")
 
@@ -190,7 +193,7 @@ def test_console_owner_is_rechecked_at_native_commit(client, core, monkeypatch):
     original = Memory.decide_from_console
 
     def rotate(memory, *args, **kwargs):
-        assert memory.store is not client.app_core.store and memory.store.db.in_transaction
+        assert memory.store is not client.app_core.store and memory.store.in_transaction
         core.settings.control_token = SecretStr("rotated-between-auth-and-memory")
         return original(memory, *args, **kwargs)
 
@@ -198,7 +201,7 @@ def test_console_owner_is_rechecked_at_native_commit(client, core, monkeypatch):
     response = client.post("/v1/console/memories/" + memory_id + "/decision",
                            json={"decision": "confirm"}, headers=headers)
     assert response.status_code == 401, response.text
-    assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (memory_id,)) == {
+    assert core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_id,)) == {
         "status": "HYPOTHESIS"}
     assert not core.store.rows("SELECT * FROM events WHERE event_type='memory.console_decided'")
 
@@ -214,8 +217,8 @@ def test_console_correction_content_cannot_be_attached_to_another_decision(clien
     assert response.status_code == 400, response.text
     repeated = client.post(path, json=body, headers=headers)
     assert repeated.status_code == response.status_code and repeated.json() == response.json()
-    assert core.store.one("SELECT state FROM console_operations WHERE request_id=?",
+    assert core.store.one('SELECT state FROM console_operations WHERE request_id=%s',
                           (headers["Idempotency-Key"],)) == {"state": "REJECTED"}
-    assert core.store.one("SELECT status FROM memories WHERE memory_id=?", (memory_id,)) == {
+    assert core.store.one('SELECT status FROM memories WHERE memory_id=%s', (memory_id,)) == {
         "status": "HYPOTHESIS"}
     assert not core.store.rows("SELECT * FROM events WHERE event_type='memory.console_decided'")

@@ -1,11 +1,13 @@
 import asyncio
 import copy
 import json
-import sqlite3
-from contextlib import closing
+from contextlib import contextmanager
 from unittest.mock import patch
 
+import psycopg
 import pytest
+from psycopg import sql
+from psycopg.rows import dict_row
 
 from companion.store import migrate
 from scripts import benchmark_p8b_context as benchmark_module
@@ -21,7 +23,6 @@ from scripts.benchmark_p8b_context import (
     quantiles,
     synthetic_units,
 )
-from tests.support.historical_schema import assert_schema_metadata
 
 
 @pytest.fixture(scope="module")
@@ -30,9 +31,43 @@ def benchmark_workspace(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def evidence(benchmark_workspace):
+def native_snapshots():
+    return {"cases": []}
+
+
+@pytest.fixture(scope="module")
+def evidence(benchmark_workspace, native_snapshots):
     dataset = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    original = benchmark_module.isolated_database
+
+    @contextmanager
+    def inspected(*, template=None):
+        with original(template=template) as database:
+            yield database
+            with psycopg.connect(database.get_secret_value(), row_factory=dict_row) as db:
+                if template is None:
+                    native_snapshots["template"] = {
+                        "revision": db.execute("SELECT version_num FROM alembic_version")
+                            .fetchone(),
+                        "counts": {
+                            row["tablename"]: db.execute(sql.SQL("SELECT COUNT(*) AS count FROM {}")
+                                .format(sql.Identifier(row["tablename"]))).fetchone()["count"]
+                            for row in db.execute("SELECT tablename FROM pg_tables "
+                                                  "WHERE schemaname=current_schema()").fetchall()
+                        },
+                    }
+                else:
+                    native_snapshots["cases"].append({
+                        "database": db.info.dbname,
+                        "fact": db.execute("SELECT * FROM memories WHERE memory_id='tea'")
+                            .fetchone(),
+                        "sources": db.execute(
+                            "SELECT e.*,v.polarity FROM memory_evidence v JOIN events e "
+                            "USING(event_id) WHERE v.memory_id='tea' ORDER BY event_id"
+                        ).fetchall(),
+                    })
     with (
+        patch("scripts.benchmark_p8b_context.isolated_database", inspected),
         patch("companion.retrieval.SemanticIndex.warmup", side_effect=AssertionError("encoder")),
         patch("companion.retrieval.SemanticIndex.scores", side_effect=AssertionError("retrieval")),
         patch("companion.retrieval.SemanticIndex.scores_async",
@@ -47,36 +82,32 @@ def evidence(benchmark_workspace):
     return result
 
 
-def test_benchmark_cases_cannot_contaminate_the_shared_empty_schema(evidence, benchmark_workspace):
-    assert len(list(benchmark_workspace.glob("*/*/core.sqlite3"))) == 24
-    with closing(sqlite3.connect(benchmark_workspace / "schema.sqlite3")) as template:
-        assert_schema_metadata(template)
-        tables = template.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        for (name,) in tables:
-            if (name not in {"alembic_version", "runtime_meta"}
-                and not name.startswith("memories_fts_")):
-                assert template.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0] == 0
+def test_benchmark_cases_cannot_contaminate_the_shared_empty_schema(evidence, native_snapshots):
+    cases = native_snapshots["cases"]
+    assert len(cases) == len({row["database"] for row in cases}) == 24
+    template = native_snapshots["template"]
+    assert template["revision"] == {"version_num": "pg0002_relationship_standing"}
+    assert len(template["counts"]) >= 100
+    assert all(count == 0 for name, count in template["counts"].items()
+               if name not in {"alembic_version", "runtime_meta"})
 
 
 def test_fixture_facts_and_positive_sources_share_the_frozen_core_clock(
-    evidence, benchmark_workspace,
+    evidence, native_snapshots,
 ):
     dataset = json.loads(FIXTURE.read_text(encoding="utf-8"))
     tea = next(row for row in dataset["memories"] if row["memory_id"] == "tea")
-    with closing(sqlite3.connect(benchmark_workspace / "baseline/indirect/core.sqlite3")) as store:
-        store.row_factory = sqlite3.Row
-        fact = store.execute("SELECT * FROM memories WHERE memory_id='tea'").fetchone()
-        assert fact["content"] == tea["content"]
-        assert fact["created_at"] == fact["updated_at"] == NOW
-        assert fact["valid_from"] is fact["valid_to"] is None
-        sources = store.execute(
-            "SELECT e.*,v.polarity FROM memory_evidence v JOIN events e USING(event_id) "
-            "WHERE v.memory_id='tea' ORDER BY event_id",
-        ).fetchall()
-        assert [row["event_id"] for row in sources] == sorted(tea["evidence_ids"])
-        assert all(row["polarity"] == 1 and row["actor_id"] == "owner"
-                   and row["privacy_scope"] == "private" and row["redacted"] == 0
-                   and row["occurred_at"] == row["ingested_at"] == NOW for row in sources)
+    index = next(i for i, case in enumerate(dataset["cases"]) if case["id"] == "indirect")
+    snapshot = native_snapshots["cases"][index]
+    fact = snapshot["fact"]
+    assert fact["content"] == tea["content"]
+    assert fact["created_at"] == fact["updated_at"] == NOW
+    assert fact["valid_from"] is fact["valid_to"] is None
+    sources = snapshot["sources"]
+    assert [row["event_id"] for row in sources] == sorted(tea["evidence_ids"])
+    assert all(row["polarity"] == 1 and row["actor_id"] == "owner"
+               and row["privacy_scope"] == "private" and row["redacted"] == 0
+               and row["occurred_at"] == row["ingested_at"] == NOW for row in sources)
 
 
 def test_fixture_retrieval_cannot_bypass_missing_native_evidence(

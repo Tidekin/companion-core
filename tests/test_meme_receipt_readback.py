@@ -30,6 +30,7 @@ def test_original_usage_readback_survives_stop_unknown_and_restart(make_runtime,
     core = SemanticCore(runtime, event)
     if fence != "stop":
         core.caption.state = "UNKNOWN"
+        core.caption.missing_response = True
 
     async def scenario():
         async with core.client() as client:
@@ -51,11 +52,16 @@ def test_original_usage_readback_survives_stop_unknown_and_restart(make_runtime,
             http = SemanticHTTP(runtime.window, client, check=runtime._owner_check)
             adapter = CaptionHTTP(http, runtime.catalog)
             assert (await adapter.get(job_id))["usage"] == usage
-            with pytest.raises((ValueError, httpx.HTTPStatusError)):
-                await adapter.submit(request)
-            with pytest.raises((ValueError, httpx.HTTPStatusError)):
-                await http.profile()
-            assert len(core.caption.submissions) == len(core.caption.model_calls) == 1
+            if fence == "stop":
+                with pytest.raises((ValueError, httpx.HTTPStatusError)):
+                    await adapter.submit(request)
+                with pytest.raises((ValueError, httpx.HTTPStatusError)):
+                    await http.profile()
+            else:
+                assert (await adapter.submit(request))["job_id"] == job_id
+                assert await http.profile()
+            assert len(core.caption.submissions) == (1 if fence == "stop" else 2)
+            assert len(core.caption.model_calls) == 1
             assert len(core.core.store.rows("SELECT * FROM model_usage")) == 1
             assert core.core.store.rows("SELECT * FROM outbox") == []
 
@@ -64,6 +70,8 @@ def test_original_usage_readback_survives_stop_unknown_and_restart(make_runtime,
 
 @pytest.mark.parametrize("change", ["unknown_job", "body", "path", "config", "job_id",
                                     "asset_sha256", "request_sha256", "retained_job"])
+
+
 def test_result_readback_rejects_foreign_job_changed_request_and_receipt(make_runtime, change):
     runtime, event, _ = make_runtime()
     core = SemanticCore(runtime, event)
