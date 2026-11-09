@@ -310,6 +310,12 @@ revision 为 r+2 的后继 authority。使用后继私密配置执行原 `owner-
 
 ### 未绑定工作的 STOP 链
 
+同一授权下未关联 QQ 输入的主动任务不进入输入 carry 回执的请求集合。它仍须是原生
+私有主人会话中的 `system.timer/activity.tick`、同一原授权和逻辑任务，任务已终态，
+且完整账本已验证原 UNKNOWN 结算与原生执行关闭。全部费用、用量与 UNKNOWN 保留在
+原全局账务和 window 范围；缺少关闭、非 activity、任务／授权／来源不一致均拒绝。
+QQ 输入自身的 carry、完整全局核对与其余工作静止校验保持不变，wire 回执不增加字段。
+
 发布失败时，Core 可能在 Bridge 交接前激活一个后继、又因失败处理再次 STOP，例如
 r → STOP r+1 → ACTIVE r+2 → STOP r+3。Bridge 从未持有 r+2，因此原规则（后继必须为
 r+2）会让交接永久卡住。认证的 `/owner-authority/stop-receipt` 因此接受这样的链：

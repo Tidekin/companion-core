@@ -69,9 +69,9 @@ def observer(items):
     return observe
 
 
-def stranded(core, tmp_path, **approval_changes):
+def stranded(core, tmp_path, *, purposes=("chat",), **approval_changes):
     approved_live(core, tmp_path, concurrency=1, **approval_changes)
-    job_id = authorized_job(core)
+    job_id = authorized_job(core, purposes=purposes)
     request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
 
     async def exercise():

@@ -60,8 +60,8 @@ def legacy(core, tmp_path, monkeypatch, request):
             **capabilities(settings),
             **{key: digest(value) for key, value in old_capabilities(settings).items()},
         })
-        old.setattr(model_carry_support, "authorized_job", lambda core: authorized_job(
-            core, purposes=("chat", "memory", "meme", "rem"),
+        old.setattr(model_carry_support, "authorized_job", lambda core, *, purposes: authorized_job(
+            core, purposes=(*purposes, "memory", "meme", "rem"),
         ))
         case = migrated(core, tmp_path, expires_at=None, rates_valid_until=None,
                         window_calls=getattr(request, "param", 1))

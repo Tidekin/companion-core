@@ -839,16 +839,36 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
             }
         )
         requests.update(ids)
-    current_unknown = store.rows(
-        'SELECT a.request_id, a.authority_json FROM model_admissions AS a JOIN model_usage AS m '
-        "USING (request_id) WHERE m.state = 'UNKNOWN'"
-    )
-    if not requests or requests != {
-        row["request_id"]
-        for row in current_unknown
-        if json.loads(row["authority_json"]) == authority
-    }:
+    current_unknown = {row["request_id"]: row for row in store.rows(
+        "SELECT a.request_id,a.authority_json,a.logical_request_id,m.scenario,m.job_id,"
+        "j.kind,j.state,j.authority_json AS job_authority,e.source,e.actor_id,e.event_type,"
+        "e.privacy_scope,c.scope,c.owner_actor_id FROM model_admissions a "
+        "JOIN model_usage m USING(request_id) LEFT JOIN jobs j ON j.job_id=m.job_id "
+        "LEFT JOIN events e ON e.event_id=j.event_id "
+        "LEFT JOIN conversations c ON c.conversation_id=e.conversation_id "
+        "WHERE m.state='UNKNOWN'"
+    ) if json.loads(row["authority_json"]) == authority}
+    if not requests or not requests <= current_unknown.keys():
         raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+    # _continuation already validates all global custody and UNKNOWN closures.
+    # This wire receipt covers QQ inputs; independent terminal activities retain
+    # their original global/window accounting without acquiring a fabricated input.
+    for request_id in current_unknown.keys() - requests:
+        row = current_unknown[request_id]
+        closed = view["model_controls"].get(view["model_closures"].get(request_id))
+        try:
+            eligible = (row["kind"] == row["scenario"] == "activity"
+                and row["state"] in {"SUCCEEDED", "FAILED", "CANCELLED"}
+                and row["logical_request_id"] == row["job_id"]
+                and json.loads(row["job_authority"]) == authority
+                and (row["source"], row["actor_id"], row["event_type"], row["privacy_scope"],
+                     row["scope"], row["owner_actor_id"])
+                == ("system.timer", "system", "activity.tick", "private", "private", "owner")
+                and closed and closed["kind"] == CLOSE and closed["authority"] == authority)
+        except (TypeError, ValueError):
+            eligible = False
+        if not eligible:
+            raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
     closures = [
         {"request_id": request_id, "record_sha256": view["model_closures"][request_id]}
         for request_id in sorted(requests)
