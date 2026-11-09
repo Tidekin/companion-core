@@ -40,51 +40,70 @@ def nominate(memory, query, subjects, memory_ids, semantic_ids=()):
     if subjects:
         base += "AND m.subject = ANY(%s::text[]) "
         params.append(list(subjects))
-    projection = "SELECT m.memory_id,octet_length(m.content) AS text_bytes "
+    projection = "SELECT m.memory_id,octet_length(m.content) AS text_bytes,m.updated_at "
     headers, lexical = {}, []
+    channels = []
 
-    def collect(sql, args, size):
-        values = work.rows(memory.store, sql, args, limit=size + 1)
-        if len(values) > size:
-            work.mark("candidate_pool")
-        for row in values[:size]:
-            if row["memory_id"] not in headers and len(headers) < ceiling:
-                headers[row["memory_id"]] = row
-        return [row["memory_id"] for row in values[:size]]
+    def collect(sql, args, size, *, order="updated_at DESC,memory_id", lexical=False,
+                extra=True):
+        # Each indexed channel keeps its original LIMIT before the small window
+        # assigns a deterministic position. UNION ALL then needs one metered read.
+        channels.append((sql, args, size, order, lexical, extra))
 
     try:
         if query != "*":
             exact = exact_terms(query)
             channel = min(24, ceiling)
-            lexical += collect(projection + base + "AND m.memory_id = ANY(%s::text[]) "
+            collect(projection + base + "AND m.memory_id = ANY(%s::text[]) "
                     "ORDER BY m.updated_at DESC,m.memory_id LIMIT %s",
-                    (*params, exact, channel + 1), channel)
+                    (*params, exact, channel + 1), channel, lexical=True)
             # Preserve SQLite NOCASE's ASCII-only identity matching.
-            lexical += collect(projection + base + "AND translate(m.fact_key,"
+            collect(projection + base + "AND translate(m.fact_key,"
                     "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz') = ANY(%s::text[]) "
                     "ORDER BY m.updated_at DESC,m.memory_id LIMIT %s",
                     (*params, [value.translate(str.maketrans(
                         "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
-                        for value in exact], channel + 1), channel)
+                        for value in exact], channel + 1), channel, lexical=True)
             patterns = ["%" + value.replace("\\", "\\\\").replace("%", "\\%").replace(
                 "_", "\\_") + "%" for value in terms(query)]
             if patterns:
-                lexical += collect(projection + base + "AND m.content ILIKE ANY(%s::text[]) "
-                    "ORDER BY public.word_similarity(%s,m.content) DESC,"
+                collect(projection.rstrip() + ",public.word_similarity(%s,m.content) AS score "
+                    + base + "AND m.content ILIKE ANY(%s::text[]) "
+                    "ORDER BY score DESC,"
                     "m.updated_at DESC,m.memory_id LIMIT %s",
-                    (*params, patterns, query, channel + 1), channel)
+                    (query, *params, patterns, channel + 1), channel,
+                    order="score DESC,updated_at DESC,memory_id", lexical=True)
             if semantic_ids:
-                values = work.rows(memory.store, projection + base
+                positions = {mid: i for i, mid in enumerate(semantic_ids)}
+                collect(projection.rstrip() + ",array_position(%s::text[],m.memory_id) AS rank "
+                    + base
                     + "AND m.memory_id = ANY(%s::text[]) LIMIT %s",
-                    (*params, list(semantic_ids), ceiling), limit=ceiling)
-                position = {mid: i for i, mid in enumerate(semantic_ids)}
-                for row in sorted(values, key=lambda row: position[row["memory_id"]]):
-                    if row["memory_id"] not in headers and len(headers) < ceiling:
-                        headers[row["memory_id"]] = row
-        collect(projection + base + "ORDER BY m.needs_review,m.status='CONFIRMED' DESC,"
-                "m.updated_at DESC,m.memory_id LIMIT %s", (*params, ceiling + 1), ceiling)
+                    (sorted(positions, key=positions.get), *params, list(semantic_ids), ceiling),
+                    ceiling, order="rank", extra=False)
+        collect(projection.rstrip() + ",m.needs_review,m.status='CONFIRMED' AS confirmed "
+                + base + "ORDER BY m.needs_review,m.status='CONFIRMED' DESC,"
+                "m.updated_at DESC,m.memory_id LIMIT %s", (*params, ceiling + 1), ceiling,
+                order="needs_review,confirmed DESC,updated_at DESC,memory_id")
+        statements, bindings = [], []
+        for index, (statement, args, _, order, _, _) in enumerate(channels):
+            statements.append(
+                f"(SELECT {index} AS channel,row_number() OVER (ORDER BY {order}) AS position,"
+                "c.memory_id,c.text_bytes FROM (" + statement + ") c)")
+            bindings.extend(args)
+        values = work.rows(memory.store, "SELECT * FROM (" + " UNION ALL ".join(statements)
+            + ") nominated ORDER BY channel,position", tuple(bindings),
+            limit=sum(size + extra for _, _, size, _, _, extra in channels))
+        for index, (_, _, size, _, is_lexical, _) in enumerate(channels):
+            rows = [row for row in values if row["channel"] == index]
+            if len(rows) > size:
+                work.mark("candidate_pool")
+            for row in rows[:size]:
+                if row["memory_id"] not in headers and len(headers) < ceiling:
+                    headers[row["memory_id"]] = row
+                if is_lexical:
+                    lexical.append(row["memory_id"])
     except retrieval_work.WorkLimit:
-        pass  # Already nominated identities can still undergo complete live validation.
+        return [], []  # The shared work receipt records the incomplete nomination.
     selected = []
     for header in headers.values():
         if not work.take("candidates"):

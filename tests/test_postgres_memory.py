@@ -1,5 +1,6 @@
 """Native lexical nomination and bounded reads before full memory lifecycle adoption."""
 
+import itertools
 from contextlib import closing
 from types import SimpleNamespace
 
@@ -87,6 +88,39 @@ def test_candidate_bodies_are_materialized_in_one_metered_batch(memory_database,
         assert sum("JOIN unnest" in statement for statement in reads) == 1
         assert len(reads) <= 5
         assert work.counts["sql_milliseconds"] >= len(reads)
+
+
+def test_nomination_leaves_room_for_live_proof_within_the_original_sql_budget(
+    memory_database, tmp_path, monkeypatch,
+):
+    # An old exact-key hit must survive transport cost before evidence validation.
+    # Keep the real indexed SQL, the 1-second cap and the complete candidate scope.
+    ticks = itertools.count(0, .25)
+    monkeypatch.setattr(retrieval_work, "monotonic", lambda: next(ticks))
+    with closing(Store(memory_database, tmp_path)) as store, retrieval_work.scope() as work:
+        rows, lexical = memory_candidates.nominate(
+            SimpleNamespace(store=store), "CAMERA_CASE", (), None)
+        assert "camera" in lexical
+        assert "camera" in {row["memory_id"] for row in rows}
+        assert work.remaining("sql_milliseconds") >= 500
+
+
+def test_semantic_nomination_keeps_rank_before_recent_noise_and_enforces_scope(
+    memory_database, tmp_path,
+):
+    semantic = ["whale", "camera", "whale", "color"]
+    with closing(Store(memory_database, tmp_path)) as store:
+        with retrieval_work.scope() as work:
+            work.take("candidates", retrieval_work.LIMITS["candidates"] - 3)
+            rows, lexical = memory_candidates.nominate(
+                SimpleNamespace(store=store), "unknown_probe", (), None, semantic)
+            assert [row["memory_id"] for row in rows] == ["camera", "whale", "color"]
+            assert not lexical
+        with retrieval_work.scope():
+            rows, _ = memory_candidates.nominate(
+                SimpleNamespace(store=store), "unknown_probe", ("project",),
+                ["camera", "color"], semantic)
+            assert [row["memory_id"] for row in rows] == ["camera"]
 
 
 def test_native_nomination_keeps_explicit_scope_and_empty_scope(memory_database, tmp_path):

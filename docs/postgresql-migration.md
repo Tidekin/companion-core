@@ -210,6 +210,13 @@ CLI 在创建工作循环前完成这些同步初始化，随后才开始领取�
 和 [PostgreSQL statement_timeout](https://www.postgresql.org/docs/16/runtime-config-client.html#GUC-STATEMENT-TIMEOUT)
 的原生语义；同一消息中的超时分别作用于每条语句，整个操作仍受 Core 的绝对截止时间约束。
 
+记忆候选的精确 ID、事实键、文本、语义及最近记录查询通过原生
+[UNION ALL](https://www.postgresql.org/docs/18/queries-union.html) 合并为一次有限读取。
+各通道先执行原过滤、排序及行数上限，再用
+[row_number](https://www.postgresql.org/docs/18/tutorial-window.html) 标明通道内顺序；
+最终按通道与位置消费，保留原候选优先级、去重、字节计费和溢出凭证。事实正文仍在
+申请字节额度后单独读取，来源和证明继续走原校验；检索 SQL 总额度保持 1000 毫秒。
+
 回复校验在一条 SELECT 中读取事件撤回标记、消息类型和双方回复版本；来源读取也在
 一条 SELECT 中取回原事件、签名回执和隐私版本。原有限来源图在读取正文时一并读取
 有上限的邻接 ID，正文读取前仍先申请原字节预算。重复读取合并在各次原校验边界内，
