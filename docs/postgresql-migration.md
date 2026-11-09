@@ -238,6 +238,12 @@ CLI 在创建工作循环前完成这些同步初始化，随后才开始领取�
 内的后续修改也必须重新检查。该对象不保存授权结论，不跨 `await` 或多次边界复用。
 历史来源及图片原始字节仍走原来源、凭证和有效期校验，未知费用不取代来源或结果证据。
 
+模型预检及发送前检查也在各自同步边界内合并授权、原生任务、签名来源和回复修订。
+任务的事件绑定由同一条查询中的原生任务行提供；任务租约及最终派发期限仍由原校验器检查。
+来源查询同时读取撤回标记，继续使用原撤回状态解析与拒绝码；标记键沿用相同的 UTF-8
+SHA-256，[PostgreSQL 原生散列函数](https://www.postgresql.org/docs/16/functions-binarystring.html)
+与 Python 的原键计算分别验证。临时原行不会跨异步调用或多次模型校验保存。
+
 复用既有 `to_jsonb` 行投影与原生事务，不新增存储或依赖；DSH 已核验的文档存储实现
 仍不提供可替代 Core 业务校验的 PostgreSQL 事务接口，见 ADR 0002。
 [PostgreSQL 的语句快照](https://www.postgresql.org/docs/16/transaction-iso.html#XACT-READ-COMMITTED)
