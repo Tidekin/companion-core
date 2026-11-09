@@ -40,9 +40,16 @@ def frozen(store, proof):
     return row, policy
 
 
-def stopped(store, proof, stop, *, current=False):
+def stopped(store, proof, stop, *, current=False, chain=False):
     original, _ = frozen(store, proof)
     ref = AuthorityRef.from_dict(proof["authority"])
+    if chain:
+        from companion.owner_stop_receipt import stopped_chain
+
+        if (not stop or stop["record_sha256"] != proof["core_stop_record_sha256"]
+            or stopped_chain(store, ref, through=stop) is None):
+            raise ValueError("original native STOP required")
+        return
     if (not stop or stop["state"] != "STOPPED"
         or stop["grant_id"] != ref.grant_id or stop["revision"] != ref.revision + 1
         or stop["predecessor_sha256"] != original["record_sha256"]

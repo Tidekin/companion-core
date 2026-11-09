@@ -13,6 +13,7 @@ from companion.privacy import ErasureLedger
 from companion.transport import lease_deliveries, recover_deliveries
 from companion_delivery_protocol import no_io
 from tests.support.evaluation import work
+from tests.support.owner_authority import activate
 from tests.support.owner_delivery_reconciliation import delivery_proof
 from tests.support.owner_input import captured, inbound
 
@@ -205,3 +206,51 @@ def test_non_dispatch_receipt_never_uses_manual_unknown_validator(core, tmp_path
     with pytest.raises(ValueError, match="DELIVERY_RESOLUTION_BINDING_INVALID"):
         wire.validate_delivery(result["receipt"]["delivery"])
     assert paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
+
+
+def test_proactive_text_uses_the_same_zero_io_proof_shape(core, tmp_path):
+    proof, key = reserved(core, tmp_path)
+    proof['action_type'] = 'qq.private.proactive'
+    proof['signature'] = key.sign(wire.signing_payload(proof)).hex()
+    assert no_io.proof(proof) == proof
+    # A supported wire shape does not change the original Core admission binding.
+    with pytest.raises(CoreError, match='DELIVERY_QUIESCENCE_INVALID'):
+        delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock())
+
+
+@pytest.mark.parametrize('bound_intermediate', [False, True])
+def test_zero_send_reuses_only_unbound_stopped_authority_chains(
+    core, tmp_path, bound_intermediate,
+):
+    from companion.store import encode
+
+    proof, key = reserved(core, tmp_path)
+    original = core.store.one('SELECT policy_json FROM owner_authority_revisions WHERE revision=1')
+    policy = OwnerGrantPolicy.model_validate_json(original['policy_json'])
+    middle = activate(core, policy, revision=2, operation='zero-io-intermediate')[0]['authority']
+    if bound_intermediate:
+        core.store.execute('UPDATE jobs SET authority_json=%s WHERE event_id=%s',
+                           (encode(middle), proof['event_id']))
+    stopped = owner_authority.stop(core.store, core.settings, core.clock,
+        AuthorityStop(operation_id='zero-io-chain-stop', authority=middle))
+    proof['core_stop_record_sha256'] = stopped['record_sha256']
+    proof['signature'] = key.sign(wire.signing_payload(proof)).hex()
+    before = core.store.one('SELECT * FROM outbox WHERE message_id=%s', (proof['message_id'],))
+    fees = core.store.rows('SELECT * FROM model_usage')
+    journal = Path(core.settings.paid_model.journal_path).read_bytes()
+    if bound_intermediate:
+        with pytest.raises(CoreError):
+            delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock())
+    else:
+        receipt = delivery_reconciliation.prepare(core.store, core.settings, proof, core.clock())
+        assert receipt['state'] == 'NOT_SENT'
+        assert receipt['receipt']['quiescence'] == proof
+        # The same historical receipt remains readable after the final activation.
+        activate(core, policy, revision=4, operation='zero-io-chain-successor')
+        assert delivery_reconciliation.prepare(
+            core.store, core.settings, proof, core.clock()) == receipt
+    assert core.store.one('SELECT * FROM outbox WHERE message_id=%s',
+                          (proof['message_id'],)) == before
+    assert core.store.rows('SELECT * FROM model_usage') == fees
+    if bound_intermediate:
+        assert Path(core.settings.paid_model.journal_path).read_bytes() == journal
