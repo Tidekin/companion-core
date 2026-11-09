@@ -329,6 +329,23 @@ AuthorityRef v2 和 capture v2 保持各自原合同。Bridge 复用原独占锁
 原停止与 reconciliation 机制；wire DTO 与摘要规则由 Core 的
 `companion_delivery_protocol/model_carry.py` 统一维护。
 
+### 过期任务的 UNKNOWN 结算补齐
+
+任务租期过期通过原生 `budget.settle` 同时保留 UNKNOWN 与账本结算，不能只更新 SQL 状态。
+历史直接写 SQL 留下的 RESERVED/UNKNOWN 差异，由离线 operator 使用
+`python -m companion reconcile-expired-model-attempt --request <private-json> --request-sha256 <sha256>`
+预检，再以同一请求加 `--commit`。请求固定任务、账本身份和链尾、原 admission/usage 摘要、
+当前授权摘要、人工授权证据摘要和完整 executor 清单，不接收金额或替换用量。
+
+命令复用部署 controller 的两次观察、退出等待和原五类 worker 排他锁；API 和全部模型
+executor 必须以 `restart=no` 停止，operator 同时保持 Bridge 停止，恢复完成后恢复原重启策略。
+只接受已经 `WORKER_LEASE_EXPIRED` 的 FAILED chat/activity 任务，以及金额、原契约和 I/O
+fence 完全相同的 Journal RESERVED / SQL UNKNOWN。完整原校验器先检查拟追加的精确字节，
+再追加原生 UNKNOWN settle 与由真实 executor 退出证明的原生执行关闭记录，完整复核后
+才移除该缺陷留下的 `model_budget_blocked=1` 并记录
+审计。其他独立阻断、损坏、恢复标记、凭证变化或差异均拒绝；所有费用、用量、UNKNOWN、
+STOP 和非金额限制保留，旧消息不会重跑。追加 fsync 后提交失败可由相同请求完成，无重复结算。
+
 ### 普通文字回复的 Core 发送前检查
 
 Core 的 begin-send 和 owner send-check 仅在 SQLite 的 BEGIN IMMEDIATE 返回 SQLITE_BUSY、事务尚未开始时返回专用 503。Bridge 在原消息、原租约内重试该检查，每次重试仍核对本地撤回、权限及截止时间。OneBot 的发送调用只执行一次。
