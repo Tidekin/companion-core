@@ -521,8 +521,8 @@ def _same_approval(old, new, *, renewal_at=None):
                 new_rates <= now or (old_rates is not None and new_rates < old_rates)))):
             raise CoreError("OWNER_MODEL_RENEWAL_EXPIRY_REQUIRED", 409)
         allowed.update({"expires_at", "rates_valid_until"})
-        # The per-call output ceiling may only rise. Every money amount, call count and
-        # per-attempt/request cap stays identical, so no liability bound can grow.
+        # Ordinary renewal may only raise the output ceiling; other resource limits
+        # and token prices stay identical. Monetary retirement uses exact limits.
         if new["max_output_tokens"] < old["max_output_tokens"]:
             raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
         allowed.add("max_output_tokens")
@@ -562,6 +562,9 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
     renewal = isinstance(request, dict) and request.get("version") == 2
     if renewal:
         fields.add("previous_paid_contract")
+    retirement = renewal and "monetary_retirement" in request
+    if retirement:
+        fields.add("monetary_retirement")
     kind = RENEW if renewal else CARRY
     if (
         not isinstance(request, dict)
@@ -650,7 +653,22 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
         old_policy = original.policy.model_dump(mode="json")
         new_policy = policy.model_dump(mode="json")
         allowed = {"authorization_sha256", "paid_contract_sha256", "unknown_carry_sha256"}
-        if renewal:
+        old = request["previous_paid_contract"] if renewal else json.loads(
+            store.one(
+                'SELECT snapshot_json FROM model_admissions WHERE request_id = %s',
+                (value["unknowns"][0]["request_id"],),
+            )["snapshot_json"]
+        )
+        new = paid_budget.snapshot(settings)
+        if renewal and paid_budget.sha(old) != original.policy.paid_contract_sha256:
+            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+        if retirement:
+            from companion.monetary_retirement import previous_approval
+
+            old = previous_approval(settings, old, new, original.policy, policy,
+                                    request["monetary_retirement"])
+            allowed.add("capability_policies")
+        elif renewal:
             from companion import model_renewal
 
             model_renewal.check_policy(store, settings, original.policy, policy, now,
@@ -665,16 +683,7 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
             != {k: v for k, v in new_policy.items() if k not in allowed}
         ):
             raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
-        old = request["previous_paid_contract"] if renewal else json.loads(
-            store.one(
-                'SELECT snapshot_json FROM model_admissions WHERE request_id = %s',
-                (value["unknowns"][0]["request_id"],),
-            )["snapshot_json"]
-        )
-        new = paid_budget.snapshot(settings)
-        if renewal and paid_budget.sha(old) != original.policy.paid_contract_sha256:
-            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
-        _same_approval(old, new, renewal_at=now if renewal else None)
+        _same_approval(old, new, renewal_at=now if renewal and not retirement else None)
         if new["window_id"] != request["successor_window_id"]:
             raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
         # Recompute the original per-window credential tags using the current key.

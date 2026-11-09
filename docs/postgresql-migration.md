@@ -209,6 +209,18 @@ CLI 在创建工作循环前完成这些同步初始化，随后才开始领取�
 保证一次 SELECT 的已提交读取一致；[原生 JSON 行转换](https://www.postgresql.org/docs/16/functions-json.html)
 保留复合行的字段名、空值和数值类型，转换后的行不构成执行许可。
 
+旧金额契约退役复用离线 v2 续期请求及其原执行器退出证明、STOP、UNKNOWN 清单和日志。
+请求显式增加 `monetary_retirement`，值为发生指纹变化的 meme/rem 原始配置散列输入。
+原配置必须匹配原授权中的能力指纹；仅删除 meme 的 `meme_caption_daily_micro_usd`
+或 rem 的 `daily_micro_usd`、`monthly_micro_usd` 后，必须恰好匹配当前配置的新指纹。
+旧费用快照仍须先匹配原契约摘要，随后仅忽略已退役的八个金额字段：
+`daily_micro_usd`、`local_monthly_micro_usd`、`monthly_micro_usd`、
+`per_attempt_micro_usd`、`per_request_micro_usd`、`reflection_monthly_micro_usd`、
+`scenario_daily_micro_usd`、`window_micro_usd`。调用、并发、token、价格、有效期、用途、
+来源和隐私范围保持原值；旧窗口调用仍计入后继窗口。请求与原配置证明共同绑定到
+原续期凭证的请求指纹，原费用、UNKNOWN、配置版本、签名和哈希链均不改写。
+该显式操作不放宽普通续期，不允许重放旧输入或缺失原响应的模型请求。
+
 滚动更新脚本使用 `--state-directory` 指向宿主机的 Core 状态目录，按 Worker 原生名称
 核对锁文件。授权修订、UNKNOWN 数量及在途任务和投递在仍运行的 API 容器内通过原生
 只读快照读取，复用该容器的部署连接配置。操作员命令参数不携带数据库凭据；首次

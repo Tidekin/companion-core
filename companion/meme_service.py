@@ -108,6 +108,12 @@ class DiscoverySettlement(StrictModel):
 
 def policy_hash(settings):
     """Bind the existing discovery and caption policies as one native capability."""
+    value = policy_value(settings)
+    return digest(value) if value is not None else None
+
+
+def policy_value(settings):
+    """The concrete hash input, also used to verify a legacy monetary retirement."""
     if not (settings.expression_enabled or settings.meme_discovery_enabled
             or settings.meme_semantics_enabled):
         return None
@@ -145,7 +151,7 @@ def policy_hash(settings):
         value["catalog"]["retrieval"] = {"binding_version": 2, "profile": PROFILE}
         if settings.meme_discovery_enabled:
             value["catalog"]["acquisition"] = acquisition_profile(settings)
-    return digest(value)
+    return value
 
 
 
