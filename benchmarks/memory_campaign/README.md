@@ -202,3 +202,13 @@ It is never silently counted as an answer failure or converted into a pass. The 
 anchor gate margin, majority baseline, batch rejection and publication restrictions stay
 unchanged. A preflight calibration on the complete frozen anchor pool qualifies a judge
 configuration for a new run; actual mixed-batch gates and review still apply to that run.
+
+The 2026-11-09 preflight froze scorer `3334b5a0` and preserved all 40 historical anchors,
+their labels and answer text (20 positive, 20 negative), adding only original clocks.
+One Qwen pass and two DeepSeek passes each judged the complete pool under shuffled blind
+keys, without replacement votes. The existing gates passed at 82.5%, 82.5% and 77.5%
+against a 50% majority baseline plus the unchanged 15-point margin. These are preflight
+results on anchor-only batches, not a new v6/v6.1 score or permission to bypass actual
+mixed-batch gates. Raw wrong judgments and the previous failed calibration remain intact.
+The preflight cost CNY 0.22995828, bringing this targeted repair's cumulative cost to
+CNY 1.89940128 under its CNY 2 cap, with no new UNKNOWN or RESERVED entries.
