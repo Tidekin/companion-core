@@ -167,8 +167,10 @@ class Memory:
                 nominated = self.index.nominate(query, subjects=subjects, memory_ids=memory_ids)
         except retrieval_work.WorkLimit as error:
             retrieval_work.current().mark(error.reason)
+        importance = {}
         version, sources, rows, lexical, proof = self._prepare_search(
             query, actor, subjects, limit, memory_ids=memory_ids, now=now, semantic_ids=nominated,
+            importance=importance,
         )
         try:
             similarities = self.index.scores(query, rows) if query != "*" and rows else {}
@@ -176,17 +178,18 @@ class Memory:
             retrieval_work.current().mark(error.reason)
             similarities = {}
         return self._finish_search(query, rows, lexical, similarities, limit, version, sources,
-                                   explain=explain, trace=trace)
+                                   explain=explain, trace=trace, importance=importance)
 
     async def search_async(self, query, actor="owner", subjects=(), limit=6, *,
                            memory_ids=None, now=None, source_check=None, clock=None,
-                           explain=None, trace=None):
+                           explain=None, trace=None, _consume=None):
         with retrieval_work.scope():
             return await self._search_async(query, actor, subjects, limit, memory_ids=memory_ids,
-                now=now, source_check=source_check, clock=clock, explain=explain, trace=trace)
+                now=now, source_check=source_check, clock=clock, explain=explain, trace=trace,
+                consume=_consume)
 
     async def _search_async(self, query, actor, subjects, limit, *, memory_ids, now,
-                            source_check, clock, explain, trace):
+                            source_check, clock, explain, trace, consume=None):
         self.require_owner(actor)
         if source_check:
             source_check()
@@ -199,9 +202,10 @@ class Memory:
             retrieval_work.current().mark(error.reason)
         if source_check:
             source_check()
+        importance = {}
         version, sources, rows, lexical, proof = self._prepare_search(
             query, actor, subjects, limit, memory_ids=memory_ids, now=now,
-            semantic_ids=nominated, pin=True,
+            semantic_ids=nominated, pin=True, importance=importance,
         )
         similarities = {}
         if query != "*" and rows:
@@ -221,11 +225,15 @@ class Memory:
 
             try:
                 if rows:
-                    similarities = await self.index.scores_async(query, rows, revalidate=revalidate)
+                    with retrieval_work.current().stage("encoding", reserve={
+                        "sql_milliseconds": min(120, retrieval_work.current().remaining(
+                            "sql_milliseconds") // 3)}):
+                        similarities = await self.index.scores_async(
+                            query, rows, revalidate=revalidate)
             except retrieval_work.WorkLimit as error:
                 retrieval_work.current().mark(error.reason)
         rerank_scores = None
-        fused = self._fused_order(query, rows, lexical, similarities)
+        fused = self._fused_order(query, rows, lexical, similarities, importance)
         model, pool = self._rerank_pool(query, fused[0], limit)
         if pool:
             from companion import reranker
@@ -244,12 +252,24 @@ class Memory:
             sources = MemorySources(self, clock(), bounded=True, work=retrieval_work.current())
         return self._finish_search(query, rows, lexical, similarities, limit, version, sources,
                                    explain=explain, trace=trace, rerank_scores=rerank_scores,
-                                   fused=fused)
+                                   fused=fused, importance=importance, consume=consume)
 
-    def _prepare_search(self, query, actor="owner", subjects=(), limit=6, *,
-                        memory_ids=None, now=None, semantic_ids=(), pin=False):
+    def _prepare_search(self, *args, **kwargs):
+        work = retrieval_work.current()
+        try:
+            with work.stage("candidate_proofs", reserve={"sql_milliseconds": min(
+                250, work.remaining("sql_milliseconds") // 3)}):
+                return self._prepare_candidates(*args, **kwargs)
+        except retrieval_work.WorkLimit as error:
+            work.mark(error.reason)
+            sources = MemorySources(self, kwargs.get("now"), bounded=True, work=work)
+            return read_version(self), sources, [], [], {"rows": [], "event_ids": [],
+                "historical": False, "sources": {}, "source_event_ids": []}
+
+    def _prepare_candidates(self, query, actor="owner", subjects=(), limit=6, *,
+                        memory_ids=None, now=None, semantic_ids=(), pin=False, importance=None):
         from companion.memory_candidates import nominate
-        from companion.memory_enrichment import IMPORTANCE, refresh_importance
+        from companion.memory_enrichment import IMPORTANCE, ranking_importance
 
         self.require_owner(actor)
         work = retrieval_work.current()
@@ -277,17 +297,11 @@ class Memory:
                     "JOIN events e ON e.event_id=v.event_id "
                     "WHERE v.memory_id=memories.memory_id AND e.redacted=0)", (row["memory_id"],))
                 continue
-            try:
-                if state["enriched"] or row["importance"] != .5:
-                    row["importance"] = refresh_importance(self, row, now)
-            except retrieval_work.WorkLimit as error:
-                work.mark(error.reason)
-                break
             repaired.append(row)
 
         def collect():
-            version = read_version(self)
             sources = MemorySources(self, now, bounded=True, work=work)
+            version = read_version(self, source_view=sources)
             rows, parts = [], []
             try:
                 sources.prefetch_facts(repaired)
@@ -298,6 +312,9 @@ class Memory:
                     max_bytes=work.remaining("text_bytes") // 3 if pin else None)
             except retrieval_work.WorkLimit as error:
                 work.mark(error.reason)
+            values = ranking_importance(self, repaired, now, sources=sources)
+            if importance is not None:
+                importance.update(values)
             for row in repaired:
                 try:
                     evidence = sources.evidence(row["memory_id"])
@@ -316,7 +333,8 @@ class Memory:
                     break
             if query == "*":
                 rows.sort(key=lambda row: (not row["needs_review"], row["status"] == "CONFIRMED",
-                                          row["importance"], row["updated_at"]), reverse=True)
+                                          values.get(row["memory_id"], .5), row["updated_at"]),
+                          reverse=True)
             allowed = {row["memory_id"] for row in rows}
             proof = {"rows": [row for part in parts for row in part["rows"]],
                      "event_ids": [], "historical": False,
@@ -338,11 +356,13 @@ class Memory:
         return model, ordered[:limit * 2]
 
     def _finish_search(self, query, rows, lexical, similarities, limit, version, sources, *,
-                       explain=None, trace=None, rerank_scores=None, fused=None):
+                       explain=None, trace=None, rerank_scores=None, fused=None, importance=None,
+                       consume=None):
         """`rerank_scores` (memory_id -> score) lets async callers rescore off the loop."""
         eligible, lexical_raw = len(rows), len(lexical)
         rows, ranks, lexical_count, semantic_count = (
-            fused if fused is not None else self._fused_order(query, rows, lexical, similarities))
+            fused if fused is not None else self._fused_order(
+                query, rows, lexical, similarities, importance))
         matched = len(rows)
         model, pool = self._rerank_pool(query, rows, limit)
         if pool:
@@ -361,9 +381,10 @@ class Memory:
                     limit * 2:]
         return self._complete_search(rows, ranks, eligible, lexical_raw, lexical_count,
                                      semantic_count, matched, limit, version, sources,
-                                     explain=explain, trace=trace)
+                                     explain=explain, trace=trace, importance=importance,
+                                     consume=consume)
 
-    def _fused_order(self, query, rows, lexical, similarities):
+    def _fused_order(self, query, rows, lexical, similarities, importance=None):
         from companion.memory_candidates import exact_terms
 
         ranks = {}
@@ -408,7 +429,7 @@ class Memory:
                     row["memory_id"] in exact,
                     scores[row["memory_id"]],
                     similarities.get(row["memory_id"], 0.),
-                    row["importance"],
+                    (importance or {}).get(row["memory_id"], .5),
                 ),
                 reverse=True,
             )
@@ -416,14 +437,15 @@ class Memory:
 
     def _complete_search(self, rows, ranks, eligible, lexical_raw, lexical_count,
                          semantic_count, matched, limit, version, sources, *,
-                         explain=None, trace=None):
+                         explain=None, trace=None, importance=None, consume=None):
         return self.store.read_or_write(lambda: self._complete_search_snapshot(
             rows, ranks, eligible, lexical_raw, lexical_count, semantic_count,
-            matched, limit, version, sources, explain=explain, trace=trace))
+            matched, limit, version, sources, explain=explain, trace=trace, importance=importance,
+            consume=consume))
 
     def _complete_search_snapshot(self, rows, ranks, eligible, lexical_raw, lexical_count,
                                   semantic_count, matched, limit, version, sources, *,
-                                  explain, trace):
+                                  explain, trace, importance=None, consume=None):
         rows = rows[:limit]
         check_version(self, version)
         try:
@@ -442,7 +464,7 @@ class Memory:
                 retrieval_work.current().mark(error.reason)
                 break
             if row["evidence_ids"]:
-                current.append(row)
+                current.append({**row, "importance": (importance or {}).get(row["memory_id"], .5)})
         check_version(self, version)
         if explain is not None:
             explain.update({row["memory_id"]: ranks.get(row["memory_id"], {}) for row in current})
@@ -453,7 +475,7 @@ class Memory:
                 "selected": {row["memory_id"]: ranks.get(row["memory_id"], {})
                              for row in current}})
             trace["work"] = retrieval_work.current().receipt()
-        return current
+        return consume(current, sources) if consume else current
 
     def validate_candidate(self, candidate, confirmed=False, *, now=None, rejection=None):
         def reject(reason):

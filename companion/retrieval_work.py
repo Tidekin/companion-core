@@ -20,6 +20,7 @@ LIMITS = {"candidates": 256, "text_bytes": 1048576, "cold_vectors": 16,
           "attachment_rows": 128}
 NOTE = "本轮检索覆盖有限，未命中不代表主人没有说过或没有这段记忆。"
 _work = ContextVar("retrieval_work", default=None)
+_stages = ContextVar("retrieval_stages", default=())
 
 
 class WorkLimit(CoreError):
@@ -36,15 +37,42 @@ class Work:
     def mark(self, reason):
         with self.lock:
             self.limited.add(reason)
+            if reason in LIMITS:
+                self.limited.update("stage:" + label + ":" + reason
+                    for work, label, _ in _stages.get() if work is self)
+
+    def _ceiling(self, name):
+        return min([LIMITS[name], *(ceiling.get(name, LIMITS[name])
+            for work, _, ceiling in _stages.get() if work is self)])
+
+    @contextmanager
+    def stage(self, name, *, reserve):
+        """Leave shared reply allowance for later stages; never create a new budget."""
+        ceiling = {key: max(0, LIMITS[key] - value) for key, value in reserve.items()}
+        token = _stages.set((*_stages.get(), (self, name, ceiling)))
+        try:
+            yield
+        finally:
+            _stages.reset(token)
+
+    def exhausted(self):
+        """Hard exhaustion only: a soft phase boundary still permits later fallback."""
+        with self.lock:
+            return self.closed or any(self.counts[key] >= LIMITS[key] for key in (
+                "sql_milliseconds", "text_bytes", "source_nodes", "candidates", "searches"))
 
     def remaining(self, name):
         with self.lock:
-            return max(0, LIMITS[name] - self.counts[name]) if not self.closed else 0
+            return max(0, self._ceiling(name) - self.counts[name]) if not self.closed else 0
 
     def take(self, name, count=1):
         with self.lock:
-            if self.closed or self.counts[name] + count > LIMITS[name]:
+            if count < 0:
+                raise ValueError("negative retrieval work")
+            if self.closed or self.counts[name] + count > self._ceiling(name):
                 self.limited.add(name)
+                self.limited.update("stage:" + label + ":" + name
+                    for work, label, _ in _stages.get() if work is self)
                 return False
             self.counts[name] += count
             return True

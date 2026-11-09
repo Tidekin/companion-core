@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from datetime import datetime
 
 from companion import retrieval_work
@@ -514,7 +515,8 @@ class MemoryContext:
             return self.store.read_or_write(check)
         return available
 
-    def add_reply_facts(self, selection, facts, settings, clock, *, chat, paused):
+    def add_reply_facts(self, selection, facts, settings, clock, *, chat, paused,
+                        query="", allowed_ids=None):
         from companion import context_selection
         from companion.model import MEMORY_HEADING, RELATIONSHIP_HEADING
 
@@ -532,7 +534,8 @@ class MemoryContext:
                     clock(), rows=standing)}], module="memory")
         for rank, h in enumerate(hits):
             memory = {**{k: h[k] for k in (
-                "subject", "kind", "content", "status", "needs_review", "evidence_ids")},
+                "memory_id", "subject", "kind", "content", "status", "needs_review",
+                "evidence_ids")},
                 **({"origin": h["origin"]} if h.get("origin") else {}),
                 **relations.get(h["memory_id"], {}),
                 **({"happened_on": happened}
@@ -545,6 +548,22 @@ class MemoryContext:
                 proofs=[{"kind": "memory", "proof": memory_proof}], module="memory",
                 fact=(h["subject"], h["content"]))
             memory_references.append((reference, h))
+        if chat and re.search(r"最初|最早|原来|之前|更正|改过|变更|顺序|依次|版本|"
+                              r"截至|当时|当天|当前|现在|"
+                              r"\b(?:earliest|previous|as of|revisions)\b", query, re.I):
+            seen = set()
+            for h in hits[:2]:
+                if h["memory_id"] in seen:
+                    continue
+                chain = self.history(h["memory_id"], clock(), memory_ids=allowed_ids)
+                revisions = chain["revisions"]
+                seen.update(row["memory_id"] for row in revisions)
+                if len(revisions) < 2 and not chain["truncated"]:
+                    continue
+                proof = self.pin(clock(), rows=revisions, historical=True)
+                selection.add(MEMORY_HEADING, {"memory_history": chain},
+                    proof["source_event_ids"], priority=context_selection.RELATED,
+                    required=True, proofs=[{"kind": "memory", "proof": proof}], module="memory")
         if paused:
             selection.add(MEMORY_HEADING,
                 {"memories": [], "self_observations": [],
@@ -680,14 +699,16 @@ class MemoryContext:
         version = self._begin(actor)
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
-        rows = await self.memory.search_async(
+        return await self.memory.search_async(
             query, actor=actor, memory_ids=memory_ids, limit=self._limit() + 2, now=now,
             source_check=source_check, clock=clock, trace=trace,
+            _consume=lambda rows, sources: self._recall_result(
+                rows, version, query, sources.now, memory_ids, project_query, trace,
+                source_view=sources),
         )
-        return self._recall_result(rows, version, query, clock() if clock else now,
-                                   memory_ids, project_query, trace)
 
-    def _recall_result(self, rows, version, query, now, memory_ids, project_query, trace=None):
+    def _recall_result(self, rows, version, query, now, memory_ids, project_query, trace=None, *,
+                       source_view=None):
         if not self.store.in_transaction:
             return self.store.read_or_write(lambda: self._recall_result(
                 rows, version, query, now, memory_ids, project_query, trace))
@@ -696,7 +717,7 @@ class MemoryContext:
                 project_query, memory_ids=memory_ids, limit=6, now=now,
             )
         work = retrieval_work.current()
-        sources = MemorySources(self.memory, now, bounded=True, work=work)
+        sources = source_view or MemorySources(self.memory, now, bounded=True, work=work)
         try:
             sources.prefetch([row["memory_id"] for row in rows])
         except retrieval_work.WorkLimit as error:
@@ -957,7 +978,8 @@ class MemoryContext:
         A supplied allowlist bounds every member, not just the initially selected ID.
         """
         with retrieval_work.scope():
-            return self._history(memory_id, now, actor=actor, memory_ids=memory_ids)
+            return self.store.read_or_write(lambda: self._history(
+                memory_id, now, actor=actor, memory_ids=memory_ids))
 
     def _history(self, memory_id, now, *, actor, memory_ids):
         version = self._begin(actor)
@@ -999,25 +1021,26 @@ class MemoryContext:
             "ORDER BY rank.later_count,m.created_at DESC,m.memory_id LIMIT 21", (now, memory_id),
         )
         sources = MemorySources(self.memory, now, bounded=True, work=work)
-        items = []
+        items, admitted = [], []
         for header in rows[:20]:
             if memory_ids is not None and header["memory_id"] not in memory_ids:
                 continue
             if not work.take("candidates") or not work.take("text_bytes", header["text_bytes"]):
                 break
-            row = self.store.one('SELECT memories.memory_id AS memory_id, memories.subject AS '
-                'subject, memories.kind AS kind, memories.content AS content, memories.status AS '
-                'status, memories.origin AS origin, memories.confidence AS confidence, '
-                'memories.importance AS importance, memories.privacy_scope AS privacy_scope, '
-                'memories.supersedes_memory_id AS supersedes_memory_id, memories.created_at AS '
-                'created_at, memories.updated_at AS updated_at, memories.valid_from AS valid_from, '
-                'memories.valid_to AS valid_to, memories.last_reviewed_at AS last_reviewed_at, '
-                'memories.fact_key AS fact_key, memories.needs_review AS needs_review FROM '
-                'memories AS memories WHERE memories.memory_id = %s AND '
-                "OCTET_LENGTH(memories.content) = %s AND memories.privacy_scope = 'private' AND "
-                "memories.confidence > 0 AND memories.status IN ('CONFIRMED', 'HYPOTHESIS', "
-                "'SUPERSEDED')",
-                                 (header["memory_id"], header["text_bytes"]))
+            admitted.append(header)
+        try:
+            bodies = work.rows(self.store, "SELECT " + ",".join("m." + key
+                for key in MEMORY_COLUMNS) + " FROM memories m JOIN "
+                "unnest(%s::text[],%s::bigint[]) WITH ORDINALITY "
+                "wanted(memory_id,bytes,position) USING(memory_id) "
+                "WHERE octet_length(m.content)=wanted.bytes ORDER BY wanted.position",
+                ([row["memory_id"] for row in admitted], [row["text_bytes"] for row in admitted]),
+                limit=max(1, len(admitted))) if admitted else []
+            sources.prefetch([row["memory_id"] for row in bodies])
+        except retrieval_work.WorkLimit as error:
+            work.mark(error.reason)
+            bodies = []
+        for row in bodies:
             try:
                 if row and (evidence := sources.evidence(row["memory_id"])):
                     items.append(self._fact(row, evidence))
@@ -1027,6 +1050,8 @@ class MemoryContext:
         check_version(self.memory, version)
         coverage = work.receipt()
         return {"privacy_epoch": version[0], "as_of": now, "revisions": items,
+                "order": "newest_to_oldest_by_replacement",
+                "time_basis": "recorded timestamps; effective dates only when explicit in content",
                 "truncated": len(rows) > 20 or coverage["coverage_limited"],
                 **({"retrieval_coverage": coverage, "note": retrieval_work.NOTE}
                    if coverage["coverage_limited"] else {})}

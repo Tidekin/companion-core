@@ -50,13 +50,14 @@ def _recorded_usage(store, request_id):
         "'memory_extract' AND state IN ('SETTLED','UNKNOWN')", (request_id,))
 
 
-def _valid(memory, record, now, content_hash, *, work=None):
+def _valid(memory, record, now, content_hash, *, work=None, source_view=None, recorded_ids=None):
     try:
         if (record["content_sha256"] != content_hash
-            or not _recorded_usage(memory.store, record["request_id"])
+            or not (_recorded_usage(memory.store, record["request_id"]) if recorded_ids is None
+                    else record["request_id"] in recorded_ids)
             or record["source_event_ids"] != record["proof"]["source_event_ids"]):
             return False
-        MemoryContext(memory).revalidate(record["proof"], now, work=work)
+        MemoryContext(memory).revalidate(record["proof"], now, work=work, source_view=source_view)
         return True
     except retrieval_work.WorkLimit:
         raise
@@ -132,6 +133,79 @@ def refresh_importance(memory, row, now):
     if records != saved or value != row["importance"]:
         return _importance(memory.store, row["memory_id"], records)
     return value
+
+
+def ranking_importance(memory, rows, now, *, sources):
+    """Bounded ranking projection; facts still require their original full proof.
+
+    Read metadata, positive support and extraction receipts in batches. Reuse only
+    this immutable snapshot's original sources, never a permission verdict. Missing
+    or unaffordable derived scores use the established neutral .5 value.
+    """
+    if not memory.store.in_read_snapshot or not sources._snapshot_cache():
+        raise RuntimeError("MEMORY_SOURCE_SNAPSHOT_REQUIRED")
+    work, store = sources.work, memory.store
+    scores = {row["memory_id"]: .5 for row in rows}
+    if not rows:
+        return scores
+    try:
+        keys = [IMPORTANCE + row["memory_id"] for row in rows]
+        sizes = work.source_rows(store,
+            "SELECT key,octet_length(value) AS size FROM runtime_meta "
+            "WHERE key=ANY(%s::text[])", (keys,), limit=len(keys))
+        # Ranking metadata cannot spend the bytes reserved for actual facts and
+        # their next-boundary source checks. It is never evidence to display.
+        allowance = min(65536, work.remaining("text_bytes") // 8)
+        admitted = []
+        for item in sizes:
+            if item["size"] <= allowance and work.take("text_bytes", item["size"]):
+                admitted.append(item)
+                allowance -= item["size"]
+            else:
+                work.mark("importance_metadata")
+        if not admitted:
+            return scores
+        values = work.source_rows(store,
+            "SELECT r.key,r.value FROM runtime_meta r JOIN "
+            "unnest(%s::text[],%s::bigint[]) expected(key,bytes) USING(key) "
+            "WHERE octet_length(r.value)=expected.bytes",
+            ([r["key"] for r in admitted], [r["size"] for r in admitted]), limit=len(admitted))
+        saved = {}
+        for value in values:
+            try:
+                records = json.loads(value["value"])
+            except (ValueError, TypeError):
+                continue
+            if isinstance(records, list) and len(records) <= 20:
+                saved[value["key"][len(IMPORTANCE):]] = [record for record in records
+                    if isinstance(record, dict) and type(record.get("salience")) is int
+                    and 1 <= record["salience"] <= 10 and isinstance(record.get("proof"), dict)
+                    and record["proof"].get("event_ids") == [record.get("event_id")]
+                    and isinstance(record.get("event_id"), str)
+                    and isinstance(record.get("request_id"), str)]
+        pairs = [(mid, r["event_id"]) for mid, records in saved.items() for r in records]
+        requests = list({r["request_id"] for records in saved.values() for r in records})
+        if not pairs or not requests:
+            return scores
+        supported = {(r["memory_id"], r["event_id"]) for r in work.source_rows(store,
+            "SELECT v.memory_id,v.event_id FROM memory_evidence v JOIN "
+            "unnest(%s::text[],%s::text[]) wanted(memory_id,event_id) "
+            "USING(memory_id,event_id) WHERE v.polarity=1",
+            ([p[0] for p in pairs], [p[1] for p in pairs]), limit=len(pairs))}
+        recorded = {r["request_id"] for r in work.source_rows(store,
+            "SELECT request_id FROM model_usage WHERE request_id=ANY(%s::text[]) "
+            "AND scenario='memory_extract' AND state IN ('SETTLED','UNKNOWN')",
+            (requests,), limit=len(requests))}
+        for row in rows:
+            valid = [record for record in saved.get(row["memory_id"], [])
+                if (row["memory_id"], record["event_id"]) in supported
+                and _valid(memory, record, now, _hash(row["content"]), work=work,
+                           source_view=sources, recorded_ids=recorded)]
+            if valid:
+                scores[row["memory_id"]] = sum(r["salience"] for r in valid)/(10*len(valid))
+    except retrieval_work.WorkLimit:
+        work.mark("importance_metadata")
+    return scores
 
 
 def record(memory, candidates, memory_ids, events, summaries, request_id, now, *, reference_ids=()):

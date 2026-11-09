@@ -744,6 +744,7 @@ class Core(Runtime):
             )
             memory_references = self.memory_context.add_reply_facts(
                 selection, facts, cfg, self.clock, chat=job["kind"] == "chat", paused=memory_paused,
+                query=text, allowed_ids=allowed,
             )
         # A bounded window admits only its approved facts, never learned jargon.
         if (job["kind"] == "chat" and cfg.jargon.enabled and turn.permits("memory")

@@ -434,3 +434,33 @@ mock provider transport. The Core measurement ends at durable outbox completion;
 generation and QQ transport are measured separately. Results must state source revision,
 CPU/memory limits, cold and warm samples, mean and P95. Profiling runs and unrestricted
 desktop timings do not establish the server latency target.
+
+### Extracted long-history evidence and shared work
+
+Foreground ranking projects salience from bounded batches of the existing importance records,
+positive evidence pairs and extraction usage receipts. It validates the original proofs against
+one immutable `MemorySources` view; missing, stale or unaffordable ranking metadata uses neutral
+importance. Ranking no longer rewrites derived importance for every nominee. Extraction retains
+the existing recording/refresh path. Fact eligibility and source provenance remain authoritative.
+
+Automatic recall leaves part of the same reply-local allowance for raw turns and later lookup.
+Candidate proof preparation and encoder validation leave SQL allowance for final source checks.
+These are nested phase ceilings on one `Work`, inherited across awaits and worker-thread context;
+they never reset its totals. Final async result assembly uses the fresh post-await source view
+within its synchronous snapshot. Permission checks and external erasure-ledger bytes remain fresh.
+Hard exhaustion returns an explicit terminal tool result with the actual coverage receipt; a
+partial search cannot establish that the owner has no record. The 1,000ms SQL allowance measures
+bounded client read wall time, including native transport/control, rather than server execution
+alone; see [PostgreSQL timeout semantics](https://www.postgresql.org/docs/16/runtime-config-client.html).
+
+Temporal questions can include the existing supported revision chain in the initial context,
+with a separate historical proof and newest-to-oldest replacement order. History reads fact
+bodies and source roots in batches in one immutable snapshot; truncation remains explicit.
+Original speaker and source dates govern interpretation. Upload, recording and real effective
+dates are distinct, and uncertain ASR names remain candidates rather than confirmed identities.
+
+Regression fixtures use actual EXTRACT/REVIEW salience and native proofs, asynchronous retrieval,
+real TCP ingress and independent CLI workers. At 48 and 480 admitted source events, the needed
+original text must appear in the actual final provider request. Provider transport is mocked;
+this checks evidence delivery, separately from model reading quality, consistent with the
+[LongMemEval retrieval/reading distinction](https://arxiv.org/html/2410.10813v2).

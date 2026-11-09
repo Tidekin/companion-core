@@ -82,7 +82,10 @@ async def reply(core, job, snapshots):
             and "memory" in view.policy.purposes):
             trace = {}
             try:
-                with phase("recall_memory", job["trace_id"]):
+                with phase("recall_memory", job["trace_id"]), retrieval_work.current().stage(
+                    "automatic_memory", reserve={"sql_milliseconds": 150,
+                        "text_bytes": 65536, "source_nodes": 64, "candidates": 24,
+                        "searches": 1}):
                     result = await core.memory_context.recall_async(query, core.clock(),
                         project_query=query, clock=core.clock, trace=trace,
                         source_check=lambda: check_conversation(
