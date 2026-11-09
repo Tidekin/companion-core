@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -132,3 +134,27 @@ def test_campaign_imports_leave_the_native_sdk_probe_available():
 
     assert Path(benchmark_qq_beta.__file__).resolve() == (
         Path(__file__).resolve().parents[1] / "scripts/benchmark_qq_beta.py")
+
+
+@pytest.mark.parametrize("native_first", [False, True])
+def test_campaign_and_native_scripts_resolve_in_both_fresh_import_orders(tmp_path, native_first):
+    root = Path(__file__).resolve().parents[1]
+    program = """import sys
+from pathlib import Path
+root=Path(sys.argv[1])
+tools=root/'benchmarks/memory_campaign'
+sys.path.insert(0,str(tools))
+if sys.argv[2]=='True':
+ import scripts
+import roundcfg
+from scripts import benchmark_qq_beta
+from scripts.memory_benchmark import runtime
+assert Path(benchmark_qq_beta.__file__).resolve()==root/'scripts/benchmark_qq_beta.py'
+assert Path(runtime.__file__).resolve()==tools/'runner/scripts/memory_benchmark/runtime.py'
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", program, str(root), str(native_first)], cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(root), "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr

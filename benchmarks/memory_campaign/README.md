@@ -173,3 +173,9 @@ Native arms and personas execute serially so their local pre-provider timings do
 include competition from other arms/personas in this harness. The CLI accepts an explicitly
 authorized provider total up to80CNY. For a separate smoke ledger, reserve its full cap
 outside the main ledger cap so their sum stays within the user's provider allowance.
+
+The bundled runner and native Core tools share the `scripts` namespace through the
+standard library's [pkgutil.extend_path](https://docs.python.org/3.12/library/pkgutil.html#pkgutil.extend_path).
+Loading campaign configuration first keeps the native SDK probe available in the same
+interpreter. Fresh-process checks cover both import orders and bind each imported module
+to its expected checkout path; no provider call is needed for these checks.
