@@ -202,10 +202,11 @@ class Core(Runtime):
             "jobs.state = 'RUNNING' AND jobs.kind IN ('chat', 'activity') AND jobs.lease_until <= "
             '%s', (now,))
         for job in expired:
-            s.execute(
-                "UPDATE model_usage SET state = 'UNKNOWN' WHERE job_id = %s AND state = 'RESERVED'",
+            for usage in s.rows(
+                "SELECT request_id FROM model_usage WHERE job_id=%s AND state='RESERVED'",
                 (job["job_id"],),
-            )
+            ):
+                budget.settle(s, self.settings, usage["request_id"])
             state = "QUEUED" if job["attempts"] < job["max_attempts"] else "FAILED"
             from companion.agent_persistence import recoverable
 

@@ -151,6 +151,10 @@ def main():
     unstarted.add_argument("--request-id", required=True)
     unstarted.add_argument("--commit", action="store_true",
                            help="Append the closure; without it only the record is previewed")
+    expired = sub.add_parser("reconcile-expired-model-attempt")
+    expired.add_argument("--request", required=True)
+    expired.add_argument("--request-sha256", required=True)
+    expired.add_argument("--commit", action="store_true")
     args = parser.parse_args()
     try:
         settings = (Settings.load(apply_operator_config=False)
@@ -270,6 +274,22 @@ def main():
                         print(encode(model_carry.prepare(runtime.store, settings, request,
                                                        verified, utcnow(),
                                                        request_sha256=args.request_sha256)))
+        elif args.command == "reconcile-expired-model-attempt":
+            from companion import model_reconciliation
+            from companion.model_carry_controller import verify
+
+            request = model_reconciliation.load(args.request, args.request_sha256)
+            verified = verify(request.executors)
+            with ExitStack() as locks:
+                for kind in ("worker", "diary-worker", "life-worker", "executive-worker",
+                             "content-worker"):
+                    locks.enter_context(single_worker(settings.state_directory, kind))
+                with Runtime(settings) as runtime:
+                    verify(request.executors)
+                    result = model_reconciliation.reconcile(
+                        runtime.store, settings, request, verified, utcnow(), commit=args.commit)
+                    verify(request.executors)
+                    print(encode(result))
         elif args.command == "close-unstarted-model-attempt":
             from companion import model_carry
 
