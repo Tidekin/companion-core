@@ -51,7 +51,7 @@ def read_model(store, job_id):
 def read(store, job):
     """Fetch once under the original locks; callers still run every original validator.
 
-    The object is local to check_conversation and is discarded before it returns.
+    The object is local to one conversation or delivery check and is then discarded.
     No Store state, transaction cache, permission result or cross-await reuse exists.
     """
     if not store.in_transaction:

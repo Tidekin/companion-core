@@ -212,18 +212,46 @@ class Session:
 
     def ledger_lock(self, domain, *, shared=False):
         """Native transaction lock, scoped to this schema and a fixed ledger domain."""
+        self.ledger_locks(((domain, shared),))
+
+    def ledger_locks(self, domains):
+        """Acquire missing ledger locks in caller order; native locks outlive this call."""
         if self._connection.info.transaction_status != TransactionStatus.INTRANS:
             raise RuntimeError("POSTGRES_TRANSACTION_REQUIRED")
-        if type(domain) is not int or not 1 <= domain <= 16:
-            raise ValueError("invalid ledger lock domain")
         # A managed session keeps its configured schema for this finite scope.
         # PostgreSQL retains these locks until commit/rollback; an exclusive
         # acquisition also covers later shared requests. Upgrades still acquire.
-        held = self._ledger_locks.get(domain) if self._ledger_locks is not None else None
-        if held is False or held is True and shared:
+        known = dict(self._ledger_locks or {})
+        pending = []
+        for domain, shared in domains:
+            if type(domain) is not int or not 1 <= domain <= 16:
+                raise ValueError("invalid ledger lock domain")
+            held = known.get(domain)
+            if held is False or held is True and shared:
+                continue
+            pending.append((domain, bool(shared)))
+            known[domain] = bool(shared)
+        if not pending:
             return
-        function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
-        self.execute(sql.SQL("SELECT {}(hashtext(current_schema()),%s)").format(
-            sql.Identifier(function)), (domain,))
+        statements = []
+        for index, (_, shared) in enumerate(pending):
+            function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
+            statement = sql.SQL("SELECT {}(hashtext(current_schema()),%s)").format(
+                sql.Identifier(function))
+            if index:
+                statement += sql.SQL(" FROM {} ").format(sql.Identifier(f"ledger_{index - 1}"))
+            statements.append(statement)
+        if len(statements) == 1:
+            query = statements[0]
+        else:
+            # Each materialized CTE consumes its predecessor before taking the next
+            # lock. Data reads deliberately remain a later, separate SQL statement.
+            entries = [sql.SQL("{} AS MATERIALIZED ({})").format(
+                sql.Identifier(f"ledger_{index}"), statement)
+                for index, statement in enumerate(statements)]
+            query = (sql.SQL("WITH ") + sql.SQL(", ").join(entries)
+                     + sql.SQL(" SELECT * FROM {}").format(
+                         sql.Identifier(f"ledger_{len(statements) - 1}")))
+        self.execute(query, tuple(domain for domain, _ in pending))
         if self._ledger_locks is not None:
-            self._ledger_locks[domain] = bool(shared)
+            self._ledger_locks.update(known)
