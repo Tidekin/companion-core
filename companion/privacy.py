@@ -207,9 +207,11 @@ class ErasureLedger:
         )
         self.replay(store)
 
-    def read(self):
+    def read(self, *, raw=None):
+        """Validate one original payload; custody callers already hold its bytes."""
         try:
-            lines = [json.loads(line) for line in self.path.read_text("utf-8").splitlines()]
+            text = self.path.read_text("utf-8") if raw is None else raw.decode("utf-8")
+            lines = [json.loads(line) for line in text.splitlines()]
             if not lines or not isinstance(lines[0].get("ledger_id"), str):
                 raise ValueError("missing header")
             for seq, record in enumerate(lines[1:], 1):

@@ -196,6 +196,41 @@ def test_bounded_read_retains_timeout_and_snapshot_after_optional_error(database
         assert reader.one("SHOW statement_timeout") == {"statement_timeout": "3s"}
 
 
+@pytest.mark.parametrize("outcome", ["commit", "rollback", "error"])
+def test_read_transaction_uses_native_begin_and_restores_connection_settings(
+    database, monkeypatch, outcome,
+):
+    commands = []
+    execute = psycopg.Connection._exec_command
+
+    def observed(connection, command, *args, **kwargs):
+        commands.append(command)
+        return execute(connection, command, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.Connection, "_exec_command", observed)
+    with database.session() as reader:
+        connection = reader._connection
+        previous = connection.isolation_level, connection.read_only
+        problem = (pytest.raises(psycopg.errors.DivisionByZero)
+                   if outcome == "error" else nullcontext())
+        with problem:
+            with reader.transaction(readonly=True, rollback=outcome == "rollback"):
+                assert any(command.startswith(
+                    b"BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY") for command in commands
+                    if isinstance(command, bytes))
+                assert reader.one("SHOW transaction_read_only")["transaction_read_only"] == "on"
+                assert reader.one("SHOW transaction_isolation") == {
+                    "transaction_isolation": "repeatable read"}
+                if outcome == "error":
+                    reader.one("SELECT 1/0")
+        assert (connection.isolation_level, connection.read_only) == previous
+        with reader.transaction():
+            assert reader.one("SHOW transaction_read_only")["transaction_read_only"] == "off"
+            assert reader.one("SHOW transaction_isolation") == {
+                "transaction_isolation": "read committed"}
+            assert reader.execute("UPDATE items SET value=6 WHERE id=1") == 1
+
+
 @pytest.mark.parametrize("active", [False, True])
 def test_bounded_read_cannot_extend_an_existing_shorter_server_timeout(database, active):
     with database.session() as reader:

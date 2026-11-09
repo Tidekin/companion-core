@@ -35,6 +35,30 @@ def _clear_codec():
     global _previous
     _previous = None
     _validated_bytes.cache_clear()
+    _authority_bytes.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def _authority_bytes(raw):
+    from companion.authority_custody import _decode_authority
+
+    return marshal.dumps(_decode_authority(raw))
+
+
+def authority_material(raw):
+    """Reuse exact-byte decoding only; callers still check fresh DB and file custody.
+
+    Like the journal codec, retain one bounded byte key and immutable serialized
+    result. No database row, policy decision, clock or file identity is memoized.
+    """
+    if len(raw) > CACHE_MAX_BYTES:
+        from companion.authority_custody import _decode_authority
+
+        return _decode_authority(raw)
+    payload = _authority_bytes(raw)
+    if len(payload) > CACHE_MAX_BYTES:
+        _authority_bytes.cache_clear()
+    return marshal.loads(payload)
 
 
 def _decode_lines(lines, previous="0" * 64):

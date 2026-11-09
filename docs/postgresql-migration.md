@@ -262,6 +262,19 @@ SHA-256，[PostgreSQL 原生散列函数](https://www.postgresql.org/docs/16/fun
 仍拒绝计划。读取结果只在本次同步检查内使用，后续边界重新读取，也能看到当前写事务
 的修改。原生回归覆盖工具续接的两次真实模拟请求、逐项篡改及一万条无关请求的查询计划。
 
+授权原始账本的解析与生命周期折叠沿用既有精确字节编解码方式：只保留一个不超过
+`CACHE_MAX_BYTES` 的字节键和有界的不可变序列化材料；调用者得到私有副本。任何字节
+变化均重新解码，较大账本走完整路径，解码失败清除材料。每次授权核验仍重新读取文件、
+验证当前数据库投影与生命周期，检查策略和有效期，并在返回前再次核对文件。材料不包含
+数据库或时间相关的授权结论，原费用追加与对账仍使用完整财务校验。
+
+删除账本 custody 直接校验已读到的原始字节，省去中间一次重复文件读取，仍保留结尾的
+独立文件重读和数据库删除投影核对。只读事务通过 Psycopg 原生事务属性生成一条
+`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`，结束时还原连接属性；后续写事务
+继续使用原隔离级别。成功、回滚、异常及有界读取的保存点/超时均有原生回归。
+见 [Psycopg 事务属性](https://www.psycopg.org/psycopg3/docs/basic/transactions.html#transaction-characteristics)；
+同时核对项目固定 3.3.8 的 `_get_tx_start_command` 与属性设置实现，不新增依赖。
+
 复用既有 `to_jsonb` 行投影与原生事务，不新增存储或依赖；DSH 已核验的文档存储实现
 仍不提供可替代 Core 业务校验的 PostgreSQL 事务接口，见 ADR 0002。
 [PostgreSQL 的语句快照](https://www.postgresql.org/docs/16/transaction-iso.html#XACT-READ-COMMITTED)

@@ -209,9 +209,8 @@ class Session:
         if type(limit) is not int or limit < 1 or type(timeout_ms) is not int or timeout_ms < 1:
             raise ValueError("invalid bounded read limits")
         active = self.in_transaction
-        with self._connection.transaction():
-            if not active:
-                self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        scope = self._connection.transaction() if active else self.transaction(readonly=True)
+        with scope:
             settings = self.one(
                 "SELECT current_setting('transaction_read_only') AS readonly, "
                 "(EXTRACT(EPOCH FROM current_setting('statement_timeout')::interval)*1000)"
@@ -245,14 +244,27 @@ class Session:
             raise RuntimeError("POSTGRES_SESSION_CLOSED")
         if self._connection.info.transaction_status != TransactionStatus.IDLE:
             raise RuntimeError("POSTGRES_TRANSACTION_ALREADY_ACTIVE")
-        with self._connection.transaction(force_rollback=rollback):
-            self._ledger_locks = {}
-            try:
-                if readonly:
-                    self.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-                yield self
-            finally:
-                self._ledger_locks = None
+        previous = self._connection.isolation_level, self._connection.read_only
+        try:
+            if readonly:
+                # Psycopg includes these public characteristics in native BEGIN,
+                # avoiding a separate SET TRANSACTION send for every read scope.
+                self._connection.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+                self._connection.read_only = True
+            with self._connection.transaction(force_rollback=rollback):
+                self._ledger_locks = {}
+                try:
+                    yield self
+                finally:
+                    self._ledger_locks = None
+        finally:
+            if readonly and not self._connection.closed:
+                if self._connection.info.transaction_status == TransactionStatus.IDLE:
+                    self._connection.isolation_level, self._connection.read_only = previous
+                else:
+                    # An uncertain teardown must not return temporary BEGIN
+                    # characteristics to another pool borrower.
+                    self._connection.close()
 
     def custody_lock(self, key, *, shared=False):
         if self._connection.info.transaction_status != TransactionStatus.INTRANS:
