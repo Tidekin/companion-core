@@ -186,11 +186,23 @@ def source(
             store, settings, view, event_id, now, allow_commands=allow_commands,
             history=history, purpose=purpose,
         ))
-    view = owner_authority.current(
-        store, settings, lambda: now, purpose=purpose, authority=view.authority
+    if settings.owner_runtime.mode != "ENABLED":
+        raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
+    owner_authority._lock_current(store)
+    # The same native row projection as the conversation guard. Every source
+    # invocation, including each writer call, still takes fresh original rows.
+    loaded = store.one(
+        "SELECT (SELECT to_jsonb(authority_row) FROM ("
+        + owner_authority._current_query() + ") authority_row) AS authority, "
+        "(SELECT to_jsonb(source_row) FROM (" + _SOURCE_SQL + ") source_row) AS source",
+        (owner_authority.CURRENT, owner_authority.GENERATION, owner_authority.MODE, event_id),
+    )
+    view = owner_authority._checked_current(
+        store, settings, lambda: now, loaded["authority"],
+        purpose=purpose, authority=view.authority,
     )
     return _checked_source(store, settings, view, event_id, now,
-                           allow_commands=allow_commands, history=history, purpose=purpose)
+        allow_commands=allow_commands, history=history, purpose=purpose, _loaded=loaded["source"])
 
 
 def _checked_source(store, settings, view, event_id, now, *, allow_commands=False, history=False,
