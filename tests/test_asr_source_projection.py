@@ -31,6 +31,7 @@ def test_asr_source_display_keeps_original_quote_and_pins_unchanged_fact(core, e
 
     monkeypatch.setattr(refs, "read", read)
     if entry == "reply":
+        core.settings.chat_time_labels = True
         facts = core.memory_context.reply_facts(core.settings, core.clock, "取凭条哪天", [original],
                                                allowed_ids=None, include_standing=False)
         selection = context_selection.References()
@@ -38,6 +39,11 @@ def test_asr_source_display_keeps_original_quote_and_pins_unchanged_fact(core, e
                                             chat=True, paused=False)
         content = selection.messages[0]["content"][len(MEMORY_HEADING):]
         displayed = json.loads(content)["memories"][0]
+        assert "happened_on" not in displayed
+        from companion.time_context import day
+
+        source = core.store.one('SELECT occurred_at FROM events WHERE event_id=%s', ("evt_test_1",))
+        assert displayed["source_message_on"] == day(source["occurred_at"], core.settings.timezone)
         proof = facts[3]
     else:
         result = core.memory_context.recall("8月7日", core.clock())
@@ -79,3 +85,17 @@ def test_long_single_line_asr_retains_the_selected_detail_within_fact_capacity(c
     displayed = next(row for row in result["facts"] if row["memory_id"] == key)
     assert "桐桥四号" in displayed["content"]
     assert len(displayed["content"]) <= 500
+
+
+def test_recalled_asr_retains_reply_as_interpretation_beside_exact_original():
+    from companion.turn_recall import _data
+
+    original = "八月七日下午，在风亭见。"
+    reply = "我猜是枫汀，时间可能听错了。"
+    rows = [{"user_text": "补一份资料", "reply_text": reply}]
+    notes = [[{"kind": "机器转写", "text": original, "excerpt": False}]]
+    shown = _data(rows, notes, [0], "Asia/Shanghai")["turns"][0]
+    assert shown["attachments_read"][0]["text"] == original
+    assert shown["prior_assistant_interpretation"] == reply and "you_replied" not in shown
+    ordinary = _data(rows, [[]], [0], "Asia/Shanghai")["turns"][0]
+    assert ordinary["you_replied"] == reply

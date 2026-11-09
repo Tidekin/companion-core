@@ -538,7 +538,8 @@ class MemoryContext:
                 "evidence_ids")},
                 **({"origin": h["origin"]} if h.get("origin") else {}),
                 **relations.get(h["memory_id"], {}),
-                **({"happened_on": happened}
+                **({("source_message_on" if h.get("origin") == "event_observed"
+                     else "happened_on"): happened}
                    if chat and settings.chat_time_labels
                    and (happened := self._memory_happened_on(h, settings.timezone)) else {})}
             reference = selection.add(MEMORY_HEADING,
