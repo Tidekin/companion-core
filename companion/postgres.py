@@ -125,15 +125,19 @@ class Session:
         self._deadline = None
         self._timeout_limit = 0
 
+    def _remaining_timeout(self, timeout_ms=None):
+        if self._deadline is None:
+            return None
+        remaining = math.ceil((self._deadline - time.monotonic()) * 1000)
+        if remaining <= 0:
+            raise psycopg.errors.QueryCanceled("local SQL deadline exceeded")
+        if self._timeout_limit:
+            remaining = min(remaining, self._timeout_limit)
+        return min(remaining, timeout_ms) if timeout_ms is not None else remaining
+
     def _execute(self, cursor, statement, parameters=(), *, timeout_ms=None):
-        if self._deadline is not None:
-            remaining = math.ceil((self._deadline - time.monotonic()) * 1000)
-            if remaining <= 0:
-                raise psycopg.errors.QueryCanceled("local SQL deadline exceeded")
-            if self._timeout_limit:
-                remaining = min(remaining, self._timeout_limit)
-            if timeout_ms is not None:
-                remaining = min(remaining, timeout_ms)
+        remaining = self._remaining_timeout(timeout_ms)
+        if remaining is not None:
             # SET TRANSACTION must precede every SELECT in a fresh transaction.
             if not (isinstance(statement, str) and statement.startswith("SET TRANSACTION ")):
                 cursor.execute("SELECT set_config('statement_timeout',%s,false)",
@@ -247,6 +251,7 @@ class Session:
         previous = self._connection.isolation_level, self._connection.read_only
         try:
             if readonly:
+                self._remaining_timeout()
                 # Psycopg includes these public characteristics in native BEGIN,
                 # avoiding a separate SET TRANSACTION send for every read scope.
                 self._connection.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
@@ -254,6 +259,8 @@ class Session:
             with self._connection.transaction(force_rollback=rollback):
                 self._ledger_locks = {}
                 try:
+                    if readonly:
+                        self._remaining_timeout()
                     yield self
                 finally:
                     self._ledger_locks = None

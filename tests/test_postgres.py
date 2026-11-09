@@ -297,6 +297,17 @@ def test_bounded_read_cannot_extend_an_existing_shorter_server_timeout(database,
             assert reader.one("SELECT 1 AS ready") == {"ready": 1}
 
 
+def test_read_transaction_refuses_an_expired_scope_before_any_business_query(database):
+    with database.session() as reader:
+        with reader.deadline(.01):
+            sleep(.02)
+            with pytest.raises(psycopg.errors.QueryCanceled):
+                with reader.transaction(readonly=True):
+                    pass
+        assert not reader.in_transaction
+        assert reader.one("SELECT 1 AS ready") == {"ready": 1}
+
+
 def test_bounded_read_preserves_parameter_bytes_arrays_and_the_result_limit(database):
     value = "'; SELECT pg_sleep(100); -- %s \\ 中文"
     blob = b"\x00\xff';--"
