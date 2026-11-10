@@ -14,14 +14,7 @@ from companion.model import ModelAdmission, ModelClient, ModelResponseError, mod
 from companion.model_stream import consume
 from companion.paid_budget import sha
 from tests.conftest import run
-
-
-def chunk(delta=None, *, finish=None, usage=None):
-    data = {"choices": [] if usage is not None else [{
-        "index": 0, "delta": delta or {}, "finish_reason": finish}]}
-    if usage is not None:
-        data["usage"] = usage
-    return ("data: " + json.dumps(data, ensure_ascii=False) + "\r\n\r\n").encode()
+from tests.support.model_stream import chunk
 
 
 class Chunks(httpx.AsyncByteStream):

@@ -11,7 +11,7 @@ import httpx
 
 from tests.conftest import Clock
 from tests.sdk_reader_fixture import worker_for
-from tests.test_model_stream import chunk
+from tests.support.model_stream import chunk
 
 with open(sys.argv[1], 'rb') as source:
     settings, now, job_id, directory = pickle.load(source)

@@ -13,11 +13,11 @@ from companion import native_stream, owner_authority
 from companion.owner_authority_protocol import AuthorityStop
 from tests.conftest import run
 from tests.sdk_reader_fixture import worker_for
+from tests.support.model_stream import chunk
+from tests.support.native_chat import enroll, packet
+from tests.support.native_chat_tls import serve
 from tests.support.owner_console import client as client
 from tests.support.owner_input import captured
-from tests.test_model_stream import chunk
-from tests.test_native_chat import enroll, packet
-from tests.test_native_chat_wire import serve
 
 
 @pytest.mark.parametrize('outcome', ['complete', 'eof', 'revoke', 'lease', 'erase'])
