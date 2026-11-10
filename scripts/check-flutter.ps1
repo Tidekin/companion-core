@@ -6,6 +6,11 @@ $project=Join-Path $taskRoot 'clients/chat'
 Push-Location -LiteralPath $project
 try {
     & "$PSScriptRoot/flutter.ps1" -Tool flutter -ToolArguments @('pub','get','--enforce-lockfile')
+    if($LASTEXITCODE -and (Test-Path '.flutter-plugins-dependencies')) {
+        # pub get writes plugin metadata before failing on restricted Windows links.
+        & "$PSScriptRoot/prepare-flutter-links.ps1"
+        & "$PSScriptRoot/flutter.ps1" -Tool flutter -ToolArguments @('pub','get','--enforce-lockfile')
+    }
     if($LASTEXITCODE) { throw 'Flutter dependencies failed' }
     & "$PSScriptRoot/prepare-flutter-links.ps1"
     & "$PSScriptRoot/flutter.ps1" -Tool dart -ToolArguments @('format','--output=none','--set-exit-if-changed','lib','test')
