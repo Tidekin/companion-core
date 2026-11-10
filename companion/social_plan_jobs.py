@@ -127,7 +127,8 @@ def claim(module, worker_id):
             'j.context_tracked AS context_tracked, j.authority_json AS authority_json, r.plan_id '
             'AS plan_id FROM jobs AS j JOIN social_autonomy_jobs AS r ON j.job_id = r.job_id WHERE '
             "j.kind = %s AND j.state IN ('QUEUED', 'RETRY_WAIT') AND (j.next_attempt_at IS NULL OR "
-            'j.next_attempt_at <= %s) ORDER BY j.record_sequence NULLS FIRST LIMIT 1', (KIND, now))
+            'j.next_attempt_at <= %s) ORDER BY j.record_sequence NULLS FIRST LIMIT 1 '
+            'FOR UPDATE OF j SKIP LOCKED', (KIND, now))
         if not row:
             return None
         try:
