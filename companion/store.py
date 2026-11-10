@@ -14,7 +14,7 @@ import psycopg
 from psycopg import sql
 
 from companion.contracts import CoreError
-from companion.postgres import BUDGET_LEDGER, TRANSACTION_WRITE_COUNT, Database
+from companion.postgres import BUDGET_LEDGER, ERASURE_LEDGER, TRANSACTION_WRITE_COUNT, Database
 from companion.postgres import migrate as migrate
 
 
@@ -207,6 +207,11 @@ class Store:
             with self._session.transaction(rollback=rollback):
                 self.execute("SET LOCAL lock_timeout='5s'")
                 self._control_lock(control_write)
+                if delivery_preflight:
+                    # These checks already need both native ledger locks. Acquire
+                    # them before entering business code so contention retains the
+                    # existing no-business-started BUSY receipt and original lease.
+                    self._session.ledger_locks(((BUDGET_LEDGER, False), (ERASURE_LEDGER, True)))
                 locked = time.perf_counter()
                 self._control_write = control_write
                 self._scope += 1

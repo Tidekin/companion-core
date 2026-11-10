@@ -1,4 +1,4 @@
-"""Both pre-dispatch checks contend on the native privacy row over real HTTP."""
+"""Both pre-dispatch checks contend on native control and ledger locks over HTTP."""
 
 import json
 
@@ -8,6 +8,7 @@ import pytest
 from pydantic import SecretStr
 
 from companion.config import SegmentedReplyConfig
+from companion.postgres import BUDGET_LEDGER, ERASURE_LEDGER
 from companion.transport import recover_deliveries
 from companion_delivery_protocol.preflight import BUSY
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
@@ -19,7 +20,10 @@ from tests.support.evaluation_process import process_config
 
 @pytest.mark.parametrize("stage", ["begin-send", "send-check"])
 @pytest.mark.parametrize("expire", [False, True])
-def test_busy_preflight_preserves_single_dispatch_and_next_input(core, tmp_path, stage, expire):
+@pytest.mark.parametrize("lock_domain", ["control", "budget", "erasure"])
+def test_busy_preflight_preserves_single_dispatch_and_next_input(
+    core, tmp_path, stage, expire, lock_domain,
+):
     number = 0
 
     async def source(ws):
@@ -68,14 +72,28 @@ def test_busy_preflight_preserves_single_dispatch_and_next_input(core, tmp_path,
             async def lock(request):
                 if request.url.path.endswith("/" + stage):
                     if not calls:
-                        writer.execute(
-                            "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
+                        if lock_domain == "control":
+                            writer.execute(
+                                "SELECT 1 FROM runtime_meta WHERE key='privacy_epoch' FOR UPDATE")
+                        else:
+                            writer.execute(
+                                "SELECT pg_advisory_xact_lock(hashtext(current_schema()),%s)",
+                                (BUDGET_LEDGER if lock_domain == "budget" else ERASURE_LEDGER,),
+                            )
                     calls.append(json.loads(request.content))
 
             async def observe(response):
                 if response.request.url.path.endswith("/" + stage) and response.status_code == 503:
                     await response.aread()
                     busy.append(response.json())
+                    assert not sends
+                    assert active.attempts() == {"RESERVED": 1}
+                    first = core.store.one(
+                        'SELECT state,attempt_count FROM outbox ORDER BY segment_index LIMIT 1')
+                    assert first == {
+                        "state": "LEASED" if stage == "begin-send" else "SENDING",
+                        "attempt_count": int(stage == "send-check"),
+                    }
                     writer.rollback()
                     if expire:
                         core.clock.advance(core.settings.lease_seconds + 1)
