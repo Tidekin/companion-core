@@ -53,7 +53,6 @@ def node(tmp_path):
         heartbeat_seconds=0.05,
         request_timeout_seconds=0.3,
         execution_timeout_seconds=5,
-        startup_timeout_seconds=5,
     )
     return config, key, tmp_path / "child-receipts.jsonl"
 
