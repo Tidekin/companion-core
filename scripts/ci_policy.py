@@ -65,7 +65,7 @@ CRITICAL_FILES = {
 }
 CRITICAL_DIRS = (".github/", "contracts/", "migrations/", "db/", "deploy/",
                  "companion_onebot_bridge/", "companion_meme_protocol/", "companion_voice_node/",
-                 "companion_delivery_protocol/",
+                 "companion_delivery_protocol/", "companion_chat_client/",
                  "astrbot_plugin_companion_bridge/")
 
 

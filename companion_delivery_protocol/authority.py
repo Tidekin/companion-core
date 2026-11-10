@@ -50,7 +50,8 @@ def validate_authority_ref(value):
 
 # A live WebSocket frame, or an owner message read back from the protocol's history
 # after a Bridge restart left the socket closed for a few seconds.
-CAPTURE_KINDS = frozenset({"authenticated_onebot_ws", "onebot_history_backfill"})
+CAPTURE_KINDS = frozenset({"authenticated_onebot_ws", "onebot_history_backfill",
+                           "authenticated_native_device"})
 
 
 def capture_signing_payload(value):

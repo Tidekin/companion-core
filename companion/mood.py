@@ -233,7 +233,7 @@ class MoodService:
         if not MemoryProjections._live_lineage(rows, sources):
             return None
         for row in rows:
-            if row["source"] == "qq.onebot" and not (
+            if row["source"] in {"qq.onebot", "native.chat"} and not (
                 source_check(row["event_id"])
                 if source_check is not None
                 else source_allowed(
@@ -330,7 +330,7 @@ class MoodService:
             (
                 (
                     "SELECT e.event_id,e.occurred_at AS at,'feedback' AS "
-                    "kind FROM events e WHERE e.source='qq.onebot' AND "
+                    "kind FROM events e WHERE e.source IN ('qq.onebot','native.chat') AND "
                     "e.actor_id='owner' AND e.redacted=0 AND "
                     "e.event_type='message.received' AND e.ingested_at>%s "
                     'AND e.ingested_at<=%s AND e.occurred_at>%s AND '
@@ -447,7 +447,7 @@ class MoodService:
                     preceding = s.one(
                         (
                             'SELECT event_id FROM events WHERE conversation_id = %s '
-                            "AND source = 'qq.onebot' AND actor_id = 'owner' AND "
+                            "AND source IN ('qq.onebot','native.chat') AND actor_id = 'owner' AND "
                             "event_type IN ('message.received', "
                             "'message.media_received') AND record_sequence < "
                             '(SELECT record_sequence AS rowid FROM events WHERE '

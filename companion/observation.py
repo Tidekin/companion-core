@@ -507,7 +507,8 @@ class ObservationService:
             if len(observation.source_event_ids) != 1:
                 raise CoreError("OWNER_SHARED_IMAGE_REQUIRED", 403)
             event = self.store.one(
-                "SELECT body_json FROM events WHERE event_id = %s AND source = 'qq.onebot' AND "
+                "SELECT body_json FROM events WHERE event_id = %s AND source IN "
+                "('qq.onebot','native.chat') AND "
                 "actor_id = 'owner' AND redacted = 0",
                 (observation.source_event_ids[0],),
             )
@@ -521,7 +522,8 @@ class ObservationService:
                 raise CoreError("OWNER_SHARED_FILE_REQUIRED", 403)
             event = self.store.one(
                 "SELECT e.body_json FROM events AS e JOIN conversations AS c USING "
-                "(conversation_id) WHERE e.event_id = %s AND e.source = 'qq.onebot' AND e.actor_id "
+                "(conversation_id) WHERE e.event_id = %s AND e.source IN "
+                "('qq.onebot','native.chat') AND e.actor_id "
                 "= 'owner' AND e.redacted = 0 AND c.scope = 'private' AND c.owner_actor_id = "
                 "'owner'",
                 (observation.source_event_ids[0],),

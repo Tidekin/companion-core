@@ -89,7 +89,7 @@ class MemorySources:
                     'SELECT DISTINCT e.event_id FROM memory_evidence AS copy JOIN memories AS m '
                     'USING (memory_id) JOIN memory_evidence AS v USING (memory_id) JOIN events AS '
                     'e ON e.event_id = v.event_id WHERE copy.event_id = %s AND NOT '
-                    "m.supersedes_memory_id IS NULL AND e.source = 'qq.onebot'",
+                    "m.supersedes_memory_id IS NULL AND e.source IN ('qq.onebot','native.chat')",
                     (row["event_id"],),
                 )
                 for candidate in candidates:
@@ -169,7 +169,8 @@ class MemorySources:
             for memory in memories:
                 candidates = self.store.rows(
                     'SELECT DISTINCT e.event_id FROM memory_evidence AS v JOIN events AS e ON '
-                    "e.event_id = v.event_id WHERE v.memory_id = %s AND e.source = 'qq.onebot' "
+                    "e.event_id = v.event_id WHERE v.memory_id = %s AND e.source IN "
+                    "('qq.onebot','native.chat') "
                     'LIMIT %s', (memory["memory_id"], EVIDENCE_ROOTS + 1))
                 if len(candidates) > EVIDENCE_ROOTS:
                     refuse("evidence_roots")
@@ -280,7 +281,8 @@ class MemoryContext:
                             work.mark(error.reason)
                         return False
                     availability[cache_key] = bool(lineage) and all(
-                        not authority or row["source"] != "qq.onebot" or source_allowed(
+                        not authority or row["source"] not in {"qq.onebot", "native.chat"}
+                        or source_allowed(
                             self.store, settings, clock, row["event_id"], purpose)
                         for row in lineage)
                 if not availability[cache_key]:
@@ -544,7 +546,8 @@ class MemoryContext:
                             'SELECT 1 FROM events e JOIN conversations c '
                             'USING(conversation_id) WHERE e.event_id=%s AND '
                             "e.conversation_id=%s AND e.actor_id='owner' AND "
-                            "e.source='qq.onebot' AND e.privacy_scope='private' AND"
+                            "e.source IN ('qq.onebot','native.chat') AND "
+                            "e.privacy_scope='private' AND"
                             " c.scope='private' AND c.owner_actor_id='owner' AND "
                             'e.redacted=0 AND e.occurred_at>=%s AND '
                             'e.occurred_at<=%s AND e.record_sequence<(SELECT '
@@ -696,7 +699,8 @@ class MemoryContext:
             )):
                 body = json.loads(event["body_json"])
                 text = body["text"]
-                if (event["source"] != "qq.onebot" or event["event_type"] not in {
+                if (event["source"] not in {"qq.onebot", "native.chat"}
+                        or event["event_type"] not in {
                         "message.received", "message.media_received"}
                     or not text.strip()
                     or body.get("control_command") or body.get("diary_command")

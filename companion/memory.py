@@ -890,7 +890,7 @@ class Memory:
                     or source["redacted"]
                     or source["actor_id"] != "owner"
                     or source["privacy_scope"] != "private"
-                    or source["source"] != "qq.onebot"
+                    or source["source"] not in {"qq.onebot", "native.chat"}
                     or source["event_type"] != "message.received"
                     or command != operation.get(decision)
                     or arguments.split(maxsplit=1) != expected
@@ -1096,7 +1096,7 @@ class Memory:
                 ))
                 or any(json.loads(current["body_json"]).get(key)
                        != json.loads(event["body_json"]).get(key) for key in ("text", "media"))
-                or current["source"] != "qq.onebot"
+                or current["source"] not in {"qq.onebot", "native.chat"}
                 or current["event_type"] not in {"message.received", "message.media_received"}):
                 raise CoreError("EPISODE_SOURCE_CHANGED", 409)
             refreshed.append(current)

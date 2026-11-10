@@ -1,6 +1,8 @@
 # Companion Core
 
-面向单一主人 QQ 私聊的虚拟朋友核心。Python 模块化单体，原生 OneBot Bridge 负责消息传输；记忆和表达风格来自有证据的互动，初始人格为空。
+面向单一主人私密聊天的虚拟朋友核心。Python 模块化单体，支持签名设备的 Windows 文本客户端与原生 OneBot Bridge；记忆和表达风格来自有证据的互动，初始人格为空。
+
+Windows 原生文本 MVP 的设备登记、启动和验收见 [原生聊天说明](docs/native-chat-mvp.md)。它通过 Core 的真实原生入口聊天；流式、Android 和外部 Bot 连接器按后续切片交付。
 
 源码仓库：[Tidekin/companion-core](https://github.com/Tidekin/companion-core)。
 
@@ -9,10 +11,10 @@
 ## 能力与边界
 
 - 主人身份、私聊范围、机器人回声校验；入站事务、幂等冲突检测、按会话 FIFO。
-- Worker 限次重试；发送使用 `LEASED → SENDING → SENT/DELIVERY_UNCERTAIN`。不确定消息不自动重发，后续聊天可继续。
+- Worker 限次重试；QQ 发送使用 `LEASED → SENDING → SENT/DELIVERY_UNCERTAIN`。不确定消息不自动重发，后续聊天可继续。原生回复以持久化可读取为交付点。
 - DeepSeek Flash/OpenAI-compatible 模型适配；保存真实输入、输出、缓存 Token 与按冻结费率计算的费用，缺少用量时保留 UNKNOWN 提示。
 - 主动私聊有冷却、每日次数、免打扰、暂停指令；不伪造现实生活或浏览记录。
-- M1：批量记忆候选、逐字证据核验、语义冲突核对、确认/纠正/忘记、中文 FTS5 与本地语义混合检索、相关性筛选、空白起步的自我观察。
+- M1：批量记忆候选、逐字证据核验、语义冲突核对、确认/纠正/忘记、中文词法与本地语义混合检索、相关性筛选、空白起步的自我观察。
 - 加密热备份；恢复前强制回放独立遗忘日志；隐私变更期间的旧模型结果被丢弃。
 - M1.5：独立日记 Worker、自然日调度、真实来源核验、私人保存、主人查看/修订/删除、用量记录和完整遗忘回放。
 - QQ 协议端通过原生 OneBot v11 Bridge；批次隔离消息 ID，回滚禁止复用旧批次。旧 AstrBot 入口已退休，配置、状态核对与会话迁移边界见部署文档。
@@ -21,7 +23,7 @@ M0/M1 普通聊天不进入工具执行循环。v0.5 的 DSH、Windows 与媒体
 
 ## 本地启动
 
-需要 Python 3.11+（已验证 3.12）、支持 FTS5 trigram 的 SQLite，以及 `uv`。
+需要 Python 3.11+（已验证 3.12）、PostgreSQL 16+ 和 `uv`。结构迁移与旧备份导入见 [PostgreSQL 说明](docs/postgresql-migration.md)。
 
 ```powershell
 # 在仓库根目录执行。把缓存和临时数据限制在工作区。

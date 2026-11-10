@@ -227,10 +227,13 @@ def _material(store, row, job, view, requests, context_hashes, *, meme_binding=N
         'events.redacted AS redacted, events.memory_processed AS memory_processed, '
         'events.reply_revision AS reply_revision FROM events AS events WHERE events.event_id = '
         '%s', (row["origin_event_id"],))
+    actions = ({"qq.private.reply", "qq.private.poke"} if job["kind"] == "poke"
+               else {"qq.private.reply", "qq.private.proactive"})
+    if event and event["source"] == "native.chat":
+        actions = {"native.private.reply", "native.private.proactive"}
     if (not event or row["origin_event_id"] != job["event_id"]
         or row["conversation_id"] != job["conversation_id"]
-        or row["action_type"] not in ({"qq.private.reply", "qq.private.poke"}
-            if job["kind"] == "poke" else {"qq.private.reply", "qq.private.proactive"})
+        or row["action_type"] not in actions
         or row["content_sha256"] != paid_budget.sha(json.loads(row["content_json"]))):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     return {"authority": view.authority.as_dict(), "job_id": job["job_id"],
@@ -294,7 +297,8 @@ def _failure_material(store, row, job, view):
     content = {"text": failure_text(job["last_error_code"])}
     if (not event or row["origin_event_id"] != job["event_id"]
             or row["conversation_id"] != job["conversation_id"]
-            or row["action_type"] != "qq.private.reply"
+            or row["action_type"] != (
+                "native.private.reply" if event["source"] == "native.chat" else "qq.private.reply")
             or json.loads(row["content_json"]) != content
             or row["content_sha256"] != paid_budget.sha(content)):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
@@ -498,7 +502,8 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
         raise CoreError("PROACTIVE_SEND_PAUSED", 409)
     if row["reply_group_id"]:
         now = clock()
-        check_segment_ready(store, message_id, now, group=group)
+        if not row["action_type"].startswith("native."):
+            check_segment_ready(store, message_id, now, group=group)
         state = cumulative.check(store, settings, now)
         if state["policy"]:
             group = group if group is not None else reply_group(store, message_id)

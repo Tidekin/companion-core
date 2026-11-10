@@ -16,6 +16,10 @@ from companion.privacy import epoch
 from companion.qq_rich import input_digest
 from companion.store import encode
 from companion_delivery_protocol.authority import capture_signing_payload
+from companion_delivery_protocol.native_chat import KIND as NATIVE_KIND
+from companion_delivery_protocol.native_chat import SESSION as NATIVE_SESSION
+from companion_delivery_protocol.native_chat import SOURCE as NATIVE_SOURCE
+from companion_delivery_protocol.native_chat import source_identity
 
 INPUT = "owner_input:"
 
@@ -31,23 +35,26 @@ def _verify(store, settings, value, evidence):
     try:
         capture = OwnerCapture.model_validate(value)
         view = evidence(capture.authority)
-        identity = view.policy.capture
+        native = capture.kind == NATIVE_KIND
+        identity = (view.policy.native_devices.get(source_identity(capture.source_event_id)[0])
+                    if native else view.policy.capture)
         if identity is None:
             raise ValueError("capture identity absent")
         signed = capture.model_dump(mode="json", exclude={"signature"})
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(identity.public_key)).verify(
             bytes.fromhex(capture.signature), capture_signing_payload(signed)
         )
-        prefix = (
+        prefix = ("native:" + source_identity(capture.source_event_id)[0] + ":" if native else (
             f"{settings.bot_qq_id}:onebot-direct:FriendMessage:{view.policy.owner_qq_id}:"
             f"epoch:{identity.protocol_epoch}:"
-        )
+        ))
         if (
             capture.authority != view.authority.as_dict()
             or capture.identity_sha256 != identity.identity_sha256
             or capture.protocol_epoch != identity.protocol_epoch
             or not capture.source_event_id.startswith(prefix)
-            or not re.fullmatch(r"-?[1-9][0-9]{0,19}", capture.source_event_id[len(prefix) :])
+            or not re.fullmatch(r"[a-f0-9]{32}" if native else r"-?[1-9][0-9]{0,19}",
+                                capture.source_event_id[len(prefix) :])
             or capture.event_id
             != "evt_" + hashlib.sha256(capture.source_event_id.encode()).hexdigest()
             or not datetime.fromisoformat(view.created_at) <= capture.occurred_at
@@ -140,6 +147,7 @@ def check_input(store, settings, clock, event):
     try:
         value = json.loads(receipt["value"]) if receipt else {}
         capture, _ = verify(store, settings, value["capture"])
+        native = event.source == NATIVE_SOURCE
         body = event.payload.model_dump(mode="json")
         if (
             capture.authority != view.authority.as_dict()
@@ -152,11 +160,12 @@ def check_input(store, settings, clock, event):
             or value.get("input_sha256") != capture.input_sha256
             or type(value.get("privacy_epoch")) is not int
             or not 0 <= value["privacy_epoch"] <= epoch(store)
-            or event.source != "qq.onebot"
+            or (capture.kind == NATIVE_KIND) != native
             or event.event_type != "message.received"
-            or event.actor.platform_user_id != view.policy.owner_qq_id
+            or event.actor.platform_user_id != ("owner" if native else view.policy.owner_qq_id)
             or event.conversation.platform_session_key
-            != ("onebot-direct:FriendMessage:" + view.policy.owner_qq_id)
+            != (NATIVE_SESSION if native else "onebot-direct:FriendMessage:" +
+                view.policy.owner_qq_id)
             or body.get("media")
             or len(body["text"]) > view.policy.max_input_chars
             or not (body["text"].strip() or body.get("rich"))
@@ -298,8 +307,9 @@ def _source(
             not event
             or event["redacted"]
             or not isinstance(body, dict)
-            or (event["source"], event["actor_id"], event["scope"], event["owner_actor_id"])
-            != ("qq.onebot", "owner", "private", "owner")
+            or event["source"] not in {"qq.onebot", NATIVE_SOURCE}
+            or (event["actor_id"], event["scope"], event["owner_actor_id"])
+            != ("owner", "private", "owner")
             or event["privacy_scope"] != "private"
             or event["event_type"] != "message.received"
             or body.get("media")
@@ -320,6 +330,8 @@ def _source(
             raise ValueError("source changed")
         capture, original = verify_capture(value["capture"])
         if (
+            (capture.kind == NATIVE_KIND) != (event["source"] == NATIVE_SOURCE)
+            or
             value.get("authority") != original.authority.as_dict()
             or capture.event_id != event_id
             or capture.input_sha256 != value["input_sha256"]

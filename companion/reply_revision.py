@@ -11,7 +11,7 @@ SUPERSEDED = "REPLY_SUPERSEDED"
 SOURCE_RECALLED = "REPLY_SOURCE_RECALLED"
 CANCELLED = "REPLY_CANCELLED"
 OWNER_INPUT = (
-    "source='qq.onebot' AND actor_id='owner' AND privacy_scope='private' "
+    "source IN ('qq.onebot','native.chat') AND actor_id='owner' AND privacy_scope='private' "
     "AND event_type IN ('message.received','message.media_received')"
 )
 
@@ -215,7 +215,7 @@ def advance(store, conversation_id, event_id, now):
             "redacted, events.memory_processed AS memory_processed, "
             "events.reply_revision AS reply_revision FROM events AS "
             "events WHERE events.event_id = %s AND events.conversation_id"
-            " = %s AND events.source = 'qq.onebot' AND events.actor_id = "
+            " = %s AND events.source IN ('qq.onebot','native.chat') AND events.actor_id = "
             "'owner' AND events.privacy_scope = 'private' AND "
             "events.redacted = 0"
         ),
