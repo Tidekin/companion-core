@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ".github/workflows/ci.yml"
 RECORD = "verified-tree.json"
 REQUIRED_JOBS = {
-    "preflight", "quality", "ci", "container", "browser-reader", "plugin-native",
+    "preflight", "quality", "ci", "container", "browser-reader", "plugin-native", "flutter-client",
     *(f"test ({platform}-latest, {shard})" for platform in ("ubuntu", "windows")
       for shard in range(4)),
 }
