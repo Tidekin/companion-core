@@ -52,9 +52,12 @@ def test_fixed_definitions_and_protocol_source_types_cannot_enable_third_platfor
             adapter.validate_python("third-platform")
     with pytest.raises(ValidationError):
         ObservationAdapterConfig(source="third-platform", token="synthetic")
-    # Existing non-content observation sources and QQ v1 remain separate closed contracts.
+    # Observation sources and the two approved chat inputs remain separate closed contracts.
     assert TypeAdapter(ObservationSource).validate_python("qq_image") == "qq_image"
-    assert InboundEvent.model_json_schema()["properties"]["source"]["const"] == "qq.onebot"
+    assert InboundEvent.model_json_schema()["properties"]["source"]["enum"] == [
+        "qq.onebot", "native.chat"]
+    with pytest.raises(ValidationError):
+        TypeAdapter(InboundEvent.model_fields["source"].annotation).validate_python("third-platform")
 
 
 @pytest.mark.parametrize(
