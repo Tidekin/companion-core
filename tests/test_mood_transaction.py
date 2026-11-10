@@ -74,7 +74,7 @@ def test_mood_batches_authority_but_validates_every_source(core, tmp_path, monke
             assert len(calls) <= 4
         else:
             assert len(calls) <= 2 * (3 + 2 * 6)
-        assert len(recalls) in ({6, 12} if not same_snapshot else {6})
+        assert len(recalls) in (range(6, 13) if not same_snapshot else {6})
         assert actual == expected
         assert not core.store.in_transaction
 
@@ -187,5 +187,29 @@ def test_mood_rechecks_an_external_source_change_at_publication(core, tmp_path, 
             with pytest.raises(CoreError), core.store.transaction():
                 core.mood.revalidate(expected)
         assert changed
+
+    run(native_mood(core, tmp_path, check))
+
+
+def test_mood_snapshot_change_discards_partial_reads_before_one_native_reread(
+    core, tmp_path, monkeypatch,
+):
+    def check(expected):
+        native = owner_input.input_recall.require_not_recalled
+        recalls = []
+        with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
+            def recall(*args, **kwargs):
+                native(*args, **kwargs)
+                recalls.append(1)
+                if len(recalls) == 1:
+                    other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
+                                  (owner_authority.MODE,))
+
+            monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
+            with core.store.transaction():
+                actual = core.mood.snapshot()
+        assert actual == expected
+        # Six original source checks, plus at most the first discarded source.
+        assert len(recalls) in {6, 7}
 
     run(native_mood(core, tmp_path, check))

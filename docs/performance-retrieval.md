@@ -263,8 +263,9 @@ database instance and actual transaction write count before each reuse.
 
 The original final authority check still validates the accounting journal, erasure state,
 STOP and time conditions. An own write or transaction change rejects the collected result.
-A changed external snapshot discards it and rereads once using the original per-source
-validators. PostgreSQL snapshots also advance for unrelated transactions, so a busy cluster
+A changed external snapshot immediately abandons the partial pass and rereads once using
+the original per-source validators. PostgreSQL snapshots also advance for unrelated
+transactions, so a busy cluster
 can lose this optimization. The reuse guard expires before the call returns, and asynchronous
 operations are rejected; later calls and checks after an await acquire a fresh view.
 

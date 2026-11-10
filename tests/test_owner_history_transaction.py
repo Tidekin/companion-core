@@ -103,7 +103,7 @@ def test_history_reuses_custody_inside_one_owned_write_transaction(
             actual = owner_input.history_sources(core.store, core.settings, core.clock, job)
             assert len(calls) == 2
         assert actual == expected
-        assert len(recalls) in ({3, 6} if not same_snapshot else {3})
+        assert len(recalls) in (range(3, 7) if not same_snapshot else {3})
         assert not core.store.in_transaction
 
     run(native_history(core, tmp_path, check))
@@ -246,7 +246,7 @@ def test_history_rechecks_after_an_unrelated_native_commit(core, tmp_path, monke
             with core.store.transaction():
                 assert owner_input.history_sources(
                     core.store, core.settings, core.clock, job) == expected
-        assert len(recalls) == 2 * len(expected)
+        assert len(recalls) in {len(expected), len(expected) + 1}
 
     run(native_history(core, tmp_path, check))
 

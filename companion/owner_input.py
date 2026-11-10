@@ -388,18 +388,33 @@ def batch_sources(store, operation):
     scope, before = store.validation_scope, store.change_token()
     active = True
 
+    class SnapshotChanged(Exception):
+        pass
+
     def unchanged():
-        return (active and scope is not None and store.validation_scope == scope
-                and (store.in_read_snapshot or store.change_token() == before))
+        if not active or scope is None or store.validation_scope != scope:
+            return False
+        if not store.in_read_snapshot:
+            current = store.change_token()
+            if current["writes"] != before["writes"]:
+                return False
+            if current != before:
+                # Stop the partial pass before doing all remaining source checks.
+                raise SnapshotChanged
+        return True
 
     try:
-        result = run(unchanged if scope is not None else None)
+        discarded = False
+        try:
+            result = run(unchanged if scope is not None else None)
+        except SnapshotChanged:
+            discarded = True
         if not store.in_transaction or store.validation_scope != scope:
             raise CoreError("PRIVACY_CHANGED", 409)
         after = store.change_token()
         if after["writes"] != before["writes"]:
             raise CoreError("PRIVACY_CHANGED", 409)
-        if scope is not None and after != before:
+        if scope is not None and (discarded or after != before):
             # READ COMMITTED may observe an unrelated writer. Discard the batched
             # result and read again without reusing authority or source evidence.
             active = False
