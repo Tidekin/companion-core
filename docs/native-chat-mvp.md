@@ -1,8 +1,8 @@
 # 原生文本聊天最小版本
 
-状态：原生签名设备合同已由主人确认；当前切片实现 Windows 文本聊天。Core 基线为 PostgreSQL 主线 a3e51241，新增结构修订 pg0003_native_chat。
+状态：原生签名设备合同已由主人确认；当前切片采用 Flutter 实现 Android / Windows 共用的多 Bot 私聊客户端。Core 基线为 PostgreSQL 主线 a3e51241，新增结构修订 pg0003_native_chat。
 
-首期先交付 Windows 桌面客户端：连接自己的 Core、登录设备、发送文字、沿用原有记忆与人格、读取持久回复和历史、断网后恢复。Android、多端完善、流式和外部 Bot 兼容随后分项交付。Core 共同性能修复只做一轮关键改动，不以全面优化为客户端开发的前置条件。
+首期交付原生文本客户端：连接自己的 Core、登录设备、发送文字、沿用原有记忆与人格、读取持久回复和历史、断网后恢复。真机与后台能力、多端完善、流式和外部 Bot 兼容随后分项交付。Core 共同性能修复只做一轮关键改动，不以全面优化为客户端开发的前置条件。
 
 ## 复用现有授权的原生输入合同
 
@@ -31,13 +31,21 @@
 
 最小读取接口支持有界历史分页、按原提交查询状态和最终回复、删除标记。客户端重连查询已有任务与历史，不为补齐界面重新生成。原生聊天与现有 QQ 聊天的历史合并作为显式后续迁移选择。
 
-## Windows 客户端
+## Flutter 双端客户端
 
-采用标准库 Tk 桌面界面完成首个客户端，HTTP 使用项目已有 httpx，离线记录使用 SQLite。网络在后台线程处理，界面持续显示连接、待发送和任务状态；已入队文本保留稳定身份。
+采用 Flutter 3.47.9 / Dart 3.13.7，Riverpod 管理连接与界面状态、Drift/SQLite 保存本地记录、Dio 调用 Core HTTPS、go_router 处理宽屏双栏和手机会话导航。`clients/chat` 与 Python 服务端分别构建、分发。模型适配器继续只负责模型调用。
 
-设备签名密钥通过 Windows DPAPI 保护；模型密钥、Bridge 密钥和主人控制凭据不写入客户端缓存。设备会话可仅保存在运行内存，重新启动后再次登录，避免扩大凭据留存范围。
+从第一版开始保存多个 Bot 连接。每个连接有自己的名称、后端类型、HTTPS 地址、设备签名密钥、缓存加密密钥、会话 Cookie、CSRF、授权引用、草稿、待发队列、已读位置和网络队列。相同远端消息 ID 以 Bot ID 作命名空间；一个 Bot 的连接等待不会阻塞另一个 Bot。
 
-首期客户端支持登录、设备身份导出与登记提示、文字发送、历史查看、重连和明显的错误状态。已发送、已接受、处理失败与结果不确定分别展示。流式在这一闭环稳定后贯通供应商、Core、服务端和客户端。
+当前一个 Core 实例对应一个 Bot，多个实例可以同时在线。每个实例内部仍为一个主人的 `native:owner` 私聊；这不表示单个 Core 已增加多个人格或群聊。`ChatBackend` 是客户端的连接接口，后续 AstrBot / DSH 接入在这个边界实现，服务端 transport 继续保持 HTTP v1 独立。
+
+设备种子和缓存密钥由 flutter_secure_storage 使用平台安全存储保护；聊天正文、草稿、原授权和待发包以 AES-GCM 加密后写入 SQLite，AAD 绑定 Bot 与记录身份。主人控制凭据、Cookie、CSRF 只在运行内存中，重启后重新登录。Android 禁用自动备份和明文网络。TLS 正常验证证书、拒绝跨站重定向。
+
+## 开发与界面调试 MCP
+
+直接复用官方 Dart/Flutter MCP，入口是 `scripts/flutter-mcp.ps1`；服务端提供分析、测试、设备发现、Widget 树、控件操作、运行错误与热重载。它属于开发工具，不是聊天 Bot 的工具执行权限，也不会改变 M0/M1 的外部能力限制。
+
+`lib/main_debug.dart` 是带 Flutter Driver 扩展的开发入口，只使用内存中的合成 Bot，界面有明确开发提示；正式 `lib/main.dart` 使用真实连接和平台安全存储，不导入该入口。正式构建保留 `lib/main.dart` 为目标。
 
 ## 验收
 
@@ -51,29 +59,42 @@
 上述原生来源合同已按 AGENTS.md 完成讨论并获得确认。流式、Android、通用后端绑定和外部 Bot 适配继续按独立切片交付。
 
 
-## 运行 Windows 客户端
+## 构建与运行
 
-1. 服务端升级到本分支代码并运行原有数据库迁移入口；使用正常的独立聊天 worker。迁移只扩展原生 Outbox 类型，不改写历史消息。
-2. Core 的现有主人授权已启用 chat；需要原有记忆和历史时，继续开启 memory / history 的独立来源范围。已有 QQ capture 可以保留。全新安装也可以在原主人授权中仅登记 native_devices，capture 为 null，无需 QQ 协议端或 QQ 密钥。
-3. 配置 console.enabled=true、console.public_origin 为真实 HTTPS 根地址，通过现有反向代理开放 /v1/console/。主人控制凭据只在自己的 Core 与客户端之间使用。
-4. 在已安装项目依赖的 Windows 工作区运行：
+服务端先升级到本分支并运行现有数据库迁移入口，再使用正常的独立聊天 Worker。配置 `console.enabled=true`、`console.public_origin` 为真实 HTTPS 根地址，经原反向代理开放 `/v1/console/`。全新安装可以仅登记 native_devices、capture 为 null，不需要 QQ 密钥；复用既有 Core 时保留原授权中的记忆和历史来源范围。
+
+Windows 工作区安装固定 SDK，并准备客户端：
 
 ```powershell
-./scripts/chat-client.ps1 -Server https://your-core.example
+./scripts/install-flutter.ps1
+Set-Location clients/chat
+../../scripts/flutter.ps1 -Tool flutter -ToolArguments @('pub','get','--enforce-lockfile')
+../../scripts/prepare-flutter-links.ps1
+../../scripts/flutter.ps1 -Tool flutter -ToolArguments @('run','-d','windows')
 ```
 
-也可以运行 `.venv/Scripts/python.exe -m companion_chat_client --server https://your-core.example`。这是当前可运行的 Python/Tk 桌面版本；安装包和双端共享界面留到后续客户端切片。
+打开后添加多个 Bot 的名称和 HTTPS 地址，分别登录主人凭据，预览并批准登记。首次登记会更新授权版本。若 Core 尚无允许 chat 的主人授权，需先用原主人授权 status / preview / revisions 流程批准该设备公钥与 chat 目的；后续撤销也走同一流程。设备密钥与 QQ capture 独立。
 
-首次打开后可复制设备公钥。已启用 chat 的 Core 上，登录后预览并批准登记；设备尚未成为任何 chat 授权的一部分时，管理员先通过原主人授权 status / preview / revisions 接口登记该公钥。设备登记成功后保留 QQ capture 原值。撤销设备时，通过同一原主人授权流程删除 native_devices 中对应项；在途旧授权任务可能失效。
+正式 Windows 构建使用 `flutter build windows --release`；需分发整个 `build/windows/x64/runner/Release` 目录，不能只复制 exe。Android 使用同一源码 `flutter build apk --debug` 进行开发安装；公开发布前另行配置自己的 release 签名、升级与分发渠道。Android 最低 API 24。Android 构建还需 JDK 17、Android SDK 36，以及各插件要求的 NDK；下载和构建缓存放在工作区 `.local`。
 
-客户端只接受 HTTPS 根地址，验证证书，不跟随登录重定向；可使用受信任证书或 HTTPX 支持的系统证书配置。客户端不持久化主人凭据、CSRF 或会话 cookie。设备密钥、正文缓存和待发包在写入 SQLite/文件前使用当前 Windows 用户的 DPAPI 加密，数据目录默认为工作区 .local/native-chat-client。
+默认数据目录为系统应用支持目录；开发可用 `--dart-define=COMPANION_DATA_DIR=<工作区内目录>` 指定 SQLite 位置。`scripts/flutter.ps1` 将工具缓存限制在工作区；需要使用已有 Android/JDK 工具时按本机配置准备 `.local/android-sdk` 与 JAVA_HOME。含空格路径遇到原生 hook 的 SDK 兼容问题时，可以给同一工作区设置临时 `subst` 别名，并设 `COMPANION_FLUTTER_WORKSPACE` 为该别名，保持所有文件仍落在原工作区。目录联接辅助脚本用于当前 Windows 未启用开发者模式的环境，不修改系统设置。
 
-发送后保留原签名、原时间和原授权；丢失接受响应也只重试同一请求。旧授权请求被拒后显示原因，不能自动改签为新消息。新消息使用同步得到的当前授权。Ctrl+Enter 发送，Enter 换行；上次本机入队未完成的消息在重新登录后查询原任务。
+验证入口：`scripts/check-flutter.ps1` 执行锁文件、格式、分析与 Flutter 测试；`-WindowsBuild` / `-AndroidBuild` 增加构建；`-Wire` 用配置好的测试 PostgreSQL 运行真实 TLS + 独立 Worker 的跨语言验收，外部模型 HTTP 固定返回。该测试的临时证书与测试专用密钥仅保存在 `.local/test-temp`，不替代正式平台安全存储。
 
-历史恢复采用分页查询：启动/登录及“同步全部历史”执行全量核对，日常轮询最近页和未完成任务。远端遗忘通过删除标记清除缓存正文；离线设备需恢复连接并同步才能收到更新。界面显示最近 200 条，本地缓存保留已同步的历史。当前没有主动通知、跨端实时推送或流式 token 展示。
+调试界面可运行 `flutter run -d windows -t lib/main_debug.dart`，再让开发工具连接 `scripts/flutter-mcp.ps1`。先读取实时 Widget 树，再按实际控件操作。Windows 应用需要处于可绘制状态；MCP、SDK 和界面验收均只用于开发。
+
+## 当前能力与后续切片
+
+文本提交先在本机持久入队，沿用同一签名、同一请求 ID 和原授权重试。丢失接受响应只补查或重投同一请求；已接受任务不重新生成。旧授权请求被拒绝后明确显示原因，不自动改签。UNKNOWN 显示结果待核对，保留 Core 的不重复付费语义。
+
+登录及“同步全部历史”执行分页核对，日常同步最近页和未完成任务；界面显示最近 200 个输入轮次。本地已同步历史按 Bot 保存，远端删除标记在收到同步时清除正文。离线设备和未进入日常最近页的旧记录要在恢复连接并执行完整同步后完成核对。
+
+本轮先交付原生文本闭环。真正的 token 流式仍需贯通供应商、Core Worker、持久消息状态与客户端；当前没有把已完成文本拆成动画来宣称流式。下一切片接这一链路，再扩展后台通知、多媒体、AstrBot / DSH 和群聊。Android 后台常驻、真机兼容及公开发布验收单独进行。
 
 ## 复用依据
 
-- [Tkinter 线程模型](https://docs.python.org/3.12/library/tkinter.html#threading-model)：界面由主线程操作，网络和 SQLite 由单个后台线程拥有。
-- [CryptProtectData](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)、[CryptUnprotectData](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata)：使用当前用户保护及 UI_FORBIDDEN，不使用 LOCAL_MACHINE。
-- 设备证明、权限撤销、预算和 UNKNOWN 复用仓库已有 owner capture / OwnerGrantPolicy / paid journal，原生客户端仅依赖共享 wire 包，不导入 Core 内部存储。
+- [Flutter 官方 MCP](https://docs.flutter.dev/ai/get-started)、[工具说明](https://docs.flutter.dev/ai/tools)：复用 SDK 的 MCP 与 Widget/Driver 能力。
+- [Flutter SDK 归档](https://docs.flutter.dev/install/archive)：SDK 固定版本和官方 SHA-256；[Drift 平台支持](https://drift.simonbinder.eu/platforms/)：Android / Windows 的 NativeDatabase。
+- [Riverpod](https://pub.dev/packages/flutter_riverpod)、[Dio](https://pub.dev/packages/dio)、[flutter_secure_storage](https://pub.dev/packages/flutter_secure_storage)：版本固定在 pubspec.yaml / pubspec.lock，采用各平台现成实现。
+- DSH 本地 Cordis MCP bundle 研究复用了 stdio command / args / env / cwd 的现成边界，不新建自有界面 RPC 协议。
+- 设备签名、撤销、预算和 UNKNOWN 复用现有 owner capture / OwnerGrantPolicy / paid journal。Python 与 Dart 的共同签名字节已用独立测试向量核对。

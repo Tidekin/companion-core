@@ -261,9 +261,6 @@ def main():
             "companion/migrations/postgresql/versions/pg0003_native_chat.py",
             "companion/native_chat.py",
             "companion_delivery_protocol/native_chat.py",
-            "companion_chat_client/__main__.py",
-            "companion_chat_client/engine.py",
-            "companion_chat_client/protection.py",
         } <= set(archive.namelist())
         with tempfile.TemporaryDirectory(prefix="package-check-", dir=temporary) as folder:
             destination = Path(folder).resolve()

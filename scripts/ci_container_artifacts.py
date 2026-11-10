@@ -29,7 +29,7 @@ MANIFEST = "container-images.json"
 COMPONENTS = {
     "core": {
         "tag": "companion-core:test", "recipe": "Dockerfile", "lock": "uv.lock",
-        "copies": {"pyproject.toml", "uv.lock", "companion", "companion_chat_client",
+        "copies": {"pyproject.toml", "uv.lock", "companion",
                    "source_reader",
                    "companion_onebot_bridge", "companion_meme_protocol", "companion_meme_sources",
                    "companion_voice_node", "companion_delivery_protocol", "migrations", "db"},

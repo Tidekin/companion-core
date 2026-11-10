@@ -60,7 +60,6 @@ file-parser = [
 packages = [
     "companion", "source_reader", "companion_onebot_bridge", "companion_meme_protocol",
     "companion_voice_node", "companion_delivery_protocol", "companion_meme_sources",
-    "companion_chat_client",
 ]
 
 [tool.hatch.build]
@@ -69,7 +68,7 @@ exclude = [
     ".env", "config.toml", "gateway.toml", "**/__pycache__/**", "**/*.py[cod]", "*.sqlite*", "*.log",
     ".pytest_cache/**", ".ruff_cache/**", ".codex-remote-attachments/**",
     ".playwright-cli/**", "output/playwright/**",
-    ".planning/**",
+    ".planning/**", "clients/**",
     "**/*.owner-images/**",
 ]
 

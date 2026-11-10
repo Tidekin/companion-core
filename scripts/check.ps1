@@ -51,7 +51,7 @@ try {
         & $Python scripts/ci_policy.py docs
         if ($LASTEXITCODE -ne 0) { throw 'Documentation checks failed' }
     } else {
-        & $Python -m ruff check companion companion_chat_client companion_onebot_bridge companion_meme_protocol companion_meme_sources companion_voice_node companion_delivery_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts "--cache-dir=$roundTemp/ruff-cache"
+        & $Python -m ruff check companion companion_onebot_bridge companion_meme_protocol companion_meme_sources companion_voice_node companion_delivery_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts "--cache-dir=$roundTemp/ruff-cache"
         if ($LASTEXITCODE -ne 0) { throw 'Lint failed' }
         $feedbackArguments = @('--workers', $Workers)
         if ($Impact) { $feedbackArguments += '--impact' }

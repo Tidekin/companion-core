@@ -2,12 +2,12 @@
 
 import asyncio
 import ipaddress
-import ssl
-import sys
+import json
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
-import httpx
 import pytest
 import uvicorn
 from cryptography import x509
@@ -17,9 +17,6 @@ from pydantic import SecretStr
 
 from companion.api import create_app
 from companion.api_store import ApiStore
-from companion_chat_client.api import Api
-from companion_chat_client.cache import Cache
-from companion_chat_client.engine import Engine
 from tests.conftest import run
 from tests.support.native_history_delivery import sdk_step
 from tests.support.owner_console import PASSWORD
@@ -65,53 +62,49 @@ async def serve(core, tmp_path):
     task = asyncio.create_task(server.serve(sockets=[listener]))
     try:
         await asyncio.wait_for(ready.wait(), 5)
-        yield origin, ssl.create_default_context(cafile=str(certificate))
+        yield origin, certificate
     finally:
         server.should_exit = True
         await asyncio.wait_for(task, 5)
         listener.close()
 
 
-@pytest.mark.skipif(sys.platform != 'win32', reason='Windows DPAPI client over real TLS')
-def test_windows_client_tls_entry_worker_and_restart_without_qq(core, tmp_path):
+@pytest.mark.skipif(os.environ.get('COMPANION_FLUTTER_WIRE') != '1',
+    reason='explicit Flutter/Core cross-runtime gate; run scripts/check-flutter.ps1 -Wire')
+def test_flutter_tls_entry_worker_and_restart_without_qq(core, tmp_path):
     captured(core, tmp_path)
-    directory = tmp_path / 'native-client'
+    directory = tmp_path / 'flutter-client'
+    directory.mkdir()
+    root = Path(os.environ['COMPANION_FLUTTER_WORKSPACE']) if os.environ.get(
+        'COMPANION_FLUTTER_WORKSPACE') else Path(__file__).resolve().parents[1]
+    project = root / 'clients/chat'
 
     async def scenario():
-        async with serve(core, tmp_path) as (origin, context):
-            def initial():
-                events = []
-                engine = Engine(Api(origin, transport=httpx.HTTPTransport(
-                    verify=context, trust_env=False)), Cache(directory, origin),
-                    lambda *item: events.append(item), clock=core.clock)
+        async with serve(core, tmp_path) as (origin, certificate):
+            config = directory / 'wire.private.json'
+
+            async def client(phase):
+                config.write_text(json.dumps(dict(phase=phase, origin=origin,
+                    certificate=str(certificate), password=PASSWORD, directory=str(directory),
+                    now=core.clock.now.isoformat())), encoding='utf-8')
+                env = {**os.environ, 'COMPANION_WIRE_CONFIG': str(config)}
+                process = await asyncio.create_subprocess_exec('pwsh', '-NoProfile', '-File',
+                    str(root / 'scripts/flutter.ps1'), '-Tool', 'flutter',
+                    'test', 'test/wire_entry.dart',
+                    cwd=project, env=env, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT)
                 try:
-                    engine.login(PASSWORD)
-                    assert events[-1][0] == 'approval'
-                    engine.approve()
-                    engine.send('真实 TLS 原生客户端验收。')
-                    return engine.cache.pending()[0]['event_id'], engine.public_key
-                finally:
-                    engine.close()
+                    logs, _ = await asyncio.wait_for(process.communicate(), 180)
+                except BaseException:
+                    process.kill()
+                    await process.wait()
+                    raise
+                assert process.returncode == 0, logs.decode(errors='replace')
 
-            event_id, public_key = await asyncio.to_thread(initial)
-            await sdk_step(core, tmp_path, event_id, 1)
-
-            def restart():
-                engine = Engine(Api(origin, transport=httpx.HTTPTransport(
-                    verify=context, trust_env=False)), Cache(directory, origin),
-                    lambda *item: None, clock=core.clock)
-                try:
-                    assert engine.public_key == public_key
-                    engine.login(PASSWORD)
-                    turns = engine.cache.turns()
-                    assert len(turns) == 1
-                    assert turns[0]['event_id'] == event_id
-                    assert turns[0]['replies'][0]['text'] == '原始历史答复'
-                    assert not engine.cache.pending()
-                finally:
-                    engine.close()
-
-            await asyncio.to_thread(restart)
+            await client('initial')
+            receipt = json.loads((directory / 'receipt.json').read_text(encoding='utf-8'))
+            await sdk_step(core, tmp_path, receipt['event_id'], 1)
+            await client('restart')
             assert len(core.store.rows('SELECT 1 FROM model_usage')) == 1
 
     run(scenario())

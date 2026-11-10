@@ -1,8 +1,8 @@
 # Companion Core
 
-面向单一主人私密聊天的虚拟朋友核心。Python 模块化单体，支持签名设备的 Windows 文本客户端与原生 OneBot Bridge；记忆和表达风格来自有证据的互动，初始人格为空。
+面向单一主人私密聊天的虚拟朋友核心。Python 模块化单体，支持签名设备的 Flutter 多 Bot 文本客户端与原生 OneBot Bridge；记忆和表达风格来自有证据的互动，初始人格为空。
 
-Windows 原生文本 MVP 的设备登记、启动和验收见 [原生聊天说明](docs/native-chat-mvp.md)。它通过 Core 的真实原生入口聊天；流式、Android 和外部 Bot 连接器按后续切片交付。
+Flutter 双端共用的原生文本 MVP 的设备登记、启动、开发 MCP 和验收见 [原生聊天说明](docs/native-chat-mvp.md)。它通过 Core 的真实原生入口聊天；可同时接入多个 Core 实例、分别私聊；流式、Android 真机与后台完善、AstrBot / DSH 和群聊按后续切片交付。
 
 源码仓库：[Tidekin/companion-core](https://github.com/Tidekin/companion-core)。
 
