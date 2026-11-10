@@ -251,6 +251,33 @@ def test_history_rechecks_after_an_unrelated_native_commit(core, tmp_path, monke
     run(native_history(core, tmp_path, check))
 
 
+def test_background_commit_does_not_multiply_history_custody_checks(core, tmp_path, monkeypatch):
+    def check(job, expected):
+        calls, changed = [], []
+        native = owner_input.input_recall.require_not_recalled
+        custody = authority_custody.check
+        with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
+            def recall(*args, **kwargs):
+                native(*args, **kwargs)
+                if not changed:
+                    changed.append(True)
+                    other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
+                                  (owner_authority.MODE,))
+
+            def journal(*args, **kwargs):
+                calls.append(True)
+                return custody(*args, **kwargs)
+
+            monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
+            monkeypatch.setattr(authority_custody, "check", journal)
+            with core.store.transaction():
+                assert owner_input.history_sources(
+                    core.store, core.settings, core.clock, job) == expected
+        assert len(calls) <= 4
+
+    run(native_history(core, tmp_path, check, turns=8))
+
+
 @pytest.mark.parametrize("max_messages", [0, 3])
 def test_native_history_obeys_the_existing_recent_message_setting(core, tmp_path, max_messages):
     def check(job, expected):

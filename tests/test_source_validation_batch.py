@@ -45,23 +45,40 @@ def test_actual_write_during_a_read_cannot_publish_the_collected_result(core):
         owner_input.batch_sources(core.store, read)
 
 
-def test_unrelated_commit_retries_native_reads_without_reusing_the_first_view(core):
+def test_unrelated_commit_rebuilds_a_fresh_batch_without_per_source_fallback(core):
     calls, saved = [], []
     with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
         def read(unchanged):
             calls.append(unchanged is not None)
-            if unchanged is not None:
+            if len(calls) == 1:
                 saved.append(unchanged)
                 other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
                               (owner_authority.MODE,))
                 assert not unchanged()
                 return "stale view"
             assert not saved[0]()
-            return "fresh native reads"
+            assert unchanged is not None and unchanged()
+            return "fresh batched reads"
 
         with core.store.transaction():
-            assert owner_input.batch_sources(core.store, read) == "fresh native reads"
-    assert calls == [True, False]
+            assert owner_input.batch_sources(core.store, read) == "fresh batched reads"
+    assert calls == [True, True]
+
+
+def test_continuous_snapshot_changes_keep_the_bounded_native_fallback(core):
+    calls = []
+    with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
+        def read(unchanged):
+            calls.append(unchanged is not None)
+            if unchanged is not None:
+                other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
+                              (owner_authority.MODE,))
+                unchanged()
+            return "conservative result"
+
+        with core.store.transaction():
+            assert owner_input.batch_sources(core.store, read) == "conservative result"
+    assert calls == [True, True, False]
 
 
 @pytest.mark.parametrize("transactional", [False, True])

@@ -371,8 +371,8 @@ def batch_sources(store, operation):
     """One synchronous source read; never retain a permission or a cross-await cache.
 
     An owned write scope may reuse reads only while its actual native snapshot and
-    write counter match. A different external commit retries once with the original
-    per-source validators. Own writes invalidate the entire collected result.
+    write counter match. One external commit gets a fresh batched read before the
+    conservative per-source fallback. Own writes invalidate the collected result.
     The operation still owns its original initial/final authority and file checks.
     """
     def run(check):
@@ -386,42 +386,51 @@ def batch_sources(store, operation):
     if not store.in_transaction:
         return run(None)
     scope, before = store.validation_scope, store.change_token()
+    original_writes = before["writes"]
     active = True
+    generation = 0
 
     class SnapshotChanged(Exception):
         pass
 
-    def unchanged():
-        if not active or scope is None or store.validation_scope != scope:
-            return False
-        if not store.in_read_snapshot:
-            current = store.change_token()
-            if current["writes"] != before["writes"]:
+    def guard(attempt):
+        def unchanged():
+            if (not active or attempt != generation or scope is None
+                    or store.validation_scope != scope):
                 return False
-            if current != before:
-                # Stop the partial pass before doing all remaining source checks.
-                raise SnapshotChanged
-        return True
+            if not store.in_read_snapshot:
+                current = store.change_token()
+                if current["writes"] != original_writes:
+                    return False
+                if current != before:
+                    # Stop partial work before reading every remaining source.
+                    raise SnapshotChanged
+            return True
+        return unchanged
 
     try:
-        discarded = False
-        try:
-            result = run(unchanged if scope is not None else None)
-        except SnapshotChanged:
-            discarded = True
-        if not store.in_transaction or store.validation_scope != scope:
-            raise CoreError("PRIVACY_CHANGED", 409)
-        after = store.change_token()
-        if after["writes"] != before["writes"]:
-            raise CoreError("PRIVACY_CHANGED", 409)
-        if scope is not None and (discarded or after != before):
-            # READ COMMITTED may observe an unrelated writer. Discard the batched
-            # result and read again without reusing authority or source evidence.
-            active = False
-            result = run(None)
-            if (not store.in_transaction or store.validation_scope != scope
-                    or store.change_token()["writes"] != before["writes"]):
+        for attempt in range(2):
+            generation = attempt
+            discarded = False
+            try:
+                result = run(guard(attempt) if scope is not None else None)
+            except SnapshotChanged:
+                discarded = True
+            if not store.in_transaction or store.validation_scope != scope:
                 raise CoreError("PRIVACY_CHANGED", 409)
+            after = store.change_token()
+            if after["writes"] != original_writes:
+                raise CoreError("PRIVACY_CHANGED", 409)
+            if scope is None or (not discarded and after == before):
+                return result
+            # Rebuild the authority/source view on the new native snapshot; do
+            # not carry a permission, partial result or old guard to this attempt.
+            before = after
+        active = False
+        result = run(None)
+        if (not store.in_transaction or store.validation_scope != scope
+                or store.change_token()["writes"] != original_writes):
+            raise CoreError("PRIVACY_CHANGED", 409)
         return result
     finally:
         active = False
