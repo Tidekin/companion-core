@@ -3,8 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../chat/core_backend.dart';
 import '../chat/models.dart';
 import '../chat/session.dart';
-import '../data/repository.dart';
-import '../data/vault.dart';
+import '../persistence/repository.dart';
+import '../persistence/vault.dart';
 
 final repositoryProvider = Provider<ChatRepository>(
   (ref) => throw UnimplementedError(),

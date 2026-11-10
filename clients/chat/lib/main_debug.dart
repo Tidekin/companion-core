@@ -6,9 +6,9 @@ import 'package:flutter_driver/driver_extension.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'chat/models.dart';
-import 'data/database.dart';
-import 'data/repository.dart';
-import 'data/vault.dart';
+import 'persistence/database.dart';
+import 'persistence/repository.dart';
+import 'persistence/vault.dart';
 import 'dev/demo_backend.dart';
 import 'ui/app.dart';
 import 'ui/providers.dart';

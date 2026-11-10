@@ -5,9 +5,9 @@ import 'package:cryptography/cryptography.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:companion_chat/chat/models.dart';
-import 'package:companion_chat/data/database.dart';
-import 'package:companion_chat/data/repository.dart';
-import 'package:companion_chat/data/vault.dart';
+import 'package:companion_chat/persistence/database.dart';
+import 'package:companion_chat/persistence/repository.dart';
+import 'package:companion_chat/persistence/vault.dart';
 
 Map<String, dynamic> turn(String text) => {
   'event_id': 'same-event',

@@ -9,9 +9,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:companion_chat/chat/core_backend.dart';
 import 'package:companion_chat/chat/models.dart';
 import 'package:companion_chat/chat/session.dart';
-import 'package:companion_chat/data/database.dart';
-import 'package:companion_chat/data/repository.dart';
-import 'package:companion_chat/data/vault.dart';
+import 'package:companion_chat/persistence/database.dart';
+import 'package:companion_chat/persistence/repository.dart';
+import 'package:companion_chat/persistence/vault.dart';
 
 void main() {
   test('shipped Dart Core adapter real TLS, persistence and worker interoperability', () async {

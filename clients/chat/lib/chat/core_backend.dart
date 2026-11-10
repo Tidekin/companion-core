@@ -4,8 +4,8 @@ import 'dart:io';
 import 'package:cryptography/cryptography.dart';
 import 'package:dio/dio.dart';
 
-import '../data/repository.dart';
-import '../data/vault.dart';
+import '../persistence/repository.dart';
+import '../persistence/vault.dart';
 import 'models.dart';
 
 class ConnectionReview {

@@ -6,9 +6,9 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:companion_chat/chat/core_backend.dart';
 import 'package:companion_chat/chat/models.dart';
-import 'package:companion_chat/data/database.dart';
-import 'package:companion_chat/data/repository.dart';
-import 'package:companion_chat/data/vault.dart';
+import 'package:companion_chat/persistence/database.dart';
+import 'package:companion_chat/persistence/repository.dart';
+import 'package:companion_chat/persistence/vault.dart';
 
 class Wire implements HttpClientAdapter {
   Wire(this.name);
