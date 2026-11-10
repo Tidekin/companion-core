@@ -1,6 +1,7 @@
 """First-party native entry never requires a QQ transport or an external send lease."""
 
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from companion import owner_authority
@@ -53,19 +54,33 @@ def test_native_session_capture_isolated_and_idempotent(client, core, tmp_path):
     assert older['items'][0]['event_id'] == body['capture']['event_id']
 
 
-def test_native_http_independent_worker_publishes_and_recovers_history(client, core, tmp_path):
+@pytest.mark.parametrize('content_enabled', [False, True])
+def test_native_http_independent_worker_publishes_and_recovers_history(
+    client, core, tmp_path, content_enabled,
+):
     from tests.support.owner_authority_setup import prepare
 
     core.settings.memory_enabled = False
+    core.settings.content_enabled = content_enabled
     key = Ed25519PrivateKey.generate()
     policy = prepare(core, tmp_path)
     device_id, identity = device_identity(key.public_key().public_bytes_raw().hex())
     activate(core, OwnerGrantPolicy.model_validate({**policy.model_dump(),
-        'purposes': ['chat'], 'capture': None, 'native_devices': {device_id: identity}}))
+        'purposes': ['chat', 'content'] if content_enabled else ['chat'],
+        'capture': None, 'native_devices': {device_id: identity}}))
     headers, authority = enroll(client, key)
     body = packet(core, key, authority)
     first = client.post('/v1/console/chat/messages', json=body, headers=headers)
     assert first.status_code == 202, first.text
+    assert not core.store.rows('SELECT 1 FROM content_items')
+    if content_enabled:
+        from companion import content
+        from companion.contracts import CoreError
+
+        # The text-only native MVP must not widen the QQ media provenance boundary.
+        with pytest.raises(CoreError, match='CONTENT_OWNER_SOURCE_REQUIRED'):
+            content.owner_source(core.store, core.settings, core.clock, core.settings.content,
+                                 first.json()['event_id'])
     job_id, wire = run(sdk_step(core, tmp_path, first.json()['event_id'], 1))
     assert any(body['text'] in str(item) for item in wire['messages'])
     status = client.get('/v1/console/chat/messages/' + first.json()['event_id'])
