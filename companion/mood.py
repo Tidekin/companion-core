@@ -233,7 +233,7 @@ class MoodService:
         if not MemoryProjections._live_lineage(rows, sources):
             return None
         for row in rows:
-            if row["source"] == "qq.onebot" and not (
+            if row["source"] in {"qq.onebot", "native.chat"} and not (
                 source_check(row["event_id"])
                 if source_check is not None
                 else source_allowed(
@@ -330,7 +330,7 @@ class MoodService:
             (
                 (
                     "SELECT e.event_id,e.occurred_at AS at,'feedback' AS "
-                    "kind FROM events e WHERE e.source='qq.onebot' AND "
+                    "kind FROM events e WHERE e.source IN ('qq.onebot','native.chat') AND "
                     "e.actor_id='owner' AND e.redacted=0 AND "
                     "e.event_type='message.received' AND e.ingested_at>%s "
                     'AND e.ingested_at<=%s AND e.occurred_at>%s AND '
@@ -447,7 +447,7 @@ class MoodService:
                     preceding = s.one(
                         (
                             'SELECT event_id FROM events WHERE conversation_id = %s '
-                            "AND source = 'qq.onebot' AND actor_id = 'owner' AND "
+                            "AND source IN ('qq.onebot','native.chat') AND actor_id = 'owner' AND "
                             "event_type IN ('message.received', "
                             "'message.media_received') AND record_sequence < "
                             '(SELECT record_sequence AS rowid FROM events WHERE '
@@ -627,15 +627,23 @@ class MoodService:
                 prior["reason"], prior["kind"] = "REVIEWED_GOAL_COMPLETION", "experience"
             else:
                 merged[key] = item
+        ordered = sorted(
+            merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
+        )
+        published = ordered[-LIMIT:]
         if view:
+            if unchanged is None and s.in_write_transaction:
+                # Under sustained unrelated commits, batching conservatively falls
+                # back to independent source reads. Recheck published lineage after
+                # collection too: a source may have changed after its first read.
+                for key in sorted({key for item in published for key in item["source_event_ids"]}):
+                    if not self._lineage(key, sources):
+                        raise CoreError("PRIVACY_CHANGED", 409)
             # Independent journals, STOP and time remain live at the batch boundary.
             owner_authority.current(
                 s, cfg, self.clock, purpose="expression", authority=view.authority
             )
-        ordered = sorted(
-            merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
-        )
-        return ordered[-LIMIT:], len(candidates) > LIMIT or len(ordered) > LIMIT
+        return published, len(candidates) > LIMIT or len(ordered) > LIMIT
 
     def _appraisals(self, at, allowed, cutoff, sources, taken, source_check=None):
         """Model-judged owner wording; an exact-phrase signal on the same message wins.

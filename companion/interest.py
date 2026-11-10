@@ -205,7 +205,8 @@ def profile(store, settings, now, requester):
             'e USING (event_id) JOIN conversations AS c USING (conversation_id) WHERE me.memory_id '
             "= %s AND e.redacted = 0 AND e.actor_id = 'owner' AND e.privacy_scope = 'private' AND "
             "c.scope = 'private' AND c.owner_actor_id = 'owner' AND e.ingested_at >= %s AND "
-            "e.occurred_at <= %s AND e.source IN ('qq.onebot', 'owner.decision') ORDER BY "
+            "e.occurred_at <= %s AND e.source IN "
+            "('qq.onebot','native.chat','owner.decision') ORDER BY "
             'e.occurred_at NULLS FIRST, e.event_id NULLS FIRST',
             (row["memory_id"], cutoff, now),
         )

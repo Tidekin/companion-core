@@ -7,6 +7,7 @@ unknown provider or tool effects stop recovery instead of repeating I/O.
 """
 
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from time import perf_counter_ns
 
 from pydantic_ai import Agent, Conversation, DeferredToolRequests
@@ -29,7 +30,7 @@ class ControlledModel(Model):
     """Map the mature Model interface to an injected completion, without authority."""
 
     def __init__(self, model_name: str, complete: Callable[..., Awaitable[ModelResponse]], *,
-                 image_input: bool = False):
+                 image_input: bool = False, stream_complete=None):
         super().__init__(profile={
             "supports_tools": True, "supports_text_output": True,
             "supports_inline_system_prompts": True,
@@ -41,6 +42,7 @@ class ControlledModel(Model):
         })
         self._model_name = model_name
         self._complete = complete
+        self._stream_complete = stream_complete
 
     @property
     def model_name(self):
@@ -62,6 +64,24 @@ class ControlledModel(Model):
         response = await self._complete(
             wire, tools=[*parameters.function_tools, *parameters.output_tools])
         return to_runtime_response(response, model_name=self.model_name, provider_name=self.system)
+
+
+    @asynccontextmanager
+    async def request_stream(self, messages, model_settings, model_request_parameters,
+                             run_context=None):
+        from companion.agent_stream import ControlledStream
+
+        settings, parameters = self.prepare_request(model_settings, model_request_parameters)
+        if (self._stream_complete is None or settings or parameters.native_tools
+                or parameters.output_mode not in {"text", "tool"}):
+            raise CoreError("CORE_MODEL_CONFIGURATION_REQUIRED", 503)
+        response = ControlledStream(parameters, self._stream_complete,
+            request_wire(messages, parameters),
+            [*parameters.function_tools, *parameters.output_tools], self.model_name)
+        try:
+            yield response
+        finally:
+            await response.close_stream()
 
 
 def check_conversation(core, job, snapshots=(), *, current_request=None, purpose="chat"):
@@ -116,15 +136,28 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
     with phase("agent_guard", job["trace_id"]):
         check()
 
-    async def complete(wire, *, tools):
+    from companion import transport
+    from companion.model import ModelClient
+
+    streaming = transport.native_text(core.store, job["event_id"]) and isinstance(
+        core.model, ModelClient)
+    publisher = None
+    if streaming:
+        from companion.native_stream import Publisher
+
+        publisher = Publisher(core, job, snapshots)
+
+    async def complete(wire, *, tools, on_delta=None):
         with phase("request_guard", job["trace_id"]):
             check()
         try:
             with phase("request_validate", job["trace_id"]):
-                context_planner.check_request(core, job, snapshots, wire, tools)
+                context_planner.check_request(core, job, snapshots, wire, tools,
+                                              stream=streaming)
             with phase("request_reserve", job["trace_id"]):
                 request_id = budget.reserve(core.store, core.settings, job["job_id"], "chat", wire,
-                                            core.clock(), clock=core.clock, tools=tools)
+                                            core.clock(), clock=core.clock, tools=tools,
+                                            stream=streaming)
         except Exception:
             if persistence is not None:
                 persistence.not_admitted()
@@ -151,6 +184,7 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
             response = await budget.complete(
                 core.model, core.store, core.settings, request_id, wire, "chat", core.clock,
                 tools=tools, source_check=check_request, trace_id=job["trace_id"],
+                stream=streaming, on_delta=on_delta,
             )
         except ModelResponseError as error:
             if persistence is not None:
@@ -186,7 +220,8 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
         with phase("request_guard", job["trace_id"]):
             check()
         with phase("request_plan", job["trace_id"]):
-            messages = context_planner.plan_request(core, job, snapshots, request_context)
+            messages = context_planner.plan_request(core, job, snapshots, request_context,
+                                                    stream=streaming)
             request_context.messages = messages
             ctx.messages[:] = messages
         if persistence is not None:
@@ -207,7 +242,8 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
             output_types.append(output)
         agent = Agent(
             ControlledModel(core.settings.model_name, complete,
-                            image_input=bool(paid and paid.image_input)),
+                            image_input=bool(paid and paid.image_input),
+                            stream_complete=complete if streaming else None),
             output_type=output_types, toolsets=toolsets,
             retries=1, name="companion", deps_type=object,
             capabilities=[Hooks(**hooks)],
@@ -219,6 +255,7 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
         deferred_tool_results=deferred_tool_results,
         usage_limits=UsageLimits(request_limit=paid.per_request_calls if paid else 1),
         infer_name=False,
+        **({"event_stream_handler": publisher.events} if publisher is not None else {}),
     )
     if persistence is not None:
         persistence.save_result(result)

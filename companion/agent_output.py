@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_ai import ToolOutput
 from pydantic_ai.messages import ModelResponse, ToolCallPart
 
-from companion import voice_authority
+from companion import transport, voice_authority
 from companion.contracts import CoreError
 from companion_delivery_protocol.reply_groups import mixed_part
 
@@ -94,6 +94,8 @@ def final_text(output):
 
 
 def reply_output(core, job):
+    if transport.native_text(core.store, job["event_id"]):
+        return None
     policy = core.settings.voice.reply
     if job["kind"] != "chat" or not voice_authority.permitted(
         core.store, core.settings, core.clock

@@ -15,6 +15,12 @@ def digest(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
+def native_text(store, event_id):
+    """The current first-party client advertises text output only."""
+    return bool(store.one("SELECT 1 FROM events WHERE event_id=%s AND source='native.chat'",
+                          (event_id,)))
+
+
 def enqueue(store, event_id, conversation_id, text, now, action="qq.private.reply", key=None, *,
             reply_to=None):
     if action not in {"qq.private.reply", "qq.private.proactive"}:
@@ -40,6 +46,11 @@ def enqueue(store, event_id, conversation_id, text, now, action="qq.private.repl
 def queue_delivery(store, message_id, event_id, conversation_id, action, content, key, now, *,
                    lane=None, authority=None):
     """Record an admitted delivery in its caller's transaction."""
+    if action in {"qq.private.reply", "qq.private.proactive"} and store.one(
+        "SELECT 1 FROM conversations WHERE conversation_id=%s AND platform='native.chat'",
+        (conversation_id,),
+    ):
+        action = action.replace("qq.", "native.", 1)
     routing = {}
     if lane is not None:
         routing["delivery_lane"] = lane
@@ -250,16 +261,20 @@ def reply_group(store, message_id, *, require_sent=False):
             'outbox.reply_group_id = %s ORDER BY outbox.segment_index NULLS FIRST',
                           (row["reply_group_id"],))
         source = store.one(
-            'SELECT j.event_id, e.conversation_id, j.kind, e.redacted FROM jobs AS j JOIN events '
+            'SELECT j.event_id, e.conversation_id, j.kind, e.redacted, e.source FROM jobs AS j '
+            'JOIN events '
             'AS e USING (event_id) WHERE j.job_id = %s', (row["reply_group_id"],),
         )
         if (
             not source or source["redacted"]
             or source["kind"] not in {"chat", "activity", "reply_recovery"}
             or not 1 <= len(rows) <= 2**31 - 1 or row["segment_count"] != len(rows)
-            or row["action_type"] not in {"qq.private.reply", "qq.private.proactive"}
+            or row["action_type"] not in (
+                {"native.private.reply", "native.private.proactive"}
+                if source["source"] == "native.chat"
+                else {"qq.private.reply", "qq.private.proactive"})
             or (source["kind"] in {"chat", "reply_recovery"}
-                and row["action_type"] != "qq.private.reply")
+                and row["action_type"] not in {"qq.private.reply", "native.private.reply"})
             or (source["event_id"], source["conversation_id"]) != (
                 row["origin_event_id"], row["conversation_id"])
             or type(row["segment_interval_ms"]) is not int
@@ -492,7 +507,8 @@ def cancel_proactive_work(store, now):
         "AUTONOMY_PAUSED",
         now,
     )
-    _cancel_unsent(store, now, "AUTONOMY_PAUSED", "action_type='qq.private.proactive'", ())
+    _cancel_unsent(store, now, "AUTONOMY_PAUSED",
+                   "action_type IN ('qq.private.proactive','native.private.proactive')", ())
 
 
 def _delivery_scope(store, settings, request, now):

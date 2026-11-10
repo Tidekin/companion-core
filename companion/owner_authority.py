@@ -882,6 +882,9 @@ def activate(store, settings, clock, request):
             "ACTIVE",
             previous,
         )
+        from companion.native_stream import withdraw
+
+        withdraw(store)
         return _reply(row)
 
 
@@ -912,6 +915,9 @@ def stop(store, settings, clock, request):
 
 def restore(store):
     """Called only by controlled backup restore, after newest erasure replay."""
+    from companion.native_stream import withdraw
+
+    withdraw(store)
     _put(store, GENERATION, uid("restore"))
     _put(store, MODE, "OFF")
 

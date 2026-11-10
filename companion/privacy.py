@@ -1014,7 +1014,8 @@ class ErasureLedger:
             for row in store.rows(
                 "SELECT m.memory_id, m.supersedes_memory_id, m.content, e.body_json FROM memories "
                 "AS m JOIN memory_evidence AS v USING (memory_id) JOIN events AS e USING "
-                "(event_id) WHERE NOT m.supersedes_memory_id IS NULL AND e.source = 'qq.onebot' "
+                "(event_id) WHERE NOT m.supersedes_memory_id IS NULL AND e.source IN "
+                "('qq.onebot','native.chat') "
                 'AND e.event_id IN (SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s '
                 "AS JSON)) AS parsed(value))",
                 (encode(sorted(event_ids)),),

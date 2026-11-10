@@ -156,7 +156,8 @@ def owner_feedback(store, settings, event_id, now):
     event = store.one(
         'SELECT e.body_json, e.ingested_at, e.occurred_at FROM events AS e JOIN conversations AS c '
         "USING (conversation_id) WHERE e.event_id = %s AND e.redacted = 0 AND e.actor_id = 'owner' "
-        "AND e.source = 'qq.onebot' AND e.privacy_scope = 'private' AND e.event_type = "
+        "AND e.source IN ('qq.onebot','native.chat') AND e.privacy_scope = 'private' "
+        "AND e.event_type = "
         "'message.received' AND c.scope = 'private' AND c.owner_actor_id = 'owner' AND "
         'LENGTH(e.body_json) <= 16000',
         (event_id,),
@@ -304,7 +305,8 @@ class AffectEngine:
     def _topic_targets(self, row):
         previous = self.store.one(
             'SELECT event_id, ingested_at FROM events WHERE conversation_id = %s AND '
-            "record_sequence < %s AND source = 'qq.onebot' AND actor_id = 'owner' AND NOT "
+            "record_sequence < %s AND source IN ('qq.onebot','native.chat') AND "
+            "actor_id = 'owner' AND NOT "
             'EXISTS(SELECT 1 FROM affect_evidence AS a WHERE a.event_id = events.event_id AND '
             "a.dimension = 'engagement') ORDER BY record_sequence DESC NULLS LAST LIMIT 1",
             (row["conversation_id"], row["event_row"]),

@@ -896,6 +896,11 @@ class Core(Runtime):
             reply_revision.remember_sources(s, job, material["source_events"])
         turn = _ReplyTurn(cfg, job, authority, json.loads(job["body_json"]), followup)
         rules, affect, style, decision = self._reply_rules(turn, model_tools)
+        from companion.transport import native_text
+
+        if native_text(s, job["event_id"]):
+            rules.append("\n当前聊天设备只支持文字，请用文字回复；"
+                         "需要说明图片、语音或歌曲时直接描述。", dynamic=True)
         mark("context_rules")
         selection = context_selection.References()
         bounded_text = private_life.strict(s, cfg)
@@ -1388,6 +1393,9 @@ class Core(Runtime):
         try:
             reply_revision.check_job(self.store, job)
             authority = self._owner_job_view(job)
+            from companion.transport import native_text
+
+            text_only = native_text(self.store, job["event_id"])
             bounded_text = authority is None and live_text.active(self.store, self.settings)
             generated_reply = False
             if bounded_text:
@@ -1501,6 +1509,7 @@ class Core(Runtime):
             preview_only = any(s["kind"] == "video_preview_reply" for s in context_snapshots)
             quote_choice = None
             if (authority and generated_reply and not preview_only and job["kind"] == "chat"
+                    and not text_only
                     and self.settings.quote_policy != "never"):
                 quote_choice, reply = reply_quote.extract(reply)
             with self.store.transaction():
@@ -1522,6 +1531,7 @@ class Core(Runtime):
                     return True
                 self._check_reply_epoch(job, captured_epoch)
                 now = self.clock()
+                message_ids = []
                 reply_is_current = not reply_revision.owner_input(
                     self.store, job["event_id"],
                 ) or reply_revision.current(self.store, job["event_id"])
@@ -1544,6 +1554,7 @@ class Core(Runtime):
                         self.expression.intent(job["event_id"], reply, now)
                         if policy and generated_reply and job["kind"] == "chat" and not preview_only
                         and not voice_reply and not singing_reply and not mixed_reply
+                        and not text_only
                         and self.settings.expression_enabled
                         and (authority is None or "expression" in authority.policy.purposes)
                         else None
@@ -1557,7 +1568,7 @@ class Core(Runtime):
 
                         newer = self.store.one((
                             'SELECT 1 FROM events WHERE conversation_id = %s AND '
-                            "actor_id = 'owner' AND source = 'qq.onebot' AND "
+                            "actor_id = 'owner' AND source IN ('qq.onebot','native.chat') AND "
                             "event_type IN ('message.received', "
                             "'message.media_received') AND record_sequence > "
                             '(SELECT record_sequence AS rowid FROM events WHERE '
@@ -1617,7 +1628,8 @@ class Core(Runtime):
                                 'SELECT 1 FROM events WHERE conversation_id = %s AND '
                                 "actor_id = 'owner' AND event_type IN "
                                 "('message.received', 'message.media_received') AND "
-                                "source = 'qq.onebot' AND record_sequence > (SELECT "
+                                "source IN ('qq.onebot','native.chat') AND "
+                                "record_sequence > (SELECT "
                                 'record_sequence AS rowid FROM events WHERE event_id = '
                                 '%s) LIMIT 1'
                             ), (job["conversation_id"], job["event_id"]),
@@ -1639,7 +1651,7 @@ class Core(Runtime):
                             action="qq.private.proactive" if job["kind"] == "activity"
                             else "qq.private.reply",
                         )]
-                    if (authority and message_ids and generated_reply
+                    if (authority and message_ids and generated_reply and not text_only
                             and not voice_reply and not singing_reply and not mixed_reply
                             and job["kind"] == "chat"):
                         from companion import image_generation
@@ -1655,6 +1667,13 @@ class Core(Runtime):
                 if conversation_store is not None:
                     conversation_store.complete()
                 job_queue.release(self.store, job["job_id"], "SUCCEEDED", now)
+                from companion.native_stream import finish
+
+                finish(self.store, job)
+                if message_ids:
+                    from companion.native_delivery import publish
+
+                    publish(self.store, self.settings, self.clock, message_ids)
                 self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now,
                                  **({"reply_suppressed": True} if not reply_is_current else {}),
                                  **({"reply_skipped": True} if silent else {}))
@@ -1690,6 +1709,9 @@ class Core(Runtime):
             if (not current or current["state"] != "RUNNING"
                 or current["lease_token"] != job["lease_token"]):
                 return
+            from companion.native_stream import interrupt
+
+            interrupt(self, job)
             if code in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED,
                         reply_revision.CANCELLED, "INPUT_RECALLED", "OWNER_SOURCE_CHANGED",
                         "OWNER_CAPTURE_INVALID", "OWNER_SOURCE_JOB_BINDING_REQUIRED"}:
@@ -1784,6 +1806,9 @@ class Core(Runtime):
                                  key=f"failure:{job['job_id']}:v1")
             owner_delivery.record_failure_notice(
                 self.store, self.settings, self.clock, job["job_id"], message_id)
+            from companion.native_delivery import publish
+
+            publish(self.store, self.settings, self.clock, [message_id])
         except CoreError:
             # The grant or source no longer allows a send; the failure itself stands.
             self.store.execute("ROLLBACK TO SAVEPOINT failure_notice")

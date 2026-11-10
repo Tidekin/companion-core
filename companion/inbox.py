@@ -30,6 +30,9 @@ from companion.transport import (
     digest,
     set_proactive_paused,
 )
+from companion_delivery_protocol.native_chat import SESSION as NATIVE_SESSION
+from companion_delivery_protocol.native_chat import SOURCE as NATIVE_SOURCE
+from companion_delivery_protocol.native_chat import source_identity
 
 
 def receive(store, settings, clock, ledger, event, key, *, content_options):
@@ -45,11 +48,20 @@ def receive(store, settings, clock, ledger, event, key, *, content_options):
 
 def ingest(s, cfg, clock, ledger, event, key, *, content, diary, affect):
     origin = event.conversation.platform_session_key
-    if event.actor.platform_user_id != cfg.owner_qq_id:
+    native = event.source == NATIVE_SOURCE
+    if event.actor.platform_user_id != ("owner" if native else cfg.owner_qq_id):
         raise CoreError("OWNER_REQUIRED", 403)
-    if not origin.endswith(f":FriendMessage:{cfg.owner_qq_id}"):
+    if (origin != NATIVE_SESSION if native else
+            not origin.endswith(f":FriendMessage:{cfg.owner_qq_id}")):
         raise CoreError("PRIVATE_OWNER_SESSION_REQUIRED", 403)
-    if not event.source_event_id.startswith(f"{cfg.bot_qq_id}:{origin}:"):
+    if native:
+        try:
+            source_identity(event.source_event_id)
+        except ValueError as error:
+            raise CoreError("INVALID_SOURCE_EVENT_ID", 400) from error
+        if not owner_authority.required(s, cfg):
+            raise CoreError("OWNER_AUTHORITY_REQUIRED", 403)
+    elif not event.source_event_id.startswith(f"{cfg.bot_qq_id}:{origin}:"):
         raise CoreError("INVALID_SOURCE_EVENT_ID", 400)
     if not key or len(key) > 512:
         raise CoreError("INVALID_IDEMPOTENCY_KEY", 400)

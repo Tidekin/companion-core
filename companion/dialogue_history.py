@@ -176,7 +176,7 @@ def recent_sent_sources(
                 'FROM outbox reply WHERE '
                 'reply.origin_event_id=e.event_id AND '
                 'reply.conversation_id=%s AND '
-                "reply.action_type='qq.private.reply' AND "
+                "reply.action_type IN ('qq.private.reply','native.private.reply') AND "
                 "reply.state='SENT' AND "
                 "json_typeof(reply.content_json::json#>'{text}')='string"
                 "' "
@@ -188,7 +188,7 @@ def recent_sent_sources(
                 'AND length((CASE WHEN reply.content_json IS JSON THEN '
                 "(reply.content_json::json#>>'{text}') END))>0) WHERE "
                 "e.conversation_id=%s AND e.actor_id='owner' AND "
-                "e.privacy_scope='private' AND e.source='qq.onebot' AND "
+                "e.privacy_scope='private' AND e.source IN ('qq.onebot','native.chat') AND "
                 "e.event_type IN ('message.received',"
                 "'message.media_received') AND e.redacted=0 AND "
 
@@ -332,7 +332,7 @@ def pending_owner_sources(
                 "(e.body_json::json#>>'{text}') END) AS user_text,'' AS "
                 'reply_text FROM events e JOIN jobs j USING(event_id) '
                 "WHERE e.conversation_id=%s AND e.actor_id='owner' AND "
-                "e.source='qq.onebot' AND e.privacy_scope='private' AND "
+                "e.source IN ('qq.onebot','native.chat') AND e.privacy_scope='private' AND "
                 "e.event_type IN ('message.received',"
                 "'message.media_received') AND e.redacted=0 AND "
                 "e.reply_revision>0 AND j.kind='chat' AND "
@@ -356,7 +356,7 @@ def pending_owner_sources(
                 "json_typeof(e.body_json::json#>'{rich}')='object') AND "
                 'NOT EXISTS (SELECT 1 FROM outbox o WHERE '
                 'o.origin_event_id=e.event_id AND '
-                "o.action_type='qq.private.reply' AND o.state='SENT') "
+                "o.action_type IN ('qq.private.reply','native.private.reply') AND o.state='SENT') "
                 'ORDER BY e.record_sequence DESC LIMIT %s'
 
         ),

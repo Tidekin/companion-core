@@ -147,7 +147,7 @@
   "properties": {
     "schema_version": {"const": 1},
     "event_id": {"type": "string", "minLength": 8},
-    "source": {"const": "qq.onebot"},
+    "source": {"enum": ["qq.onebot", "native.chat"]},
     "source_event_id": {"type": "string", "minLength": 1},
     "event_type": {"enum": ["message.received", "message.media_received"]},
     "occurred_at": {"type": "string", "format": "date-time"},

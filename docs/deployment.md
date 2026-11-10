@@ -39,7 +39,7 @@ CI 为 Core、OneBot Bridge、Source Reader、Console UI 保留已通过容器�
 python -B scripts/ci_container_artifacts.py consume --repository Tidekin/companion-core --run-id <successful-run-id> --destination .local/verified-images
 ```
 
-消费者核对原始 full run 的十四项成功 job、源码 tree、attempt、制品身份和 SHA256，
+消费者核对原始 full run 的全部十五项成功 job（含 Flutter 客户端）、源码 tree、attempt、制品身份和 SHA256，
 然后下载、`docker image load` 并核对实际 image ID 与 `linux/amd64` 平台。
 主分支复用回执指向原 full run 的原制品；证据缺失、过期或不一致会直接失败，不回退重建。
 `consumed-images.json` 保存实际 image ID、下载及加载耗时。可加 `--previous-run`

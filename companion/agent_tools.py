@@ -136,7 +136,8 @@ Each tool requires its current purpose on the original owner-authorized job.
                 if (work := retrieval_work.current()) is not None:
                     work.mark(error.reason)
                 return False
-            if not lineage or not all(row["source"] != "qq.onebot" or source_allowed(
+            if not lineage or not all(
+                    row["source"] not in {"qq.onebot", "native.chat"} or source_allowed(
                     core.store, core.settings, core.clock, row["event_id"], "memory")
                     for row in lineage):
                 return False

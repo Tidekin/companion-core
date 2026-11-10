@@ -3,6 +3,7 @@
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from datetime import date
 from types import SimpleNamespace
@@ -40,6 +41,7 @@ MEMORY_REJECTIONS = frozenset(
 
 class Login(StrictModel):
     password: SecretStr
+    device_public_key: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class Mode(StrictModel):
@@ -147,6 +149,13 @@ def _check_owner(core, request):
         or not hmac.compare_digest(row["credential_tag"], _credential(settings))
     ):
         raise CoreError("CONSOLE_LOGIN_REQUIRED", 401)
+    native = re.fullmatch(r"native_([a-f0-9]{32})_[A-Za-z0-9_-]{43}", token)
+    row["native_device_id"] = native.group(1) if native else None
+    if native and not (
+        request.url.path.startswith("/v1/console/chat/")
+        or request.url.path == "/v1/console/session"
+    ):
+        raise CoreError("NATIVE_SESSION_SCOPE_REQUIRED", 403)
     if request.method not in {"GET", "HEAD"}:
         _origin(request, settings)
         if not hmac.compare_digest(request.headers.get("x-csrf-token", ""), row["csrf_token"]):
@@ -329,6 +338,11 @@ def register_console_routes(app, settings):
                         (settings.console.max_sessions - 1,),
                     )
                     token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+                    if body.device_public_key is not None:
+                        from companion_delivery_protocol.native_chat import device_identity
+
+                        device_id, _ = device_identity(body.device_public_key)
+                        token = f"native_{device_id}_{token}"
                     seconds = settings.console.session_seconds
                     expires = after(now, seconds)
                     s.insert(
@@ -393,6 +407,10 @@ def register_console_routes(app, settings):
     register_publication_routes(
         app, settings, prefix + "/qzone/publications", auth, publication_check
     )
+
+    from companion.native_chat_api import register_routes as register_native_chat_routes
+
+    register_native_chat_routes(app, settings, prefix + "/chat", auth, publication_check)
 
     async def write(request, key, body, apply, *, rejected_errors=frozenset()):
         clock, captured = app.state.core.clock, _request_fields(request)

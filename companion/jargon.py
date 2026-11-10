@@ -46,7 +46,7 @@ RETRYABLE_CODES = {
 }
 OWNER_TEXT = (
 
-        "e.actor_id='owner' AND e.source='qq.onebot' AND "
+        "e.actor_id='owner' AND e.source IN ('qq.onebot','native.chat') AND "
         "e.privacy_scope='private' AND "
         "e.event_type='message.received' AND e.redacted=0 AND "
         'COALESCE((CASE WHEN e.body_json IS JSON THEN CASE '

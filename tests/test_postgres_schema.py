@@ -48,7 +48,12 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
         for name in source:
             expected = {row[1]: row[2] for row in legacy.execute(f'PRAGMA table_info("{name}")')}
             actual = column_types[name]
-            assert set(actual) == set(expected) | {"record_sequence"}, name
+            extra = {"record_sequence"}
+            if name == "agent_conversations":
+                extra |= {"preview_json", "preview_version"}
+                assert actual["preview_json"] == "text"
+                assert actual["preview_version"] == "bigint"
+            assert set(actual) == set(expected) | extra, name
             for column, kind in expected.items():
                 assert actual[column] == {
                     "INTEGER": "bigint", "TEXT": "text", "BLOB": "bytea",
@@ -61,7 +66,7 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
             "WHERE constraint_schema=current_schema() AND constraint_type='FOREIGN KEY'"
         )["n"] == foreign_keys
         assert session.one("SELECT version_num FROM alembic_version") == {
-            "version_num": "pg0002_relationship_standing"}
+            "version_num": "pg0004_native_stream"}
 
 
 def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_index():
@@ -87,7 +92,7 @@ def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_inde
         with psycopg.connect(info.get_secret_value()) as db:
             assert directions(db) == expected
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0002_relationship_standing",)
+                "pg0004_native_stream",)
 
 
 def audit(session, document):

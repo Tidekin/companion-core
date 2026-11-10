@@ -137,6 +137,9 @@ def recent_history(store, settings, job):
 
 def stop_work(store, now):
     """Revoke queued/leased native work; retain uncertainty for dispatched reads/sends."""
+    from companion.native_stream import withdraw
+
+    withdraw(store)
     for table, states in (
         ("jobs", "'QUEUED','RUNNING','RETRY_WAIT'"),
         ("outbox", "'PENDING','LEASED','RETRY_WAIT'"),

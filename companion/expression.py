@@ -300,7 +300,7 @@ class ExpressionEngine:
                     'SELECT e.body_json FROM events AS e JOIN conversations '
                     'AS c USING (conversation_id) WHERE e.event_id = %s AND '
                     "e.redacted = 0 AND e.actor_id = 'owner' AND "
-                    "e.privacy_scope = 'private' AND e.source = 'qq.onebot' "
+                    "e.privacy_scope = 'private' AND e.source IN ('qq.onebot','native.chat') "
                     "AND c.scope = 'private' AND c.owner_actor_id = 'owner'"
                 ),
                 (event_id,),
@@ -402,12 +402,9 @@ class ExpressionEngine:
             "e.conversation_id = c.conversation_id WHERE e.event_id = %s AND e.redacted = 0",
             (event_id,),
         )
-        if not event or (
-            event["actor_id"],
-            event["source"],
-            event["scope"],
-            event["owner_actor_id"],
-        ) != ("owner", "qq.onebot", "private", "owner"):
+        if (not event or event["source"] not in {"qq.onebot", "native.chat"}
+            or (event["actor_id"], event["scope"], event["owner_actor_id"])
+                != ("owner", "private", "owner")):
             return intent
         if not reply_revision.current(self.store, event_id):
             return intent
@@ -486,14 +483,14 @@ class ExpressionEngine:
             if previous:
                 return previous["message_id"]
             event = self.store.one(
-                "SELECT conversation_id FROM events WHERE event_id = %s AND redacted = 0",
+                "SELECT conversation_id,source FROM events WHERE event_id = %s AND redacted = 0",
                 (event_id,),
             )
             if not event:
                 raise CoreError("PRIVACY_CHANGED", 503)
             if event["conversation_id"] != conversation_id:
                 raise CoreError("EXPRESSION_CONVERSATION_MISMATCH", 400)
-            if not self.settings.expression_enabled:
+            if not self.settings.expression_enabled or event["source"] == "native.chat":
                 return enqueue(
                     self.store, event_id, conversation_id, reply, now, action=action, key=key
                 )

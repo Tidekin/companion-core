@@ -60,7 +60,7 @@ class Payload(StrictModel):
 class InboundEvent(StrictModel):
     schema_version: Literal[1]
     event_id: str = Field(min_length=8, max_length=128)
-    source: Literal["qq.onebot"]
+    source: Literal["qq.onebot", "native.chat"]
     source_event_id: str = Field(min_length=1, max_length=512)
     event_type: Literal["message.received", "message.media_received"]
     occurred_at: AwareDatetime

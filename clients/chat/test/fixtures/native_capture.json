@@ -1,0 +1,140 @@
+[
+  {
+    "seed": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31
+    ],
+    "authority": {
+      "version": 2,
+      "grant_id": "grant_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": 3,
+      "policy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "restore_generation": "test_generation"
+    },
+    "request_id": "0123456789abcdef0123456789abcdef",
+    "time": "2026-11-10T04:00:00+00:00",
+    "text": "原生签名测试：\"你好\"\\目录\n第二行 🐟",
+    "packet": {
+      "capture": {
+        "authority": {
+          "version": 2,
+          "grant_id": "grant_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": 3,
+          "policy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "restore_generation": "test_generation"
+        },
+        "kind": "authenticated_native_device",
+        "event_id": "evt_97c0e5a5198fd619ff5dc373b148e4012f86ed2a1fd814da065ceca4f023950b",
+        "source_event_id": "native:56475aa75463474c0285df5dbf2bcab7:0123456789abcdef0123456789abcdef",
+        "input_sha256": "a1c983a61c0d23e30e5d556c85a48378b6183c53f6c9146d2fb82841105287de",
+        "frame_sha256": "a619cc2e65335abbd1f8fc9acf6f8bf1d3d0a63d813024f6c6e266d7705b5436",
+        "evidence_sha256": "8fc7664e11d3150d918453599ac02b324de2a475c735c64159266ab434ecd2a8",
+        "identity_sha256": "8f644d1391a20e496aa8081db8063098b17801ab9605019a302dd88c16cb69cc",
+        "protocol_epoch": "native-v1",
+        "received_at": "2026-11-10T04:00:00+00:00",
+        "occurred_at": "2026-11-10T04:00:00+00:00",
+        "signature": "c822ff2c37fdfc5996bca2a51974b5b474ae7191d44b8b49083a662e448b6f366e6d7332338eebc1bd7062d4deff421d95b0e2b9d6674b1cb6cb3f7bffdef70d"
+      },
+      "text": "原生签名测试：\"你好\"\\目录\n第二行 🐟"
+    }
+  },
+  {
+    "seed": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31
+    ],
+    "authority": {
+      "version": 2,
+      "grant_id": "grant_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "revision": 3,
+      "policy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "restore_generation": "test_generation"
+    },
+    "request_id": "0123456789abcdef0123456789abcdef",
+    "time": "2026-11-10T04:00:00.123456+00:00",
+    "text": "原生签名测试：\"你好\"\\目录\n第二行 🐟",
+    "packet": {
+      "capture": {
+        "authority": {
+          "version": 2,
+          "grant_id": "grant_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "revision": 3,
+          "policy_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "restore_generation": "test_generation"
+        },
+        "kind": "authenticated_native_device",
+        "event_id": "evt_97c0e5a5198fd619ff5dc373b148e4012f86ed2a1fd814da065ceca4f023950b",
+        "source_event_id": "native:56475aa75463474c0285df5dbf2bcab7:0123456789abcdef0123456789abcdef",
+        "input_sha256": "a1c983a61c0d23e30e5d556c85a48378b6183c53f6c9146d2fb82841105287de",
+        "frame_sha256": "b5c71cd73071891e9e3e62111da66a5b1b2f322f773f7d32d47fd237dc6ff118",
+        "evidence_sha256": "8fc7664e11d3150d918453599ac02b324de2a475c735c64159266ab434ecd2a8",
+        "identity_sha256": "8f644d1391a20e496aa8081db8063098b17801ab9605019a302dd88c16cb69cc",
+        "protocol_epoch": "native-v1",
+        "received_at": "2026-11-10T04:00:00.123456+00:00",
+        "occurred_at": "2026-11-10T04:00:00.123456+00:00",
+        "signature": "35696dd814a7260bad3d6e85d19c1c04141a4a5b66b8cea9ec9ad72c163b365dffb2d1faff2bd8095a2368320d0742bdf3b861b1ba1e573f7bf665cc4987fb00"
+      },
+      "text": "原生签名测试：\"你好\"\\目录\n第二行 🐟"
+    }
+  }
+]

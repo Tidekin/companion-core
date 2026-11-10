@@ -14,7 +14,7 @@ from psycopg import sql
 from pydantic import SecretStr
 
 SOURCE_REVISION = "0068_image_review_target"
-TARGET_REVISION = "pg0002_relationship_standing"
+TARGET_REVISION = "pg0004_native_stream"
 
 
 def migrate_sqlite(path, revision="head"):
@@ -112,7 +112,8 @@ def _require_empty(target, tables):
 def _copy_table(source, target, name, actual):
     identifier = sql.Identifier(name)
     quoted, columns = _columns(source, name)
-    if actual != set(columns) | {"record_sequence"}:
+    projection = {"preview_json", "preview_version"} if name == "agent_conversations" else set()
+    if actual != set(columns) | {"record_sequence"} | projection:
         raise RuntimeError("SQLITE_IMPORT_COLUMN_SET_MISMATCH")
     rows = source.execute(f"SELECT rowid,* FROM {quoted} ORDER BY rowid")
     first = rows.fetchone()
@@ -143,6 +144,10 @@ def _copy_table(source, target, name, actual):
 
 def _compare_table(source, target, name):
     quoted, columns = _columns(source, name)
+    if name == "agent_conversations" and target.execute(
+        "SELECT 1 FROM agent_conversations WHERE preview_json IS NOT NULL OR preview_version<>0"
+    ).fetchone():
+        raise RuntimeError("SQLITE_IMPORT_ROW_RECONCILIATION_FAILED")
     statement = sql.SQL("SELECT {} FROM {} ORDER BY record_sequence").format(
         sql.SQL(",").join(sql.Identifier(column) for column in ["record_sequence", *columns]),
         sql.Identifier(name))

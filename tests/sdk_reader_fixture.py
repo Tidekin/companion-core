@@ -26,6 +26,21 @@ def call(call_id, name, arguments):
     }}
 
 
+def response(body, *, stream=False):
+    if not stream:
+        return httpx.Response(200, json=body)
+    message = body["choices"][0]["message"]
+    if "tool_calls" in message:
+        message = {**message, "tool_calls": [
+            {**item, "index": index} for index, item in enumerate(message["tool_calls"])]}
+    chunks = [{"choices": [{"index": 0, "delta": message, "finish_reason": None}]},
+              {"choices": [{"index": 0, "delta": {}, "finish_reason":
+                  body["choices"][0]["finish_reason"]}]}, {"choices": [], "usage": body["usage"]}]
+    data = "".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
+    return httpx.Response(200, text=data + "data: [DONE]\n\n",
+                          headers={"Content-Type": "text/event-stream"})
+
+
 class Provider:
     def __init__(self, *responses):
         self.responses = list(responses)
@@ -39,7 +54,7 @@ class Provider:
         body = self.responses.pop(0)
         if isinstance(body, httpx.Response):
             return body
-        return httpx.Response(200, json=body)
+        return response(body, stream=self.requests[-1].get("stream", False))
 
 
 @asynccontextmanager
