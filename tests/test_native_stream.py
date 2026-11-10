@@ -3,6 +3,7 @@
 import asyncio
 import json
 import ssl
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -20,8 +21,11 @@ from tests.support.owner_console import client as client
 from tests.support.owner_input import captured
 
 
-@pytest.mark.parametrize('outcome', ['complete', 'eof', 'revoke', 'lease', 'erase'])
-def test_preview_first_block_final_fence_and_withdrawal(client, core, tmp_path, outcome):
+@pytest.mark.parametrize('outcome', ['complete', 'eof', 'revoke', 'lease', 'erase',
+                                     'progress', 'burst'])
+def test_preview_first_block_final_fence_and_withdrawal(
+    client, core, tmp_path, outcome, monkeypatch,
+):
     captured(core, tmp_path)
     key = Ed25519PrivateKey.generate()
     headers, authority = enroll(client, key)
@@ -29,6 +33,17 @@ def test_preview_first_block_final_fence_and_withdrawal(client, core, tmp_path, 
         json=packet(core, key, authority)).json()
     event_id, job_id = accepted['event_id'], accepted['job_id']
     calls = []
+    checks = []
+    if outcome == 'burst':
+        original = native_stream.check_conversation
+
+        def expensive_check(*args, **kwargs):
+            result = original(*args, **kwargs)
+            checks.append(1)
+            time.sleep(0.11)  # Preserve real validation; emulate a slow production boundary.
+            return result
+
+        monkeypatch.setattr(native_stream, 'check_conversation', expensive_check)
 
     async def scenario():
         release = asyncio.Event()
@@ -40,6 +55,14 @@ def test_preview_first_block_final_fence_and_withdrawal(client, core, tmp_path, 
                 await asyncio.wait_for(release.wait(), 30)
                 if outcome == 'eof':
                     return
+                if outcome == 'progress':
+                    for _ in range(3):
+                        await asyncio.sleep(0.12)
+                        core.clock.advance(core.settings.lease_seconds // 2)
+                        yield chunk({'content': '，持续正文'})
+                elif outcome == 'burst':
+                    for _ in range(32):
+                        yield chunk({'content': '字'})
                 yield chunk({'content': '，最终正文。'})
                 yield chunk(finish='stop')
                 yield chunk(usage={'prompt_tokens': 100, 'completion_tokens': 20})
@@ -86,12 +109,17 @@ def test_preview_first_block_final_fence_and_withdrawal(client, core, tmp_path, 
             finally:
                 release.set()
                 await task
-            if outcome == 'complete':
+            if outcome in {'complete', 'progress', 'burst'}:
                 turn = client.get('/v1/console/chat/messages/' + event_id).json()['items'][0]
                 assert turn['state'] == 'SUCCEEDED'
                 assert turn['preview']['state'] == 'COMPLETE' and not turn['preview']['text']
-                assert [reply['text'] for reply in turn['replies']] == ['首段正文，最终正文。']
+                middle = '，持续正文' * 3 if outcome == 'progress' else (
+                    '字' * 32 if outcome == 'burst' else '')
+                assert [reply['text'] for reply in turn['replies']] == [
+                    '首段正文' + middle + '，最终正文。']
                 assert turn['preview']['version'] > 1
+                if outcome == 'burst':
+                    assert len(checks) < 20, 'buffered tiny deltas must share public validation'
             elif outcome == 'eof':
                 turn = client.get('/v1/console/chat/messages/' + event_id).json()['items'][0]
                 assert turn['uncertain'] and turn['state'] != 'SUCCEEDED'

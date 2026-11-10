@@ -48,8 +48,10 @@ class ControlledStream(StreamedResponse):
     async def _get_event_iterator(self):
         self._task = asyncio.create_task(self._produce())
         emitted = False
+        missing = pending = object()
         while True:
-            item = await self._queue.get()
+            item = await self._queue.get() if pending is missing else pending
+            pending = missing
             if isinstance(item, BaseException):
                 raise item
             if not isinstance(item, ModelDelta):
@@ -64,8 +66,21 @@ class ControlledStream(StreamedResponse):
                 break
             emitted = True
             if item.kind == "text":
+                # Coalesce only adjacent text already in the existing bounded queue.
+                # Keep thinking, tools, completion and failures in their original order.
+                pieces = [item.text]
+                while True:
+                    try:
+                        buffered = self._queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if isinstance(buffered, ModelDelta) and buffered.kind == "text":
+                        pieces.append(buffered.text)
+                    else:
+                        pending = buffered
+                        break
                 for event in self._parts_manager.handle_text_delta(
-                    vendor_part_id="text", content=item.text):
+                    vendor_part_id="text", content="".join(pieces)):
                     yield event
             elif item.kind == "thinking":
                 for event in self._parts_manager.handle_thinking_delta(
