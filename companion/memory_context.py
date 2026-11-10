@@ -535,7 +535,7 @@ class MemoryContext:
                     return None
             allowed = None  # Check nominated sources individually below.
 
-        def collect():
+        def collect(unchanged=None):
             source_check = finish = None
             if not authority and allowed is None:
                 def source_check(event_id):
@@ -556,7 +556,8 @@ class MemoryContext:
             if authority:
                 # Episodes share their sources; check them all against one job view.
                 _, check, finish = owner_input.history_batch(
-                    s, cfg, clock, job, purpose="proactive" if followup else "chat")
+                    s, cfg, clock, job, purpose="proactive" if followup else "chat",
+                    unchanged=unchanged)
 
                 def source_check(event_id):
                     try:
@@ -580,7 +581,8 @@ class MemoryContext:
                 finish()
             return found
 
-        result = s.read_or_write(collect) if authority else collect()
+        result = (s.read_or_write(lambda: owner_input.batch_sources(s, collect))
+                  if authority else collect())
         return self._fit_reply_continuation(cfg, result["items"], authority, history, now,
                                             reserved_ids, reserved_bytes)
 

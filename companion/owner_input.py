@@ -1,6 +1,7 @@
 """Signed owner input evidence; durable policy and current execution are separate checks."""
 
 import hashlib
+import inspect
 import json
 import re
 from datetime import datetime
@@ -366,21 +367,54 @@ def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid
     return _history_sources(store, settings, clock, job, purpose=purpose, cutoff_rowid=cutoff_rowid)
 
 
-def history_batch(store, settings, clock, job, *, purpose):
-    """One job authority view for many history sources read from one DB state.
+def batch_sources(store, operation):
+    """One synchronous source read; never retain a permission or a cross-await cache.
 
-    Inside a repeatable read-only snapshot no other writer's commit is visible,
-    so per-source checks reuse the view and capture evidence while this connection has
-    not written. Outside them, or after any own write, each source takes the full check.
-    `finish` rechecks live authority and independent files for the whole batch.
+    An owned write scope may reuse reads only while its actual native snapshot and
+    write counter match. A different external commit retries once with the original
+    per-source validators. Own writes invalidate the entire collected result.
+    The operation still owns its original initial/final authority and file checks.
     """
+    def run(check):
+        result = operation(check)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise TypeError("SYNCHRONOUS_SOURCE_READ_REQUIRED")
+        return result
+
+    if not store.in_transaction:
+        return run(None)
+    scope, before = store.validation_scope, store.change_token()
+    active = True
+
+    def unchanged():
+        return (active and scope is not None and store.validation_scope == scope
+                and (store.in_read_snapshot or store.change_token() == before))
+
+    try:
+        result = run(unchanged if scope is not None else None)
+        if not store.in_transaction or store.validation_scope != scope:
+            raise CoreError("PRIVACY_CHANGED", 409)
+        after = store.change_token()
+        if after["writes"] != before["writes"]:
+            raise CoreError("PRIVACY_CHANGED", 409)
+        if scope is not None and after != before:
+            # READ COMMITTED may observe an unrelated writer. Discard the batched
+            # result and read again without reusing authority or source evidence.
+            active = False
+            result = run(None)
+            if (not store.in_transaction or store.validation_scope != scope
+                    or store.change_token()["writes"] != before["writes"]):
+                raise CoreError("PRIVACY_CHANGED", 409)
+        return result
+    finally:
+        active = False
+
+
+def history_batch(store, settings, clock, job, *, purpose, unchanged=None):
+    """Original validators over one batch_sources call's freshly checked job view."""
     view = owner_authority.check_job(store, settings, clock, job, purpose=purpose)
-    scope = store.frozen_scope
-
-    def frozen():
-        return scope is not None and store.frozen_scope == scope
-
-    batched, changes = frozen(), store.change_token()
     originals = {encode(view.authority.as_dict()): view}
 
     def evidence(ref):
@@ -393,7 +427,7 @@ def history_batch(store, settings, clock, job, *, purpose):
         return _verify(store, settings, value, evidence)
 
     def check(event_id):
-        if batched and frozen():
+        if unchanged is not None and unchanged():
             if settings.owner_runtime.mode != "ENABLED":
                 raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
             if purpose not in view.policy.purposes or "history" not in view.policy.purposes:
@@ -412,20 +446,17 @@ def history_batch(store, settings, clock, job, *, purpose):
     def finish():
         # A source exclusion must never swallow a changed batch-wide boundary.
         owner_authority.check_job(store, settings, clock, job, purpose=purpose)
-        if batched:
-            if not frozen():
-                raise CoreError(reply_revision.CANCELLED, 409)
-        elif not store.in_transaction or store.change_token()["writes"] != changes["writes"]:
-            # READ COMMITTED may observe unrelated commits. Only this transaction's
-            # own changes invalidate the source rows it has already checked here.
-            raise CoreError(reply_revision.CANCELLED, 409)
 
     return view, check, finish
 
 
 def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
-    view, check, finish = history_batch(store, settings, clock, job, purpose=purpose)
-    return _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid)
+    def collect(unchanged):
+        view, check, finish = history_batch(store, settings, clock, job, purpose=purpose,
+                                           unchanged=unchanged)
+        return _collect_history(store, settings, clock, job, view, check, finish, cutoff_rowid)
+
+    return batch_sources(store, collect)
 
 
 def history_for_owner(store, settings, clock, job, view):

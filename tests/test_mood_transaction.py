@@ -42,6 +42,7 @@ def test_mood_batches_authority_but_validates_every_source(core, tmp_path, monke
                                                         transactional):
     def check(expected):
         calls, recalls = [], []
+        same_snapshot = True
         native = authority_custody.check
         native_recall = owner_input.input_recall.require_not_recalled
 
@@ -63,13 +64,17 @@ def test_mood_batches_authority_but_validates_every_source(core, tmp_path, monke
                 core.store.execute("ROLLBACK")
         else:
             with core.store.transaction() if transactional else nullcontext():
+                before = core.store.change_token() if transactional else None
                 actual = core.mood.snapshot()
-        if transactional:
-            # Two independent authority checks per source outside a Core read snapshot.
+                same_snapshot = not transactional or core.store.change_token() == before
+        if transactional == "read_transaction":
+            # Borrowed transactions keep the original independent checks per source.
             assert len(calls) == 3 + 2 * len(recalls)
-        else:
+        elif same_snapshot:
             assert len(calls) <= 4
-        assert len(recalls) == 6
+        else:
+            assert len(calls) <= 2 * (3 + 2 * 6)
+        assert len(recalls) in ({6, 12} if not same_snapshot else {6})
         assert actual == expected
         assert not core.store.in_transaction
 
@@ -161,5 +166,26 @@ def test_mood_rechecks_mutable_batch_at_publication(core, tmp_path, monkeypatch,
                 core.mood.snapshot()
         finally:
             journal.write_bytes(original)
+
+    run(native_mood(core, tmp_path, check))
+
+
+def test_mood_rechecks_an_external_source_change_at_publication(core, tmp_path, monkeypatch):
+    def check(expected):
+        native = core.mood._appraisals
+        changed = []
+        with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
+            def collect(*args, **kwargs):
+                signals = native(*args, **kwargs)
+                if not changed:
+                    other.execute("UPDATE events SET redacted=1 WHERE event_id=%s",
+                                  (expected["signals"][0]["event_id"],))
+                    changed.append(1)
+                return signals
+
+            monkeypatch.setattr(core.mood, "_appraisals", collect)
+            with pytest.raises(CoreError), core.store.transaction():
+                core.mood.revalidate(expected)
+        assert changed
 
     run(native_mood(core, tmp_path, check))
