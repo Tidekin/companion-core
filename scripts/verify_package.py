@@ -180,7 +180,7 @@ def verify_postgres(destination, environment):
         native.migrate(info)
         with native.Database(info) as database, database.session() as session:
             assert session.one('SELECT version_num FROM alembic_version')=={
-                'version_num':'pg0002_relationship_standing'}
+                'version_num':'pg0003_native_chat'}
             assert session.one("SELECT count(*) AS n FROM information_schema.tables "
                 "WHERE table_schema=current_schema() AND table_type='BASE TABLE'")=={'n':104}
         print('PASS: extracted wheel initializes native PostgreSQL migrations')
