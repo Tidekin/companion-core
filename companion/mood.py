@@ -627,15 +627,23 @@ class MoodService:
                 prior["reason"], prior["kind"] = "REVIEWED_GOAL_COMPLETION", "experience"
             else:
                 merged[key] = item
+        ordered = sorted(
+            merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
+        )
+        published = ordered[-LIMIT:]
         if view:
+            if unchanged is None and s.in_write_transaction:
+                # Under sustained unrelated commits, batching conservatively falls
+                # back to independent source reads. Recheck published lineage after
+                # collection too: a source may have changed after its first read.
+                for key in sorted({key for item in published for key in item["source_event_ids"]}):
+                    if not self._lineage(key, sources):
+                        raise CoreError("PRIVACY_CHANGED", 409)
             # Independent journals, STOP and time remain live at the batch boundary.
             owner_authority.current(
                 s, cfg, self.clock, purpose="expression", authority=view.authority
             )
-        ordered = sorted(
-            merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
-        )
-        return ordered[-LIMIT:], len(candidates) > LIMIT or len(ordered) > LIMIT
+        return published, len(candidates) > LIMIT or len(ordered) > LIMIT
 
     def _appraisals(self, at, allowed, cutoff, sources, taken, source_check=None):
         """Model-judged owner wording; an exact-phrase signal on the same message wins.
