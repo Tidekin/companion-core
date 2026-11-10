@@ -75,6 +75,8 @@ Set-Location clients/chat
 
 打开后添加多个 Bot 的名称和 HTTPS 地址，分别登录主人凭据，预览并批准登记。首次登记会更新授权版本。若 Core 尚无允许 chat 的主人授权，需先用原主人授权 status / preview / revisions 流程批准该设备公钥与 chat 目的；后续撤销也走同一流程。设备密钥与 QQ capture 独立。
 
+保留历史 UNKNOWN 的既有生产实例，设备变更使用原有 STOP → 受控授权 preview/apply → Bridge/Worker 交接流程，并要求当前授权下工作已终态且没有 UNKNOWN；仅改变 `native_devices`，预算、原 UNKNOWN 与其他权限保持不变。部署时可先登记客户端公钥，再启动会话。普通登录不自动停止生产服务或重跑旧请求。空设备字段保持省略，原授权摘要及签名证据不变。
+
 正式 Windows 构建使用 `flutter build windows --release`；需分发整个 `build/windows/x64/runner/Release` 目录，不能只复制 exe。Android 使用同一源码 `flutter build apk --debug` 进行开发安装；公开发布前另行配置自己的 release 签名、升级与分发渠道。Android 最低 API 24。Android 构建还需 JDK 17、Android SDK 36，以及各插件要求的 NDK；下载和构建缓存放在工作区 `.local`。
 
 默认数据目录为系统应用支持目录；开发可用 `--dart-define=COMPANION_DATA_DIR=<工作区内目录>` 指定 SQLite 位置。`scripts/flutter.ps1` 将工具缓存限制在工作区；需要使用已有 Android/JDK 工具时按本机配置准备 `.local/android-sdk` 与 JAVA_HOME。含空格路径遇到原生 hook 的 SDK 兼容问题时，可以给同一工作区设置临时 `subst` 别名，并设 `COMPANION_FLUTTER_WORKSPACE` 为该别名，保持所有文件仍落在原工作区。目录联接辅助脚本用于当前 Windows 未启用开发者模式的环境，不修改系统设置。

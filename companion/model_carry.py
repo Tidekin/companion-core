@@ -892,10 +892,17 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
 
 
 def purpose_revision(old, new):
-    """One private-purpose addition or an existing voice/meme configuration revision."""
+    """A scoped device, private-purpose or existing voice/meme permission revision."""
     if old == new:
         return
     before, after = old.model_dump(mode="json"), new.model_dump(mode="json")
+    # Device identity validation belongs to OwnerGrantPolicy. This only permits the
+    # already approved device map to change; the original activation still requires
+    # STOP, terminal work and no UNKNOWN under the immediately preceding authority.
+    if (old.native_devices != new.native_devices
+            and {k: v for k, v in before.items() if k != "native_devices"}
+            == {k: v for k, v in after.items() if k != "native_devices"}):
+        return
     for capability in ("voice", "meme"):
         fingerprint = new.capability_policies.get(capability)
         if (capability in old.purposes and hash_value(fingerprint)
