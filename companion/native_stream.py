@@ -11,11 +11,11 @@ from pydantic_ai.messages import (
     TextPartDelta,
 )
 
-from companion import owner_delivery, transport
+from companion import job_queue, owner_delivery, transport
 from companion.agent_runtime import check_conversation
 from companion.contracts import CoreError
 from companion.privacy import epoch
-from companion.store import encode
+from companion.store import after, encode
 
 
 class Publisher:
@@ -61,6 +61,8 @@ class Publisher:
         with store.transaction():
             check_conversation(self.core, self.job, self.snapshots,
                                current_request=self.request_id)
+            at = self.core.clock()
+            job_queue.renew(store, self.job, after(at, self.core.settings.lease_seconds), now=at)
             value = {"text": self.text, "state": "GENERATING", "request_id": self.request_id,
                      "lease_token": self.job["lease_token"], "privacy_epoch": epoch(store)}
             changed = store.execute(

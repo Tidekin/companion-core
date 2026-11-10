@@ -127,3 +127,56 @@ def test_admission_binds_stream_mode_and_sdk_receives_first_text_before_end():
                         cfg, [{"role": "user", "content": "x"}], "chat"))))
             assert len(requests) == 1
     run(scenario())
+
+
+def test_buffered_text_preserves_sdk_tool_boundary_and_final_result():
+    async def scenario():
+        cfg = Settings(mode='live', model_key='synthetic-model-key', owner_qq_id='10001',
+            bot_qq_id='10002', bridge_token='synthetic-bridge-token-24-characters',
+            database='unused')
+        requests, executed, seen = [], [], []
+
+        def provider(request):
+            requests.append(json.loads(request.content))
+            if len(requests) == 1:
+                parts = [chunk({'content': value}) for value in ['A', 'B']]
+                parts += [chunk({'reasoning_content': 'private reasoning'}),
+                    chunk({'tool_calls': [{'index': 0, 'id': 'call-1', 'function': {
+                        'name': 'echo', 'arguments': '{"value":'}}]}),
+                    chunk({'tool_calls': [{'index': 0, 'function': {'arguments': '"x"}'}}]}),
+                    chunk(finish='tool_calls')]
+            else:
+                parts = [chunk({'content': value}) for value in ['C', 'D']]
+                parts.append(chunk(finish='stop'))
+            parts += [chunk(usage={'prompt_tokens': 40, 'completion_tokens': 12}),
+                      b'data: [DONE]\n\n']
+            return httpx.Response(200, headers={'content-type': 'text/event-stream'},
+                                  stream=Chunks(parts))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as http:
+            async def complete(wire, *, tools, on_delta=None):
+                return await ModelClient(cfg, http).complete(wire, 'chat', tools=tools,
+                    stream=True, on_delta=on_delta, admission=ModelAdmission(sha(
+                        model_payload(cfg, wire, 'chat', tools=tools, stream=True))))
+
+            agent = Agent(ControlledModel(cfg.model_name, complete, stream_complete=complete))
+
+            @agent.tool_plain
+            def echo(value: str) -> str:
+                executed.append(value)
+                return 'returned:' + value
+
+            async def observe(ctx, events):
+                async for event in events:
+                    if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+                        seen.append(event.part.content)
+                    elif (isinstance(event, PartDeltaEvent)
+                          and isinstance(event.delta, TextPartDelta)):
+                        seen.append(event.delta.content_delta)
+
+            result = await agent.run('synthetic', event_stream_handler=observe)
+            assert result.output == 'CD' and executed == ['x'] and len(requests) == 2
+            assert ''.join(seen) == 'ABCD'
+            assert any(item.get('role') == 'tool' and 'returned:x' in item.get('content', '')
+                       for item in requests[1]['messages'])
+    run(scenario())
