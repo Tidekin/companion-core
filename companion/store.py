@@ -91,6 +91,11 @@ class Store:
         # repeatable read-only scope may reuse an unchanged snapshot's summary.
         return self._scope if self.in_read_snapshot else None
 
+    @property
+    def validation_scope(self):
+        """Identity of a caller-owned transaction; write scopes also need change_token."""
+        return self._scope if self.in_read_snapshot or self.in_write_transaction else None
+
     def change_token(self):
         """Native snapshot plus actual transaction writes, including triggers/CTEs."""
         # A repeatable read-only transaction cannot write business tables. Backend

@@ -249,10 +249,17 @@ class MoodService:
 
     def _signals(self, at, allowed):
         s, cfg = self.store, self.settings
-        if owner_authority.required(s, cfg) and not s.in_transaction:
+        if not owner_authority.required(s, cfg):
+            return self._collect_signals(at, allowed, None)
+        if not s.in_transaction:
             # Reuse the native history reader's synchronous batch on one DB state.
             # This batch never spans an await or a later context revalidation.
             return s.read_or_write(lambda: self._signals(at, allowed))
+        return owner_input.batch_sources(
+            s, lambda unchanged: self._collect_signals(at, allowed, unchanged))
+
+    def _collect_signals(self, at, allowed, unchanged):
+        s, cfg = self.store, self.settings
         sources = MemorySources(self.memory, self.clock())
         view = None
         if owner_authority.required(s, cfg):
@@ -264,14 +271,10 @@ class MoodService:
                 ),
             )
 
-        def frozen():
-            return s.in_read_snapshot
-
-        transactional, changes = frozen(), s.change_token()
         originals = {encode(view.authority.as_dict()): view} if view else {}
 
         def batched():
-            return view and transactional and frozen() and s.change_token() == changes
+            return view and unchanged is not None and unchanged()
 
         def permitted(purpose):
             if not batched():
@@ -629,11 +632,6 @@ class MoodService:
             owner_authority.current(
                 s, cfg, self.clock, purpose="expression", authority=view.authority
             )
-            if transactional:
-                if not frozen() or s.change_token() != changes:
-                    raise CoreError("PRIVACY_CHANGED", 409)
-            elif not s.in_transaction or s.change_token()["writes"] != changes["writes"]:
-                raise CoreError("PRIVACY_CHANGED", 409)
         ordered = sorted(
             merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
         )

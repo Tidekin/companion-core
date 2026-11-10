@@ -253,6 +253,24 @@ Core worker through mocked provider transport and native memory-review/chat sett
 Source-aware image/history, console, extraction and synchronous ranking callers are checked too.
 The exact frozen candidate and checks belong to the single verification receipt.
 
+## Synchronous source validation
+
+History, reply continuation and mood source collection reuse the existing validators within
+one synchronous `owner_input.batch_sources` call. Only a Store-owned transaction can reuse
+its checked authority and capture evidence. Read-only snapshots retain their existing
+repeatable view; write transactions additionally compare the native snapshot, schema,
+database instance and actual transaction write count before each reuse.
+
+The original final authority check still validates the accounting journal, erasure state,
+STOP and time conditions. An own write or transaction change rejects the collected result.
+A changed external snapshot immediately abandons the partial pass and rereads once using
+the original per-source validators. PostgreSQL snapshots also advance for unrelated
+transactions, so a busy cluster
+can lose this optimization. The reuse guard expires before the call returns, and asynchronous
+operations are rejected; later calls and checks after an await acquire a fresh view.
+Mock-mode mood reads that do not require owner authority retain their original source
+collector, without starting an authorization batch.
+
 ## Reply query reuse and bounded follow-up
 
 Fact search and raw-turn ranking reuse a query vector only inside one reply, keyed by
