@@ -324,9 +324,12 @@ class Core(Runtime):
         if (self.settings.voice.enabled and row["kind"] == "chat"
             and self.voice.input_status(row["event_id"], row["job_id"]).state == "WAITING"):
             return None
+        from companion.transport import native_text
+
         if (
             self.settings.content_enabled
             and row["kind"] == "chat"
+            and not native_text(s, row["event_id"])
             and not body.get("diary_command")
             and not body.get("control_command")
         ):
@@ -616,6 +619,8 @@ class Core(Runtime):
         return prompt_rules, affect, style, conversation_decision
 
     def _reply_input(self, turn, rules, notice_messages):
+        from companion.transport import native_text
+
         job, cfg, body, text = turn.job, turn.settings, turn.body, turn.text
         current = {"role": "user", "content": text or (
             "主人发送了一条非文本消息。" if turn.authority else "请看看我分享的内容。")}
@@ -633,6 +638,7 @@ class Core(Runtime):
         if (
             cfg.content_enabled and turn.permits("content")
             and job["kind"] == "chat"
+            and not native_text(self.store, job["event_id"])
             and not body.get("diary_command")
             and not body.get("control_command")
         ):
