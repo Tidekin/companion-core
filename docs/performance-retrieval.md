@@ -268,6 +268,8 @@ the original per-source validators. PostgreSQL snapshots also advance for unrela
 transactions, so a busy cluster
 can lose this optimization. The reuse guard expires before the call returns, and asynchronous
 operations are rejected; later calls and checks after an await acquire a fresh view.
+Mock-mode mood reads that do not require owner authority retain their original source
+collector, without starting an authorization batch.
 
 ## Reply query reuse and bounded follow-up
 

@@ -1,4 +1,4 @@
-"""Native mood sources reuse authority only inside a Core-owned read snapshot."""
+"""Native mood source validation within bounded, Core-owned transactions."""
 
 import json
 from contextlib import nullcontext
@@ -14,6 +14,27 @@ from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, worker_for
 from tests.support.native_consumer_entry import environment
+
+
+def test_mock_mood_without_owner_custody_does_not_repeat_source_collection(
+    core, monkeypatch,
+):
+    assert not owner_authority.required(core.store, core.settings)
+    calls = []
+    native = core.mood._collect_signals
+    with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
+        def collect(*args, **kwargs):
+            calls.append(1)
+            result = native(*args, **kwargs)
+            if len(calls) == 1:
+                other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
+                              (owner_authority.MODE,))
+            return result
+
+        monkeypatch.setattr(core.mood, "_collect_signals", collect)
+        with core.store.transaction():
+            assert core.mood._signals(core.clock(), None) == ([], False)
+    assert len(calls) == 1
 
 
 async def native_mood(core, tmp_path, check):

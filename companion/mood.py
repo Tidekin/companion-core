@@ -249,7 +249,9 @@ class MoodService:
 
     def _signals(self, at, allowed):
         s, cfg = self.store, self.settings
-        if owner_authority.required(s, cfg) and not s.in_transaction:
+        if not owner_authority.required(s, cfg):
+            return self._collect_signals(at, allowed, None)
+        if not s.in_transaction:
             # Reuse the native history reader's synchronous batch on one DB state.
             # This batch never spans an await or a later context revalidation.
             return s.read_or_write(lambda: self._signals(at, allowed))
