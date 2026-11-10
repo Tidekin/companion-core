@@ -152,12 +152,11 @@ def memory_scope(core):
 def test_native_memory_commands_context_history_and_erasure(client, core, tmp_path, monkeypatch):
     import json
 
-    import httpx
     import numpy as np
 
     from companion.reply_segments import SegmentedReplyConfig
     from companion.retrieval import SemanticIndex
-    from tests.sdk_reader_fixture import answer, worker_for
+    from tests.sdk_reader_fixture import answer, response, worker_for
 
     captured(core, tmp_path)
     memory_scope(core)
@@ -184,7 +183,7 @@ def test_native_memory_commands_context_history_and_erasure(client, core, tmp_pa
 
     def provider(request):
         requests.append(json.loads(request.content))
-        return httpx.Response(200, json=answer('第一段足够长。第二段也足够长。'))
+        return response(answer('第一段足够长。第二段也足够长。'), stream=requests[-1].get('stream'))
 
     def send(text):
         response = client.post('/v1/console/chat/messages', json=packet(core, key, authority, text),

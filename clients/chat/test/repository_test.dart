@@ -24,6 +24,43 @@ Map<String, dynamic> turn(String text) => {
 };
 
 void main() {
+  test(
+    'late frames cannot resurrect withdrawn, completed or erased previews',
+    () async {
+      final db = ChatDatabase(NativeDatabase.memory());
+      final repo = ChatRepository(db, CacheCipher(MemoryVault()));
+      await repo.addBot(
+        BotProfile(id: 'a', name: 'a', endpoint: Uri.parse('https://a.test')),
+      );
+      final generating = {
+        ...turn('original'),
+        'state': 'RUNNING',
+        'replies': [],
+        'preview': {'version': 2, 'state': 'GENERATING', 'text': 'partial'},
+      };
+      await repo.merge('a', [generating]);
+      await repo.withdrawPreviews('a');
+      await repo.merge('a', [generating]);
+      expect((await repo.turns('a')).single.preview!.text, isEmpty);
+      final finalTurn = {
+        ...turn('original'),
+        'preview': {'version': 3, 'state': 'COMPLETE', 'text': ''},
+      };
+      await repo.merge('a', [finalTurn]);
+      await repo.merge('a', [generating]);
+      expect((await repo.turns('a')).single.state, 'SUCCEEDED');
+      expect((await repo.turns('a')).single.replies, hasLength(1));
+      await repo.merge('a', [
+        {...finalTurn, 'text': '', 'replies': [], 'redacted': true},
+      ]);
+      await repo.merge('a', [finalTurn, generating]);
+      final erased = (await repo.turns('a')).single;
+      expect(erased.text, isEmpty);
+      expect(erased.replies, isEmpty);
+      expect(erased.redacted, isTrue);
+      await db.close();
+    },
+  );
   test('identical backend message IDs, drafts and unread marks remain scoped to each Bot', () async {
     final db = ChatDatabase(NativeDatabase.memory());
     final vault = MemoryVault();

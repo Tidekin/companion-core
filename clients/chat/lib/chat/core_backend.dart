@@ -27,6 +27,8 @@ abstract interface class ChatBackend {
   Future<void> refresh();
   Future<Map<String, dynamic>> history({int? before});
   Future<List<Map<String, dynamic>>> status(String eventId);
+  Stream<Map<String, dynamic>> watchTurns();
+  void stopWatching();
   Future<String> publicIdentity();
   void close();
 }
@@ -51,6 +53,13 @@ class CoreBackend implements ChatBackend {
   Map<String, dynamic>? _authority;
   String? _csrf;
   String? _cookie;
+  CancelToken? _events;
+
+  Map<String, dynamic> get _headers => {
+    'Origin': bot.endpoint.origin,
+    if (_csrf != null) 'X-CSRF-Token': _csrf,
+    if (_cookie != null) HttpHeaders.cookieHeader: _cookie,
+  };
 
   Future<SimpleKeyPair> _deviceKey() => _key ??= () async {
     final name = 'companion_${bot.id}_device_seed';
@@ -81,14 +90,7 @@ class CoreBackend implements ChatBackend {
         path,
         data: body,
         queryParameters: query,
-        options: Options(
-          method: method,
-          headers: {
-            'Origin': bot.endpoint.origin,
-            if (_csrf != null) 'X-CSRF-Token': _csrf,
-            if (_cookie != null) HttpHeaders.cookieHeader: _cookie,
-          },
-        ),
+        options: Options(method: method, headers: _headers),
       );
       final status = response.statusCode ?? 503;
       final value = response.data is Map
@@ -247,7 +249,79 @@ class CoreBackend implements ChatBackend {
           .toList();
 
   @override
+  Stream<Map<String, dynamic>> watchTurns() async* {
+    stopWatching();
+    final token = _events = CancelToken();
+    try {
+      final response = await http.get<ResponseBody>(
+        '/v1/console/chat/events',
+        cancelToken: token,
+        options: Options(
+          responseType: ResponseType.stream,
+          headers: _headers,
+          receiveTimeout: const Duration(seconds: 30),
+        ),
+      );
+      if (response.statusCode != 200) {
+        throw BackendError(
+          'STREAM_SESSION_REQUIRED',
+          status: response.statusCode,
+        );
+      }
+      if (!(response.headers.value('content-type') ?? '').startsWith(
+        'text/event-stream',
+      )) {
+        throw const BackendError('INVALID_EVENT_STREAM');
+      }
+      var event = '';
+      final data = <String>[];
+      var size = 0;
+      await for (final line
+          in response.data!.stream
+              .cast<List<int>>()
+              .transform(utf8.decoder)
+              .transform(const LineSplitter())) {
+        if (line.isEmpty) {
+          if (data.isNotEmpty) {
+            final value = Map<String, dynamic>.from(
+              jsonDecode(data.join('\n')) as Map,
+            );
+            if (event == 'session') {
+              throw BackendError(value['error'] as String, status: 403);
+            }
+            if (event == 'turn') yield value;
+          }
+          event = '';
+          data.clear();
+          size = 0;
+        } else if (line.startsWith('event:')) {
+          event = line.substring(6).trimLeft();
+        } else if (line.startsWith('data:')) {
+          final value = line.substring(5).replaceFirst(RegExp(r'^ '), '');
+          size += value.length;
+          if (size > 262144) throw const BackendError('INVALID_EVENT_STREAM');
+          data.add(value);
+        }
+      }
+    } on DioException {
+      if (!token.isCancelled) {
+        throw const BackendError('CONNECTION_UNAVAILABLE');
+      }
+    } finally {
+      token.cancel();
+      if (identical(_events, token)) _events = null;
+    }
+  }
+
+  @override
+  void stopWatching() {
+    _events?.cancel();
+    _events = null;
+  }
+
+  @override
   void close() {
+    stopWatching();
     _cookie = _csrf = null;
     http.close(force: true);
   }

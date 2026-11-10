@@ -72,13 +72,48 @@ void main() {
           values[key] = (await vault.read(key))!;
         }
         await secrets.writeAsString(jsonEncode(values));
+      } else if (config['phase'] == 'stream') {
+        await File('$directory/subscription-ready').writeAsString('ready');
+        final partial = await session
+            .watch()
+            .firstWhere(
+              (state) => state.turns.any(
+                (turn) => turn.preview?.text.isNotEmpty ?? false,
+              ),
+            )
+            .timeout(const Duration(seconds: 60));
+        expect(partial.turns.single.preview!.text, '真正流式的首段');
+        expect(partial.turns.single.preview!.state, 'GENERATING');
+        expect(partial.turns.single.state, 'RUNNING');
+        expect(partial.turns.single.replies, isEmpty);
+        expect(partial.unread, 0);
+        await session.disconnect();
+        expect(session.state.connected, isFalse);
+        await session.login(config['password'] as String);
+        expect(session.state.turns.single.id, partial.turns.single.id);
+        expect(session.state.turns.single.preview!.text, '真正流式的首段');
+        await File('$directory/client-saw-preview')
+            .writeAsString('before provider end');
+        final complete = await session
+            .watch()
+            .firstWhere((state) => state.turns.single.state == 'SUCCEEDED')
+            .timeout(const Duration(seconds: 30));
+        expect(complete.turns.single.id, partial.turns.single.id);
+        expect(complete.turns.single.replies.single.text, '真正流式的首段，模型结束后补全。');
+        expect(complete.turns.single.preview!.text, isEmpty);
+        expect(complete.turns.single.preview!.state, 'COMPLETE');
+        expect(complete.pending, isEmpty);
+        expect(complete.unread, 1);
       } else {
         final receipt = jsonDecode(
           await File('$directory/receipt.json').readAsString(),
         ) as Map;
         expect(await backend.publicIdentity(), receipt['public_key']);
         expect(session.state.turns.single.id, receipt['event_id']);
-        expect(session.state.turns.single.replies.single.text, '原始历史答复');
+        expect(
+          session.state.turns.single.replies.single.text,
+          '真正流式的首段，模型结束后补全。',
+        );
         expect(session.state.pending, isEmpty);
       }
     } finally {

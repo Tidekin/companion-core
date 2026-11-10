@@ -96,6 +96,7 @@ class ChatTurn {
     this.redacted = false,
     this.uncertain = false,
     this.error,
+    this.preview,
   });
   final String id;
   final int sequence;
@@ -106,6 +107,7 @@ class ChatTurn {
   final bool uncertain;
   final String? error;
   final List<ChatReply> replies;
+  final ChatPreview? preview;
   factory ChatTurn.fromJson(Map<String, dynamic> value) => ChatTurn(
     id: value['event_id'] as String,
     sequence: value['sequence'] as int,
@@ -115,9 +117,26 @@ class ChatTurn {
     redacted: value['redacted'] as bool,
     uncertain: value['uncertain'] as bool? ?? false,
     error: value['error'] as String?,
+    preview: value['preview'] is Map
+        ? ChatPreview.fromJson(
+            Map<String, dynamic>.from(value['preview'] as Map),
+          )
+        : null,
     replies: (value['replies'] as List)
         .map((r) => ChatReply.fromJson(Map<String, dynamic>.from(r as Map)))
         .toList(),
+  );
+}
+
+class ChatPreview {
+  const ChatPreview(this.version, this.text, this.state);
+  final int version;
+  final String text;
+  final String state;
+  factory ChatPreview.fromJson(Map<String, dynamic> value) => ChatPreview(
+    value['version'] as int,
+    value['text'] as String,
+    value['state'] as String,
   );
 }
 

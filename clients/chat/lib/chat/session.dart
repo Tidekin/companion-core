@@ -59,6 +59,64 @@ class BotSession {
   bool _connected = false;
   Future<void>? _syncFlight;
   int _generation = 0;
+  StreamSubscription<Map<String, dynamic>>? _events;
+  Timer? _reconnect;
+  Future<void> _eventTail = Future.value();
+  int _backoff = 1;
+
+  Future<void> _stopEvents() async {
+    _reconnect?.cancel();
+    _reconnect = null;
+    backend.stopWatching();
+    final events = _events;
+    _events = null;
+    if (events != null) await events.cancel();
+  }
+
+  void _startEvents(int generation) {
+    if (_closed || !_active || generation != _generation || _events != null) {
+      return;
+    }
+    _events = backend.watchTurns().listen(
+      (item) {
+        _eventTail = _eventTail
+            .then((_) async {
+              if (_closed || !_active || generation != _generation) return;
+              await repository.merge(bot.id, [item]);
+              _guard(generation);
+              _backoff = 1;
+              _connected = true;
+              await _publish('已连接');
+            })
+            .catchError((Object error) {
+              if (error is! _SessionStopped) _streamEnded(generation, error);
+            });
+      },
+      onError: (Object error) => _streamEnded(generation, error),
+      onDone: () => _streamEnded(generation, null),
+    );
+  }
+
+  void _streamEnded(int generation, Object? error) {
+    if (_closed || !_active || generation != _generation) return;
+    unawaited(_stopEvents());
+    _connected = false;
+    if (error is BackendError && {401, 403}.contains(error.status)) {
+      _active = false;
+      unawaited(
+        repository
+            .withdrawPreviews(bot.id)
+            .then((_) => _publish('设备授权或登录已失效，请重新登录')),
+      );
+      return;
+    }
+    unawaited(_publish('连接中断；正在恢复原任务'));
+    _reconnect = Timer(
+      Duration(seconds: _backoff),
+      () => _startEvents(generation),
+    );
+    _backoff = (_backoff * 2).clamp(1, 30);
+  }
 
   void _guard(int generation) {
     if (_closed || generation != _generation) throw _SessionStopped();
@@ -112,7 +170,11 @@ class BotSession {
       } on BackendError catch (error) {
         if (_closed || generation != _generation) return;
         _connected = false;
-        if ({401, 403}.contains(error.status)) _active = false;
+        if ({401, 403}.contains(error.status)) {
+          _active = false;
+          await _stopEvents();
+          await repository.withdrawPreviews(bot.id);
+        }
         await _publish(
           error.code == 'CONNECTION_UNAVAILABLE'
               ? '连接中断；保留原消息，后台会继续尝试同步'
@@ -129,6 +191,7 @@ class BotSession {
   }
 
   Future<void> login(String credential) {
+    unawaited(_stopEvents());
     final generation = ++_generation;
     _active = _connected = false;
     return _network(() async {
@@ -238,11 +301,14 @@ class BotSession {
     } while (full && before != null);
     if (full) await repository.reconcile(bot.id, seen);
     _guard(generation);
+    if (!_active) return;
     _connected = true;
     await _publish('已连接');
+    _startEvents(generation);
   }
 
   Future<void> disconnect() async {
+    await _stopEvents();
     _generation++;
     _review = null;
     _active = _connected = false;
@@ -254,6 +320,7 @@ class BotSession {
     _closed = true;
     _generation++;
     _timer?.cancel();
+    await _stopEvents();
     backend.close();
     // A paused UI subscriber must not block disposal of the other Bot sessions.
     unawaited(_updates.close());

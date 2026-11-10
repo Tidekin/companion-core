@@ -52,6 +52,41 @@ class UiRepository implements ChatRepository {
 
 void main() {
   testWidgets(
+    'preview updates in place and final reply replaces its generating bubble',
+    (tester) async {
+      ChatTurn turn({bool done = false}) => ChatTurn(
+        id: 'stream',
+        sequence: 1,
+        text: 'question',
+        createdAt: DateTime.utc(2026),
+        state: done ? 'SUCCEEDED' : 'RUNNING',
+        preview: ChatPreview(
+          done ? 2 : 1,
+          done ? '' : '首段正文',
+          done ? 'COMPLETE' : 'GENERATING',
+        ),
+        replies: done
+            ? [const ChatReply(id: 'final', text: '首段正文，完成。', state: 'SENT')]
+            : [],
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: TurnView(turn: turn())),
+        ),
+      );
+      expect(find.text('生成中预览'), findsOneWidget);
+      expect(find.text('首段正文'), findsOneWidget);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: TurnView(turn: turn(done: true))),
+        ),
+      );
+      expect(find.text('生成中预览'), findsNothing);
+      expect(find.byKey(const ValueKey('preview_stream')), findsNothing);
+      expect(find.text('首段正文，完成。'), findsOneWidget);
+    },
+  );
+  testWidgets(
     'two private Bot chats keep drafts and replies separate across responsive navigation',
     (tester) async {
       tester.view.physicalSize = const Size(1200, 900);

@@ -1667,6 +1667,9 @@ class Core(Runtime):
                 if conversation_store is not None:
                     conversation_store.complete()
                 job_queue.release(self.store, job["job_id"], "SUCCEEDED", now)
+                from companion.native_stream import finish
+
+                finish(self.store, job)
                 if message_ids:
                     from companion.native_delivery import publish
 
@@ -1706,6 +1709,9 @@ class Core(Runtime):
             if (not current or current["state"] != "RUNNING"
                 or current["lease_token"] != job["lease_token"]):
                 return
+            from companion.native_stream import interrupt
+
+            interrupt(self, job)
             if code in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED,
                         reply_revision.CANCELLED, "INPUT_RECALLED", "OWNER_SOURCE_CHANGED",
                         "OWNER_CAPTURE_INVALID", "OWNER_SOURCE_JOB_BINDING_REQUIRED"}:

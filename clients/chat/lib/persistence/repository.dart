@@ -86,16 +86,46 @@ class ChatRepository {
   }
 
   Future<void> merge(String botId, List<Map<String, dynamic>> items) async {
-    final sealed = <(Map<String, dynamic>, Uint8List)>[];
-    for (final item in items) {
-      sealed.add((
-        item,
-        await cipher.seal(botId, 'turn/${item['event_id']}', item),
-      ));
-    }
     await db.transaction(() async {
-      for (final (item, bytes) in sealed) {
+      for (var item in items) {
         final eventId = item['event_id'] as String;
+        final row =
+            await (db.select(db.turnRows)..where(
+                  (r) => r.botId.equals(botId) & r.eventId.equals(eventId),
+                ))
+                .getSingleOrNull();
+        if (row != null) {
+          final previous = Map<String, dynamic>.from(
+            (await cipher.open(botId, 'turn/$eventId', row.payload))! as Map,
+          );
+          if (previous['redacted'] == true) continue;
+          if (item['redacted'] != true) {
+            const terminal = {'SUCCEEDED', 'FAILED', 'CANCELLED'};
+            if (terminal.contains(previous['state']) &&
+                !terminal.contains(item['state'])) {
+              continue;
+            }
+            final before = previous['preview'] as Map?;
+            final after = item['preview'] as Map?;
+            final oldVersion = before?['version'] as int? ?? 0;
+            final newVersion = after?['version'] as int? ?? 0;
+            if (oldVersion > newVersion) continue;
+            const priority = {
+              'GENERATING': 0,
+              'WAITING': 1,
+              'INTERRUPTED': 2,
+              'COMPLETE': 3,
+              'WITHDRAWN': 4,
+            };
+            if (before != null &&
+                oldVersion == newVersion &&
+                (priority[before['state']] ?? 0) >
+                    (priority[after?['state']] ?? 0)) {
+              item = {...item, 'preview': before};
+            }
+          }
+        }
+        final bytes = await cipher.seal(botId, 'turn/$eventId', item);
         await db
             .into(db.turnRows)
             .insertOnConflictUpdate(
@@ -115,6 +145,27 @@ class ChatRepository {
         }
       }
     });
+  }
+
+  Future<void> withdrawPreviews(String botId) async {
+    final rows = await (db.select(
+      db.turnRows,
+    )..where((r) => r.botId.equals(botId))).get();
+    final items = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      final item = Map<String, dynamic>.from(
+        (await cipher.open(botId, 'turn/${row.eventId}', row.payload))! as Map,
+      );
+      if (item['preview'] case final Map preview) {
+        if (preview['text'] != '') {
+          items.add({
+            ...item,
+            'preview': {...preview, 'text': '', 'state': 'WITHDRAWN'},
+          });
+        }
+      }
+    }
+    await merge(botId, items);
   }
 
   Future<void> reconcile(String botId, Set<String> present) async {

@@ -180,7 +180,7 @@ def verify_postgres(destination, environment):
         native.migrate(info)
         with native.Database(info) as database, database.session() as session:
             assert session.one('SELECT version_num FROM alembic_version')=={
-                'version_num':'pg0003_native_chat'}
+                'version_num':'pg0004_native_stream'}
             assert session.one("SELECT count(*) AS n FROM information_schema.tables "
                 "WHERE table_schema=current_schema() AND table_type='BASE TABLE'")=={'n':104}
         print('PASS: extracted wheel initializes native PostgreSQL migrations')
@@ -259,7 +259,12 @@ def main():
             "companion/migrations/postgresql/versions/pg0001_core.py",
             "companion/migrations/postgresql/versions/pg0002_relationship_standing.py",
             "companion/migrations/postgresql/versions/pg0003_native_chat.py",
+            "companion/migrations/postgresql/versions/pg0004_native_stream.py",
             "companion/native_chat.py",
+            "companion/native_chat_api.py",
+            "companion/native_stream.py",
+            "companion/model_stream.py",
+            "companion/agent_stream.py",
             "companion_delivery_protocol/native_chat.py",
         } <= set(archive.namelist())
         with tempfile.TemporaryDirectory(prefix="package-check-", dir=temporary) as folder:

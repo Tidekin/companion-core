@@ -39,14 +39,17 @@ def _job(store, job_id):
         'AS e ON j.event_id = e.event_id WHERE j.job_id = %s', (job_id,))
 
 
-def _snapshots(store, job):
+def _snapshots(store, job, *, preview=False):
     if job["kind"] != "chat" or reply_revision.control_job(store, job):
         return []
     row = store.one('SELECT phase, snapshots_json FROM agent_conversations WHERE job_id = %s',
                      (job["job_id"],))
     try:
         snapshots = json.loads(row["snapshots_json"]) if row else []
-        if not row or row["phase"] not in {"OUTPUT", "COMPLETE"} or not isinstance(snapshots, list):
+        phases = {"OUTPUT", "COMPLETE"}
+        if preview:
+            phases |= {"MODEL_PENDING", "READY", "WAITING", "STOPPED"}
+        if not row or row["phase"] not in phases or not isinstance(snapshots, list):
             raise ValueError("original context snapshots required")
         return snapshots
     except (ValueError, KeyError, TypeError) as error:
@@ -107,7 +110,7 @@ def _readings(store, settings, clock, job, snapshots, *, executing):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
 
 
-def _sources(store, settings, clock, job, *, executing=False):
+def _sources(store, settings, clock, job, *, executing=False, preview=False):
     from companion.conversation_guard import read
 
     if job is None:
@@ -130,7 +133,7 @@ def _sources(store, settings, clock, job, *, executing=False):
     if job["kind"] == "chat":
         owner_input._checked_source(store, settings, view, job["event_id"], clock(),
                                      allow_commands=True, _loaded=reads.source)
-        snapshots = _snapshots(store, job)
+        snapshots = _snapshots(store, job, preview=preview)
         history = _history_proof(store, job, snapshots)
         owner_input.check_history(store, settings, clock, job, history)
         _images(store, settings, clock, job, snapshots, executing=executing,

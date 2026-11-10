@@ -608,6 +608,8 @@ class TurnView extends StatelessWidget {
   Widget build(BuildContext context) {
     final status = turn.uncertain
         ? '结果待核对 · 不会自动重新生成'
+        : turn.preview?.state == 'WITHDRAWN' && turn.state == 'RUNNING'
+        ? '回复未完成'
         : {
                 'QUEUED': '等待处理',
                 'RUNNING': '正在回复',
@@ -625,6 +627,19 @@ class TurnView extends StatelessWidget {
           Bubble(text: turn.redacted ? '此消息已删除' : turn.text, owner: true),
           for (final reply in turn.replies.where((r) => r.text.isNotEmpty))
             Bubble(text: reply.text),
+          if (turn.preview case final preview?
+              when !turn.redacted &&
+                  turn.replies.every((r) => r.text.isEmpty)) ...[
+            if (preview.text.isNotEmpty)
+              Bubble(key: ValueKey('preview_${turn.id}'), text: preview.text),
+            Text(switch (preview.state) {
+              'GENERATING' => '生成中预览',
+              'INTERRUPTED' => '回复未完成',
+              'WITHDRAWN' => '预览已撤回',
+              'WAITING' => '等待恢复原任务',
+              _ => '',
+            }, style: Theme.of(context).textTheme.bodySmall),
+          ],
           Text(status, style: Theme.of(context).textTheme.bodySmall),
         ],
       ),

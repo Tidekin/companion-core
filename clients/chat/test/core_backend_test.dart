@@ -15,6 +15,7 @@ class Wire implements HttpClientAdapter {
   final String name;
   final requests = <RequestOptions>[];
   bool redirect = false;
+  String? eventData;
   @override
   Future<ResponseBody> fetch(
     RequestOptions options,
@@ -22,6 +23,17 @@ class Wire implements HttpClientAdapter {
     Future<void>? cancelFuture,
   ) async {
     requests.add(options);
+    if (options.path.endsWith('/events') && eventData != null) {
+      return ResponseBody(
+        Stream.fromIterable(
+          utf8.encode(eventData!).map((byte) => Uint8List.fromList([byte])),
+        ),
+        200,
+        headers: {
+          'content-type': ['text/event-stream; charset=utf-8'],
+        },
+      );
+    }
     final login = options.path.endsWith('/session');
     return ResponseBody.fromString(
       jsonEncode(
@@ -51,6 +63,35 @@ class Wire implements HttpClientAdapter {
 }
 
 void main() {
+  test('SSE handles fragmented UTF8, comments and multiline frames; session revocation stops it', () async {
+    final db = ChatDatabase(NativeDatabase.memory());
+    final vault = MemoryVault();
+    final wire = Wire('stream')
+      ..eventData =
+          ': heartbeat\r\n\r\nevent: turn\r\n'
+          'data: {"event_id":"one",\r\ndata: "text":"你好🐟"}\r\n\r\n'
+          'event: session\ndata: {"error":"NATIVE_DEVICE_REVOKED"}\n\n';
+    final backend = CoreBackend(
+      BotProfile(
+        id: 'stream',
+        name: 'stream',
+        endpoint: Uri.parse('https://stream.test'),
+      ),
+      ChatRepository(db, CacheCipher(vault)),
+      vault,
+      transport: Dio()..httpClientAdapter = wire,
+    );
+    final seen = <Map<String, dynamic>>[];
+    await expectLater(
+      backend.watchTurns().forEach(seen.add),
+      throwsA(
+        isA<BackendError>().having((error) => error.status, 'status', 403),
+      ),
+    );
+    expect(seen.single['text'], '你好🐟');
+    backend.close();
+    await db.close();
+  });
   test(
     'per-Bot device seed, cookie, CSRF, authority and HTTPS redirect boundary',
     () async {

@@ -12,7 +12,7 @@ from companion.owner_authority_protocol import (
     OwnerCapture,
     OwnerGrantPolicy,
 )
-from companion.store import uid
+from companion.store import encode, uid
 from companion_delivery_protocol.native_chat import (
     KIND,
     SESSION,
@@ -111,6 +111,8 @@ def submit(context, body, *, content_options):
 
 
 def _turn(context, row):
+    from companion.native_stream import project
+
     erased = bool(row["redacted"])
     replies = context.store.rows(
         "SELECT message_id,content_json,state,created_at FROM outbox WHERE origin_event_id=%s "
@@ -123,6 +125,7 @@ def _turn(context, row):
             "redacted": erased, "created_at": row["occurred_at"], "state": row["state"],
             "uncertain": bool(row["uncertain"]),
             "error": row["last_error_code"],
+            "preview": project(context, row["event_id"], redacted=erased),
             "replies": [{"message_id": item["message_id"], "state": item["state"],
                          "text": ("" if erased or item["state"] != "SENT" else
                                   json.loads(item["content_json"]).get("text", "")),
@@ -130,14 +133,41 @@ def _turn(context, row):
 
 
 _HISTORY = (
-    "SELECT e.*,j.state,j.last_error_code,EXISTS(SELECT 1 FROM model_usage mu "
+    "SELECT e.*,j.state,j.last_error_code,ac.preview_version AS stream_version,"
+    "ac.preview_json IS NOT NULL AS stream_active,(SELECT jsonb_agg("
+    "jsonb_build_array(o.message_id,o.state,o.content_sha256) ORDER BY o.record_sequence) "
+    "FROM outbox o WHERE o.origin_event_id=e.event_id) AS stream_replies,"
+    "EXISTS(SELECT 1 FROM model_usage mu "
     "WHERE mu.job_id=j.job_id AND mu.state='UNKNOWN') AS uncertain "
     "FROM events e JOIN jobs j USING(event_id) "
+    "LEFT JOIN agent_conversations ac USING(job_id) "
     "JOIN conversations c USING(conversation_id) WHERE e.source='native.chat' "
     "AND e.actor_id='owner' AND e.privacy_scope='private' AND j.kind='chat' "
     "AND c.scope='private' AND c.owner_actor_id='owner' AND c.platform='native.chat' "
     "AND c.platform_session_key='native:owner' "
 )
+
+
+def changes(context, previous):
+    """Compare public-data revisions, never cache permission or source-check results.
+
+    Inactive history is projected only on changes. Every active preview still checks
+    its current proof and lease on every subscription read, including lease expiry.
+    """
+    from companion.privacy import epoch
+
+    _, view = device_view(context)
+    scope = (epoch(context.store), view.authority.revision)
+    rows = context.store.rows(_HISTORY + 'ORDER BY e.record_sequence DESC LIMIT 100')
+    items, signatures = [], {}
+    for row in reversed(rows):
+        signature = encode([scope, *[row[name] for name in (
+            'state', 'redacted', 'last_error_code', 'uncertain', 'stream_version',
+            'stream_replies')]])
+        signatures[row['event_id']] = signature
+        if row['stream_active'] or previous.get(row['event_id']) != signature:
+            items.append(_turn(context, row))
+    return items, signatures
 
 
 def history(context, *, before=None, limit=50, event_id=None):

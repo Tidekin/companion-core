@@ -251,9 +251,11 @@ def model_route(settings, scenario):
         settings.provider, settings.model_name, settings.model_url.rstrip("/"))
 
 
-def model_payload(settings, messages, scenario, *, tools=(), generation=None):
+def model_payload(settings, messages, scenario, *, tools=(), generation=None, stream=False):
     from companion.agent_messages import tool_payload
 
+    if type(stream) is not bool or stream and scenario != "chat":
+        raise CoreError("MODEL_STREAM_SCOPE_REQUIRED", 503)
     if tools and scenario != "chat":
         raise CoreError("MODEL_TOOLS_SCOPE_REQUIRED", 503)
     if generation is not None and (scenario != "gateway" or not isinstance(
@@ -265,8 +267,10 @@ def model_payload(settings, messages, scenario, *, tools=(), generation=None):
         "model": model_route(settings, scenario)[1],
         "messages": messages,
         "max_tokens": settings.output_tokens(scenario),
-        "stream": False,
+        "stream": stream,
     }
+    if stream:
+        payload["stream_options"] = {"include_usage": True}
     if scenario in {"memory_extract", "memory_review", "diary", "reflection", "meme_caption",
                     "qq_poke", "social_autonomy", "content_video_preview", "rem",
                     "watch_review", "style_distill", "jargon"}:
@@ -296,7 +300,8 @@ class ModelClient:
         self.settings = settings
         self.client = client
 
-    async def complete(self, messages, scenario, *, admission=None, tools=(), generation=None):
+    async def complete(self, messages, scenario, *, admission=None, tools=(), generation=None,
+                       stream=False, on_delta=None):
         if self.settings.mode == "demo":
             if scenario == "qq_poke":
                 return ModelResponse('{"kind":"none"}', 0, 0)
@@ -317,7 +322,7 @@ class ModelClient:
         from companion.paid_budget import sha
 
         payload = model_payload(self.settings, messages, scenario, tools=tools,
-                                generation=generation)
+                                generation=generation, stream=stream)
         if (
             not isinstance(admission, ModelAdmission)
             or admission.consumed
@@ -364,7 +369,14 @@ class ModelClient:
                 )
                 content = request.content
                 try:
-                    response = await scoped.send(request)
+                    response = await scoped.send(request, stream=stream)
+                    if stream and response.status_code < 400:
+                        from companion.model_stream import consume
+
+                        return await consume(response, on_delta, tools=bool(tools))
+                    if stream:
+                        await response.aread()
+                        await response.aclose()
                 finally:
                     started = request.extensions.pop("companion_model_http_started_ns", None)
                     if type(started) is int and admission.trace_id is not None:

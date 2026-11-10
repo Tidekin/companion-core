@@ -20,7 +20,7 @@ from companion.store import Store
 CONTRACT_KEY = "derived_erasure_contract"
 # Bump when an existing handler's cleanup meaning changes without a new name.
 # Names detect registration additions; they cannot detect arbitrary code edits.
-CONTRACT_REVISION = 3
+CONTRACT_REVISION = 4
 
 
 @dataclass(frozen=True)

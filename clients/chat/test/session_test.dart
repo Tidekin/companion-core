@@ -28,6 +28,37 @@ void main() {
   });
   tearDown(() => db.close());
 
+  test('independent live previews do not count unread; revoked stream clears only its Bot', () async {
+    final ba = DemoBackend(bot('a'));
+    final bb = DemoBackend(bot('b'));
+    final a = await create('a', ba);
+    final b = await create('b', bb);
+    await a.login('a');
+    await b.login('b');
+    Map<String, dynamic> partial(String text) => {
+      'event_id': 'same',
+      'sequence': 1,
+      'text': 'question',
+      'created_at': '2026-11-10T00:00:00Z',
+      'state': 'RUNNING',
+      'replies': [],
+      'redacted': false,
+      'preview': {'version': 1, 'text': text, 'state': 'GENERATING'},
+    };
+    final aUpdate = a.watch().firstWhere((s) => s.turns.isNotEmpty);
+    final bUpdate = b.watch().firstWhere((s) => s.turns.isNotEmpty);
+    ba.events.add(partial('private A'));
+    bb.events.add(partial('private B'));
+    expect((await aUpdate).turns.single.preview!.text, 'private A');
+    expect((await bUpdate).turns.single.preview!.text, 'private B');
+    expect(a.state.unread, 0);
+    final revoked = a.watch().firstWhere((s) => !s.connected);
+    ba.events.addError(const BackendError('REVOKED', status: 403));
+    expect((await revoked).turns.single.preview!.text, isEmpty);
+    expect(b.state.turns.single.preview!.text, 'private B');
+    expect(b.state.connected, isTrue);
+  });
+
   test('slow Bot A cannot block Bot B or either local outbox', () async {
     final aBackend = DemoBackend(bot('a'));
     final bBackend = DemoBackend(bot('b'));

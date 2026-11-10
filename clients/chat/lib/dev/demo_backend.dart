@@ -1,4 +1,6 @@
 // Synthetic transport for debug UI and tests. Production main never imports it.
+import 'dart:async';
+
 import '../chat/core_backend.dart';
 import '../chat/models.dart';
 
@@ -11,6 +13,11 @@ class DemoBackend implements ChatBackend {
   int submissions = 0;
   int generations = 0;
   bool bound = true;
+  final events = StreamController<Map<String, dynamic>>.broadcast();
+  @override
+  Stream<Map<String, dynamic>> watchTurns() => events.stream;
+  @override
+  void stopWatching() {}
   @override
   Future<ConnectionReview> login(String credential) async =>
       const ConnectionReview(true, {});
@@ -79,5 +86,7 @@ class DemoBackend implements ChatBackend {
   @override
   Future<String> publicIdentity() async => 'synthetic-${bot.id}';
   @override
-  void close() {}
+  void close() {
+    unawaited(events.close());
+  }
 }

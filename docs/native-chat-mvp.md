@@ -56,7 +56,7 @@
 5. 原生回复不能进入 QQ 投递；旧 QQ 来源保持原类型。
 6. 遗忘、撤销、模型 UNKNOWN、Worker 崩溃与恢复仍遵守原有保证。
 
-上述原生来源合同已按 AGENTS.md 完成讨论并获得确认。流式、Android、通用后端绑定和外部 Bot 适配继续按独立切片交付。
+原生来源及本轮流式展示合同已按 AGENTS.md 完成讨论并获得确认。通用后端绑定和外部 Bot 适配继续按独立切片交付。
 
 
 ## 构建与运行
@@ -89,7 +89,9 @@ Set-Location clients/chat
 
 登录及“同步全部历史”执行分页核对，日常同步最近页和未完成任务；界面显示最近 200 个输入轮次。本地已同步历史按 Bot 保存，远端删除标记在收到同步时清除正文。离线设备和未进入日常最近页的旧记录要在恢复连接并执行完整同步后完成核对。
 
-本轮先交付原生文本闭环。真正的 token 流式仍需贯通供应商、Core Worker、持久消息状态与客户端；当前没有把已完成文本拆成动画来宣称流式。下一切片接这一链路，再扩展后台通知、多媒体、AstrBot / DSH 和群聊。Android 后台常驻、真机兼容及公开发布验收单独进行。
+原生文本现已贯通供应商 SSE、原有 Agent/Worker、持久预览、Core HTTPS SSE 与 Flutter 界面。模型未结束即可显示正文，最终事务完成后由正式回复替换预览。每个 Bot 各自订阅；断开订阅不取消 Worker，重新登录恢复原任务。后台通知、多媒体、AstrBot / DSH 和群聊后续扩展。Android 后台常驻、真机兼容及公开发布验收单独进行。
+
+服务端需迁移到 `pg0004_native_stream`。反向代理应关闭 `/v1/console/chat/events` 的响应缓冲与缓存，并允许长连接；服务端发送约 10 秒心跳，客户端在 30 秒无数据时重连。订阅初始返回最近 100 轮快照，其后按变化推送；旧任务仍由原状态/历史接口补查。活跃预览每次读取都重新校验来源与租约，静止历史不会被每 250ms 全量重新投影。
 
 ## 复用依据
 
@@ -98,3 +100,21 @@ Set-Location clients/chat
 - [Riverpod](https://pub.dev/packages/flutter_riverpod)、[Dio](https://pub.dev/packages/dio)、[flutter_secure_storage](https://pub.dev/packages/flutter_secure_storage)：版本固定在 pubspec.yaml / pubspec.lock，采用各平台现成实现。
 - DSH 本地 Cordis MCP bundle 研究复用了 stdio command / args / env / cwd 的现成边界，不新建自有界面 RPC 协议。
 - 设备签名、撤销、预算和 UNKNOWN 复用现有 owner capture / OwnerGrantPolicy / paid journal。Python 与 Dart 的共同签名字节已用独立测试向量核对。
+- [Pydantic AI Agent 事件](https://pydantic.dev/docs/ai/core-concepts/agent/)、[DeepSeek 流式协议](https://api-docs.deepseek.com/api/create-chat-completion/)、[HTTPX-SSE](https://github.com/florimondmanca/httpx-sse)、[Starlette StreamingResponse](https://starlette.dev/responses/)：保留原 Agent.run 工具循环、费用结算及 Hooks；新增锁定 `httpx-sse==0.4.3` 处理供应商 SSE 帧。DSH 本地 `dsh-llm-deepseek` 与 `dsh-llm-pi-ai` 实现用于核对文本/推理/工具事件边界，未接入或执行 DSH。
+
+
+## 本轮流式切片：已确认的展示合同
+
+范围仅 Core 与 Flutter 原生私聊；现有签名输入、owner 授权、chat Worker、最终 Outbox 和费用证据保持原职责。实际供应商 token 进入已锁定 Pydantic AI 的原生流式接口，保留原 Agent 工具循环和 Hooks。
+
+现有历史只返回已持久确认的最终文字。要在模型结束前展示内容，需要一个可恢复但尚未最终确认的预览；仅内存转发无法保证 Worker 重启后的恢复，直接提前标成 SENT 则破坏费用、来源和交付确认。建议在原生 SDK 会话旁保存有界正文快照，经普通 HTTPS SSE 推送；首块及时发布，后续按约100ms合并写入，不逐 token 写数据库。
+
+- 继续使用原输入轮次 event_id；历史、预览、最终回复在客户端同一轮次内更新。SSE 事件复用原生 turn JSON，增加可选 preview：单调 version、正文 text、生成/中断/撤回状态。最终回复仍使用原 Outbox 证据，替换该轮预览，不增加另一份相同答案。
+- SSE 建立时读取最新快照，重连补读已有任务与历史；不新增全局可靠游标或逐 token 重放协议，不为补字重新调用模型。
+- 对外仅投影 SDK 的普通文字；推理、原始工具参数、凭据和调试数据不发布。多次模型请求时，预览可以由下一次请求的回答替换；查询工具自身按原授权执行。
+- 每次持久发布复核原租约、权限与来源；读取/订阅再次复核。撤销、来源遗忘或租约失效停止增量并清除不可继续展示的预览。
+- 正常断网不取消 Worker；重新连接恢复同一轮。异常中断保留明确的未完成/结果待核对标记；从不把部分文字写成成功的记忆或日记。
+- 模型结束后继续原费用结算、来源复核与最终事务；只有这些步骤完成才展示为完成。UNKNOWN 继续沿用原不重复付费规则。
+- 每个 Bot 保留独立连接与状态。AstrBot、DSH 接入和群聊不在本轮。
+
+主人已明确确认上述预览、最终确认与恢复合同，本轮据此实现。

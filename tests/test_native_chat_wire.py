@@ -4,6 +4,8 @@ import asyncio
 import ipaddress
 import json
 import os
+import pickle
+import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -18,7 +20,6 @@ from pydantic import SecretStr
 from companion.api import create_app
 from companion.api_store import ApiStore
 from tests.conftest import run
-from tests.support.native_history_delivery import sdk_step
 from tests.support.owner_console import PASSWORD
 from tests.support.owner_input import captured
 
@@ -103,7 +104,30 @@ def test_flutter_tls_entry_worker_and_restart_without_qq(core, tmp_path):
 
             await client('initial')
             receipt = json.loads((directory / 'receipt.json').read_text(encoding='utf-8'))
-            await sdk_step(core, tmp_path, receipt['event_id'], 1)
+            client_task = asyncio.create_task(client('stream'))
+            async with asyncio.timeout(90):
+                while not (directory / 'subscription-ready').exists():
+                    if client_task.done():
+                        await client_task
+                        raise AssertionError('client exited without subscribing')
+                    await asyncio.sleep(0.05)
+            job_id = core.store.one('SELECT job_id FROM jobs WHERE event_id=%s',
+                                    (receipt['event_id'],))['job_id']
+            worker_config = directory / 'worker.pickle'
+            worker_config.write_bytes(pickle.dumps((core.settings, core.clock.now,
+                                                   job_id, str(directory))))
+            worker = await asyncio.create_subprocess_exec(sys.executable, '-B',
+                str(root / 'tests/native_stream_worker.py'), str(worker_config),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            try:
+                await client_task
+                logs, _ = await asyncio.wait_for(worker.communicate(), 90)
+                assert worker.returncode == 0, logs.decode(errors='replace')
+            finally:
+                if worker.returncode is None:
+                    worker.kill()
+                    await worker.wait()
+            assert (directory / 'client-saw-preview').exists()
             await client('restart')
             assert len(core.store.rows('SELECT 1 FROM model_usage')) == 1
 
