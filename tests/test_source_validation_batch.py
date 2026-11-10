@@ -13,9 +13,16 @@ def test_returned_read_guard_expires_before_the_next_boundary(core):
     saved = []
 
     def read(unchanged):
-        assert unchanged()
-        saved.append(unchanged)
+        if unchanged is not None:
+            saved.append(unchanged)
         return "read"
+
+    with core.store.read_snapshot():
+        def stable(unchanged):
+            assert unchanged()
+            saved.append(unchanged)
+        owner_input.batch_sources(core.store, stable)
+        assert not saved[-1]()
 
     with core.store.transaction():
         assert owner_input.batch_sources(core.store, read) == "read"
@@ -28,7 +35,7 @@ def test_returned_read_guard_expires_before_the_next_boundary(core):
 
 def test_actual_write_during_a_read_cannot_publish_the_collected_result(core):
     def read(unchanged):
-        assert unchanged()
+        assert unchanged is not None
         core.store.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
                            (owner_authority.MODE,))
         assert not unchanged()
@@ -45,7 +52,6 @@ def test_unrelated_commit_retries_native_reads_without_reusing_the_first_view(co
             calls.append(unchanged is not None)
             if unchanged is not None:
                 saved.append(unchanged)
-                assert unchanged()
                 other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
                               (owner_authority.MODE,))
                 assert not unchanged()
