@@ -2027,7 +2027,7 @@ const LIMIT_NAMES = {
   max_concurrent: "并发", deadline_seconds: "处理时限", max_chars: "字数上限", wait_seconds: "等待", daily_queries: "每日搜索", max_active: "同时进行",
 };
 const VALUE_NAMES = { auto: "自动", voice_input: "只回应语音", text_only: "只回文字", poke_only: "只拍回去", none: "不使用", qq_social_v1: "QQ 资料与空间", references_v1: "引用与转发", owner_private_v1: "仅主人私聊", isolated_container: "隔离容器", sentence: "按句子长度分段", semantic: "按语义分段（由她写的换行决定）", unlimited: "不限",
-  OFF: "关闭", SHADOW: "只记录不生效", ENABLED: "开启", PREVIEW: "只预览", participation_v1: "参与式 v1", participation_v2: "参与式 v2",
+  OFF: "关闭", SHADOW: "只记录不生效", ENABLED: "开启", PREVIEW: "只预览", participation_v1: "参与式 v1", participation_v2: "参与式 v2", character_v1: "角色表达",
   never: "不引用", occasionally: "偶尔引用", often: "经常引用", disabled: "关闭", low: "低", high: "高", max: "最高", bridge: "Bridge 管理", core: "Core 管理",
   happy: "开心", like: "喜欢", surprised: "惊讶", morning: "早安", sleep: "晚安", sad: "难过", angry: "生气", shy: "害羞", tired: "困了", thinking: "思考", love: "爱心", cry: "哭哭" };
 function limitValue(k, v) {
@@ -2084,7 +2084,7 @@ const subLabel = k => SUB[k] || String(k).split("_").map(t => TOKENS[t] || "").j
 /* 与 poke_protocol / voice_config / social_autonomy_protocol 中的 Literal 保持一致 */
 const SUB_ENUMS = { mode: { poke_policy: ["auto", "text_only", "poke_only", "none"], reply: ["voice_input", "auto"], segmented_reply: ["sentence", "semantic"],
     conversation_policy: ["OFF", "SHADOW", "ENABLED"], owner_runtime: ["OFF", "SHADOW", "ENABLED"], life_loop: ["OFF", "PREVIEW", "SHADOW"] },
-  strategy: { conversation_policy: ["participation_v1", "participation_v2"] }, scope: { social_autonomy: ["none", "qq_social_v1"] } };
+  strategy: { conversation_policy: ["participation_v1", "participation_v2", "character_v1"] }, scope: { social_autonomy: ["none", "qq_social_v1"] } };
 const isSensitiveSub = k => /(_sha256|private_key|_socket|parser_image|token|secret)$/.test(k) || k === "key";
 
 /* ================= 记忆关系图 =================

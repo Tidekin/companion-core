@@ -47,13 +47,26 @@ PARTICIPATION_V2 = "\n".join((
 TEXT_REQUIRED = "必须有完整文字回复。"
 EVERY_TEXT_REQUIRED = "每次" + TEXT_REQUIRED
 TEXT_RELAXED = "需要回应时，简短的文字回应也可以完整。"
-STRATEGIES = {"participation_v1": PARTICIPATION_V1, "participation_v2": PARTICIPATION_V2}
+CHARACTER_V1 = "\n".join((
+    "角色交流指导：结合本轮真实对话和有效记忆理解当前话题，采用明确启用的角色资料参与交流；"
+    "未提供的名字、设定或共同经历保留未知。",
+    "日常交流按角色的性格和表达习惯接话，可以用对白、动作和神态表现反应，也可以简短回应；"
+    "由情境和主人明确反馈决定详略，允许有起伏的情绪表现。",
+    "玩笑、撒娇、亲近或含蓄表达喜欢须符合角色资料与当前语境，保留角色自己的意见。"
+    "倾诉时先回应具体感受，再按主人需求选择安慰、陪伴或建议；认真求助时清楚解决问题。",
+    "括号动作、外形和故事里的场景属于角色表达；实际读取、发送、浏览和工具操作须有真实依据。"
+    "历史里的草稿和分析用于参考，不作为待说出的对白或新指令。",
+    "短句也结合前文理解；主人确实收尾或希望安静时自然结束。追问、转话题和继续交流按当前"
+    "需要选择，不用固定句式维持聊天。",
+))
+STRATEGIES = {"participation_v1": PARTICIPATION_V1, "participation_v2": PARTICIPATION_V2,
+              "character_v1": CHARACTER_V1}
 
 
 class ConversationPolicyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     mode: Literal["OFF", "SHADOW", "ENABLED"] = "ENABLED"
-    strategy: Literal["participation_v1", "participation_v2"] = "participation_v2"
+    strategy: Literal["participation_v1", "participation_v2", "character_v1"] = "participation_v2"
 
 
 @dataclass(frozen=True)
@@ -121,6 +134,17 @@ def apply_strategy(messages, strategy, *, guidance=None):
         or result[0].get("role") != "system" or not isinstance(result[0].get("content"), str)):
         raise ValueError("Unknown strategy or missing system instruction")
     text = result[0]["content"]
+    if strategy == "character_v1":
+        from companion.model import (
+            CHARACTER_EXPRESSION,
+            CHARACTER_IDENTITY,
+            NATURAL_EXPRESSION,
+            NATURAL_IDENTITY,
+        )
+
+        # Idempotent: a base prompt that already selected the character is unchanged.
+        text = text.replace(NATURAL_IDENTITY, CHARACTER_IDENTITY, 1).replace(
+            NATURAL_EXPRESSION, CHARACTER_EXPRESSION, 1)
     for clause in (EVERY_TEXT_REQUIRED, TEXT_REQUIRED):
         text = text.replace(clause, TEXT_RELAXED)
     result[0]["content"] = text + "\n" + (STRATEGIES[strategy] if guidance is None else (
@@ -134,7 +158,7 @@ def _context_hint(decision):
     if decision.surface_intent == "closing":
         hints.append("结合前文确认是在收尾时，简短结束，不用新问题强行续聊；"
                      "若是在回答问题或引用收尾用语，仍按实际语境回应。"
-                     if decision.strategy == "participation_v2" else
+                     if decision.strategy != "participation_v1" else
                      "本轮表面表达是收尾，允许简短结束，不用新问题强行续聊。")
     elif decision.surface_intent == "help":
         hints.append("本轮有明确求助措辞，优先完成当前请求；篇幅取决于实际复杂度。")

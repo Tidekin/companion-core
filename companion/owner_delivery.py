@@ -82,6 +82,17 @@ def _images(store, settings, clock, job, snapshots, *, executing, _item_ids=None
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
 
 
+def _characters(store, settings, clock, snapshots):
+    from companion.history_import import validate_character_proof
+
+    try:
+        for snapshot in snapshots:
+            if snapshot["kind"] == "character":
+                validate_character_proof(store, settings, clock, snapshot["proof"])
+    except (ValueError, KeyError, TypeError, CoreError) as error:
+        raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
+
+
 def _memories(store, settings, clock, view, snapshots):
     from companion.memory import Memory
     from companion.memory_context import MemoryContext
@@ -139,6 +150,7 @@ def _sources(store, settings, clock, job, *, executing=False, preview=False):
         _images(store, settings, clock, job, snapshots, executing=executing,
                  _item_ids=reads.image_item_ids)
         _memories(store, settings, clock, view, snapshots)
+        _characters(store, settings, clock, snapshots)
         _readings(store, settings, clock, job, snapshots, executing=executing)
         from companion.agent_singing import revalidate
 

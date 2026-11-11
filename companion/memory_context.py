@@ -205,6 +205,13 @@ class MemorySources:
         root = next((row for row in self.lineage(event_id) if row["event_id"] == event_id), None)
         if not root or root["actor_id"] != "owner":
             return None
+        if root["source"] == "owner.history":
+            from companion.history_import import source_allowed
+            from companion.store import utcnow
+
+            if not source_allowed(self.store, self.settings, lambda: self.now or utcnow(),
+                                  root, "memory"):
+                return None
         body = json.loads(root["body_json"])
         if (not isinstance(body, dict) or not isinstance(body.get("text"), str)
             or (require_text and not body["text"].strip())):
@@ -256,12 +263,20 @@ class MemoryContext:
 
     @staticmethod
     def _fact(row, sources):
-        return {**{key: row[key] for key in MEMORY_FIELDS},
+        result = {**{key: row[key] for key in MEMORY_FIELDS},
                 "origin": row["origin"],
                 "evidence_ids": [source["event_id"] for source in sources],
                 "evidence": [{key: source[key] for key in (
             "event_id", "source", "occurred_at", "ingested_at",
         )} for source in sources[-8:]], "evidence_truncated": len(sources) > 8}
+        from companion.history_import import source_metadata
+
+        # Imported facts say where they came from; raw copied text never enters here.
+        origins = [source_metadata(source) for source in sources
+                   if source["source"] == "owner.history"]
+        if origins:
+            result["historical_provenance"] = origins[:2]
+        return result
 
     def reply_source_check(self, settings, clock, authority):
         """Return a purpose-specific lineage check for this one prompt build."""
