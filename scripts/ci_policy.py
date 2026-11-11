@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
-FULL_JOBS = ("test", "container", "browser-reader", "plugin-native")
+FULL_JOBS = ("test", "container", "browser-reader", "plugin-native", "flutter-client")
 # Only these existing Console assets and their browser regressions can use Console
 # checks instead of backend suites. Other Python files and new assets keep full CI.
 STATIC_UI = {"companion/console_static/" + name for name in ("app.css", "app.js", "index.html")}
@@ -65,7 +65,7 @@ CRITICAL_FILES = {
 }
 CRITICAL_DIRS = (".github/", "contracts/", "migrations/", "db/", "deploy/",
                  "companion_onebot_bridge/", "companion_meme_protocol/", "companion_voice_node/",
-                 "companion_delivery_protocol/",
+                 "companion_delivery_protocol/", "clients/chat/",
                  "astrbot_plugin_companion_bridge/")
 
 

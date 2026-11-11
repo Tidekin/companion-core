@@ -44,6 +44,6 @@ def test_idle_receipts_skip_history_but_keep_identity_and_pending_guard(config, 
                 runtime.path.write_bytes(runtime.path.read_bytes() + b"truncated")
                 with pytest.raises(ValueError):
                     await spool.flush_result(client, runtime=runtime)
-                assert checks == [{"active": False}] and requests == []
+                assert checks == [{"active": False, "include_records": False}] and requests == []
 
     run(scenario())

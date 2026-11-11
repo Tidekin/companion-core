@@ -1,4 +1,4 @@
-"""Native mood sources reuse authority only inside a Core-owned read snapshot."""
+"""Native mood source validation within bounded, Core-owned transactions."""
 
 import json
 from contextlib import nullcontext
@@ -14,6 +14,28 @@ from companion.store import encode
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, worker_for
 from tests.support.native_consumer_entry import environment
+from tests.support.postgres_snapshots import observe_snapshots
+
+
+def test_mock_mood_without_owner_custody_does_not_repeat_source_collection(
+    core, monkeypatch,
+):
+    assert not owner_authority.required(core.store, core.settings)
+    calls = []
+    native = core.mood._collect_signals
+    with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
+        def collect(*args, **kwargs):
+            calls.append(1)
+            result = native(*args, **kwargs)
+            if len(calls) == 1:
+                other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
+                              (owner_authority.MODE,))
+            return result
+
+        monkeypatch.setattr(core.mood, "_collect_signals", collect)
+        with core.store.transaction():
+            assert core.mood._signals(core.clock(), None) == ([], False)
+    assert len(calls) == 1
 
 
 async def native_mood(core, tmp_path, check):
@@ -42,6 +64,7 @@ def test_mood_batches_authority_but_validates_every_source(core, tmp_path, monke
                                                         transactional):
     def check(expected):
         calls, recalls = [], []
+        same_snapshot = True
         native = authority_custody.check
         native_recall = owner_input.input_recall.require_not_recalled
 
@@ -63,13 +86,21 @@ def test_mood_batches_authority_but_validates_every_source(core, tmp_path, monke
                 core.store.execute("ROLLBACK")
         else:
             with core.store.transaction() if transactional else nullcontext():
+                before = core.store.change_token() if transactional else None
                 actual = core.mood.snapshot()
-        if transactional:
-            # Two independent authority checks per source outside a Core read snapshot.
-            assert len(calls) == 3 + 2 * len(recalls)
-        else:
+                same_snapshot = not transactional or core.store.change_token() == before
+        if transactional == "read_transaction":
+            # Borrowed transactions keep one independent custody check per source;
+            # the source then reuses that freshly checked view in the same scope.
+            assert len(calls) == 3 + len(recalls)
+        elif same_snapshot:
             assert len(calls) <= 4
-        assert len(recalls) == 6
+        else:
+            # Original independent checks per source plus two discarded batches.
+            assert len(calls) <= 7 + 2 * len(recalls)
+        # Two discarded collections, fallback collection and publication recheck
+        # are all bounded by the same six sources when snapshots keep changing.
+        assert len(recalls) in (range(6, 25) if not same_snapshot else {6})
         assert actual == expected
         assert not core.store.in_transaction
 
@@ -161,5 +192,69 @@ def test_mood_rechecks_mutable_batch_at_publication(core, tmp_path, monkeypatch,
                 core.mood.snapshot()
         finally:
             journal.write_bytes(original)
+
+    run(native_mood(core, tmp_path, check))
+
+
+@pytest.mark.parametrize("foreign_commits", [0, 2])
+def test_mood_rechecks_an_external_source_change_at_publication(
+    core, tmp_path, monkeypatch, foreign_commits,
+):
+    def check(expected):
+        native = core.mood._appraisals
+        native_collect = core.mood._collect_signals
+        changed, attempts = [], []
+        with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
+            def collect_signals(*args, **kwargs):
+                # Consume the two bounded batch retries with real unrelated commits,
+                # then revoke a source while the conservative path collects signals.
+                if len(attempts) < foreign_commits:
+                    other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
+                                  (owner_authority.MODE,))
+                attempts.append(1)
+                return native_collect(*args, **kwargs)
+
+            def collect(*args, **kwargs):
+                signals = native(*args, **kwargs)
+                if not changed:
+                    other.execute("UPDATE events SET redacted=1 WHERE event_id=%s",
+                                  (expected["signals"][0]["event_id"],))
+                    changed.append(1)
+                return signals
+
+            monkeypatch.setattr(core.mood, "_appraisals", collect)
+            monkeypatch.setattr(core.mood, "_collect_signals", collect_signals)
+            with pytest.raises(CoreError), core.store.transaction():
+                core.mood.revalidate(expected)
+        assert changed
+
+    run(native_mood(core, tmp_path, check))
+
+
+@pytest.mark.parametrize("foreign_commits", [1, 2])
+def test_mood_snapshot_change_discards_partial_reads(
+    core, tmp_path, monkeypatch, foreign_commits,
+):
+    def check(expected):
+        native = owner_input.input_recall.require_not_recalled
+        recalls, commits = [], []
+        snapshots = observe_snapshots(core.store, monkeypatch)
+        with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
+            def recall(*args, **kwargs):
+                native(*args, **kwargs)
+                recalls.append(1)
+                if len(commits) < foreign_commits:
+                    commits.append(1)
+                    other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
+                                  (owner_authority.MODE,))
+
+            monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
+            with core.store.transaction():
+                actual = core.mood.snapshot()
+        assert actual == expected
+        assert len(commits) == foreign_commits
+        # One external commit discards at most the first source. Concurrent
+        # sibling tests can additionally trigger the conservative publication path.
+        assert 6 <= len(recalls) <= (7 if len(snapshots) <= 2 else 24)
 
     run(native_mood(core, tmp_path, check))

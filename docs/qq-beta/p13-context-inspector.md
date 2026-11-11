@@ -114,7 +114,7 @@ v2 的初始 fit 原因记录在 `assembly_dropped`；逐请求原因覆盖其�
 同一 Work。执行边界必需复核保留各自的有界预算，不共享可选检索已消耗的额度。
 
 PostgreSQL 两字查询参与有限词法提名，候选内复用现有中文 bigram BM25；精确身份匹配
-继续使用 ASCII `translate`。`pg0003_fact_key_ascii` 将原 `lower(fact_key)` 索引替换为
+继续使用 ASCII `translate`。`pg0006_fact_key_ascii` 将原 `lower(fact_key)` 索引替换为
 与查询相同的表达式，原基线迁移保持冻结。
 
 `chat_restore_timeout_seconds`（默认 5 秒）限制 checkpoint 恢复、来源复核及争用退让的

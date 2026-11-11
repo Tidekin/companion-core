@@ -58,6 +58,8 @@ from companion.model import (
     PRINCIPLES,
     RECALL_RULES,
     SOURCE_RULES,
+    needs_source_rules,
+    principles,
 )
 from companion.observation import ObservationService
 from companion.privacy import epoch, redact
@@ -327,9 +329,12 @@ class Core(Runtime):
         if (self.settings.voice.enabled and row["kind"] == "chat"
             and self.voice.input_status(row["event_id"], row["job_id"]).state == "WAITING"):
             return None
+        from companion.transport import native_text
+
         if (
             self.settings.content_enabled
             and row["kind"] == "chat"
+            and not native_text(s, row["event_id"])
             and not body.get("diary_command")
             and not body.get("control_command")
         ):
@@ -388,7 +393,8 @@ class Core(Runtime):
         memory_prepared = False
         for snapshot in snapshots:
             try:
-                purpose = {"memory": "memory", "growth": "expression", "affect": "affect",
+                purpose = {"memory": "memory", "character": "expression",
+                           "growth": "expression", "affect": "affect",
                            "mood": "expression", "watch": "exploration", "interest": "memory",
                            "voice": "voice", "diary": "diary", "images": "image",
                            "style_observation": "expression"}.get(
@@ -420,6 +426,10 @@ class Core(Runtime):
                         # their combined sources exceed this snapshot's shared view.
                         memory_sources = None
                         self.memory_context.revalidate(snapshot["proof"], now)
+                elif snapshot["kind"] == "character":
+                    from companion.history_import import revalidate_character
+
+                    revalidate_character(self, job, snapshot["proof"])
                 elif snapshot["kind"] == "growth":
                     self.expression_learning.revalidate_reply(
                         self.settings, job, self._affect_context(authority), snapshot["proof"])
@@ -584,18 +594,30 @@ class Core(Runtime):
         body, text, authority, followup = turn.body, turn.text, turn.authority, turn.followup
         expression_rules, expression_data = self.expression.instruction_parts(job["event_id"]) if (
             turn.permits("expression")) else ("", "")
-        rules = PRINCIPLES + (MEMORY_RULES if cfg.memory_enabled and turn.permits("memory")
-                              else "") + expression_rules
+        policy = (cfg.conversation_policy if job["kind"] == "chat" or followup
+                  else conversation_policy.ConversationPolicyConfig(mode="OFF"))
+        rules = principles(character_expression=(
+            policy.mode == "ENABLED" and policy.strategy == "character_v1")) + (
+            MEMORY_RULES if cfg.memory_enabled and turn.permits("memory") else ""
+        ) + expression_rules
+        if turn.permits("expression") and not private_life.strict(s, cfg):
+            from companion.history_import import CHARACTER_RULES, active_character
+
+            if active_character(s):
+                rules += CHARACTER_RULES
         if followup:
             rules += "\n" + turn_taking.FOLLOW_UP_RULES
         affect = self._affect_context(authority)
         rules, policy_data, conversation_decision = conversation_policy.prompt_parts(
-            rules, cfg.conversation_policy if job["kind"] == "chat" or followup
-            else conversation_policy.ConversationPolicyConfig(mode="OFF"),
+            rules, policy,
             current_text=text, affect=affect,
             guidance=cfg.conversation_guidance if job["kind"] == "chat" or followup else None,
         )
         dynamic_rules = [expression_data, policy_data]
+        if cfg.profile.enabled and job["kind"] == "chat" and turn.permits("profile"):
+            from companion import companion_profile
+
+            dynamic_rules.append(companion_profile.prompt_fact(s, cfg))
         if job["kind"] == "chat" and not cfg.chat_time_labels:
             # Stored event times keep a rebuilt context identical to the measured one.
             current_event = s.one((
@@ -647,6 +669,8 @@ class Core(Runtime):
         return prompt_rules, affect, style, conversation_decision
 
     def _reply_input(self, turn, rules, notice_messages):
+        from companion.transport import native_text
+
         job, cfg, body, text = turn.job, turn.settings, turn.body, turn.text
         current = {"role": "user", "content": text or (
             "主人发送了一条非文本消息。" if turn.authority else "请看看我分享的内容。")}
@@ -664,6 +688,7 @@ class Core(Runtime):
         if (
             cfg.content_enabled and turn.permits("content")
             and job["kind"] == "chat"
+            and not native_text(self.store, job["event_id"])
             and not body.get("diary_command")
             and not body.get("control_command")
         ):
@@ -700,6 +725,14 @@ class Core(Runtime):
                          memories, memory_paused, mark):
         s, cfg, job, text = self.store, turn.settings, turn.job, turn.text
         authority = turn.authority
+        if turn.permits("expression") and not bounded_text:
+            from companion.history_import import character_context
+
+            # An explicitly configured character is the starting point of every turn.
+            if character := character_context(self, job):
+                selection.include(character["message"], character["source_event_ids"],
+                                  proof={"kind": "character", "proof": character["proof"]})
+                selection.required.add(id(character["message"]))
         if turn.permits("goals"):
             self.life.add_reply_references(selection, related)
         if cfg.watch_ledger.enabled and job["kind"] == "chat" and turn.permits("exploration"):
@@ -709,7 +742,7 @@ class Core(Runtime):
             and affect["state"].get("engagement") != "pause"):
             mood = self.mood.reference(at=job["created_at"], text=text)
             if mood:
-                selection.add("小肥鱼的心情参考（数据）：",
+                selection.add("你的心情参考（数据）：",
                     {key: mood[key] for key in ("rules", "state", "confidence", "evaluated_at")},
                     mood["proof"]["source_event_ids"], priority=context_selection.MOOD,
                     proofs=[{"kind": "mood", "proof": mood["proof"]}])
@@ -825,9 +858,15 @@ class Core(Runtime):
         mark("context_history")
         image_review_target, image_review_proofs = None, []
         if authority and job["kind"] == "chat" and turn.permits("image"):
-            image_review_target = image_review.target(self, job, turn.body, sources)
+            # Recalled turns left the ordinary window but stay in the authorized
+            # source set: an explicit objection may still target their images.
+            window = sorted([*zip(sources, turns, strict=True), *recalled_history],
+                            key=lambda pair: original_order.get(pair[0]["event_id"], -1))
+            window_sources = [source for source, _ in window]
+            image_review_target = image_review.target(self, job, turn.body, window_sources)
             if turn.permits("memory"):
-                image_review_proofs = image_review.annotate(self, job, sources, turns)
+                image_review_proofs = image_review.annotate(
+                    self, job, window_sources, [group for _, group in window])
         return dialogue_history.ReplyHistory(sources, turns, continuation, image_review_target,
             image_review_proofs, recalled=recalled, recalled_reference=recalled_reference,
             recalled_history=recalled_history, original_order=original_order)
@@ -940,6 +979,11 @@ class Core(Runtime):
             reply_revision.remember_sources(s, job, material["source_events"])
         turn = _ReplyTurn(cfg, job, authority, json.loads(job["body_json"]), followup)
         rules, affect, style, decision = self._reply_rules(turn, model_tools)
+        from companion.transport import native_text
+
+        if native_text(s, job["event_id"]):
+            rules.append("\n当前聊天设备只支持文字，请用文字回复；"
+                         "需要说明图片、语音或歌曲时直接描述。", dynamic=True)
         mark("context_rules")
         selection = context_selection.References()
         bounded_text = private_life.strict(s, cfg)
@@ -966,7 +1010,8 @@ class Core(Runtime):
         mark("context_current")
         if (work := retrieval_work.current()) is not None and work.receipt()["coverage_limited"]:
             rules.append("\n" + retrieval_work.NOTE, dynamic=True)
-        if turn.permits("memory") or turn.permits("history"):
+        if (turn.permits("memory") or turn.permits("history")) and needs_source_rules(
+                json.dumps([selection.messages, current_input], ensure_ascii=False, default=str)):
             rules.append(SOURCE_RULES, dynamic=True)
         protected = combined or image_memory or (
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and memory_refs)
@@ -1434,6 +1479,9 @@ class Core(Runtime):
         try:
             reply_revision.check_job(self.store, job)
             authority = self._owner_job_view(job)
+            from companion.transport import native_text
+
+            text_only = native_text(self.store, job["event_id"])
             bounded_text = authority is None and live_text.active(self.store, self.settings)
             generated_reply = False
             if bounded_text:
@@ -1547,6 +1595,7 @@ class Core(Runtime):
             preview_only = any(s["kind"] == "video_preview_reply" for s in context_snapshots)
             quote_choice = None
             if (authority and generated_reply and not preview_only and job["kind"] == "chat"
+                    and not text_only
                     and self.settings.quote_policy != "never"):
                 quote_choice, reply = reply_quote.extract(reply)
             with self.store.transaction():
@@ -1568,6 +1617,7 @@ class Core(Runtime):
                     return True
                 self._check_reply_epoch(job, captured_epoch)
                 now = self.clock()
+                message_ids = []
                 reply_is_current = not reply_revision.owner_input(
                     self.store, job["event_id"],
                 ) or reply_revision.current(self.store, job["event_id"])
@@ -1590,6 +1640,7 @@ class Core(Runtime):
                         self.expression.intent(job["event_id"], reply, now)
                         if policy and generated_reply and job["kind"] == "chat" and not preview_only
                         and not voice_reply and not singing_reply and not mixed_reply
+                        and not text_only
                         and self.settings.expression_enabled
                         and (authority is None or "expression" in authority.policy.purposes)
                         else None
@@ -1603,7 +1654,7 @@ class Core(Runtime):
 
                         newer = self.store.one((
                             'SELECT 1 FROM events WHERE conversation_id = %s AND '
-                            "actor_id = 'owner' AND source = 'qq.onebot' AND "
+                            "actor_id = 'owner' AND source IN ('qq.onebot','native.chat') AND "
                             "event_type IN ('message.received', "
                             "'message.media_received') AND record_sequence > "
                             '(SELECT record_sequence AS rowid FROM events WHERE '
@@ -1663,7 +1714,8 @@ class Core(Runtime):
                                 'SELECT 1 FROM events WHERE conversation_id = %s AND '
                                 "actor_id = 'owner' AND event_type IN "
                                 "('message.received', 'message.media_received') AND "
-                                "source = 'qq.onebot' AND record_sequence > (SELECT "
+                                "source IN ('qq.onebot','native.chat') AND "
+                                "record_sequence > (SELECT "
                                 'record_sequence AS rowid FROM events WHERE event_id = '
                                 '%s) LIMIT 1'
                             ), (job["conversation_id"], job["event_id"]),
@@ -1685,7 +1737,7 @@ class Core(Runtime):
                             action="qq.private.proactive" if job["kind"] == "activity"
                             else "qq.private.reply",
                         )]
-                    if (authority and message_ids and generated_reply
+                    if (authority and message_ids and generated_reply and not text_only
                             and not voice_reply and not singing_reply and not mixed_reply
                             and job["kind"] == "chat"):
                         from companion import image_generation
@@ -1701,6 +1753,13 @@ class Core(Runtime):
                 if conversation_store is not None:
                     conversation_store.complete()
                 job_queue.release(self.store, job["job_id"], "SUCCEEDED", now)
+                from companion.native_stream import finish
+
+                finish(self.store, job)
+                if message_ids:
+                    from companion.native_delivery import publish
+
+                    publish(self.store, self.settings, self.clock, message_ids)
                 self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now,
                                  **({"reply_suppressed": True} if not reply_is_current else {}),
                                  **({"reply_skipped": True} if silent else {}))
@@ -1736,6 +1795,9 @@ class Core(Runtime):
             if (not current or current["state"] != "RUNNING"
                 or current["lease_token"] != job["lease_token"]):
                 return
+            from companion.native_stream import interrupt
+
+            interrupt(self, job)
             if code in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED,
                         reply_revision.CANCELLED, "INPUT_RECALLED", "OWNER_SOURCE_CHANGED",
                         "OWNER_CAPTURE_INVALID", "OWNER_SOURCE_JOB_BINDING_REQUIRED"}:
@@ -1845,6 +1907,9 @@ class Core(Runtime):
                                  key=f"failure:{job['job_id']}:v1")
             owner_delivery.record_failure_notice(
                 self.store, self.settings, self.clock, job["job_id"], message_id)
+            from companion.native_delivery import publish
+
+            publish(self.store, self.settings, self.clock, [message_id])
         except CoreError:
             # The grant or source no longer allows a send; the failure itself stands.
             self.store.execute("ROLLBACK TO SAVEPOINT failure_notice")

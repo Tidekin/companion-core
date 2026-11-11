@@ -92,7 +92,8 @@ def recall_tools(core, monkeypatch, results, raw=None):
 
     context = SimpleNamespace(recall_async=recall_async,
                               pin=lambda *a, **k: {"source_event_ids": []})
-    store = SimpleNamespace(one=lambda *a: {"ok": 1})
+    store = SimpleNamespace(one=lambda *a: {"ok": 1}, in_transaction=True,
+                            read_or_write=lambda operation: operation())
     fake = SimpleNamespace(store=store, settings=core.settings, clock=core.clock,
                            memory_context=context, memory=core.memory,
                            content=SimpleNamespace(options=SimpleNamespace(image_adapter="x")))

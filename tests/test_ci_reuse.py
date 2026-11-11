@@ -131,6 +131,22 @@ def test_identical_actual_tree_reuses_full_success_and_validates_again(evidence)
                                   root=evidence["root"]) == proof
 
 
+def test_release_proof_jobs_match_the_actual_full_workflow():
+    workflow = yaml.safe_load((ROOT / ci_reuse.WORKFLOW).read_text(encoding="utf8"))
+    actual = set(workflow["jobs"]) - {"test"}
+    actual.update(f"test ({platform}-latest, {shard})"
+                  for platform in ("ubuntu", "windows") for shard in range(4))
+    assert ci_reuse.REQUIRED_JOBS == actual
+
+
+def test_skipped_flutter_build_cannot_authorize_runtime_image_consumption(evidence):
+    next(job for job in evidence["jobs"]["jobs"] if job["name"] == "flutter-client")[
+        "conclusion"] = "skipped"
+    assert evidence["plan"]() == ("full", None)
+    with pytest.raises(ValueError):
+        images.resolve_source("synthetic/repository", 101, read=evidence["read"])
+
+
 @pytest.mark.parametrize("updated_at", [
     "2026-11-01T09:18:01Z", "2099-01-01T00:00:00Z", "2020-01-01T00:00:00Z", None,
 ])
@@ -263,13 +279,6 @@ def test_reuse_workflow_keeps_only_lightweight_validation_and_full_only_artifact
     assert steps[upload]["with"]["name"] == "ci-full-${{ github.run_attempt }}"
     assert steps[upload]["with"]["path"] == ".local/ci/verified-tree.json"
     assert steps[upload]["with"]["include-hidden-files"] == "true"
-    assert ci_reuse.REQUIRED_JOBS == {
-        "preflight", "quality", "ci", "container", "browser-reader", "plugin-native",
-        "test (ubuntu-latest, 0)", "test (ubuntu-latest, 1)",
-        "test (windows-latest, 0)", "test (windows-latest, 1)",
-        "test (ubuntu-latest, 2)", "test (ubuntu-latest, 3)",
-        "test (windows-latest, 2)", "test (windows-latest, 3)",
-    }
 
 
 def test_record_cli_captures_real_tree_only_for_full_success(repository, monkeypatch):

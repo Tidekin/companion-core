@@ -58,11 +58,26 @@ _REVISION_FIELDS = (
     "r.record_sha256, r.journal_id, r.journal_path, r.created_at"
 )
 
-_CUSTODY_FIELDS = (
-    "identity.value AS custody_journal_id, lifecycle.value AS custody_lifecycle, "
+_CUSTODY_PROJECTION = (
     "(SELECT jsonb_agg(history ORDER BY history.revision) FROM "
     f"(SELECT {_REVISION_FIELDS}, pointer.value AS current_head "
-    "FROM owner_authority_revisions r) history) AS custody_projection"
+    "FROM owner_authority_revisions r) history)"
+)
+# SHA-256 of every projection field authority_custody validates, plus the head
+# pointer. Equal digests mean byte-identical projection content in this statement.
+_CUSTODY_DIGEST = (
+    "(SELECT encode(sha256(convert_to(COALESCE(string_agg(ROW("
+    f"{_REVISION_FIELDS})::text, chr(30) ORDER BY r.revision), '') || chr(29) || "
+    "CASE WHEN pointer.value IS NULL THEN 'n' ELSE 'p' || pointer.value END, 'UTF8')), "
+    "'hex') FROM owner_authority_revisions r)"
+)
+_CUSTODY_FIELDS = (
+    "identity.value AS custody_journal_id, lifecycle.value AS custody_lifecycle, "
+    f"{_CUSTODY_DIGEST} AS custody_digest"
+)
+CUSTODY_PROJECTION_SQL = (
+    f"SELECT {_CUSTODY_PROJECTION} AS projection, {_CUSTODY_DIGEST} AS digest "
+    "FROM (VALUES (1)) AS anchor(v) LEFT JOIN runtime_meta pointer ON pointer.key=%s"
 )
 _CUSTODY_JOINS = (
     "LEFT JOIN runtime_meta pointer ON pointer.key=%s "
@@ -887,6 +902,9 @@ def activate(store, settings, clock, request):
             "ACTIVE",
             previous,
         )
+        from companion.native_stream import withdraw
+
+        withdraw(store)
         return _reply(row)
 
 
@@ -917,6 +935,9 @@ def stop(store, settings, clock, request):
 
 def restore(store):
     """Called only by controlled backup restore, after newest erasure replay."""
+    from companion.native_stream import withdraw
+
+    withdraw(store)
     _put(store, GENERATION, uid("restore"))
     _put(store, MODE, "OFF")
 

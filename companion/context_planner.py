@@ -337,7 +337,7 @@ def _filter(messages, removed):
     return selected
 
 
-def plan_request(core, job, snapshots, request_context):
+def plan_request(core, job, snapshots, request_context, *, stream=False):
     plan = check(core, job, snapshots)
     if plan is None:
         return request_context.messages
@@ -359,7 +359,7 @@ def plan_request(core, job, snapshots, request_context):
     # inspection metadata in native memory results is cheaper to remove than the
     # original conversation's statement, quotation and attribution as a whole.
     original = measure_request(core.settings, request_wire(messages, parameters), "chat",
-        tools=[*parameters.function_tools, *parameters.output_tools])
+        tools=[*parameters.function_tools, *parameters.output_tools], stream=stream)
     if pressure(core.settings, original):
         messages = _compact_memory_tools(messages)
     base_messages = messages
@@ -369,7 +369,7 @@ def plan_request(core, job, snapshots, request_context):
             core.settings,
             request_wire(messages, parameters),
             "chat",
-            tools=[*parameters.function_tools, *parameters.output_tools],
+            tools=[*parameters.function_tools, *parameters.output_tools], stream=stream,
         )
 
     measured = measure()
@@ -451,10 +451,10 @@ def _compact_memory_tools(messages):
     return selected
 
 
-def check_request(core, job, snapshots, wire, tools):
+def check_request(core, job, snapshots, wire, tools, *, stream=False):
     plan = check(core, job, snapshots)
     if plan is not None:
-        measured = measure_request(core.settings, wire, "chat", tools=tools)
+        measured = measure_request(core.settings, wire, "chat", tools=tools, stream=stream)
         pending = plan["pending"]
         if (
             pending is None

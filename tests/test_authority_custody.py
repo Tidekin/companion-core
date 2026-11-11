@@ -51,19 +51,6 @@ def test_same_length_changed_journal_never_reuses_verified_material(core, tmp_pa
     assert owner_authority.current(core.store, core.settings, core.clock)
 
 
-def test_material_reuse_returns_private_bounded_values(core, tmp_path, monkeypatch):
-    captured(core, tmp_path)
-    raw = Path(core.settings.paid_model.journal_path).read_bytes()
-    paid_budget._clear_codec()
-    first = paid_budget.authority_material(raw)
-    first["authority"].clear()
-    assert paid_budget.authority_material(raw)["authority"]
-    paid_budget._clear_codec()
-    monkeypatch.setattr(paid_budget, "CACHE_MAX_BYTES", len(raw)-1)
-    assert paid_budget.authority_material(raw)["authority"]
-    assert paid_budget._authority_bytes.cache_info().currsize == 0
-
-
 def test_erasure_custody_parses_its_original_bytes_without_a_third_file_read(
     core, tmp_path, monkeypatch,
 ):

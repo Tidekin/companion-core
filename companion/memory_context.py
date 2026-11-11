@@ -251,7 +251,7 @@ class MemorySources:
                     'SELECT DISTINCT e.event_id FROM memory_evidence AS copy JOIN memories AS m '
                     'USING (memory_id) JOIN memory_evidence AS v USING (memory_id) JOIN events AS '
                     'e ON e.event_id = v.event_id WHERE copy.event_id = %s AND NOT '
-                    "m.supersedes_memory_id IS NULL AND e.source = 'qq.onebot'",
+                    "m.supersedes_memory_id IS NULL AND e.source IN ('qq.onebot','native.chat')",
                     (row["event_id"],),
                 )
                 for candidate in candidates:
@@ -352,7 +352,8 @@ class MemorySources:
             for memory in memories:
                 candidates = self._rows(
                     'SELECT DISTINCT e.event_id FROM memory_evidence AS v JOIN events AS e ON '
-                    "e.event_id = v.event_id WHERE v.memory_id = %s AND e.source = 'qq.onebot' "
+                    "e.event_id = v.event_id WHERE v.memory_id = %s AND e.source IN "
+                    "('qq.onebot','native.chat') "
                     'LIMIT %s', (memory["memory_id"], EVIDENCE_ROOTS + 1), limit=EVIDENCE_ROOTS + 1)
                 if len(candidates) > EVIDENCE_ROOTS:
                     refuse("evidence_roots")
@@ -402,6 +403,13 @@ class MemorySources:
         root = next((row for row in self.lineage(event_id) if row["event_id"] == event_id), None)
         if not root or root["actor_id"] != "owner":
             return None
+        if root["source"] == "owner.history":
+            from companion.history_import import source_allowed
+            from companion.store import utcnow
+
+            if not source_allowed(self.store, self.settings, lambda: self.now or utcnow(),
+                                  root, "memory"):
+                return None
         body = json.loads(root["body_json"])
         if (not isinstance(body, dict) or not isinstance(body.get("text"), str)
             or (require_text and not body["text"].strip())):
@@ -486,12 +494,20 @@ class MemoryContext:
 
     @staticmethod
     def _fact(row, sources):
-        return {**{key: row[key] for key in MEMORY_FIELDS},
+        result = {**{key: row[key] for key in MEMORY_FIELDS},
                 "origin": row["origin"],
                 "evidence_ids": [source["event_id"] for source in sources],
                 "evidence": [{key: source[key] for key in (
             "event_id", "source", "occurred_at", "ingested_at",
         )} for source in sources[-8:]], "evidence_truncated": len(sources) > 8}
+        from companion.history_import import source_metadata
+
+        # Imported facts say where they came from; raw copied text never enters here.
+        origins = [source_metadata(source) for source in sources
+                   if source["source"] == "owner.history"]
+        if origins:
+            result["historical_provenance"] = origins[:2]
+        return result
 
     def reply_source_check(self, settings, clock, authority):
         """Return a purpose-specific lineage check for this one prompt build."""
@@ -515,7 +531,8 @@ class MemoryContext:
                 # SourceView's DB rows are reusable; each permission/file check is live.
                 return bool(lineage) and (not authority or sources_allowed(
                     self.store, settings, clock,
-                    (row["event_id"] for row in lineage if row["source"] == "qq.onebot"), purpose))
+                    (row["event_id"] for row in lineage
+                     if row["source"] in {"qq.onebot", "native.chat"}), purpose))
 
             return self.store.read_or_write(check)
         return available
@@ -841,7 +858,7 @@ class MemoryContext:
                     return None
             allowed = None  # Check nominated sources individually below.
 
-        def collect():
+        def collect(unchanged=None):
             source_check = finish = None
             if not authority and allowed is None:
                 def source_check(event_id):
@@ -850,7 +867,8 @@ class MemoryContext:
                             'SELECT 1 FROM events e JOIN conversations c '
                             'USING(conversation_id) WHERE e.event_id=%s AND '
                             "e.conversation_id=%s AND e.actor_id='owner' AND "
-                            "e.source='qq.onebot' AND e.privacy_scope='private' AND"
+                            "e.source IN ('qq.onebot','native.chat') AND "
+                            "e.privacy_scope='private' AND"
                             " c.scope='private' AND c.owner_actor_id='owner' AND "
                             'e.redacted=0 AND e.occurred_at>=%s AND '
                             'e.occurred_at<=%s AND e.record_sequence<(SELECT '
@@ -862,7 +880,8 @@ class MemoryContext:
             if authority:
                 # Episodes share their sources; check them all against one job view.
                 _, check, finish = owner_input.history_batch(
-                    s, cfg, clock, job, purpose="proactive" if followup else "chat")
+                    s, cfg, clock, job, purpose="proactive" if followup else "chat",
+                    unchanged=unchanged)
 
                 def source_check(event_id):
                     try:
@@ -886,7 +905,8 @@ class MemoryContext:
                 finish()
             return found
 
-        result = s.read_or_write(collect) if authority else collect()
+        result = (s.read_or_write(lambda: owner_input.batch_sources(s, collect))
+                  if authority else collect())
         return self._fit_reply_continuation(cfg, result["items"], authority, history, now,
                                             reserved_ids, reserved_bytes)
 
@@ -1000,7 +1020,8 @@ class MemoryContext:
             )):
                 body = json.loads(event["body_json"])
                 text = body["text"]
-                if (event["source"] != "qq.onebot" or event["event_type"] not in {
+                if (event["source"] not in {"qq.onebot", "native.chat"}
+                        or event["event_type"] not in {
                         "message.received", "message.media_received"}
                     or not text.strip()
                     or body.get("control_command") or body.get("diary_command")

@@ -710,7 +710,10 @@ class ErasureLedger:
                 (record["erasure_id"], len(prefix), prefix, len(prefix)),
             )
         }
-        roots = set(record["event_ids"]) | recorded
+        from companion.history_import import erasure_roots
+
+        # One imported file is an indivisible source, including its attestations.
+        roots = erasure_roots(store, set(record["event_ids"]) | recorded)
         if record.get("target_type") == "raw_retention":
             event_ids, memory_ids = self.retention_events(store, roots), set(record["memory_ids"])
         else:
@@ -784,10 +787,13 @@ class ErasureLedger:
                 self.record_complete(store, record)
                 return
 
+        from companion.history_import import erasure_roots
+
+        roots = erasure_roots(store, record["event_ids"])
         event_ids = (
-            self.retention_events(store, record["event_ids"])
+            self.retention_events(store, roots)
             if record.get("target_type") == "raw_retention"
-            else dependent_events(store, record["event_ids"])
+            else dependent_events(store, roots)
         )
         memory_ids = set(record["memory_ids"])
         for event_id in event_ids:
@@ -1016,7 +1022,8 @@ class ErasureLedger:
             for row in store.rows(
                 "SELECT m.memory_id, m.supersedes_memory_id, m.content, e.body_json FROM memories "
                 "AS m JOIN memory_evidence AS v USING (memory_id) JOIN events AS e USING "
-                "(event_id) WHERE NOT m.supersedes_memory_id IS NULL AND e.source = 'qq.onebot' "
+                "(event_id) WHERE NOT m.supersedes_memory_id IS NULL AND e.source IN "
+                "('qq.onebot','native.chat') "
                 'AND e.event_id IN (SELECT value COLLATE "C" FROM JSON_ARRAY_ELEMENTS_TEXT(CAST(%s '
                 "AS JSON)) AS parsed(value))",
                 (encode(sorted(event_ids)),),

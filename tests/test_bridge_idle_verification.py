@@ -1,6 +1,7 @@
 """The real idle delivery loop validates custody without copying unused history."""
 
 import asyncio
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -73,5 +74,48 @@ def test_idle_delivery_checks_live_custody_without_materializing_records(
                     await delivery
                     assert requests == ["/internal/v1/deliveries/lease",
                                         "/internal/v1/owner-authority/check"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("damage", [None, "stop", "head"])
+def test_idle_input_and_recall_checks_validate_without_copying_history(
+    config, monkeypatch, damage,
+):
+    from companion_onebot_bridge import held_inputs, owner_notices
+    from companion_onebot_bridge.owner_memes import MemePump
+
+    async def scenario():
+        cfg = replace(config, meme_enabled=True)
+        with Spool(cfg) as spool:
+            runtime = OwnerRuntime(spool)
+            pump = MemePump(runtime, None)
+            runtime.verify(include_records=False)
+            if damage == "stop":
+                journal.stop_marker(runtime.stop_path)
+            elif damage == "head":
+                with runtime.db:
+                    runtime.db.execute("UPDATE owner_runtime SET journal_head=?", ("f" * 64,))
+
+            def copy_unused_history(*args):
+                pytest.fail("idle input/recall/discovery copied the complete owner journal")
+
+            monkeypatch.setattr(owner_runtime, "deepcopy", copy_unused_history)
+            if damage:
+                code = ("OWNER_RUNTIME_STOPPED" if damage == "stop"
+                        else "OWNER_JOURNAL_RECONCILIATION_REQUIRED")
+                with pytest.raises(ValueError, match=code):
+                    await held_inputs.promote_one(runtime, None, None)
+                with pytest.raises(ValueError, match=code):
+                    pump.tick(idle=True)
+                if damage == "head":
+                    with pytest.raises(ValueError, match=code):
+                        await owner_notices.flush_one(runtime, None)
+            else:
+                assert await held_inputs.promote_one(runtime, None, None) is False
+                assert await runtime.flush_one(None) is False
+                assert owner_notices.recalled(runtime, "absent") is False
+                pump.tick(idle=True)
+            await pump.close()
 
     asyncio.run(scenario())

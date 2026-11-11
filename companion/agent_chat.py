@@ -8,7 +8,7 @@ from time import monotonic
 import psycopg
 from pydantic_ai import DeferredToolRequests
 
-from companion import job_queue, qq_video, reply_revision, retrieval_work
+from companion import job_queue, qq_video, reply_revision, retrieval_work, transport
 from companion.agent_persistence import ConversationStore
 from companion.agent_reading import deferred_results, reader_tools
 from companion.agent_runtime import check_conversation, run_conversation
@@ -59,22 +59,30 @@ async def reply(core, job, snapshots):
                     .01, min(.25, .02 * 2 ** min(attempt, 4)))))
                 attempt += 1
     with phase("context_tools", job["trace_id"]):
+        text_only = transport.native_text(core.store, job["event_id"])
         tools = [core_query_tools(core, job, snapshots)]
         from companion.agent_singing import toolset
 
-        if singing_tools := toolset(core, job, snapshots, persistence):
+        if not text_only and (singing_tools := toolset(core, job, snapshots, persistence)):
             tools.append(singing_tools)
         if (core.settings.content_enabled and core.settings.observation_enabled
             and "content" in view.policy.purposes):
             tools.append(reader_tools(core, job, snapshots, persistence))
         from companion import video_input
 
-        if video_input.enabled(core.settings) and {"content", "image"} <= set(view.policy.purposes):
+        if (not text_only and video_input.enabled(core.settings)
+                and {"content", "image"} <= set(view.policy.purposes)):
             tools.append(qq_video.toolset(core, job, snapshots))
         from companion import image_generation
 
-        if "expression" in view.policy.purposes and image_generation.available(core, job):
+        if (not text_only and "expression" in view.policy.purposes
+                and image_generation.available(core, job)):
             tools.append(image_generation.toolset(core, job, snapshots))
+        from companion import profile_tools
+
+        # Native and QQ chats share one companion identity and display profile.
+        if profile_tools.available(core, view):
+            tools.append(profile_tools.toolset(core, job, snapshots))
     with phase("context_build", job["trace_id"]):
         memories = []
         query = json.loads(job["body_json"]).get("text", "").strip()

@@ -141,7 +141,8 @@ Each tool requires its current purpose on the original owner-authorized job.
                 work.mark(error.reason)
             return False
         return bool(lineage) and sources_allowed(core.store, core.settings, core.clock,
-            (row["event_id"] for row in lineage if row["source"] == "qq.onebot"), "memory")
+            (row["event_id"] for row in lineage
+             if row["source"] in {"qq.onebot", "native.chat"}), "memory")
 
     async def raw_turns(query):
         """One bounded search of delivered raw turns, for facts never summarized."""

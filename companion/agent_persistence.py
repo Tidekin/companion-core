@@ -28,7 +28,9 @@ def erase_conversations(store, event_ids):
     for event_id in event_ids:
         jobs = 'SELECT job_id FROM job_sources WHERE event_id=%s'
         store.execute("UPDATE agent_conversations SET phase='STOPPED',conversation_json=NULL,"
-                      "snapshots_json='[]',output_text=NULL WHERE job_id IN (" + jobs + ")",
+                      "snapshots_json='[]',output_text=NULL,preview_json=NULL,"
+                      "preview_version=preview_version+1 "
+                      "WHERE job_id IN (" + jobs + ")",
                       (event_id,))
         store.execute("UPDATE agent_tool_calls SET result_json=NULL,metadata_json=NULL,"
                       "args_sha256='',state=CASE WHEN state='STARTED' THEN 'UNKNOWN' ELSE state "

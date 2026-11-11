@@ -144,7 +144,7 @@ a build. Directory permissions may differ for the owner-only migration-directory
 
 | Identity | Meaning |
 |---|---|
-| Commit, tree, run ID and attempt | Original full CI source and all fourteen successful jobs |
+| Commit, tree, run ID and attempt | Original full CI source and all fifteen successful jobs, including Flutter |
 | `image_id` | Actual producer-local Docker ID; classic stores use config IDs, containerd uses manifest/index IDs |
 | `config_digest` | Portable SHA256 of the original saved image configuration bytes |
 | `archive_descriptor` / `platform_manifest_descriptor` | Validated OCI root and single `linux/amd64` manifest descriptors |

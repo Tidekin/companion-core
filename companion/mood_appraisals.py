@@ -34,7 +34,7 @@ def owner_text(store, event_id):
     """The retained private owner wording, or None for anything that is not a plain message."""
     event = store.one(
         "SELECT body_json FROM events WHERE event_id = %s AND redacted = 0 AND actor_id = 'owner' "
-        "AND source = 'qq.onebot' AND privacy_scope = 'private' AND event_type = "
+        "AND source IN ('qq.onebot','native.chat') AND privacy_scope = 'private' AND event_type = "
         "'message.received' AND LENGTH(body_json) <= 16000",
         (event_id,),
     )

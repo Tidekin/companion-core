@@ -13,7 +13,7 @@ Purpose = Literal[
     "chat", "history", "memory", "diary", "affect", "consolidation", "reflection", "goals",
     "wake", "exploration", "social", "expression", "proactive", "content", "image", "file",
     "meme", "poke", "voice", "account_actions", "bili_video", "life", "evaluation", "rem",
-    "qzone_publication",
+    "qzone_publication", "profile",
 ]
 CapabilityPolicy = Literal[
     "image", "file", "meme", "poke", "voice", "account_actions", "bili_video", "rem",
@@ -59,6 +59,9 @@ class OwnerGrantPolicy(StrictModel):
         default=None, pattern=SHA, exclude_if=lambda value: value is None,
     )
     capture: CaptureIdentity | None = None
+    native_devices: dict[str, CaptureIdentity] = Field(
+        default_factory=dict, max_length=16, exclude_if=lambda value: not value,
+    )
     history: HistoryPolicy = Field(default_factory=HistoryPolicy)
     memory_scope: Literal["none", "owner_private"] = "none"
     source_retention_days: int = Field(default=365, ge=1, le=3650, strict=True)
@@ -74,8 +77,13 @@ class OwnerGrantPolicy(StrictModel):
 
         if len(set(self.purposes)) != len(self.purposes):
             raise ValueError("duplicate owner purposes")
-        if "chat" in self.purposes and self.capture is None:
+        if "chat" in self.purposes and self.capture is None and not self.native_devices:
             raise ValueError("chat requires authenticated capture identity")
+        from companion_delivery_protocol.native_chat import device_identity
+
+        for device_id, identity in self.native_devices.items():
+            if (device_id, identity.model_dump()) != device_identity(identity.public_key):
+                raise ValueError("native device identity changed")
         if ("history" in self.purposes) != (self.history.scope != "none"):
             raise ValueError("history purpose and source scope must agree")
         if ("memory" in self.purposes) != (self.memory_scope != "none"):
@@ -132,7 +140,8 @@ class ModelCarryReference(AuthorityReference):
 
 
 class OwnerCapture(AuthorityReference):
-    kind: Literal["authenticated_onebot_ws", "onebot_history_backfill"]
+    kind: Literal["authenticated_onebot_ws", "onebot_history_backfill",
+                  "authenticated_native_device"]
     event_id: str = Field(pattern=r"^evt_[a-f0-9]{64}$")
     source_event_id: str = Field(min_length=1, max_length=512)
     input_sha256: str = Field(pattern=SHA)

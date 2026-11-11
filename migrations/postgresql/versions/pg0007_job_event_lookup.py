@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "pg0004_job_event_lookup"
-down_revision = "pg0003_fact_key_ascii"
+revision = "pg0007_job_event_lookup"
+down_revision = "pg0006_fact_key_ascii"
 branch_labels = None
 depends_on = None
 

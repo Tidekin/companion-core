@@ -82,7 +82,7 @@ def pending_result(spool, *, runtime=None):
                 return None
             if runtime is None:
                 runtime = OwnerRuntime(spool)
-            runtime.verify(active=False)
+            runtime.verify(active=False, include_records=False)
             done = {row[0] for row in spool.db.execute(
                 f"SELECT message_id FROM {TABLE} WHERE receipt_json IS NOT NULL")}
             return next((row for row in spool.db.execute(

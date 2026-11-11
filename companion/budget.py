@@ -219,6 +219,7 @@ def reserve(
     source_check=None,
     tools=(),
     generation=None,
+    stream=False,
 ):
     from companion import runtime_config
 
@@ -235,7 +236,8 @@ def reserve(
         cloud_task_kind, cloud_task_id = "video", inputs.video_binding["task_id"]
     autonomous = scenario not in {"chat", "qq_poke", "evaluation", "gateway"}
     day, month = _period_starts(now, settings.timezone)
-    measurement = measure_request(wire, messages, scenario, tools=tools, generation=generation)
+    measurement = measure_request(wire, messages, scenario, tools=tools,
+        generation=generation, stream=stream)
     estimated_input = measurement.reserved_input_tokens
     output_tokens = measurement.output_allowance
     check_request_limits(wire.paid_model, measurement, scenario)
@@ -328,7 +330,8 @@ def reserve(
         if approval:
             from companion.model import model_payload
 
-            payload = model_payload(wire, messages, scenario, tools=tools, generation=generation)
+            payload = model_payload(wire, messages, scenario, tools=tools,
+                generation=generation, stream=stream)
             _record_paid_reservation(
                 store, settings, approval, scenario, request_id, logical_request_id,
                 estimate, measurement, receipt, paid_budget.sha(payload), quota, now,
@@ -857,11 +860,13 @@ def _check_measurement(
     *,
     tools=(),
     generation=None,
+    stream=False,
     video_profile=None,
     prepared=None,
 ):
     if prepared is None:
-        measured = measure_request(settings, messages, scenario, tools=tools, generation=generation)
+        measured = measure_request(settings, messages, scenario, tools=tools,
+            generation=generation, stream=stream)
     else:
         from companion.model import model_payload
 
@@ -869,7 +874,8 @@ def _check_measurement(
         if contract != paid_budget.sha(
             paid_budget.snapshot(settings)
         ) or measured.payload_sha256 != paid_budget.sha(
-            model_payload(settings, messages, scenario, tools=tools, generation=generation)
+            model_payload(settings, messages, scenario, tools=tools,
+                generation=generation, stream=stream)
         ):
             raise CoreError("MODEL_TOKEN_MEASUREMENT_CHANGED", 503)
     check_request_limits(settings.paid_model, measured, scenario)
@@ -900,6 +906,8 @@ async def complete(
     tools=(),
     trace_id=None,
     generation=None,
+    stream=False,
+    on_delta=None,
 ):
     """Dispatch a reservation and settle every outcome before returning to its caller."""
     from companion.model import (
@@ -927,7 +935,7 @@ async def complete(
             source_check=source_check,
             tools=tools,
             trace_id=trace_id,
-            generation=generation,
+            generation=generation, stream=stream, on_delta=on_delta,
         )
         usable_response = True
         return response
@@ -1083,6 +1091,8 @@ async def _dispatch(
     tools=(),
     trace_id=None,
     generation=None,
+    stream=False,
+    on_delta=None,
 ):
     """Persisted admission is fenced before adapter I/O."""
     from companion import notices, runtime_config
@@ -1100,7 +1110,8 @@ async def _dispatch(
             cloud_budget.mark_dispatched(
                 store, "model", request_id, clock() if callable(clock) else clock
             )
-        return await model.complete(messages, scenario, **({"tools": tools} if tools else {}))
+        return await model.complete(messages, scenario, **({"tools": tools} if tools else {}),
+                                    **({"stream": True, "on_delta": on_delta} if stream else {}))
     if not callable(clock):
         raise CoreError("MODEL_ADMISSION_CLOCK_REQUIRED", 503)
     now = clock()
@@ -1116,16 +1127,17 @@ async def _dispatch(
     counting_contract = paid_budget.sha(paid_budget.snapshot(wire))
     with phase("dispatch_measure", trace_id):
         prepared = (measure_request(wire, messages, scenario, tools=tools,
-                                    generation=generation), counting_contract)
+                                    generation=generation, stream=stream), counting_contract)
 
     def check_payload(admission):
         if admission["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
         if admission["payload_sha256"] != paid_budget.sha(model_payload(
-            wire, messages, scenario, tools=tools, generation=generation,
+            wire, messages, scenario, tools=tools, generation=generation, stream=stream,
         )):
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-        _check_measurement(wire, admission, messages, scenario, tools=tools, generation=generation,
+        _check_measurement(wire, admission, messages, scenario, tools=tools,
+            generation=generation, stream=stream,
                            video_profile=profile, prepared=prepared)
 
     with phase("dispatch_journal", trace_id), store.transaction():
@@ -1187,13 +1199,15 @@ async def _dispatch(
                 admission=admission,
                 **({"tools": tools} if tools else {}),
                 **({"generation": generation} if generation else {}),
+                **({"stream": True, "on_delta": on_delta} if stream else {}),
             )
         finally:
             if dispatch is not None:
                 dispatch["transport_returned"] = True
     with store.transaction():
         cloud_budget.mark_dispatched(store, "model", request_id, clock())
-    return await model.complete(messages, scenario, **({"tools": tools} if tools else {}))
+    return await model.complete(messages, scenario, **({"tools": tools} if tools else {}),
+                                    **({"stream": True, "on_delta": on_delta} if stream else {}))
 
 
 def record_provider_discrepancy(

@@ -15,6 +15,7 @@ from tests.conftest import run
 from tests.sdk_reader_fixture import answer, worker_for
 from tests.support.native_consumer_entry import environment
 from tests.support.native_history_delivery import sdk_step
+from tests.support.postgres_snapshots import observe_snapshots
 
 
 async def native_history(core, tmp_path, check, *, turns=3, independent=False):
@@ -64,6 +65,7 @@ def test_history_reuses_custody_inside_one_owned_write_transaction(
 ):
     def check(job, expected):
         calls, recalls = [], []
+        same_snapshot = True
         native = authority_custody.check
         native_recall = owner_input.input_recall.require_not_recalled
 
@@ -88,13 +90,21 @@ def test_history_reuses_custody_inside_one_owned_write_transaction(
             assert len(calls) == len(expected) + 2
         elif transactional:
             with core.store.transaction():
+                before = core.store.change_token()
                 actual = owner_input.history_sources(core.store, core.settings, core.clock, job)
-            # READ COMMITTED also rechecks each source, unlike the owned snapshot.
-            assert len(calls) == len(expected) + 2
+                same_snapshot = core.store.change_token() == before
+            # Only this synchronous boundary reuses the unchanged native snapshot.
+            if same_snapshot:
+                assert len(calls) == 2
+            else:
+                # Another database's parallel fixture also advances the native
+                # snapshot. One bounded reread keeps the original full checks.
+                assert 2 <= len(calls) <= 2 * (len(expected) + 2)
         else:
             actual = owner_input.history_sources(core.store, core.settings, core.clock, job)
             assert len(calls) == 2
-        assert actual == expected and len(recalls) == 3
+        assert actual == expected
+        assert len(recalls) in (range(3, 7) if not same_snapshot else {3})
         assert not core.store.in_transaction
 
     run(native_history(core, tmp_path, check))
@@ -238,6 +248,64 @@ def test_full_history_batches_without_the_journal_byte_cache(core, tmp_path, mon
         assert not core.store.in_transaction
 
     run(native_history(core, tmp_path, check, turns=15))
+
+
+def test_history_rechecks_after_an_unrelated_native_commit(core, tmp_path, monkeypatch):
+    def check(job, expected):
+        recalls = []
+        snapshots = observe_snapshots(core.store, monkeypatch)
+        native = owner_input.input_recall.require_not_recalled
+        with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
+            def recall(*args, **kwargs):
+                native(*args, **kwargs)
+                recalls.append(1)
+                if len(recalls) == 1:
+                    other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
+                                  (owner_authority.MODE,))
+
+            monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
+            with core.store.transaction():
+                assert owner_input.history_sources(
+                    core.store, core.settings, core.clock, job) == expected
+        assert len(expected) <= len(recalls) <= (
+            len(expected) + 1 if len(snapshots) <= 2 else 3 * len(expected))
+
+    run(native_history(core, tmp_path, check))
+
+
+@pytest.mark.parametrize("foreign_commits", [1, 2])
+def test_background_commit_does_not_multiply_history_custody_checks(
+    core, tmp_path, monkeypatch, foreign_commits,
+):
+    def check(job, expected):
+        calls, changed = [], []
+        snapshots = observe_snapshots(core.store, monkeypatch)
+        native = owner_input.input_recall.require_not_recalled
+        custody = authority_custody.check
+        with psycopg.connect(core.settings.database.get_secret_value(), autocommit=True) as other:
+            def recall(*args, **kwargs):
+                native(*args, **kwargs)
+                if len(changed) < foreign_commits:
+                    changed.append(True)
+                    other.execute("UPDATE runtime_meta SET value=value WHERE key=%s",
+                                  (owner_authority.MODE,))
+
+            def journal(*args, **kwargs):
+                calls.append(True)
+                return custody(*args, **kwargs)
+
+            monkeypatch.setattr(owner_input.input_recall, "require_not_recalled", recall)
+            monkeypatch.setattr(authority_custody, "check", journal)
+            with core.store.transaction():
+                assert owner_input.history_sources(
+                    core.store, core.settings, core.clock, job) == expected
+        assert len(changed) == foreign_commits
+        # PostgreSQL snapshots include concurrent sibling-test commits too. Keep
+        # the tight single-commit bound; sustained churn may use the documented
+        # per-source fallback after the two bounded batching attempts.
+        assert len(calls) <= (4 if len(snapshots) <= 2 else len(expected) + 6)
+
+    run(native_history(core, tmp_path, check, turns=8))
 
 
 @pytest.mark.parametrize("max_messages", [0, 3])

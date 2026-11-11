@@ -7,7 +7,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 from pydantic import SecretStr
@@ -252,6 +252,47 @@ def test_two_connections_retry_one_original_unadmitted_request(core):
     assert len(calls) == 1
     assert core.store.one("SELECT state FROM social_autonomy_plans")["state"] == "READY"
     assert len(core.store.rows("SELECT * FROM model_usage")) == 1
+
+
+def test_retry_claim_skips_an_original_job_selected_by_another_connection(core, monkeypatch):
+    module, ref, _ = background(core)
+    with deferred_admission(), pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
+        planned(module, ref)
+    core.clock.advance(60)
+    selected, contender_finished = Event(), Event()
+    native = social_plan_jobs.job_queue.claim
+
+    def hold_first(store, job_id, worker, *args, **kwargs):
+        if worker == "first":
+            selected.set()
+            assert contender_finished.wait(timeout=5)
+        return native(store, job_id, worker, *args, **kwargs)
+
+    monkeypatch.setattr(social_plan_jobs.job_queue, "claim", hold_first)
+
+    def claim(worker):
+        from companion.social_autonomy import SocialAutonomy
+
+        if worker == "second":
+            assert selected.wait(timeout=5)
+        try:
+            with closing(Store(core.store.database, core.store.state_directory)) as store:
+                return social_plan_jobs.claim(
+                    SocialAutonomy(store, core.settings, clock=core.clock), worker)
+        finally:
+            if worker == "second":
+                contender_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(claim, "first")
+        second = workers.submit(claim, "second")
+        winner, skipped = first.result(timeout=10), second.result(timeout=10)
+    assert winner and skipped is None
+    row = core.store.one("SELECT state,lease_token,attempts FROM jobs WHERE job_id=%s",
+                         (winner["job_id"],))
+    assert row == {"state": "RUNNING", "lease_token": winner["lease_token"], "attempts": 1}
+    assert not core.store.rows("SELECT * FROM model_usage")
+    assert not module.model.calls
 
 
 @pytest.mark.parametrize("mode", ["before_reserve", "reserved", "settled"])

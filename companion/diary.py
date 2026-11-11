@@ -393,7 +393,8 @@ class DiaryRepository:
             "e.fingerprint AS fingerprint, e.redacted AS redacted, e.memory_processed AS "
             "memory_processed, e.reply_revision AS reply_revision FROM events AS e JOIN "
             "conversations AS c ON e.conversation_id = c.conversation_id WHERE e.actor_id = "
-            "'owner' AND e.privacy_scope = 'private' AND e.redacted = 0 AND e.source = 'qq.onebot' "
+            "'owner' AND e.privacy_scope = 'private' AND e.redacted = 0 AND e.source "
+            "IN ('qq.onebot','native.chat') "
             "AND e.event_type IN ('message.received', 'message.media_received') AND c.scope = "
             "'private' AND c.owner_actor_id = 'owner' AND e.occurred_at >= %s AND e.occurred_at < "
             "%s AND e.ingested_at >= %s ORDER BY e.occurred_at NULLS FIRST, e.event_id NULLS FIRST",
@@ -479,7 +480,7 @@ class DiaryRepository:
                 + marks
                 + (
                     ") AND e.conversation_id=ep.conversation_id AND "
-                    "e.actor_id='owner' AND e.source='qq.onebot' AND "
+                    "e.actor_id='owner' AND e.source IN ('qq.onebot','native.chat') AND "
                     "e.privacy_scope='private' AND e.redacted=0 AND "
                     "e.event_type IN "
                     "('message.received','message.media_received') AND "

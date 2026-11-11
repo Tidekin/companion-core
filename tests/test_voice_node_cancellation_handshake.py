@@ -109,6 +109,37 @@ def test_cancel_control_waits_for_exit_and_replays_after_ack_loss(node, claimed,
     run(scenario())
 
 
+def test_cancel_after_ready_within_native_startup_budget_keeps_zero_dispatch(node):
+    config, key, counter = node
+    remote = CancelCore(config, key, claimed=2)
+
+    class DelayedReady(FixtureSupervisor):
+        async def _read(self):
+            # Exercise real child startup beyond the old fixture's five-second
+            # allowance, within the unchanged native ten-second startup budget.
+            await asyncio.sleep(6)
+            return await super()._read()
+
+    def factory(workspace, temporary):
+        child = DelayedReady(workspace, temporary, counter=counter)
+        remote.children.append(child)
+        return child
+
+    async def scenario():
+        worker = VoiceNodeWorker(config, transport=httpx.MockTransport(remote),
+                                 supervisor_factory=factory)
+        assert await worker.run(once=True) == "DISCARDED"
+        assert remote.claimed == 2 and len(remote.children) == 1
+        assert len(remote.terminal_controls) == 1
+        assert remote.terminal_controls[0].resource_state == "READY"
+        assert child_receipts(counter) == [] and remote.result_bodies == []
+        with NodeState(config.state_directory) as state:
+            assert state.active_job() is None
+            assert state.resource()["state"] == "READY"
+
+    run(scenario())
+
+
 def test_cancel_control_continue_is_not_a_terminal_acknowledgment(node):
     config, key, counter = node
     remote = CancelCore(config, key, claimed=1)

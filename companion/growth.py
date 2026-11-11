@@ -63,7 +63,8 @@ class ExpressionLearning:
                          feedback_reset_at(s) or "")
             rows = s.rows(
                 'SELECT e.event_id FROM events AS e JOIN conversations AS c USING '
-                "(conversation_id) WHERE e.actor_id = 'owner' AND e.source = 'qq.onebot' AND "
+                "(conversation_id) WHERE e.actor_id = 'owner' AND e.source IN "
+                "('qq.onebot','native.chat') AND "
                 "e.event_type = 'message.received' AND e.privacy_scope = 'private' AND e.redacted "
                 "= 0 AND c.scope = 'private' AND c.owner_actor_id = 'owner' AND e.ingested_at > %s "
                 'AND e.ingested_at <= %s AND e.occurred_at <= %s ORDER BY e.occurred_at DESC NULLS '

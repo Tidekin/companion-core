@@ -104,7 +104,7 @@ INTERACTIONS = {
 }
 CHAT_SIGNALS = FEEDBACK | INTERACTIONS
 FILTER_RULES = (
-    "这是小肥鱼自身的暂时表达参考，不是主人的情绪、固定人格或真实情绪体验的证明。"
+    "这是你自身的暂时表达参考，不是主人的情绪、固定人格或真实情绪体验的证明。"
     "仅可轻微影响措辞、关注点和表达意愿；不必提心情或每轮表演感受，不指定回复。"
     "优先理解当前语境和主人明确偏好；严肃求助、危险、隐私及主人要求暂停时不用心情滤镜。"
     "不覆盖事实、理性判断、承诺、权限、预算或消息次数。"
@@ -228,12 +228,23 @@ class MoodService:
         except CoreError:
             return False
 
-    def _lineage(self, key, sources, source_check=None):
+    def _lineage(self, key, sources, source_check=None, memo=None):
+        # A memo is only passed inside one unchanged batch_sources read; callers
+        # receive a fresh list because signal assembly extends lineage in place.
+        if memo is not None and key in memo:
+            cached = memo[key]
+            return None if cached is None else list(cached)
+        rows = self._read_lineage(key, sources, source_check)
+        if memo is not None:
+            memo[key] = None if rows is None else tuple(rows)
+        return rows
+
+    def _read_lineage(self, key, sources, source_check):
         rows = list(sources._lineage(key))
         if not MemoryProjections._live_lineage(rows, sources):
             return None
         for row in rows:
-            if row["source"] == "qq.onebot" and not (
+            if row["source"] in {"qq.onebot", "native.chat"} and not (
                 source_check(row["event_id"])
                 if source_check is not None
                 else source_allowed(
@@ -247,12 +258,21 @@ class MoodService:
                 return None
         return rows
 
-    def _signals(self, at, allowed):
+    def _signals(self, at, allowed, only=None):
         s, cfg = self.store, self.settings
-        if owner_authority.required(s, cfg) and not s.in_transaction:
+        if not owner_authority.required(s, cfg):
+            return self._collect_signals(at, allowed, None, only)
+        if not s.in_transaction:
             # Reuse the native history reader's synchronous batch on one DB state.
             # This batch never spans an await or a later context revalidation.
-            return s.read_or_write(lambda: self._signals(at, allowed))
+            return s.read_or_write(lambda: self._signals(at, allowed, only))
+        return owner_input.batch_sources(
+            s, lambda unchanged: self._collect_signals(at, allowed, unchanged, only))
+
+    def _collect_signals(self, at, allowed, unchanged, only=None):
+        # `only` limits candidates to these event ids for proof revalidation. Each
+        # candidate still runs exactly the validation of a full collection.
+        s, cfg = self.store, self.settings
         sources = MemorySources(self.memory, self.clock())
         view = None
         if owner_authority.required(s, cfg):
@@ -264,14 +284,10 @@ class MoodService:
                 ),
             )
 
-        def frozen():
-            return s.in_read_snapshot
-
-        transactional, changes = frozen(), s.change_token()
         originals = {encode(view.authority.as_dict()): view} if view else {}
 
         def batched():
-            return view and transactional and frozen() and s.change_token() == changes
+            return view and unchanged is not None and unchanged()
 
         def permitted(purpose):
             if not batched():
@@ -293,6 +309,13 @@ class MoodService:
                 originals[key] = owner_authority.evidence(s, cfg, ref)
             return originals[key]
 
+        # Per-event results within this one unchanged batch read. batch_sources
+        # discards the whole collection when the native snapshot or own writes change.
+        checked, lineages = {}, {}
+
+        def memo():
+            return lineages if batched() else None
+
         def source_check(event_id):
             if not batched():
                 return source_allowed(s, cfg, self.clock, event_id, "expression")
@@ -304,6 +327,11 @@ class MoodService:
                 and datetime.fromisoformat(now) >= view.policy.expires_at
             ):
                 raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
+            if event_id not in checked:
+                checked[event_id] = checked_source(event_id, now)
+            return checked[event_id]
+
+        def checked_source(event_id, now):
             receipt = s.one(
                 "SELECT value FROM runtime_meta WHERE key = %s", (owner_input.INPUT + event_id,)
             )
@@ -323,11 +351,16 @@ class MoodService:
             return True
 
         cutoff = max(after(at, -WINDOW), reset_at(s) or after(at, -WINDOW))
+        ids = () if only is None else (list(only),)
+
+        def scoped(column):
+            return "" if only is None else f" AND {column} = ANY(%s::text[])"
+
         candidates = s.rows(
             (
                 (
                     "SELECT e.event_id,e.occurred_at AS at,'feedback' AS "
-                    "kind FROM events e WHERE e.source='qq.onebot' AND "
+                    "kind FROM events e WHERE e.source IN ('qq.onebot','native.chat') AND "
                     "e.actor_id='owner' AND e.redacted=0 AND "
                     "e.event_type='message.received' AND e.ingested_at>%s "
                     'AND e.ingested_at<=%s AND e.occurred_at>%s AND '
@@ -335,23 +368,26 @@ class MoodService:
                     'rtrim(trim((CASE WHEN e.body_json IS JSON THEN '
                     "(e.body_json::json#>>'{text}') END)),'。！! ') IN "
                     '(SELECT value FROM json_array_elements_text(%s::json) '
-                    'AS ids(value)) UNION ALL SELECT w.source_event_id,'
+                    'AS ids(value))' + scoped("e.event_id")
+                    + ' UNION ALL SELECT w.source_event_id,'
                     "w.updated_at,'watch' FROM watch_ledger w WHERE "
                     "w.state='JUDGED' AND w.rating<>0 AND "
                     "w.depth<>'title_only' AND w.updated_at>%s AND "
-                    'w.updated_at<=%s UNION ALL SELECT g.result_event_id,'
+                    'w.updated_at<=%s' + scoped("w.source_event_id")
+                    + ' UNION ALL SELECT g.result_event_id,'
                     "g.updated_at,'goal' FROM goals g WHERE g.state='DONE' "
                     'AND g.redacted=0 AND g.result_event_id IS NOT NULL AND '
-                    'g.updated_at>%s AND g.updated_at<=%s ORDER BY at DESC,'
-                    'event_id,kind LIMIT %s'
+                    'g.updated_at>%s AND g.updated_at<=%s' + scoped("g.result_event_id")
+                    + ' ORDER BY at DESC,event_id,kind LIMIT %s'
                 )
             ),
-            (cutoff, at, cutoff, at, encode(list(CHAT_SIGNALS)), cutoff, at, cutoff, at, LIMIT + 1),
+            (cutoff, at, cutoff, at, encode(list(CHAT_SIGNALS)), *ids, cutoff, at, *ids,
+             cutoff, at, *ids, LIMIT + 1),
         )
         signals, used = [], set()
         for candidate in candidates[:LIMIT]:
             key, kind = candidate["event_id"], candidate["kind"]
-            lineage = self._lineage(key, sources, source_check)
+            lineage = self._lineage(key, sources, source_check, memo())
             if not lineage:
                 continue
             event = next(row for row in lineage if row["event_id"] == key)
@@ -416,6 +452,7 @@ class MoodService:
                         reply["origin_event_id"],
                         sources,
                         source_check,
+                        memo(),
                     )
                 ):
                     continue
@@ -444,7 +481,7 @@ class MoodService:
                     preceding = s.one(
                         (
                             'SELECT event_id FROM events WHERE conversation_id = %s '
-                            "AND source = 'qq.onebot' AND actor_id = 'owner' AND "
+                            "AND source IN ('qq.onebot','native.chat') AND actor_id = 'owner' AND "
                             "event_type IN ('message.received', "
                             "'message.media_received') AND record_sequence < "
                             '(SELECT record_sequence AS rowid FROM events WHERE '
@@ -567,9 +604,11 @@ class MoodService:
                         )
                     ):
                         continue
-                    expanded = [self._lineage(root, sources, source_check) for root in roots]
+                    expanded = [
+                        self._lineage(root, sources, source_check, memo()) for root in roots
+                    ]
                     expanded += [
-                        self._lineage(step["outcome_event_id"], sources, source_check)
+                        self._lineage(step["outcome_event_id"], sources, source_check, memo())
                         for step in steps
                     ]
                     if any(not value for value in expanded):
@@ -604,7 +643,8 @@ class MoodService:
                 signals.append(signal)
                 used.add((category, identity))
         signals += self._appraisals(
-            at, allowed, cutoff, sources, {x["event_id"] for x in signals}, source_check
+            at, allowed, cutoff, sources, {x["event_id"] for x in signals}, source_check,
+            memo, only,
         )
         # The same observation's review and verified goal result form one bounded impulse.
         merged = {}
@@ -624,22 +664,26 @@ class MoodService:
                 prior["reason"], prior["kind"] = "REVIEWED_GOAL_COMPLETION", "experience"
             else:
                 merged[key] = item
+        ordered = sorted(
+            merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
+        )
+        published = ordered[-LIMIT:]
         if view:
+            if unchanged is None and s.in_write_transaction:
+                # Under sustained unrelated commits, batching conservatively falls
+                # back to independent source reads. Recheck published lineage after
+                # collection too: a source may have changed after its first read.
+                for key in sorted({key for item in published for key in item["source_event_ids"]}):
+                    if not self._lineage(key, sources):
+                        raise CoreError("PRIVACY_CHANGED", 409)
             # Independent journals, STOP and time remain live at the batch boundary.
             owner_authority.current(
                 s, cfg, self.clock, purpose="expression", authority=view.authority
             )
-            if transactional:
-                if not frozen() or s.change_token() != changes:
-                    raise CoreError("PRIVACY_CHANGED", 409)
-            elif not s.in_transaction or s.change_token()["writes"] != changes["writes"]:
-                raise CoreError("PRIVACY_CHANGED", 409)
-        ordered = sorted(
-            merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
-        )
-        return ordered[-LIMIT:], len(candidates) > LIMIT or len(ordered) > LIMIT
+        return published, len(candidates) > LIMIT or len(ordered) > LIMIT
 
-    def _appraisals(self, at, allowed, cutoff, sources, taken, source_check=None):
+    def _appraisals(self, at, allowed, cutoff, sources, taken, source_check=None,
+                    memo=lambda: None, only=None):
         """Model-judged owner wording; an exact-phrase signal on the same message wins.
 
         A row counts once it was recorded by `at`, but acts from when the owner said it:
@@ -654,14 +698,16 @@ class MoodService:
             "mood_appraisals.request_id AS request_id, mood_appraisals.created_at AS created_at, "
             "mood_appraisals.target_message_id AS target_message_id, mood_appraisals.target_sha256 "
             "AS target_sha256 FROM mood_appraisals AS mood_appraisals WHERE "
-            "mood_appraisals.created_at > %s AND mood_appraisals.created_at <= %s ORDER BY "
-            "mood_appraisals.created_at NULLS FIRST, mood_appraisals.event_id NULLS FIRST",
-            (cutoff, at),
+            "mood_appraisals.created_at > %s AND mood_appraisals.created_at <= %s"
+            + ("" if only is None else " AND mood_appraisals.event_id = ANY(%s::text[])")
+            + " ORDER BY mood_appraisals.created_at NULLS FIRST, "
+            "mood_appraisals.event_id NULLS FIRST",
+            (cutoff, at) if only is None else (cutoff, at, list(only)),
         ):
             key = row["event_id"]
             if key in taken or not mood_appraisals.still_valid(s, row):
                 continue
-            lineage = self._lineage(key, sources, source_check)
+            lineage = self._lineage(key, sources, source_check, memo())
             if not lineage:
                 continue
             event = next(item for item in lineage if item["event_id"] == key)
@@ -677,7 +723,7 @@ class MoodService:
                     (row["target_message_id"],),
                 )
                 if target["action_type"] == "qq.private.reply":
-                    prior = self._lineage(target["origin_event_id"], sources, source_check)
+                    prior = self._lineage(target["origin_event_id"], sources, source_check, memo())
                     if not prior:
                         continue
                     lineage = lineage + prior
@@ -698,7 +744,7 @@ class MoodService:
             )
         return mood_appraisals.capped(signals, self.settings.timezone)
 
-    def snapshot(self, *, at=None, allowed=None):
+    def snapshot(self, *, at=None, allowed=None, only=None):
         at = stamp(at or self.clock())
         if at > stamp(self.clock()):
             raise CoreError("MOOD_TIME_INVALID", 400)
@@ -708,7 +754,7 @@ class MoodService:
         )
         enabled = bool(self.settings.mood_enabled)
         active = enabled and not paused and self._permitted("expression")
-        signals, truncated = self._signals(at, allowed) if active else ([], False)
+        signals, truncated = self._signals(at, allowed, only) if active else ([], False)
         # Repeated evidence from the same real event cannot manufacture a lasting undertone.
         state = fold(signals, at)
         if truncated:
@@ -743,7 +789,16 @@ class MoodService:
         return result
 
     def revalidate(self, proof):
-        if self.snapshot(at=proof["evaluated_at"], allowed=proof["allowed"]) != proof:
+        """Recheck the evidence this proof used; never widen it.
+
+        Header state (enabled, pause, expression permission, reset, scope) and every
+        listed signal are rebuilt with the original validators and must be identical.
+        Only candidates named by the proof are read: older evidence that became usable
+        after the proof does not fail it. A truncated proof is rebuilt in full.
+        """
+        only = None if proof.get("truncated") else sorted(
+            {item["event_id"] for item in proof.get("signals", [])})
+        if self.snapshot(at=proof["evaluated_at"], allowed=proof["allowed"], only=only) != proof:
             raise CoreError("PRIVACY_CHANGED", 409)
 
     def reference(self, *, at=None, allowed=None, text=""):

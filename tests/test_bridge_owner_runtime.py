@@ -300,6 +300,25 @@ def test_any_spool_write_or_journal_append_forces_a_full_replay(config, monkeypa
         assert runtime.verify(active=False)[-1]["kind"] == "OWNER_STOPPED"
 
 
+def test_selected_history_is_caller_owned_and_does_not_filter_validation(config):
+    with Spool(config) as spool:
+        runtime = OwnerRuntime(spool)
+        selected = runtime.verify(record_kinds={"OWNER_BOUND"})
+        selected[0]["data"]["authority"]["revision"] = 999
+        assert runtime.verify()[0]["data"]["authority"] == runtime.authority
+        assert runtime.verify(record_kinds={"ACK"}) == []
+        # OWNER_STOPPED is outside the selected kinds; it must still fence callers.
+        runtime.stop()
+        with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+            runtime.verify(record_kinds={"ACK"})
+        assert runtime.verify(active=False, record_kinds={"OWNER_BOUND"})[0][
+            "data"]["authority"] == runtime.authority
+        with runtime.db:
+            runtime.db.execute("UPDATE owner_runtime SET journal_head=? WHERE id=1", ("f" * 64,))
+        with pytest.raises(ValueError, match="OWNER_JOURNAL_RECONCILIATION_REQUIRED"):
+            runtime.verify(active=False, record_kinds={"ACK"})
+
+
 @pytest.mark.parametrize("change", ["journal_tamper", "other_connection", "stop_marker"])
 def test_cached_proof_never_hides_out_of_band_changes(config, change):
     import sqlite3

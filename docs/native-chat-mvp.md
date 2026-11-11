@@ -1,0 +1,122 @@
+# 原生文本聊天最小版本
+
+状态：原生签名设备合同已由主人确认；当前切片采用 Flutter 实现 Android / Windows 共用的多 Bot 私聊客户端。Core 基线为 PostgreSQL 主线 a3e51241，新增结构修订 pg0003_native_chat。
+
+首期交付原生文本客户端：连接自己的 Core、登录设备、发送文字、沿用原有记忆与人格、读取持久回复和历史、断网后恢复。真机与后台能力、多端完善、流式和外部 Bot 兼容随后分项交付。Core 共同性能修复只做一轮关键改动，不以全面优化为客户端开发的前置条件。
+
+## 复用现有授权的原生输入合同
+
+当前 OwnerCapture 只识别签名的 QQ 输入，原生客户端需要有可核验的独立来源。本切片复用现有 Ed25519 输入证据、OwnerGrantPolicy、权限账本、累计准入和任务租约，增加一种来源及其设备公钥登记。原生消息明确记录为 `native.chat`。
+
+| 项目 | 已确认合同 |
+|---|---|
+| 主人身份 | 继续使用 Core 的内部 owner 主体；客户端不提交 QQ 号或选择其他主体 |
+| 设备登录 | 复用现有主人控制台会话、有效期、撤销、Origin 和 CSRF；首次连接输入主人凭据，客户端不保存该凭据 |
+| 设备证明 | 每设备 Ed25519 密钥；公钥通过现有主人授权预览与批准流程进入 OwnerGrantPolicy 的原生设备映射 |
+| 原生会话 | 同一 Core 主人的一个 `native:owner` 逻辑会话；保留平台独立来源与历史出处 |
+| 输入身份 | 稳定的设备与提交身份组成 source_event_id；event_id 继续使用确定性摘要，重试沿用原签名与原授权引用 |
+| 输入证据 | 复用原签名域和已定义字段，增加 `authenticated_native_device` 类型；签名绑定正文摘要、原授权、设备身份与时间 |
+| 准入 | 登记公钥只允许该设备提交输入；实际模型、记忆、工具权限仍由现有目的授权、预算和来源校验决定 |
+| 恢复与撤销 | 保留旧来源证据；恢复代际、撤销、遗忘和过期使旧执行权限失效；离线请求不自动改签到新授权 |
+
+设备登记会更新原主人授权版本，尚未完成的旧授权任务可能失效；界面需要在批准前明确这一影响。原有 QQ capture 和原生设备映射分别保留，登记原生设备不替换 QQ 密钥。新增字段的默认序列化保持现存授权记录的原始摘要可读。
+
+备选方案是仅凭登录会话写入原生消息。它可以减少客户端签名，但需要新增另一套可恢复的来源证明，并重新界定数据库外证据的保证。首期建议沿用已有签名证据模型。
+
+## 数据与执行
+
+平台和客户端使用稳定提交身份。Core 保存真实原生事件并创建一个现有 chat 任务；独立聊天 Worker 继续运行原记忆、人格、模型账务与恢复流程。
+
+原生回复以服务端持久化可读取为交付点，设备通过有界历史接口同步；首期不记录已读回执。QQ 传输不能领取原生回复。未确认模型结果继续保留 UNKNOWN；保存到自己的数据库不代表外部工具效果已经确认。
+
+最小读取接口支持有界历史分页、按原提交查询状态和最终回复、删除标记。客户端重连查询已有任务与历史，不为补齐界面重新生成。原生聊天与现有 QQ 聊天的历史合并作为显式后续迁移选择。
+
+## Flutter 双端客户端
+
+采用 Flutter 3.47.9 / Dart 3.13.7，Riverpod 管理连接与界面状态、Drift/SQLite 保存本地记录、Dio 调用 Core HTTPS、go_router 处理宽屏双栏和手机会话导航。`clients/chat` 与 Python 服务端分别构建、分发。模型适配器继续只负责模型调用。
+
+从第一版开始保存多个 Bot 连接。每个连接有自己的名称、后端类型、HTTPS 地址、设备签名密钥、缓存加密密钥、会话 Cookie、CSRF、授权引用、草稿、待发队列、已读位置和网络队列。相同远端消息 ID 以 Bot ID 作命名空间；一个 Bot 的连接等待不会阻塞另一个 Bot。
+
+当前一个 Core 实例对应一个 Bot，多个实例可以同时在线。每个实例内部仍为一个主人的 `native:owner` 私聊；这不表示单个 Core 已增加多个人格或群聊。`ChatBackend` 是客户端的连接接口，后续 AstrBot / DSH 接入在这个边界实现，服务端 transport 继续保持 HTTP v1 独立。
+
+设备种子和缓存密钥由 flutter_secure_storage 使用平台安全存储保护；聊天正文、草稿、原授权和待发包以 AES-GCM 加密后写入 SQLite，AAD 绑定 Bot 与记录身份。主人控制凭据、Cookie、CSRF 只在运行内存中，重启后重新登录。Android 禁用自动备份和明文网络。TLS 正常验证证书、拒绝跨站重定向。
+
+## 开发与界面调试 MCP
+
+直接复用官方 Dart/Flutter MCP，入口是 `scripts/flutter-mcp.ps1`；服务端提供分析、测试、设备发现、Widget 树、控件操作、运行错误与热重载。它属于开发工具，不是聊天 Bot 的工具执行权限，也不会改变 M0/M1 的外部能力限制。
+
+`lib/main_debug.dart` 是带 Flutter Driver 扩展的开发入口，只使用内存中的合成 Bot，界面有明确开发提示；正式 `lib/main.dart` 使用真实连接和平台安全存储，不导入该入口。正式构建保留 `lib/main.dart` 为目标。
+
+## 验收
+
+1. 未运行 QQ 协议端、Bridge 或 AstrBot 时，客户端通过真实 Core HTTP 和独立 Worker 完成文字回复。
+2. 同一提交重试只产生一份事件和任务；不同内容使用同一身份被拒。
+3. 未登记设备、错误签名、错误会话、失效授权和越权历史查询被拒。
+4. 原记忆和人格进入原生对话上下文，历史在重启、断网和客户端缓存恢复后保持一致。
+5. 原生回复不能进入 QQ 投递；旧 QQ 来源保持原类型。
+6. 遗忘、撤销、模型 UNKNOWN、Worker 崩溃与恢复仍遵守原有保证。
+
+原生来源及本轮流式展示合同已按 AGENTS.md 完成讨论并获得确认。通用后端绑定和外部 Bot 适配继续按独立切片交付。
+
+
+## 构建与运行
+
+服务端先升级到本分支并运行现有数据库迁移入口，再使用正常的独立聊天 Worker。配置 `console.enabled=true`、`console.public_origin` 为真实 HTTPS 根地址，经原反向代理开放 `/v1/console/`。全新安装可以仅登记 native_devices、capture 为 null，不需要 QQ 密钥；复用既有 Core 时保留原授权中的记忆和历史来源范围。
+
+Windows 工作区安装固定 SDK，并准备客户端：
+
+```powershell
+./scripts/install-flutter.ps1
+Set-Location clients/chat
+../../scripts/flutter.ps1 -Tool flutter -ToolArguments @('pub','get','--enforce-lockfile')
+../../scripts/prepare-flutter-links.ps1
+../../scripts/flutter.ps1 -Tool flutter -ToolArguments @('run','-d','windows')
+```
+
+打开后添加多个 Bot 的名称和 HTTPS 地址，分别登录主人凭据，预览并批准登记。首次登记会更新授权版本。若 Core 尚无允许 chat 的主人授权，需先用原主人授权 status / preview / revisions 流程批准该设备公钥与 chat 目的；后续撤销也走同一流程。设备密钥与 QQ capture 独立。
+
+保留历史 UNKNOWN 的既有生产实例，设备变更使用原有 STOP → 受控授权 preview/apply → Bridge/Worker 交接流程，并要求当前授权下工作已终态且没有 UNKNOWN；仅改变 `native_devices`，预算、原 UNKNOWN 与其他权限保持不变。部署时可先登记客户端公钥，再启动会话。普通登录不自动停止生产服务或重跑旧请求。空设备字段保持省略，原授权摘要及签名证据不变。
+
+正式 Windows 构建使用 `flutter build windows --release`；需分发整个 `build/windows/x64/runner/Release` 目录，不能只复制 exe。Android 使用同一源码 `flutter build apk --debug` 进行开发安装；公开发布前另行配置自己的 release 签名、升级与分发渠道。Android 最低 API 24。Android 构建还需 JDK 17、Android SDK 36，以及各插件要求的 NDK；下载和构建缓存放在工作区 `.local`。
+
+默认数据目录为系统应用支持目录；开发可用 `--dart-define=COMPANION_DATA_DIR=<工作区内目录>` 指定 SQLite 位置。`scripts/flutter.ps1` 将工具缓存限制在工作区；需要使用已有 Android/JDK 工具时按本机配置准备 `.local/android-sdk` 与 JAVA_HOME。含空格路径遇到原生 hook 的 SDK 兼容问题时，可以给同一工作区设置临时 `subst` 别名，并设 `COMPANION_FLUTTER_WORKSPACE` 为该别名，保持所有文件仍落在原工作区。目录联接辅助脚本用于当前 Windows 未启用开发者模式的环境，不修改系统设置。
+
+验证入口：`scripts/check-flutter.ps1` 执行锁文件、格式、分析与 Flutter 测试；`-WindowsBuild` / `-AndroidBuild` 增加构建；`-Wire` 用配置好的测试 PostgreSQL 运行真实 TLS + 独立 Worker 的跨语言验收，外部模型 HTTP 固定返回。该测试的临时证书与测试专用密钥仅保存在 `.local/test-temp`，不替代正式平台安全存储。
+
+调试界面可运行 `flutter run -d windows -t lib/main_debug.dart`，再让开发工具连接 `scripts/flutter-mcp.ps1`。先读取实时 Widget 树，再按实际控件操作。Windows 应用需要处于可绘制状态；MCP、SDK 和界面验收均只用于开发。
+
+## 当前能力与后续切片
+
+文本提交先在本机持久入队，沿用同一签名、同一请求 ID 和原授权重试。丢失接受响应只补查或重投同一请求；已接受任务不重新生成。旧授权请求被拒绝后明确显示原因，不自动改签。UNKNOWN 显示结果待核对，保留 Core 的不重复付费语义。
+
+登录及“同步全部历史”执行分页核对，日常同步最近页和未完成任务；界面显示最近 200 个输入轮次。本地已同步历史按 Bot 保存，远端删除标记在收到同步时清除正文。离线设备和未进入日常最近页的旧记录要在恢复连接并执行完整同步后完成核对。
+
+原生文本现已贯通供应商 SSE、原有 Agent/Worker、持久预览、Core HTTPS SSE 与 Flutter 界面。模型未结束即可显示正文，最终事务完成后由正式回复替换预览。每个 Bot 各自订阅；断开订阅不取消 Worker，重新登录恢复原任务。后台通知、多媒体、AstrBot / DSH 和群聊后续扩展。Android 后台常驻、真机兼容及公开发布验收单独进行。
+
+服务端需迁移到 `pg0004_native_stream`。反向代理应关闭 `/v1/console/chat/events` 的响应缓冲与缓存，并允许长连接；服务端发送约 10 秒心跳，客户端在 30 秒无数据时重连。订阅初始返回最近 100 轮快照，其后按变化推送；旧任务仍由原状态/历史接口补查。活跃预览每次读取都重新校验来源与租约，静止历史不会被每 250ms 全量重新投影。
+
+## 复用依据
+
+- [Flutter 官方 MCP](https://docs.flutter.dev/ai/get-started)、[工具说明](https://docs.flutter.dev/ai/tools)：复用 SDK 的 MCP 与 Widget/Driver 能力。
+- [Flutter SDK 归档](https://docs.flutter.dev/install/archive)：SDK 固定版本和官方 SHA-256；[Drift 平台支持](https://drift.simonbinder.eu/platforms/)：Android / Windows 的 NativeDatabase。
+- [Riverpod](https://pub.dev/packages/flutter_riverpod)、[Dio](https://pub.dev/packages/dio)、[flutter_secure_storage](https://pub.dev/packages/flutter_secure_storage)：版本固定在 pubspec.yaml / pubspec.lock，采用各平台现成实现。
+- DSH 本地 Cordis MCP bundle 研究复用了 stdio command / args / env / cwd 的现成边界，不新建自有界面 RPC 协议。
+- 设备签名、撤销、预算和 UNKNOWN 复用现有 owner capture / OwnerGrantPolicy / paid journal。Python 与 Dart 的共同签名字节已用独立测试向量核对。
+- [Pydantic AI Agent 事件](https://pydantic.dev/docs/ai/core-concepts/agent/)、[DeepSeek 流式协议](https://api-docs.deepseek.com/api/create-chat-completion/)、[HTTPX-SSE](https://github.com/florimondmanca/httpx-sse)、[Starlette StreamingResponse](https://starlette.dev/responses/)：保留原 Agent.run 工具循环、费用结算及 Hooks；新增锁定 `httpx-sse==0.4.3` 处理供应商 SSE 帧。DSH 本地 `dsh-llm-deepseek` 与 `dsh-llm-pi-ai` 实现用于核对文本/推理/工具事件边界，未接入或执行 DSH。
+
+
+## 本轮流式切片：已确认的展示合同
+
+范围仅 Core 与 Flutter 原生私聊；现有签名输入、owner 授权、chat Worker、最终 Outbox 和费用证据保持原职责。实际供应商 token 进入已锁定 Pydantic AI 的原生流式接口，保留原 Agent 工具循环和 Hooks。
+
+现有历史只返回已持久确认的最终文字。要在模型结束前展示内容，需要一个可恢复但尚未最终确认的预览；仅内存转发无法保证 Worker 重启后的恢复，直接提前标成 SENT 则破坏费用、来源和交付确认。建议在原生 SDK 会话旁保存有界正文快照，经普通 HTTPS SSE 推送；首块及时发布，后续按约100ms合并写入，不逐 token 写数据库。
+
+- 继续使用原输入轮次 event_id；历史、预览、最终回复在客户端同一轮次内更新。SSE 事件复用原生 turn JSON，增加可选 preview：单调 version、正文 text、生成/中断/撤回状态。最终回复仍使用原 Outbox 证据，替换该轮预览，不增加另一份相同答案。
+- SSE 建立时读取最新快照，重连补读已有任务与历史；不新增全局可靠游标或逐 token 重放协议，不为补字重新调用模型。
+- 对外仅投影 SDK 的普通文字；推理、原始工具参数、凭据和调试数据不发布。多次模型请求时，预览可以由下一次请求的回答替换；查询工具自身按原授权执行。
+- 每次持久发布复核原租约、权限与来源；读取/订阅再次复核。撤销、来源遗忘或租约失效停止增量并清除不可继续展示的预览。
+- 正常断网不取消 Worker；重新连接恢复同一轮。异常中断保留明确的未完成/结果待核对标记；从不把部分文字写成成功的记忆或日记。
+- 模型结束后继续原费用结算、来源复核与最终事务；只有这些步骤完成才展示为完成。UNKNOWN 继续沿用原不重复付费规则。
+- 每个 Bot 保留独立连接与状态。AstrBot、DSH 接入和群聊不在本轮。
+
+主人已明确确认上述预览、最终确认与恢复合同，本轮据此实现。

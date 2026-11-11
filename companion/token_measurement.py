@@ -146,6 +146,10 @@ def _exact_supported(config, provider, endpoint, payload):
     ):
         return "route_mismatch"
     fields = {"model", "messages", "max_tokens", "stream", "thinking"}
+    if payload.get("stream") is True:
+        fields.add("stream_options")
+        if payload.get("stream_options") != {"include_usage": True}:
+            return "request_mode_not_verified"
     if "temperature" in payload:
         fields.add("temperature")
     if payload.get("thinking") == {"type": "enabled"}:
@@ -160,7 +164,7 @@ def _exact_supported(config, provider, endpoint, payload):
         return "request_format_not_verified"
     if (payload["thinking"] not in ({"type": "disabled"}, {"type": "enabled"})
         or payload.get("reasoning_effort", "high") not in {"low", "high", "max"}
-        or payload["stream"] is not False):
+        or type(payload["stream"]) is not bool):
         return "request_mode_not_verified"
     if not payload["messages"] or not all(map(_text_message, payload["messages"])):
         return "message_format_not_verified"
@@ -169,7 +173,7 @@ def _exact_supported(config, provider, endpoint, payload):
     return None
 
 
-def measure_payload(settings, payload, scenario, *, tools=(), generation=None):
+def measure_payload(settings, payload, scenario, *, tools=(), generation=None, stream=False):
     """Measure the same complete generated payload used by admission and model transport.
 
     Provider-count is a distinct evidence kind; no remote backend is enabled here.
@@ -180,7 +184,7 @@ def measure_payload(settings, payload, scenario, *, tools=(), generation=None):
 
     messages = payload.get("messages")
     if not isinstance(messages, list) or payload != model_payload(
-        settings, messages, scenario, tools=tools, generation=generation):
+        settings, messages, scenario, tools=tools, generation=generation, stream=stream):
         raise CoreError("MODEL_TOKEN_PAYLOAD_INVALID", 503)
     approval = settings.paid_model
     provider, _, endpoint = model_route(settings, scenario)
@@ -242,8 +246,10 @@ def measure_payload(settings, payload, scenario, *, tools=(), generation=None):
                        reservation_margin=reserved - tokens, method=method, reason=reason)
 
 
-def measure_request(settings, messages, scenario="chat", *, tools=(), generation=None):
+def measure_request(settings, messages, scenario="chat", *, tools=(),
+                    generation=None, stream=False):
     from companion.model import model_payload
 
     return measure_payload(settings, model_payload(settings, messages, scenario, tools=tools,
-                           generation=generation), scenario, tools=tools, generation=generation)
+                           generation=generation, stream=stream), scenario, tools=tools,
+                               generation=generation, stream=stream)
