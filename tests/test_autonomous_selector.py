@@ -436,3 +436,45 @@ def test_maintenance_lanes_report_only_committed_work(core):
     (root / "orphan.tmp").write_bytes(b"orphan")
     assert progressed("media_cleanup")
     assert not progressed("media_cleanup")
+
+
+def test_idle_fast_lane_waits_its_idle_interval_and_keeps_pace_when_busy(monkeypatch):
+    from companion import autonomous_selector
+
+    clock, outcomes = [1000.0], [False, True]
+    monkeypatch.setattr(autonomous_selector, "monotonic", lambda: clock[0])
+
+    async def index():
+        return UnitResult(outcomes.pop(0))
+
+    selector = RoundRobin(
+        (Lane("memory_index", index, interval=1.0, idle_interval=60.0),), lambda: True)
+    run(selector.step())
+    # Nothing to warm: the next wake is a minute away, not one second.
+    assert selector.next_maintenance == clock[0] + 60.0
+    clock[0] += 60.0
+    selector.resume()
+    run(selector.step())
+    # Real progress keeps the fast cadence.
+    assert selector.next_maintenance == clock[0] + 1.0
+
+
+def test_scheduling_hint_reuses_one_authority_view_per_window(core, monkeypatch):
+    from companion import autonomous_selector, owner_authority
+
+    clock, calls = [1000.0], []
+    monkeypatch.setattr(autonomous_selector, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(owner_authority, "current",
+                        lambda *a, **k: calls.append(1) or "view")
+    hint = autonomous_selector.HintView(core, seconds=5.0)
+    assert [hint.get() for _ in range(20)] == ["view"] * 20
+    assert len(calls) == 1
+    clock[0] += 5.0
+    assert hint.get() == "view" and len(calls) == 2
+
+    def refused(*args, **kwargs):
+        raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
+
+    monkeypatch.setattr(owner_authority, "current", refused)
+    clock[0] += 5.0
+    assert hint.get() is None

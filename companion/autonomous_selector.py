@@ -29,6 +29,9 @@ class Lane:
     # Local bookkeeping with no model or network I/O; it keeps running while
     # foreground chat has precedence, as it did before the selector.
     maintenance: bool = False
+    # A periodic lane that found nothing waits this long instead of `interval`,
+    # so an idle fast lane cannot turn every wait into a one-second full sweep.
+    idle_interval: float | None = None
 
 
 @dataclass(frozen=True)
@@ -130,18 +133,42 @@ class RoundRobin:
             return Selection(lane.name, UnitResult(False), bool(self.remaining))
         lane.failures, lane.retry_at = 0, 0
         if lane.interval is not None:
-            lane.next_at = monotonic() + lane.interval
+            idle = not result.progressed and lane.idle_interval is not None
+            lane.next_at = monotonic() + (lane.idle_interval if idle else lane.interval)
         if result.progressed:
             self.resume()
         return Selection(lane.name, result, bool(self.remaining))
 
 
-def foreground_clear(core):
+# Scheduling hints reuse one checked authority view for this many seconds. Every
+# domain still runs its own authority, admission and dispatch checks.
+HINT_VIEW_SECONDS = 5.0
+
+
+class HintView:
+    """One owner authority view per short window, for scheduling decisions only."""
+
+    def __init__(self, core, seconds=HINT_VIEW_SECONDS):
+        self.core, self.seconds = core, seconds
+        self.view, self.until = None, 0.0
+
+    def get(self):
+        now = monotonic()
+        if now >= self.until:
+            try:
+                self.view = owner_authority.current(
+                    self.core.store, self.core.settings, self.core.clock)
+            except CoreError:
+                self.view = None
+            self.until = now + self.seconds
+        return self.view
+
+
+def foreground_clear(core, hint=None):
     if not owner_authority.required(core.store, core.settings):
         return not budget.chat_pending(core.store, core.clock())
-    try:
-        view = owner_authority.current(core.store, core.settings, core.clock)
-    except CoreError:
+    view = hint.get() if hint is not None else _view(core)
+    if view is None:
         return False
     # This is a scheduling hint over the native signed input receipt, not a new
     # permission or input queue. Final admission remains owned by the domain.
@@ -154,14 +181,18 @@ def foreground_clear(core):
     return not pending
 
 
-def _allowed(core, purposes):
+def _view(core):
+    try:
+        return owner_authority.current(core.store, core.settings, core.clock)
+    except CoreError:
+        return None
+
+
+def _allowed(core, purposes, hint=None):
     if not owner_authority.required(core.store, core.settings):
         return True
-    try:
-        view = owner_authority.current(core.store, core.settings, core.clock)
-    except CoreError:
-        return False
-    return set(purposes) <= set(view.policy.purposes)
+    view = hint.get() if hint is not None else _view(core)
+    return view is not None and set(purposes) <= set(view.policy.purposes)
 
 
 def native_selector(core, worker_id) -> RoundRobin:
@@ -185,13 +216,17 @@ def native_selector(core, worker_id) -> RoundRobin:
     ):
         raise CoreError("NATIVE_MEMORY_STEP_REQUIRED", 503)
 
-    def lane(name, operation, purposes=(), *, interval=None, maintenance=False):
+    hint = HintView(core)
+
+    def lane(name, operation, purposes=(), *, interval=None, maintenance=False,
+             idle_interval=None):
         async def run():
-            if not _allowed(core, purposes):
+            if not _allowed(core, purposes, hint):
                 return UnitResult(False)
             return await operation()
 
-        return Lane(name, run, interval=interval, maintenance=maintenance)
+        return Lane(name, run, interval=interval, maintenance=maintenance,
+                    idle_interval=idle_interval)
 
     def maintenance(name, operation, purposes=()):
         async def run():
@@ -402,9 +437,10 @@ def native_selector(core, worker_id) -> RoundRobin:
             lane("diary", diary, ("diary",)),
             lane("consolidation", consolidation, ("consolidation",)),
             lane("memory", memory, ("memory",)),
-            lane("memory_index", memory_index, ("memory",), interval=1.0),
+            lane("memory_index", memory_index, ("memory",), interval=1.0,
+                 idle_interval=MAINTENANCE_SECONDS),
             lane("rem", rem, ("rem", "memory")),
             lane("social", social, ("social",)),
         ),
-        lambda: foreground_clear(core),
+        lambda: foreground_clear(core, hint),
     )
