@@ -165,3 +165,96 @@ class BackendError implements Exception {
   @override
   String toString() => code;
 }
+
+/// The companion's own display profile as committed by Core. `revision` orders
+/// updates across devices; `displayName` is never an identity key.
+class CompanionProfile {
+  const CompanionProfile({
+    required this.companionId,
+    required this.revision,
+    required this.displayName,
+    required this.autoName,
+    required this.autoAvatar,
+    required this.settingsRevision,
+    required this.selfUpdateEnabled,
+    this.avatarAssetId,
+    this.viewerAlias,
+  });
+  final String? companionId;
+  final int revision;
+  final String displayName;
+  final String? avatarAssetId;
+  final bool autoName;
+  final bool autoAvatar;
+  final String? viewerAlias;
+  final int settingsRevision;
+  final bool selfUpdateEnabled;
+
+  /// What the owner sees in lists and headers: their own alias first.
+  String get shownName => viewerAlias ?? displayName;
+
+  bool isNewerThan(CompanionProfile? other) =>
+      other == null ||
+      revision > other.revision ||
+      revision == other.revision && settingsRevision > other.settingsRevision;
+
+  factory CompanionProfile.fromJson(Map<String, dynamic> value) =>
+      CompanionProfile(
+        companionId: value['companion_id'] as String?,
+        revision: value['revision'] as int,
+        displayName: value['display_name'] as String,
+        avatarAssetId: value['avatar_asset_id'] as String?,
+        autoName: value['auto_name'] as bool? ?? true,
+        autoAvatar: value['auto_avatar'] as bool? ?? true,
+        viewerAlias: value['viewer_alias'] as String?,
+        settingsRevision: value['settings_revision'] as int? ?? 0,
+        selfUpdateEnabled: value['self_update_enabled'] as bool? ?? false,
+      );
+}
+
+class ProfileChange {
+  const ProfileChange({
+    required this.changeId,
+    required this.newRevision,
+    required this.fields,
+    required this.newName,
+    required this.actorType,
+    required this.createdAt,
+    this.oldRevision,
+    this.oldName,
+    this.note,
+    this.restoredFromChangeId,
+  });
+  final String changeId;
+  final int? oldRevision;
+  final int newRevision;
+  final String fields;
+  final String? oldName;
+  final String newName;
+  final String actorType;
+  final String? note;
+  final String? restoredFromChangeId;
+  final DateTime createdAt;
+
+  bool get initial => fields == 'initial';
+
+  /// Real source labels; demonstrations never pose as the companion.
+  String get actorLabel => switch (actorType) {
+    'companion' => '伙伴更新',
+    'owner' => '你更新',
+    _ => '系统调整',
+  };
+
+  factory ProfileChange.fromJson(Map<String, dynamic> value) => ProfileChange(
+    changeId: value['change_id'] as String,
+    oldRevision: value['old_revision'] as int?,
+    newRevision: value['new_revision'] as int,
+    fields: value['fields'] as String,
+    oldName: value['old_name'] as String?,
+    newName: value['new_name'] as String,
+    actorType: value['actor_type'] as String,
+    note: value['note'] as String?,
+    restoredFromChangeId: value['restored_from_change_id'] as String?,
+    createdAt: DateTime.parse(value['created_at'] as String),
+  );
+}

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -31,6 +32,27 @@ abstract interface class ChatBackend {
   void stopWatching();
   Future<String> publicIdentity();
   void close();
+
+  /// Committed profile only; a failed or pending update never appears here.
+  Future<CompanionProfile> profile();
+  Future<List<ProfileChange>> profileChanges({int? before});
+  Future<CompanionProfile> updateProfileSettings({
+    required int expectedSettingsRevision,
+    bool? autoName,
+  });
+  Future<CompanionProfile> setProfileAlias({
+    required int expectedSettingsRevision,
+    String? alias,
+  });
+  Future<CompanionProfile> restoreProfile({
+    required String changeId,
+    required int expectedRevision,
+    required bool pauseName,
+    required String operationId,
+  });
+
+  /// Profile snapshots pushed by the event stream while it is connected.
+  Stream<CompanionProfile> get profileUpdates;
 }
 
 class CoreBackend implements ChatBackend {
@@ -54,6 +76,78 @@ class CoreBackend implements ChatBackend {
   String? _csrf;
   String? _cookie;
   CancelToken? _events;
+  final _profiles = StreamController<CompanionProfile>.broadcast();
+
+  @override
+  Stream<CompanionProfile> get profileUpdates => _profiles.stream;
+
+  @override
+  Future<CompanionProfile> profile() async => CompanionProfile.fromJson(
+    await _request('GET', '/v1/console/chat/profile'),
+  );
+
+  @override
+  Future<List<ProfileChange>> profileChanges({int? before}) async =>
+      ((await _request(
+                'GET',
+                '/v1/console/chat/profile/changes',
+                query: {'before': ?before},
+              ))['changes']
+              as List)
+          .map(
+            (item) =>
+                ProfileChange.fromJson(Map<String, dynamic>.from(item as Map)),
+          )
+          .toList();
+
+  @override
+  Future<CompanionProfile> updateProfileSettings({
+    required int expectedSettingsRevision,
+    bool? autoName,
+  }) async => CompanionProfile.fromJson(
+    await _request(
+      'PUT',
+      '/v1/console/chat/profile/settings',
+      body: {
+        'expected_settings_revision': expectedSettingsRevision,
+        'auto_name': ?autoName,
+      },
+    ),
+  );
+
+  @override
+  Future<CompanionProfile> setProfileAlias({
+    required int expectedSettingsRevision,
+    String? alias,
+  }) async => CompanionProfile.fromJson(
+    await _request(
+      'PUT',
+      '/v1/console/chat/profile/alias',
+      body: {
+        'expected_settings_revision': expectedSettingsRevision,
+        'alias': alias,
+      },
+    ),
+  );
+
+  @override
+  Future<CompanionProfile> restoreProfile({
+    required String changeId,
+    required int expectedRevision,
+    required bool pauseName,
+    required String operationId,
+  }) async => CompanionProfile.fromJson(
+    await _request(
+      'POST',
+      '/v1/console/chat/profile/restore',
+      body: {
+        'change_id': changeId,
+        'expected_revision': expectedRevision,
+        'pause_name': pauseName,
+        'operation_id': operationId,
+      },
+    ),
+  );
 
   Map<String, dynamic> get _headers => {
     'Origin': bot.endpoint.origin,
@@ -290,6 +384,9 @@ class CoreBackend implements ChatBackend {
               throw BackendError(value['error'] as String, status: 403);
             }
             if (event == 'turn') yield value;
+            if (event == 'profile') {
+              _profiles.add(CompanionProfile.fromJson(value));
+            }
           }
           event = '';
           data.clear();
@@ -322,6 +419,7 @@ class CoreBackend implements ChatBackend {
   @override
   void close() {
     stopWatching();
+    unawaited(_profiles.close());
     _cookie = _csrf = null;
     http.close(force: true);
   }

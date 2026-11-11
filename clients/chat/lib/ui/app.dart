@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../chat/models.dart';
 import '../chat/session.dart';
+import 'profile.dart';
 import 'providers.dart';
 import 'theme.dart';
 
@@ -464,6 +465,8 @@ class BotList extends ConsumerWidget {
                             ?.text ??
                         preview.text;
               final active = bot.id == selected;
+              final shown =
+                  ref.watch(profileProvider(bot)).value?.shownName ?? bot.name;
               final time = preview == null
                   ? null
                   : sentAt(preview.createdAt, short: true);
@@ -488,7 +491,7 @@ class BotList extends ConsumerWidget {
                       ),
                       child: Row(
                         children: [
-                          InitialAvatar(id: bot.id, name: bot.name),
+                          InitialAvatar(id: bot.id, name: shown),
                           const SizedBox(width: 11),
                           Expanded(
                             child: Column(
@@ -498,7 +501,7 @@ class BotList extends ConsumerWidget {
                                   children: [
                                     Expanded(
                                       child: Text(
-                                        bot.name,
+                                        shown,
                                         maxLines: 1,
                                         overflow: TextOverflow.ellipsis,
                                         style: const TextStyle(
@@ -666,6 +669,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
   String lastDraft = '';
   bool sending = false;
   bool initialized = false;
+  bool panelOpen = false;
   // Items present when the conversation first renders, or already shown, never
   // replay their entrance when rebuilt or scrolled back into view.
   Set<String>? shown;
@@ -880,7 +884,35 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
       for (final message in pending) 'pending_${message.requestId}',
     };
     final compact = widget.compact;
-    return Column(
+    final profile = ref.watch(profileProvider(widget.bot)).value;
+    final name = profile?.shownName ?? widget.bot.name;
+    // Bubble avatars follow the committed name; identity stays the Bot id.
+    final speaker = profile == null
+        ? widget.bot
+        : BotProfile(
+            id: widget.bot.id,
+            name: profile.displayName,
+            endpoint: widget.bot.endpoint,
+            backend: widget.bot.backend,
+          );
+    final changes =
+        (ref.watch(profileChangesProvider(widget.bot)).value ??
+                const <ProfileChange>[])
+            .where((change) => !change.initial)
+            .toList()
+          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    // Committed profile changes sit at their real time between turns.
+    final timeline = <Object>[];
+    var next = 0;
+    for (final turn in state.turns) {
+      while (next < changes.length &&
+          changes[next].createdAt.isBefore(turn.createdAt)) {
+        timeline.add(changes[next++]);
+      }
+      timeline.add(turn);
+    }
+    timeline.addAll(changes.skip(next));
+    final chat = Column(
       children: [
         Container(
           height: compact ? 68 : 86,
@@ -900,7 +932,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                 ),
               InitialAvatar(
                 id: widget.bot.id,
-                name: widget.bot.name,
+                name: profile?.displayName ?? widget.bot.name,
                 size: compact ? 38 : 44,
               ),
               const SizedBox(width: 10),
@@ -910,7 +942,7 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      widget.bot.name,
+                      name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -927,6 +959,23 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     ),
                   ],
                 ),
+              ),
+              IconButton(
+                key: ValueKey('profile_${widget.bot.id}'),
+                tooltip: '形象与称呼',
+                color: Warm.textSoft,
+                isSelected: panelOpen,
+                icon: const Icon(Icons.badge_outlined),
+                onPressed: () {
+                  if (compact) {
+                    showWarmSheet<void>(
+                      context,
+                      (context) => ProfilePanel(bot: widget.bot),
+                    );
+                  } else {
+                    setState(() => panelOpen = !panelOpen);
+                  }
+                },
               ),
               TextButton(
                 key: ValueKey('connect_${widget.bot.id}'),
@@ -948,18 +997,30 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                 compact ? 14 : 24,
                 18,
               ),
-              itemCount: state.turns.length + pending.length,
+              itemCount: timeline.length + pending.length,
               itemBuilder: (context, index) {
-                if (index < state.turns.length) {
-                  final turn = state.turns[index];
+                if (index < timeline.length) {
+                  final item = timeline[index];
+                  if (item is ProfileChange) {
+                    return Appear(
+                      key: ValueKey('change_${item.changeId}'),
+                      animate:
+                          DateTime.now().difference(item.createdAt).inSeconds <
+                          60,
+                      duration: const Duration(milliseconds: 160),
+                      offset: 6,
+                      child: ProfileEventRow(bot: widget.bot, change: item),
+                    );
+                  }
+                  final turn = item as ChatTurn;
                   return TurnView(
                     key: ValueKey('turn_${turn.id}'),
                     turn: turn,
-                    bot: widget.bot,
+                    bot: speaker,
                     animate: entering(turn.id),
                   );
                 }
-                final message = pending[index - state.turns.length];
+                final message = pending[index - timeline.length];
                 final failed = message.error != null;
                 return Appear(
                   key: ValueKey('pending_${message.requestId}'),
@@ -1076,6 +1137,28 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                     ),
                   ),
               ],
+            ),
+          ),
+        ),
+      ],
+    );
+    if (compact || !panelOpen) return chat;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(child: chat),
+        Appear(
+          duration: Motion.panel,
+          offset: 0,
+          child: Container(
+            width: 300,
+            decoration: const BoxDecoration(
+              color: Color(0x33FFFFFF),
+              border: Border(left: BorderSide(color: Warm.line)),
+            ),
+            child: ProfilePanel(
+              bot: widget.bot,
+              onClose: () => setState(() => panelOpen = false),
             ),
           ),
         ),
