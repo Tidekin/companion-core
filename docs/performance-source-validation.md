@@ -23,3 +23,19 @@ Bridge 的待回报结果路径保留完整验证，省去未使用的历史记�
 完整财务回放、较大日志冷启动、持续事务争用和 Bridge 整体恢复仍有后续优化空间。平台首段延迟的目标需要真实链路采样；本轮不将局部优化换算为生产聊天加速比例。
 
 PostgreSQL 的 [事务隔离](https://www.postgresql.org/docs/current/transaction-iso.html) 和 [快照信息](https://www.postgresql.org/docs/current/functions-info.html) 是批次新旧材料的依据；新批次仍按原来源与权限 validator 运行。
+
+## 2026-11-11 权限投影与 Mood 复验
+
+生产环境实测：一轮聊天里，worker 事件循环花 71 秒处理本轮。其中 `Core._check_context_snapshots` 占 47.8 秒，主要是 `MoodService.revalidate` 每次都完整重建 snapshot（约 2 秒，338 条 SQL）。`owner_authority.current()` 在 4 分钟采样里合计占 82.6 秒，每次调用都要聚合全部 167 条修订和约 347 KB 的 policy 文本。采样方式为 py-spy，采样期间 life-worker 已停。
+
+改动：
+
+- 授权读取只取 projection 字段和 head 指针的 SHA-256 摘要。同一份 journal 链、同一路径、同一摘要的组合，第一次在同一语句里读完整 projection，要求摘要一致后运行原 `_validate_projection`；之后的调用只复核 journal 路径别名。当前状态、过期、目的、journal 字节和生命周期比较每次仍然检查。任何 custody 失败都会清空缓存。复用的是"相同输入的校验结论"，不是已批准的权限。
+- 授权链和 live lifecycle 在已有的 `_material` 索引里，每份 journal 字节只 fold 一次。每次检查拿 marshal 拷贝。链无效时记为空，admission 检查不受影响。
+- Mood 在一次未变化的 `batch_sources` 读取内，按事件复用 lineage 和来源校验结果。快照或自身写入变化时，batch_sources 仍丢弃整批结果；批外不复用。
+
+生产数据只读对照（新旧代码在同一事务快照里运行）：view、evidence 和 mood snapshot 完全一致，旧 proof 用新代码复验通过。`current()` 中位数从 58 ms 降到 28 ms，`evidence()` 从 44 ms 降到 23 ms，mood snapshot 从约 1.9 s 降到约 1.0 s。未做真实聊天端到端复测，不换算成整轮加速比例。
+
+Mood 复验改为按 proof 范围执行（主人已确认语义变化，设计见 [单轮聊天延迟重构](plans/2026-11-11-turn-latency-refactor.md)）：只读取 proof 列出的候选，并用原 validator 重建、要求完全一致；truncated 的 proof 仍完整重建。生产数据只读对照：复验从 2095 ms 降到 709 ms，篡改 fingerprint、delta、paused 或加入外来 signal 都返回 `PRIVACY_CHANGED`。
+
+后续：每轮仍有约 15 次上下文复验，每次的剩余成本主要在来源校验和历史授权 evidence 的逐条查询。`Core.run_once` 是串行的，后台单元不会在一轮聊天中途插入，只影响下一条消息的领取时间。撤销日志式复验（B2）暂不实施。

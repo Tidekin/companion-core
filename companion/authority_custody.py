@@ -6,6 +6,8 @@ Financial append/settlement and operator reconciliation retain the full validato
 
 import json
 import marshal
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -23,7 +25,22 @@ class _Material:
     lifecycle: tuple
     reservations: MappingProxyType
     invalid_reservation: bool
+    # marshal of (authority records, live lifecycle, managed), folded once per
+    # verified journal; None when the chain itself is invalid.
+    chain: bytes | None
     size: int
+
+
+def _fold_chain(authority, lifecycle):
+    """Fold the indexed authority and lifecycle records with the original validators."""
+    folded, live, seen, managed = [], None, set(), False
+    for payload, digest in authority:
+        owner_authority.fold(folded, marshal.loads(payload), digest)
+    for payload, digest in lifecycle:
+        record = marshal.loads(payload)
+        live = paid_budget._live_record(record, digest, live, seen)
+        managed |= record["kind"] != "window_stop"
+    return folded, live, managed
 
 
 @lru_cache(maxsize=1)
@@ -63,8 +80,14 @@ def _material(raw):
                                      ("contract_sha256", "measurement") if key in record})
             reservations[request_id] = (count + 1, payload)
             size += len(request_id) + len(payload) + 16
+    try:
+        chain = marshal.dumps(_fold_chain(authority, lifecycle))
+        size += len(chain)
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        # Admission checks do not depend on this chain; authority checks refuse it.
+        chain = None
     return _Material(journal_id, tuple(authority), tuple(lifecycle),
-                     MappingProxyType(reservations), invalid_reservation, size)
+                     MappingProxyType(reservations), invalid_reservation, chain, size)
 
 
 def _read_material(raw):
@@ -110,6 +133,40 @@ def check_admissions(store, view, admissions):
         raise CoreError("OWNER_DELIVERY_MODEL_EVIDENCE_CHANGED", 403) from error
 
 
+# (folded journal chain, journal path, projection digest) -> projection journal
+# paths. A hit means the same journal bytes were already validated against a
+# byte-identical DB projection; it is not a permission. Current state, expiry,
+# purpose and file aliases are still checked on every call.
+_projections = OrderedDict()
+_projections_lock = threading.Lock()
+_PROJECTION_ENTRIES = 4
+
+
+def _check_projection(store, material, authority, journal_id, path, digest):
+    if not isinstance(digest, str) or len(digest) != 64:
+        raise ValueError("authority projection digest")
+    key = (material.chain, str(path), digest)
+    with _projections_lock:
+        saved_paths = _projections.get(key)
+        if saved_paths is not None:
+            _projections.move_to_end(key)
+    if saved_paths is None:
+        row = store.one(owner_authority.CUSTODY_PROJECTION_SQL, (owner_authority.CURRENT,))
+        if row is None or row["digest"] != digest:
+            raise ValueError("authority projection changed during check")
+        owner_authority._validate_projection(authority, journal_id, path, row["projection"])
+        saved_paths = frozenset(item["journal_path"] for item in row["projection"])
+        with _projections_lock:
+            _projections[key] = saved_paths
+            while len(_projections) > _PROJECTION_ENTRIES:
+                _projections.popitem(last=False)
+        return
+    # Same rule as _validate_projection: every saved path still names this journal.
+    current = path.resolve()
+    if any(Path(value).resolve() != current for value in saved_paths):
+        raise ValueError("authority projection mismatch")
+
+
 def check(store, revision, *, historical=False):
     if not store.in_transaction:
         raise RuntimeError("AUTHORITY_CUSTODY_REQUIRES_TRANSACTION")
@@ -118,21 +175,17 @@ def check(store, revision, *, historical=False):
     try:
         raw = path.read_bytes()
         material = _read_material(raw)
-        authority, lifecycle, seen = [], None, set()
-        managed = False
         journal_id = material.journal_id
-        for payload, digest in material.authority:
-            owner_authority.fold(authority, marshal.loads(payload), digest)
-        for payload, digest in material.lifecycle:
-            record = marshal.loads(payload)
-            lifecycle = paid_budget._live_record(record, digest, lifecycle, seen)
-            managed |= record["kind"] != "window_stop"
+        if material.chain is None:
+            raise ValueError("authority or lifecycle chain")
+        # A fresh copy per check: no caller shares or mutates the folded records.
+        authority, lifecycle, managed = marshal.loads(material.chain)
         if journal_id is None:
             raise ValueError("journal header required")
-        projection = revision["custody_projection"]
         if revision["custody_journal_id"] != journal_id:
             raise ValueError("journal identity")
-        owner_authority._validate_projection(authority, journal_id, path, projection)
+        _check_projection(store, material, authority, journal_id, path,
+                          revision["custody_digest"])
         stored = revision["custody_lifecycle"]
         if (managed or stored is not None) and (
             (json.loads(stored) if stored is not None else None) != lifecycle
@@ -148,5 +201,7 @@ def check(store, revision, *, historical=False):
             raise ValueError("journal changed during authority check")
     except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
         _material.cache_clear()
+        with _projections_lock:
+            _projections.clear()
         paid_budget._clear_codec()
         raise CoreError("OWNER_AUTHORITY_CUSTODY_REQUIRED", 503) from error
