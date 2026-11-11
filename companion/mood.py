@@ -228,7 +228,18 @@ class MoodService:
         except CoreError:
             return False
 
-    def _lineage(self, key, sources, source_check=None):
+    def _lineage(self, key, sources, source_check=None, memo=None):
+        # A memo is only passed inside one unchanged batch_sources read; callers
+        # receive a fresh list because signal assembly extends lineage in place.
+        if memo is not None and key in memo:
+            cached = memo[key]
+            return None if cached is None else list(cached)
+        rows = self._read_lineage(key, sources, source_check)
+        if memo is not None:
+            memo[key] = None if rows is None else tuple(rows)
+        return rows
+
+    def _read_lineage(self, key, sources, source_check):
         rows = list(sources._lineage(key))
         if not MemoryProjections._live_lineage(rows, sources):
             return None
@@ -296,6 +307,13 @@ class MoodService:
                 originals[key] = owner_authority.evidence(s, cfg, ref)
             return originals[key]
 
+        # Per-event results within this one unchanged batch read. batch_sources
+        # discards the whole collection when the native snapshot or own writes change.
+        checked, lineages = {}, {}
+
+        def memo():
+            return lineages if batched() else None
+
         def source_check(event_id):
             if not batched():
                 return source_allowed(s, cfg, self.clock, event_id, "expression")
@@ -307,6 +325,11 @@ class MoodService:
                 and datetime.fromisoformat(now) >= view.policy.expires_at
             ):
                 raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
+            if event_id not in checked:
+                checked[event_id] = checked_source(event_id, now)
+            return checked[event_id]
+
+        def checked_source(event_id, now):
             receipt = s.one(
                 "SELECT value FROM runtime_meta WHERE key = %s", (owner_input.INPUT + event_id,)
             )
@@ -354,7 +377,7 @@ class MoodService:
         signals, used = [], set()
         for candidate in candidates[:LIMIT]:
             key, kind = candidate["event_id"], candidate["kind"]
-            lineage = self._lineage(key, sources, source_check)
+            lineage = self._lineage(key, sources, source_check, memo())
             if not lineage:
                 continue
             event = next(row for row in lineage if row["event_id"] == key)
@@ -419,6 +442,7 @@ class MoodService:
                         reply["origin_event_id"],
                         sources,
                         source_check,
+                        memo(),
                     )
                 ):
                     continue
@@ -570,9 +594,11 @@ class MoodService:
                         )
                     ):
                         continue
-                    expanded = [self._lineage(root, sources, source_check) for root in roots]
+                    expanded = [
+                        self._lineage(root, sources, source_check, memo()) for root in roots
+                    ]
                     expanded += [
-                        self._lineage(step["outcome_event_id"], sources, source_check)
+                        self._lineage(step["outcome_event_id"], sources, source_check, memo())
                         for step in steps
                     ]
                     if any(not value for value in expanded):
@@ -607,7 +633,8 @@ class MoodService:
                 signals.append(signal)
                 used.add((category, identity))
         signals += self._appraisals(
-            at, allowed, cutoff, sources, {x["event_id"] for x in signals}, source_check
+            at, allowed, cutoff, sources, {x["event_id"] for x in signals}, source_check,
+            memo,
         )
         # The same observation's review and verified goal result form one bounded impulse.
         merged = {}
@@ -645,7 +672,8 @@ class MoodService:
             )
         return published, len(candidates) > LIMIT or len(ordered) > LIMIT
 
-    def _appraisals(self, at, allowed, cutoff, sources, taken, source_check=None):
+    def _appraisals(self, at, allowed, cutoff, sources, taken, source_check=None,
+                    memo=lambda: None):
         """Model-judged owner wording; an exact-phrase signal on the same message wins.
 
         A row counts once it was recorded by `at`, but acts from when the owner said it:
@@ -667,7 +695,7 @@ class MoodService:
             key = row["event_id"]
             if key in taken or not mood_appraisals.still_valid(s, row):
                 continue
-            lineage = self._lineage(key, sources, source_check)
+            lineage = self._lineage(key, sources, source_check, memo())
             if not lineage:
                 continue
             event = next(item for item in lineage if item["event_id"] == key)
@@ -683,7 +711,7 @@ class MoodService:
                     (row["target_message_id"],),
                 )
                 if target["action_type"] == "qq.private.reply":
-                    prior = self._lineage(target["origin_event_id"], sources, source_check)
+                    prior = self._lineage(target["origin_event_id"], sources, source_check, memo())
                     if not prior:
                         continue
                     lineage = lineage + prior

@@ -23,7 +23,22 @@ class _Material:
     lifecycle: tuple
     reservations: MappingProxyType
     invalid_reservation: bool
+    # marshal of (authority records, live lifecycle, managed), folded once per
+    # verified journal; None when the chain itself is invalid.
+    chain: bytes | None
     size: int
+
+
+def _fold_chain(authority, lifecycle):
+    """Fold the indexed authority and lifecycle records with the original validators."""
+    folded, live, seen, managed = [], None, set(), False
+    for payload, digest in authority:
+        owner_authority.fold(folded, marshal.loads(payload), digest)
+    for payload, digest in lifecycle:
+        record = marshal.loads(payload)
+        live = paid_budget._live_record(record, digest, live, seen)
+        managed |= record["kind"] != "window_stop"
+    return folded, live, managed
 
 
 @lru_cache(maxsize=1)
@@ -63,8 +78,14 @@ def _material(raw):
                                      ("contract_sha256", "measurement") if key in record})
             reservations[request_id] = (count + 1, payload)
             size += len(request_id) + len(payload) + 16
+    try:
+        chain = marshal.dumps(_fold_chain(authority, lifecycle))
+        size += len(chain)
+    except (ValueError, TypeError, KeyError, UnicodeError):
+        # Admission checks do not depend on this chain; authority checks refuse it.
+        chain = None
     return _Material(journal_id, tuple(authority), tuple(lifecycle),
-                     MappingProxyType(reservations), invalid_reservation, size)
+                     MappingProxyType(reservations), invalid_reservation, chain, size)
 
 
 def _read_material(raw):
@@ -118,15 +139,11 @@ def check(store, revision, *, historical=False):
     try:
         raw = path.read_bytes()
         material = _read_material(raw)
-        authority, lifecycle, seen = [], None, set()
-        managed = False
         journal_id = material.journal_id
-        for payload, digest in material.authority:
-            owner_authority.fold(authority, marshal.loads(payload), digest)
-        for payload, digest in material.lifecycle:
-            record = marshal.loads(payload)
-            lifecycle = paid_budget._live_record(record, digest, lifecycle, seen)
-            managed |= record["kind"] != "window_stop"
+        if material.chain is None:
+            raise ValueError("authority or lifecycle chain")
+        # A fresh copy per check: no caller shares or mutates the folded records.
+        authority, lifecycle, managed = marshal.loads(material.chain)
         if journal_id is None:
             raise ValueError("journal header required")
         projection = revision["custody_projection"]
