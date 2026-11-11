@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from tests.test_memory_campaign_integrity import campaign as campaign
+from tests.support.memory_campaign import campaign as campaign
 
 
 @pytest.fixture
