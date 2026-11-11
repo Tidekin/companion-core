@@ -207,6 +207,6 @@ def test_valid_appraisal_survives_exhausted_unrelated_fact_reviews(core):
     chat = ingest(core, 3, "聊聊电影吧")
     assert run(core.run_once(job_id=chat["job_id"]))
     messages, kind = core.model.calls[-1]
-    assert kind == "chat" and any("小肥鱼的心情参考" in m["content"] for m in messages)
+    assert kind == "chat" and any("你的心情参考" in m["content"] for m in messages)
     assert core.store.one('SELECT 1 FROM job_sources WHERE job_id=%s AND event_id=%s',
                           (chat["job_id"], key))

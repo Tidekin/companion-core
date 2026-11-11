@@ -13,7 +13,7 @@ Purpose = Literal[
     "chat", "history", "memory", "diary", "affect", "consolidation", "reflection", "goals",
     "wake", "exploration", "social", "expression", "proactive", "content", "image", "file",
     "meme", "poke", "voice", "account_actions", "bili_video", "life", "evaluation", "rem",
-    "qzone_publication",
+    "qzone_publication", "profile",
 ]
 CapabilityPolicy = Literal[
     "image", "file", "meme", "poke", "voice", "account_actions", "bili_video", "rem",

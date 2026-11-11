@@ -63,6 +63,11 @@ async def reply(core, job, snapshots):
         if (not text_only and "expression" in view.policy.purposes
                 and image_generation.available(core, job)):
             tools.append(image_generation.toolset(core, job, snapshots))
+        from companion import profile_tools
+
+        # Native and QQ chats share one companion identity and display profile.
+        if profile_tools.available(core, view):
+            tools.append(profile_tools.toolset(core, job, snapshots))
     with phase("context_build", job["trace_id"]):
         memories = []
         query = json.loads(job["body_json"]).get("text", "").strip()
