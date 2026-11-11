@@ -108,7 +108,7 @@ def test_guard_read_keeps_individual_proof_allowances_when_the_union_is_too_larg
 ):
     from companion import retrieval_work
     from tests.conftest import ingest
-    from tests.test_memory_proof_batches import facts
+    from tests.support.memory_proof_facts import facts
 
     facts(core, count=9, chars=40)
     proofs = [core.memory_context.pin(core.clock(), event_ids={

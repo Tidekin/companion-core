@@ -101,11 +101,10 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             core.clock.advance(1)
             event = await entry.admit(6, "继续说说天文光谱，你当时的判断是什么？")
             messages = await worker("selected")
-            # Source guidance must survive final SDK fitting and worker/config rebuilds,
-            # after the capability block that otherwise separates it from the question.
+            # Transcript/date source guidance is added only for turns carrying such
+            # material; this ordinary recall turn keeps the base prompt size.
             assert messages[0]["role"] == "system"
-            assert messages[0]["content"].endswith(SOURCE_RULES)
-            assert messages[0]["content"].count(SOURCE_RULES) == 1
+            assert SOURCE_RULES not in messages[0]["content"]
             prompt = "\n".join(m["content"] for m in messages)
             # Exclude the raw original owner utterance: reference copies occur once.
             refs = [m for m in messages if m["role"] == "user" and any(
@@ -130,3 +129,12 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == len(calls)
 
     run(scenario())
+
+
+def test_source_rules_follow_only_transcript_or_dated_source_material():
+    from companion.model import needs_source_rules
+
+    assert not needs_source_rules('{"role":"user","content":"天文光谱"}')
+    for marker in ('"transcripts"', '"attachments_read"', '"prior_assistant_interpretation"',
+                   '"source_message_on"'):
+        assert needs_source_rules('{"x":1,' + marker + ':[]}')
