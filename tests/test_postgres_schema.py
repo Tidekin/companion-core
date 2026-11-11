@@ -37,7 +37,10 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
         target = [row["table_name"] for row in session.rows(
             "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() "
             "AND table_type='BASE TABLE' AND table_name!='alembic_version' ORDER BY table_name")]
-        assert target == source
+        from companion.legacy_import import NATIVE_ONLY_TABLES
+
+        assert set(NATIVE_ONLY_TABLES) <= set(target)
+        assert [name for name in target if name not in NATIVE_ONLY_TABLES] == source
         column_types = {}
         for row in session.rows(
             "SELECT table_name,column_name,data_type FROM information_schema.columns "
@@ -66,7 +69,7 @@ def test_baseline_preserves_canonical_business_columns_and_foreign_keys(native, 
             "WHERE constraint_schema=current_schema() AND constraint_type='FOREIGN KEY'"
         )["n"] == foreign_keys
         assert session.one("SELECT version_num FROM alembic_version") == {
-            "version_num": "pg0004_native_stream"}
+            "version_num": "pg0005_companion_profile"}
 
 
 def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_index():
@@ -92,7 +95,7 @@ def test_fresh_baseline_and_existing_database_have_the_ordered_relationship_inde
         with psycopg.connect(info.get_secret_value()) as db:
             assert directions(db) == expected
             assert db.execute("SELECT version_num FROM alembic_version").fetchone() == (
-                "pg0004_native_stream",)
+                "pg0005_companion_profile",)
 
 
 def audit(session, document):

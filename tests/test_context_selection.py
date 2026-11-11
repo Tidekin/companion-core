@@ -125,13 +125,13 @@ def test_core_drops_mood_before_evidence_and_preserves_current_conversation(core
     sent_history(core, 21, "天文资料里那张图有问题", "对，标注与光谱不符")
     job = current_job(core, text="天文资料再说说？")
     full = core.context(job, memories=[])
-    assert "小肥鱼的心情参考" in encode(full)
+    assert "你的心情参考" in encode(full)
     assert "天文资料错误很多" in encode(full)
     relevant = [m for m in full if "天文资料错误很多" in m["content"]]
     core.settings.context_soft_tokens = measure_request(
         core.settings, [full[0], *relevant, *full[-3:]]).reserved_input_tokens
     messages = core.context(job, memories=[])
-    assert "小肥鱼的心情参考" not in encode(messages)
+    assert "你的心情参考" not in encode(messages)
     assert "天文资料错误很多" in encode(messages)
     assert "对，标注与光谱不符" in encode(messages)
     assert "旧的烘焙话题" not in encode(messages)

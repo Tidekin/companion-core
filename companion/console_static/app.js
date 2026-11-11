@@ -2756,9 +2756,9 @@ const MOOD_REASONS = { HELPFUL_FEEDBACK: "明确的正向互动反馈", THANKS_F
   OWNER_PLAYFUL: "主人在逗你玩（模型判断）" };
 const padText = value => ["pleasure", "arousal", "dominance"].map(k => Number(value?.[k] || 0).toFixed(3)).join(" / ");
 function moodSheet(m) {
-  if (!m || m.error) return sheet("小肥鱼的心情", failNote("心情", m?.error));
+  if (!m || m.error) return sheet("伙伴的心情", failNote("心情", m?.error));
   const signals = m.signals || [];
-  return sheet("小肥鱼的心情", [
+  return sheet("伙伴的心情", [
     el("p", { class: "note mb" }, !m.enabled ? "动态心情未开启，可在配置页开启。" : m.paused ? "心情滤镜已暂停。恢复后根据仍有效的来源重新计算。" : !m.active ? "当前授权不允许使用心情滤镜。" : "表达参考会自然衰减；数值不代表真实情绪体验或固定人格。"),
     el("p", { class: "note mb" }, "以下依次为愉悦度 / 唤醒度 / 支配感；0 表示没有方向性参考，也可能缺少依据。"),
     kv("即时心情 · 半衰期 3 小时", padText(m.immediate)),

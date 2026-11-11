@@ -78,6 +78,7 @@ LABELS = {
     "quote_policy": "回复时引用原消息", "style_live": "聊天时参考已批准的表达",
     "style_distill": "从评论提炼表达候选",
     "jargon": "学习主人的黑话", "meme_wiki": "梗百科（查梗与接梗）",
+    "profile": "伙伴自行更新名字",
     "watch_ledger": "观看记录与看法",
     "rem": "夜间 REM 记录", "life_loop": "生活话题循环",
     "evaluation_enabled": "对话评测实验", "owner_runtime": "主人授权运行模式",
@@ -129,7 +130,7 @@ LABELS = {
     "qzone_reading_enabled": "授权读取 QQ 空间正文",
     "observation_enabled": "来源观察", "voice_enabled": "语音输入",
     "camera_enabled": "摄像头观察", "android_enabled": "Android 观察",
-    "mood_enabled": "小肥鱼的动态心情",
+    "mood_enabled": "伙伴的动态心情",
     "affect_enabled": "互动状态调整", "affect_decay_minutes": "互动状态有效期（分钟）",
     "affect_max_evidence": "互动状态证据上限",
     "consolidation_enabled": "记忆整理", "consolidation_local_hour": "记忆整理时刻（小时）",
@@ -360,7 +361,7 @@ GROUPS = {"chat_thinking": "model", "chat_thinking_tokens": "model",
           "input_debounce": "expression", "turn_taking": "expression",
           "quote_policy": "expression",
           "style_live": "expression", "style_distill": "expression", "jargon": "memory",
-          "meme_wiki": "expression", "image_generation": "expression",
+          "meme_wiki": "expression", "image_generation": "expression", "profile": "expression",
           "watch_ledger": "content", "rem": "autonomy", "life_loop": "autonomy"}
 
 
