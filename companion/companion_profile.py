@@ -133,53 +133,73 @@ def _change(store, change_id):
     return dict(row) if row else None
 
 
-def _commit(store, profile, now, *, name, actor, note=None, idempotency_key=None,
-            job_id=None, tool_call_id=None, operation_id=None, restored_from=None):
+_KEEP = object()
+
+
+def _commit(store, profile, now, *, actor, name=None, avatar=_KEEP, note=None,
+            idempotency_key=None, job_id=None, tool_call_id=None, operation_id=None,
+            restored_from=None):
+    """One revision for one atomic change of the name, the avatar or both."""
     change_id, revision = uid("pchg"), profile["revision"] + 1
+    name = profile["display_name"] if name is None else name
+    avatar = profile["avatar_asset_id"] if avatar is _KEEP else avatar
+    fields = {(True, False): "name", (False, True): "avatar", (True, True): "both"}[
+        (name != profile["display_name"], avatar != profile["avatar_asset_id"])]
     store.execute(
         "INSERT INTO companion_profile_changes (change_id,old_revision,new_revision,fields,"
         "old_name,new_name,old_avatar_asset_id,new_avatar_asset_id,actor_type,origin_job_id,"
         "origin_tool_call_id,origin_operation_id,idempotency_key,note,restored_from_change_id,"
-        "created_at) VALUES (%s,%s,%s,'name',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        (change_id, profile["revision"], revision, profile["display_name"], name,
-         profile["avatar_asset_id"], profile["avatar_asset_id"], actor, job_id, tool_call_id,
+        "created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (change_id, profile["revision"], revision, fields, profile["display_name"], name,
+         profile["avatar_asset_id"], avatar, actor, job_id, tool_call_id,
          operation_id, idempotency_key, note, restored_from, now))
-    store.execute("UPDATE companion_profile SET revision=%s, display_name=%s, updated_at=%s "
-                  "WHERE singleton='self' AND revision=%s",
-                  (revision, name, now, profile["revision"]))
-    return change_id, {**profile, "revision": revision, "display_name": name, "updated_at": now}
+    store.execute("UPDATE companion_profile SET revision=%s, display_name=%s, "
+                  "avatar_asset_id=%s, updated_at=%s WHERE singleton='self' AND revision=%s",
+                  (revision, name, avatar, now, profile["revision"]))
+    return change_id, {**profile, "revision": revision, "display_name": name,
+                       "avatar_asset_id": avatar, "updated_at": now}
+
+
+def _public(profile):
+    return {key: profile[key] for key in ("revision", "display_name", "avatar_asset_id")}
 
 
 def _confirmed(change_id, profile):
     return {"status": "confirmed", "change_id": change_id, "new_revision": profile["revision"],
-            "profile": {key: profile[key] for key in ("revision", "display_name")}}
+            "profile": _public(profile)}
 
 
-def _retry_after(store, settings, now):
-    """Seconds until the companion may change its name again, or 0."""
+def _retry_after(store, settings, now, field="name"):
+    """Seconds until the companion may change this field again, or 0."""
     config, moment = settings.profile, datetime.fromisoformat(now)
-    if config.name_daily_limit == 0:
+    limit = config.name_daily_limit if field == "name" else config.avatar_daily_limit
+    cooldown = config.name_cooldown_seconds if field == "name" else 0
+    if limit == 0:
         return 86400
     rows = store.rows(
         "SELECT created_at FROM companion_profile_changes WHERE actor_type='companion' "
-        "AND fields IN ('name','both') AND created_at > %s ORDER BY created_at DESC",
-        ((moment - timedelta(days=1)).isoformat(timespec="microseconds"),))
+        "AND fields IN (%s,'both') AND created_at > %s ORDER BY created_at DESC",
+        (field, (moment - timedelta(days=1)).isoformat(timespec="microseconds")))
     waits = []
-    if len(rows) >= config.name_daily_limit:
-        oldest = rows[config.name_daily_limit - 1]["created_at"] if rows else now
-        waits.append(datetime.fromisoformat(oldest) + timedelta(days=1) - moment)
+    if len(rows) >= limit:
+        waits.append(datetime.fromisoformat(rows[limit - 1]["created_at"])
+                     + timedelta(days=1) - moment)
     latest = store.one(
         "SELECT MAX(created_at) AS at FROM companion_profile_changes WHERE "
-        "actor_type='companion' AND fields IN ('name','both')")["at"]
-    if latest:
-        waits.append(datetime.fromisoformat(latest)
-                     + timedelta(seconds=config.name_cooldown_seconds) - moment)
+        "actor_type='companion' AND fields IN (%s,'both')", (field,))["at"]
+    if latest and cooldown:
+        waits.append(datetime.fromisoformat(latest) + timedelta(seconds=cooldown) - moment)
     return max([0, *(int(wait.total_seconds()) + 1 for wait in waits if wait.total_seconds() > 0)])
 
 
-def update_by_companion(store, settings, now, *, display_name, expected_revision, note,
-                        job_id, tool_call_id):
-    """The companion's own name change; the caller already checked the leased job."""
+def update_by_companion(store, settings, now, *, expected_revision, note, job_id,
+                        tool_call_id, display_name=None, avatar_asset_id=None):
+    """The companion's own name/avatar change; the caller already checked the leased job.
+
+    Both requested fields commit together in one revision, or neither does.
+    """
+    from companion import companion_avatar
+
     _require_write(store)
     key = f"{job_id}:{tool_call_id}"
     previous = store.one("SELECT change_id FROM companion_profile_changes "
@@ -190,27 +210,70 @@ def update_by_companion(store, settings, now, *, display_name, expected_revision
         return {"status": "confirmed", "change_id": change["change_id"],
                 "new_revision": change["new_revision"],
                 "profile": {"revision": change["new_revision"],
-                            "display_name": change["new_name"]}}
+                            "display_name": change["new_name"],
+                            "avatar_asset_id": change["new_avatar_asset_id"]}}
     profile = _ensure(store, settings, now)
-    public = {key: profile[key] for key in ("revision", "display_name")}
-    if not owner_settings(store)["auto_name"]:
+    public = _public(profile)
+    if display_name is None and avatar_asset_id is None:
+        return {"status": "validation_failed", "field": "display_name",
+                "reason": "NOTHING_REQUESTED", "profile": public}
+    owner = owner_settings(store)
+    if display_name is not None and not owner["auto_name"]:
         return {"status": "disabled_by_user", "field": "display_name", "profile": public}
+    if avatar_asset_id is not None and not owner["auto_avatar"]:
+        return {"status": "disabled_by_user", "field": "avatar", "profile": public}
     if expected_revision != profile["revision"]:
         return {"status": "revision_conflict", "profile": public}
     try:
-        name = validate_name(display_name)
+        name = None if display_name is None else validate_name(display_name)
         if note is not None and len(note) > 200:
             raise ValueError("NOTE_TOO_LONG")
     except ValueError as error:
         return {"status": "validation_failed", "field": "display_name", "reason": str(error),
                 "profile": public}
-    if name == profile["display_name"]:
+    if avatar_asset_id is not None and (
+            not isinstance(avatar_asset_id, str)
+            or not companion_avatar.ASSET_ID.fullmatch(avatar_asset_id)
+            or companion_avatar.ready(store, avatar_asset_id) is None):
+        return {"status": "asset_not_ready", "field": "avatar", "profile": public}
+    name_changes = name is not None and name != profile["display_name"]
+    avatar_changes = (avatar_asset_id is not None
+                      and avatar_asset_id != profile["avatar_asset_id"])
+    if not name_changes and not avatar_changes:
         return {"status": "no_change", "profile": public}
-    if wait := _retry_after(store, settings, now):
-        return {"status": "rate_limited", "retry_after_seconds": wait, "profile": public}
-    change_id, updated = _commit(store, profile, now, name=name, actor="companion", note=note,
-                                 idempotency_key=key, job_id=job_id, tool_call_id=tool_call_id)
+    for field, changes in (("name", name_changes), ("avatar", avatar_changes)):
+        if changes and (wait := _retry_after(store, settings, now, field)):
+            return {"status": "rate_limited", "field": field, "retry_after_seconds": wait,
+                    "profile": public}
+    change_id, updated = _commit(
+        store, profile, now, actor="companion", name=name if name_changes else None,
+        avatar=avatar_asset_id if avatar_changes else _KEEP, note=note,
+        idempotency_key=key, job_id=job_id, tool_call_id=tool_call_id)
     return _confirmed(change_id, updated)
+
+
+def set_avatar(store, settings, now, *, asset_id, expected_revision, operation_id):
+    """The owner sets an uploaded avatar directly; recorded as an owner revision."""
+    from companion import companion_avatar
+
+    _require_write(store)
+    # Compare with what the owner saw: revision 0 is the not-yet-created initial view.
+    seen = current(store, settings)["revision"]
+    profile = _ensure(store, settings, now)
+    previous = store.one("SELECT change_id FROM companion_profile_changes "
+                         "WHERE idempotency_key=%s", ("owner:" + operation_id,))
+    if previous:
+        return {"change_id": previous["change_id"], **view(store, settings)}
+    if expected_revision != seen:
+        raise CoreError("PROFILE_REVISION_CONFLICT", 409)
+    if (not isinstance(asset_id, str) or not companion_avatar.ASSET_ID.fullmatch(asset_id)
+            or companion_avatar.ready(store, asset_id) is None):
+        raise CoreError("PROFILE_ASSET_UNAVAILABLE", 410)
+    if asset_id == profile["avatar_asset_id"]:
+        raise CoreError("PROFILE_NO_CHANGE", 409)
+    change_id, _ = _commit(store, profile, now, actor="owner", avatar=asset_id,
+                           idempotency_key="owner:" + operation_id, operation_id=operation_id)
+    return {"change_id": change_id, **view(store, settings)}
 
 
 def update_settings(store, settings, now, *, expected_settings_revision, auto_name=None,
@@ -263,11 +326,17 @@ def restore(store, settings, now, *, change_id, expected_revision, pause_name, o
     target = _change(store, change_id)
     if target is None:
         raise CoreError("PROFILE_CHANGE_NOT_FOUND", 404)
-    if target["new_name"] == profile["display_name"]:
+    from companion import companion_avatar
+
+    avatar = target["new_avatar_asset_id"]
+    if avatar is not None and companion_avatar.ready(store, avatar) is None:
+        # The image expired or was erased; its record stays, restoring it cannot.
+        raise CoreError("PROFILE_ASSET_UNAVAILABLE", 410)
+    if (target["new_name"], avatar) == (profile["display_name"], profile["avatar_asset_id"]):
         raise CoreError("PROFILE_NO_CHANGE", 409)
-    restored_id, _ = _commit(store, profile, now, name=target["new_name"], actor="owner",
-                             idempotency_key="owner:" + operation_id, operation_id=operation_id,
-                             restored_from=change_id)
+    restored_id, _ = _commit(store, profile, now, name=target["new_name"], avatar=avatar,
+                             actor="owner", idempotency_key="owner:" + operation_id,
+                             operation_id=operation_id, restored_from=change_id)
     if pause_name:
         # Only an explicit owner choice pauses future self-updates.
         store.execute("UPDATE companion_profile_settings SET auto_name=false, "
@@ -295,5 +364,6 @@ def prompt_fact(store, settings):
     if character and character != name:
         text += f"你的角色名是「{character}」；显示名是你自己选的，可以与角色名不同。"
     if settings.profile.enabled:
-        text += "想换名字时可以用 update_display_profile 自己改，改成功之前不要说已经改了。"
+        text += ("想换名字或换成主人上传的头像时可以用 update_display_profile 自己改，"
+                 "改成功之前不要说已经改了。")
     return text

@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 
 import '../chat/models.dart';
 import '../chat/session.dart';
+import 'avatar.dart';
 import 'profile.dart';
 import 'providers.dart';
 import 'theme.dart';
@@ -491,7 +492,7 @@ class BotList extends ConsumerWidget {
                       ),
                       child: Row(
                         children: [
-                          InitialAvatar(id: bot.id, name: shown),
+                          CompanionAvatar(bot: bot, name: shown),
                           const SizedBox(width: 11),
                           Expanded(
                             child: Column(
@@ -930,8 +931,8 @@ class _ChatPaneState extends ConsumerState<ChatPane> {
                   color: Warm.textSoft,
                   icon: const Icon(Icons.arrow_back_rounded),
                 ),
-              InitialAvatar(
-                id: widget.bot.id,
+              CompanionAvatar(
+                bot: widget.bot,
                 name: profile?.displayName ?? widget.bot.name,
                 size: compact ? 38 : 44,
               ),
@@ -1309,7 +1310,7 @@ class Bubble extends StatelessWidget {
         if (!owner && bot != null) ...[
           Padding(
             padding: const EdgeInsets.only(top: 7),
-            child: InitialAvatar(id: bot!.id, name: bot!.name, size: 32),
+            child: CompanionAvatar(bot: bot!, size: 32),
           ),
           const SizedBox(width: 10),
         ],

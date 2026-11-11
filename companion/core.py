@@ -253,6 +253,10 @@ class Core(Runtime):
             if scanned < MEDIA_CLEANUP_BATCH:
                 scan.close()
                 del self._media_scans[module]
+        from companion import companion_avatar
+
+        with self.store.transaction():
+            removed += companion_avatar.cleanup(self.store, self.clock())
         return removed
 
     def close(self):

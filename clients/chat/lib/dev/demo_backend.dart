@@ -1,5 +1,6 @@
 // Synthetic transport for debug UI and tests. Production main never imports it.
 import 'dart:async';
+import 'dart:typed_data';
 
 import '../chat/core_backend.dart';
 import '../chat/models.dart';
@@ -41,28 +42,48 @@ class DemoBackend implements ChatBackend {
     _commit(name, 'companion');
   }
 
-  void _commit(String name, String actor, {String? restoredFrom}) {
+  final avatars = <String, Uint8List>{};
+
+  void _commit(
+    String name,
+    String actor, {
+    String? restoredFrom,
+    String? avatar,
+  }) {
+    final newAvatar = avatar ?? current.avatarAssetId;
     changes.add(
       ProfileChange(
         changeId: 'pchg_${changes.length + 1}_${bot.id}',
         oldRevision: current.revision,
         newRevision: current.revision + 1,
-        fields: 'name',
+        fields: newAvatar == current.avatarAssetId
+            ? 'name'
+            : name == current.displayName
+            ? 'avatar'
+            : 'both',
         oldName: current.displayName,
         newName: name,
+        oldAvatarAssetId: current.avatarAssetId,
+        newAvatarAssetId: newAvatar,
         actorType: actor,
         restoredFromChangeId: restoredFrom,
         createdAt: DateTime.now().toUtc(),
       ),
     );
-    current = _copy(revision: current.revision + 1, displayName: name);
+    current = _copy(
+      revision: current.revision + 1,
+      displayName: name,
+      avatarAssetId: newAvatar,
+    );
     profiles.add(current);
   }
 
   CompanionProfile _copy({
     int? revision,
     String? displayName,
+    String? avatarAssetId,
     bool? autoName,
+    bool? autoAvatar,
     String? viewerAlias,
     bool clearAlias = false,
     int? settingsRevision,
@@ -70,8 +91,9 @@ class DemoBackend implements ChatBackend {
     companionId: current.companionId,
     revision: revision ?? current.revision,
     displayName: displayName ?? current.displayName,
+    avatarAssetId: avatarAssetId ?? current.avatarAssetId,
     autoName: autoName ?? current.autoName,
-    autoAvatar: current.autoAvatar,
+    autoAvatar: autoAvatar ?? current.autoAvatar,
     viewerAlias: clearAlias ? null : viewerAlias ?? current.viewerAlias,
     settingsRevision: settingsRevision ?? current.settingsRevision,
     selfUpdateEnabled: true,
@@ -88,6 +110,7 @@ class DemoBackend implements ChatBackend {
   Future<CompanionProfile> updateProfileSettings({
     required int expectedSettingsRevision,
     bool? autoName,
+    bool? autoAvatar,
   }) async {
     if (expectedSettingsRevision != current.settingsRevision) {
       throw const BackendError(
@@ -97,11 +120,33 @@ class DemoBackend implements ChatBackend {
     }
     current = _copy(
       autoName: autoName,
+      autoAvatar: autoAvatar,
       settingsRevision: current.settingsRevision + 1,
     );
     profiles.add(current);
     return current;
   }
+
+  @override
+  Future<CompanionProfile> uploadAvatar({
+    required Uint8List bytes,
+    required String mimeType,
+    required int expectedRevision,
+    required String operationId,
+  }) async {
+    if (expectedRevision != current.revision) {
+      throw const BackendError('PROFILE_REVISION_CONFLICT', status: 409);
+    }
+    final id = 'avt_${(avatars.length + 1).toRadixString(16).padLeft(32, '0')}';
+    avatars[id] = bytes;
+    _commit(current.displayName, 'owner', avatar: id);
+    return current;
+  }
+
+  @override
+  Future<Uint8List> avatarImage(String assetId) async =>
+      avatars[assetId] ??
+      (throw const BackendError('PROFILE_ASSET_UNAVAILABLE', status: 410));
 
   @override
   Future<CompanionProfile> setProfileAlias({
@@ -134,7 +179,12 @@ class DemoBackend implements ChatBackend {
       throw const BackendError('PROFILE_REVISION_CONFLICT', status: 409);
     }
     final target = changes.firstWhere((item) => item.changeId == changeId);
-    _commit(target.newName, 'owner', restoredFrom: changeId);
+    _commit(
+      target.newName,
+      'owner',
+      restoredFrom: changeId,
+      avatar: target.newAvatarAssetId,
+    );
     if (pauseName) {
       current = _copy(
         autoName: false,

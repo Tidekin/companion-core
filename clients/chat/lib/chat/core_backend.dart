@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 import 'package:dio/dio.dart';
@@ -39,7 +40,20 @@ abstract interface class ChatBackend {
   Future<CompanionProfile> updateProfileSettings({
     required int expectedSettingsRevision,
     bool? autoName,
+    bool? autoAvatar,
   });
+
+  /// Uploads owner-chosen avatar material and, in the same Core transaction,
+  /// makes it the current avatar. Core re-checks and re-encodes the bytes.
+  Future<CompanionProfile> uploadAvatar({
+    required Uint8List bytes,
+    required String mimeType,
+    required int expectedRevision,
+    required String operationId,
+  });
+
+  /// The checked 512x512 PNG for one asset; immutable per asset id.
+  Future<Uint8List> avatarImage(String assetId);
   Future<CompanionProfile> setProfileAlias({
     required int expectedSettingsRevision,
     String? alias,
@@ -104,6 +118,7 @@ class CoreBackend implements ChatBackend {
   Future<CompanionProfile> updateProfileSettings({
     required int expectedSettingsRevision,
     bool? autoName,
+    bool? autoAvatar,
   }) async => CompanionProfile.fromJson(
     await _request(
       'PUT',
@@ -111,9 +126,63 @@ class CoreBackend implements ChatBackend {
       body: {
         'expected_settings_revision': expectedSettingsRevision,
         'auto_name': ?autoName,
+        'auto_avatar': ?autoAvatar,
       },
     ),
   );
+
+  @override
+  Future<CompanionProfile> uploadAvatar({
+    required Uint8List bytes,
+    required String mimeType,
+    required int expectedRevision,
+    required String operationId,
+  }) async => CompanionProfile.fromJson(
+    Map<String, dynamic>.from(
+      (await _request(
+            'POST',
+            '/v1/console/chat/profile/avatars',
+            body: {
+              'mime_type': mimeType,
+              'data_base64': base64Encode(bytes),
+              'operation_id': operationId,
+              'expected_revision': expectedRevision,
+            },
+          ))['profile']
+          as Map,
+    ),
+  );
+
+  final _avatarImages = <String, Future<Uint8List>>{};
+
+  @override
+  Future<Uint8List> avatarImage(String assetId) {
+    if (!RegExp(r'^avt_[a-f0-9]{32}$').hasMatch(assetId)) {
+      return Future.error(const BackendError('PROFILE_ASSET_UNAVAILABLE'));
+    }
+    return _avatarImages[assetId] ??= _fetchAvatar(assetId)
+        .catchError((Object error) {
+          // A failure is not cached; the next build may try again.
+          _avatarImages.remove(assetId);
+          throw error;
+        });
+  }
+
+  Future<Uint8List> _fetchAvatar(String assetId) async {
+    try {
+      final response = await http.get<List<int>>(
+        '/v1/console/chat/profile/assets/$assetId',
+        options: Options(headers: _headers, responseType: ResponseType.bytes),
+      );
+      final status = response.statusCode ?? 503;
+      if (status != 200 || response.data == null) {
+        throw BackendError('HTTP_$status', status: status);
+      }
+      return Uint8List.fromList(response.data!);
+    } on DioException {
+      throw const BackendError('CONNECTION_UNAVAILABLE');
+    }
+  }
 
   @override
   Future<CompanionProfile> setProfileAlias({

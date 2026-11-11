@@ -1,6 +1,8 @@
 """Native chat routes use original owner sessions and independent API Store sessions."""
 
 import asyncio
+import base64
+import binascii
 import json
 import time
 from contextlib import nullcontext
@@ -8,9 +10,9 @@ from types import SimpleNamespace
 
 from fastapi import Request
 from pydantic import Field
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
-from companion import companion_profile, native_chat
+from companion import companion_avatar, companion_profile, native_chat
 from companion.console_api import _operation, _request_fields
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import ErasureLedger
@@ -32,6 +34,29 @@ class ProfileRestore(StrictModel):
     expected_revision: int = Field(ge=0, strict=True)
     pause_name: bool = False
     operation_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{8,64}$")
+
+
+class AvatarUpload(StrictModel):
+    mime_type: str = Field(pattern=r"^image/(png|jpeg|webp)$")
+    # Base64 of at most MAX_UPLOAD_BYTES; Core checks the decoded bytes again.
+    data_base64: str = Field(min_length=4, max_length=(companion_avatar.MAX_UPLOAD_BYTES + 2)
+                             // 3 * 4)
+    operation_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{8,64}$")
+    # When set, the owner's upload becomes the avatar in the same transaction.
+    expected_revision: int | None = Field(default=None, ge=0, strict=True)
+
+
+class AvatarChoice(StrictModel):
+    asset_id: str = Field(pattern=r"^avt_[a-f0-9]{32}$")
+    expected_revision: int = Field(ge=0, strict=True)
+    operation_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{8,64}$")
+
+
+def _decoded(text):
+    try:
+        return base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise CoreError("AVATAR_IMAGE_INVALID", 400) from error
 
 
 def _profile_event(view):
@@ -165,6 +190,49 @@ def register_routes(app, settings, prefix, auth, authenticate):
             ctx.store, ctx.settings, ctx.clock(), change_id=body.change_id,
             expected_revision=body.expected_revision, pause_name=body.pause_name,
             operation_id=body.operation_id)))
+
+    @app.get(prefix + "/profile/avatars", dependencies=auth)
+    async def profile_avatars(request: Request):
+        return await execute(request, lambda ctx, check: {
+            "avatars": companion_avatar.available(ctx.store)}, readonly=True)
+
+    @app.post(prefix + "/profile/avatars", dependencies=auth)
+    async def profile_avatar_upload(body: AvatarUpload, request: Request):
+        data = _decoded(body.data_base64)
+
+        def upload(ctx):
+            if body.expected_revision is not None and companion_profile.current(
+                    ctx.store, ctx.settings)["revision"] != body.expected_revision:
+                # Refuse before any bytes reach disk; a rollback cannot remove a file.
+                raise CoreError("PROFILE_REVISION_CONFLICT", 409)
+            asset = companion_avatar.create(ctx.store, ctx.clock(), data=data,
+                                            mime=body.mime_type,
+                                            operation_id=body.operation_id)
+            result = {"asset": {key: asset[key] for key in (
+                "asset_id", "width", "height", "created_at")}}
+            if body.expected_revision is not None:
+                result["profile"] = companion_profile.set_avatar(
+                    ctx.store, ctx.settings, ctx.clock(), asset_id=asset["asset_id"],
+                    expected_revision=body.expected_revision,
+                    operation_id=body.operation_id)
+            return result
+
+        return await execute(request, write(upload))
+
+    @app.put(prefix + "/profile/avatar", dependencies=auth)
+    async def profile_avatar(body: AvatarChoice, request: Request):
+        return await execute(request, write(lambda ctx: companion_profile.set_avatar(
+            ctx.store, ctx.settings, ctx.clock(), asset_id=body.asset_id,
+            expected_revision=body.expected_revision, operation_id=body.operation_id)))
+
+    @app.get(prefix + "/profile/assets/{asset_id}", dependencies=auth)
+    async def profile_asset(asset_id: str, request: Request):
+        data = await execute(request, lambda ctx, check: companion_avatar.read_bytes(
+            ctx.store, asset_id), readonly=True)
+        # Asset ids never change content; the session check above still runs each time.
+        return Response(data, media_type="image/png", headers={
+            "Cache-Control": "private, max-age=86400, immutable",
+            "X-Content-Type-Options": "nosniff"})
 
     @app.get(prefix + "/messages/{event_id}", dependencies=auth)
     async def status(event_id: str, request: Request):

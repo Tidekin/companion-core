@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../chat/core_backend.dart';
 import '../chat/models.dart';
+import 'avatar.dart';
 import 'providers.dart';
 import 'theme.dart';
 
@@ -12,21 +13,34 @@ String _time(DateTime value) {
   return '${local.month}月${local.day}日 ${two(local.hour)}:${two(local.minute)}';
 }
 
-String _message(Object error) => error is BackendError
+String _message(Object error) => error is AvatarPickError
+    ? error.message
+    : error is BackendError
     ? switch (error.code) {
         'PROFILE_SETTINGS_REVISION_CONFLICT' ||
         'PROFILE_REVISION_CONFLICT' => '资料刚刚在别处更新过，已刷新，请再试一次。',
         'PROFILE_ALIAS_INVALID' => '备注不能为空，也不能包含不可见字符。',
-        'PROFILE_NO_CHANGE' => '当前已经是这个名字。',
+        'PROFILE_NO_CHANGE' => '当前已经是这个名字和头像。',
+        'PROFILE_ASSET_UNAVAILABLE' => '那张头像已经过期或被清理，无法恢复。',
+        'AVATAR_TOO_LARGE' => '图片太大，请换一张小一点的。',
+        'AVATAR_FORMAT_UNSUPPORTED' ||
+        'AVATAR_IMAGE_INVALID' ||
+        'AVATAR_EMPTY' => '这张图片无法用作头像，请换一张 PNG、JPEG 或 WebP。',
         _ => '保存失败（${error.code}），已保留原来的设置。',
       }
     : '保存失败，已保留原来的设置。';
 
 /// "形象与称呼": current committed profile, alias, self-update switch, history.
 class ProfilePanel extends ConsumerStatefulWidget {
-  const ProfilePanel({super.key, required this.bot, this.onClose});
+  const ProfilePanel({
+    super.key,
+    required this.bot,
+    this.onClose,
+    this.pickAvatar = pickAvatarFile,
+  });
   final BotProfile bot;
   final VoidCallback? onClose;
+  final AvatarPicker pickAvatar;
   @override
   ConsumerState<ProfilePanel> createState() => _ProfilePanelState();
 }
@@ -51,6 +65,18 @@ class _ProfilePanelState extends ConsumerState<ProfilePanel> {
       if (mounted) setState(() => saving = false);
     }
   }
+
+  Future<void> changeAvatar(CompanionProfile profile) => run(() async {
+    final picked = await widget.pickAvatar();
+    if (picked == null) return;
+    await _backend.uploadAvatar(
+      bytes: picked.bytes,
+      mimeType: picked.mimeType,
+      expectedRevision: profile.revision,
+      operationId: 'avatar-${randomId()}',
+    );
+    ref.invalidate(profileProvider(widget.bot));
+  });
 
   Future<void> editAlias(CompanionProfile profile) async {
     final controller = TextEditingController(text: profile.viewerAlias ?? '');
@@ -145,16 +171,18 @@ class _ProfilePanelState extends ConsumerState<ProfilePanel> {
             )
           else ...[
             Center(
-              child: AnimatedSwitcher(
-                duration: Motion.reduced(context)
-                    ? Duration.zero
-                    : const Duration(milliseconds: 160),
-                child: InitialAvatar(
-                  key: ValueKey('avatar_${profile.revision}'),
-                  id: widget.bot.id,
-                  name: profile.displayName,
-                  size: 88,
-                ),
+              child: CompanionAvatar(
+                bot: widget.bot,
+                name: profile.displayName,
+                size: 88,
+              ),
+            ),
+            Center(
+              child: TextButton.icon(
+                key: const ValueKey('profile_change_avatar'),
+                onPressed: saving ? null : () => changeAvatar(profile),
+                icon: const Icon(Icons.photo_outlined, size: 16),
+                label: const Text('更换头像', style: TextStyle(fontSize: 12)),
               ),
             ),
             const SizedBox(height: 14),
@@ -209,11 +237,29 @@ class _ProfilePanelState extends ConsumerState<ProfilePanel> {
                           : null,
                     ),
             ),
+            _Row(
+              label: '自行选择头像',
+              trailing: saving
+                  ? null
+                  : Switch(
+                      key: const ValueKey('profile_auto_avatar'),
+                      value: profile.autoAvatar,
+                      onChanged: profile.selfUpdateEnabled
+                          ? (value) => run(
+                              () => _backend.updateProfileSettings(
+                                expectedSettingsRevision:
+                                    profile.settingsRevision,
+                                autoAvatar: value,
+                              ),
+                            )
+                          : null,
+                    ),
+            ),
             if (!profile.selfUpdateEnabled)
               const Padding(
                 padding: EdgeInsets.fromLTRB(4, 0, 4, 8),
                 child: Text(
-                  'Core 尚未开启伙伴自行改名。',
+                  'Core 尚未开启伙伴自行更新资料。',
                   style: TextStyle(fontSize: 11, color: Warm.meta),
                 ),
               ),
@@ -225,7 +271,8 @@ class _ProfilePanelState extends ConsumerState<ProfilePanel> {
             ),
             const SizedBox(height: 14),
             const Text(
-              '更新后在聊天内轻量告知，不打断对话。名字变了，还是同一位伙伴，聊天记录和记忆不变。',
+              '更新后在聊天内轻量告知，不打断对话。名字或头像变了，还是同一位伙伴，聊天记录和记忆不变。'
+              '伙伴只能从你上传过的图片里选头像；没用上的图片保留 180 天。',
               style: TextStyle(fontSize: 11, height: 1.7, color: Warm.meta),
             ),
           ],
@@ -320,12 +367,16 @@ class _ChangesSheet extends ConsumerWidget {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setState) => AlertDialog(
-          title: const Text('恢复这个名字？'),
+          title: const Text('恢复到这个版本？'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('会把名字改回「${change.newName}」，作为一条新的记录保存，原有记录都会保留。'),
+              Text(
+                '会把名字改回「${change.newName}」'
+                '${change.newAvatarAssetId != profile.avatarAssetId ? '并换回当时的头像' : ''}'
+                '，作为一条新的记录保存，原有记录都会保留。',
+              ),
               const SizedBox(height: 12),
               CheckboxListTile(
                 key: const ValueKey('restore_pause_name'),
@@ -389,7 +440,7 @@ class _ChangesSheet extends ConsumerWidget {
           ),
           const SizedBox(height: 4),
           const Text(
-            '每次名字变化都会保留，恢复也会记成一条新记录。',
+            '每次名字和头像变化都会保留，恢复也会记成一条新记录。',
             style: TextStyle(fontSize: 12, color: Warm.meta),
           ),
           const SizedBox(height: 14),
@@ -428,11 +479,19 @@ class _ChangesSheet extends ConsumerWidget {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    change.oldName == null
+                    change.oldName == null || !change.nameChanged
                         ? change.newName
                         : '${change.oldName}  →  ${change.newName}',
                     style: const TextStyle(fontSize: 15),
                   ),
+                  if (change.avatarChanged)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 4),
+                      child: Text(
+                        '换了头像',
+                        style: TextStyle(fontSize: 12, color: Warm.meta),
+                      ),
+                    ),
                   if (change.note case final note?) ...[
                     const SizedBox(height: 4),
                     Text(
@@ -440,13 +499,15 @@ class _ChangesSheet extends ConsumerWidget {
                       style: const TextStyle(fontSize: 12, color: Warm.meta),
                     ),
                   ],
-                  if (profile != null && change.newName != profile.displayName)
+                  if (profile != null &&
+                      (change.newName != profile.displayName ||
+                          change.newAvatarAssetId != profile.avatarAssetId))
                     Align(
                       alignment: Alignment.centerRight,
                       child: TextButton(
                         key: ValueKey('restore_${change.changeId}'),
                         onPressed: () => restore(context, ref, profile, change),
-                        child: const Text('恢复这个名字'),
+                        child: const Text('恢复到这个版本'),
                       ),
                     ),
                 ],
@@ -466,11 +527,15 @@ class ProfileEventRow extends ConsumerWidget {
   final ProfileChange change;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final text = change.actorType == 'companion'
-        ? '${change.oldName ?? '伙伴'} 把名字改成了「${change.newName}」'
-        : change.actorType == 'owner'
-        ? '你把伙伴的名字恢复为「${change.newName}」'
-        : '名字调整为「${change.newName}」';
+    final who = change.oldName ?? '伙伴';
+    final text = switch ((change.actorType, change.fields)) {
+      ('companion', 'avatar') => '$who 换了新头像',
+      ('companion', 'both') => '$who 换了新头像，并把名字改成了「${change.newName}」',
+      ('companion', _) => '$who 把名字改成了「${change.newName}」',
+      ('owner', 'avatar') => '你给伙伴换了头像',
+      ('owner', _) => '你把伙伴的名字恢复为「${change.newName}」',
+      _ => '名字调整为「${change.newName}」',
+    };
     return Center(
       child: Container(
         margin: const EdgeInsets.fromLTRB(0, 6, 0, 18),
